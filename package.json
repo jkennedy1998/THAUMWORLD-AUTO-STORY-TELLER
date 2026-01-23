@@ -1,0 +1,33 @@
+{
+  "name": "thaumworld-auto-story-teller",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "tsx src/interface_program/main.ts",
+    "build": "tsc",
+    "start": "node dist/interface_program/main.js",
+    "format": "prettier . --write"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jkennedy1998/THAUMWORLD-AUTO-STORY-TELLER.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/jkennedy1998/THAUMWORLD-AUTO-STORY-TELLER/issues"
+  },
+  "homepage": "https://github.com/jkennedy1998/THAUMWORLD-AUTO-STORY-TELLER#readme",
+  "dependencies": {
+    "jsonc-parser": "^3.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.10",
+    "prettier": "^3.8.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

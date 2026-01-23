@@ -1,0 +1,10 @@
+﻿{
+  "format": "logv1",
+  "messages": [
+    {
+      "id": "2026-01-01T09:07:35 : 000001 : K7M2QF",
+      "sender": "J",
+      "content": "the id is constructed in the following way : \n the time and date in the format of (YYYY-MM-DDTHH:mm:ss.sssZ) : the message index with 6 places : the output of randBase32(6) \n the sender and content is set by whoever sends the message"
+    }
+  ]
+}
