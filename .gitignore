@@ -27,3 +27,8 @@ coverage/
 .cache/
 .tmp/
 *.tmp
+.DS_STORE
+__pycache__/
+.venv/
+/local_data/data_slot_[1-9]*/
+

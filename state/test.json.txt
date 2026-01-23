@@ -1,4 +1,0 @@
-{
-  "gold": 1,
-  "inventory": []
-}
