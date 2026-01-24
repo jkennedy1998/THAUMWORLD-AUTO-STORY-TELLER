@@ -1,0 +1,41 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>THAUMWORLD Mono UI (Canvas)</title>
+
+    <!-- Martian Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Martian+Mono:wght@200;400;600&display=swap"
+          rel="stylesheet" />
+
+    <style>
+        html,
+        body {
+            margin: 0;
+            height: 100%;
+            background: #0b0b0b;
+        }
+
+        #root {
+            height: 100%;
+            display: grid;
+            place-items: center;
+        }
+
+        canvas {
+            image-rendering: pixelated;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="root">
+        <canvas id="mono_canvas"></canvas>
+    </div>
+
+    <script type="module" src="./main.ts"></script>
+</body>
+</html>
