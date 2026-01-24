@@ -1,7 +1,7 @@
 import { create_canvas } from '../mono_ui/canvas.js';
 import { compose_modules } from '../mono_ui/compose.js';
 import { make_fill_module } from '../mono_ui/modules/fill_module.js';
-import type { Canvas, Cell, Module, Rect, Rgb, TileEvent } from '../mono_ui/types.js';
+import type { Canvas, Cell, Module, Rect, Rgb, TileEvent, PointerEvent } from '../mono_ui/types.js';
 
 
 // ---------- renderer config (matches your Figma % intent) ----------
@@ -17,8 +17,50 @@ let last_hover: { x: number; y: number } | null = null;
 // ---------- canvas size (tile grid) ----------
 const grid_width = 80;
 const grid_height = 30;
+// ---------- helpers: ----------
 
-// ---------- helper: rect contains (inclusive) ----------
+let hover_owner_id: string | null = null;
+let hover_tile: { x: number; y: number } | null = null;
+
+let capture_owner_id: string | null = null;
+let down_owner_id: string | null = null;
+let down_tile: { x: number; y: number } | null = null;
+
+let last_tile: { x: number; y: number } | null = null;
+
+function make_pointer_event(
+    kind: PointerEvent['kind'],
+    x: number,
+    y: number,
+    buttons: number,
+    cell?: Cell,
+): PointerEvent {
+    const e: any = {
+        pointer_id: 0,
+        kind,
+        x,
+        y,
+        buttons,
+    };
+
+    if (last_tile) {
+        e.prev_x = last_tile.x;
+        e.prev_y = last_tile.y;
+    }
+
+    if (cell !== undefined) {
+        e.cell = cell;
+    }
+
+    return e as PointerEvent;
+}
+
+
+function find_module_by_id(modules: Module[], id: string | null): Module | null {
+    if (!id) return null;
+    return modules.find((m) => m.id === id) ?? null;
+}
+
 function rect_contains(rect: Rect, x: number, y: number): boolean {
     return x >= rect.x0 && x <= rect.x1 && y >= rect.y0 && y <= rect.y1;
 }
@@ -26,15 +68,22 @@ function rect_contains(rect: Rect, x: number, y: number): boolean {
 function route_to_top_module(modules: Module[], x: number, y: number): Module | undefined {
     for (let i = modules.length - 1; i >= 0; i--) {
         const m = modules[i];
+        if (!m) continue; // <- fixes TS 'possibly undefined'
         if (rect_contains(m.rect, x, y)) return m;
     }
     return undefined;
 }
 
+
 // ---------- canvas element ----------
+//the ctx2 exists so that ctx2 is defined by default and links to our canvas element
 const el = document.getElementById('mono_canvas') as HTMLCanvasElement;
 const ctx = el.getContext('2d');
 if (!ctx) throw new Error('2d canvas context not available');
+
+const ctx2: CanvasRenderingContext2D = ctx;
+
+
 
 // ---------- engine canvas ----------
 const engine_canvas: Canvas = create_canvas(grid_width, grid_height);
@@ -72,13 +121,33 @@ const modules: Module[] = [
                 }
             },
 
-            OnTileHover(event: TileEvent): void {
-                hover = { x: event.x, y: event.y };
+            OnPointerEnter(e: PointerEvent): void {
+                console.log('panel enter', e.x, e.y);
+                hover = { x: e.x, y: e.y };
             },
 
-            OnTileClick(event: TileEvent): void {
-                console.log('click panel', event.x, event.y);
+            OnPointerMove(e: PointerEvent): void {
+                hover = { x: e.x, y: e.y };
             },
+
+            OnPointerLeave(e: PointerEvent): void {
+                console.log('panel leave', e.x, e.y);
+                hover = null;
+            },
+
+            OnPointerDown(e: PointerEvent): void {
+                console.log('panel down', e.x, e.y);
+            },
+
+            OnPointerUp(e: PointerEvent): void {
+                console.log('panel up', e.x, e.y);
+            },
+
+            OnClick(e: PointerEvent): void {
+                console.log('panel click', e.x, e.y);
+            },
+
+
         };
     })(),
 
@@ -87,7 +156,7 @@ const modules: Module[] = [
     // animated cursor module (topmost)
     {
         id: 'cursor',
-        rect: { x0: 0, y0: 0, x1: grid_width - 1, y1: grid_height - 1 },
+        rect: { x0: 0, y0: 0, x1: -1, y1: -1 },
         Draw(c: Canvas): void {
             const t = performance.now() * 0.002;
             const x = Math.floor((Math.sin(t) * 0.5 + 0.5) * (grid_width - 1));
@@ -104,8 +173,8 @@ function get_metrics() {
     const letter_spacing_px = font_size_px * BASE_LETTER_SPACING_MULT;
 
     // measure monospace glyph width
-    ctx.font = `${font_size_px}px "${FONT_FAMILY}"`;
-    const glyph_w = ctx.measureText('M').width;
+    ctx2.font = `${font_size_px}px "${FONT_FAMILY}"`;
+    const glyph_w = ctx2.measureText('M').width;
 
     const tile_w = glyph_w + letter_spacing_px;
     const tile_h = line_height_px;
@@ -130,11 +199,11 @@ function draw_canvas(c: Canvas) {
     const { font_size_px, tile_w, tile_h } = get_metrics();
 
     // background clear
-    ctx.clearRect(0, 0, el.width, el.height);
+    ctx2.clearRect(0, 0, el.width, el.height);
 
     // preconfigure text
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
+    ctx2.textAlign = 'center';
+    ctx2.textBaseline = 'middle';
 
     // naive draw: per cell (we’ll optimize later with dirty cells + style buckets)
     for (let y = 0; y < c.height; y++) {
@@ -148,16 +217,16 @@ function draw_canvas(c: Canvas) {
             // style -> font
             // (for now: just "regular" maps to 400 weight, non-italic)
             // later: map style string to weight/italic.
-            ctx.font = `${font_size_px}px "${FONT_FAMILY}"`;
+            ctx2.font = `${font_size_px}px "${FONT_FAMILY}"`;
 
             // rgb
-            ctx.fillStyle = `rgb(${cell.rgb.r},${cell.rgb.g},${cell.rgb.b})`;
+            ctx2.fillStyle = `rgb(${cell.rgb.r},${cell.rgb.g},${cell.rgb.b})`;
 
             // center glyph in tile
             const cx = x * tile_w + tile_w / 2;
             const cy = canvas_y + tile_h / 2;
 
-            ctx.fillText(cell.char, cx, cy);
+            ctx2.fillText(cell.char, cx, cy);
         }
     }
 }
@@ -165,6 +234,10 @@ function draw_canvas(c: Canvas) {
 // ---------- input mapping ----------
 let hovered: { x: number; y: number } | null = null;
 let hovered_owner_module_id: string | null = null;
+let hover_owner: Module | null = null;
+let capture_owner: Module | null = null;
+let down_owner: Module | null = null;
+
 
 function mouse_to_tile(ev: MouseEvent): { x: number; y: number } | null {
     const { tile_w, tile_h } = get_metrics();
@@ -182,63 +255,124 @@ function mouse_to_tile(ev: MouseEvent): { x: number; y: number } | null {
 }
 
 el.addEventListener('mousemove', (ev) => {
+  const t = mouse_to_tile(ev);
 
-
-    const t = mouse_to_tile(ev);
-    hovered = t;
-
-    if (!t) {
-        hovered_owner_module_id = null;
-        return;
+  // leaving grid area (but still on canvas element)
+  if (!t) {
+    if (!capture_owner && hover_owner?.OnPointerLeave && last_tile) {
+        hover_owner.OnPointerLeave(
+            make_pointer_event(
+                'leave',
+                last_tile.x,
+                last_tile.y,
+                ev.buttons,
+                engine_canvas.get(last_tile.x, last_tile.y),
+            )
+        );
     }
+    hover_owner = null;
+    last_tile = null;
+    return;
+  }
 
-    const top = route_to_top_module(modules, t.x, t.y);
-    const top_id = top?.id ?? null;
-    if (top_id !== hovered_owner_module_id) {
-        // clear previous module hover
-        const prev = modules.find(m => m.id === hovered_owner_module_id);
-        if (prev && prev.OnTileHover) {
-            prev.OnTileHover({ x: -1, y: -1, cell: undefined });
-        }
-    }
+  const top = route_to_top_module(modules, t.x, t.y) ?? null;
 
-    last_hover = t ? { x: t.x, y: t.y } : null;
+  // build event base
+    const base = make_pointer_event(
+        'move',
+        t.x,
+        t.y,
+        ev.buttons,
+        engine_canvas.get(t.x, t.y),
+    );
 
-    // Only notify when the owning top-module changes
-    if (top_id !== hovered_owner_module_id) {
-        hovered_owner_module_id = top_id;
 
-        if (top && top.OnTileHover) {
-            const event: TileEvent = { x: t.x, y: t.y, cell: engine_canvas.get(t.x, t.y) };
-            top.OnTileHover(event);
-        }
-    }
+  // if captured, route only to capture owner
+  if (capture_owner) {
+    capture_owner.OnPointerMove?.(base);
+    last_tile = t;
+    return;
+  }
+
+  // hover owner change => leave + enter
+  if (top !== hover_owner) {
+    hover_owner?.OnPointerLeave?.({ ...base, kind: 'leave' });
+    top?.OnPointerEnter?.({ ...base, kind: 'enter' });
+    hover_owner = top;
+  }
+
+  // always move on current hover owner
+  top?.OnPointerMove?.(base);
+
+  last_tile = t;
 });
 
 
-el.addEventListener('mouseleave', () => {
-    hovered = null;
-    hovered_owner_module_id = null;
+
+el.addEventListener('mouseleave', (ev) => {
+    if (!capture_owner && hover_owner && last_tile) {
+        hover_owner.OnPointerLeave?.(
+            make_pointer_event(
+                'leave',
+                last_tile.x,
+                last_tile.y,
+                0,
+                engine_canvas.get(last_tile.x, last_tile.y),
+            )
+        );
+    }
+
+    hover_owner = null;
+    last_tile = null;
 });
 
 
-el.addEventListener('click', (ev) => {
+
+el.addEventListener('mousedown', (ev) => {
     const t = mouse_to_tile(ev);
     if (!t) return;
 
-    const top = route_to_top_module(modules, t.x, t.y);
-    if (!top) return;
+    const top = route_to_top_module(modules, t.x, t.y) ?? null;
+    down_owner = top;
+    capture_owner = top;
 
-    const event: TileEvent = { x: t.x, y: t.y, cell: engine_canvas.get(t.x, t.y) };
-    last_click = { x: t.x, y: t.y };
+    top?.OnPointerDown?.(
+        make_pointer_event('down', t.x, t.y, ev.buttons, engine_canvas.get(t.x, t.y))
+    );
 
-    if (top.OnTileClick) {
-        top.OnTileClick(event);
-    } else {
-        // TEMP fallback log if no click hook
-        console.log('tile_click (no handler)', { module_id: top.id, ...event });
-    }
 });
+
+el.addEventListener('mouseup', (ev) => {
+    const t = mouse_to_tile(ev);
+    if (!t) {
+        // release capture even if mouseup outside grid
+        capture_owner = null;
+        down_owner = null;
+        return;
+    }
+
+    const top = route_to_top_module(modules, t.x, t.y) ?? null;
+    const target = capture_owner ?? top;
+
+    top?.OnPointerDown?.(
+        make_pointer_event('down', t.x, t.y, ev.buttons, engine_canvas.get(t.x, t.y))
+    );
+
+
+    // click synthesis: down+up on same module AND mouseup inside rect
+    if (down_owner && target && down_owner === target) {
+        if (rect_contains(target.rect, t.x, t.y)) {
+            target.OnClick?.(
+                make_pointer_event('click', t.x, t.y, ev.buttons, engine_canvas.get(t.x, t.y))
+            );
+
+        }
+    }
+
+    capture_owner = null;
+    down_owner = null;
+});
+
 
 
 // ---------- main loop ----------

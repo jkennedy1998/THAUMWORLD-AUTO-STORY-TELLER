@@ -35,16 +35,38 @@ export type TileEvent = {
     cell: Cell | undefined;
 };
 
+export type PointerKind = 'enter' | 'leave' | 'move' | 'down' | 'up' | 'click';
+
+export type PointerEvent = {
+    pointer_id: number; // 0 = mouse
+    kind: PointerKind;
+    x: number;
+    y: number;
+    prev_x?: number;
+    prev_y?: number;
+    buttons: number;
+    cell?: Cell;
+};
+
 export type Module = {
     id: string;
     rect: Rect;
-
     Draw(canvas: Canvas): void;
 
-    // Optional input hooks (routed to TOP module only)
+    // legacy (keep temporarily)
     OnTileHover?(event: TileEvent): void;
     OnTileClick?(event: TileEvent): void;
+
+    // new lifecycle
+    OnPointerEnter?(e: PointerEvent): void;
+    OnPointerLeave?(e: PointerEvent): void;
+    OnPointerMove?(e: PointerEvent): void;
+    OnPointerDown?(e: PointerEvent): void;
+    OnPointerUp?(e: PointerEvent): void;
+    OnClick?(e: PointerEvent): void;
 };
+
+
 
 
 export function rect_width(rect: Rect): number {
