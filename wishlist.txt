@@ -1,0 +1,5 @@
+ripple effect module just for funzies. had a padding around the rect that fades the ripple out.
+
+inventory systems
+
+shift clicking an inventory slot that you are searching through adds that to inventory

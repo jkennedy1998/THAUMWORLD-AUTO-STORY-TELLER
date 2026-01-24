@@ -6,7 +6,7 @@ export type Rgb = {
     b: number; // 0-255
 };
 
-// Your style model: a string name, not booleans (e.g. "regular", "thin_italic")
+// Style model: a string name, not booleans (e.g. "regular", "thin_italic")
 export type StyleName = string;
 
 // One tile / cell in the canvas
@@ -47,7 +47,29 @@ export type PointerEvent = {
     buttons: number;
     cell?: Cell;
 };
+export type DragKind = 'drag_start' | 'drag_move' | 'drag_end';
 
+export type DragEvent = {
+    pointer_id: number;        // 0 = mouse
+    kind: DragKind;
+
+    x: number;                 // current tile
+    y: number;
+
+    start_x: number;           // tile where mouse went down
+    start_y: number;
+
+    dx: number;                // current - start
+    dy: number;
+
+    step_dx: number;           // current - previous
+    step_dy: number;
+
+    buttons: number;
+    cell?: Cell;
+};
+
+// this is the parent to anything that lives on the screen that can be interacted with. 
 export type Module = {
     id: string;
     rect: Rect;
@@ -64,6 +86,9 @@ export type Module = {
     OnPointerDown?(e: PointerEvent): void;
     OnPointerUp?(e: PointerEvent): void;
     OnClick?(e: PointerEvent): void;
+    OnDragStart?(e: DragEvent): void;
+    OnDragMove?(e: DragEvent): void;
+    OnDragEnd?(e: DragEvent): void;
 };
 
 

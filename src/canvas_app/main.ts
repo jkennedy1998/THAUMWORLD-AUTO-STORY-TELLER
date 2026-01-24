@@ -10,22 +10,10 @@ const BASE_FONT_SIZE_PX = 10; // scale=1 => ~10px
 const BASE_LINE_HEIGHT_MULT = 1.5; // 150%
 const BASE_LETTER_SPACING_MULT = 0.08; // 8%
 let scale = 1.0; // 0..2 => 0%..200%
-let last_click: { x: number; y: number } | null = null;
-let last_hover: { x: number; y: number } | null = null;
-
 
 // ---------- canvas size (tile grid) ----------
 const grid_width = 80;
 const grid_height = 30;
-// ---------- helpers: ----------
-
-let hover_owner_id: string | null = null;
-let hover_tile: { x: number; y: number } | null = null;
-
-let capture_owner_id: string | null = null;
-let down_owner_id: string | null = null;
-let down_tile: { x: number; y: number } | null = null;
-
 let last_tile: { x: number; y: number } | null = null;
 
 function make_pointer_event(
@@ -53,6 +41,39 @@ function make_pointer_event(
     }
 
     return e as PointerEvent;
+}
+function make_drag_event(
+    kind: 'drag_start' | 'drag_move' | 'drag_end',
+    x: number,
+    y: number,
+    buttons: number,
+    cell?: Cell,
+) {
+    if (!down_tile) throw new Error('drag event without down_tile');
+
+    const prev = last_tile ?? { x: down_tile.x, y: down_tile.y };
+
+    const e: any = {
+        pointer_id: 0,
+        kind,
+        x,
+        y,
+        start_x: down_tile.x,
+        start_y: down_tile.y,
+        dx: x - down_tile.x,
+        dy: y - down_tile.y,
+        step_dx: x - prev.x,
+        step_dy: y - prev.y,
+        buttons,
+    };
+
+    if (cell !== undefined) e.cell = cell;
+    return e;
+}
+
+function drag_distance_tiles(x: number, y: number): number {
+    if (!down_tile) return 0;
+    return Math.max(Math.abs(x - down_tile.x), Math.abs(y - down_tile.y));
 }
 
 
@@ -126,27 +147,20 @@ const modules: Module[] = [
                 hover = { x: e.x, y: e.y };
             },
 
-            OnPointerMove(e: PointerEvent): void {
-                hover = { x: e.x, y: e.y };
-            },
+            OnPointerMove(e: PointerEvent): void {hover = { x: e.x, y: e.y };},
 
             OnPointerLeave(e: PointerEvent): void {
                 console.log('panel leave', e.x, e.y);
-                hover = null;
-            },
+                hover = null;},
 
-            OnPointerDown(e: PointerEvent): void {
-                console.log('panel down', e.x, e.y);
-            },
+            OnPointerDown(e: PointerEvent): void {console.log('panel down', e.x, e.y);},
 
-            OnPointerUp(e: PointerEvent): void {
-                console.log('panel up', e.x, e.y);
-            },
+            OnPointerUp(e: PointerEvent): void {console.log('panel up', e.x, e.y);},
 
-            OnClick(e: PointerEvent): void {
-                console.log('panel click', e.x, e.y);
-            },
-
+            OnClick(e: PointerEvent): void { console.log('panel click', e.x, e.y );},
+            OnDragStart(e) { console.log('panel drag start', e.start_x, e.start_y, '->', e.x, e.y); },
+            OnDragMove(e) { /* optional log spam */ },
+            OnDragEnd(e) { console.log('panel drag end', e.start_x, e.start_y, '->', e.x, e.y); },
 
         };
     })(),
@@ -237,6 +251,10 @@ let hovered_owner_module_id: string | null = null;
 let hover_owner: Module | null = null;
 let capture_owner: Module | null = null;
 let down_owner: Module | null = null;
+let last_click: { x: number; y: number } | null = null;
+let down_tile: { x: number; y: number } | null = null;
+let dragging = false;
+const DRAG_THRESHOLD_TILES = 1;
 
 
 function mouse_to_tile(ev: MouseEvent): { x: number; y: number } | null {
@@ -268,6 +286,7 @@ el.addEventListener('mousemove', (ev) => {
                 ev.buttons,
                 engine_canvas.get(last_tile.x, last_tile.y),
             )
+
         );
     }
     hover_owner = null;
@@ -287,12 +306,31 @@ el.addEventListener('mousemove', (ev) => {
     );
 
 
-  // if captured, route only to capture owner
-  if (capture_owner) {
-    capture_owner.OnPointerMove?.(base);
-    last_tile = t;
-    return;
-  }
+  // if captured, ...
+    if (capture_owner) {
+        capture_owner.OnPointerMove?.(base);
+
+        if (down_tile) {
+            const dist = drag_distance_tiles(t.x, t.y);
+
+            if (!dragging && dist >= DRAG_THRESHOLD_TILES) {
+                dragging = true;
+                capture_owner.OnDragStart?.(
+                    make_drag_event('drag_start', t.x, t.y, ev.buttons, engine_canvas.get(t.x, t.y))
+                );
+            }
+
+            if (dragging) {
+                capture_owner.OnDragMove?.(
+                    make_drag_event('drag_move', t.x, t.y, ev.buttons, engine_canvas.get(t.x, t.y))
+                );
+            }
+        }
+
+        last_tile = t;
+        return;
+    }
+
 
   // hover owner change => leave + enter
   if (top !== hover_owner) {
@@ -334,6 +372,8 @@ el.addEventListener('mousedown', (ev) => {
 
     const top = route_to_top_module(modules, t.x, t.y) ?? null;
     down_owner = top;
+    down_tile = t;
+    dragging = false;
     capture_owner = top;
 
     top?.OnPointerDown?.(
@@ -348,19 +388,29 @@ el.addEventListener('mouseup', (ev) => {
         // release capture even if mouseup outside grid
         capture_owner = null;
         down_owner = null;
+        down_tile = null;
+        dragging = false;
         return;
+
     }
 
     const top = route_to_top_module(modules, t.x, t.y) ?? null;
     const target = capture_owner ?? top;
 
-    top?.OnPointerDown?.(
-        make_pointer_event('down', t.x, t.y, ev.buttons, engine_canvas.get(t.x, t.y))
+    target?.OnPointerUp?.(
+        make_pointer_event('up', t.x, t.y, ev.buttons, engine_canvas.get(t.x, t.y))
     );
+
+    if (dragging && target) {
+        target.OnDragEnd?.(
+            make_drag_event('drag_end', t.x, t.y, ev.buttons, engine_canvas.get(t.x, t.y))
+        );
+    }
+
 
 
     // click synthesis: down+up on same module AND mouseup inside rect
-    if (down_owner && target && down_owner === target) {
+    if (!dragging && down_owner && target && down_owner === target) {
         if (rect_contains(target.rect, t.x, t.y)) {
             target.OnClick?.(
                 make_pointer_event('click', t.x, t.y, ev.buttons, engine_canvas.get(t.x, t.y))
@@ -371,6 +421,9 @@ el.addEventListener('mouseup', (ev) => {
 
     capture_owner = null;
     down_owner = null;
+    down_tile = null;
+    dragging = false;
+
 });
 
 
