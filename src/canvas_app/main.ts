@@ -1,7 +1,8 @@
 import { create_canvas } from '../mono_ui/canvas.js';
 import { compose_modules } from '../mono_ui/compose.js';
 import { make_fill_module } from '../mono_ui/modules/fill_module.js';
-import type { Canvas, Cell, Module, Rect, Rgb, TileEvent, PointerEvent } from '../mono_ui/types.js';
+import type { Canvas, Cell, Module, Rect, Rgb, PointerEvent, DragEvent, WheelEvent } from '../mono_ui/types.js';
+import { make_button_module } from '../mono_ui/modules/button_module.js';
 
 
 // ---------- renderer config (matches your Figma % intent) ----------
@@ -15,20 +16,51 @@ let scale = 1.0; // 0..2 => 0%..200%
 const grid_width = 80;
 const grid_height = 30;
 let last_tile: { x: number; y: number } | null = null;
+let focused_owner: Module | null = null;
+let pending_single_click: {
+    run_at_ms: number;
+    target: Module;
+    button: number;
+    x: number;
+    y: number;
+    ev: MouseEvent;
+} | null = null;
+
+
+const DBLCLICK_MS = 250;
+const DBLCLICK_TILE_RADIUS = 1;
+let last_click_sig: {
+    t_ms: number;
+    module_id: string;
+    button: number;
+    x: number;
+    y: number;
+} | null = null;
+let wheel_accum_dx = 0;
+let wheel_accum_dy = 0;
+let wheel_pending: { x: number; y: number; mods: any; delta_mode: number } | null = null;
 
 function make_pointer_event(
     kind: PointerEvent['kind'],
     x: number,
     y: number,
-    buttons: number,
+    ev: MouseEvent,
     cell?: Cell,
+    click_count?: 1 | 2,
 ): PointerEvent {
     const e: any = {
         pointer_id: 0,
         kind,
         x,
         y,
-        buttons,
+
+        buttons: ev.buttons,
+        button: ev.button,
+
+        shift: ev.shiftKey,
+        ctrl: ev.ctrlKey,
+        alt: ev.altKey,
+        meta: ev.metaKey,
     };
 
     if (last_tile) {
@@ -36,12 +68,12 @@ function make_pointer_event(
         e.prev_y = last_tile.y;
     }
 
-    if (cell !== undefined) {
-        e.cell = cell;
-    }
+    if (cell !== undefined) e.cell = cell;
+    if (click_count !== undefined) e.click_count = click_count;
 
     return e as PointerEvent;
 }
+
 function make_drag_event(
     kind: 'drag_start' | 'drag_move' | 'drag_end',
     x: number,
@@ -104,6 +136,14 @@ if (!ctx) throw new Error('2d canvas context not available');
 
 const ctx2: CanvasRenderingContext2D = ctx;
 
+const key_sink = document.getElementById('key_sink') as HTMLTextAreaElement | null;
+key_sink?.focus();
+
+el.addEventListener('pointerdown', () => key_sink?.focus());
+
+el.addEventListener('contextmenu', (ev) => {
+    ev.preventDefault();
+});
 
 
 // ---------- engine canvas ----------
@@ -121,6 +161,16 @@ const modules: Module[] = [
         char: '.',
         rgb: WHITE,
         style: 'regular',
+    }),
+    make_button_module({
+        id: 'btn_test',
+        rect: { x0: 45, y0: 2, x1: 75, y1: 6 },
+        label: '[ TEST BUTTON ]',
+        rgb: { r: 255, g: 220, b: 120 },
+        bg: { char: '-', rgb: { r: 80, g: 80, b: 80 } },
+        OnPress(e) {
+            console.log('btn press', { button: e.button, count: e.click_count ?? 1 });
+        },
     }),
     ((): Module => {
         const rect: Rect = { x0: 2, y0: 2, x1: 40, y1: 12 };
@@ -157,10 +207,16 @@ const modules: Module[] = [
 
             OnPointerUp(e: PointerEvent): void {console.log('panel up', e.x, e.y);},
 
-            OnClick(e: PointerEvent): void { console.log('panel click', e.x, e.y );},
             OnDragStart(e) { console.log('panel drag start', e.start_x, e.start_y, '->', e.x, e.y); },
             OnDragMove(e) { /* optional log spam */ },
             OnDragEnd(e) { console.log('panel drag end', e.start_x, e.start_y, '->', e.x, e.y); },
+            Focusable: true,
+            OnFocus() { console.log('panel focus'); },
+            OnBlur() { console.log('panel blur'); },
+            OnClick(e) { console.log('panel click', { button: e.button, count: e.click_count ?? 1 }); },
+            OnWheel(e) { console.log('panel wheel', e.delta_y); },
+            OnKeyDown(e) { console.log('panel key', e.key); },
+            OnTextInput(s) { console.log('panel text', JSON.stringify(s)); },
 
         };
     })(),
@@ -254,6 +310,7 @@ let down_owner: Module | null = null;
 let last_click: { x: number; y: number } | null = null;
 let down_tile: { x: number; y: number } | null = null;
 let dragging = false;
+
 const DRAG_THRESHOLD_TILES = 1;
 
 
@@ -283,7 +340,7 @@ el.addEventListener('mousemove', (ev) => {
                 'leave',
                 last_tile.x,
                 last_tile.y,
-                ev.buttons,
+                ev,
                 engine_canvas.get(last_tile.x, last_tile.y),
             )
 
@@ -301,7 +358,7 @@ el.addEventListener('mousemove', (ev) => {
         'move',
         t.x,
         t.y,
-        ev.buttons,
+        ev,
         engine_canvas.get(t.x, t.y),
     );
 
@@ -350,14 +407,9 @@ el.addEventListener('mousemove', (ev) => {
 el.addEventListener('mouseleave', (ev) => {
     if (!capture_owner && hover_owner && last_tile) {
         hover_owner.OnPointerLeave?.(
-            make_pointer_event(
-                'leave',
-                last_tile.x,
-                last_tile.y,
-                0,
-                engine_canvas.get(last_tile.x, last_tile.y),
-            )
+            make_pointer_event('leave', last_tile.x, last_tile.y, ev as unknown as MouseEvent, engine_canvas.get(last_tile.x, last_tile.y))
         );
+
     }
 
     hover_owner = null;
@@ -375,12 +427,34 @@ el.addEventListener('mousedown', (ev) => {
     down_tile = t;
     dragging = false;
     capture_owner = top;
-
+    if (top?.Focusable && top !== focused_owner) {
+        focused_owner?.OnBlur?.();
+        focused_owner = top;
+        focused_owner?.OnFocus?.();
+    }
     top?.OnPointerDown?.(
-        make_pointer_event('down', t.x, t.y, ev.buttons, engine_canvas.get(t.x, t.y))
+        make_pointer_event('down', t.x, t.y, ev, engine_canvas.get(t.x, t.y))
     );
 
+
 });
+
+//mousewheel listener ---------------------------
+el.addEventListener('wheel', (ev) => {
+    ev.preventDefault();
+
+    const t = mouse_to_tile(ev as any);
+    if (!t) return;
+
+    wheel_accum_dx += ev.deltaX;
+    wheel_accum_dy += ev.deltaY;
+    wheel_pending = {
+        x: t.x,
+        y: t.y,
+        delta_mode: ev.deltaMode,
+        mods: { shift: ev.shiftKey, ctrl: ev.ctrlKey, alt: ev.altKey, meta: ev.metaKey },
+    };
+}, { passive: false });
 
 el.addEventListener('mouseup', (ev) => {
     const t = mouse_to_tile(ev);
@@ -398,7 +472,7 @@ el.addEventListener('mouseup', (ev) => {
     const target = capture_owner ?? top;
 
     target?.OnPointerUp?.(
-        make_pointer_event('up', t.x, t.y, ev.buttons, engine_canvas.get(t.x, t.y))
+        make_pointer_event('up', t.x, t.y, ev, engine_canvas.get(t.x, t.y))
     );
 
     if (dragging && target) {
@@ -412,9 +486,38 @@ el.addEventListener('mouseup', (ev) => {
     // click synthesis: down+up on same module AND mouseup inside rect
     if (!dragging && down_owner && target && down_owner === target) {
         if (rect_contains(target.rect, t.x, t.y)) {
-            target.OnClick?.(
-                make_pointer_event('click', t.x, t.y, ev.buttons, engine_canvas.get(t.x, t.y))
-            );
+            const now = performance.now();
+            const button = ev.button;
+
+            // if we already have a pending single-click, a 2nd click within the window becomes dblclick
+            const p = pending_single_click;
+
+            const is_double =
+                !!p &&
+                now <= p.run_at_ms &&
+                p.target.id === target.id &&
+                p.button === button &&
+                Math.max(Math.abs(t.x - p.x), Math.abs(t.y - p.y)) <= DBLCLICK_TILE_RADIUS;
+
+            if (is_double) {
+                // cancel the queued single
+                pending_single_click = null;
+
+                // emit ONLY double
+                target.OnClick?.(
+                    make_pointer_event('click', t.x, t.y, ev, engine_canvas.get(t.x, t.y), 2)
+                );
+            } else {
+                // queue single click (fires after window if not upgraded to double)
+                pending_single_click = {
+                    run_at_ms: now + DBLCLICK_MS,
+                    target,
+                    button,
+                    x: t.x,
+                    y: t.y,
+                    ev,
+                };
+            }
 
         }
     }
@@ -426,19 +529,83 @@ el.addEventListener('mouseup', (ev) => {
 
 });
 
+function dispatch_global_keydown(ev: KeyboardEvent): boolean {
+    // Example global: Esc clears focus
+    if (ev.key === 'Escape') {
+        focused_owner?.OnBlur?.();
+        focused_owner = null;
+        return true;
+    }
+    return false;
+}
+
+key_sink?.addEventListener('keydown', (ev) => {
+    // Optional: allow a root module style global hook
+    for (let i = modules.length - 1; i >= 0; i--) {
+        const m = modules[i];
+        if (!m) continue;
+        if (m.OnGlobalKeyDown) {
+            m.OnGlobalKeyDown(ev);
+            // if you want “handled”, add a boolean return later
+            break;
+        }
+    }
+
+    if (dispatch_global_keydown(ev)) return;
+    focused_owner?.OnKeyDown?.(ev);
+});
+
+key_sink?.addEventListener('keyup', (ev) => {
+    focused_owner?.OnKeyUp?.(ev);
+});
+
+key_sink?.addEventListener('beforeinput', (ev: InputEvent) => {
+    if (!focused_owner?.OnTextInput) return;
+    // @ts-ignore
+    const data = ev.data;
+    if (typeof data === 'string' && data.length > 0) {
+        focused_owner.OnTextInput(data);
+    }
+});
 
 
-// ---------- main loop ----------
+// ---------- TICK / MAIN LOOP OF PROGRAM HERE ----------
 function tick() {
     // compose modules -> engine canvas (later modules overwrite earlier)
-    compose_modules(engine_canvas, modules);
+    const now = performance.now();
+    if (pending_single_click && now >= pending_single_click.run_at_ms) {
+        const p = pending_single_click;
+        pending_single_click = null;
 
+        p.target.OnClick?.(
+            make_pointer_event('click', p.x, p.y, p.ev, engine_canvas.get(p.x, p.y), 1)
+        );
+    }
+
+
+    compose_modules(engine_canvas, modules);
     if (last_click) {
         engine_canvas.set(last_click.x, last_click.y, {
             char: '!',
             rgb: { r: 255, g: 120, b: 120 },
             style: 'regular',
         });
+    }
+
+    if (wheel_pending) {
+        const { x, y, delta_mode, mods } = wheel_pending;
+        const top = route_to_top_module(modules, x, y);
+        top?.OnWheel?.({
+            x, y,
+            delta_x: wheel_accum_dx,
+            delta_y: wheel_accum_dy,
+            delta_mode,
+            ...mods,
+        });
+
+        wheel_accum_dx = 0;
+        wheel_accum_dy = 0;
+        wheel_pending = null;
     }
 
     draw_canvas(engine_canvas);

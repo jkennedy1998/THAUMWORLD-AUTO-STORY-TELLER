@@ -35,18 +35,48 @@ export type TileEvent = {
     cell: Cell | undefined;
 };
 
+export type WheelEvent = {
+    x: number;
+    y: number;
+
+    delta_x: number;
+    delta_y: number;
+    delta_mode: number; // 0 pixels, 1 lines, 2 pages
+
+    shift: boolean;
+    ctrl: boolean;
+    alt: boolean;
+    meta: boolean;
+};
+
 export type PointerKind = 'enter' | 'leave' | 'move' | 'down' | 'up' | 'click';
 
 export type PointerEvent = {
     pointer_id: number; // 0 = mouse
     kind: PointerKind;
+
     x: number;
     y: number;
     prev_x?: number;
     prev_y?: number;
+
+    step_dx: number;
+    step_dy: number;
+
+    button: number;
+
+    shift: boolean;
+    ctrl: boolean;
+    alt: boolean;
+    meta: boolean;
+
     buttons: number;
     cell?: Cell;
+
+    // click synthesis (optional)
+    click_count?: 1 | 2;
 };
+
 export type DragKind = 'drag_start' | 'drag_move' | 'drag_end';
 
 export type DragEvent = {
@@ -89,6 +119,17 @@ export type Module = {
     OnDragStart?(e: DragEvent): void;
     OnDragMove?(e: DragEvent): void;
     OnDragEnd?(e: DragEvent): void;
+    Focusable?: boolean;
+    OnFocus?(): void;
+    OnBlur?(): void;
+    OnWheel?(e: WheelEvent): void;
+    // keyboard lanes
+    OnKeyDown?(e: KeyboardEvent): void;
+    OnKeyUp?(e: KeyboardEvent): void;
+    OnTextInput?(text: string): void;
+    // optional global shortcut lane (UI calls first)
+    OnGlobalKeyDown?(e: KeyboardEvent): void;
+
 };
 
 
