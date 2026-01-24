@@ -8,9 +8,19 @@ import { make_button_module } from '../mono_ui/modules/button_module.js';
 // ---------- renderer config (matches your Figma % intent) ----------
 const FONT_FAMILY = 'Martian Mono';
 const BASE_FONT_SIZE_PX = 10; // scale=1 => ~10px
+
+// 0..7 -> css font-weight (Martian Mono supports 100..800)
+const WEIGHT_INDEX_TO_CSS: readonly number[] = [100, 200, 300, 400, 500, 600, 700, 800] as const;
+function clamp_weight_index(w: unknown): number {
+    const v = typeof w === 'number' ? Math.trunc(w) : 3;
+    if (!Number.isFinite(v)) return 3;
+    return Math.max(0, Math.min(7, v));
+}
+
 const BASE_LINE_HEIGHT_MULT = 1.5; // 150%
 const BASE_LETTER_SPACING_MULT = 0.08; // 8%
 let scale = 1.0; // 0..2 => 0%..200%
+// weight index 0..7 -> CSS font-weight
 
 // ---------- canvas size (tile grid) ----------
 const grid_width = 80;
@@ -27,7 +37,7 @@ let pending_single_click: {
 } | null = null;
 
 
-const DBLCLICK_MS = 250;
+const DBLCLICK_MS = 180;
 const DBLCLICK_TILE_RADIUS = 1;
 let last_click_sig: {
     t_ms: number;
@@ -243,7 +253,8 @@ function get_metrics() {
     const letter_spacing_px = font_size_px * BASE_LETTER_SPACING_MULT;
 
     // measure monospace glyph width
-    ctx2.font = `${font_size_px}px "${FONT_FAMILY}"`;
+    ctx2.font = `400 ${font_size_px}px "${FONT_FAMILY}"`;
+
     const glyph_w = ctx2.measureText('M').width;
 
     const tile_w = glyph_w + letter_spacing_px;
@@ -284,10 +295,19 @@ function draw_canvas(c: Canvas) {
             // map bottom-left y to canvas y (canvas origin is top-left)
             const canvas_y = (c.height - 1 - y) * tile_h;
 
-            // style -> font
-            // (for now: just "regular" maps to 400 weight, non-italic)
-            // later: map style string to weight/italic.
-            ctx2.font = `${font_size_px}px "${FONT_FAMILY}"`;
+            // weight (temporary: read weight_index even before the shared Cell type is updated)
+            const weight_index_raw = (cell as any).weight_index;
+            const weight_index = clamp_weight_index(
+                typeof weight_index_raw === 'number' ? weight_index_raw : 3 // default = "regular-ish"
+            );
+            const css_weight = WEIGHT_INDEX_TO_CSS[weight_index];
+
+            // include weight directly in the font string
+            const wi = clamp_weight_index((cell as any).weight_index);
+            const css_w = WEIGHT_INDEX_TO_CSS[wi];
+            ctx2.font = `${css_w} ${font_size_px}px "${FONT_FAMILY}"`;
+
+
 
             // rgb
             ctx2.fillStyle = `rgb(${cell.rgb.r},${cell.rgb.g},${cell.rgb.b})`;

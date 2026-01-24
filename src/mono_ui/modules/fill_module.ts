@@ -7,7 +7,11 @@ export type FillModuleConfig = {
     char: string;
     style?: StyleName;
     rgb?: Rgb;
+
+    // optional; if omitted, canvas normalization defaults to 3
+    weight_index?: number;
 };
+
 
 export function make_fill_module(config: FillModuleConfig): Module {
     return {
@@ -19,6 +23,7 @@ export function make_fill_module(config: FillModuleConfig): Module {
                 char: config.char,
                 ...(config.style !== undefined ? { style: config.style } : {}),
                 ...(config.rgb !== undefined ? { rgb: config.rgb } : {}),
+                ...(config.weight_index !== undefined ? { weight_index: config.weight_index } : {}),
             };
 
             canvas.fill_rect(config.rect, cell);

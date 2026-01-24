@@ -12,9 +12,15 @@ export type StyleName = string;
 // One tile / cell in the canvas
 export type Cell = {
     char: string; // expected length 1; space ' ' means clear
+
+    // 0..7 mapped to Martian Mono weights 100..800
+    // 0=thin ... 3=regular-ish ... 7=black-ish
+    weight_index: number;
+
     style: StyleName;
     rgb: Rgb;
 };
+
 
 // Inclusive rect in bottom-left coordinates:
 // covers all cells where x in [x0..x1] and y in [y0..y1]

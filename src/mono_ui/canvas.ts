@@ -1,8 +1,18 @@
-import type { Canvas, Cell, Rect, Rgb, StyleName } from "./types.js";
+﻿import type { Canvas, Cell, Rect, Rgb, StyleName } from "./types.js";
 
 const DEFAULT_RGB: Rgb = { r: 255, g: 255, b: 255 };
 const DEFAULT_STYLE: StyleName = "regular";
 const DEFAULT_CHAR = " ";
+
+// 0..7 => 8 weights. default 3 ≈ "regular"
+const DEFAULT_WEIGHT_INDEX = 3;
+
+function clamp_weight_index(n: unknown): number {
+    const v = typeof n === "number" ? Math.trunc(n) : DEFAULT_WEIGHT_INDEX;
+    if (!Number.isFinite(v)) return DEFAULT_WEIGHT_INDEX;
+    return Math.max(0, Math.min(7, v));
+}
+
 
 function clamp_byte(n: number): number {
     if (!Number.isFinite(n)) return 0;
@@ -19,8 +29,10 @@ function normalize_cell(partial: Partial<Cell> & { char: string }): Cell {
         : DEFAULT_RGB;
 
     const style = partial.style ?? DEFAULT_STYLE;
+    const weight_index = clamp_weight_index((partial as any).weight_index);
 
-    return { char, rgb, style };
+    return { char, rgb, style, weight_index };
+
 }
 
 // Bottom-left coords (x,y) map to internal row-major storage (row 0 = top row)
