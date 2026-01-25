@@ -12,6 +12,9 @@ export type InputModuleOptions = {
     // called on submit
     on_submit: (target_id: string, message: string) => void;
 
+    // optional: expose a submit trigger to external modules
+    bind_submit?: (submit: () => void) => void;
+
     // styling
     text_rgb?: Rgb;
     border_rgb?: Rgb;
@@ -126,6 +129,8 @@ export function make_input_module(opts: InputModuleOptions): Module {
             weight_index: w_base,
         });
     }
+
+    opts.bind_submit?.(submit);
 
     return {
         id: opts.id,

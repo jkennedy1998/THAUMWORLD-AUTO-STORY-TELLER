@@ -137,14 +137,17 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
         const src = opts.get_source();
         if (src.rev === cached_rev && text_w === cached_width) return;
 
+        const text_h = rect_height(inner_text_rect());
+        const prev_max_scroll = Math.max(0, cached_lines.length - text_h);
+        const was_at_bottom = cached_rev === -1 ? true : (scroll_y >= prev_max_scroll);
+
         cached_rev = src.rev;
         cached_width = text_w;
         cached_lines = wrap_messages(src.messages, text_w);
 
-        // clamp scroll when content changes
-        const text_h = rect_height(inner_text_rect());
+        // clamp scroll when content changes; keep bottom lock if already at bottom
         const max_scroll = Math.max(0, cached_lines.length - text_h);
-        scroll_y = clamp(scroll_y, 0, max_scroll);
+        scroll_y = was_at_bottom ? max_scroll : clamp(scroll_y, 0, max_scroll);
     }
 
     function inner_text_rect(): Rect {

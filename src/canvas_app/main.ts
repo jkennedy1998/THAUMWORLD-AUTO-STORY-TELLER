@@ -305,6 +305,7 @@ set_text_window_messages("log", [
     "hey! :3",
 ]);
 //LIST OF MODULES WITHIN THE BOOTED WINDOW
+let input_submit: (() => void) | null = null;
 const modules: Module[] = [
 
     make_fill_module({
@@ -343,12 +344,24 @@ const modules: Module[] = [
             append_text_window_message(target_id, message);
             void send_to_interpreter(message);
         },
+        bind_submit: (submit) => { input_submit = submit; },
         border_rgb: { r: 160, g: 160, b: 160 },
         text_rgb: { r: 255, g: 255, b: 255 },
         cursor_rgb: { r: 255, g: 255, b: 255 },
         bg: { char: " ", rgb: { r: 20, g: 20, b: 20 } },
         base_weight_index: 3,
         placeholder: "Type… (Enter=send, Shift+Enter=new line, Backspace=delete)",
+    }),
+
+    make_button_module({
+        id: 'btn_send',
+        rect: { x0: 62, y0: 2, x1: 72, y1: 12 },
+        label: 'send',
+        rgb: { r: 255, g: 220, b: 120 },
+        bg: { char: '-', rgb: { r: 50, g: 50, b: 50 } },
+        OnPress() {
+            input_submit?.();
+        },
     }),
 
 
