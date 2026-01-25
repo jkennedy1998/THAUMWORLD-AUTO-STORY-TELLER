@@ -1,6 +1,7 @@
-﻿import type { Canvas, Module, Rect, Rgb, PointerEvent } from "../types.js";
+import type { Canvas, Module, Rect, Rgb, PointerEvent } from "../types.js";
 import { rect_width, rect_height } from "../types.js";
 import { draw_border } from "../padding.js";
+import { get_color_by_name } from "../colors.js";
 
 export type InputModuleOptions = {
     id: string;
@@ -93,9 +94,9 @@ function wrap_preserve_newlines(text: string, width: number): string[] {
 }
 
 export function make_input_module(opts: InputModuleOptions): Module {
-    const text_rgb: Rgb = opts.text_rgb ?? { r: 255, g: 255, b: 255 };
-    const border_rgb: Rgb = opts.border_rgb ?? { r: 160, g: 160, b: 160 };
-    const cursor_rgb: Rgb = opts.cursor_rgb ?? { r: 255, g: 255, b: 255 };
+    const text_rgb: Rgb = opts.text_rgb ?? get_color_by_name("off_white").rgb;
+    const border_rgb: Rgb = opts.border_rgb ?? get_color_by_name("light_gray").rgb;
+    const cursor_rgb: Rgb = opts.cursor_rgb ?? get_color_by_name("off_white").rgb;
     const w_base = typeof opts.base_weight_index === "number" ? clamp(Math.trunc(opts.base_weight_index), 0, 7) : 3;
 
     let focused = false;
@@ -210,7 +211,7 @@ export function make_input_module(opts: InputModuleOptions): Module {
                     const is_placeholder = buffer.length === 0 && (opts.placeholder ?? "").length > 0;
                     c.set(inner.x0 + col, y, {
                         char: ch,
-                        rgb: is_placeholder ? { r: 140, g: 140, b: 140 } : text_rgb,
+                        rgb: is_placeholder ? get_color_by_name("medium_gray").rgb : text_rgb,
                         style: "regular",
                         weight_index: w_base,
                     });

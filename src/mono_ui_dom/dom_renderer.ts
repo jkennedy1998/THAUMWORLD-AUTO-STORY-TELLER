@@ -16,23 +16,20 @@ export class DomRenderer {
      * Later: attach to a real DOM root
      */
     attach(root: HTMLElement): void {
-        // TODO: create grid container, store root
+        // TODO: map DOM items + inventories into tiles
     }
 
     /**
      * Pure adapter: Canvas -> DOM
      */
     render(canvas: Canvas): void {
-        // TODO:
-        // - iterate canvas
-        // - map each Cell to a DOM tile
-        // - apply font, scale, color
+        //
     }
 
     /**
      * Later: tile click mapping
      */
     on_tile_click(handler: (x: number, y: number, cell: Cell) => void): void {
-        // TODO
+        //
     }
 }

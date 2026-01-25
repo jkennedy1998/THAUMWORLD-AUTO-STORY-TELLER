@@ -1,8 +1,3 @@
-﻿/**
- * TODO NEXT: get interface program working
- * TODO ART: get renderer to tell the interface what system text the user might want to interact with (click / copy paste)
- */
-
 import * as readline from "node:readline";
 import * as http from "node:http";
 import { debug_log } from "../shared/debug.js";
@@ -241,7 +236,6 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
                 }
 
                 if (msg.sender?.toLowerCase() === "interpreter_ai") {
-                    // TODO: connect data broker program here instead of sending to log
                 }
             }
 

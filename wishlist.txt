@@ -3,3 +3,5 @@ ripple effect module just for funzies. had a padding around the rect that fades 
 inventory systems
 
 shift clicking an inventory slot that you are searching through adds that to inventory
+
+TODO ART: get renderer to tell the interface what system text the user might want to interact with (click / copy paste)

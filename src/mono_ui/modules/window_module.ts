@@ -1,6 +1,7 @@
-﻿import type { Canvas, Module, Rect, Rgb, WheelEvent } from "../types.js";
+import type { Canvas, Module, Rect, Rgb, WheelEvent } from "../types.js";
 import { rect_width, rect_height } from "../types.js";
 import { draw_border } from "../padding.js";
+import { get_color_by_name } from "../colors.js";
 
 export type TextWindowSource = {
     messages: string[];
@@ -168,8 +169,8 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
         Focusable: true,
 
         Draw(c: Canvas): void {
-            const border_rgb = opts.border_rgb ?? { r: 180, g: 180, b: 180 };
-            const text_rgb = opts.text_rgb ?? { r: 255, g: 255, b: 255 };
+            const border_rgb = opts.border_rgb ?? get_color_by_name("light_gray").rgb;
+            const text_rgb = opts.text_rgb ?? get_color_by_name("off_white").rgb;
             const w_base = base_weight();
 
             // optional bg fill behind everything

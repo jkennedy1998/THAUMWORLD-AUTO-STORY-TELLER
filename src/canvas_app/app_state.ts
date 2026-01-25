@@ -4,6 +4,7 @@ import { make_text_window_module } from '../mono_ui/modules/window_module.js';
 import { make_input_module } from '../mono_ui/modules/input_module.js';
 import type { Module, Rgb } from '../mono_ui/types.js';
 import { debug_warn } from '../shared/debug.js';
+import { get_color_by_name } from '../mono_ui/colors.js';
 
 export const APP_CONFIG = {
     font_family: 'Martian Mono',
@@ -32,7 +33,8 @@ type WindowFeed = {
 };
 
 export function create_app_state(): AppState {
-    const WHITE: Rgb = { r: 255, g: 255, b: 255 };
+    const WHITE: Rgb = get_color_by_name('off_white').rgb;
+    const DEEP_RED: Rgb = get_color_by_name('deep_red').rgb;
 
     const ui_state = {
         text_windows: new Map<string, { messages: string[]; rev: number }>(),
@@ -173,52 +175,52 @@ async function fetch_log_messages(slot: number): Promise<string[]> {
             id: 'bg',
             rect: { x0: 0, y0: 0, x1: APP_CONFIG.grid_width - 1, y1: APP_CONFIG.grid_height - 1 },
             char: '.',
-            rgb: WHITE,
+            rgb: DEEP_RED,
             style: 'regular',
         }),
 
         make_text_window_module({
             id: 'log',
-            rect: { x0: 2, y0: 14, x1: 60, y1: 24 },
+            rect: { x0: 1, y0: 13, x1: 78, y1: 24 },
             get_source: () => ui_state.text_windows.get('log') ?? { messages: [], rev: 0 },
-            border_rgb: { r: 160, g: 160, b: 160 },
-            text_rgb: { r: 255, g: 255, b: 255 },
-            bg: { char: ' ', rgb: { r: 20, g: 20, b: 20 } },
+            border_rgb: get_color_by_name('light_gray').rgb,
+            text_rgb: get_color_by_name('off_white').rgb,
+            bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
             base_weight_index: 3,
         }),
 
         make_text_window_module({
             id: 'status',
-            rect: { x0: 2, y0: 26, x1: 60, y1: 28 },
+            rect: { x0: 1, y0: 26, x1: 78, y1: 28 },
             get_source: () => ui_state.text_windows.get('status') ?? { messages: [], rev: 0 },
-            border_rgb: { r: 120, g: 120, b: 120 },
-            text_rgb: { r: 200, g: 200, b: 200 },
-            bg: { char: ' ', rgb: { r: 14, g: 14, b: 14 } },
+            border_rgb: get_color_by_name('medium_gray').rgb,
+            text_rgb: get_color_by_name('pale_gray').rgb,
+            bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
             base_weight_index: 3,
         }),
 
         make_input_module({
             id: 'input',
-            rect: { x0: 2, y0: 2, x1: 60, y1: 12 },
+            rect: { x0: 1, y0: 1, x1: 66, y1: 11 },
             target_id: 'log',
             on_submit: (target_id, message) => {
                 void send_to_interpreter(message);
             },
             bind_submit: (submit) => { input_submit = submit; },
-            border_rgb: { r: 160, g: 160, b: 160 },
-            text_rgb: { r: 255, g: 255, b: 255 },
-            cursor_rgb: { r: 255, g: 255, b: 255 },
-            bg: { char: ' ', rgb: { r: 20, g: 20, b: 20 } },
+            border_rgb: get_color_by_name('light_gray').rgb,
+            text_rgb: get_color_by_name('off_white').rgb,
+            cursor_rgb: get_color_by_name('off_white').rgb,
+            bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
             base_weight_index: 3,
             placeholder: 'Type… (Enter=send, Shift+Enter=new line, Backspace=delete)',
         }),
 
         make_button_module({
             id: 'btn_send',
-            rect: { x0: 62, y0: 2, x1: 72, y1: 12 },
+            rect: { x0: 68, y0: 1, x1: 78, y1: 11 },
             label: 'send',
-            rgb: { r: 255, g: 220, b: 120 },
-            bg: { char: '-', rgb: { r: 50, g: 50, b: 50 } },
+            rgb: get_color_by_name('pale_orange').rgb,
+            bg: { char: '-', rgb: get_color_by_name('dark_gray').rgb },
             OnPress() {
                 input_submit?.();
             },

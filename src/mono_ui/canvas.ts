@@ -1,6 +1,7 @@
-﻿import type { Canvas, Cell, Rect, Rgb, StyleName } from "./types.js";
+import type { Canvas, Cell, Rect, Rgb, StyleName } from "./types.js";
+import { get_color_by_name } from "./colors.js";
 
-const DEFAULT_RGB: Rgb = { r: 255, g: 255, b: 255 };
+const DEFAULT_RGB: Rgb = get_color_by_name("off_white").rgb;
 const DEFAULT_STYLE: StyleName = "regular";
 const DEFAULT_CHAR = " ";
 
