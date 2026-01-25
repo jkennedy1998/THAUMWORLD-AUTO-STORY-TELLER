@@ -26,6 +26,21 @@ async function simulate_ai(msg: MessageEnvelope): Promise<string> {
     return `STUB AI: received "${msg.content}"`;
 }
 
+function message_contains_text(msg: MessageEnvelope, needle: string): boolean {
+    if (!needle) return false;
+    const text = msg.content ?? "";
+    return text.toLowerCase().includes(needle.toLowerCase());
+}
+
+function parse_error_iteration(error_stage: string | undefined): number {
+    if (!error_stage) return 1;
+    if (!error_stage.startsWith("interpretation_error_")) return 1;
+    const parts = error_stage.split("_");
+    const last = parts[parts.length - 1] ?? "";
+    const n = Number(last);
+    return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 1;
+}
+
 function post_tweak(text: string, original: MessageEnvelope): MessageEnvelope {
     const input: MessageInput = {
         sender: "interpreter_ai",
@@ -51,7 +66,16 @@ function update_outbox_message(outbox_path: string, updated: MessageEnvelope): v
 
 async function process_message(outbox_path: string, inbox_path: string, log_path: string, msg: MessageEnvelope): Promise<void> {
     debug_log("Interpreter: received", { id: msg.id, status: msg.status, stage: msg.stage });
-    write_status_line(get_status_path(data_slot_number), "the interpreter grabs the message");
+    const error_stage = (msg.meta as any)?.error_stage as string | undefined;
+    const iteration = parse_error_iteration(error_stage);
+    const next_iteration = iteration + 1;
+
+    if (error_stage) {
+        write_status_line(get_status_path(data_slot_number), "the interpreter is refining the translation");
+    } else {
+        write_status_line(get_status_path(data_slot_number), "the interpreter grabs the message");
+    }
+
     const prepped = pre_tweak(msg);
 
     const processing = try_set_message_status(prepped, "processing");
@@ -63,6 +87,10 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
 
     const response_text = await simulate_ai(processing.message);
     const response_msg = post_tweak(response_text, processing.message);
+
+    response_msg.meta = { ...(response_msg.meta ?? {}), machine_text: response_msg.content };
+    response_msg.stage = error_stage ? `interpreted_${next_iteration}` : "interpreted_1";
+    response_msg.status = "sent";
 
     // TODO: send to data broker program here instead of inbox
     append_inbox_message(inbox_path, response_msg);

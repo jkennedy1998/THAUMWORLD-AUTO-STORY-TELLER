@@ -12,6 +12,7 @@ export function route_message(message: MessageEnvelope): RouteResult {
 
     const is_user = sender === "j" || sender === "user" || type === "user_input";
     const is_interpreter = sender === "interpreter_ai" || type === "interpreter_ai";
+    const is_broker = sender === "data_broker" || type === "data_broker";
 
     if (is_user) {
         const { message: sent } = try_set_message_status(message, 'sent');
@@ -25,6 +26,33 @@ export function route_message(message: MessageEnvelope): RouteResult {
     }
 
     if (is_interpreter) {
+        if (message.stage?.startsWith("interpreted_")) {
+            return {
+                log: message,
+                outbox: {
+                    ...message,
+                    status: "sent",
+                },
+            };
+        }
+        return { log: message };
+    }
+
+    if (is_broker) {
+        if (message.stage?.startsWith("interpretation_error_")) {
+            return {
+                log: message,
+                outbox: {
+                    ...message,
+                    stage: "interpreter_ai",
+                    status: "sent",
+                    meta: {
+                        ...(message.meta ?? {}),
+                        error_stage: message.stage,
+                    },
+                },
+            };
+        }
         return { log: message };
     }
 
