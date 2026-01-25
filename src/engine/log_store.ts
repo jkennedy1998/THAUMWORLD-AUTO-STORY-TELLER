@@ -2,7 +2,7 @@
 
 import * as fs from "node:fs";
 import { parse } from "jsonc-parser";
-import type { LogFile, LogMessage } from "./types.js";
+import type { LogFile, MessageEnvelope } from "./types.js";
 import { BASE32_RFC_ALPHABET } from "./types.js";
 
 
@@ -73,11 +73,11 @@ export function make_log_id(message_index: number): string {
     return `${iso} : ${idx} : ${rand}`;
 }
 
-export function append_log_message(log_path: string, sender: string, content: string): LogMessage {
+export function append_log_message(log_path: string, sender: string, content: string): MessageEnvelope {
     const log = read_log(log_path);
     const idx = next_message_index(log);
 
-    const msg: LogMessage = {
+    const msg: MessageEnvelope = {
         id: make_log_id(idx),
         sender,
         content,
@@ -88,4 +88,11 @@ export function append_log_message(log_path: string, sender: string, content: st
 
     write_log(log_path, log);
     return msg;
+}
+
+export function append_log_envelope(log_path: string, message: MessageEnvelope): MessageEnvelope {
+    const log = read_log(log_path);
+    log.messages.unshift(message);
+    write_log(log_path, log);
+    return message;
 }

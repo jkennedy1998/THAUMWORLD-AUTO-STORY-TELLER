@@ -16,3 +16,8 @@ export function get_inbox_path(slot: number): string {
     // the path to the inbox
     return path.join(get_data_slot_dir(slot), "inbox.jsonc");
 }
+
+export function get_outbox_path(slot: number): string {
+    // the path to the outbox
+    return path.join(get_data_slot_dir(slot), "outbox.jsonc");
+}

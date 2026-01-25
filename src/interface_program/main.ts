@@ -6,9 +6,15 @@
 import * as readline from "node:readline";
 import * as http from "node:http";
 
-import { get_data_slot_dir, get_inbox_path, get_log_path } from "../engine/paths.js";
+import { get_data_slot_dir, get_inbox_path, get_log_path, get_outbox_path } from "../engine/paths.js";
 import { read_inbox, clear_inbox, ensure_inbox_exists } from "../engine/inbox_store.js";
+import { ensure_outbox_exists } from "../engine/outbox_store.js";
 import { ensure_dir_exists, ensure_log_exists, read_log, append_log_message } from "../engine/log_store.js";
+import { append_outbox_message } from "../engine/outbox_store.js";
+import { append_log_envelope } from "../engine/log_store.js";
+import { create_correlation_id } from "../engine/message.js";
+import { route_message } from "../engine/router.js";
+import type { MessageEnvelope } from "../engine/types.js";
 import type { LogFile } from "../engine/types.js";
 
 const data_slot_number = 1; // hard set to 1 for now
@@ -167,7 +173,8 @@ function start_http_server(log_path: string): void {
 }
 
 // repeatedly check tasks that take time using current_state (shell)
-function Breath(log_path: string, inbox_path: string): void {
+// Breath is the stage coordinator for routing and state transitions.
+function Breath(log_path: string, inbox_path: string, outbox_path: string): void {
     try {
         flush_incoming_messages();
 
@@ -178,7 +185,26 @@ function Breath(log_path: string, inbox_path: string): void {
                 const msg = inbox.messages[i];
                 if (!msg) continue;
 
-                append_log_message(log_path, msg.sender, msg.content);
+                const normalized: MessageEnvelope = {
+                    ...msg,
+                    created_at: msg.created_at ?? new Date().toISOString(),
+                };
+
+                const is_user = msg.sender?.toLowerCase() === "j";
+                if (normalized.correlation_id === undefined && is_user) {
+                    normalized.correlation_id = create_correlation_id();
+                }
+
+                const routed = route_message(normalized);
+                append_log_envelope(log_path, routed.log);
+
+                if (routed.outbox) {
+                    append_outbox_message(outbox_path, routed.outbox);
+                }
+
+                if (msg.sender?.toLowerCase() === "interpreter_ai") {
+                    // TODO: connect data broker program here instead of sending to log
+                }
             }
 
             clear_inbox(inbox_path);
@@ -195,18 +221,20 @@ function Breath(log_path: string, inbox_path: string): void {
 }
 
 // run on boot (shell)
-function initialize(): { log_path: string; inbox_path: string } {
+function initialize(): { log_path: string; inbox_path: string; outbox_path: string } {
     const data_slot_dir = get_data_slot_dir(data_slot_number);
     const log_path = get_log_path(data_slot_number);
     const inbox_path = get_inbox_path(data_slot_number);
+    const outbox_path = get_outbox_path(data_slot_number);
 
     ensure_dir_exists(data_slot_dir);
     ensure_log_exists(log_path);
     ensure_inbox_exists(inbox_path);
+    ensure_outbox_exists(outbox_path);
 
     append_log_message(log_path, "SYSTEM", "INTERFACE_PROGRAM booted");
 
-    return { log_path, inbox_path };
+    return { log_path, inbox_path, outbox_path };
 }
 
 // TEMP DEBUG CLI:
@@ -252,7 +280,7 @@ function run_cli(log_path: string): void {
 
 // ---- boot ----
 console.log("BOOT: main.ts reached boot section");
-const { log_path, inbox_path } = initialize();
+const { log_path, inbox_path, outbox_path } = initialize();
 console.log("BOOT: initialize() done", { log_path, inbox_path });
 
 console.log("BOOT: starting Breath loop");
@@ -261,7 +289,7 @@ start_http_server(log_path);
 
 // Live engine/UI tick (needed for external program inbox + log updates)
 setInterval(() => {
-    Breath(log_path, inbox_path);
+    Breath(log_path, inbox_path, outbox_path);
 }, 2000);
 
 
