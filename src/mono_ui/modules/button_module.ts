@@ -57,11 +57,6 @@ export function make_button_module(opts: ButtonOptions): Module {
 
 
     function draw_label(c: Canvas) {
-        if (click_boost_frames > 0) {
-            click_boost_frames--;
-        }
-
-
         const y = rect.y0 + Math.floor((rect.y1 - rect.y0) / 2);
         const label = opts.label;
         const start_x = rect.x0 + Math.max(0, Math.floor(((rect.x1 - rect.x0 + 1) - label.length) / 2));

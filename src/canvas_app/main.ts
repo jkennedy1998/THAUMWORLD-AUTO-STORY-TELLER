@@ -1,8 +1,11 @@
-import { create_canvas } from '../mono_ui/canvas.js';
+ï»¿import { create_canvas } from '../mono_ui/canvas.js';
 import { compose_modules } from '../mono_ui/compose.js';
 import { make_fill_module } from '../mono_ui/modules/fill_module.js';
 import type { Canvas, Cell, Module, Rect, Rgb, PointerEvent, DragEvent, WheelEvent } from '../mono_ui/types.js';
 import { make_button_module } from '../mono_ui/modules/button_module.js';
+import { make_text_window_module } from '../mono_ui/modules/window_module.js';
+import { make_input_module } from '../mono_ui/modules/input_module.js';
+
 
 
 // ---------- renderer config (matches your Figma % intent) ----------
@@ -146,14 +149,46 @@ if (!ctx) throw new Error('2d canvas context not available');
 
 const ctx2: CanvasRenderingContext2D = ctx;
 
-const key_sink = document.getElementById('key_sink') as HTMLTextAreaElement | null;
-key_sink?.focus();
+function ensure_key_sink(): HTMLTextAreaElement {
+    let ks = document.getElementById('key_sink') as HTMLTextAreaElement | null;
 
-el.addEventListener('pointerdown', () => key_sink?.focus());
+
+    if (!ks) {
+        ks = document.createElement('textarea');
+        ks.id = 'key_sink';
+
+        // Make it focusable but invisible and out of the way
+        ks.setAttribute('autocomplete', 'off');
+        ks.setAttribute('autocorrect', 'off');
+        ks.setAttribute('autocapitalize', 'off');
+        ks.setAttribute('spellcheck', 'false');
+
+        ks.style.position = 'fixed';
+        ks.style.left = '-9999px';
+        ks.style.top = '0px';
+        ks.style.width = '1px';
+        ks.style.height = '1px';
+        ks.style.opacity = '0';
+
+        document.body.appendChild(ks);
+        console.warn('[mono_ui] key_sink element was missing; created one automatically');
+    }
+
+    return ks;
+}
+
+const key_sink = ensure_key_sink();
+
+console.log("key_sink:", key_sink, "active:", document.activeElement);
+focus_key_sink();
 
 el.addEventListener('contextmenu', (ev) => {
     ev.preventDefault();
 });
+function focus_key_sink() {
+    // keep keyboard lane alive
+    key_sink.focus({ preventScroll: true });
+}
 
 
 // ---------- engine canvas ----------
@@ -163,8 +198,53 @@ const engine_canvas: Canvas = create_canvas(grid_width, grid_height);
 const WHITE: Rgb = { r: 255, g: 255, b: 255 };
 const CYAN: Rgb = { r: 120, g: 220, b: 255 };
 const YELLOW: Rgb = { r: 255, g: 220, b: 120 };
+const ui_state = {
+    text_windows: new Map<string, { messages: string[]; rev: number }>(),
+};
 
+function set_text_window_messages(id: string, messages: string[]) {
+    const cur = ui_state.text_windows.get(id);
+    if (!cur) {
+        ui_state.text_windows.set(id, { messages: [...messages], rev: 1 });
+    } else {
+        cur.messages = [...messages];
+        cur.rev++;
+    }
+}
+function append_text_window_message(id: string, message: string) {
+    const cur = ui_state.text_windows.get(id);
+    if (!cur) {
+        ui_state.text_windows.set(id, { messages: [message], rev: 1 });
+    } else {
+        cur.messages.push(message);
+        cur.rev++;
+    }
+}
+
+
+// expose for external programs (dev hook)
+(window as any).THAUM_UI = {
+    set_text_window_messages,
+    append_text_window_message,
+};
+
+
+set_text_window_messages("log", [
+    "This is a text window. It wraps words onto new lines.",
+    "If a word is tooooooooolongtobefitononeline it will hyphenate-and-continue.",
+    "Scroll with the mouse wheel if there is more text.",
+    "Scroll with the mouse wheel if there is more text.",
+    "Scroll with the mouse wheel if there is more text.",
+    "Scroll with the mouse wheel if there is more text.",
+    "Scroll with the mouse wheel if there is more text.",
+    "Scroll with the mouse wheel if there is more text.",
+    "Scroll with the mouse wheel if there is more text.",
+    "Scroll with the mouse wheel if there is more text.",
+    "hey! :3",
+]);
+//LIST OF MODULES WITHIN THE BOOTED WINDOW
 const modules: Module[] = [
+
     make_fill_module({
         id: 'bg',
         rect: { x0: 0, y0: 0, x1: grid_width - 1, y1: grid_height - 1 },
@@ -172,78 +252,104 @@ const modules: Module[] = [
         rgb: WHITE,
         style: 'regular',
     }),
-    make_button_module({
-        id: 'btn_test',
-        rect: { x0: 45, y0: 2, x1: 75, y1: 6 },
-        label: '[ TEST BUTTON ]',
-        rgb: { r: 255, g: 220, b: 120 },
-        bg: { char: '-', rgb: { r: 80, g: 80, b: 80 } },
-        OnPress(e) {
-            console.log('btn press', { button: e.button, count: e.click_count ?? 1 });
-        },
+
+    make_text_window_module({
+        id: "log",
+        rect: { x0: 2, y0: 14, x1: 60, y1: 28 },
+        get_source: () => ui_state.text_windows.get("log") ?? { messages: [], rev: 0 },
+        border_rgb: { r: 160, g: 160, b: 160 },
+        text_rgb: { r: 255, g: 255, b: 255 },
+        bg: { char: " ", rgb: { r: 20, g: 20, b: 20 } },
+        base_weight_index: 3,
     }),
-    ((): Module => {
-        const rect: Rect = { x0: 2, y0: 2, x1: 40, y1: 12 };
-        let hover: { x: number; y: number } | null = null;
 
-        return {
-            id: 'panel',
-            rect,
-
-            Draw(c: Canvas): void {
-                c.fill_rect(rect, { char: '#', rgb: CYAN, style: 'regular' });
-
-                if (hover) {
-                    c.set(hover.x, hover.y, {
-                        char: '+',
-                        rgb: { r: 120, g: 255, b: 120 },
-                        style: 'regular',
-                    });
-                }
-            },
-
-            OnPointerEnter(e: PointerEvent): void {
-                console.log('panel enter', e.x, e.y);
-                hover = { x: e.x, y: e.y };
-            },
-
-            OnPointerMove(e: PointerEvent): void {hover = { x: e.x, y: e.y };},
-
-            OnPointerLeave(e: PointerEvent): void {
-                console.log('panel leave', e.x, e.y);
-                hover = null;},
-
-            OnPointerDown(e: PointerEvent): void {console.log('panel down', e.x, e.y);},
-
-            OnPointerUp(e: PointerEvent): void {console.log('panel up', e.x, e.y);},
-
-            OnDragStart(e) { console.log('panel drag start', e.start_x, e.start_y, '->', e.x, e.y); },
-            OnDragMove(e) { /* optional log spam */ },
-            OnDragEnd(e) { console.log('panel drag end', e.start_x, e.start_y, '->', e.x, e.y); },
-            Focusable: true,
-            OnFocus() { console.log('panel focus'); },
-            OnBlur() { console.log('panel blur'); },
-            OnClick(e) { console.log('panel click', { button: e.button, count: e.click_count ?? 1 }); },
-            OnWheel(e) { console.log('panel wheel', e.delta_y); },
-            OnKeyDown(e) { console.log('panel key', e.key); },
-            OnTextInput(s) { console.log('panel text', JSON.stringify(s)); },
-
-        };
-    })(),
-
-
-
-    // animated cursor module (topmost)
-    {
-        id: 'cursor',
-        rect: { x0: 0, y0: 0, x1: -1, y1: -1 },
-        Draw(c: Canvas): void {
-            const t = performance.now() * 0.002;
-            const x = Math.floor((Math.sin(t) * 0.5 + 0.5) * (grid_width - 1));
-            const y = Math.floor((Math.cos(t) * 0.5 + 0.5) * (grid_height - 1));
-            c.set(x, y, { char: '@', rgb: YELLOW, style: 'regular' });
+    //make_button_module({
+    //    id: 'btn_test',
+    //    rect: { x0: 45, y0: 2, x1: 75, y1: 6 },
+    //    label: '[ TEST BUTTON ]',
+    //    rgb: { r: 255, g: 220, b: 120 },
+    //    bg: { char: '-', rgb: { r: 80, g: 80, b: 80 } },
+    //    OnPress(e) {
+    //        console.log('btn press', { button: e.button, count: e.click_count ?? 1 });
+    //    },
+    //}),
+    make_input_module({
+        id: "input",
+        rect: { x0: 2, y0: 2, x1: 60, y1: 12 }, // sits above the log window
+        target_id: "log",
+        on_submit: (target_id, message) => {
+            append_text_window_message(target_id, message);
         },
-    },
+        border_rgb: { r: 160, g: 160, b: 160 },
+        text_rgb: { r: 255, g: 255, b: 255 },
+        cursor_rgb: { r: 255, g: 255, b: 255 },
+        bg: { char: " ", rgb: { r: 20, g: 20, b: 20 } },
+        base_weight_index: 3,
+        placeholder: "Typeâ€¦ (Enter=send, Shift+Enter=new line, Backspace=delete)",
+    }),
+
+
+    //seting a fill module with the event listeners
+    //((): Module => {
+    //    const rect: Rect = { x0: 2, y0: 2, x1: 40, y1: 12 };
+    //    let hover: { x: number; y: number } | null = null;
+
+    //    return {
+    //        id: 'panel',
+    //        rect,
+
+    //        Draw(c: Canvas): void {
+    //            c.fill_rect(rect, { char: '#', rgb: CYAN, style: 'regular' });
+
+    //            if (hover) {
+    //                c.set(hover.x, hover.y, {
+    //                    char: '+',
+    //                    rgb: { r: 120, g: 255, b: 120 },
+    //                    style: 'regular',
+    //                });
+    //            }
+    //        },
+
+    //        OnPointerEnter(e: PointerEvent): void {
+    //            console.log('panel enter', e.x, e.y);
+    //            hover = { x: e.x, y: e.y };
+    //        },
+
+    //        OnPointerMove(e: PointerEvent): void {hover = { x: e.x, y: e.y };},
+
+    //        OnPointerLeave(e: PointerEvent): void {
+    //            console.log('panel leave', e.x, e.y);
+    //            hover = null;},
+
+    //        OnPointerDown(e: PointerEvent): void {console.log('panel down', e.x, e.y);},
+
+    //        OnPointerUp(e: PointerEvent): void {console.log('panel up', e.x, e.y);},
+
+    //        OnDragStart(e) { console.log('panel drag start', e.start_x, e.start_y, '->', e.x, e.y); },
+    //        OnDragMove(e) { /* optional log spam */ },
+    //        OnDragEnd(e) { console.log('panel drag end', e.start_x, e.start_y, '->', e.x, e.y); },
+    //        Focusable: true,
+    //        OnFocus() { console.log('panel focus'); },
+    //        OnBlur() { console.log('panel blur'); },
+    //        OnClick(e) { console.log('panel click', { button: e.button, count: e.click_count ?? 1 }); },
+    //        OnWheel(e) { console.log('panel wheel', e.delta_y); },
+    //        OnKeyDown(e) { console.log('panel key', e.key); },
+    //        OnTextInput(s) { console.log('panel text', JSON.stringify(s)); },
+
+    //    };
+    //})(),
+
+    //// animated cursor module (topmost)
+    //{
+    //    id: 'cursor',
+    //    rect: { x0: 0, y0: 0, x1: -1, y1: -1 },
+    //    Draw(c: Canvas): void {
+    //        const t = performance.now() * 0.002;
+    //        const x = Math.floor((Math.sin(t) * 0.5 + 0.5) * (grid_width - 1));
+    //        const y = Math.floor((Math.cos(t) * 0.5 + 0.5) * (grid_height - 1));
+    //        c.set(x, y, { char: '@', rgb: YELLOW, style: 'regular' });
+    //    },
+    //},
 ];
 
 // ---------- font/tile metrics ----------
@@ -286,7 +392,7 @@ function draw_canvas(c: Canvas) {
     ctx2.textAlign = 'center';
     ctx2.textBaseline = 'middle';
 
-    // naive draw: per cell (we’ll optimize later with dirty cells + style buckets)
+    // naive draw: per cell (weâ€™ll optimize later with dirty cells + style buckets)
     for (let y = 0; y < c.height; y++) {
         for (let x = 0; x < c.width; x++) {
             const cell = c.get(x, y);
@@ -439,6 +545,11 @@ el.addEventListener('mouseleave', (ev) => {
 
 
 el.addEventListener('mousedown', (ev) => {
+    ev.preventDefault();
+    focus_key_sink();
+    key_sink.focus();
+    console.log("after click, activeElement =", document.activeElement?.id);
+
     const t = mouse_to_tile(ev);
     if (!t) return;
 
@@ -556,6 +667,8 @@ function dispatch_global_keydown(ev: KeyboardEvent): boolean {
         focused_owner = null;
         return true;
     }
+    console.log("keydown fired:", ev.key);
+
     return false;
 }
 
@@ -566,7 +679,7 @@ key_sink?.addEventListener('keydown', (ev) => {
         if (!m) continue;
         if (m.OnGlobalKeyDown) {
             m.OnGlobalKeyDown(ev);
-            // if you want “handled”, add a boolean return later
+            // if you want â€œhandledâ€, add a boolean return later
             break;
         }
     }
@@ -581,12 +694,19 @@ key_sink?.addEventListener('keyup', (ev) => {
 
 key_sink?.addEventListener('beforeinput', (ev: InputEvent) => {
     if (!focused_owner?.OnTextInput) return;
+    console.log("beforeinput fired:", ev.inputType, (ev as any).data);
+
+    // prevent the textarea from filling up; we are the text engine
+    ev.preventDefault();
+
     // @ts-ignore
     const data = ev.data;
+
     if (typeof data === 'string' && data.length > 0) {
         focused_owner.OnTextInput(data);
     }
 });
+
 
 
 // ---------- TICK / MAIN LOOP OF PROGRAM HERE ----------
