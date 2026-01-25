@@ -11,6 +11,9 @@ import { make_input_module } from '../mono_ui/modules/input_module.js';
 // ---------- renderer config (matches your Figma % intent) ----------
 const FONT_FAMILY = 'Martian Mono';
 const BASE_FONT_SIZE_PX = 10; // scale=1 => ~10px
+const INTERPRETER_ENDPOINT = 'http://localhost:8787/api/input';
+const INTERPRETER_LOG_ENDPOINT = 'http://localhost:8787/api/log';
+const SELECTED_DATA_SLOT = 1;
 
 // 0..7 -> css font-weight (Martian Mono supports 100..800)
 const WEIGHT_INDEX_TO_CSS: readonly number[] = [100, 200, 300, 400, 500, 600, 700, 800] as const;
@@ -221,6 +224,65 @@ function append_text_window_message(id: string, message: string) {
     }
 }
 
+type WindowFeed = {
+    window_id: string;
+    fetch_messages: () => Promise<string[]>;
+};
+
+const window_feeds: WindowFeed[] = [];
+
+function register_window_feed(feed: WindowFeed): void {
+    window_feeds.push(feed);
+}
+
+async function poll_window_feeds(): Promise<void> {
+    const tasks = window_feeds.map(async (feed) => {
+        try {
+            const messages = await feed.fetch_messages();
+            set_text_window_messages(feed.window_id, messages);
+        } catch (err) {
+            console.warn('[mono_ui] failed to refresh window feed', feed.window_id, err);
+        }
+    });
+
+    await Promise.all(tasks);
+}
+
+function start_window_feed_polling(interval_ms: number): void {
+    void poll_window_feeds();
+    setInterval(() => {
+        void poll_window_feeds();
+    }, interval_ms);
+}
+
+async function send_to_interpreter(message: string): Promise<void> {
+    try {
+        const res = await fetch(INTERPRETER_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: message, sender: 'J' }),
+        });
+
+        if (!res.ok) {
+            throw new Error(`HTTP ${res.status}`);
+        }
+    } catch (err) {
+        console.warn('[mono_ui] failed to send to interpreter', err);
+        append_text_window_message('log', '[system] failed to reach interpreter');
+    }
+}
+
+async function fetch_log_messages(slot: number): Promise<string[]> {
+    const res = await fetch(`${INTERPRETER_LOG_ENDPOINT}?slot=${slot}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    const data = (await res.json()) as { ok: boolean; messages?: { sender: string; content: string }[] };
+    if (!data.ok || !Array.isArray(data.messages)) return [];
+
+    const ordered = [...data.messages].reverse();
+    return ordered.map((m) => `${m.sender}: ${m.content}`);
+}
+
 
 // expose for external programs (dev hook)
 (window as any).THAUM_UI = {
@@ -279,6 +341,7 @@ const modules: Module[] = [
         target_id: "log",
         on_submit: (target_id, message) => {
             append_text_window_message(target_id, message);
+            void send_to_interpreter(message);
         },
         border_rgb: { r: 160, g: 160, b: 160 },
         text_rgb: { r: 255, g: 255, b: 255 },
@@ -351,6 +414,11 @@ const modules: Module[] = [
     //    },
     //},
 ];
+
+register_window_feed({
+    window_id: 'log',
+    fetch_messages: () => fetch_log_messages(SELECTED_DATA_SLOT),
+});
 
 // ---------- font/tile metrics ----------
 function get_metrics() {
@@ -754,6 +822,7 @@ function tick() {
 
 // boot
 resize_to_grid();
+start_window_feed_polling(1000);
 tick();
 
 // TEMP: change scale with keys (0.5, 1, 1.5, 2)

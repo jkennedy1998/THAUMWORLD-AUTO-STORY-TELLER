@@ -4,15 +4,17 @@
  */
 
 import * as readline from "node:readline";
+import * as http from "node:http";
 
 import { get_data_slot_dir, get_inbox_path, get_log_path } from "../engine/paths.js";
 import { read_inbox, clear_inbox, ensure_inbox_exists } from "../engine/inbox_store.js";
 import { ensure_dir_exists, ensure_log_exists, read_log, append_log_message } from "../engine/log_store.js";
 import type { LogFile } from "../engine/types.js";
 
-
 const data_slot_number = 1; // hard set to 1 for now
 const visual_log_limit = 12;
+const HTTP_PORT = 8787;
+const ENABLE_CLI_LOG = false;
 
 let current_state: "awaiting_user" | "processing" | "error" = "awaiting_user";
 let message_buffer = ""; // message construction buffer
@@ -57,6 +59,113 @@ function render_visual_log(log: LogFile, last_n: number): void {
     console.log("-------------------------\n");
 }
 
+type InputRequest = {
+    text: string;
+    sender?: string;
+};
+
+function start_http_server(log_path: string): void {
+    const server = http.createServer((req, res) => {
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+        if (req.method === "OPTIONS") {
+            res.writeHead(204);
+            res.end();
+            return;
+        }
+
+        const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+        if (url.pathname === "/api/input") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const MAX_BYTES = 64 * 1024;
+            let body = "";
+
+            req.on("data", (chunk) => {
+                body += chunk;
+                if (body.length > MAX_BYTES) {
+                    res.writeHead(413, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "payload_too_large" }));
+                    req.destroy();
+                }
+            });
+
+            req.on("end", () => {
+                let parsed: InputRequest | null = null;
+                try {
+                    parsed = JSON.parse(body) as InputRequest;
+                } catch {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+                    return;
+                }
+
+                const text = typeof parsed?.text === "string" ? parsed.text : "";
+                if (!text.trim()) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "empty_text" }));
+                    return;
+                }
+
+                const sender = typeof parsed?.sender === "string" && parsed.sender.trim().length > 0
+                    ? parsed.sender.trim()
+                    : "J";
+
+                current_state = "processing";
+                append_log_message(log_path, sender, text);
+                append_log_message(log_path, "ASSISTANT", `STUB (no AI yet). You said: ${text}`);
+                current_state = "awaiting_user";
+
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true }));
+            });
+            return;
+        }
+
+        if (url.pathname === "/api/log") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+            if (!Number.isFinite(slot) || slot <= 0) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
+                return;
+            }
+
+            try {
+                const log = read_log(get_log_path(slot));
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, messages: log.messages }));
+            } catch (err: any) {
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: err?.message ?? "read_failed" }));
+            }
+            return;
+        }
+
+        if (url.pathname !== "/api/input") {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: false, error: "not_found" }));
+            return;
+        }
+    });
+
+    server.listen(HTTP_PORT, () => {
+        console.log(`HTTP bridge listening on http://localhost:${HTTP_PORT}/api/input`);
+    });
+}
+
 // repeatedly check tasks that take time using current_state (shell)
 function Breath(log_path: string, inbox_path: string): void {
     try {
@@ -75,8 +184,10 @@ function Breath(log_path: string, inbox_path: string): void {
             clear_inbox(inbox_path);
         }
 
-        const log = read_log(log_path);
-        render_visual_log(log, visual_log_limit);
+        if (ENABLE_CLI_LOG) {
+            const log = read_log(log_path);
+            render_visual_log(log, visual_log_limit);
+        }
     } catch (err) {
         current_state = "error";
         console.error(err);
@@ -145,6 +256,7 @@ const { log_path, inbox_path } = initialize();
 console.log("BOOT: initialize() done", { log_path, inbox_path });
 
 console.log("BOOT: starting Breath loop");
+start_http_server(log_path);
 
 
 // Live engine/UI tick (needed for external program inbox + log updates)
