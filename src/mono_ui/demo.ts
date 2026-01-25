@@ -1,4 +1,5 @@
 import { create_canvas } from "./canvas.js";
+import { debug_log } from "../shared/debug.js";
 import { compose_modules } from "./compose.js";
 import { make_fill_module } from "./modules/fill_module.js";
 
@@ -25,5 +26,5 @@ for (let y = c.height - 1; y >= 0; y--) {
     for (let x = 0; x < c.width; x++) {
         row += c.get(x, y)?.char ?? " ";
     }
-    console.log(row);
+    debug_log(row);
 }

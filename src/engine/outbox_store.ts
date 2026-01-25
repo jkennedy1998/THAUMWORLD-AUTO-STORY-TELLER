@@ -25,6 +25,25 @@ export function write_outbox(outbox_path: string, outbox: OutboxFile): void {
     fs.writeFileSync(outbox_path, JSON.stringify(outbox, null, 2), "utf-8");
 }
 
+export function prune_outbox_messages(outbox: OutboxFile, max_messages: number): OutboxFile {
+    if (max_messages <= 0) return outbox;
+    if (outbox.messages.length <= max_messages) return outbox;
+
+    const next = { ...outbox, messages: [...outbox.messages] };
+    let over = next.messages.length - max_messages;
+    if (over <= 0) return next;
+
+    for (let i = next.messages.length - 1; i >= 0 && over > 0; i--) {
+        const msg = next.messages[i];
+        if (msg?.status === "done") {
+            next.messages.splice(i, 1);
+            over--;
+        }
+    }
+
+    return next;
+}
+
 export function clear_outbox(outbox_path: string): void {
     const empty: OutboxFile = { schema_version: 1, messages: [] };
     fs.writeFileSync(outbox_path, JSON.stringify(empty, null, 2), "utf-8");
@@ -39,6 +58,7 @@ export function ensure_outbox_exists(outbox_path: string): void {
 export function append_outbox_message(outbox_path: string, message: MessageEnvelope): MessageEnvelope {
     const outbox = read_outbox(outbox_path);
     outbox.messages.unshift(message);
-    write_outbox(outbox_path, outbox);
+    const pruned = prune_outbox_messages(outbox, 10);
+    write_outbox(outbox_path, pruned);
     return message;
 }

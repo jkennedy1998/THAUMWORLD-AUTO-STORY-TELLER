@@ -5,8 +5,9 @@
   "main": "electron/main.js",
   "scripts": {
     "mono_demo": "tsx src/mono_ui/demo.ts",
-    "dev": "concurrently \"tsx src/interface_program/main.ts\" \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "dev": "concurrently \"tsx src/interface_program/main.ts\" \"tsx src/interpreter_ai/main.ts\" \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "interface_dev": "tsx src/interface_program/main.ts",
+    "interpreter_dev": "tsx src/interpreter_ai/main.ts",
     "build": "tsc",
     "start": "node dist/interface_program/main.js",
     "format": "prettier . --write",

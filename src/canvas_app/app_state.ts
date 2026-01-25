@@ -3,6 +3,7 @@ import { make_button_module } from '../mono_ui/modules/button_module.js';
 import { make_text_window_module } from '../mono_ui/modules/window_module.js';
 import { make_input_module } from '../mono_ui/modules/input_module.js';
 import type { Module, Rgb } from '../mono_ui/types.js';
+import { debug_warn } from '../shared/debug.js';
 
 export const APP_CONFIG = {
     font_family: 'Martian Mono',
@@ -16,6 +17,7 @@ export const APP_CONFIG = {
 
     interpreter_endpoint: 'http://localhost:8787/api/input',
     interpreter_log_endpoint: 'http://localhost:8787/api/log',
+    interpreter_status_endpoint: 'http://localhost:8787/api/status',
     selected_data_slot: 1,
 } as const;
 
@@ -57,6 +59,7 @@ export function create_app_state(): AppState {
     }
 
     const window_feeds: WindowFeed[] = [];
+    const pending_user_messages = new Map<string, string>();
 
     function register_window_feed(feed: WindowFeed): void {
         window_feeds.push(feed);
@@ -68,7 +71,7 @@ export function create_app_state(): AppState {
                 const messages = await feed.fetch_messages();
                 set_text_window_messages(feed.window_id, messages);
             } catch (err) {
-                console.warn('[mono_ui] failed to refresh window feed', feed.window_id, err);
+                debug_warn('[mono_ui] failed to refresh window feed', feed.window_id, err);
             }
         });
 
@@ -93,21 +96,55 @@ export function create_app_state(): AppState {
             if (!res.ok) {
                 throw new Error(`HTTP ${res.status}`);
             }
+
+            const data = (await res.json()) as { ok: boolean; id?: string };
+            if (data.ok && data.id) {
+                pending_user_messages.set(data.id, message);
+                void poll_window_feeds();
+            }
         } catch (err) {
-            console.warn('[mono_ui] failed to send to interpreter', err);
+            debug_warn('[mono_ui] failed to send to interpreter', err);
             append_text_window_message('log', '[system] failed to reach interpreter');
         }
     }
 
-    async function fetch_log_messages(slot: number): Promise<string[]> {
-        const res = await fetch(`${APP_CONFIG.interpreter_log_endpoint}?slot=${slot}`);
+async function fetch_log_messages(slot: number): Promise<string[]> {
+    const res = await fetch(`${APP_CONFIG.interpreter_log_endpoint}?slot=${slot}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    const data = (await res.json()) as { ok: boolean; messages?: { id: string; sender: string; content: string; type?: string }[] };
+    if (!data.ok || !Array.isArray(data.messages)) return [];
+
+    const ordered = [...data.messages].reverse();
+    const seen_ids = new Set<string>();
+
+    const filtered = ordered.filter((m) => {
+        if (!m?.id) return false;
+        if (seen_ids.has(m.id)) return false;
+        seen_ids.add(m.id);
+
+        const sender = (m.sender ?? '').toLowerCase();
+        if (sender === 'j' || sender === 'interpreter_ai') return true;
+        if (m.type === 'user_input') return true;
+        return false;
+    });
+
+    for (const m of filtered) {
+        if (pending_user_messages.has(m.id)) pending_user_messages.delete(m.id);
+    }
+
+    const from_log = filtered.map((m) => `${m.sender}: ${m.content}`);
+    const pending = Array.from(pending_user_messages.values()).map((content) => `J: ${content}`);
+    return [...from_log, ...pending];
+}
+
+    async function fetch_status_line(slot: number): Promise<string[]> {
+        const res = await fetch(`${APP_CONFIG.interpreter_status_endpoint}?slot=${slot}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-        const data = (await res.json()) as { ok: boolean; messages?: { sender: string; content: string }[] };
-        if (!data.ok || !Array.isArray(data.messages)) return [];
-
-        const ordered = [...data.messages].reverse();
-        return ordered.map((m) => `${m.sender}: ${m.content}`);
+        const data = (await res.json()) as { ok: boolean; status?: { line?: string } };
+        if (!data.ok || !data.status?.line) return [""];
+        return [data.status.line];
     }
 
     (window as any).THAUM_UI = {
@@ -142,11 +179,21 @@ export function create_app_state(): AppState {
 
         make_text_window_module({
             id: 'log',
-            rect: { x0: 2, y0: 14, x1: 60, y1: 28 },
+            rect: { x0: 2, y0: 14, x1: 60, y1: 24 },
             get_source: () => ui_state.text_windows.get('log') ?? { messages: [], rev: 0 },
             border_rgb: { r: 160, g: 160, b: 160 },
             text_rgb: { r: 255, g: 255, b: 255 },
             bg: { char: ' ', rgb: { r: 20, g: 20, b: 20 } },
+            base_weight_index: 3,
+        }),
+
+        make_text_window_module({
+            id: 'status',
+            rect: { x0: 2, y0: 26, x1: 60, y1: 28 },
+            get_source: () => ui_state.text_windows.get('status') ?? { messages: [], rev: 0 },
+            border_rgb: { r: 120, g: 120, b: 120 },
+            text_rgb: { r: 200, g: 200, b: 200 },
+            bg: { char: ' ', rgb: { r: 14, g: 14, b: 14 } },
             base_weight_index: 3,
         }),
 
@@ -155,7 +202,6 @@ export function create_app_state(): AppState {
             rect: { x0: 2, y0: 2, x1: 60, y1: 12 },
             target_id: 'log',
             on_submit: (target_id, message) => {
-                append_text_window_message(target_id, message);
                 void send_to_interpreter(message);
             },
             bind_submit: (submit) => { input_submit = submit; },
@@ -182,6 +228,11 @@ export function create_app_state(): AppState {
     register_window_feed({
         window_id: 'log',
         fetch_messages: () => fetch_log_messages(APP_CONFIG.selected_data_slot),
+    });
+
+    register_window_feed({
+        window_id: 'status',
+        fetch_messages: () => fetch_status_line(APP_CONFIG.selected_data_slot),
     });
 
     return {

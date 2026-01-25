@@ -21,3 +21,8 @@ export function get_outbox_path(slot: number): string {
     // the path to the outbox
     return path.join(get_data_slot_dir(slot), "outbox.jsonc");
 }
+
+export function get_status_path(slot: number): string {
+    // the path to the status file
+    return path.join(get_data_slot_dir(slot), "status.jsonc");
+}

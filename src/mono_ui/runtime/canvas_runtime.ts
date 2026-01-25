@@ -2,6 +2,7 @@ import { create_canvas } from '../canvas.js';
 import { compose_modules } from '../compose.js';
 import type { Canvas, Cell, Module, PointerEvent, DragEvent, WheelEvent } from '../types.js';
 import { rect_contains } from '../types.js';
+import { debug_warn } from '../../shared/debug.js';
 
 export type CanvasRuntimeOptions = {
     canvas: HTMLCanvasElement;
@@ -135,7 +136,7 @@ export class CanvasRuntime {
             ks.style.opacity = '0';
 
             document.body.appendChild(ks);
-            console.warn('[mono_ui] key_sink element was missing; created one automatically');
+            debug_warn('[mono_ui] key_sink element was missing; created one automatically');
         }
 
         return ks;

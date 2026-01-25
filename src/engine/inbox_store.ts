@@ -29,8 +29,19 @@ export function clear_inbox(inbox_path: string): void {
     fs.writeFileSync(inbox_path, JSON.stringify(empty, null, 2), "utf-8");
 }
 
+export function write_inbox(inbox_path: string, inbox: InboxFile): void {
+    fs.writeFileSync(inbox_path, JSON.stringify(inbox, null, 2), "utf-8");
+}
+
 export function ensure_inbox_exists(inbox_path: string): void {
     if (fs.existsSync(inbox_path)) return;
     const initial: InboxFile = { schema_version: 1, messages: [] };
     fs.writeFileSync(inbox_path, JSON.stringify(initial, null, 2), "utf-8");
+}
+
+export function append_inbox_message(inbox_path: string, message: InboxFile["messages"][number]): InboxFile["messages"][number] {
+    const inbox = read_inbox(inbox_path);
+    inbox.messages.unshift(message);
+    write_inbox(inbox_path, inbox);
+    return message;
 }
