@@ -2,10 +2,10 @@
   "name": "thaumworld-auto-story-teller",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "electron/main.js",
   "scripts": {
     "mono_demo": "tsx src/mono_ui/demo.ts",
-    "dev": "concurrently \"tsx src/interface_program/main.ts\" \"vite\"",
+    "dev": "concurrently \"tsx src/interface_program/main.ts\" \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "interface_dev": "tsx src/interface_program/main.ts",
     "build": "tsc",
     "start": "node dist/interface_program/main.js",
@@ -35,6 +35,8 @@
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vite": "^7.3.1",
-    "concurrently": "^9.2.0"
+    "concurrently": "^9.2.0",
+    "electron": "^32.3.1",
+    "wait-on": "^7.2.0"
   }
 }
