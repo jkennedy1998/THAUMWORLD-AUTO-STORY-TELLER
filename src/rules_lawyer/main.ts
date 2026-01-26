@@ -6,7 +6,7 @@ import { create_message, try_set_message_status } from "../engine/message.js";
 import type { MessageInput } from "../engine/message.js";
 import { append_log_envelope } from "../engine/log_store.js";
 import type { MessageEnvelope } from "../engine/types.js";
-import { debug_log } from "../shared/debug.js";
+import { debug_log, debug_waiting_roll } from "../shared/debug.js";
 import { apply_rules_stub } from "./effects.js";
 import type { CommandNode } from "../system_syntax/index.js";
 import { make_log_id } from "../engine/log_store.js";
@@ -195,6 +195,9 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
             };
             if (msg.correlation_id) req.correlation_id = msg.correlation_id;
             roll_requests.push(req);
+            if (req.meta?.rolled_by_player) {
+                debug_waiting_roll("Awaiting Roll", dice, field, i);
+            }
         }
     }
 

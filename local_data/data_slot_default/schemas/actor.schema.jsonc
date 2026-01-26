@@ -8,6 +8,9 @@
     "id",
     "name",
     "kind",
+    "size_mag",
+    "sleep_type",
+    "sleep_required_per_day",
     "languages",
     "stats",
     "profs",
@@ -17,12 +20,16 @@
     "resources",
     "derived",
     "derived_overrides",
+    "equipment_weight",
+    "inventory_weight",
     "inventory",
     "equipment",
     "tags",
     "location",
     "character_mag",
-    "perks"
+    "perks",
+    "perk_points",
+    "memory"
   ],
   "properties": {
     "schema_version": { "type": "number" },
@@ -30,10 +37,13 @@
     "name": { "type": "string" },
     "title": { "type": "string" },
     "kind": { "type": "string" },
+    "size_mag": { "type": "number" },
     "sex": { "type": "string" },
     "age": { "type": "number" },
     "sexual_orientation": { "type": "string" },
-    "languages": { "type": "array", "items": { "type": "string" } },
+    "sleep_type": { "type": "string", "enum": ["SLEEP", "REPAIR"] },
+    "sleep_required_per_day": { "type": "number" },
+    "languages": { "type": "array", "items": { "$ref": "#/definitions/language" } },
     "lore": {
       "type": "object",
       "additionalProperties": false,
@@ -69,6 +79,7 @@
     "personality": {
       "type": "object",
       "additionalProperties": false,
+      "description": "Narrative-only hints for renderer; not used for actor action selection.",
       "properties": {
         "story_goal": { "type": "string" },
         "fear": { "type": "string" },
@@ -182,10 +193,9 @@
         "walk": { "type": "number" },
         "climb": { "type": "number" },
         "swim": { "type": "number" },
-        "fly": { "type": "number" },
-        "burrow": { "type": "number" }
+        "fly": { "type": "number" }
       },
-      "required": ["walk", "climb", "swim", "fly", "burrow"]
+      "required": ["walk", "climb", "swim", "fly"]
     },
     "location": {
       "type": "object",
@@ -253,6 +263,8 @@
       "type": "object",
       "additionalProperties": { "type": "number" }
     },
+    "equipment_weight": { "type": "number" },
+    "inventory_weight": { "type": "number" },
     "inventory": {
       "type": "array",
       "items": { "$ref": "#/definitions/item" }
@@ -268,7 +280,9 @@
     },
     "tags": { "type": "array", "items": { "$ref": "#/definitions/tag" } },
     "character_mag": { "type": "number" },
-    "perks": { "type": "array", "items": { "type": "string" } }
+    "perks": { "type": "array", "items": { "type": "string" } },
+    "perk_points": { "$ref": "#/definitions/perk_points" },
+    "memory": { "type": "array", "items": { "type": "string" } }
   },
   "definitions": {
     "resource_pair": {
@@ -290,6 +304,28 @@
     "tag": {
       "type": "object",
       "additionalProperties": true
+    },
+    "sense": {
+      "type": "string",
+      "enum": ["light", "aroma", "pressure", "thaumic"]
+    },
+    "language": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "understood_senses": { "type": "array", "items": { "$ref": "#/definitions/sense" } }
+      },
+      "required": ["name", "understood_senses"]
+    },
+    "perk_points": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "current": { "type": "number" },
+        "total": { "type": "number" }
+      },
+      "required": ["current", "total"]
     }
   }
 }

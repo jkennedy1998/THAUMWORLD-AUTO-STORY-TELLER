@@ -4,11 +4,16 @@
   "id": "default_npc",
   "name": "default npc",
   "title": "",
-  "kind": "",
+  "kind": "DEFAULT_KIND",
+  "size_mag": 0,
   "sex": "",
   "age": 0,
   "sexual_orientation": "",
-  "languages": [],
+  "sleep_type": "SLEEP",
+  "sleep_required_per_day": 4,
+  "languages": [
+    { "name": "apish", "understood_senses": ["pressure", "light"] }
+  ],
   "lore": {
     "backstory": "",
     "family": "",
@@ -79,8 +84,7 @@
     "walk": 0,
     "climb": 0,
     "swim": 0,
-    "fly": 0,
-    "burrow": 0
+    "fly": 0
   },
   "location": {
     "world_tile": { "x": 0, "y": 0 },
@@ -105,6 +109,8 @@
     "weight_penalty": 0
   },
   "derived_overrides": {},
+  "equipment_weight": 0,
+  "inventory_weight": 0,
   "inventory": [],
   "equipment": {
     "body_slots": {},
@@ -112,5 +118,7 @@
   },
   "tags": [],
   "character_mag": 1,
-  "perks": []
+  "perks": [],
+  "perk_points": { "current": 7, "total": 7 },
+  "memory": []
 }

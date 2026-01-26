@@ -3,6 +3,7 @@
 TODO: prefer explicit verbs/enums for code conversion
 TODO: tag system deep pass in separate chat
 TODO: story system representation pending (complex)
+TODO: deeper senses model (pressure subtypes, learned senses)
 
 Purpose
 - system text is machine-readable and JSON-representative, not natural language
@@ -44,7 +45,7 @@ Reference model
   - tile.loc.world.market.5.12
 
 Data shapes (minimal stubs)
-- character: id, name, stats, profs, vigor, health, thaum, thaum_capacity, thaum_regen, calls, spell_slots, actions, partial_actions, senses, movement, temperature_range, size, carry_capacity, weight_penalty, evasion, fortitude, tags, inventory, equipment, location, memory
+- character: id, name, kind, size_mag, sleep_type, sleep_required_per_day, stats, profs, vigor, health, thaum, thaum_capacity, thaum_regen, calls, spell_slots, actions, partial_actions, senses, movement, temperature_range, carry_capacity, weight_penalty, evasion, fortitude, tags, inventory, equipment, location, languages, memory
 - npc: id, name, stats, profs, personality, memory
 - item: id, mag, tags, weight, size, hardness, conductivity
 - tile: id, coords, tags, temperature, contents
@@ -214,12 +215,15 @@ Enums (tight validation)
 - resource: HEALTH|VIGOR|THAUM
 - trade_direction: from|to
 - mode (movement): walk|climb|swim|fly|burrow
-- sense: light|vibration|aroma|thaumic
+- sense: light|pressure|aroma|thaumic
 - slot: head|torso|arm|hand|leg|wing|tail|custom
 - op (condition): EQUALS|NOT_EQUALS|GT|GTE|LT|LTE|IN|NOT_IN
 - scope: CHARACTER|CHARACTER.BODY_SLOT|ITEM|TAG|TILE|REGION_TILE|WORLD_TILE
 - scope: CHARACTER|CHARACTER.BODY_SLOT|ITEM|TAG|TILE|REGION_TILE|WORLD_TILE
 - condition: per_health|per_damage|outside_safe_range|inside_safe_range|has_tag:FLAMMABLE|adjacent_has_tag:FIRE!|holder_is_character_tool|holder_is_character_tool_attack
+
+Movement note
+- burrow uses climb speed / 4 (round down) and requires tool hardness >= medium hardness
 
 MAG tables (core data)
 - ROLL_MAG:

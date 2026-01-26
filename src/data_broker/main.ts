@@ -6,7 +6,7 @@ import { create_message, try_set_message_status } from "../engine/message.js";
 import type { MessageInput } from "../engine/message.js";
 import { append_log_envelope } from "../engine/log_store.js";
 import type { MessageEnvelope } from "../engine/types.js";
-import { debug_log } from "../shared/debug.js";
+import { debug_log, debug_broker_content } from "../shared/debug.js";
 import { parse_machine_text } from "../system_syntax/index.js";
 import type { CommandNode } from "../system_syntax/index.js";
 import { resolve_references } from "../reference_resolver/resolver.js";
@@ -196,6 +196,7 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
             const brokered = create_message(brokered_input);
             append_outbox_message(outbox_path, brokered);
             debug_log("DataBroker: band_aid brokered sent", { id: brokered.id, stage: brokered.stage });
+            debug_broker_content("Broker Out", machine_text ?? "");
             write_status_line(get_status_path(data_slot_number), `data broker pass ${iteration}: band aid brokered`);
 
             const done = try_set_message_status(processing.message, "done");
@@ -272,6 +273,7 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
             const brokered = create_message(brokered_input);
             append_outbox_message(outbox_path, brokered);
             debug_log("DataBroker: band_aid brokered sent", { id: brokered.id, stage: brokered.stage });
+            debug_broker_content("Broker Out", machine_text);
             write_status_line(get_status_path(data_slot_number), `data broker pass ${iteration}: band aid brokered`);
 
             const done = try_set_message_status(processing.message, "done");
@@ -396,6 +398,7 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
     // TODO: send brokered_n message to rules_lawyer
     append_outbox_message(outbox_path, brokered);
     debug_log("DataBroker: brokered sent", { id: brokered.id, stage: brokered.stage });
+    debug_broker_content("Broker Out", machine_text);
 
     const done = try_set_message_status(processing.message, "done");
     if (done.ok) {

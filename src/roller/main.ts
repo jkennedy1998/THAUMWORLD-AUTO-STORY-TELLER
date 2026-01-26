@@ -5,7 +5,7 @@ import { ensure_outbox_exists, read_outbox, write_outbox, prune_outbox_messages,
 import { create_message, try_set_message_status } from "../engine/message.js";
 import type { MessageInput } from "../engine/message.js";
 import type { MessageEnvelope } from "../engine/types.js";
-import { debug_log } from "../shared/debug.js";
+import { debug_log, debug_roll } from "../shared/debug.js";
 import { roll_expr } from "../rules_lawyer/dice.js";
 import { ensure_roller_status_exists, read_roller_status, write_roller_status } from "../engine/roller_status_store.js";
 
@@ -94,6 +94,7 @@ function handle_roll_request(outbox_path: string, status_path: string, msg: Mess
 
     const rolled = roll_expr(dice);
     if (!rolled) return;
+    debug_roll("Roll", dice, rolled.base, rolled.faces, "system");
     write_status(status_path, { spinner: next_spinner() });
     emit_roll_result(outbox_path, request, rolled.faces, rolled.base);
 }
@@ -108,6 +109,7 @@ function handle_roll_input(outbox_path: string, status_path: string, msg: Messag
 
     const rolled = roll_expr(request.dice);
     if (!rolled) return;
+    debug_roll("Roll", request.dice, rolled.base, rolled.faces, "player");
 
     delete pending_player[roll_id];
     active_roll_id = Object.keys(pending_player)[0] ?? null;

@@ -6,7 +6,7 @@ import { create_message, try_set_message_status } from "../engine/message.js";
 import type { MessageInput } from "../engine/message.js";
 import { append_log_envelope } from "../engine/log_store.js";
 import type { MessageEnvelope } from "../engine/types.js";
-import { debug_log } from "../shared/debug.js";
+import { debug_log, debug_content } from "../shared/debug.js";
 import { get_status_path } from "../engine/paths.js";
 import { ensure_status_exists, write_status_line } from "../engine/status_store.js";
 
@@ -128,6 +128,7 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
     const should_fallback = is_refinement && next_iteration >= ITERATION_LIMIT && response_text.length === 0;
     const final_text = should_fallback ? create_fallback_command(original_text) : response_text;
     response_msg.content = final_text;
+    debug_content("Interpreter Out", response_msg.content ?? "");
     response_msg.meta = {
         ...(response_msg.meta ?? {}),
         machine_text: final_text,

@@ -1,0 +1,10 @@
+{
+  // Language definitions database
+  "languages": [
+    {
+      "name": "apish",
+      "default_senses": ["pressure", "light"],
+      "notes": ""
+    }
+  ]
+}
