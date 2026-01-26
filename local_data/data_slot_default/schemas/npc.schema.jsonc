@@ -1,0 +1,295 @@
+{
+  // NPC JSONC schema (strict)
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "name",
+    "kind",
+    "languages",
+    "stats",
+    "profs",
+    "senses",
+    "temperature_range",
+    "movement",
+    "resources",
+    "derived",
+    "derived_overrides",
+    "inventory",
+    "equipment",
+    "tags",
+    "location",
+    "character_mag",
+    "perks"
+  ],
+  "properties": {
+    "schema_version": { "type": "number" },
+    "id": { "type": "string" },
+    "name": { "type": "string" },
+    "title": { "type": "string" },
+    "kind": { "type": "string" },
+    "sex": { "type": "string" },
+    "age": { "type": "number" },
+    "sexual_orientation": { "type": "string" },
+    "languages": { "type": "array", "items": { "type": "string" } },
+    "lore": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backstory": { "type": "string" },
+        "family": { "type": "string" },
+        "relationship": { "type": "string" }
+      },
+      "required": ["backstory", "family", "relationship"]
+    },
+    "appearance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "size_mag": { "type": "number" },
+        "build": { "type": "string" },
+        "hair_fur_shell_skin_color": { "type": "string" },
+        "eye_color": { "type": "string" },
+        "distinguishing_features": { "type": "string" },
+        "clothing_style": { "type": "string" },
+        "accessories": { "type": "string" }
+      },
+      "required": [
+        "size_mag",
+        "build",
+        "hair_fur_shell_skin_color",
+        "eye_color",
+        "distinguishing_features",
+        "clothing_style",
+        "accessories"
+      ]
+    },
+    "personality": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "story_goal": { "type": "string" },
+        "fear": { "type": "string" },
+        "flaw": { "type": "string" },
+        "hobby": { "type": "string" },
+        "passion": { "type": "string" },
+        "happy_triggers": { "type": "string" },
+        "favorite_food_drink": { "type": "string" },
+        "sad_triggers": { "type": "string" },
+        "angry_triggers": { "type": "string" },
+        "temptations": { "type": "string" }
+      },
+      "required": [
+        "story_goal",
+        "fear",
+        "flaw",
+        "hobby",
+        "passion",
+        "happy_triggers",
+        "favorite_food_drink",
+        "sad_triggers",
+        "angry_triggers",
+        "temptations"
+      ]
+    },
+    "senses": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "light": { "type": "number" },
+        "aroma": { "type": "number" },
+        "pressure": { "type": "number" },
+        "thaumic": { "type": "number" }
+      },
+      "required": ["light", "aroma", "pressure", "thaumic"]
+    },
+    "temperature_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "low": { "type": "number" },
+        "high": { "type": "number" }
+      },
+      "required": ["low", "high"]
+    },
+    "stats": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "con": { "type": "number" },
+        "str": { "type": "number" },
+        "dex": { "type": "number" },
+        "wis": { "type": "number" },
+        "int": { "type": "number" },
+        "cha": { "type": "number" }
+      },
+      "required": ["con", "str", "dex", "wis", "int", "cha"]
+    },
+    "profs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pain": { "type": "number" },
+        "brawn": { "type": "number" },
+        "accuracy": { "type": "number" },
+        "speed": { "type": "number" },
+        "quiet": { "type": "number" },
+        "hearth": { "type": "number" },
+        "beasts": { "type": "number" },
+        "instinct": { "type": "number" },
+        "resonation": { "type": "number" },
+        "arcana": { "type": "number" },
+        "golemancy": { "type": "number" },
+        "history": { "type": "number" },
+        "organica": { "type": "number" },
+        "mechanics": { "type": "number" },
+        "dietic": { "type": "number" },
+        "stability": { "type": "number" },
+        "deception": { "type": "number" },
+        "power": { "type": "number" },
+        "performance": { "type": "number" },
+        "communication": { "type": "number" }
+      },
+      "required": [
+        "pain",
+        "brawn",
+        "accuracy",
+        "speed",
+        "quiet",
+        "hearth",
+        "beasts",
+        "instinct",
+        "resonation",
+        "arcana",
+        "golemancy",
+        "history",
+        "organica",
+        "mechanics",
+        "dietic",
+        "stability",
+        "deception",
+        "power",
+        "performance",
+        "communication"
+      ]
+    },
+    "movement": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "walk": { "type": "number" },
+        "climb": { "type": "number" },
+        "swim": { "type": "number" },
+        "fly": { "type": "number" },
+        "burrow": { "type": "number" }
+      },
+      "required": ["walk", "climb", "swim", "fly", "burrow"]
+    },
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "world_tile": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "x": { "type": "number" }, "y": { "type": "number" } },
+          "required": ["x", "y"]
+        },
+        "region_tile": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "x": { "type": "number" }, "y": { "type": "number" } },
+          "required": ["x", "y"]
+        },
+        "tile": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "x": { "type": "number" }, "y": { "type": "number" } },
+          "required": ["x", "y"]
+        }
+      },
+      "required": ["world_tile", "region_tile", "tile"]
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "health": { "$ref": "#/definitions/resource_pair" },
+        "vigor": { "$ref": "#/definitions/resource_pair_mag" },
+        "actions": { "$ref": "#/definitions/resource_pair" },
+        "partial_actions": { "$ref": "#/definitions/resource_pair" },
+        "thaum": { "$ref": "#/definitions/resource_pair" },
+        "thaum_capacity": { "$ref": "#/definitions/resource_pair" },
+        "thaum_regen": { "$ref": "#/definitions/resource_pair" },
+        "calls": { "$ref": "#/definitions/resource_pair" },
+        "spell_slots": { "$ref": "#/definitions/resource_pair" }
+      },
+      "required": [
+        "health",
+        "vigor",
+        "actions",
+        "partial_actions",
+        "thaum",
+        "thaum_capacity",
+        "thaum_regen",
+        "calls",
+        "spell_slots"
+      ]
+    },
+    "derived": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "evasion": { "type": "number" },
+        "fortitude": { "type": "number" },
+        "carry_capacity": { "type": "number" },
+        "weight_penalty": { "type": "number" }
+      },
+      "required": ["evasion", "fortitude", "carry_capacity", "weight_penalty"]
+    },
+    "derived_overrides": {
+      "type": "object",
+      "additionalProperties": { "type": "number" }
+    },
+    "inventory": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/item" }
+    },
+    "equipment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "body_slots": { "type": "object" },
+        "hand_slots": { "type": "object" }
+      },
+      "required": ["body_slots", "hand_slots"]
+    },
+    "tags": { "type": "array", "items": { "$ref": "#/definitions/tag" } },
+    "character_mag": { "type": "number" },
+    "perks": { "type": "array", "items": { "type": "string" } }
+  },
+  "definitions": {
+    "resource_pair": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "current": { "type": "number" }, "max": { "type": "number" } },
+      "required": ["current", "max"]
+    },
+    "resource_pair_mag": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "current": { "type": "number" }, "max": { "type": "number" }, "mag": { "type": "number" } },
+      "required": ["current", "max", "mag"]
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "tag": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

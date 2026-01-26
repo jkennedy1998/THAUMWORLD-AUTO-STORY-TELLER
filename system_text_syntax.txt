@@ -61,6 +61,13 @@ Data storage
 - character sheets for actors and npcs are JSON files
 - resource properties are stored as objects with current/max (and regen where applicable)
 
+Derived overrides policy
+- derived_overrides stores delta values from formula outputs
+- if no override is needed, omit the field
+- final_value = computed_value + override_delta
+- temporary buffs use SYSTEM.* adjustments, not derived_overrides
+- optional provenance: derived_override_sources.<field> = "perk:rapid_heal" or similar
+
 Standard keys (common)
 - actor: ref
 - target: ref
