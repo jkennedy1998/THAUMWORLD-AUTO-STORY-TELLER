@@ -2,6 +2,7 @@ import { make_fill_module } from '../mono_ui/modules/fill_module.js';
 import { make_button_module } from '../mono_ui/modules/button_module.js';
 import { make_text_window_module } from '../mono_ui/modules/window_module.js';
 import { make_input_module } from '../mono_ui/modules/input_module.js';
+import { make_roller_module } from '../mono_ui/modules/roller_module.js';
 import type { Module, Rgb } from '../mono_ui/types.js';
 import { debug_warn } from '../shared/debug.js';
 import { get_color_by_name } from '../mono_ui/colors.js';
@@ -19,6 +20,8 @@ export const APP_CONFIG = {
     interpreter_endpoint: 'http://localhost:8787/api/input',
     interpreter_log_endpoint: 'http://localhost:8787/api/log',
     interpreter_status_endpoint: 'http://localhost:8787/api/status',
+    roller_status_endpoint: 'http://localhost:8787/api/roller_status',
+    roller_roll_endpoint: 'http://localhost:8787/api/roll',
     selected_data_slot: 1,
 } as const;
 
@@ -38,6 +41,13 @@ export function create_app_state(): AppState {
 
     const ui_state = {
         text_windows: new Map<string, { messages: string[]; rev: number }>(),
+        roller: {
+            spinner: "|",
+            last_roll: "",
+            dice_label: "D20",
+            disabled: true,
+            roll_id: null as string | null,
+        },
     };
 
     function set_text_window_messages(id: string, messages: string[]) {
@@ -76,6 +86,22 @@ export function create_app_state(): AppState {
                 debug_warn('[mono_ui] failed to refresh window feed', feed.window_id, err);
             }
         });
+
+        tasks.push((async () => {
+            try {
+                const res = await fetch(APP_CONFIG.roller_status_endpoint);
+                if (!res.ok) return;
+                const data = (await res.json()) as { ok: boolean; status?: any };
+                if (!data.ok || !data.status) return;
+                ui_state.roller.spinner = String(data.status.spinner ?? "|");
+                ui_state.roller.last_roll = String(data.status.last_player_roll ?? "");
+                ui_state.roller.dice_label = String(data.status.dice_label ?? "D20");
+                ui_state.roller.disabled = Boolean(data.status.disabled ?? true);
+                ui_state.roller.roll_id = data.status.roll_id ?? null;
+            } catch {
+                // ignore
+            }
+        })());
 
         await Promise.all(tasks);
     }
@@ -203,7 +229,7 @@ async function fetch_log_messages(slot: number): Promise<string[]> {
 
         make_text_window_module({
             id: 'log',
-            rect: { x0: 1, y0: 13, x1: 78, y1: 24 },
+            rect: { x0: 1, y0: 13, x1: 66, y1: 24 },
             get_source: () => ui_state.text_windows.get('log') ?? { messages: [], rev: 0 },
             border_rgb: get_color_by_name('light_gray').rgb,
             text_rgb: get_color_by_name('off_white').rgb,
@@ -246,6 +272,24 @@ async function fetch_log_messages(slot: number): Promise<string[]> {
             OnPress() {
                 input_submit?.();
             },
+        }),
+
+        make_roller_module({
+            id: 'roller',
+            rect: { x0: 68, y0: 13, x1: 78, y1: 24 },
+            get_state: () => ui_state.roller,
+            on_roll: async (roll_id) => {
+                await fetch(APP_CONFIG.roller_roll_endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ roll_id }),
+                });
+            },
+            text_rgb: get_color_by_name('pale_orange').rgb,
+            dim_rgb: get_color_by_name('medium_gray').rgb,
+            border_rgb: get_color_by_name('dark_gray').rgb,
+            bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
+            base_weight_index: 3,
         }),
     ];
 

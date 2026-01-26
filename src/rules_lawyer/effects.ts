@@ -1,6 +1,5 @@
 import type { CommandNode, ValueNode } from "../system_syntax/index.js";
 import type { RuleResult } from "./types.js";
-import { roll_expr } from "./dice.js";
 
 function format_command_line(command: CommandNode): string {
     const args = Object.entries(command.args)
@@ -60,17 +59,7 @@ function compute_roll(roll_node: ValueNode | undefined): ValueNode | undefined {
         }
     }
 
-    if (!faces && dice_expr) {
-        const rolled = roll_expr(dice_expr);
-        if (rolled) {
-            faces = rolled.faces;
-            base = rolled.base;
-            const first_face = faces[0] ?? 0;
-            roll.nat = faces.length === 1
-                ? { type: "number", value: first_face }
-                : { type: "list", value: faces.map((n) => ({ type: "number", value: n })) };
-        }
-    }
+    // dice rolling is handled by roller; only compute when nat is provided
 
     if (base === null) base = 0;
     roll.base = { type: "number", value: base };

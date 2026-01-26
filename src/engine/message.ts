@@ -15,11 +15,16 @@ type StatusResult = {
     message: MessageEnvelope;
 };
 
+function is_awaiting_roll(status: MessageStatus | undefined): boolean {
+    return typeof status === 'string' && status.startsWith('awaiting_roll_');
+}
+
 function can_transition_status(from: MessageStatus | undefined, to: MessageStatus): boolean {
     if (from === undefined) return to === 'sent' || to === 'queued';
     if (from === 'queued') return to === 'sent' || to === 'processing' || to === 'error';
     if (from === 'sent') return to === 'processing' || to === 'error';
-    if (from === 'processing') return to === 'done' || to === 'error';
+    if (from === 'processing') return to === 'done' || to === 'error' || is_awaiting_roll(to);
+    if (is_awaiting_roll(from)) return to === 'processing' || to === 'done' || to === 'error';
     return false;
 }
 

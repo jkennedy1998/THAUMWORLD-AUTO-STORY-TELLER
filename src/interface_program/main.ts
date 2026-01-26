@@ -2,7 +2,7 @@ import * as readline from "node:readline";
 import * as http from "node:http";
 import { debug_log } from "../shared/debug.js";
 
-import { get_data_slot_dir, get_inbox_path, get_item_dir, get_log_path, get_outbox_path, get_status_path, get_world_dir } from "../engine/paths.js";
+import { get_data_slot_dir, get_inbox_path, get_item_dir, get_log_path, get_outbox_path, get_status_path, get_world_dir, get_roller_status_path } from "../engine/paths.js";
 import { read_inbox, clear_inbox, ensure_inbox_exists, append_inbox_message } from "../engine/inbox_store.js";
 import { ensure_outbox_exists } from "../engine/outbox_store.js";
 import { ensure_dir_exists, ensure_log_exists, read_log, append_log_message } from "../engine/log_store.js";
@@ -13,6 +13,7 @@ import { route_message } from "../engine/router.js";
 import type { MessageEnvelope } from "../engine/types.js";
 import type { LogFile } from "../engine/types.js";
 import { ensure_status_exists, read_status, write_status_line } from "../engine/status_store.js";
+import { ensure_roller_status_exists, read_roller_status, write_roller_status } from "../engine/roller_status_store.js";
 
 const data_slot_number = 1; // hard set to 1 for now
 const visual_log_limit = 12;
@@ -115,6 +116,75 @@ function start_http_server(log_path: string): void {
 
                 res.writeHead(200, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ ok: true, id: inbound.id }));
+            });
+            return;
+        }
+
+        if (url.pathname === "/api/roller_status") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            try {
+                const status = read_roller_status(get_roller_status_path(data_slot_number));
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, status }));
+            } catch (err) {
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "failed_to_read" }));
+            }
+            return;
+        }
+
+        if (url.pathname === "/api/roll") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const MAX_BYTES = 16 * 1024;
+            let body = "";
+
+            req.on("data", (chunk) => {
+                body += chunk;
+                if (body.length > MAX_BYTES) {
+                    res.writeHead(413, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "payload_too_large" }));
+                    req.destroy();
+                }
+            });
+
+            req.on("end", () => {
+                let parsed: { roll_id?: string } | null = null;
+                try {
+                    parsed = JSON.parse(body) as { roll_id?: string };
+                } catch {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+                    return;
+                }
+
+                const roll_id = typeof parsed?.roll_id === "string" ? parsed.roll_id : "";
+                if (!roll_id) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "missing_roll_id" }));
+                    return;
+                }
+
+                const roll_input = create_message({
+                    sender: "roller_ui",
+                    content: "roll",
+                    status: "sent",
+                    stage: "roll_input_1",
+                    meta: { roll_id },
+                });
+
+                append_outbox_message(outbox_path, roll_input);
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, id: roll_input.id }));
             });
             return;
         }
@@ -258,6 +328,7 @@ function initialize(): { log_path: string; inbox_path: string; outbox_path: stri
     const status_path = get_status_path(data_slot_number);
     const world_dir = get_world_dir(data_slot_number);
     const item_dir = get_item_dir(data_slot_number);
+    const roller_status_path = get_roller_status_path(data_slot_number);
 
     ensure_dir_exists(data_slot_dir);
     ensure_log_exists(log_path);
@@ -266,6 +337,7 @@ function initialize(): { log_path: string; inbox_path: string; outbox_path: stri
     ensure_status_exists(status_path);
     ensure_dir_exists(world_dir);
     ensure_dir_exists(item_dir);
+    ensure_roller_status_exists(roller_status_path);
 
     write_status_line(status_path, "awaiting actor input");
 
