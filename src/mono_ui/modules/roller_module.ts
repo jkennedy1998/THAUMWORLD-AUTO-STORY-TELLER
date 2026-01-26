@@ -84,7 +84,8 @@ export function make_roller_module(opts: RollerModuleOptions): Module {
             const btn_label = label;
             const start_x = btn.x0 + Math.max(0, Math.floor((rect_width(btn) - btn_label.length) / 2));
             const y = btn.y0 + Math.floor(rect_height(btn) / 2);
-            draw_text(c, start_x, y, btn_label, btn_rgb, w_base + (hovered ? 1 : 0));
+            const weight = state.disabled ? 0 : w_base + (hovered ? 1 : 0);
+            draw_text(c, start_x, y, btn_label, btn_rgb, weight);
 
             if (pressed) {
                 c.set(btn.x0, btn.y1, { char: "P", rgb: btn_rgb, style: "regular", weight_index: w_base + 2 });
