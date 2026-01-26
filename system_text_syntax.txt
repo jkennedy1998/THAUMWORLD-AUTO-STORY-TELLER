@@ -1,5 +1,9 @@
 # SYSTEM TEXT SYNTAX (DRAFT)
 
+TODO: prefer explicit verbs/enums for code conversion
+TODO: tag system deep pass in separate chat
+TODO: story system representation pending (complex)
+
 Purpose
 - system text is machine-readable and JSON-representative, not natural language
 - pipeline: user input > system text > computed > diff > narrative by ai > user reply
@@ -40,7 +44,7 @@ Reference model
   - tile.loc.world.market.5.12
 
 Data shapes (minimal stubs)
-- character: id, name, stats, profs, vigor, health, thaum, tags, senses, movement, inventory, equipment, memory
+- character: id, name, stats, profs, vigor, health, thaum, thaum_capacity, thaum_regen, calls, spell_slots, actions, partial_actions, senses, movement, temperature_range, size, carry_capacity, weight_penalty, evasion, fortitude, tags, inventory, equipment, memory
 - npc: id, name, stats, profs, personality, memory
 - item: id, mag, tags, weight, size, hardness, conductivity
 - tile: id, coords, tags, temperature, contents
@@ -51,6 +55,10 @@ Data shapes (minimal stubs)
 - glyph: id, type, mag, cost
 - tag: id, mag, meta, context
 - roll: type, dice, base, effectors, result
+
+Data storage
+- character sheets for actors and npcs are JSON files
+- resource properties are stored as objects with current/max (and regen where applicable)
 
 Standard keys (common)
 - actor: ref
@@ -66,6 +74,18 @@ Standard keys (common)
 - mode: string
 - tags: list of tag object
 - roll: roll object
+- action_cost: enum
+- action_window: enum
+- duration: number
+- unit: enum
+- target_roll: enum
+- size_delta: number
+- on_peak: list of system effects
+- on_blunder: list of system effects
+- consumes: list of resource deltas
+- resets_movement: bool
+- partial_only_negative: bool
+- potency_applies_to: ref
 
 Roll object (explicit)
 - roll={
@@ -96,6 +116,178 @@ Condition object
 Spell object (args shape)
 - spell={glyphs=[ref,...], call_cost=number, thaum_cost=number, activator=ref, targeter=ref, tool=ref}
 
+Action extensions (minimal)
+- action_cost: FULL|PARTIAL|EXTENDED|NONE
+- action_window: TURN|ROUND|EXTENDED_ACTION
+- unit: TURN|ROUND|EXTENDED_ACTION
+- target_roll: RESULT|POTENCY|BOTH
+- consumes entry: {resource=HEALTH|VIGOR|THAUM, amount=number, optional=true|false}
+- constraint entry: {type=HOLD_CANCEL_ON_DAMAGE|GRAPPLE_LIMIT|PARTIAL_ONLY_NEGATIVE, value=number or ref}
+- partial_only_negative: bool (use when action_cost=PARTIAL)
+
+Stat bonus equation
+- stat_bonus = floor((stat - 50) / 2)
+- reference usage: actor.self.stats.cha.bonus
+
+Enums (tight validation)
+- stat: CON|STR|DEX|WIS|INT|CHA
+- resource: HEALTH|VIGOR|THAUM
+- mode (movement): walk|climb|swim|fly|burrow
+- sense: light|vibration|aroma|thaumic
+- slot: head|torso|arm|hand|leg|wing|tail|custom
+- op (condition): EQUALS|NOT_EQUALS|GT|GTE|LT|LTE|IN|NOT_IN
+
+MAG tables (core data)
+- ROLL_MAG:
+  - {mag=-2, raw="1 / 1d4", dice="1d4", average=0.4}
+  - {mag=-1, raw="1 / 1d2", dice="1d2", average=0.666}
+  - {mag=0, raw="1", dice="1", average=1}
+  - {mag=1, dice="1d2", average=1.5}
+  - {mag=2, dice="1d4", average=2.5}
+  - {mag=3, dice="1d6", average=3.5}
+  - {mag=4, dice="1d8", average=4.5}
+  - {mag=5, dice="2d4", average=5}
+  - {mag=6, dice="1d10", average=5.5}
+  - {mag=7, dice="1d12", average=6.5}
+  - {mag=8, dice="2d6", average=7}
+  - {mag=9, dice="2d8", average=9}
+  - {mag=10, dice="3d6", average=10.5}
+
+- DAMAGE_MAG:
+  - {mag=-2, desc="subtle irritation, molecular manipulation, nerve stimulation"}
+  - {mag=-1, desc="flesh irritation, precision alteration, mental communication"}
+  - {mag=0, desc="flesh pain, light surface scratched, 100% discernable feeling"}
+  - {mag=1, desc="minimal flesh damage, foliage cut, twine snapped"}
+  - {mag=2, desc="light surface damage, moderate flesh damage, firecrackers"}
+  - {mag=3, desc="medium surface scratched, wood chopped, light metals dented"}
+  - {mag=4, desc="medium surface damage, moderately sized fireworks"}
+  - {mag=5, desc="organ damage from force, hard surface scratch, 1 stick dynamite"}
+  - {mag=6, desc="hard surface / light wall damage"}
+  - {mag=7, desc="light wall destruction like on wooden doors, closed windows or some weak walls"}
+  - {mag=8, desc="medium wall damage like on thin stone walls or reinforced doors"}
+  - {mag=9, desc="medium wall destruction"}
+  - {mag=10, desc="hardened wall damage, knocking out an average unarmored naked ape"}
+
+- HARDNESS_MAG:
+  - {mag=-2, desc="ephemeral or naturally dissipating"}
+  - {mag=-1, desc="paper, cloth, thin leaves, non compacted snow"}
+  - {mag=0, desc="paper, cloth, thin leaves, non compacted snow"}
+  - {mag=1, desc="flesh, thick plant matter or fruit, compacted snow"}
+  - {mag=2, desc="light chitin, light leather, crumbling stones"}
+  - {mag=3, desc="hard chitin, hard leather, thorns, horns, chunky stones"}
+  - {mag=4, desc="medium surfaces, wood, bone, thin medium or light metal plate"}
+  - {mag=5, desc="hardened woods, hardened bones, intact shell, generic stone"}
+  - {mag=6, desc="hardened shells, medium metal like bronze or brass"}
+  - {mag=7, desc="hard metal like irons"}
+  - {mag=8, desc="structural stone, reinforced hard metal like thick iron walls"}
+  - {mag=9, desc="reinforced structural stone, hard metal alloy like steel"}
+  - {mag=10, desc="reinforced hard metal alloy like thick steel walls"}
+
+- CONDUCTIVITY_MAG:
+  - {mag=-6, desc="very porous materials", thaum_impact="+32 THAUM cost"}
+  - {mag=-5, desc="soft rubbers and elastics", thaum_impact="+16 THAUM cost"}
+  - {mag=-4, desc="hard rubbers", thaum_impact="+8 THAUM cost"}
+  - {mag=-3, desc="silica glass", thaum_impact="+4 THAUM cost"}
+  - {mag=-2, desc="obsidian glass", thaum_impact="+2 THAUM cost"}
+  - {mag=-1, desc="metallic glass or quickly quenched metals", thaum_impact="+1 THAUM cost"}
+  - {mag=0, desc="amber, resin", thaum_impact="not conductive"}
+  - {mag=1, desc="impure copper", thaum_impact="1 THAUMPACITY"}
+  - {mag=2, desc="crystalized woods", thaum_impact="2 THAUMPACITY"}
+  - {mag=3, desc="slow cast metal, bone", thaum_impact="4 THAUMPACITY"}
+  - {mag=4, desc="pure copper, flawed gems", thaum_impact="8 THAUMPACITY"}
+  - {mag=5, desc="pure gold, natural gems", thaum_impact="16 THAUMPACITY"}
+  - {mag=6, desc="nearly flawless gems", thaum_impact="32 THAUMPACITY"}
+
+- WEIGHT_MAG:
+  - {mag=-2, weight=0.01, desc="the turbulence of general atmospheres, a flea, a hair, a puff of pollen"}
+  - {mag=-1, weight=0.1, desc="a feather, a single coin, a key, a ring or small trinket, most ammo, xs+ character of flesh"}
+  - {mag=0, weight=1, desc="a dagger, a wand, a small stone, a light bow, light non-torso armor, light tools"}
+  - {mag=1, weight=5, desc="a medium tool, a staff, light crafting kits, medium non-torso armor, light torso armor"}
+  - {mag=2, weight=10, desc="a heavy metal tool, heavy crafting kits, medium torso armor, heavy non-torso armor"}
+  - {mag=3, weight=15, desc="heavy torso armor, a chest, an s- creature of flesh"}
+  - {mag=4, weight=35, desc="a crate full of light goods, an s+ sized creature of flesh"}
+  - {mag=5, weight=75, desc="a crate full of heavy goods, an m- sized creature of flesh"}
+  - {mag=6, weight=125, desc="an anvil, an m+ sized creature of flesh"}
+  - {mag=7, weight=250, desc="a small boulder, an l sized creature of flesh"}
+  - {mag=8, weight=500, desc="an l+ creature of flesh"}
+  - {mag=9, weight=1000, desc="a loaded wagon"}
+  - {mag=10, weight=2000, desc="about 1 ton, a l sized creature made of stone"}
+
+- SIZE_MAG:
+  - {mag=-2, size="xs-", tiles=0, tiles_note="no occupancy", desc="a pin drop, a mite, a flea"}
+  - {mag=-1, size="xs+", tiles=0, tiles_note="no occupancy", desc="a grape, a small rock, an eye of a naked ape"}
+  - {mag=0, size="s-", tiles=0.1, desc="a watermelon"}
+  - {mag=1, size="s+", tiles=0.5, desc="the chest of a naked ape, a small wooden chest"}
+  - {mag=2, size="m-", tiles=1, desc="a large wooden chest"}
+  - {mag=3, size="m+", tiles=2, tiles_note="any 2 adjacent", desc="most doorways"}
+  - {mag=4, size="l-", tiles=4, tiles_note="any shape", desc="double doorways, large beds"}
+  - {mag=5, size="l+", tiles=8, tiles_note="any shape", desc="a small 2x4 sized bathroom"}
+  - {mag=6, size="xl-", tiles=16, tiles_note="any shape", desc="a small 4x4 sized room"}
+  - {mag=7, size="xxl+", tiles=32, tiles_note="any shape", desc="a smallish 8x4 sized room"}
+  - {mag=8, size="xxl-", tiles=64, tiles_note="any shape", desc="a medium 8x8 sized room"}
+  - {mag=9, size="xxl+", tiles=128, tiles_note="any shape", desc="an 8x16 room"}
+  - {mag=10, size="xxxl-", tiles=256, tiles_note="any shape", desc="a 16x16 room"}
+
+- TEMPERATURE_MAG:
+  - {mag=-6, desc="magical, heat-draining cold force, lesser than deep space cold"}
+  - {mag=-5, desc="cold polar nights"}
+  - {mag=-4, desc="winter nights, exposed dead flesh freezes"}
+  - {mag=-3, desc="exposed water freezes"}
+  - {mag=-2, desc="exposed and still water freezes, a cold winter day"}
+  - {mag=-1, desc="a brisk fall or spring day, cold metal, cold rain"}
+  - {mag=0, desc="liquid water, perfect for a naked ape"}
+  - {mag=1, desc="a muggy summer day, warm metal"}
+  - {mag=2, desc="a sauna, hot springs, exposed and still water evaporates"}
+  - {mag=3, desc="boiling water"}
+  - {mag=4, desc="warm glowing metal iron"}
+  - {mag=5, desc="lava caves, underwater heat vents"}
+  - {mag=6, desc="a magical incinerating heat force, lesser than the sun"}
+
+- DISTANCE_MAG:
+  - {mag=-2, desc="pinpoint distance"}
+  - {mag=-1, desc="a few inches"}
+  - {mag=0, desc="within 1 tile"}
+  - {mag=1, desc="on the adjacent tile"}
+  - {mag=2, desc="3 tiles away"}
+  - {mag=3, desc="5 tiles away"}
+  - {mag=4, desc="10 tiles away"}
+  - {mag=5, desc="30 tiles away"}
+  - {mag=6, desc="100 tiles away"}
+  - {mag=7, desc="300 tiles away"}
+  - {mag=8, desc="1,000 tiles away"}
+  - {mag=9, desc="3,000 tiles away / within a WORLD TILE"}
+  - {mag=10, desc="10,000 tiles away / 1 WORLD TILE away"}
+
+- SPEED_MAG:
+  - {mag=-2, desc="microscopic movements"}
+  - {mag=-1, desc="1 tile per EXTENDED ACTION"}
+  - {mag=0, desc="1 tile per ROUND"}
+  - {mag=1, desc="1 tile per ACTION"}
+  - {mag=2, desc="2 tiles per ACTION"}
+  - {mag=3, desc="4 tiles per ACTION"}
+  - {mag=4, desc="8 tiles per ACTION"}
+  - {mag=5, desc="16 tiles per ACTION"}
+  - {mag=6, desc="32 tiles per ACTION"}
+  - {mag=7, desc="64 tiles per ACTION"}
+  - {mag=8, desc="128 tiles per ACTION"}
+  - {mag=9, desc="256 tiles per ACTION"}
+  - {mag=10, desc="512 tiles per ACTION"}
+
+- TIME_MAG:
+  - {mag=-2, desc="a very scientific measurement of time"}
+  - {mag=-1, desc="an instant / functionally immediate"}
+  - {mag=0, desc="a short perceived moment"}
+  - {mag=1, desc="1 TURN"}
+  - {mag=2, desc="1 ROUND or about 6 seconds"}
+  - {mag=3, desc="2 ROUNDS"}
+  - {mag=4, desc="5 ROUNDS"}
+  - {mag=5, desc="10 ROUNDS or about 1 minute"}
+  - {mag=6, desc="600 ROUNDS or about 1 hour"}
+  - {mag=7, desc="1 EXTENDED ACTION or about 2 hours"}
+  - {mag=8, desc="2 EXTENDED ACTIONS"}
+  - {mag=9, desc="5 EXTENDED ACTIONS"}
+  - {mag=10, desc="10 EXTENDED ACTIONS or 1 DAY"}
+
 Verbs (actions)
 - USE
 - ATTACK
@@ -120,34 +312,372 @@ Verbs (system state)
 - SYSTEM.ADJUST_RESOURCE (health, vigor, thaum)
 - SYSTEM.ADJUST_INVENTORY
 - SYSTEM.ADJUST_EQUIPMENT
+- SYSTEM.ADJUST_WEIGHT_PENALTY
+- SYSTEM.ADJUST_CARRY_CAPACITY
+- SYSTEM.ADJUST_ACTIONS
+- SYSTEM.ADJUST_PARTIAL_ACTIONS
+- SYSTEM.RESET_ACTIONS
+- SYSTEM.ADJUST_MOVEMENT_SPEED
+- SYSTEM.RESET_MOVEMENT_SPEEDS
+- SYSTEM.DECAY_MOVEMENT_SPEEDS
+- SYSTEM.ADJUST_SENSE_MAG
+- SYSTEM.ADJUST_THAUM_CAPACITY
+- SYSTEM.ADJUST_THAUM_REGEN
+- SYSTEM.ADJUST_CALLS
+- SYSTEM.ADJUST_SPELL_SLOTS
+- SYSTEM.SET_ITEM_MAG
+- SYSTEM.SET_ITEM_HARDNESS
+- SYSTEM.SET_ITEM_CONDUCTIVITY
+- SYSTEM.SET_ITEM_WEIGHT
+- SYSTEM.SET_ITEM_SIZE
+- SYSTEM.SET_TILE_TEMPERATURE
+- SYSTEM.SET_WORLD_TILE_TEMPERATURE
 - SYSTEM.SET_CONDITION
 - SYSTEM.CLEAR_CONDITION
+- SYSTEM.SET_OCCUPANCY
+- SYSTEM.CLEAR_OCCUPANCY
 - SYSTEM.ADVANCE_TIME (TURN, ROUND, EXTENDED_ACTION)
+- SYSTEM.ROLL_INITIATIVE
+- SYSTEM.SET_INITIATIVE_ORDER
 - SYSTEM.START_TIMED_EVENT
 - SYSTEM.END_TIMED_EVENT
 - SYSTEM.ADVANCE_STORY_BEAT
 - SYSTEM.SET_AWARENESS
 - SYSTEM.CLEAR_AWARENESS
+- SYSTEM.CHECK_AWARENESS
+- SYSTEM.APPLY_TEMPERATURE_EXPOSURE
+- SYSTEM.APPLY_DIET_TICK
+- SYSTEM.APPLY_SLEEP_REPAIR_TICK
 - SYSTEM.APPLY_DAMAGE
 - SYSTEM.APPLY_HEAL
 - SYSTEM.APPLY_BREAK
+- SYSTEM.APPLY_REROLL
 - SYSTEM.CAST_SPELL
+- SYSTEM.APPLY_DURATION_EFFECT
+- SYSTEM.APPLY_ACTION_CONSTRAINT
+
+Field directory (required / optional)
+
+USE
+- required: actor, target
+- optional: tool, roll, potency, tags, action_cost
+
+ATTACK
+- required: actor, target, roll, potency
+- optional: tool, tags, action_cost, on_blunder
+
+HELP
+- required: actor, target, potency
+- optional: roll, tool, tags, action_cost, target_roll, on_peak
+
+DEFEND
+- required: actor, target, potency
+- optional: roll, tool, tags, action_cost, potency_applies_to, duration, unit
+
+GRAPPLE
+- required: actor, target, roll
+- optional: tags, action_cost, size_delta, on_peak, on_blunder
+
+INSPECT
+- required: actor, target, roll
+- optional: tool, tags, action_cost
+
+COMMUNICATE
+- required: actor, targets, text, language, senses
+- optional: tone, contexts, roll, action_cost
+
+DODGE
+- required: actor, potency
+- optional: roll, tags, action_cost, potency_applies_to, duration, unit
+
+CRAFT
+- required: actor, tool, components, result, roll
+- optional: tags, action_cost, on_peak, on_blunder
+
+SLEEP
+- required: actor, potency
+- optional: roll, tags, action_cost, consumes, on_peak
+
+REPAIR
+- required: actor, potency
+- optional: roll, tags, action_cost, consumes, on_peak
+
+MOVE
+- required: actor, target
+- optional: mode, roll, action_cost, resets_movement
+
+WORK
+- required: actor, task
+- optional: roll, potency, action_cost, on_peak, on_blunder
+
+GUARD
+- required: actor, area
+- optional: roll, potency, action_cost
+
+HOLD
+- required: actor, verb, condition
+- optional: roll, potency, action_cost, on_peak, on_blunder
+
+SYSTEM.APPLY_TAG
+- required: target, tag
+- optional: source
+
+SYSTEM.REMOVE_TAG
+- required: target, tag
+- optional: source
+
+SYSTEM.ADJUST_STAT
+- required: target, stat, amount
+- optional: source
+
+SYSTEM.ADJUST_RESOURCE
+- required: target, resource, amount
+- optional: source
+
+SYSTEM.ADJUST_INVENTORY
+- required: target, item, amount
+- optional: source
+
+SYSTEM.ADJUST_EQUIPMENT
+- required: target, slot, item, mode
+- optional: source
+
+SYSTEM.ADJUST_ACTIONS
+- required: target, amount
+- optional: source
+
+SYSTEM.ADJUST_PARTIAL_ACTIONS
+- required: target, amount
+- optional: source
+
+SYSTEM.RESET_ACTIONS
+- required: target
+- optional: source
+
+SYSTEM.ADJUST_MOVEMENT_SPEED
+- required: target, mode, amount
+- optional: source
+
+SYSTEM.RESET_MOVEMENT_SPEEDS
+- required: target
+- optional: source
+
+SYSTEM.DECAY_MOVEMENT_SPEEDS
+- required: target, amount
+- optional: source
+
+SYSTEM.ADJUST_SENSE_MAG
+- required: target, sense, amount
+- optional: source
+
+SYSTEM.ADJUST_THAUM_CAPACITY
+- required: target, amount
+- optional: source
+
+SYSTEM.ADJUST_THAUM_REGEN
+- required: target, amount
+- optional: source
+
+SYSTEM.ADJUST_CALLS
+- required: target, amount
+- optional: source
+
+SYSTEM.ADJUST_SPELL_SLOTS
+- required: target, amount
+- optional: source
+
+SYSTEM.SET_ITEM_MAG
+- required: target, mag
+- optional: source
+
+SYSTEM.SET_ITEM_HARDNESS
+- required: target, mag
+- optional: source
+
+SYSTEM.SET_ITEM_CONDUCTIVITY
+- required: target, mag
+- optional: source
+
+SYSTEM.SET_ITEM_WEIGHT
+- required: target, mag
+- optional: source
+
+SYSTEM.SET_ITEM_SIZE
+- required: target, mag
+- optional: source
+
+SYSTEM.SET_TILE_TEMPERATURE
+- required: target, mag
+- optional: source
+
+SYSTEM.SET_WORLD_TILE_TEMPERATURE
+- required: target, mag
+- optional: source
+
+SYSTEM.ADJUST_WEIGHT_PENALTY
+- required: target, amount
+- optional: source
+
+SYSTEM.ADJUST_CARRY_CAPACITY
+- required: target, amount
+- optional: source
+
+SYSTEM.SET_CONDITION
+- required: target, condition
+- optional: source
+
+SYSTEM.CLEAR_CONDITION
+- required: target, condition
+- optional: source
+
+SYSTEM.SET_OCCUPANCY
+- required: target, tiles
+- optional: source
+
+SYSTEM.CLEAR_OCCUPANCY
+- required: target
+- optional: source
+
+SYSTEM.ADVANCE_TIME
+- required: unit, count
+- optional: source
+
+SYSTEM.ROLL_INITIATIVE
+- required: target, roll
+- optional: source
+
+SYSTEM.SET_INITIATIVE_ORDER
+- required: event, order
+- optional: source
+
+SYSTEM.START_TIMED_EVENT
+- required: event, participants
+- optional: source
+
+SYSTEM.END_TIMED_EVENT
+- required: event
+- optional: source
+
+SYSTEM.ADVANCE_STORY_BEAT
+- required: story, beat
+- optional: source
+
+SYSTEM.SET_AWARENESS
+- required: observer, target
+- optional: source
+
+SYSTEM.CLEAR_AWARENESS
+- required: observer, target
+- optional: source
+
+SYSTEM.CHECK_AWARENESS
+- required: observer, target, roll
+- optional: source
+
+SYSTEM.APPLY_TEMPERATURE_EXPOSURE
+- required: target, delta, unit
+- optional: source
+
+SYSTEM.APPLY_DIET_TICK
+- required: target, unit
+- optional: source
+
+SYSTEM.APPLY_SLEEP_REPAIR_TICK
+- required: target, unit
+- optional: source
+
+SYSTEM.APPLY_DAMAGE
+- required: target, amount
+- optional: tag, source
+
+SYSTEM.APPLY_HEAL
+- required: target, amount
+- optional: source
+
+SYSTEM.APPLY_BREAK
+- required: target, amount
+- optional: source
+
+SYSTEM.APPLY_REROLL
+- required: target, amount
+- optional: source
+
+SYSTEM.CAST_SPELL
+- required: caster, spell
+- optional: roll, potency, source
+
+SYSTEM.APPLY_DURATION_EFFECT
+- required: target, effect, duration, unit
+- optional: source
+
+SYSTEM.APPLY_ACTION_CONSTRAINT
+- required: target, constraint, duration, unit
+- optional: source
 
 COMMUNICATE rules
 - always specify language and senses
 - senses define how the message is transmitted: pressure, light, thaumic
 - keep contexts small (<= 10 refs)
 
+System effect object
+- effect={verb=SYSTEM.X, args={k=v, ...}}
+
 Examples (system text)
 - actor.MOVE(target=tile.loc.forest.10.12, mode="walk")
 - actor.ATTACK(target=npc.local.guard, tool=item.inventory.sword, roll={type=RESULT, dice="D20", base=14, nat=14, effectors=[{type=SHIFT, value=2, source=actor.self.stats.dex}], target_cr=npc.local.guard.evasion, result=16}, potency={type=POTENCY, mag=2, dice="1d4", base=3, nat=3, effectors=[{type=SHIFT, value=1, source=item.inventory.sword}], result=4})
+- actor.DEFEND(target=actor.self, potency={type=POTENCY, mag=1, dice="1d2", base=2, nat=2, effectors=[], result=2}, potency_applies_to=actor.self.evasion, duration=1, unit=TURN)
 - actor.CRAFT(tool=item.inventory.hammer, components=[item.inventory.wood, item.inventory.nails], result=item.inventory.box, roll={type=RESULT, dice="D20", base=12, nat=12, effectors=[{type=SHIFT, value=1, source=actor.self.profs.mechanics}], target_cr=10, result=13})
 - actor.HOLD(verb=ATTACK, condition={type=STATE, target=npc.local.guard.state, op=EQUALS, value="visible"})
 - actor.COMMUNICATE(targets=[npc.local.guard], text="halt, who goes there?", language=lang.common, senses=[pressure], tone="stern", contexts=[lore.city.curfew])
 - SYSTEM.APPLY_DAMAGE(target=actor.self, amount=4, tag=[{name=DAMAGE, mag=1}])
 - SYSTEM.APPLY_TAG(target=tile.loc.forest.10.12, tag={name=FIRE, mag=2, meta=[DISPERSING]})
+- SYSTEM.APPLY_DURATION_EFFECT(target=actor.self, effect={verb=SYSTEM.ADJUST_RESOURCE, args={target=actor.self, resource=VIGOR, amount=1}}, duration=1, unit=EXTENDED_ACTION)
 - SYSTEM.ADVANCE_TIME(unit=EXTENDED_ACTION, count=1)
 - SYSTEM.CAST_SPELL(caster=actor.self, spell={glyphs=[spell.glyph.targeter.line, spell.glyph.activator.burn], call_cost=2, thaum_cost=4, activator=spell.glyph.activator.burn, targeter=spell.glyph.targeter.line, tool=item.inventory.wand})
+
+Action examples (full coverage)
+- actor.USE(target=item.inventory.torch, action_cost=PARTIAL, roll={type=RESULT, dice="D20", base=9, nat=9, effectors=[], target_cr=0, result=9})
+- actor.HELP(target=actor.ally, target_roll=POTENCY, potency={type=POTENCY, mag=1, dice="1d2", base=1, nat=1, effectors=[{type=SHIFT, value=1, source=actor.self.profs.brawn}], result=2}, action_cost=FULL, on_peak=[{verb=SYSTEM.APPLY_REROLL, args={target=actor.ally, amount=1}}])
+- actor.GRAPPLE(target=npc.local.guard, roll={type=RESULT, dice="D20", base=11, nat=11, effectors=[{type=SHIFT, value=2, source=actor.self.profs.brawn}], target_cr=12, result=13}, size_delta=0, action_cost=FULL, on_peak=[{verb=SYSTEM.APPLY_TAG, args={target=npc.local.guard, tag={name=GRAPPLED, mag=1, info=actor.self}}}])
+- actor.INSPECT(target=tile.loc.cave.4.9, roll={type=RESULT, dice="D20", base=10, nat=10, effectors=[{type=SHIFT, value=1, source=actor.self.profs.instinct}], target_cr=10, result=11})
+- actor.DODGE(potency={type=POTENCY, mag=1, dice="1d2", base=2, nat=2, effectors=[], result=2}, action_cost=FULL, potency_applies_to=actor.self.evasion, duration=1, unit=TURN)
+- actor.SLEEP(potency={type=POTENCY, mag=1, dice="1d2", base=2, nat=2, effectors=[{type=SHIFT, value=1, source=actor.self.stats.con}], result=3}, consumes=[{resource=VIGOR, amount=1, optional=true}], action_cost=EXTENDED)
+- actor.REPAIR(potency={type=POTENCY, mag=1, dice="1d2", base=2, nat=2, effectors=[{type=SHIFT, value=1, source=actor.self.stats.con}], result=3}, consumes=[{resource=VIGOR, amount=1, optional=true}], action_cost=EXTENDED)
+- actor.MOVE(target=tile.loc.market.5.12, mode="walk", action_cost=FULL, resets_movement=true)
+- actor.WORK(task="research spell slots", action_cost=EXTENDED, roll={type=RESULT, dice="D20", base=12, nat=12, effectors=[{type=SHIFT, value=1, source=actor.self.profs.arcana}], target_cr=10, result=13}, on_peak=[{verb=SYSTEM.ADJUST_RESOURCE, args={target=actor.self, resource=THAUM, amount=1}}])
+- actor.GUARD(area=loc.world.market, action_cost=EXTENDED, roll={type=RESULT, dice="D20", base=10, nat=10, effectors=[], target_cr=10, result=10})
+- actor.HOLD(verb=ATTACK, action_cost=FULL, condition={type=ACTION, target=npc.local.guard.action, op=EQUALS, value="open_mouth"}, on_blunder=[{verb=SYSTEM.APPLY_ACTION_CONSTRAINT, args={target=actor.self, constraint={type=HOLD_CANCEL_ON_DAMAGE, value=true}, duration=1, unit=TURN}}])
+
+System examples (mechanics coverage)
+- SYSTEM.CHECK_AWARENESS(observer=actor.self, target=npc.local.guard, roll={type=RESULT, dice="D20", base=12, nat=12, effectors=[{type=SHIFT, value=1, source=actor.self.profs.instinct}], target_cr=12, result=13})
+- SYSTEM.SET_AWARENESS(observer=actor.self, target=npc.local.guard)
+- SYSTEM.APPLY_TEMPERATURE_EXPOSURE(target=actor.self, delta=2, unit=EXTENDED_ACTION)
+- SYSTEM.APPLY_DIET_TICK(target=actor.self, unit=EXTENDED_ACTION)
+- SYSTEM.APPLY_SLEEP_REPAIR_TICK(target=actor.self, unit=EXTENDED_ACTION)
+- SYSTEM.ADJUST_WEIGHT_PENALTY(target=actor.self, amount=2)
+- SYSTEM.ADJUST_CARRY_CAPACITY(target=actor.self, amount=5)
+- SYSTEM.SET_OCCUPANCY(target=actor.self, tiles=[tile.loc.cave.4.9])
+- SYSTEM.CLEAR_OCCUPANCY(target=actor.self)
+- SYSTEM.ROLL_INITIATIVE(target=actor.self, roll={type=RESULT, dice="D20", base=15, nat=15, effectors=[{type=SHIFT, value=2, source=actor.self.stats.dex}], result=17})
+- SYSTEM.SET_INITIATIVE_ORDER(event=timed_event.local.fight, order=[actor.self, npc.local.guard])
+- SYSTEM.ADJUST_ACTIONS(target=actor.self, amount=-1)
+- SYSTEM.ADJUST_PARTIAL_ACTIONS(target=actor.self, amount=-1)
+- SYSTEM.RESET_ACTIONS(target=actor.self)
+- SYSTEM.ADJUST_MOVEMENT_SPEED(target=actor.self, mode=walk, amount=-1)
+- SYSTEM.RESET_MOVEMENT_SPEEDS(target=actor.self)
+- SYSTEM.DECAY_MOVEMENT_SPEEDS(target=actor.self, amount=1)
+- SYSTEM.ADJUST_SENSE_MAG(target=actor.self, sense=light, amount=1)
+- SYSTEM.ADJUST_THAUM_CAPACITY(target=actor.self, amount=1)
+- SYSTEM.ADJUST_THAUM_REGEN(target=actor.self, amount=1)
+- SYSTEM.ADJUST_CALLS(target=actor.self, amount=1)
+- SYSTEM.ADJUST_SPELL_SLOTS(target=actor.self, amount=1)
+- SYSTEM.SET_ITEM_MAG(target=item.inventory.sword, mag=3)
+- SYSTEM.SET_ITEM_HARDNESS(target=item.inventory.sword, mag=5)
+- SYSTEM.SET_ITEM_CONDUCTIVITY(target=item.inventory.wand, mag=4)
+- SYSTEM.SET_ITEM_WEIGHT(target=item.inventory.armor, mag=2)
+- SYSTEM.SET_ITEM_SIZE(target=item.inventory.chest, mag=3)
+- SYSTEM.SET_TILE_TEMPERATURE(target=tile.loc.cave.4.9, mag=-2)
+- SYSTEM.SET_WORLD_TILE_TEMPERATURE(target=world_tile.loc.region.3.2, mag=1)
 
 Iteration model
 - stages track iteration count (interpreted_1, interpreted_2, ...)
