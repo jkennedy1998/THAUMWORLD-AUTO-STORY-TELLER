@@ -6,20 +6,24 @@ Purpose
 
 Core rules
 - one command per line
-- lines may be long when attaching memory or data
 - dot notation expresses ownership and traversal
-- command syntax should be strict and deterministic
+- syntax must be strict and deterministic
+- all rolls are explicit (type, base, effectors, result)
+- system-side state changes use SYSTEM.* verbs
 
-Grammar (first swing)
+Grammar
 - line: <subject>.<VERB>(<args>)
 - subject: <ref>
-- VERB: uppercase action keyword
+- VERB: uppercase action keyword or SYSTEM keyword
 - args: key=value pairs, comma-separated
 - value types:
   - string: "quoted text"
   - number: 0, 1, 1.5
   - bool: true | false
   - ref: dot reference (see reference model)
+  - list: [v1, v2, v3]
+  - object: {k=v, k2=v2}
+  - enum: UPPER_SNAKE or lower_snake (defined per field)
 
 Example line
 - actor.MOVE(target=loc.world.market, mode="walk")
@@ -28,56 +32,27 @@ Reference model
 - dot notation expresses ownership and fields
 - references drill down through stored data
 - examples:
-  - actor.self.current_health
-  - actor.self.name
+  - actor.self.health.current
+  - actor.self.stats.dex
   - actor.self.inventory.torch
   - npc.local.guard.memory.trust
   - loc.world.market
   - tile.loc.world.market.5.12
 
-Command shape (draft)
-- <subject>.<VERB>(args)
-- VERB must be one of the game verbs below
+Data shapes (minimal stubs)
+- character: id, name, stats, profs, vigor, health, thaum, tags, senses, movement, inventory, equipment, memory
+- npc: id, name, stats, profs, personality, memory
+- item: id, mag, tags, weight, size, hardness, conductivity
+- tile: id, coords, tags, temperature, contents
+- world_tile: id, coords, temperature, contents
+- story: id, beats, flow, current_beat
+- story_beat: id, archetype, content, harmony, dissonance, necessary
+- spell: id, glyphs, call_cost, thaum_cost, activator
+- glyph: id, type, mag, cost
+- tag: id, mag, meta, context
+- roll: type, dice, base, effectors, result
 
-Verbs (actions)
-- USE (character doing it + target)
-- ATTACK (character doing it + target)
-- HELP (character doing it + target)
-- DEFEND (character doing it + target)
-- GRAPPLE (character doing it + target)
-- INSPECT (character doing it + target)
-- COMMUNICATE (character doing it + nearby targets within communication distance)
-- DODGE (character doing it + target)
-- CRAFT (character doing it + crafting tool + crafting components + intended result)
-- SLEEP (character doing it)
-- REPAIR (character doing it)
-- MOVE (character + target)
-- WORK (character + task)
-- GUARD (character + a local area)
-- HOLD (character + another verb + a condition)
-
-COMMUNICATE (draft syntax)
-- target.COMMUNICATE(targets, "sent text", language_flag, "tone", [contexts])
-- example:
-  - actor.COMMUNICATE(
-      targets=npc.local.guard,
-      text="halt, who goes there?",
-      language=lang.common,
-      senses=pressure,light,
-      tone="stern",
-      contexts=lore.city.curfew,npc.local.guard.memory,actor.self.memory
-    )
-
-COMMUNICATE rules (v0)
-- always specify language and senses
-- senses define how the message is transmitted
-  - pressure (hearing/touch)
-  - light (sight)
-  - thaumic (magic/thaumic sense)
-- keep communication payloads small (recommended <= 10 context refs)
-- a prompt should only include a single COMMUNICATE action
-
-Standard keys (initial)
+Standard keys (common)
 - actor: ref
 - target: ref
 - targets: list of ref
@@ -87,41 +62,93 @@ Standard keys (initial)
 - task: ref
 - area: ref
 - text: string
-- condition: string or ref
+- condition: object
 - mode: string
+- tags: list of tag object
+- roll: roll object
 
-Data shapes (minimal stubs)
-- actor: id, name, inventory, stats, memory
-- npc: id, name, inventory, stats, memory, personality
-- map tile: id, coords, locals
-- local: id, neighbors, contents
-- lore: id, tags, entries
+Roll object (explicit)
+- roll={
+    type=RESULT|POTENCY,
+    mag=number (required for POTENCY),
+    dice=string (e.g. "1d6", "2d4", "D20"),
+    nat=number or null,
+    base=number,
+    effectors=[effector, ...],
+    reroll=number (optional),
+    target_cr=number or ref (optional),
+    peak=number (optional),
+    blunder=number (optional),
+    result=number
+  }
 
-Examples (draft)
-- actor.MOVE(target=loc.world.market)
-- actor.ATTACK(target=npc.local.guard)
-- actor.CRAFT(tool=item.inventory.hammer, components=item.inventory.wood,item.inventory.nails, result=item.inventory.box)
-- actor.HOLD(verb=ATTACK, condition="until target leaves")
+Effector object
+- effector={type=SHIFT|SCALE, value=number, source=ref or string}
+- order: NAT/base -> SHIFT -> SCALE -> caps
+- rounding: always down
+
+Tag object
+- tag={name=TAG_NAME, mag=number, meta=[TAG_NAME,...], info=string or ref}
+
+Condition object
+- condition={type=ACTION|COUNT|SENSE|STATE|TIMING, target=ref or string, op=enum, value=number or ref, time=number or ref}
+
+Spell object (args shape)
+- spell={glyphs=[ref,...], call_cost=number, thaum_cost=number, activator=ref, targeter=ref, tool=ref}
+
+Verbs (actions)
+- USE
+- ATTACK
+- HELP
+- DEFEND
+- GRAPPLE
+- INSPECT
+- COMMUNICATE
+- DODGE
+- CRAFT
+- SLEEP
+- REPAIR
+- MOVE
+- WORK
+- GUARD
+- HOLD
+
+Verbs (system state)
+- SYSTEM.APPLY_TAG
+- SYSTEM.REMOVE_TAG
+- SYSTEM.ADJUST_STAT
+- SYSTEM.ADJUST_RESOURCE (health, vigor, thaum)
+- SYSTEM.ADJUST_INVENTORY
+- SYSTEM.ADJUST_EQUIPMENT
+- SYSTEM.SET_CONDITION
+- SYSTEM.CLEAR_CONDITION
+- SYSTEM.ADVANCE_TIME (TURN, ROUND, EXTENDED_ACTION)
+- SYSTEM.START_TIMED_EVENT
+- SYSTEM.END_TIMED_EVENT
+- SYSTEM.ADVANCE_STORY_BEAT
+- SYSTEM.SET_AWARENESS
+- SYSTEM.CLEAR_AWARENESS
+- SYSTEM.APPLY_DAMAGE
+- SYSTEM.APPLY_HEAL
+- SYSTEM.APPLY_BREAK
+- SYSTEM.CAST_SPELL
+
+COMMUNICATE rules
+- always specify language and senses
+- senses define how the message is transmitted: pressure, light, thaumic
+- keep contexts small (<= 10 refs)
+
+Examples (system text)
+- actor.MOVE(target=tile.loc.forest.10.12, mode="walk")
+- actor.ATTACK(target=npc.local.guard, tool=item.inventory.sword, roll={type=RESULT, dice="D20", base=14, nat=14, effectors=[{type=SHIFT, value=2, source=actor.self.stats.dex}], target_cr=npc.local.guard.evasion, result=16}, potency={type=POTENCY, mag=2, dice="1d4", base=3, nat=3, effectors=[{type=SHIFT, value=1, source=item.inventory.sword}], result=4})
+- actor.CRAFT(tool=item.inventory.hammer, components=[item.inventory.wood, item.inventory.nails], result=item.inventory.box, roll={type=RESULT, dice="D20", base=12, nat=12, effectors=[{type=SHIFT, value=1, source=actor.self.profs.mechanics}], target_cr=10, result=13})
+- actor.HOLD(verb=ATTACK, condition={type=STATE, target=npc.local.guard.state, op=EQUALS, value="visible"})
+- actor.COMMUNICATE(targets=[npc.local.guard], text="halt, who goes there?", language=lang.common, senses=[pressure], tone="stern", contexts=[lore.city.curfew])
+- SYSTEM.APPLY_DAMAGE(target=actor.self, amount=4, tag=[{name=DAMAGE, mag=1}])
+- SYSTEM.APPLY_TAG(target=tile.loc.forest.10.12, tag={name=FIRE, mag=2, meta=[DISPERSING]})
+- SYSTEM.ADVANCE_TIME(unit=EXTENDED_ACTION, count=1)
+- SYSTEM.CAST_SPELL(caster=actor.self, spell={glyphs=[spell.glyph.targeter.line, spell.glyph.activator.burn], call_cost=2, thaum_cost=4, activator=spell.glyph.activator.burn, targeter=spell.glyph.targeter.line, tool=item.inventory.wand})
 
 Iteration model
 - stages track iteration count (interpreted_1, interpreted_2, ...)
 - n means how many rounds of interpretation/repair have occurred
-// AI_SUGGESTION: formalize error payload for interpretation_error_n with fields: errors[], warnings[], expected, machine_text
-
-Data sources (json files)
-- npcs: per npc sheet
-- map: grid of world tiles
-  - TODO: add location variables (temperature, elevation, season, etc.)
-- locals: stored with map (optimization to be discussed)
-- actors: per actor sheet + inventory
-- lore: bucket json
-  - TODO: sort by knowledge categories (dewy decimal-like)
-  - TODO: rank knowledge by proficiency and mag threshold
-
-Standard keys / data types
-- keys and data types should be standardized and stored
-- idea: store the system text schema similar to log format (format, not storage structure)
-
-Notes / TODOs
-- TODO: COMMUNICATE should accept multiple targets, track languages, and range
-- TODO: HOLD should allow nested commands inside its arguments
