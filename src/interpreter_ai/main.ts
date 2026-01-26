@@ -70,6 +70,7 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
     const iteration = parse_error_iteration(error_stage);
     const next_iteration = iteration + 1;
 
+    // Iteration rule: interpretation_error_n => interpreted_(n+1)
     if (error_stage) {
         write_status_line(get_status_path(data_slot_number), "the interpreter is refining the translation");
     } else {

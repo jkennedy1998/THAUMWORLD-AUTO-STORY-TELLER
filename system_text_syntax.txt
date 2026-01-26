@@ -1,0 +1,127 @@
+# SYSTEM TEXT SYNTAX (DRAFT)
+
+Purpose
+- system text is machine-readable and JSON-representative, not natural language
+- pipeline: user input > system text > computed > diff > narrative by ai > user reply
+
+Core rules
+- one command per line
+- lines may be long when attaching memory or data
+- dot notation expresses ownership and traversal
+- command syntax should be strict and deterministic
+
+Grammar (first swing)
+- line: <subject>.<VERB>(<args>)
+- subject: <ref>
+- VERB: uppercase action keyword
+- args: key=value pairs, comma-separated
+- value types:
+  - string: "quoted text"
+  - number: 0, 1, 1.5
+  - bool: true | false
+  - ref: dot reference (see reference model)
+
+Example line
+- actor.MOVE(target=loc.world.market, mode="walk")
+
+Reference model
+- dot notation expresses ownership and fields
+- references drill down through stored data
+- examples:
+  - actor.self.current_health
+  - actor.self.name
+  - actor.self.inventory.torch
+  - npc.local.guard.memory.trust
+  - loc.world.market
+  - tile.loc.world.market.5.12
+
+Command shape (draft)
+- <subject>.<VERB>(args)
+- VERB must be one of the game verbs below
+
+Verbs (actions)
+- USE (character doing it + target)
+- ATTACK (character doing it + target)
+- HELP (character doing it + target)
+- DEFEND (character doing it + target)
+- GRAPPLE (character doing it + target)
+- INSPECT (character doing it + target)
+- COMMUNICATE (character doing it + nearby targets within communication distance)
+- DODGE (character doing it + target)
+- CRAFT (character doing it + crafting tool + crafting components + intended result)
+- SLEEP (character doing it)
+- REPAIR (character doing it)
+- MOVE (character + target)
+- WORK (character + task)
+- GUARD (character + a local area)
+- HOLD (character + another verb + a condition)
+
+COMMUNICATE (draft syntax)
+- target.COMMUNICATE(targets, "sent text", language_flag, "tone", [contexts])
+- example:
+  - actor.COMMUNICATE(
+      targets=npc.local.guard,
+      text="halt, who goes there?",
+      language=lang.common,
+      senses=pressure,light,
+      tone="stern",
+      contexts=lore.city.curfew,npc.local.guard.memory,actor.self.memory
+    )
+
+COMMUNICATE rules (v0)
+- always specify language and senses
+- senses define how the message is transmitted
+  - pressure (hearing/touch)
+  - light (sight)
+  - thaumic (magic/thaumic sense)
+- keep communication payloads small (recommended <= 10 context refs)
+- a prompt should only include a single COMMUNICATE action
+
+Standard keys (initial)
+- actor: ref
+- target: ref
+- targets: list of ref
+- tool: ref
+- components: list of ref
+- result: ref
+- task: ref
+- area: ref
+- text: string
+- condition: string or ref
+- mode: string
+
+Data shapes (minimal stubs)
+- actor: id, name, inventory, stats, memory
+- npc: id, name, inventory, stats, memory, personality
+- map tile: id, coords, locals
+- local: id, neighbors, contents
+- lore: id, tags, entries
+
+Examples (draft)
+- actor.MOVE(target=loc.world.market)
+- actor.ATTACK(target=npc.local.guard)
+- actor.CRAFT(tool=item.inventory.hammer, components=item.inventory.wood,item.inventory.nails, result=item.inventory.box)
+- actor.HOLD(verb=ATTACK, condition="until target leaves")
+
+Iteration model
+- stages track iteration count (interpreted_1, interpreted_2, ...)
+- n means how many rounds of interpretation/repair have occurred
+// AI_SUGGESTION: formalize error payload for interpretation_error_n with fields: errors[], warnings[], expected, machine_text
+
+Data sources (json files)
+- npcs: per npc sheet
+- map: grid of world tiles
+  - TODO: add location variables (temperature, elevation, season, etc.)
+- locals: stored with map (optimization to be discussed)
+- actors: per actor sheet + inventory
+- lore: bucket json
+  - TODO: sort by knowledge categories (dewy decimal-like)
+  - TODO: rank knowledge by proficiency and mag threshold
+
+Standard keys / data types
+- keys and data types should be standardized and stored
+- idea: store the system text schema similar to log format (format, not storage structure)
+
+Notes / TODOs
+- TODO: COMMUNICATE should accept multiple targets, track languages, and range
+- TODO: HOLD should allow nested commands inside its arguments
