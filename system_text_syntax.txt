@@ -103,6 +103,7 @@ Roll object (explicit)
     dice=string (e.g. "1d6", "2d4", "D20"),
     nat=number | list[number] | null,
     base=number,
+    roll_result=string (optional),
     effectors=[effector, ...],
     reroll=number (optional),
     target_cr=number or ref (optional),
