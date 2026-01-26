@@ -37,15 +37,6 @@ export function get_npc_path(slot: number, npc_id: string): string {
     return path.join(get_npc_dir(slot), `${npc_id}.jsonc`);
 }
 
-export function get_default_npc_path(): string {
-    // the path to the default npc template
-    return path.join(process.cwd(), "local_data", "data_slot_default", "default_npc.jsonc");
-}
-
-export function get_default_item_path(): string {
-    // the path to the default item template
-    return path.join(process.cwd(), "local_data", "data_slot_default", "default_item.jsonc");
-}
 
 export function get_actor_dir(slot: number): string {
     // the path to actor storage for a data slot
@@ -57,17 +48,59 @@ export function get_actor_path(slot: number, actor_id: string): string {
     return path.join(get_actor_dir(slot), `${actor_id}.jsonc`);
 }
 
-export function get_default_actor_path(): string {
-    // the path to the default actor template
-    return path.join(process.cwd(), "local_data", "data_slot_default", "default_actor.jsonc");
-}
 
 export function get_world_path(slot: number): string {
     // the path to world storage for a data slot
+    return path.join(get_world_dir(slot), "world.jsonc");
+}
+
+export function get_legacy_world_path(slot: number): string {
     return path.join(get_data_slot_dir(slot), "world.jsonc");
 }
 
 export function get_default_world_path(): string {
     // the path to the default world template
+    return path.join(process.cwd(), "local_data", "data_slot_default", "world", "default_world.jsonc");
+}
+
+export function get_legacy_default_world_path(): string {
     return path.join(process.cwd(), "local_data", "data_slot_default", "default_world.jsonc");
+}
+
+export function get_world_dir(slot: number): string {
+    return path.join(get_data_slot_dir(slot), "world");
+}
+
+export function get_item_dir(slot: number): string {
+    return path.join(get_data_slot_dir(slot), "items");
+}
+
+export function get_item_path(slot: number, item_id: string): string {
+    return path.join(get_item_dir(slot), `${item_id}.jsonc`);
+}
+
+export function get_default_item_path(): string {
+    return path.join(process.cwd(), "local_data", "data_slot_default", "items", "default_item.jsonc");
+}
+
+export function get_legacy_default_item_path(): string {
+    return path.join(process.cwd(), "local_data", "data_slot_default", "default_item.jsonc");
+}
+
+export function get_default_actor_path(): string {
+    // the path to the default actor template
+    return path.join(process.cwd(), "local_data", "data_slot_default", "actors", "default_actor.jsonc");
+}
+
+export function get_legacy_default_actor_path(): string {
+    return path.join(process.cwd(), "local_data", "data_slot_default", "default_actor.jsonc");
+}
+
+export function get_default_npc_path(): string {
+    // the path to the default npc template
+    return path.join(process.cwd(), "local_data", "data_slot_default", "npcs", "default_npc.jsonc");
+}
+
+export function get_legacy_default_npc_path(): string {
+    return path.join(process.cwd(), "local_data", "data_slot_default", "default_npc.jsonc");
 }

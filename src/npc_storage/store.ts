@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { parse } from "jsonc-parser";
 import { ensure_dir_exists, rand_base32_rfc } from "../engine/log_store.js";
-import { get_default_npc_path, get_npc_dir, get_npc_path } from "../engine/paths.js";
+import { get_default_npc_path, get_legacy_default_npc_path, get_npc_dir, get_npc_path } from "../engine/paths.js";
 
 export type NpcLookupResult =
     | { ok: true; npc: Record<string, unknown>; path: string }
@@ -47,7 +47,7 @@ export function ensure_npc_dir(slot: number): string {
 export function load_npc(slot: number, npc_id: string): NpcLookupResult {
     const npc_path = get_npc_path(slot, npc_id);
     if (!fs.existsSync(npc_path)) {
-        const todo = `NPC cannot be found: ${npc_id}. TODO: create new NPC JSONC at ${npc_path}`;
+        const todo = `NPC cannot be found: ${npc_id}. Create new NPC JSONC at ${npc_path}`;
         return { ok: false, error: "npc_not_found", todo };
     }
 
@@ -58,12 +58,28 @@ export function load_npc(slot: number, npc_id: string): NpcLookupResult {
 export function load_default_npc(): NpcLookupResult {
     const template_path = get_default_npc_path();
     if (!fs.existsSync(template_path)) {
-        const todo = `Default NPC template missing. TODO: create ${template_path}`;
-        return { ok: false, error: "default_npc_missing", todo };
+        const legacy_path = get_legacy_default_npc_path();
+        if (fs.existsSync(legacy_path)) {
+            ensure_dir_exists(path.dirname(template_path));
+            fs.copyFileSync(legacy_path, template_path);
+        } else {
+            const todo = `Default NPC template missing. Create ${template_path}`;
+            return { ok: false, error: "default_npc_missing", todo };
+        }
     }
 
     const npc = read_jsonc(template_path);
     return { ok: true, npc, path: template_path };
+}
+
+export function ensure_npc_exists(slot: number, npc_id: string): NpcLookupResult {
+    const existing = load_npc(slot, npc_id);
+    if (existing.ok) return existing;
+    const template = load_default_npc();
+    if (!template.ok) return template;
+    const npc = { ...template.npc, id: npc_id, name: npc_id };
+    const npc_path = save_npc(slot, npc_id, npc);
+    return { ok: true, npc, path: npc_path };
 }
 
 export function save_npc(slot: number, npc_id: string, npc: Record<string, unknown>): string {

@@ -65,7 +65,7 @@ function parse_error_iteration(meta: Record<string, unknown> | undefined): numbe
 
 function create_fallback_command(original_text: string): string {
     const sanitized = original_text.replace(/"/g, "'").slice(0, 120);
-    return `default_actor.COMMUNICATE(tool=default_actor.voice, targets=[npc.default_npc], text="fallback response to keep story moving: ${sanitized}", language=lang.common, senses=[pressure], tone="uncertain", contexts=[region_tile.r0_0_0_0])`;
+    return `default_actor.COMMUNICATE(tool=default_actor.voice, targets=[npc.default_npc], text="fallback response to keep story moving: ${sanitized}", language=lang.common, senses=[pressure], tone="uncertain", contexts=[region_tile.0.0.0.0])`;
 }
 
 function post_tweak(text: string, original: MessageEnvelope): MessageEnvelope {

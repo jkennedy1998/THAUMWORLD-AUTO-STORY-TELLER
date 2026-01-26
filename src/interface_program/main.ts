@@ -2,7 +2,7 @@ import * as readline from "node:readline";
 import * as http from "node:http";
 import { debug_log } from "../shared/debug.js";
 
-import { get_data_slot_dir, get_inbox_path, get_log_path, get_outbox_path, get_status_path } from "../engine/paths.js";
+import { get_data_slot_dir, get_inbox_path, get_item_dir, get_log_path, get_outbox_path, get_status_path, get_world_dir } from "../engine/paths.js";
 import { read_inbox, clear_inbox, ensure_inbox_exists, append_inbox_message } from "../engine/inbox_store.js";
 import { ensure_outbox_exists } from "../engine/outbox_store.js";
 import { ensure_dir_exists, ensure_log_exists, read_log, append_log_message } from "../engine/log_store.js";
@@ -256,12 +256,16 @@ function initialize(): { log_path: string; inbox_path: string; outbox_path: stri
     const inbox_path = get_inbox_path(data_slot_number);
     const outbox_path = get_outbox_path(data_slot_number);
     const status_path = get_status_path(data_slot_number);
+    const world_dir = get_world_dir(data_slot_number);
+    const item_dir = get_item_dir(data_slot_number);
 
     ensure_dir_exists(data_slot_dir);
     ensure_log_exists(log_path);
     ensure_inbox_exists(inbox_path);
     ensure_outbox_exists(outbox_path);
     ensure_status_exists(status_path);
+    ensure_dir_exists(world_dir);
+    ensure_dir_exists(item_dir);
 
     write_status_line(status_path, "awaiting actor input");
 

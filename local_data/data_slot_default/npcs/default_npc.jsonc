@@ -1,0 +1,116 @@
+{
+  // Default NPC template
+  "schema_version": 1,
+  "id": "default_npc",
+  "name": "default npc",
+  "title": "",
+  "kind": "",
+  "sex": "",
+  "age": 0,
+  "sexual_orientation": "",
+  "languages": [],
+  "lore": {
+    "backstory": "",
+    "family": "",
+    "relationship": ""
+  },
+  "appearance": {
+    "size_mag": 0,
+    "build": "",
+    "hair_fur_shell_skin_color": "",
+    "eye_color": "",
+    "distinguishing_features": "",
+    "clothing_style": "",
+    "accessories": ""
+  },
+  "personality": {
+    "story_goal": "",
+    "fear": "",
+    "flaw": "",
+    "hobby": "",
+    "passion": "",
+    "happy_triggers": "",
+    "favorite_food_drink": "",
+    "sad_triggers": "",
+    "angry_triggers": "",
+    "temptations": ""
+  },
+  "senses": {
+    "light": 0,
+    "aroma": 0,
+    "pressure": 0,
+    "thaumic": 0
+  },
+  "temperature_range": {
+    "low": 0,
+    "high": 0
+  },
+  "stats": {
+    "con": 50,
+    "str": 50,
+    "dex": 50,
+    "wis": 50,
+    "int": 50,
+    "cha": 50
+  },
+  "profs": {
+    "pain": 0,
+    "brawn": 0,
+    "accuracy": 0,
+    "speed": 0,
+    "quiet": 0,
+    "hearth": 0,
+    "beasts": 0,
+    "instinct": 0,
+    "resonation": 0,
+    "arcana": 0,
+    "golemancy": 0,
+    "history": 0,
+    "organica": 0,
+    "mechanics": 0,
+    "dietic": 0,
+    "stability": 0,
+    "deception": 0,
+    "power": 0,
+    "performance": 0,
+    "communication": 0
+  },
+  "movement": {
+    "walk": 0,
+    "climb": 0,
+    "swim": 0,
+    "fly": 0,
+    "burrow": 0
+  },
+  "location": {
+    "world_tile": { "x": 0, "y": 0 },
+    "region_tile": { "x": 0, "y": 0 },
+    "tile": { "x": 0, "y": 0 }
+  },
+  "resources": {
+    "health": { "current": 1, "max": 1 },
+    "vigor": { "current": 1, "max": 1, "mag": 1 },
+    "actions": { "current": 1, "max": 1 },
+    "partial_actions": { "current": 1, "max": 1 },
+    "thaum": { "current": 1, "max": 1 },
+    "thaum_capacity": { "current": 0, "max": 0 },
+    "thaum_regen": { "current": 1, "max": 1 },
+    "calls": { "current": 0, "max": 0 },
+    "spell_slots": { "current": 0, "max": 0 }
+  },
+  "derived": {
+    "evasion": 0,
+    "fortitude": 0,
+    "carry_capacity": 0,
+    "weight_penalty": 0
+  },
+  "derived_overrides": {},
+  "inventory": [],
+  "equipment": {
+    "body_slots": {},
+    "hand_slots": {}
+  },
+  "tags": [],
+  "character_mag": 1,
+  "perks": []
+}

@@ -1,0 +1,16 @@
+{
+  // Default item template
+  "schema_version": 1,
+  "id": "default_item",
+  "name": "default item",
+  // weight is raw count for carry capacity math
+  // weight_mag is optional fallback when weight is unknown
+  "weight": 0,
+  "weight_mag": null,
+  "mag": 1,
+  "size_mag": 0,
+  "hardness_mag": 0,
+  "conductivity_mag": 0,
+  "tags": [],
+  "notes": ""
+}

@@ -53,7 +53,7 @@ function parse_value(cursor: Cursor, errors: ParseError[]): ValueNode | undefine
         while (peek(cursor)?.type === "dot") {
             const dot = consume(cursor);
             const next = peek(cursor);
-            if (!next || next.type !== "identifier") {
+            if (!next || (next.type !== "identifier" && next.type !== "number")) {
                 errors.push({
                     code: "E_EXPECTED",
                     message: "expected identifier after '.' in ref",

@@ -11,6 +11,9 @@ import { parse_machine_text } from "../system_syntax/index.js";
 import type { CommandNode } from "../system_syntax/index.js";
 import { resolve_references } from "../reference_resolver/resolver.js";
 import { ensure_status_exists, write_status_line } from "../engine/status_store.js";
+import { ensure_actor_exists } from "../actor_storage/store.js";
+import { ensure_npc_exists } from "../npc_storage/store.js";
+import { ensure_region_tile, ensure_world_tile } from "../world_storage/store.js";
 
 const data_slot_number = 1;
 const POLL_MS = 800;
@@ -31,19 +34,31 @@ function parse_stage_iteration(stage: string | undefined): number {
 }
 
 function format_error_summary(
-    errors: Array<string | { code?: string; message?: string; line?: number; column?: number }>,
+    errors: Array<
+        | string
+        | { code?: string; message?: string; line?: number; column?: number }
+        | { ref?: string; reason?: string; path?: string }
+    >,
 ): string {
     if (errors.length === 0) return "none";
     return errors
         .map((err) => {
             if (typeof err === "string") return err;
-            const code = err.code ? `${err.code}:` : "";
-            const msg = err.message ?? "unknown error";
-            const loc =
-                typeof err.line === "number" && typeof err.column === "number"
-                    ? `@${err.line}:${err.column}`
-                    : "";
-            return `${code}${msg}${loc}`;
+            if ("reason" in err || "ref" in err) {
+                const ref = err.ref ? `${err.ref}:` : "";
+                const reason = err.reason ?? "unknown";
+                return `${ref}${reason}`;
+            }
+            if ("code" in err || "message" in err) {
+                const code = err.code ? `${err.code}:` : "";
+                const msg = err.message ?? "unknown error";
+                const loc =
+                    typeof err.line === "number" && typeof err.column === "number"
+                        ? `@${err.line}:${err.column}`
+                        : "";
+                return `${code}${msg}${loc}`;
+            }
+            return "unknown";
         })
         .join("; ");
 }
@@ -51,16 +66,83 @@ function format_error_summary(
 function resolve_entities(
     commands: CommandNode[],
     options: { use_representative_data: boolean },
-): { resolved: Record<string, unknown>; errors: string[]; warnings: string[] } {
+): {
+    resolved: Record<string, unknown>;
+    errors: Array<{ ref: string; reason: string; path?: string }>;
+    warnings: Array<{ ref: string; message: string }>;
+} {
     const resolved = resolve_references(commands, {
         slot: data_slot_number,
         use_representative_data: options.use_representative_data,
     });
     return {
         resolved: resolved.resolved,
-        errors: resolved.errors.map((e) => `${e.ref}: ${e.reason}`),
-        warnings: resolved.warnings.map((w) => `${w.ref}: ${w.message}`),
+        errors: resolved.errors,
+        warnings: resolved.warnings,
     };
+}
+
+function parse_ref_parts(ref: string): string[] {
+    return ref.split(".").filter((p) => p.length > 0);
+}
+
+function create_missing_entities(
+    errors: Array<{ ref: string; reason: string; path?: string }>,
+): { created: number; notes: string[] } {
+    let created = 0;
+    const notes: string[] = [];
+
+    for (const err of errors) {
+        if (err.reason === "actor_not_found") {
+            const parts = parse_ref_parts(err.ref);
+            const actor_id = parts[1] ?? "";
+            if (!actor_id) continue;
+            const created_actor = ensure_actor_exists(data_slot_number, actor_id);
+            if (created_actor.ok) {
+                created += 1;
+                notes.push(`created actor ${actor_id}`);
+            }
+        }
+
+        if (err.reason === "npc_not_found") {
+            const parts = parse_ref_parts(err.ref);
+            const npc_id = parts[1] ?? "";
+            if (!npc_id) continue;
+            const created_npc = ensure_npc_exists(data_slot_number, npc_id);
+            if (created_npc.ok) {
+                created += 1;
+                notes.push(`created npc ${npc_id}`);
+            }
+        }
+
+        if (err.reason === "world_tile_missing") {
+            const parts = parse_ref_parts(err.ref);
+            const x = Number(parts[1]);
+            const y = Number(parts[2]);
+            if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+            const created_tile = ensure_world_tile(data_slot_number, x, y);
+            if (created_tile.ok) {
+                created += 1;
+                notes.push(`created world_tile ${x},${y}`);
+            }
+        }
+
+        if (err.reason === "region_tile_missing") {
+            const parts = parse_ref_parts(err.ref);
+            const world_x = Number(parts[1]);
+            const world_y = Number(parts[2]);
+            const region_x = Number(parts[3]);
+            const region_y = Number(parts[4]);
+            if (![world_x, world_y, region_x, region_y].every((n) => Number.isFinite(n))) continue;
+            const created_region = ensure_region_tile(data_slot_number, world_x, world_y, region_x, region_y);
+            if (created_region.ok) {
+                created += 1;
+                notes.push(`created region_tile ${world_x},${world_y}.${region_x},${region_y}`);
+            }
+        }
+    }
+
+    return { created, notes };
 }
 
 function update_outbox_message(outbox_path: string, updated: MessageEnvelope): void {
@@ -240,8 +322,15 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
         should_create_from_scratch,
     });
     write_status_line(get_status_path(data_slot_number), `data broker pass ${iteration}: resolving`);
-    // TODO<system-reminder>: add data creation rules (iteration 4 create, iteration 5 create from scratch)
-    const resolved = resolve_entities(parsed.commands, { use_representative_data: should_create_from_scratch });
+    let resolved = resolve_entities(parsed.commands, { use_representative_data: should_create_from_scratch });
+    if (resolved.errors.length > 0 && should_create_data && !should_create_from_scratch) {
+        const created = create_missing_entities(resolved.errors);
+        if (created.created > 0) {
+            debug_log("DataBroker: created missing data", { id: msg.id, created: created.created, notes: created.notes });
+            write_status_line(get_status_path(data_slot_number), `data broker pass ${iteration}: created ${created.created} missing`);
+            resolved = resolve_entities(parsed.commands, { use_representative_data: false });
+        }
+    }
     if (resolved.errors.length > 0 && !should_create_from_scratch) {
         debug_log("DataBroker: resolve errors", { id: msg.id, errors: resolved.errors, warnings: resolved.warnings });
         write_status_line(get_status_path(data_slot_number), `data broker pass ${iteration}: resolve error`);

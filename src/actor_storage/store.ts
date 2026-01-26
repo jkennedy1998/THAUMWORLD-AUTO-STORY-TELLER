@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { parse } from "jsonc-parser";
 import { ensure_dir_exists, rand_base32_rfc } from "../engine/log_store.js";
-import { get_actor_dir, get_actor_path, get_default_actor_path } from "../engine/paths.js";
+import { get_actor_dir, get_actor_path, get_default_actor_path, get_legacy_default_actor_path } from "../engine/paths.js";
 
 export type ActorLookupResult =
     | { ok: true; actor: Record<string, unknown>; path: string }
@@ -47,7 +47,7 @@ export function ensure_actor_dir(slot: number): string {
 export function load_actor(slot: number, actor_id: string): ActorLookupResult {
     const actor_path = get_actor_path(slot, actor_id);
     if (!fs.existsSync(actor_path)) {
-        const todo = `Actor cannot be found: ${actor_id}. TODO: create new Actor JSONC at ${actor_path}`;
+        const todo = `Actor cannot be found: ${actor_id}. Create new Actor JSONC at ${actor_path}`;
         return { ok: false, error: "actor_not_found", todo };
     }
 
@@ -58,12 +58,28 @@ export function load_actor(slot: number, actor_id: string): ActorLookupResult {
 export function load_default_actor(): ActorLookupResult {
     const template_path = get_default_actor_path();
     if (!fs.existsSync(template_path)) {
-        const todo = `Default Actor template missing. TODO: create ${template_path}`;
-        return { ok: false, error: "default_actor_missing", todo };
+        const legacy_path = get_legacy_default_actor_path();
+        if (fs.existsSync(legacy_path)) {
+            ensure_dir_exists(path.dirname(template_path));
+            fs.copyFileSync(legacy_path, template_path);
+        } else {
+            const todo = `Default Actor template missing. Create ${template_path}`;
+            return { ok: false, error: "default_actor_missing", todo };
+        }
     }
 
     const actor = read_jsonc(template_path);
     return { ok: true, actor, path: template_path };
+}
+
+export function ensure_actor_exists(slot: number, actor_id: string): ActorLookupResult {
+    const existing = load_actor(slot, actor_id);
+    if (existing.ok) return existing;
+    const template = load_default_actor();
+    if (!template.ok) return template;
+    const actor = { ...template.actor, id: actor_id, name: actor_id };
+    const actor_path = save_actor(slot, actor_id, actor);
+    return { ok: true, actor, path: actor_path };
 }
 
 export function save_actor(slot: number, actor_id: string, actor: Record<string, unknown>): string {
