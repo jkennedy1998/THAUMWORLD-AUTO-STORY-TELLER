@@ -44,11 +44,12 @@ Reference model
   - tile.loc.world.market.5.12
 
 Data shapes (minimal stubs)
-- character: id, name, stats, profs, vigor, health, thaum, thaum_capacity, thaum_regen, calls, spell_slots, actions, partial_actions, senses, movement, temperature_range, size, carry_capacity, weight_penalty, evasion, fortitude, tags, inventory, equipment, memory
+- character: id, name, stats, profs, vigor, health, thaum, thaum_capacity, thaum_regen, calls, spell_slots, actions, partial_actions, senses, movement, temperature_range, size, carry_capacity, weight_penalty, evasion, fortitude, tags, inventory, equipment, location, memory
 - npc: id, name, stats, profs, personality, memory
 - item: id, mag, tags, weight, size, hardness, conductivity
 - tile: id, coords, tags, temperature, contents
 - world_tile: id, coords, temperature, contents
+- region_tile: id, coords, temperature, contents
 - story: id, beats, flow, current_beat
 - story_beat: id, archetype, content, harmony, dissonance, necessary
 - spell: id, glyphs, call_cost, thaum_cost, activator
@@ -206,6 +207,7 @@ Enums (tight validation)
 - slot: head|torso|arm|hand|leg|wing|tail|custom
 - op (condition): EQUALS|NOT_EQUALS|GT|GTE|LT|LTE|IN|NOT_IN
 - scope: CHARACTER|CHARACTER.BODY_SLOT|ITEM|TAG|TILE|LOCAL|WORLD_TILE
+- scope: CHARACTER|CHARACTER.BODY_SLOT|ITEM|TAG|TILE|REGION_TILE|WORLD_TILE
 - condition: per_health|per_damage|outside_safe_range|inside_safe_range|has_tag:FLAMMABLE|adjacent_has_tag:FIRE!|holder_is_character_tool|holder_is_character_tool_attack
 
 MAG tables (core data)
@@ -324,10 +326,10 @@ MAG tables (core data)
   - {mag=4, desc="10 tiles away"}
   - {mag=5, desc="30 tiles away"}
   - {mag=6, desc="100 tiles away"}
-  - {mag=7, desc="300 tiles away"}
-  - {mag=8, desc="1,000 tiles away"}
-  - {mag=9, desc="3,000 tiles away / within a WORLD TILE"}
-  - {mag=10, desc="10,000 tiles away / 1 WORLD TILE away"}
+  - {mag=7, desc="within 1 REGION TILE"}
+  - {mag=8, desc="1 REGION TILE away (1,000 tiles)"}
+  - {mag=9, desc="3 REGION TILEs away"}
+  - {mag=10, desc="10 REGION TILEs away / 1 WORLD TILE away"}
 
 - SPEED_MAG:
   - {mag=-2, desc="microscopic movements"}
@@ -403,8 +405,10 @@ Verbs (system state)
 - SYSTEM.SET_ITEM_SIZE
 - SYSTEM.SET_TILE_TEMPERATURE
 - SYSTEM.SET_WORLD_TILE_TEMPERATURE
+- SYSTEM.SET_REGION_TILE_TEMPERATURE
 - SYSTEM.ADJUST_TILE_TEMPERATURE
 - SYSTEM.ADJUST_WORLD_TILE_TEMPERATURE
+- SYSTEM.ADJUST_REGION_TILE_TEMPERATURE
 - SYSTEM.ADJUST_TAG_BALANCE
 - SYSTEM.SET_CONDITION
 - SYSTEM.CLEAR_CONDITION
@@ -589,11 +593,19 @@ SYSTEM.SET_WORLD_TILE_TEMPERATURE
 - required: target, mag
 - optional: source
 
+SYSTEM.SET_REGION_TILE_TEMPERATURE
+- required: target, mag
+- optional: source
+
 SYSTEM.ADJUST_TILE_TEMPERATURE
 - required: target, mag
 - optional: source
 
 SYSTEM.ADJUST_WORLD_TILE_TEMPERATURE
+- required: target, mag
+- optional: source
+
+SYSTEM.ADJUST_REGION_TILE_TEMPERATURE
 - required: target, mag
 - optional: source
 
@@ -781,9 +793,13 @@ System examples (mechanics coverage)
 - SYSTEM.SET_ITEM_WEIGHT(target=item.inventory.armor, mag=2)
 - SYSTEM.SET_ITEM_SIZE(target=item.inventory.chest, mag=3)
 - SYSTEM.SET_TILE_TEMPERATURE(target=tile.loc.cave.4.9, mag=-2)
+- SYSTEM.SET_REGION_TILE_TEMPERATURE(target=region_tile.loc.0.0.3.2, mag=1)
 - SYSTEM.SET_WORLD_TILE_TEMPERATURE(target=world_tile.loc.region.3.2, mag=1)
 - SYSTEM.TRADE_RESOURCE(from=actor.self.health.current, to=npc.local.victim.health.current, mag=2, rate=1, reason="vampiric sap")
 
 Iteration model
 - stages track iteration count (interpreted_1, interpreted_2, ...)
 - n means how many rounds of interpretation/repair have occurred
+- REGION_TILE:
+  - {width_tiles=1000, desc="a town or neighborhood, a cave system or distinct area"}
+  - {world_tile_grid="10x10 REGION TILEs per WORLD TILE"}

@@ -1,0 +1,13 @@
+{
+  // Default item template
+  "schema_version": 1,
+  "id": "default_item",
+  "name": "default item",
+  "weight": 0,
+  "mag": 1,
+  "size_mag": 0,
+  "hardness_mag": 0,
+  "conductivity_mag": 0,
+  "tags": [],
+  "notes": ""
+}
