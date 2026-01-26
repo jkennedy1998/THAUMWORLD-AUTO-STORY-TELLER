@@ -21,9 +21,27 @@ function pre_tweak(msg: MessageEnvelope): MessageEnvelope {
     return msg;
 }
 
+const ITERATION_LIMIT = 5;
+
+const COMMAND_MAP: Record<string, string> = {
+    "1": "henry_actor.ATTACK(target=npc.shopkeep, tool=henry_actor.inventory.item_9x3k2q, action_cost=FULL, roll={type=RESULT, dice=\"D20\", nat=12, base=12, effectors=[], target_cr=10, result=12}, potency={type=POTENCY, mag=1, dice=\"1d2\", nat=1, base=1, effectors=[], result=1})",
+    "2": "henry_actor.CRAFT(tool=henry_actor.inventory.item_kit_2mag, components=[henry_actor.inventory.item_ing_a1, henry_actor.inventory.item_ing_a2], result=henry_actor.inventory.item_potion_flinch, action_cost=EXTENDED, roll={type=RESULT, dice=\"D20\", nat=11, base=11, effectors=[], target_cr=10, result=11}, tags=[{name=FLINCH, mag=2, info=[]}])",
+    "3": "henry_actor.COMMUNICATE(tool=henry_actor.voice, targets=[npc.shopkeep], text=\"hey, whats on the food menu today?\", language=lang.common, senses=[pressure], tone=\"curious\", contexts=[region_tile.0.0.0.0])",
+    "4": "henry_actor.MOVE(target=tile.loc.forest.10.12, tool=henry_actor.hands, mode=walk, action_cost=FULL)",
+    "5": "henry_actor.USE(target=henry_actor.inventory.item_torch, tool=henry_actor.hands, action_cost=PARTIAL, roll={type=RESULT, dice=\"D20\", nat=9, base=9, effectors=[], target_cr=0, result=9})",
+    "6": "henry_actor.INSPECT(target=tile.loc.cave.4.9, tool=henry_actor.hands, roll={type=RESULT, dice=\"D20\", nat=10, base=10, effectors=[], target_cr=10, result=10})",
+    "7": "henry_actor.GRAPPLE(target=npc.shopkeep, tool=henry_actor.hands, roll={type=RESULT, dice=\"D20\", nat=11, base=11, effectors=[], target_cr=12, result=11}, size_delta=0, action_cost=FULL)",
+    "8": "henry_actor.DEFEND(target=henry_actor, tool=henry_actor.hands, potency={type=POTENCY, mag=1, dice=\"1d2\", nat=2, base=2, effectors=[], result=2}, potency_applies_to=henry_actor.evasion, duration=1, unit=TURN)",
+    "9": "henry_actor.SLEEP(tool=henry_actor.body, potency={type=POTENCY, mag=1, dice=\"1d2\", nat=2, base=2, effectors=[], result=2}, consumes=[{resource=VIGOR, mag=1, optional=true}], action_cost=EXTENDED)",
+    "10": "henry_actor.HOLD(tool=henry_actor.hands, verb=ATTACK, action_cost=FULL, condition={type=ACTION, target=npc.shopkeep.action, op=EQUALS, value=\"open_mouth\"})",
+};
+
+// TODO: add an AI agent and train it on the system syntax
 async function simulate_ai(msg: MessageEnvelope): Promise<string> {
-    await sleep(400);
-    return `STUB AI: received "${msg.content}"`;
+    await sleep(200);
+    const text = (msg.content ?? "").trim();
+    if (COMMAND_MAP[text]) return COMMAND_MAP[text] as string;
+    return "";
 }
 
 function message_contains_text(msg: MessageEnvelope, needle: string): boolean {
@@ -89,9 +107,14 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
     const response_text = await simulate_ai(processing.message);
     const response_msg = post_tweak(response_text, processing.message);
 
-    response_msg.meta = { ...(response_msg.meta ?? {}), machine_text: response_msg.content };
+    const should_stop = error_stage && next_iteration >= ITERATION_LIMIT && response_text.length === 0;
+    response_msg.meta = { ...(response_msg.meta ?? {}), machine_text: response_text };
     response_msg.stage = error_stage ? `interpreted_${next_iteration}` : "interpreted_1";
     response_msg.status = "sent";
+
+    if (should_stop) {
+        response_msg.status = "done";
+    }
 
     // TODO: send to data broker program here instead of inbox
     append_inbox_message(inbox_path, response_msg);

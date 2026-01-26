@@ -30,7 +30,7 @@ Grammar
   - enum: UPPER_SNAKE or lower_snake (defined per field)
 
 Example line
-- actor.MOVE(target=loc.world.market, mode="walk")
+- actor.MOVE(target=loc.world.market, tool=actor.self.hands, mode="walk")
 
 Reference model
 - dot notation expresses ownership and fields
@@ -39,7 +39,7 @@ Reference model
   - actor.self.health.current
   - actor.self.stats.dex
   - actor.self.inventory.torch
-  - npc.local.guard.memory.trust
+  - npc.tavern.shopkeep.memory.trust
   - loc.world.market
   - tile.loc.world.market.5.12
 
@@ -101,7 +101,7 @@ Roll object (explicit)
     type=RESULT|POTENCY,
     mag=number (required for POTENCY),
     dice=string (e.g. "1d6", "2d4", "D20"),
-    nat=number or null,
+    nat=number | list[number] | null,
     base=number,
     effectors=[effector, ...],
     reroll=number (optional),
@@ -110,6 +110,9 @@ Roll object (explicit)
     blunder=number (optional),
     result=number
   }
+  - nat uses a list when multiple dice are rolled (e.g. 2d6)
+  - for single-die rolls, base and nat are typically equal
+  - for multi-die or fixed rolls, base is required and nat may be null or a list
 
 Effector object
 - effector={type=SHIFT|SCALE, value=number, source=ref or string}
@@ -213,7 +216,7 @@ Enums (tight validation)
 - sense: light|vibration|aroma|thaumic
 - slot: head|torso|arm|hand|leg|wing|tail|custom
 - op (condition): EQUALS|NOT_EQUALS|GT|GTE|LT|LTE|IN|NOT_IN
-- scope: CHARACTER|CHARACTER.BODY_SLOT|ITEM|TAG|TILE|LOCAL|WORLD_TILE
+- scope: CHARACTER|CHARACTER.BODY_SLOT|ITEM|TAG|TILE|REGION_TILE|WORLD_TILE
 - scope: CHARACTER|CHARACTER.BODY_SLOT|ITEM|TAG|TILE|REGION_TILE|WORLD_TILE
 - condition: per_health|per_damage|outside_safe_range|inside_safe_range|has_tag:FLAMMABLE|adjacent_has_tag:FIRE!|holder_is_character_tool|holder_is_character_tool_attack
 
@@ -445,35 +448,35 @@ Verbs (system state)
 Field directory (required / optional)
 
 USE
-- required: actor, target
+- required: actor, target, tool
 - optional: tool, roll, potency, tags, action_cost
 
 ATTACK
-- required: actor, target, roll, potency
+- required: actor, target, tool, roll, potency
 - optional: tool, tags, action_cost, on_blunder
 
 HELP
-- required: actor, target, potency
+- required: actor, target, tool, potency
 - optional: roll, tool, tags, action_cost, target_roll, on_peak
 
 DEFEND
-- required: actor, target, potency
+- required: actor, target, tool, potency
 - optional: roll, tool, tags, action_cost, potency_applies_to, duration, unit
 
 GRAPPLE
-- required: actor, target, roll
+- required: actor, target, tool, roll
 - optional: tags, action_cost, size_delta, on_peak, on_blunder
 
 INSPECT
-- required: actor, target, roll
+- required: actor, target, tool, roll
 - optional: tool, tags, action_cost
 
 COMMUNICATE
-- required: actor, targets, text, language, senses
+- required: actor, targets, text, language, senses, tool
 - optional: tone, contexts, roll, action_cost
 
 DODGE
-- required: actor, potency
+- required: actor, tool, potency
 - optional: roll, tags, action_cost, potency_applies_to, duration, unit
 
 CRAFT
@@ -481,27 +484,27 @@ CRAFT
 - optional: tags, action_cost, on_peak, on_blunder
 
 SLEEP
-- required: actor, potency
+- required: actor, tool, potency
 - optional: roll, tags, action_cost, consumes, on_peak
 
 REPAIR
-- required: actor, potency
+- required: actor, tool, potency
 - optional: roll, tags, action_cost, consumes, on_peak
 
 MOVE
-- required: actor, target
+- required: actor, tool, target
 - optional: mode, roll, action_cost, resets_movement
 
 WORK
-- required: actor, task
+- required: actor, tool, task
 - optional: roll, potency, action_cost, on_peak, on_blunder
 
 GUARD
-- required: actor, area
+- required: actor, tool, area
 - optional: roll, potency, action_cost
 
 HOLD
-- required: actor, verb, condition
+- required: actor, tool, verb, condition
 - optional: roll, potency, action_cost, on_peak, on_blunder
 
 SYSTEM.APPLY_TAG
@@ -738,7 +741,7 @@ Effect args schema (tag effects)
 - tag_name: TAG_NAME
 - mag: number (MAG)
 - mag_formula: string (e.g. "-1 * ref:tag.mag")
-- scope: CHARACTER|CHARACTER.BODY_SLOT|ITEM|TAG|TILE|LOCAL|WORLD_TILE
+- scope: CHARACTER|CHARACTER.BODY_SLOT|ITEM|TAG|TILE|REGION_TILE|WORLD_TILE
 - body_slot: ref (e.g. actor_J.torso)
 - trigger: EVENT
 - check: check object
@@ -746,12 +749,12 @@ Effect args schema (tag effects)
 - condition examples: per_health, per_damage, outside_safe_range, inside_safe_range, has_tag:FLAMMABLE, adjacent_has_tag:FIRE!
 
 Examples (system text)
-- actor.MOVE(target=tile.loc.forest.10.12, mode="walk")
+- actor.MOVE(target=tile.loc.forest.10.12, tool=actor.self.hands, mode="walk")
 - actor.ATTACK(target=npc.local.guard, tool=item.inventory.sword, roll={type=RESULT, dice="D20", base=14, nat=14, effectors=[{type=SHIFT, value=2, source=actor.self.stats.dex}], target_cr=npc.local.guard.evasion, result=16}, potency={type=POTENCY, mag=2, dice="1d4", base=3, nat=3, effectors=[{type=SHIFT, value=1, source=item.inventory.sword}], result=4})
-- actor.DEFEND(target=actor.self, potency={type=POTENCY, mag=1, dice="1d2", base=2, nat=2, effectors=[], result=2}, potency_applies_to=actor.self.evasion, duration=1, unit=TURN)
+- actor.DEFEND(target=actor.self, tool=actor.self.hands, potency={type=POTENCY, mag=1, dice="1d2", base=2, nat=2, effectors=[], result=2}, potency_applies_to=actor.self.evasion, duration=1, unit=TURN)
 - actor.CRAFT(tool=item.inventory.hammer, components=[item.inventory.wood, item.inventory.nails], result=item.inventory.box, roll={type=RESULT, dice="D20", base=12, nat=12, effectors=[{type=SHIFT, value=1, source=actor.self.profs.mechanics}], target_cr=10, result=13})
-- actor.HOLD(verb=ATTACK, condition={type=STATE, target=npc.local.guard.state, op=EQUALS, value="visible"})
-- actor.COMMUNICATE(targets=[npc.local.guard], text="halt, who goes there?", language=lang.common, senses=[pressure], tone="stern", contexts=[lore.city.curfew])
+- actor.HOLD(tool=actor.self.hands, verb=ATTACK, condition={type=STATE, target=npc.local.guard.state, op=EQUALS, value="visible"})
+- actor.COMMUNICATE(tool=actor.self.voice, targets=[npc.local.guard], text="halt, who goes there?", language=lang.common, senses=[pressure], tone="stern", contexts=[region_tile.world.0.0.0.0])
 - SYSTEM.APPLY_DAMAGE(target=actor.self, mag=4, tag=[{name=DAMAGE, mag=1}])
 - SYSTEM.APPLY_TAG(target=tile.loc.forest.10.12, tag={name=FIRE!, mag=2, meta=[DISPERSING]})
 - SYSTEM.APPLY_DURATION_EFFECT(target=actor.self, effect={verb=SYSTEM.ADJUST_RESOURCE, args={target=actor.self, resource=VIGOR, mag=1}}, duration=1, unit=EXTENDED_ACTION)
@@ -759,17 +762,17 @@ Examples (system text)
 - SYSTEM.CAST_SPELL(caster=actor.self, spell={glyphs=[spell.glyph.targeter.line, spell.glyph.activator.burn], call_cost=2, thaum_cost=4, activator=spell.glyph.activator.burn, targeter=spell.glyph.targeter.line, tool=item.inventory.wand})
 
 Action examples (full coverage)
-- actor.USE(target=item.inventory.torch, action_cost=PARTIAL, roll={type=RESULT, dice="D20", base=9, nat=9, effectors=[], target_cr=0, result=9})
-- actor.HELP(target=actor.ally, target_roll=POTENCY, potency={type=POTENCY, mag=1, dice="1d2", base=1, nat=1, effectors=[{type=SHIFT, value=1, source=actor.self.profs.brawn}], result=2}, action_cost=FULL, on_peak=[{verb=SYSTEM.APPLY_REROLL, args={target=actor.ally, mag=1}}])
-- actor.GRAPPLE(target=npc.local.guard, roll={type=RESULT, dice="D20", base=11, nat=11, effectors=[{type=SHIFT, value=2, source=actor.self.profs.brawn}], target_cr=12, result=13}, size_delta=0, action_cost=FULL, on_peak=[{verb=SYSTEM.APPLY_TAG, args={target=npc.local.guard, tag={name=GRAPPLED, mag=1, info=actor.self}}}])
-- actor.INSPECT(target=tile.loc.cave.4.9, roll={type=RESULT, dice="D20", base=10, nat=10, effectors=[{type=SHIFT, value=1, source=actor.self.profs.instinct}], target_cr=10, result=11})
-- actor.DODGE(potency={type=POTENCY, mag=1, dice="1d2", base=2, nat=2, effectors=[], result=2}, action_cost=FULL, potency_applies_to=actor.self.evasion, duration=1, unit=TURN)
-- actor.SLEEP(potency={type=POTENCY, mag=1, dice="1d2", base=2, nat=2, effectors=[{type=SHIFT, value=1, source=actor.self.stats.con}], result=3}, consumes=[{resource=VIGOR, mag=1, optional=true}], action_cost=EXTENDED)
-- actor.REPAIR(potency={type=POTENCY, mag=1, dice="1d2", base=2, nat=2, effectors=[{type=SHIFT, value=1, source=actor.self.stats.con}], result=3}, consumes=[{resource=VIGOR, mag=1, optional=true}], action_cost=EXTENDED)
-- actor.MOVE(target=tile.loc.market.5.12, mode="walk", action_cost=FULL, resets_movement=true)
-- actor.WORK(task="research spell slots", action_cost=EXTENDED, roll={type=RESULT, dice="D20", base=12, nat=12, effectors=[{type=SHIFT, value=1, source=actor.self.profs.arcana}], target_cr=10, result=13}, on_peak=[{verb=SYSTEM.ADJUST_RESOURCE, args={target=actor.self, resource=THAUM, mag=1}}])
-- actor.GUARD(area=loc.world.market, action_cost=EXTENDED, roll={type=RESULT, dice="D20", base=10, nat=10, effectors=[], target_cr=10, result=10})
-- actor.HOLD(verb=ATTACK, action_cost=FULL, condition={type=ACTION, target=npc.local.guard.action, op=EQUALS, value="open_mouth"}, on_blunder=[{verb=SYSTEM.APPLY_ACTION_CONSTRAINT, args={target=actor.self, constraint={type=HOLD_CANCEL_ON_DAMAGE, value=true}, duration=1, unit=TURN}}])
+- actor.USE(target=item.inventory.torch, tool=actor.self.hands, action_cost=PARTIAL, roll={type=RESULT, dice="D20", base=9, nat=9, effectors=[], target_cr=0, result=9})
+- actor.HELP(target=actor.ally, tool=actor.self.hands, target_roll=POTENCY, potency={type=POTENCY, mag=1, dice="1d2", base=1, nat=1, effectors=[{type=SHIFT, value=1, source=actor.self.profs.brawn}], result=2}, action_cost=FULL, on_peak=[{verb=SYSTEM.APPLY_REROLL, args={target=actor.ally, mag=1}}])
+- actor.GRAPPLE(target=npc.local.guard, tool=actor.self.hands, roll={type=RESULT, dice="D20", base=11, nat=11, effectors=[{type=SHIFT, value=2, source=actor.self.profs.brawn}], target_cr=12, result=13}, size_delta=0, action_cost=FULL, on_peak=[{verb=SYSTEM.APPLY_TAG, args={target=npc.local.guard, tag={name=GRAPPLED, mag=1, info=actor.self}}}])
+- actor.INSPECT(target=tile.loc.cave.4.9, tool=actor.self.hands, roll={type=RESULT, dice="D20", base=10, nat=10, effectors=[{type=SHIFT, value=1, source=actor.self.profs.instinct}], target_cr=10, result=11})
+- actor.DODGE(tool=actor.self.hands, potency={type=POTENCY, mag=1, dice="1d2", base=2, nat=2, effectors=[], result=2}, action_cost=FULL, potency_applies_to=actor.self.evasion, duration=1, unit=TURN)
+- actor.SLEEP(tool=actor.self.body, potency={type=POTENCY, mag=1, dice="1d2", base=2, nat=2, effectors=[{type=SHIFT, value=1, source=actor.self.stats.con}], result=3}, consumes=[{resource=VIGOR, mag=1, optional=true}], action_cost=EXTENDED)
+- actor.REPAIR(tool=actor.self.body, potency={type=POTENCY, mag=1, dice="1d2", base=2, nat=2, effectors=[{type=SHIFT, value=1, source=actor.self.stats.con}], result=3}, consumes=[{resource=VIGOR, mag=1, optional=true}], action_cost=EXTENDED)
+- actor.MOVE(target=tile.loc.market.5.12, tool=actor.self.hands, mode="walk", action_cost=FULL, resets_movement=true)
+- actor.WORK(task="research spell slots", tool=actor.self.hands, action_cost=EXTENDED, roll={type=RESULT, dice="D20", base=12, nat=12, effectors=[{type=SHIFT, value=1, source=actor.self.profs.arcana}], target_cr=10, result=13}, on_peak=[{verb=SYSTEM.ADJUST_RESOURCE, args={target=actor.self, resource=THAUM, mag=1}}])
+- actor.GUARD(area=loc.world.market, tool=actor.self.hands, action_cost=EXTENDED, roll={type=RESULT, dice="D20", base=10, nat=10, effectors=[], target_cr=10, result=10})
+- actor.HOLD(tool=actor.self.hands, verb=ATTACK, action_cost=FULL, condition={type=ACTION, target=npc.local.guard.action, op=EQUALS, value="open_mouth"}, on_blunder=[{verb=SYSTEM.APPLY_ACTION_CONSTRAINT, args={target=actor.self, constraint={type=HOLD_CANCEL_ON_DAMAGE, value=true}, duration=1, unit=TURN}}])
 
 System examples (mechanics coverage)
 - SYSTEM.CHECK_AWARENESS(observer=actor.self, target=npc.local.guard, roll={type=RESULT, dice="D20", base=12, nat=12, effectors=[{type=SHIFT, value=1, source=actor.self.profs.instinct}], target_cr=12, result=13})

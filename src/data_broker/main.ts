@@ -7,20 +7,12 @@ import type { MessageInput } from "../engine/message.js";
 import { append_log_envelope } from "../engine/log_store.js";
 import type { MessageEnvelope } from "../engine/types.js";
 import { debug_log } from "../shared/debug.js";
+import { parse_machine_text } from "../system_syntax/index.js";
+import type { CommandNode } from "../system_syntax/index.js";
+import { resolve_references } from "../reference_resolver/resolver.js";
 
 const data_slot_number = 1;
 const POLL_MS = 800;
-
-type ParsedCommand = {
-    verb: string;
-    args: Record<string, string>;
-};
-
-type ParseResult = {
-    commands: ParsedCommand[];
-    errors: string[];
-    warnings: string[];
-};
 
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -35,37 +27,19 @@ function parse_stage_iteration(stage: string | undefined): number {
     return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 1;
 }
 
-function parse_machine_text(machine_text: string | undefined): ParseResult {
-    // TODO: parse machine_text into commands (verb + args); allow proxy words later
-    if (!machine_text || machine_text.trim().length === 0) {
-        return { commands: [], errors: ["missing machine_text"], warnings: [] };
-    }
-
-    const commands: ParsedCommand[] = [];
-    const warnings: string[] = [];
-
-    const lines = machine_text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
-    for (const line of lines) {
-        const tokens = line.split(/\s+/);
-        const verb = tokens.shift();
-        if (!verb) continue;
-        const args: Record<string, string> = {};
-        for (const tok of tokens) {
-            const [k, v] = tok.split("=");
-            if (!k || !v) continue;
-            args[k] = v;
-        }
-        commands.push({ verb, args });
-    }
-
-    if (commands.length === 0) warnings.push("no commands parsed");
-    return { commands, errors: [], warnings };
-}
-
-function resolve_entities(commands: ParsedCommand[]): { resolved: Record<string, unknown>; errors: string[]; warnings: string[] } {
-    // TODO: resolve actor/npc/item/location/tile references
-    // TODO: load stored data (inventory weight, npc memory, etc.)
-    return { resolved: { commands }, errors: [], warnings: [] };
+function resolve_entities(
+    commands: CommandNode[],
+    options: { use_representative_data: boolean },
+): { resolved: Record<string, unknown>; errors: string[]; warnings: string[] } {
+    const resolved = resolve_references(commands, {
+        slot: data_slot_number,
+        use_representative_data: options.use_representative_data,
+    });
+    return {
+        resolved: resolved.resolved,
+        errors: resolved.errors.map((e) => `${e.ref}: ${e.reason}`),
+        warnings: resolved.warnings.map((w) => `${w.ref}: ${w.message}`),
+    };
 }
 
 function update_outbox_message(outbox_path: string, updated: MessageEnvelope): void {
@@ -87,9 +61,20 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
 
     const iteration = parse_stage_iteration(msg.stage);
     const machine_text = (msg.meta as any)?.machine_text as string | undefined;
+    if (!machine_text || machine_text.trim().length === 0) {
+        debug_log("DataBroker: empty machine_text", { id: msg.id, stage: msg.stage });
+        const done = try_set_message_status(processing.message, "done");
+        if (done.ok) {
+            update_outbox_message(outbox_path, done.message);
+            append_log_envelope(log_path, done.message);
+        }
+        return;
+    }
+
     const parsed = parse_machine_text(machine_text);
 
     if (parsed.errors.length > 0) {
+        debug_log("DataBroker: parse errors", { id: msg.id, errors: parsed.errors });
         const error_input: MessageInput = {
             sender: "data_broker",
             content: "unable to parse machine text",
@@ -115,15 +100,31 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
         return;
     }
 
-    const resolved = resolve_entities(parsed.commands);
-    if (resolved.errors.length > 0) {
+    const should_create_data = iteration >= 4;
+    const should_create_from_scratch = iteration >= 5;
+    debug_log("DataBroker: resolve start", {
+        id: msg.id,
+        iteration,
+        should_create_data,
+        should_create_from_scratch,
+    });
+    // TODO<system-reminder>: add data creation rules (iteration 4 create, iteration 5 create from scratch)
+    const resolved = resolve_entities(parsed.commands, { use_representative_data: should_create_from_scratch });
+    if (resolved.errors.length > 0 && !should_create_from_scratch) {
+        debug_log("DataBroker: resolve errors", { id: msg.id, errors: resolved.errors, warnings: resolved.warnings });
         const error_input: MessageInput = {
             sender: "data_broker",
             content: "unable to resolve referenced data",
             stage: `interpretation_error_${iteration}`,
             status: "done",
             reply_to: msg.id,
-            meta: { errors: resolved.errors, warnings: resolved.warnings, machine_text },
+            meta: {
+                errors: resolved.errors,
+                warnings: resolved.warnings,
+                machine_text,
+                should_create_data,
+                should_create_from_scratch,
+            },
         };
 
         if (msg.correlation_id !== undefined) error_input.correlation_id = msg.correlation_id;
@@ -142,6 +143,8 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
         return;
     }
 
+    debug_log("DataBroker: resolve ok", { id: msg.id, warnings: resolved.warnings });
+
     const brokered_input: MessageInput = {
         sender: "data_broker",
         content: "brokered data ready",
@@ -153,6 +156,8 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
             commands: parsed.commands,
             resolved: resolved.resolved,
             warnings: [...parsed.warnings, ...resolved.warnings],
+            should_create_data,
+            should_create_from_scratch,
         },
     };
 
