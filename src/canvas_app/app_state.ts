@@ -114,11 +114,24 @@ async function fetch_log_messages(slot: number): Promise<string[]> {
     const res = await fetch(`${APP_CONFIG.interpreter_log_endpoint}?slot=${slot}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-    const data = (await res.json()) as { ok: boolean; messages?: { id: string; sender: string; content: string; type?: string }[] };
+    const data = (await res.json()) as {
+        ok: boolean;
+        messages?: {
+            id: string;
+            sender: string;
+            content: string;
+            type?: string;
+            correlation_id?: string;
+            status?: string;
+            stage?: string;
+            meta?: Record<string, unknown>;
+        }[];
+    };
     if (!data.ok || !Array.isArray(data.messages)) return [];
 
     const ordered = [...data.messages].reverse();
     const seen_ids = new Set<string>();
+    const last_interpreter_text_by_correlation = new Map<string, string>();
 
     const filtered = ordered.filter((m) => {
         if (!m?.id) return false;
@@ -126,7 +139,16 @@ async function fetch_log_messages(slot: number): Promise<string[]> {
         seen_ids.add(m.id);
 
         const sender = (m.sender ?? '').toLowerCase();
-        if (sender === 'j' || sender === 'interpreter_ai') return true;
+        if (sender === 'j') return true;
+        if (sender === 'interpreter_ai') {
+            const correlation = m.correlation_id ?? 'none';
+            const content = (m.content ?? '').trim();
+            const last = last_interpreter_text_by_correlation.get(correlation);
+            last_interpreter_text_by_correlation.set(correlation, content);
+            if (!content) return false;
+            if (last !== undefined && last === content) return false;
+            return true;
+        }
         if (m.type === 'user_input') return true;
         return false;
     });

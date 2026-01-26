@@ -37,10 +37,10 @@ const COMMAND_MAP: Record<string, string> = {
 };
 
 // TODO: add an AI agent and train it on the system syntax
-async function simulate_ai(msg: MessageEnvelope): Promise<string> {
+async function simulate_ai_from_text(text: string): Promise<string> {
     await sleep(200);
-    const text = (msg.content ?? "").trim();
-    if (COMMAND_MAP[text]) return COMMAND_MAP[text] as string;
+    const key = text.trim();
+    if (COMMAND_MAP[key]) return COMMAND_MAP[key] as string;
     return "";
 }
 
@@ -50,13 +50,22 @@ function message_contains_text(msg: MessageEnvelope, needle: string): boolean {
     return text.toLowerCase().includes(needle.toLowerCase());
 }
 
-function parse_error_iteration(error_stage: string | undefined): number {
-    if (!error_stage) return 1;
-    if (!error_stage.startsWith("interpretation_error_")) return 1;
+function parse_error_iteration(meta: Record<string, unknown> | undefined): number | undefined {
+    const error_iteration = meta?.error_iteration;
+    if (typeof error_iteration === "number" && Number.isFinite(error_iteration) && error_iteration > 0) {
+        return Math.trunc(error_iteration);
+    }
+    const error_stage = typeof meta?.error_stage === "string" ? (meta?.error_stage as string) : "";
+    if (!error_stage.startsWith("interpretation_error_")) return undefined;
     const parts = error_stage.split("_");
     const last = parts[parts.length - 1] ?? "";
     const n = Number(last);
-    return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 1;
+    return Number.isFinite(n) && n > 0 ? Math.trunc(n) : undefined;
+}
+
+function create_fallback_command(original_text: string): string {
+    const sanitized = original_text.replace(/"/g, "'").slice(0, 120);
+    return `default_actor.COMMUNICATE(tool=default_actor.voice, targets=[npc.default_npc], text="fallback response to keep story moving: ${sanitized}", language=lang.common, senses=[pressure], tone="uncertain", contexts=[region_tile.r0_0_0_0])`;
 }
 
 function post_tweak(text: string, original: MessageEnvelope): MessageEnvelope {
@@ -84,13 +93,18 @@ function update_outbox_message(outbox_path: string, updated: MessageEnvelope): v
 
 async function process_message(outbox_path: string, inbox_path: string, log_path: string, msg: MessageEnvelope): Promise<void> {
     debug_log("Interpreter: received", { id: msg.id, status: msg.status, stage: msg.stage });
-    const error_stage = (msg.meta as any)?.error_stage as string | undefined;
-    const iteration = parse_error_iteration(error_stage);
-    const next_iteration = iteration + 1;
+    const meta = (msg.meta as Record<string, unknown> | undefined) ?? undefined;
+    const error_iteration = parse_error_iteration(meta);
+    const bounded_error_iteration = error_iteration ? Math.min(error_iteration, ITERATION_LIMIT) : undefined;
+    const next_iteration = Math.min((bounded_error_iteration ?? 0) + 1, ITERATION_LIMIT);
+    const is_refinement = bounded_error_iteration !== undefined;
+    const original_text = typeof meta?.original_text === "string" ? (meta?.original_text as string) : msg.content ?? "";
+    const error_reason = meta?.error_reason;
 
     // Iteration rule: interpretation_error_n => interpreted_(n+1)
-    if (error_stage) {
-        write_status_line(get_status_path(data_slot_number), "the interpreter is refining the translation");
+    if (is_refinement) {
+        const reason = typeof error_reason === "string" && error_reason.length > 0 ? ` (${error_reason})` : "";
+        write_status_line(get_status_path(data_slot_number), `interpreter pass ${next_iteration}: refining${reason}`);
     } else {
         write_status_line(get_status_path(data_slot_number), "the interpreter grabs the message");
     }
@@ -104,22 +118,35 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
     debug_log("Interpreter: processing", { id: processing.message.id });
     write_status_line(get_status_path(data_slot_number), "the interpreter is thinking");
 
-    const response_text = await simulate_ai(processing.message);
+    const response_text = await simulate_ai_from_text(is_refinement ? original_text : (processing.message.content ?? ""));
+    const error_list = Array.isArray(meta?.errors) ? (meta?.errors as unknown[]) : [];
+    if (is_refinement) {
+        debug_log("Interpreter: refine", { id: msg.id, error_iteration: bounded_error_iteration, error_reason, errors: error_list });
+    }
     const response_msg = post_tweak(response_text, processing.message);
 
-    const should_stop = error_stage && next_iteration >= ITERATION_LIMIT && response_text.length === 0;
-    response_msg.meta = { ...(response_msg.meta ?? {}), machine_text: response_text };
-    response_msg.stage = error_stage ? `interpreted_${next_iteration}` : "interpreted_1";
+    const should_fallback = is_refinement && next_iteration >= ITERATION_LIMIT && response_text.length === 0;
+    const final_text = should_fallback ? create_fallback_command(original_text) : response_text;
+    response_msg.content = final_text;
+    response_msg.meta = {
+        ...(response_msg.meta ?? {}),
+        machine_text: final_text,
+        original_text,
+        error_reason,
+        error_iteration: bounded_error_iteration,
+        errors: error_list,
+    };
+    response_msg.stage = is_refinement ? `interpreted_${next_iteration}` : "interpreted_1";
     response_msg.status = "sent";
 
-    if (should_stop) {
-        response_msg.status = "done";
+    if (should_fallback) {
+        response_msg.status = "sent";
     }
 
     // TODO: send to data broker program here instead of inbox
     append_inbox_message(inbox_path, response_msg);
     debug_log("Interpreter: sent response", { reply_to: response_msg.reply_to, id: response_msg.id });
-    write_status_line(get_status_path(data_slot_number), "the interpreter has made a translation");
+    write_status_line(get_status_path(data_slot_number), `interpreter pass ${response_msg.stage?.split("_")[1] ?? "1"}: translation ready`);
 
     const done = try_set_message_status(processing.message, "done");
     if (done.ok) {

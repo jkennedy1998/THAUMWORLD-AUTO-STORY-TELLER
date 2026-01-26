@@ -39,7 +39,7 @@ export function route_message(message: MessageEnvelope): RouteResult {
     }
 
     if (is_broker) {
-        if (message.stage?.startsWith("interpretation_error_")) {
+        if (message.status === "error") {
             return {
                 log: message,
                 outbox: {
@@ -48,7 +48,7 @@ export function route_message(message: MessageEnvelope): RouteResult {
                     status: "sent",
                     meta: {
                         ...(message.meta ?? {}),
-                        error_stage: message.stage,
+                        error_iteration: (message.meta as any)?.error_iteration ?? 1,
                     },
                 },
             };
