@@ -86,6 +86,7 @@ Standard keys (common)
 - resets_movement: bool
 - partial_only_negative: bool
 - potency_applies_to: ref
+- trade: object
 
 Roll object (explicit)
 - roll={
@@ -110,8 +111,70 @@ Effector object
 Tag object
 - tag={name=TAG_NAME, mag=number, meta=[TAG_NAME,...], info=string or ref}
 
+Tag format (authoring)
+- [ tag_name : MAG / stacks of tag : info1, info2, ... ]
+- info entries must be schema refs (character, target, or property ref like actor.self.stats.cha.bonus)
+- tags are the only syntax element that uses [ ... ]
+
+Tag definitions (database)
+- stored in local_data\data_slot_default\tag_definitions.jsonc
+- tag_definition={
+    name=TAG_NAME,
+    proficiency=PROF_NAME,
+    meta=[TAG_NAME,...],
+    stacking=sum|max|replace|custom,
+    scope=[CHARACTER|ITEM|TILE|TAG],
+    requires_info=true|false,
+    info_schema=[ref,...],
+    triggers=[event,...],
+    effects=[effect,...]
+  }
+- stacking default is sum unless overridden by tag_definition
+- effects args may use ref placeholders: ref:holder, ref:tag.name, ref:tag.mag, ref:info[n], ref:action.*, ref:host_tag.name, ref:host_tag.mag, ref:adjacent.targets
+
+Tag instances (runtime)
+- tag_instance={
+    name=TAG_NAME,
+    mag=number,
+    info=[ref,...],
+    source=ref,
+    applied_at={unit=TURN|ROUND|EXTENDED_ACTION, count=number},
+    scope=CHARACTER|ITEM|TILE|TAG
+  }
+
+Tag event system (time sensitive tracking)
+- events are tracked per chat and per timed event
+- tag triggers bind to triggerable events like: on_apply, on_remove, start_turn, end_turn, end_round, on_damage, on_action, on_attack, on_use, on_adjacent, on_sleep, on_sleep_complete, on_heal, on_grapple_check, on_temperature_tick, on_action_tick, on_extended_action_tick
+- each trigger resolves into SYSTEM.* effects
+- event tracker stores battles, timed statuses, and per-chat evaluation cycles
+
+Tag event context schema
+- event={type, time, holder, tag, context}
+- time={unit=TURN|ROUND|EXTENDED_ACTION, count=number}
+- holder=ref
+- tag=tag_instance
+- context is trigger-specific:
+  - on_apply/on_remove: {source=ref}
+  - start_turn/end_turn/end_round: {turn_owner=ref}
+  - on_damage: {damage={target=ref, source=ref, source_tool=ref, mag=number, tags=[TAG_NAME,...]}}
+  - on_action/on_attack/on_use: {action={verb=ACTION_TYPE, actor=ref, targets=[ref,...], tool=ref, roll=roll, potency=roll}}
+  - on_adjacent: {adjacent={targets=[ref,...], tags=[TAG_NAME,...]}}
+  - on_sleep/on_sleep_complete: {sleep={actor=ref, roll=roll(optional), potency=roll(optional)}}
+  - on_heal: {heal={target=ref, mag=number, source=ref}}
+  - on_grapple_check: {grapple={actor=ref, target=ref, roll=roll, cr=number|ref}}
+  - on_temperature_tick: {temperature={target=ref, delta=number, in_safe_range=true|false}}
+  - on_action_tick/on_extended_action_tick: {time_tick={unit=TURN|ROUND|EXTENDED_ACTION, count=number, actor=ref(optional)}}
+
+Damage tag sourcing
+- damage tags can be derived from the tool used in the action
+- context.damage.source_tool and context.damage.tags should reflect the tool's TAGs
+
 Condition object
 - condition={type=ACTION|COUNT|SENSE|STATE|TIMING, target=ref or string, op=enum, value=number or ref, time=number or ref}
+
+Result check object
+- check={type=RESULT, action=ACTION_TYPE, proficiency=PROF, cr=number|ref, roll=roll(optional)}
+- checks are always tied to an action type and proficiency (and its stat bonus)
 
 Spell object (args shape)
 - spell={glyphs=[ref,...], call_cost=number, thaum_cost=number, activator=ref, targeter=ref, tool=ref}
@@ -121,9 +184,14 @@ Action extensions (minimal)
 - action_window: TURN|ROUND|EXTENDED_ACTION
 - unit: TURN|ROUND|EXTENDED_ACTION
 - target_roll: RESULT|POTENCY|BOTH
-- consumes entry: {resource=HEALTH|VIGOR|THAUM, amount=number, optional=true|false}
-- constraint entry: {type=HOLD_CANCEL_ON_DAMAGE|GRAPPLE_LIMIT|PARTIAL_ONLY_NEGATIVE, value=number or ref}
+- consumes entry: {resource=HEALTH|VIGOR|THAUM, mag=number, optional=true|false}
+- constraint entry: {type=HOLD_CANCEL_ON_DAMAGE|GRAPPLE_LIMIT|PARTIAL_ONLY_NEGATIVE|MOVEMENT_LIMIT|ACTION_LIMIT|PARTIAL_ACTION_LIMIT|ITEM_FUNCTION_MAG_REDUCTION|EQUIP_BLOCKED, value=number or ref}
 - partial_only_negative: bool (use when action_cost=PARTIAL)
+- trade entry: {from=RESOURCE|PROPERTY, to=RESOURCE|PROPERTY, mag=number, rate=number, reason=string}
+
+Trade keyword
+- use trade to make explicit conversions between resources/properties
+- examples: health drain, thaum siphon, flinch action trade
 
 Stat bonus equation
 - stat_bonus = floor((stat - 50) / 2)
@@ -132,10 +200,13 @@ Stat bonus equation
 Enums (tight validation)
 - stat: CON|STR|DEX|WIS|INT|CHA
 - resource: HEALTH|VIGOR|THAUM
+- trade_direction: from|to
 - mode (movement): walk|climb|swim|fly|burrow
 - sense: light|vibration|aroma|thaumic
 - slot: head|torso|arm|hand|leg|wing|tail|custom
 - op (condition): EQUALS|NOT_EQUALS|GT|GTE|LT|LTE|IN|NOT_IN
+- scope: CHARACTER|CHARACTER.BODY_SLOT|ITEM|TAG|TILE|LOCAL|WORLD_TILE
+- condition: per_health|per_damage|outside_safe_range|inside_safe_range|has_tag:FLAMMABLE|adjacent_has_tag:FIRE!|holder_is_character_tool|holder_is_character_tool_attack
 
 MAG tables (core data)
 - ROLL_MAG:
@@ -332,6 +403,9 @@ Verbs (system state)
 - SYSTEM.SET_ITEM_SIZE
 - SYSTEM.SET_TILE_TEMPERATURE
 - SYSTEM.SET_WORLD_TILE_TEMPERATURE
+- SYSTEM.ADJUST_TILE_TEMPERATURE
+- SYSTEM.ADJUST_WORLD_TILE_TEMPERATURE
+- SYSTEM.ADJUST_TAG_BALANCE
 - SYSTEM.SET_CONDITION
 - SYSTEM.CLEAR_CONDITION
 - SYSTEM.SET_OCCUPANCY
@@ -355,6 +429,7 @@ Verbs (system state)
 - SYSTEM.CAST_SPELL
 - SYSTEM.APPLY_DURATION_EFFECT
 - SYSTEM.APPLY_ACTION_CONSTRAINT
+- SYSTEM.TRADE_RESOURCE
 
 Field directory (required / optional)
 
@@ -419,23 +494,23 @@ HOLD
 - optional: roll, potency, action_cost, on_peak, on_blunder
 
 SYSTEM.APPLY_TAG
-- required: target, tag
-- optional: source
+- required: target, tag_name, mag (or tag object)
+- optional: info, meta, source
 
 SYSTEM.REMOVE_TAG
-- required: target, tag
+- required: target, tag_name, mag
 - optional: source
 
 SYSTEM.ADJUST_STAT
-- required: target, stat, amount
+- required: target, stat, mag
 - optional: source
 
 SYSTEM.ADJUST_RESOURCE
-- required: target, resource, amount
+- required: target, resource, mag
 - optional: source
 
 SYSTEM.ADJUST_INVENTORY
-- required: target, item, amount
+- required: target, item, mag
 - optional: source
 
 SYSTEM.ADJUST_EQUIPMENT
@@ -443,11 +518,11 @@ SYSTEM.ADJUST_EQUIPMENT
 - optional: source
 
 SYSTEM.ADJUST_ACTIONS
-- required: target, amount
+- required: target, mag
 - optional: source
 
 SYSTEM.ADJUST_PARTIAL_ACTIONS
-- required: target, amount
+- required: target, mag
 - optional: source
 
 SYSTEM.RESET_ACTIONS
@@ -455,7 +530,7 @@ SYSTEM.RESET_ACTIONS
 - optional: source
 
 SYSTEM.ADJUST_MOVEMENT_SPEED
-- required: target, mode, amount
+- required: target, mode, mag
 - optional: source
 
 SYSTEM.RESET_MOVEMENT_SPEEDS
@@ -463,27 +538,27 @@ SYSTEM.RESET_MOVEMENT_SPEEDS
 - optional: source
 
 SYSTEM.DECAY_MOVEMENT_SPEEDS
-- required: target, amount
+- required: target, mag
 - optional: source
 
 SYSTEM.ADJUST_SENSE_MAG
-- required: target, sense, amount
+- required: target, sense, mag
 - optional: source
 
 SYSTEM.ADJUST_THAUM_CAPACITY
-- required: target, amount
+- required: target, mag
 - optional: source
 
 SYSTEM.ADJUST_THAUM_REGEN
-- required: target, amount
+- required: target, mag
 - optional: source
 
 SYSTEM.ADJUST_CALLS
-- required: target, amount
+- required: target, mag
 - optional: source
 
 SYSTEM.ADJUST_SPELL_SLOTS
-- required: target, amount
+- required: target, mag
 - optional: source
 
 SYSTEM.SET_ITEM_MAG
@@ -514,12 +589,24 @@ SYSTEM.SET_WORLD_TILE_TEMPERATURE
 - required: target, mag
 - optional: source
 
+SYSTEM.ADJUST_TILE_TEMPERATURE
+- required: target, mag
+- optional: source
+
+SYSTEM.ADJUST_WORLD_TILE_TEMPERATURE
+- required: target, mag
+- optional: source
+
+SYSTEM.ADJUST_TAG_BALANCE
+- required: target, mag
+- optional: source
+
 SYSTEM.ADJUST_WEIGHT_PENALTY
-- required: target, amount
+- required: target, mag
 - optional: source
 
 SYSTEM.ADJUST_CARRY_CAPACITY
-- required: target, amount
+- required: target, mag
 - optional: source
 
 SYSTEM.SET_CONDITION
@@ -587,19 +674,19 @@ SYSTEM.APPLY_SLEEP_REPAIR_TICK
 - optional: source
 
 SYSTEM.APPLY_DAMAGE
-- required: target, amount
+- required: target, mag
 - optional: tag, source
 
 SYSTEM.APPLY_HEAL
-- required: target, amount
+- required: target, mag
 - optional: source
 
 SYSTEM.APPLY_BREAK
-- required: target, amount
+- required: target, mag
 - optional: source
 
 SYSTEM.APPLY_REROLL
-- required: target, amount
+- required: target, mag
 - optional: source
 
 SYSTEM.CAST_SPELL
@@ -611,8 +698,12 @@ SYSTEM.APPLY_DURATION_EFFECT
 - optional: source
 
 SYSTEM.APPLY_ACTION_CONSTRAINT
-- required: target, constraint, duration, unit
+- required: target, constraint
 - optional: source
+
+SYSTEM.TRADE_RESOURCE
+- required: from, to, mag
+- optional: rate, reason, source
 
 COMMUNICATE rules
 - always specify language and senses
@@ -620,7 +711,20 @@ COMMUNICATE rules
 - keep contexts small (<= 10 refs)
 
 System effect object
-- effect={verb=SYSTEM.X, args={k=v, ...}}
+- effect={verb=SYSTEM.X, trigger=EVENT, args={k=v, ...}}
+- trigger is required for tag effects and optional elsewhere
+
+Effect args schema (tag effects)
+- target: ref
+- tag_name: TAG_NAME
+- mag: number (MAG)
+- mag_formula: string (e.g. "-1 * ref:tag.mag")
+- scope: CHARACTER|CHARACTER.BODY_SLOT|ITEM|TAG|TILE|LOCAL|WORLD_TILE
+- body_slot: ref (e.g. actor_J.torso)
+- trigger: EVENT
+- check: check object
+- condition: string
+- condition examples: per_health, per_damage, outside_safe_range, inside_safe_range, has_tag:FLAMMABLE, adjacent_has_tag:FIRE!
 
 Examples (system text)
 - actor.MOVE(target=tile.loc.forest.10.12, mode="walk")
@@ -629,22 +733,22 @@ Examples (system text)
 - actor.CRAFT(tool=item.inventory.hammer, components=[item.inventory.wood, item.inventory.nails], result=item.inventory.box, roll={type=RESULT, dice="D20", base=12, nat=12, effectors=[{type=SHIFT, value=1, source=actor.self.profs.mechanics}], target_cr=10, result=13})
 - actor.HOLD(verb=ATTACK, condition={type=STATE, target=npc.local.guard.state, op=EQUALS, value="visible"})
 - actor.COMMUNICATE(targets=[npc.local.guard], text="halt, who goes there?", language=lang.common, senses=[pressure], tone="stern", contexts=[lore.city.curfew])
-- SYSTEM.APPLY_DAMAGE(target=actor.self, amount=4, tag=[{name=DAMAGE, mag=1}])
-- SYSTEM.APPLY_TAG(target=tile.loc.forest.10.12, tag={name=FIRE, mag=2, meta=[DISPERSING]})
-- SYSTEM.APPLY_DURATION_EFFECT(target=actor.self, effect={verb=SYSTEM.ADJUST_RESOURCE, args={target=actor.self, resource=VIGOR, amount=1}}, duration=1, unit=EXTENDED_ACTION)
+- SYSTEM.APPLY_DAMAGE(target=actor.self, mag=4, tag=[{name=DAMAGE, mag=1}])
+- SYSTEM.APPLY_TAG(target=tile.loc.forest.10.12, tag={name=FIRE!, mag=2, meta=[DISPERSING]})
+- SYSTEM.APPLY_DURATION_EFFECT(target=actor.self, effect={verb=SYSTEM.ADJUST_RESOURCE, args={target=actor.self, resource=VIGOR, mag=1}}, duration=1, unit=EXTENDED_ACTION)
 - SYSTEM.ADVANCE_TIME(unit=EXTENDED_ACTION, count=1)
 - SYSTEM.CAST_SPELL(caster=actor.self, spell={glyphs=[spell.glyph.targeter.line, spell.glyph.activator.burn], call_cost=2, thaum_cost=4, activator=spell.glyph.activator.burn, targeter=spell.glyph.targeter.line, tool=item.inventory.wand})
 
 Action examples (full coverage)
 - actor.USE(target=item.inventory.torch, action_cost=PARTIAL, roll={type=RESULT, dice="D20", base=9, nat=9, effectors=[], target_cr=0, result=9})
-- actor.HELP(target=actor.ally, target_roll=POTENCY, potency={type=POTENCY, mag=1, dice="1d2", base=1, nat=1, effectors=[{type=SHIFT, value=1, source=actor.self.profs.brawn}], result=2}, action_cost=FULL, on_peak=[{verb=SYSTEM.APPLY_REROLL, args={target=actor.ally, amount=1}}])
+- actor.HELP(target=actor.ally, target_roll=POTENCY, potency={type=POTENCY, mag=1, dice="1d2", base=1, nat=1, effectors=[{type=SHIFT, value=1, source=actor.self.profs.brawn}], result=2}, action_cost=FULL, on_peak=[{verb=SYSTEM.APPLY_REROLL, args={target=actor.ally, mag=1}}])
 - actor.GRAPPLE(target=npc.local.guard, roll={type=RESULT, dice="D20", base=11, nat=11, effectors=[{type=SHIFT, value=2, source=actor.self.profs.brawn}], target_cr=12, result=13}, size_delta=0, action_cost=FULL, on_peak=[{verb=SYSTEM.APPLY_TAG, args={target=npc.local.guard, tag={name=GRAPPLED, mag=1, info=actor.self}}}])
 - actor.INSPECT(target=tile.loc.cave.4.9, roll={type=RESULT, dice="D20", base=10, nat=10, effectors=[{type=SHIFT, value=1, source=actor.self.profs.instinct}], target_cr=10, result=11})
 - actor.DODGE(potency={type=POTENCY, mag=1, dice="1d2", base=2, nat=2, effectors=[], result=2}, action_cost=FULL, potency_applies_to=actor.self.evasion, duration=1, unit=TURN)
-- actor.SLEEP(potency={type=POTENCY, mag=1, dice="1d2", base=2, nat=2, effectors=[{type=SHIFT, value=1, source=actor.self.stats.con}], result=3}, consumes=[{resource=VIGOR, amount=1, optional=true}], action_cost=EXTENDED)
-- actor.REPAIR(potency={type=POTENCY, mag=1, dice="1d2", base=2, nat=2, effectors=[{type=SHIFT, value=1, source=actor.self.stats.con}], result=3}, consumes=[{resource=VIGOR, amount=1, optional=true}], action_cost=EXTENDED)
+- actor.SLEEP(potency={type=POTENCY, mag=1, dice="1d2", base=2, nat=2, effectors=[{type=SHIFT, value=1, source=actor.self.stats.con}], result=3}, consumes=[{resource=VIGOR, mag=1, optional=true}], action_cost=EXTENDED)
+- actor.REPAIR(potency={type=POTENCY, mag=1, dice="1d2", base=2, nat=2, effectors=[{type=SHIFT, value=1, source=actor.self.stats.con}], result=3}, consumes=[{resource=VIGOR, mag=1, optional=true}], action_cost=EXTENDED)
 - actor.MOVE(target=tile.loc.market.5.12, mode="walk", action_cost=FULL, resets_movement=true)
-- actor.WORK(task="research spell slots", action_cost=EXTENDED, roll={type=RESULT, dice="D20", base=12, nat=12, effectors=[{type=SHIFT, value=1, source=actor.self.profs.arcana}], target_cr=10, result=13}, on_peak=[{verb=SYSTEM.ADJUST_RESOURCE, args={target=actor.self, resource=THAUM, amount=1}}])
+- actor.WORK(task="research spell slots", action_cost=EXTENDED, roll={type=RESULT, dice="D20", base=12, nat=12, effectors=[{type=SHIFT, value=1, source=actor.self.profs.arcana}], target_cr=10, result=13}, on_peak=[{verb=SYSTEM.ADJUST_RESOURCE, args={target=actor.self, resource=THAUM, mag=1}}])
 - actor.GUARD(area=loc.world.market, action_cost=EXTENDED, roll={type=RESULT, dice="D20", base=10, nat=10, effectors=[], target_cr=10, result=10})
 - actor.HOLD(verb=ATTACK, action_cost=FULL, condition={type=ACTION, target=npc.local.guard.action, op=EQUALS, value="open_mouth"}, on_blunder=[{verb=SYSTEM.APPLY_ACTION_CONSTRAINT, args={target=actor.self, constraint={type=HOLD_CANCEL_ON_DAMAGE, value=true}, duration=1, unit=TURN}}])
 
@@ -654,23 +758,23 @@ System examples (mechanics coverage)
 - SYSTEM.APPLY_TEMPERATURE_EXPOSURE(target=actor.self, delta=2, unit=EXTENDED_ACTION)
 - SYSTEM.APPLY_DIET_TICK(target=actor.self, unit=EXTENDED_ACTION)
 - SYSTEM.APPLY_SLEEP_REPAIR_TICK(target=actor.self, unit=EXTENDED_ACTION)
-- SYSTEM.ADJUST_WEIGHT_PENALTY(target=actor.self, amount=2)
-- SYSTEM.ADJUST_CARRY_CAPACITY(target=actor.self, amount=5)
+- SYSTEM.ADJUST_WEIGHT_PENALTY(target=actor.self, mag=2)
+- SYSTEM.ADJUST_CARRY_CAPACITY(target=actor.self, mag=5)
 - SYSTEM.SET_OCCUPANCY(target=actor.self, tiles=[tile.loc.cave.4.9])
 - SYSTEM.CLEAR_OCCUPANCY(target=actor.self)
 - SYSTEM.ROLL_INITIATIVE(target=actor.self, roll={type=RESULT, dice="D20", base=15, nat=15, effectors=[{type=SHIFT, value=2, source=actor.self.stats.dex}], result=17})
 - SYSTEM.SET_INITIATIVE_ORDER(event=timed_event.local.fight, order=[actor.self, npc.local.guard])
-- SYSTEM.ADJUST_ACTIONS(target=actor.self, amount=-1)
-- SYSTEM.ADJUST_PARTIAL_ACTIONS(target=actor.self, amount=-1)
+- SYSTEM.ADJUST_ACTIONS(target=actor.self, mag=-1)
+- SYSTEM.ADJUST_PARTIAL_ACTIONS(target=actor.self, mag=-1)
 - SYSTEM.RESET_ACTIONS(target=actor.self)
-- SYSTEM.ADJUST_MOVEMENT_SPEED(target=actor.self, mode=walk, amount=-1)
+- SYSTEM.ADJUST_MOVEMENT_SPEED(target=actor.self, mode=walk, mag=-1)
 - SYSTEM.RESET_MOVEMENT_SPEEDS(target=actor.self)
-- SYSTEM.DECAY_MOVEMENT_SPEEDS(target=actor.self, amount=1)
-- SYSTEM.ADJUST_SENSE_MAG(target=actor.self, sense=light, amount=1)
-- SYSTEM.ADJUST_THAUM_CAPACITY(target=actor.self, amount=1)
-- SYSTEM.ADJUST_THAUM_REGEN(target=actor.self, amount=1)
-- SYSTEM.ADJUST_CALLS(target=actor.self, amount=1)
-- SYSTEM.ADJUST_SPELL_SLOTS(target=actor.self, amount=1)
+- SYSTEM.DECAY_MOVEMENT_SPEEDS(target=actor.self, mag=1)
+- SYSTEM.ADJUST_SENSE_MAG(target=actor.self, sense=light, mag=1)
+- SYSTEM.ADJUST_THAUM_CAPACITY(target=actor.self, mag=1)
+- SYSTEM.ADJUST_THAUM_REGEN(target=actor.self, mag=1)
+- SYSTEM.ADJUST_CALLS(target=actor.self, mag=1)
+- SYSTEM.ADJUST_SPELL_SLOTS(target=actor.self, mag=1)
 - SYSTEM.SET_ITEM_MAG(target=item.inventory.sword, mag=3)
 - SYSTEM.SET_ITEM_HARDNESS(target=item.inventory.sword, mag=5)
 - SYSTEM.SET_ITEM_CONDUCTIVITY(target=item.inventory.wand, mag=4)
@@ -678,6 +782,7 @@ System examples (mechanics coverage)
 - SYSTEM.SET_ITEM_SIZE(target=item.inventory.chest, mag=3)
 - SYSTEM.SET_TILE_TEMPERATURE(target=tile.loc.cave.4.9, mag=-2)
 - SYSTEM.SET_WORLD_TILE_TEMPERATURE(target=world_tile.loc.region.3.2, mag=1)
+- SYSTEM.TRADE_RESOURCE(from=actor.self.health.current, to=npc.local.victim.health.current, mag=2, rate=1, reason="vampiric sap")
 
 Iteration model
 - stages track iteration count (interpreted_1, interpreted_2, ...)

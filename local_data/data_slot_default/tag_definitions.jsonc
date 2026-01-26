@@ -1,0 +1,262 @@
+{
+  // Tag definitions database (single file for now)
+  // info_schema entries are refs; numeric values should be stored as referenced properties.
+  "tags": [
+    {
+      "name": "DISPERSING",
+      "proficiency": null,
+      "meta": [],
+      "stacking": "sum",
+      "scope": ["CHARACTER", "ITEM", "TILE"],
+      "requires_info": false,
+      "info_schema": [],
+      "triggers": ["end_turn"],
+      "effects": [
+        {"verb": "SYSTEM.REMOVE_TAG", "trigger": "end_turn", "args": {"target": "ref:holder", "tag_name": "ref:host_tag.name", "mag": 1}}
+      ]
+    },
+    {
+      "name": "DISEASE",
+      "proficiency": "PAIN",
+      "meta": [],
+      "stacking": "sum",
+      "scope": ["CHARACTER", "ITEM", "TILE"],
+      "requires_info": true,
+      "info_schema": ["ref:disease_cr"],
+      "triggers": ["on_sleep"],
+      "effects": [
+        {
+          "verb": "SYSTEM.REMOVE_TAG",
+          "trigger": "on_sleep",
+          "args": {
+            "target": "ref:holder",
+            "tag_name": "DISEASE",
+            "mag": 1,
+            "check": {"type": "RESULT", "action": "SLEEP", "proficiency": "PAIN", "cr": "ref:info[0]"}
+          }
+        }
+      ]
+    },
+    {
+      "name": "DAMAGE",
+      "proficiency": "PAIN",
+      "meta": [],
+      "stacking": "sum",
+      "scope": ["ITEM"],
+      "requires_info": false,
+      "info_schema": [],
+      "triggers": ["on_attack", "on_use"],
+      "effects": [
+        {"verb": "SYSTEM.APPLY_TAG", "trigger": "on_attack", "args": {"target": "ref:action.damage", "tag_name": "DAMAGE", "mag": "ref:tag.mag"}},
+        {"verb": "SYSTEM.APPLY_TAG", "trigger": "on_use", "args": {"target": "ref:action.damage", "tag_name": "DAMAGE", "mag": "ref:tag.mag"}}
+      ]
+    },
+    {
+      "name": "TOOL",
+      "proficiency": null,
+      "meta": [],
+      "stacking": "sum",
+      "scope": ["ITEM", "CHARACTER"],
+      "requires_info": false,
+      "info_schema": [],
+      "triggers": ["on_action"],
+      "effects": [
+        {"verb": "SYSTEM.APPLY_DAMAGE", "trigger": "on_action", "args": {"target": "ref:holder", "mag": "ref:action.potency", "condition": "holder_is_character_tool"}},
+        {"verb": "SYSTEM.APPLY_DAMAGE", "trigger": "on_action", "args": {"target": "ref:holder", "mag": "ref:action.potency", "condition": "holder_is_character_tool_attack"}}
+      ]
+    },
+    {
+      "name": "OVERENCUMBERED",
+      "proficiency": "BRAWN",
+      "meta": [],
+      "stacking": "sum",
+      "scope": ["CHARACTER"],
+      "requires_info": false,
+      "info_schema": [],
+      "triggers": ["on_apply"],
+      "effects": [
+        {"verb": "SYSTEM.ADJUST_MOVEMENT_SPEED", "trigger": "on_apply", "args": {"target": "ref:holder", "mode": "walk", "mag_formula": "-1 * ref:tag.mag"}},
+        {"verb": "SYSTEM.ADJUST_MOVEMENT_SPEED", "trigger": "on_apply", "args": {"target": "ref:holder", "mode": "climb", "mag_formula": "-1 * ref:tag.mag"}},
+        {"verb": "SYSTEM.ADJUST_MOVEMENT_SPEED", "trigger": "on_apply", "args": {"target": "ref:holder", "mode": "swim", "mag_formula": "-1 * ref:tag.mag"}},
+        {"verb": "SYSTEM.ADJUST_MOVEMENT_SPEED", "trigger": "on_apply", "args": {"target": "ref:holder", "mode": "fly", "mag_formula": "-1 * ref:tag.mag"}},
+        {"verb": "SYSTEM.ADJUST_MOVEMENT_SPEED", "trigger": "on_apply", "args": {"target": "ref:holder", "mode": "burrow", "mag_formula": "-1 * ref:tag.mag"}},
+        {"verb": "SYSTEM.ADJUST_WEIGHT_PENALTY", "trigger": "on_apply", "args": {"target": "ref:holder", "mag_formula": "1 * ref:tag.mag"}}
+      ]
+    },
+    {
+      "name": "KNOCKED",
+      "proficiency": "BRAWN",
+      "meta": ["DISPERSING"],
+      "stacking": "sum",
+      "scope": ["CHARACTER"],
+      "requires_info": false,
+      "info_schema": [],
+      "triggers": ["on_apply", "end_turn", "on_heal"],
+      "effects": [
+        {"verb": "SYSTEM.APPLY_ACTION_CONSTRAINT", "trigger": "on_apply", "args": {"target": "ref:holder", "constraint": {"type": "MOVEMENT_LIMIT", "value": 1}}},
+        {"verb": "SYSTEM.APPLY_ACTION_CONSTRAINT", "trigger": "on_apply", "args": {"target": "ref:holder", "constraint": {"type": "PARTIAL_ACTION_LIMIT", "value": 1}}},
+        {"verb": "SYSTEM.REMOVE_TAG", "trigger": "end_turn", "args": {"target": "ref:holder", "tag_name": "KNOCKED", "mag": 1}},
+        {"verb": "SYSTEM.REMOVE_TAG", "trigger": "on_heal", "args": {"target": "ref:holder", "tag_name": "KNOCKED", "mag": 1, "condition": "per_health"}}
+      ]
+    },
+    {
+      "name": "SLEEPING",
+      "proficiency": "PAIN",
+      "meta": [],
+      "stacking": "sum",
+      "scope": ["CHARACTER"],
+      "requires_info": false,
+      "info_schema": [],
+      "triggers": ["on_apply", "on_damage", "on_sleep_complete"],
+      "effects": [
+        {"verb": "SYSTEM.APPLY_ACTION_CONSTRAINT", "trigger": "on_apply", "args": {"target": "ref:holder", "constraint": {"type": "ACTION_LIMIT", "value": 0}}},
+        {"verb": "SYSTEM.APPLY_ACTION_CONSTRAINT", "trigger": "on_apply", "args": {"target": "ref:holder", "constraint": {"type": "MOVEMENT_LIMIT", "value": 0}}},
+        {"verb": "SYSTEM.REMOVE_TAG", "trigger": "on_damage", "args": {"target": "ref:holder", "tag_name": "SLEEPING", "mag": 1, "condition": "per_damage"}},
+        {"verb": "SYSTEM.REMOVE_TAG", "trigger": "on_sleep_complete", "args": {"target": "ref:holder", "tag_name": "SLEEPING", "mag": 1}}
+      ]
+    },
+    {
+      "name": "AWARENESS",
+      "proficiency": "INSTINCT",
+      "meta": [],
+      "stacking": "custom",
+      "scope": ["CHARACTER"],
+      "requires_info": true,
+      "info_schema": ["ref:target"],
+      "triggers": ["on_apply"],
+      "effects": [
+        {"verb": "SYSTEM.SET_AWARENESS", "trigger": "on_apply", "args": {"observer": "ref:holder", "target": "ref:info[0]"}}
+      ]
+    },
+    {
+      "name": "GRAPPLED",
+      "proficiency": "BRAWN",
+      "meta": [],
+      "stacking": "sum",
+      "scope": ["CHARACTER"],
+      "requires_info": true,
+      "info_schema": ["ref:source", "ref:cr"],
+      "triggers": ["on_apply", "on_grapple_check"],
+      "effects": [
+        {"verb": "SYSTEM.APPLY_ACTION_CONSTRAINT", "trigger": "on_apply", "args": {"target": "ref:holder", "constraint": {"type": "GRAPPLE_LIMIT", "value": "ref:info[0]"}}},
+        {"verb": "SYSTEM.REMOVE_TAG", "trigger": "on_grapple_check", "args": {"target": "ref:holder", "tag_name": "GRAPPLED", "mag": 1, "check": {"type": "RESULT", "action": "GRAPPLE", "proficiency": "BRAWN", "cr": "ref:info[1]"}}}
+      ]
+    },
+    {
+      "name": "FLINCH",
+      "proficiency": "PAIN",
+      "meta": [],
+      "stacking": "sum",
+      "scope": ["CHARACTER"],
+      "requires_info": false,
+      "info_schema": [],
+      "triggers": ["start_turn"],
+      "effects": [
+        {"verb": "SYSTEM.ADJUST_ACTIONS", "trigger": "start_turn", "args": {"target": "ref:holder", "mag_formula": "-1 ACTION per 2 TAG MAG"}},
+        {"verb": "SYSTEM.ADJUST_PARTIAL_ACTIONS", "trigger": "start_turn", "args": {"target": "ref:holder", "mag_formula": "-1 PARTIAL ACTION per remaining 1 TAG MAG"}},
+        {"verb": "SYSTEM.TRADE_RESOURCE", "trigger": "start_turn", "args": {"from": "ref:holder.actions.current", "to": "ref:tag.mag", "mag": "ref:tag.mag", "rate": 0.5, "reason": "flinch trade actions to reduce tag"}},
+        {"verb": "SYSTEM.TRADE_RESOURCE", "trigger": "start_turn", "args": {"from": "ref:holder.partial_actions.current", "to": "ref:tag.mag", "mag": "ref:tag.mag", "rate": 1, "reason": "flinch trade partials to reduce tag"}}
+      ]
+    },
+    {
+      "name": "BROKEN",
+      "proficiency": "MECHANICS",
+      "meta": [],
+      "stacking": "sum",
+      "scope": ["CHARACTER", "ITEM", "TILE"],
+      "requires_info": false,
+      "info_schema": [],
+      "triggers": ["on_apply"],
+      "effects": [
+        {"verb": "SYSTEM.APPLY_ACTION_CONSTRAINT", "trigger": "on_apply", "args": {"target": "ref:holder", "constraint": {"type": "ITEM_FUNCTION_MAG_REDUCTION", "value": "ref:tag.mag"}}},
+        {"verb": "SYSTEM.APPLY_ACTION_CONSTRAINT", "trigger": "on_apply", "args": {"target": "ref:holder", "constraint": {"type": "EQUIP_BLOCKED", "value": "ref:tag.mag"}}}
+      ]
+    },
+    {
+      "name": "FIRE!",
+      "proficiency": "HEARTH",
+      "meta": ["DISPERSING"],
+      "stacking": "sum",
+      "scope": ["CHARACTER", "ITEM", "TILE"],
+      "requires_info": false,
+      "info_schema": [],
+      "triggers": ["on_apply", "end_turn", "end_round", "on_adjacent"],
+      "effects": [
+        {"verb": "SYSTEM.APPLY_DAMAGE", "trigger": "end_turn", "args": {"target": "ref:holder", "mag": "ref:tag.mag", "scope": "CHARACTER"}},
+        {"verb": "SYSTEM.APPLY_TAG", "trigger": "end_round", "args": {"target": "ref:holder", "tag_name": "BROKEN", "mag": "ref:tag.mag", "scope": "ITEM"}},
+        {"verb": "SYSTEM.APPLY_TAG", "trigger": "end_round", "args": {"target": "ref:holder", "tag_name": "BROKEN", "mag": "ref:tag.mag", "scope": "TILE"}},
+        {"verb": "SYSTEM.ADJUST_TILE_TEMPERATURE", "trigger": "on_apply", "args": {"target": "ref:holder", "mag_formula": "1 * ref:tag.mag", "scope": "TILE"}},
+        {"verb": "SYSTEM.APPLY_TAG", "trigger": "on_adjacent", "args": {"target": "ref:adjacent.targets", "tag_name": "FIRE!", "mag": "ref:tag.mag", "condition": "has_tag:FLAMMABLE"}}
+      ]
+    },
+    {
+      "name": "FLAMMABLE",
+      "proficiency": "HEARTH",
+      "meta": [],
+      "stacking": "sum",
+      "scope": ["CHARACTER", "ITEM", "TILE"],
+      "requires_info": false,
+      "info_schema": [],
+      "triggers": ["on_adjacent"],
+      "effects": [
+        {"verb": "SYSTEM.APPLY_TAG", "trigger": "on_adjacent", "args": {"target": "ref:holder", "tag_name": "FIRE!", "mag": "ref:tag.mag", "condition": "adjacent_has_tag:FIRE!"}},
+        {"verb": "SYSTEM.REMOVE_TAG", "trigger": "on_adjacent", "args": {"target": "ref:holder", "tag_name": "FLAMMABLE", "mag": "ref:tag.mag", "condition": "adjacent_has_tag:FIRE!"}}
+      ]
+    },
+    {
+      "name": "FROST!",
+      "proficiency": "HEARTH",
+      "meta": ["DISPERSING"],
+      "stacking": "sum",
+      "scope": ["CHARACTER", "ITEM", "TILE"],
+      "requires_info": false,
+      "info_schema": [],
+      "triggers": ["on_apply", "end_turn"],
+      "effects": [
+        {"verb": "SYSTEM.APPLY_DAMAGE", "trigger": "end_turn", "args": {"target": "ref:holder", "mag": "ref:tag.mag", "scope": "CHARACTER"}},
+        {"verb": "SYSTEM.ADJUST_TILE_TEMPERATURE", "trigger": "on_apply", "args": {"target": "ref:holder", "mag_formula": "-1 * ref:tag.mag", "scope": "TILE"}}
+      ]
+    },
+    {
+      "name": "HYPOTHERMIA",
+      "proficiency": "PAIN",
+      "meta": [],
+      "stacking": "sum",
+      "scope": ["CHARACTER", "ITEM", "TILE"],
+      "requires_info": false,
+      "info_schema": [],
+      "triggers": ["on_temperature_tick"],
+      "effects": [
+        {"verb": "SYSTEM.APPLY_DAMAGE", "trigger": "on_temperature_tick", "args": {"target": "ref:holder", "mag": "ref:tag.mag", "condition": "outside_safe_range"}},
+        {"verb": "SYSTEM.REMOVE_TAG", "trigger": "on_temperature_tick", "args": {"target": "ref:holder", "tag_name": "HYPOTHERMIA", "mag": 1, "condition": "inside_safe_range"}}
+      ]
+    },
+    {
+      "name": "HEATSTROKE",
+      "proficiency": "PAIN",
+      "meta": [],
+      "stacking": "sum",
+      "scope": ["CHARACTER", "ITEM", "TILE"],
+      "requires_info": false,
+      "info_schema": [],
+      "triggers": ["on_temperature_tick"],
+      "effects": [
+        {"verb": "SYSTEM.APPLY_DAMAGE", "trigger": "on_temperature_tick", "args": {"target": "ref:holder", "mag": "ref:tag.mag", "condition": "outside_safe_range"}},
+        {"verb": "SYSTEM.REMOVE_TAG", "trigger": "on_temperature_tick", "args": {"target": "ref:holder", "tag_name": "HEATSTROKE", "mag": 1, "condition": "inside_safe_range"}}
+      ]
+    },
+    {
+      "name": "BALLANCE",
+      "proficiency": null,
+      "meta": [],
+      "stacking": "sum",
+      "scope": ["TAG"],
+      "requires_info": true,
+      "info_schema": ["ref:balance_shift"],
+      "triggers": ["on_apply"],
+      "effects": [
+        {"verb": "SYSTEM.ADJUST_TAG_BALANCE", "trigger": "on_apply", "args": {"target": "ref:holder", "mag": "ref:info[0]"}}
+      ]
+    }
+  ]
+}
