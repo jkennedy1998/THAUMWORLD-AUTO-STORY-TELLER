@@ -131,3 +131,7 @@ export function get_language_definitions_path(): string {
 export function get_perk_trees_path(): string {
     return path.join(process.cwd(), "local_data", "data_slot_default", "perk_trees.jsonc");
 }
+
+export function get_creation_state_path(slot: number): string {
+    return path.join(process.cwd(), "local_data", `data_slot_${slot}`, "creation.jsonc");
+}

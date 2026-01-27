@@ -1,6 +1,6 @@
 import type { CommandNode, ValueNode } from "../system_syntax/index.js";
 import { load_actor, load_default_actor } from "../actor_storage/store.js";
-import { load_npc, load_default_npc } from "../npc_storage/store.js";
+import { load_npc } from "../npc_storage/store.js";
 import { get_region_tile, get_world_tile } from "../world_storage/store.js";
 import type { ResolvedRef, ResolverOptions, ResolverResult } from "./types.js";
 
@@ -54,14 +54,6 @@ function resolve_npc_ref(ref: string, options: ResolverOptions, result: Resolver
     const resolved: ResolvedRef = { ref, id: npc_id, type: "npc" };
     const loaded = load_npc(options.slot, npc_id);
     if (!loaded.ok) {
-        if (options.use_representative_data) {
-            const template = load_default_npc();
-            resolved.representative = true;
-            if (template.ok) resolved.path = template.path;
-            result.warnings.push({ ref, message: loaded.todo });
-            result.resolved[ref] = resolved;
-            return;
-        }
         result.errors.push({ ref, reason: loaded.error, path: loaded.todo });
         return;
     }
@@ -102,6 +94,33 @@ function resolve_region_tile_ref(ref: string, options: ResolverOptions, result: 
     if (![world_x, world_y, region_x, region_y].every((n) => Number.isFinite(n))) return;
 
     const resolved: ResolvedRef = { ref, id: `region_tile_${world_x}_${world_y}_${region_x}_${region_y}`, type: "region_tile" };
+    const loaded = get_region_tile(options.slot, world_x, world_y, region_x, region_y);
+    if (!loaded.ok) {
+        if (options.use_representative_data) {
+            resolved.representative = true;
+            result.warnings.push({ ref, message: loaded.todo });
+            result.resolved[ref] = resolved;
+            return;
+        }
+        result.errors.push({ ref, reason: loaded.error, path: loaded.todo });
+        return;
+    }
+
+    resolved.path = loaded.path;
+    result.resolved[ref] = resolved;
+}
+
+function resolve_tile_ref(ref: string, options: ResolverOptions, result: ResolverResult): void {
+    const parts = parse_ref_parts(ref);
+    const world_x = Number(parts[1]);
+    const world_y = Number(parts[2]);
+    const region_x = Number(parts[3]);
+    const region_y = Number(parts[4]);
+    const tile_x = Number(parts[5]);
+    const tile_y = Number(parts[6]);
+    if (![world_x, world_y, region_x, region_y, tile_x, tile_y].every((n) => Number.isFinite(n))) return;
+
+    const resolved: ResolvedRef = { ref, id: `tile_${world_x}_${world_y}_${region_x}_${region_y}_${tile_x}_${tile_y}`, type: "tile" };
     const loaded = get_region_tile(options.slot, world_x, world_y, region_x, region_y);
     if (!loaded.ok) {
         if (options.use_representative_data) {
@@ -181,6 +200,10 @@ function resolve_ref(ref: string, options: ResolverOptions, result: ResolverResu
     }
     if (ref.startsWith("region_tile.")) {
         resolve_region_tile_ref(ref, options, result);
+        return;
+    }
+    if (ref.startsWith("tile.")) {
+        resolve_tile_ref(ref, options, result);
         return;
     }
     if (ref.includes("item_")) {

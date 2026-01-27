@@ -4,6 +4,7 @@ import type { SenseClarity, SenseContext, SenseName } from "./senses.js";
 import { compute_sense_clarity, compute_sense_range_mag } from "./senses.js";
 import { load_actor } from "../actor_storage/store.js";
 import { load_npc } from "../npc_storage/store.js";
+import { is_timed_event_active } from "../world_storage/store.js";
 
 function format_command_line(command: CommandNode): string {
     const args = Object.entries(command.args)
@@ -54,6 +55,183 @@ function parse_subject_ref(subject: string): { type: "actor" | "npc"; id: string
     if (subject.endsWith("_actor")) return { type: "actor", id: subject };
     if (subject.endsWith("_npc")) return { type: "npc", id: subject };
     return null;
+}
+
+function load_subject_tags(slot: number, subject: string): Array<Record<string, unknown>> | null {
+    const parsed = parse_subject_ref(subject);
+    if (!parsed || !parsed.id) return null;
+    if (parsed.type === "actor") {
+        const loaded = load_actor(slot, parsed.id);
+        if (!loaded.ok) return null;
+        return Array.isArray(loaded.actor.tags) ? (loaded.actor.tags as Array<Record<string, unknown>>) : null;
+    }
+    const loaded = load_npc(slot, parsed.id);
+    if (!loaded.ok) return null;
+    return Array.isArray(loaded.npc.tags) ? (loaded.npc.tags as Array<Record<string, unknown>>) : null;
+}
+
+function load_subject_location(slot: number, subject: string): Record<string, unknown> | null {
+    const parsed = parse_subject_ref(subject);
+    if (!parsed || !parsed.id) return null;
+    if (parsed.type === "actor") {
+        const loaded = load_actor(slot, parsed.id);
+        if (!loaded.ok) return null;
+        return (loaded.actor.location as Record<string, unknown>) ?? null;
+    }
+    const loaded = load_npc(slot, parsed.id);
+    if (!loaded.ok) return null;
+    return (loaded.npc.location as Record<string, unknown>) ?? null;
+}
+
+function build_location_tile_refs(location: Record<string, unknown>): { tile: string; region: string; world: string } {
+    const world = (location.world_tile as Record<string, unknown>) ?? {};
+    const region = (location.region_tile as Record<string, unknown>) ?? {};
+    const tile = (location.tile as Record<string, unknown>) ?? {};
+    const world_x = Number(world.x ?? 0);
+    const world_y = Number(world.y ?? 0);
+    const region_x = Number(region.x ?? 0);
+    const region_y = Number(region.y ?? 0);
+    const tile_x = Number(tile.x ?? 0);
+    const tile_y = Number(tile.y ?? 0);
+    return {
+        tile: `tile.${world_x}.${world_y}.${region_x}.${region_y}.${tile_x}.${tile_y}`,
+        region: `region_tile.${world_x}.${world_y}.${region_x}.${region_y}`,
+        world: `world_tile.${world_x}.${world_y}`,
+    };
+}
+
+function parse_tile_ref(ref: string): { world_x: number; world_y: number; region_x: number; region_y: number; tile_x: number; tile_y: number } | null {
+    const parts = ref.split(".");
+    if (parts.length !== 7) return null;
+    const world_x = Number(parts[1]);
+    const world_y = Number(parts[2]);
+    const region_x = Number(parts[3]);
+    const region_y = Number(parts[4]);
+    const tile_x = Number(parts[5]);
+    const tile_y = Number(parts[6]);
+    if (![world_x, world_y, region_x, region_y, tile_x, tile_y].every((n) => Number.isFinite(n))) return null;
+    return { world_x, world_y, region_x, region_y, tile_x, tile_y };
+}
+
+function is_tile_ref(ref: string): boolean {
+    return ref.startsWith("tile.");
+}
+
+function is_region_tile_ref(ref: string): boolean {
+    return ref.startsWith("region_tile.");
+}
+
+function is_world_tile_ref(ref: string): boolean {
+    return ref.startsWith("world_tile.");
+}
+
+function get_owner_ref_from_target(target_ref: string): string | null {
+    if (target_ref.startsWith("actor.")) {
+        const parts = target_ref.split(".");
+        return parts.length >= 2 ? `${parts[0]}.${parts[1]}` : null;
+    }
+    if (target_ref.startsWith("npc.")) {
+        const parts = target_ref.split(".");
+        return parts.length >= 2 ? `${parts[0]}.${parts[1]}` : null;
+    }
+    return null;
+}
+
+function has_awareness_tag(tags: Array<Record<string, unknown>> | null, target_ref: string): boolean {
+    if (!tags || tags.length === 0) return false;
+    for (const tag of tags) {
+        if (String(tag.name ?? "").toUpperCase() !== "AWARENESS") continue;
+        const info = Array.isArray(tag.info) ? (tag.info as unknown[]) : [];
+        if (info.some((entry) => String(entry) === target_ref)) return true;
+    }
+    return false;
+}
+
+function has_target_awareness(slot: number, subject: string, target_ref: string): boolean {
+    if (!target_ref) return true;
+    if (target_ref === subject) return true;
+
+    const tags = load_subject_tags(slot, subject);
+    const location = load_subject_location(slot, subject);
+    const owner_ref = get_owner_ref_from_target(target_ref);
+
+    if (location) {
+        const refs = build_location_tile_refs(location);
+        if (is_tile_ref(target_ref) && target_ref === refs.tile) {
+            const senses = load_subject_senses(slot, subject);
+            if (senses && Number(senses.pressure ?? 0) > 0) return true;
+        }
+        if (is_tile_ref(target_ref)) {
+            const target_tile = parse_tile_ref(target_ref);
+            if (target_tile) {
+                const world = (location.world_tile as Record<string, unknown>) ?? {};
+                const region = (location.region_tile as Record<string, unknown>) ?? {};
+                const tile = (location.tile as Record<string, unknown>) ?? {};
+                const world_x = Number(world.x ?? 0);
+                const world_y = Number(world.y ?? 0);
+                const region_x = Number(region.x ?? 0);
+                const region_y = Number(region.y ?? 0);
+                const tile_x = Number(tile.x ?? 0);
+                const tile_y = Number(tile.y ?? 0);
+                const same_region = target_tile.world_x === world_x && target_tile.world_y === world_y
+                    && target_tile.region_x === region_x && target_tile.region_y === region_y;
+                if (same_region) {
+                    const dx = Math.abs(target_tile.tile_x - tile_x);
+                    const dy = Math.abs(target_tile.tile_y - tile_y);
+                    if (dx + dy === 1) {
+                        const senses = load_subject_senses(slot, subject);
+                        if (senses && Number(senses.pressure ?? 0) > 0) return true;
+                    }
+                }
+            }
+        }
+        if (is_region_tile_ref(target_ref) && target_ref === refs.region) return true;
+        if (is_world_tile_ref(target_ref) && target_ref === refs.world) return true;
+    }
+
+    if (has_awareness_tag(tags, target_ref)) return true;
+    if (owner_ref && has_awareness_tag(tags, owner_ref)) return true;
+    return false;
+}
+
+type TargetType = "character" | "body_slot" | "item" | "tile" | "region_tile" | "world_tile" | "unknown";
+
+function classify_target_type(target_ref: string): TargetType {
+    if (target_ref.startsWith("actor.") || target_ref.startsWith("npc.")) {
+        if (target_ref.includes(".body_slots.")) return "body_slot";
+        return "character";
+    }
+    if (target_ref.includes("item_")) return "item";
+    if (target_ref.startsWith("tile.")) return "tile";
+    if (target_ref.startsWith("region_tile.")) return "region_tile";
+    if (target_ref.startsWith("world_tile.")) return "world_tile";
+    return "unknown";
+}
+
+function is_allowed_target_for_verb(verb: string, target_type: TargetType, subject: string, target_ref: string, slot: number): boolean {
+    if (verb === "USE") return ["character", "body_slot", "item", "tile"].includes(target_type);
+    if (verb === "ATTACK") return ["character", "body_slot", "item", "tile"].includes(target_type);
+    if (verb === "HELP") {
+        if (target_type !== "character") return false;
+        return target_ref !== subject;
+    }
+    if (verb === "DEFEND") return target_type === "character";
+    if (verb === "GRAPPLE") return target_type === "character";
+    if (verb === "INSPECT") return ["character", "body_slot", "item", "tile", "region_tile", "world_tile"].includes(target_type);
+    if (verb === "COMMUNICATE") return ["character", "region_tile"].includes(target_type);
+    if (verb === "DODGE") return target_ref === subject;
+    if (verb === "SLEEP") return target_ref === subject;
+    if (verb === "REPAIR") return target_ref === subject || target_type === "body_slot";
+    if (verb === "MOVE") {
+        if (target_type === "tile") return is_timed_event_active(slot);
+        if (target_type === "region_tile" || target_type === "world_tile") return !is_timed_event_active(slot);
+        return false;
+    }
+    if (verb === "WORK") return ["item", "tile", "region_tile"].includes(target_type);
+    if (verb === "GUARD") return ["tile", "region_tile", "world_tile"].includes(target_type);
+    if (verb === "HOLD") return true;
+    if (verb === "CRAFT") return target_type === "item";
+    return true;
 }
 
 function load_subject_senses(slot: number, subject: string): Record<string, number> | null {
@@ -199,8 +377,9 @@ function roll_passes_attack(command: CommandNode): boolean {
     if (!roll_node || roll_node.type !== "object") return false;
     const result = get_number(roll_node.value.result as ValueNode | undefined);
 
-    // TODO: use target.evasion from resolved data
-    const target_evasion = 10;
+    const target_ref = get_identifier(command.args.target) ?? "";
+    const is_tile = target_ref.startsWith("tile.") || target_ref.startsWith("region_tile.") || target_ref.startsWith("world_tile.");
+    const target_evasion = is_tile ? 0 : 10;
     if (result === null) return false;
     return result >= target_evasion;
 }
@@ -222,6 +401,44 @@ export function apply_rules_stub(commands: CommandNode[], slot: number): RuleRes
     for (const raw of commands) {
         const command = compute_command(raw);
         event_lines.push(format_command_line(command));
+
+        const target_ref = get_identifier(command.args.target);
+        const targets_list = command.args.targets;
+
+        if (command.verb === "CRAFT") {
+            const result_ref = get_identifier(command.args.result);
+            if (!result_ref || classify_target_type(result_ref) !== "item") {
+                event_lines.push(`NOTE.INVALID_TARGET(verb=${command.verb}, target=${result_ref ?? "missing"})`);
+                continue;
+            }
+        }
+
+        if (command.verb === "COMMUNICATE") {
+            if (!targets_list || targets_list.type !== "list" || targets_list.value.length === 0) {
+                event_lines.push(`NOTE.INVALID_TARGET(verb=${command.verb}, target=missing)`);
+                continue;
+            }
+        }
+
+        if (["USE", "ATTACK", "HELP", "DEFEND", "GRAPPLE", "INSPECT", "MOVE", "WORK", "GUARD", "DODGE", "SLEEP", "REPAIR"].includes(command.verb)) {
+            const allows_missing = ["DODGE", "SLEEP", "REPAIR", "DEFEND"].includes(command.verb);
+            if (!target_ref && !allows_missing) {
+                event_lines.push(`NOTE.INVALID_TARGET(verb=${command.verb}, target=missing)`);
+                continue;
+            }
+        }
+
+        if (target_ref) {
+            const target_type = classify_target_type(target_ref);
+            if (!is_allowed_target_for_verb(command.verb, target_type, command.subject, target_ref, slot)) {
+                event_lines.push(`NOTE.INVALID_TARGET(verb=${command.verb}, target=${target_ref})`);
+                continue;
+            }
+            if (!has_target_awareness(slot, command.subject, target_ref)) {
+                event_lines.push(`NOTE.NO_AWARENESS(target=${target_ref})`);
+                continue;
+            }
+        }
 
         if (command.verb === "ATTACK") {
             if (roll_passes_attack(command)) {
@@ -271,6 +488,15 @@ export function apply_rules_stub(commands: CommandNode[], slot: number): RuleRes
                 const context = read_sense_context(command.args);
                 for (const t of targets.value) {
                     if (t.type === "identifier") {
+                        const target_type = classify_target_type(t.value);
+                        if (!is_allowed_target_for_verb(command.verb, target_type, command.subject, t.value, slot)) {
+                            event_lines.push(`NOTE.INVALID_TARGET(verb=${command.verb}, target=${t.value})`);
+                            continue;
+                        }
+                        if (!has_target_awareness(slot, command.subject, t.value)) {
+                            event_lines.push(`NOTE.NO_AWARENESS(target=${t.value})`);
+                            continue;
+                        }
                         const clarity = compute_awareness_clarity(slot, command.subject, senses, context);
                         if (clarity === "none") continue;
                         if (clarity === "obscured") {

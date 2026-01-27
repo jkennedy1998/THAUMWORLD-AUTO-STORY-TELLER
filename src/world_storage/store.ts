@@ -15,6 +15,7 @@ export type RegionLookupResult =
 type WorldStore = {
     schema_version: number;
     world_tiles: Record<string, WorldTile>;
+    timed_event_active?: boolean;
 };
 
 type WorldTile = {
@@ -99,6 +100,13 @@ export function ensure_world_exists(slot: number): WorldLookupResult {
     const world = read_jsonc(template_path) as WorldStore;
     fs.writeFileSync(world_path, JSON.stringify(world, null, 2), "utf-8");
     return { ok: true, world, path: world_path };
+}
+
+export function is_timed_event_active(slot: number): boolean {
+    const world = ensure_world_exists(slot);
+    if (!world.ok) return false;
+    const store = world.world as WorldStore;
+    return Boolean(store.timed_event_active);
 }
 
 export function ensure_world_tile(slot: number, x: number, y: number): WorldLookupResult {

@@ -1,6 +1,7 @@
 {
   // Default world template
   "schema_version": 1,
+  "timed_event_active": false,
   "world_tiles": {
     "0,0": {
       "id": "wt_0_0",

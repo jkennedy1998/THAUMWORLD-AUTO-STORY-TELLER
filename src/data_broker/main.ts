@@ -12,7 +12,6 @@ import type { CommandNode } from "../system_syntax/index.js";
 import { resolve_references } from "../reference_resolver/resolver.js";
 import { ensure_status_exists, write_status_line } from "../engine/status_store.js";
 import { ensure_actor_exists } from "../actor_storage/store.js";
-import { ensure_npc_exists } from "../npc_storage/store.js";
 import { ensure_region_tile, ensure_world_tile } from "../world_storage/store.js";
 
 const data_slot_number = 1;
@@ -105,14 +104,7 @@ function create_missing_entities(
         }
 
         if (err.reason === "npc_not_found") {
-            const parts = parse_ref_parts(err.ref);
-            const npc_id = parts[1] ?? "";
-            if (!npc_id) continue;
-            const created_npc = ensure_npc_exists(data_slot_number, npc_id);
-            if (created_npc.ok) {
-                created += 1;
-                notes.push(`created npc ${npc_id}`);
-            }
+            // TODO: do not auto-create NPCs here; generation happens at boot or via local rules.
         }
 
         if (err.reason === "world_tile_missing") {

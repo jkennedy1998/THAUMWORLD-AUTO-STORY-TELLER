@@ -253,6 +253,7 @@
       "additionalProperties": false,
       "properties": {
         "evasion": { "type": "number" },
+        "naked_evasion": { "type": "number" },
         "fortitude": { "type": "number" },
         "carry_capacity": { "type": "number" },
         "weight_penalty": { "type": "number" }
@@ -262,6 +263,13 @@
     "derived_overrides": {
       "type": "object",
       "additionalProperties": { "type": "number" }
+    },
+    "derived_effectors": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": { "$ref": "#/definitions/effector" }
+      }
     },
     "equipment_weight": { "type": "number" },
     "inventory_weight": { "type": "number" },
@@ -277,6 +285,10 @@
         "hand_slots": { "type": "object" }
       },
       "required": ["body_slots", "hand_slots"]
+    },
+    "body_slots": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/body_slot" }
     },
     "tags": { "type": "array", "items": { "$ref": "#/definitions/tag" } },
     "character_mag": { "type": "number" },
@@ -347,6 +359,26 @@
         "prerequisites": { "type": "array", "items": { "type": "string" } }
       },
       "required": ["name", "perk_tree_path", "perk_point_cost", "granted_abilities", "prerequisites"]
+    },
+    "effector": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string", "enum": ["SHIFT", "SCALE"] },
+        "value": { "type": "number" },
+        "source_type": { "type": "string", "enum": ["item", "tag", "tile", "character", "perk"] },
+        "source_ref": { "type": "string" }
+      },
+      "required": ["type", "value"]
+    },
+    "body_slot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "critical": { "type": "boolean" }
+      },
+      "required": ["name", "critical"]
     }
   }
 }

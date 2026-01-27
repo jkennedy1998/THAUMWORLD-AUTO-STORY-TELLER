@@ -110,11 +110,14 @@
   },
   "derived": {
     "evasion": 0,
+    "naked_evasion": 0,
     "fortitude": 0,
     "carry_capacity": 0,
     "weight_penalty": 0
   },
   "derived_overrides": {},
+  "derived_effectors": {},
+  "body_slots": {},
   "equipment_weight": 0,
   "inventory_weight": 0,
   "inventory": [],

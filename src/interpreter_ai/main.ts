@@ -7,8 +7,9 @@ import type { MessageInput } from "../engine/message.js";
 import { append_log_envelope } from "../engine/log_store.js";
 import type { MessageEnvelope } from "../engine/types.js";
 import { debug_log, debug_content, debug_warn } from "../shared/debug.js";
-import { find_actors } from "../actor_storage/store.js";
+import { find_actors, load_actor } from "../actor_storage/store.js";
 import { find_npcs } from "../npc_storage/store.js";
+import { is_timed_event_active } from "../world_storage/store.js";
 import { append_metric } from "../engine/metrics_store.js";
 import { ollama_chat, type OllamaMessage } from "../shared/ollama_client.js";
 import { get_status_path } from "../engine/paths.js";
@@ -28,6 +29,7 @@ const INTERPRETER_TEMPERATURE = 0.2;
 type ChatTurn = { role: "user" | "assistant"; content: string };
 
 const interpreter_sessions = new Map<string, ChatTurn[]>();
+let current_actor_id: string | null = null;
 
 const INTERPRETER_SYSTEM_PROMPT = [
     "You are the Interpreter AI for a tabletop RPG system.",
@@ -43,7 +45,7 @@ const INTERPRETER_SYSTEM_PROMPT = [
     "If unsure, choose the smallest valid command that matches intent.",
     "All greetings or conversational speech must use COMMUNICATE, not SYSTEM.*.",
     "Bad: SYSTEM.APPLY_TAG(actor.tjem, \"player\", key=\"greeting\")",
-    "Good: actor.<id>.COMMUNICATE(tool=actor.<id>.voice, targets=[npc.default_npc], text=\"hello!\", language=lang.common, senses=[pressure], tone=\"neutral\", contexts=[region_tile.0.0.0.0], sense_context={signal_mag=1})",
+    "Good: actor.<id>.COMMUNICATE(tool=actor.<id>.voice, targets=[npc.<id>], text=\"hello!\", language=lang.common, senses=[pressure], tone=\"neutral\", contexts=[region_tile.0.0.0.0], sense_context={signal_mag=1})",
     "Example: actor.MOVE(target=tile.loc.market.5.12, tool=actor.self.hands, mode=\"walk\")",
 ].join("\n");
 
@@ -61,9 +63,9 @@ const COMMAND_MAP: Record<string, string> = {
     "1": "henry_actor.ATTACK(target=npc.shopkeep, tool=henry_actor.inventory.item_9x3k2q, action_cost=FULL, roll={type=RESULT, dice=\"D20\", effectors=[], target_cr=10}, potency={type=POTENCY, mag=1, dice=\"1d2\", effectors=[]})",
     "2": "henry_actor.CRAFT(tool=henry_actor.inventory.item_kit_2mag, components=[henry_actor.inventory.item_ing_a1, henry_actor.inventory.item_ing_a2], result=henry_actor.inventory.item_potion_flinch, action_cost=EXTENDED, roll={type=RESULT, dice=\"D20\", effectors=[], target_cr=10}, tags=[{name=FLINCH, mag=2, info=[]}])",
     "3": "henry_actor.COMMUNICATE(tool=henry_actor.voice, targets=[npc.shopkeep], text=\"hey, whats on the food menu today?\", language=lang.common, senses=[pressure], tone=\"curious\", contexts=[region_tile.0.0.0.0], sense_context={signal_mag=1})",
-    "4": "henry_actor.MOVE(target=tile.loc.forest.10.12, tool=henry_actor.hands, mode=walk, action_cost=FULL)",
+    "4": "henry_actor.MOVE(target=region_tile.0.0.0.0, tool=henry_actor.hands, mode=walk, action_cost=FULL)",
     "5": "henry_actor.USE(target=henry_actor.inventory.item_torch, tool=henry_actor.hands, action_cost=PARTIAL, roll={type=RESULT, dice=\"D20\", effectors=[], target_cr=0})",
-    "6": "henry_actor.INSPECT(target=tile.loc.cave.4.9, tool=henry_actor.hands, roll={type=RESULT, dice=\"D20\", effectors=[], target_cr=10})",
+    "6": "henry_actor.INSPECT(target=region_tile.0.0.0.0, tool=henry_actor.hands, roll={type=RESULT, dice=\"D20\", effectors=[], target_cr=10})",
     "7": "henry_actor.GRAPPLE(target=npc.shopkeep, tool=henry_actor.hands, roll={type=RESULT, dice=\"D20\", effectors=[], target_cr=12}, size_delta=0, action_cost=FULL)",
     "8": "henry_actor.DEFEND(target=henry_actor, tool=henry_actor.hands, potency={type=POTENCY, mag=1, dice=\"1d2\", effectors=[]}, potency_applies_to=henry_actor.evasion, duration=1, unit=TURN)",
     "9": "henry_actor.SLEEP(tool=henry_actor.body, potency={type=POTENCY, mag=1, dice=\"1d2\", effectors=[]}, consumes=[{resource=VIGOR, mag=1, optional=true}], action_cost=EXTENDED)",
@@ -106,12 +108,13 @@ function build_interpreter_prompt(params: {
     errors: unknown[] | undefined;
     previous_machine_text: string | undefined;
     intent: Intent;
-    communicate_template: string | undefined;
+    action_verb: ActionVerb | null;
+    action_template: string | undefined;
 }): string {
     if (!params.is_refinement) {
         const base = ["Human input:", params.text, "", "Return machine text only."];
-        if (params.intent === "communicate" && params.communicate_template) {
-            base.push("", "Use COMMUNICATE for greetings and speech.", "Template:", params.communicate_template);
+        if (params.intent === "action" && params.action_template && params.action_verb) {
+            base.push("", `Use ${params.action_verb} for this intent.`, "Template:", params.action_template);
         }
         return base.join("\n").trim();
     }
@@ -137,8 +140,8 @@ function build_interpreter_prompt(params: {
         "Rewrite the machine text so it parses correctly.",
         "Return machine text only.",
     ];
-    if (params.intent === "communicate" && params.communicate_template) {
-        lines.push("", "Use COMMUNICATE for greetings and speech.", "Template:", params.communicate_template);
+    if (params.intent === "action" && params.action_template && params.action_verb) {
+        lines.push("", `Use ${params.action_verb} for this intent.`, "Template:", params.action_template);
     }
     return lines.join("\n").trim();
 }
@@ -306,30 +309,58 @@ function sanitize_machine_text(text: string): string {
     return cleaned;
 }
 
-type Intent = "communicate" | "system" | "unknown";
+type ActionVerb =
+    | "USE"
+    | "ATTACK"
+    | "HELP"
+    | "DEFEND"
+    | "GRAPPLE"
+    | "INSPECT"
+    | "COMMUNICATE"
+    | "DODGE"
+    | "CRAFT"
+    | "SLEEP"
+    | "REPAIR"
+    | "MOVE"
+    | "WORK"
+    | "GUARD"
+    | "HOLD";
 
-function detect_intent(text: string): Intent {
+type Intent = "system" | "action" | "unknown";
+
+function detect_action_verb(text: string): ActionVerb | null {
+    const lowered = text.toLowerCase();
+    const verb_keywords: Array<{ verb: ActionVerb; keywords: string[] }> = [
+        { verb: "COMMUNICATE", keywords: ["say", "ask", "tell", "speak", "talk", "hello", "hi ", "hey", "greet", "whisper", "shout", "yell", "signal", "smoke"] },
+        { verb: "INSPECT", keywords: ["inspect", "look", "examine", "search", "scan", "survey", "check", "observe"] },
+        { verb: "MOVE", keywords: ["move", "go", "walk", "run", "travel", "head", "approach", "enter", "leave"] },
+        { verb: "ATTACK", keywords: ["attack", "hit", "strike", "stab", "shoot", "kill", "punch", "slash", "swing"] },
+        { verb: "USE", keywords: ["use", "light", "ignite", "drink", "eat", "equip", "unequip", "wield", "wear", "consume"] },
+        { verb: "HELP", keywords: ["help", "assist", "aid"] },
+        { verb: "DEFEND", keywords: ["defend", "block", "parry"] },
+        { verb: "GRAPPLE", keywords: ["grapple", "grab", "wrestle"] },
+        { verb: "DODGE", keywords: ["dodge", "evade", "duck"] },
+        { verb: "CRAFT", keywords: ["craft", "make", "build", "forge", "brew"] },
+        { verb: "SLEEP", keywords: ["sleep", "rest", "nap"] },
+        { verb: "REPAIR", keywords: ["repair", "fix", "mend"] },
+        { verb: "WORK", keywords: ["work", "labor"] },
+        { verb: "GUARD", keywords: ["guard", "watch"] },
+        { verb: "HOLD", keywords: ["hold", "ready", "prepare"] },
+    ];
+
+    for (const entry of verb_keywords) {
+        if (entry.keywords.some((kw) => lowered.includes(kw))) return entry.verb;
+    }
+    return null;
+}
+
+function detect_intent(text: string): { intent: Intent; verb: ActionVerb | null } {
     const lowered = text.toLowerCase();
     const system_keywords = ["system", "apply", "tag", "set", "adjust", "remove", "add", "give", "take"];
-    if (system_keywords.some((kw) => lowered.includes(kw))) return "system";
-    const communicate_keywords = [
-        "say",
-        "ask",
-        "tell",
-        "speak",
-        "talk",
-        "hello",
-        "hi ",
-        "hey",
-        "greet",
-        "whisper",
-        "shout",
-        "yell",
-        "signal",
-        "smoke",
-    ];
-    if (communicate_keywords.some((kw) => lowered.includes(kw))) return "communicate";
-    return "unknown";
+    if (system_keywords.some((kw) => lowered.includes(kw))) return { intent: "system", verb: null };
+    const verb = detect_action_verb(text);
+    if (verb) return { intent: "action", verb };
+    return { intent: "unknown", verb: null };
 }
 
 function normalize_entity_id(raw: string): { id: string; changed: boolean } {
@@ -342,6 +373,7 @@ function normalize_entity_id(raw: string): { id: string; changed: boolean } {
 }
 
 function get_active_actor_id(): string {
+    if (current_actor_id) return current_actor_id;
     const actors = find_actors(data_slot_number, {});
     if (actors.length === 0) return "henry_actor";
     const sorted = [...actors].sort((a, b) => a.id.localeCompare(b.id));
@@ -359,16 +391,78 @@ function get_active_actor_ref(): string {
 }
 
 function resolve_communication_targets(): string[] {
-    // TODO: replace with sense-range filtering for NPCs in the active region tile.
-    const npcs = find_npcs(data_slot_number, {});
-    if (npcs.length === 0) return ["npc.default_npc"];
+    // TODO: replace with sense-range filtering and local NPC generation rules.
+    const npcs = find_npcs(data_slot_number, {}).filter((n) => n.id !== "default_npc");
+    if (npcs.length === 0) return [];
     const sorted = [...npcs].sort((a, b) => a.id.localeCompare(b.id));
-    const candidate = sorted[0]?.id ?? "default_npc";
+    const candidate = sorted[0]?.id ?? "";
     const normalized = normalize_entity_id(candidate);
     if (normalized.changed) {
         debug_warn("Interpreter: normalized npc id", { from: candidate, to: normalized.id });
     }
-    return [`npc.${normalized.id || "default_npc"}`];
+    if (!normalized.id) return [];
+    return [`npc.${normalized.id}`];
+}
+
+function get_actor_location(): { world_x: number; world_y: number; region_x: number; region_y: number; tile_x: number; tile_y: number } {
+    const actor_id = get_active_actor_id();
+    const loaded = load_actor(data_slot_number, actor_id);
+    if (!loaded.ok) {
+        return { world_x: 0, world_y: 0, region_x: 0, region_y: 0, tile_x: 0, tile_y: 0 };
+    }
+    const location = (loaded.actor.location as Record<string, any>) ?? {};
+    const world_tile = location.world_tile ?? {};
+    const region_tile = location.region_tile ?? {};
+    const tile = location.tile ?? {};
+    return {
+        world_x: Number(world_tile.x ?? 0),
+        world_y: Number(world_tile.y ?? 0),
+        region_x: Number(region_tile.x ?? 0),
+        region_y: Number(region_tile.y ?? 0),
+        tile_x: Number(tile.x ?? 0),
+        tile_y: Number(tile.y ?? 0),
+    };
+}
+
+function build_tile_ref(location: { world_x: number; world_y: number; region_x: number; region_y: number; tile_x: number; tile_y: number }): string {
+    return `tile.${location.world_x}.${location.world_y}.${location.region_x}.${location.region_y}.${location.tile_x}.${location.tile_y}`;
+}
+
+function build_region_tile_ref(location: { world_x: number; world_y: number; region_x: number; region_y: number }): string {
+    return `region_tile.${location.world_x}.${location.world_y}.${location.region_x}.${location.region_y}`;
+}
+
+function build_adjacent_tile_ref(location: { world_x: number; world_y: number; region_x: number; region_y: number; tile_x: number; tile_y: number }): string {
+    const dirs = [
+        { x: 1, y: 0 },
+        { x: -1, y: 0 },
+        { x: 0, y: 1 },
+        { x: 0, y: -1 },
+    ];
+    const pick = dirs[Math.floor(Math.random() * dirs.length)] ?? { x: 0, y: 0 };
+    return `tile.${location.world_x}.${location.world_y}.${location.region_x}.${location.region_y}.${location.tile_x + pick.x}.${location.tile_y + pick.y}`;
+}
+
+function select_tile_target_ref(): string {
+    const location = get_actor_location();
+    return Math.random() < 0.5 ? build_tile_ref(location) : build_adjacent_tile_ref(location);
+}
+
+function select_environment_target_ref(): string {
+    const location = get_actor_location();
+    if (is_timed_event_active(data_slot_number)) {
+        return Math.random() < 0.5 ? build_tile_ref(location) : build_adjacent_tile_ref(location);
+    }
+    return build_region_tile_ref(location);
+}
+
+function resolve_nearby_npc_target(): string | null {
+    const npcs = find_npcs(data_slot_number, {}).filter((n) => n.id !== "default_npc");
+    if (npcs.length === 0) return null;
+    const sorted = [...npcs].sort((a, b) => a.id.localeCompare(b.id));
+    const candidate = sorted[0]?.id ?? "";
+    if (!candidate) return null;
+    return `npc.${candidate}`;
 }
 
 function resolve_communication_senses(text: string): string[] {
@@ -438,14 +532,145 @@ function build_communicate_command(text: string): string {
     const senses = resolve_communication_senses(text);
     const context = infer_sense_context(text, senses);
     const sanitized = sanitize_quoted_text(text);
-    return `${actor_ref}.COMMUNICATE(tool=${actor_ref}.voice, targets=[${targets.join(", ")}], text="${sanitized}", language=lang.common, senses=[${senses.join(", ")}], tone="neutral", contexts=[region_tile.0.0.0.0]${format_sense_context(context)})`;
+    const targets_text = targets.length > 0 ? targets.join(", ") : build_region_tile_ref(get_actor_location());
+    return `${actor_ref}.COMMUNICATE(tool=${actor_ref}.voice, targets=[${targets_text}], text="${sanitized}", language=lang.common, senses=[${senses.join(", ")}], tone="neutral", contexts=[region_tile.0.0.0.0]${format_sense_context(context)})`;
 }
 
 function build_communicate_template(text: string): string {
     const actor_ref = get_active_actor_ref();
-    const targets = resolve_communication_targets();
     const senses = resolve_communication_senses(text);
-    return `${actor_ref}.COMMUNICATE(tool=${actor_ref}.voice, targets=[${targets.join(", ")}], text="<TEXT>", language=lang.common, senses=[${senses.join(", ")}], tone="neutral", contexts=[region_tile.0.0.0.0])`;
+    return `${actor_ref}.COMMUNICATE(tool=${actor_ref}.voice, targets=[npc.<id>], text="<TEXT>", language=lang.common, senses=[${senses.join(", ")}], tone="neutral", contexts=[region_tile.0.0.0.0])`;
+}
+
+function build_action_template(verb: ActionVerb, text: string): string {
+    const actor_ref = get_active_actor_ref();
+    if (verb === "COMMUNICATE") return build_communicate_template(text);
+    if (verb === "INSPECT") return `${actor_ref}.INSPECT(target=region_tile.0.0.0.0, tool=${actor_ref}.hands, contexts=[region_tile.0.0.0.0])`;
+    if (verb === "MOVE") return `${actor_ref}.MOVE(target=region_tile.0.0.0.0, tool=${actor_ref}.hands, mode="walk", action_cost=FULL)`;
+    if (verb === "SLEEP" || verb === "REPAIR") return `${actor_ref}.${verb}(tool=${actor_ref}.body, action_cost=EXTENDED)`;
+    if (verb === "DEFEND") return `${actor_ref}.DEFEND(target=${actor_ref}, tool=${actor_ref}.hands, action_cost=FULL)`;
+    if (verb === "DODGE") return `${actor_ref}.DODGE(target=${actor_ref}, tool=${actor_ref}.hands, action_cost=FULL)`;
+    if (verb === "GUARD") return `${actor_ref}.GUARD(target=region_tile.0.0.0.0, tool=${actor_ref}.hands, action_cost=FULL)`;
+    if (verb === "WORK") return `${actor_ref}.WORK(target=region_tile.0.0.0.0, tool=${actor_ref}.hands, action_cost=FULL)`;
+    if (verb === "HOLD") return `${actor_ref}.HOLD(tool=${actor_ref}.hands, verb=ATTACK, action_cost=FULL, condition={type=ACTION, target=${actor_ref}.action, op=EQUALS, value="open_mouth"})`;
+    if (verb === "HELP") return `${actor_ref}.HELP(target=npc.<id>, tool=${actor_ref}.hands, action_cost=FULL)`;
+    if (verb === "GRAPPLE") return `${actor_ref}.GRAPPLE(target=npc.<id>, tool=${actor_ref}.hands, action_cost=FULL)`;
+    if (verb === "ATTACK") return `${actor_ref}.ATTACK(target=npc.<id>, tool=${actor_ref}.hands, action_cost=FULL)`;
+    if (verb === "USE") return `${actor_ref}.USE(target=${actor_ref}, tool=${actor_ref}.hands, action_cost=PARTIAL)`;
+    if (verb === "CRAFT") return `${actor_ref}.CRAFT(tool=${actor_ref}.hands, components=[], result=item.result, action_cost=EXTENDED)`;
+    return `${actor_ref}.INSPECT(target=region_tile.0.0.0.0, tool=${actor_ref}.hands, contexts=[region_tile.0.0.0.0])`;
+}
+
+function extract_explicit_ref(text: string): string | null {
+    const npc = text.match(/npc\.[a-zA-Z0-9_]+/);
+    if (npc && npc[0] !== "npc.default_npc") return npc[0];
+    const actor = text.match(/actor\.[a-zA-Z0-9_]+/);
+    if (actor) return actor[0];
+    const tile = text.match(/tile\.[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/);
+    if (tile) return tile[0];
+    const region = text.match(/region_tile\.[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/);
+    if (region) return region[0];
+    const world = text.match(/world_tile\.[0-9]+\.[0-9]+/);
+    if (world) return world[0];
+    return null;
+}
+
+function resolve_npc_target_from_text(text: string): string | null {
+    const npcs = find_npcs(data_slot_number, {}).filter((n) => n.id !== "default_npc");
+    const lowered = text.toLowerCase();
+    for (const npc of npcs) {
+        if (npc.name && lowered.includes(npc.name.toLowerCase())) return `npc.${npc.id}`;
+        if (npc.id && lowered.includes(npc.id.toLowerCase())) return `npc.${npc.id}`;
+    }
+    return null;
+}
+
+function build_action_fallback(verb: ActionVerb, text: string): string {
+    const actor_ref = get_active_actor_ref();
+    const explicit_ref = extract_explicit_ref(text);
+    const npc_ref = resolve_npc_target_from_text(text);
+    const target_ref = explicit_ref ?? npc_ref;
+
+    const lowered = text.toLowerCase();
+    const wants_environment = /(ground|floor|earth|dirt|soil|stone|wall|door|furniture|table|chair|foliage|tree|bush|decoration|item|object)/.test(lowered);
+    const wants_reckless = /(reckless|wild|careless|blind|random|swing wildly|flail)/.test(lowered);
+
+    if (verb === "COMMUNICATE") {
+        return build_communicate_command(text);
+    }
+
+    if (verb === "INSPECT") {
+        return `${actor_ref}.INSPECT(target=region_tile.0.0.0.0, tool=${actor_ref}.hands, contexts=[region_tile.0.0.0.0])`;
+    }
+
+    if (verb === "ATTACK") {
+        if (target_ref) {
+            return `${actor_ref}.ATTACK(target=${target_ref}, tool=${actor_ref}.hands, action_cost=FULL)`;
+        }
+        if (wants_environment) {
+            return `${actor_ref}.ATTACK(target=${select_tile_target_ref()}, tool=${actor_ref}.hands, action_cost=FULL)`;
+        }
+        const nearby_npc = resolve_nearby_npc_target();
+        if (wants_reckless && nearby_npc) {
+            return `${actor_ref}.ATTACK(target=${nearby_npc}, tool=${actor_ref}.hands, action_cost=FULL)`;
+        }
+        return `${actor_ref}.ATTACK(target=${select_tile_target_ref()}, tool=${actor_ref}.hands, action_cost=FULL)`;
+    }
+
+    if (verb === "GRAPPLE") {
+        if (!target_ref) {
+            return `${actor_ref}.INSPECT(target=region_tile.0.0.0.0, tool=${actor_ref}.hands, contexts=[region_tile.0.0.0.0])`;
+        }
+        return `${actor_ref}.GRAPPLE(target=${target_ref}, tool=${actor_ref}.hands, action_cost=FULL)`;
+    }
+
+    if (verb === "HELP") {
+        const help_target = target_ref ?? resolve_nearby_npc_target();
+        if (!help_target) {
+            return `${actor_ref}.INSPECT(target=region_tile.0.0.0.0, tool=${actor_ref}.hands, contexts=[region_tile.0.0.0.0])`;
+        }
+        return `${actor_ref}.HELP(target=${help_target}, tool=${actor_ref}.hands, action_cost=FULL)`;
+    }
+
+    if (verb === "USE") {
+        const use_target = target_ref ?? actor_ref;
+        return `${actor_ref}.USE(target=${use_target}, tool=${actor_ref}.hands, action_cost=PARTIAL)`;
+    }
+
+    if (verb === "CRAFT") {
+        return `${actor_ref}.CRAFT(tool=${actor_ref}.hands, components=[], result=item.result, action_cost=EXTENDED)`;
+    }
+
+    if (verb === "MOVE") {
+        const move_target = target_ref ?? select_environment_target_ref();
+        return `${actor_ref}.MOVE(target=${move_target}, tool=${actor_ref}.hands, mode="walk", action_cost=FULL)`;
+    }
+
+    if (verb === "SLEEP" || verb === "REPAIR") {
+        return `${actor_ref}.${verb}(tool=${actor_ref}.body, action_cost=EXTENDED)`;
+    }
+
+    if (verb === "DEFEND") {
+        return `${actor_ref}.DEFEND(target=${actor_ref}, tool=${actor_ref}.hands, action_cost=FULL)`;
+    }
+
+    if (verb === "DODGE") {
+        return `${actor_ref}.DODGE(target=${actor_ref}, tool=${actor_ref}.hands, action_cost=FULL)`;
+    }
+
+    if (verb === "GUARD") {
+        return `${actor_ref}.GUARD(target=${select_environment_target_ref()}, tool=${actor_ref}.hands, action_cost=FULL)`;
+    }
+
+    if (verb === "WORK") {
+        return `${actor_ref}.WORK(target=${select_environment_target_ref()}, tool=${actor_ref}.hands, action_cost=FULL)`;
+    }
+
+    if (verb === "HOLD") {
+        return `${actor_ref}.HOLD(tool=${actor_ref}.hands, verb=ATTACK, action_cost=FULL, condition={type=ACTION, target=${actor_ref}.action, op=EQUALS, value="open_mouth"})`;
+    }
+
+    return `${actor_ref}.INSPECT(target=region_tile.0.0.0.0, tool=${actor_ref}.hands, contexts=[region_tile.0.0.0.0])`;
 }
 
 function describe_issue(issue: LineIssue): string {
@@ -469,7 +694,8 @@ async function run_interpreter_ai(params: {
     errors: unknown[] | undefined;
     previous_machine_text: string | undefined;
     intent: Intent;
-    communicate_template: string | undefined;
+    action_verb: ActionVerb | null;
+    action_template: string | undefined;
 }): Promise<string> {
     const session_key = get_session_key(params.msg);
     const history = get_session_history(session_key);
@@ -481,7 +707,8 @@ async function run_interpreter_ai(params: {
         errors: params.errors,
         previous_machine_text: params.previous_machine_text,
         intent: params.intent,
-        communicate_template: params.communicate_template,
+        action_verb: params.action_verb,
+        action_template: params.action_template,
     });
 
     const messages: OllamaMessage[] = [
@@ -590,6 +817,11 @@ function update_outbox_message(outbox_path: string, updated: MessageEnvelope): v
 
 async function process_message(outbox_path: string, inbox_path: string, log_path: string, msg: MessageEnvelope): Promise<void> {
     debug_log("Interpreter: received", { id: msg.id, status: msg.status, stage: msg.stage });
+    if (typeof msg.sender === "string" && msg.sender.length > 0) {
+        const normalized = normalize_entity_id(msg.sender);
+        const loaded = load_actor(data_slot_number, normalized.id);
+        if (loaded.ok) current_actor_id = normalized.id;
+    }
     const meta = (msg.meta as Record<string, unknown> | undefined) ?? undefined;
     const error_iteration = parse_error_iteration(meta);
     const bounded_error_iteration = error_iteration ? Math.min(error_iteration, ITERATION_LIMIT) : undefined;
@@ -616,8 +848,10 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
     write_status_line(get_status_path(data_slot_number), "the interpreter is thinking");
 
     const error_list = Array.isArray(meta?.errors) ? (meta?.errors as unknown[]) : [];
-    const intent = detect_intent(original_text);
-    const communicate_template = intent === "communicate" ? build_communicate_template(original_text) : undefined;
+    const detected = detect_intent(original_text);
+    const action_template = detected.intent === "action" && detected.verb
+        ? build_action_template(detected.verb, original_text)
+        : undefined;
     const actor_ref = get_active_actor_ref();
     const response_text = await run_interpreter_ai({
         msg: processing.message,
@@ -626,8 +860,9 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
         error_reason: typeof error_reason === "string" ? error_reason : undefined,
         errors: error_list,
         previous_machine_text: typeof meta?.machine_text === "string" ? (meta?.machine_text as string) : undefined,
-        intent,
-        communicate_template,
+        intent: detected.intent,
+        action_verb: detected.verb,
+        action_template,
     });
     const sanitized = sanitize_machine_text(response_text);
     let normalized = normalize_machine_text(sanitized, actor_ref, false);
@@ -650,8 +885,9 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
             error_reason: "local_validation",
             errors: retry_errors,
             previous_machine_text: sanitized,
-            intent,
-            communicate_template,
+            intent: detected.intent,
+            action_verb: detected.verb,
+            action_template,
         });
         const retry_sanitized = sanitize_machine_text(retry_text);
         const retry_normalized = normalize_machine_text(retry_sanitized, actor_ref, false);
@@ -669,12 +905,16 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
         const has_hard_error = issues.includes("invalid_line") || issues.includes("positional_args");
         if (!has_hard_error && issues.every((i) => i === "missing_tool")) {
             final_text = normalize_machine_text(final_text, actor_ref, true).text;
-        } else if (intent === "communicate") {
-            // TODO: on iteration 3+, ask the user to clarify the target via COMMUNICATE.
-            final_text = build_communicate_command(original_text);
+        } else if (detected.intent === "action" && detected.verb) {
+            // TODO: on iteration 3+, ask the user to clarify the target.
+            final_text = build_action_fallback(detected.verb, original_text);
         } else {
             final_text = "";
         }
+    }
+
+    if (final_text.includes("npc.default_npc") && detected.intent === "action" && detected.verb) {
+        final_text = build_action_fallback(detected.verb, original_text);
     }
     if (is_refinement) {
         debug_log("Interpreter: refine", { id: msg.id, error_iteration: bounded_error_iteration, error_reason, errors: error_list });

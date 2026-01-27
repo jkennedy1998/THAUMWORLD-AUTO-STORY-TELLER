@@ -1,5 +1,6 @@
 import * as readline from "node:readline";
 import * as http from "node:http";
+import * as fs from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { debug_log, debug_warn } from "../shared/debug.js";
 import { ollama_chat } from "../shared/ollama_client.js";
@@ -7,17 +8,19 @@ import { ollama_chat } from "../shared/ollama_client.js";
 import { get_data_slot_dir, get_inbox_path, get_item_dir, get_log_path, get_outbox_path, get_status_path, get_world_dir, get_roller_status_path } from "../engine/paths.js";
 import { read_inbox, clear_inbox, ensure_inbox_exists, append_inbox_message } from "../engine/inbox_store.js";
 import { ensure_outbox_exists } from "../engine/outbox_store.js";
-import { ensure_dir_exists, ensure_log_exists, read_log, append_log_message } from "../engine/log_store.js";
+import { ensure_dir_exists, ensure_log_exists, read_log, append_log_envelope, append_log_message } from "../engine/log_store.js";
 import { append_outbox_message } from "../engine/outbox_store.js";
-import { append_log_envelope } from "../engine/log_store.js";
 import { create_correlation_id, create_message } from "../engine/message.js";
 import { route_message } from "../engine/router.js";
 import type { MessageEnvelope } from "../engine/types.js";
 import type { LogFile } from "../engine/types.js";
 import { ensure_status_exists, read_status, write_status_line } from "../engine/status_store.js";
 import { ensure_roller_status_exists, read_roller_status, write_roller_status } from "../engine/roller_status_store.js";
-import { ensure_actor_exists, find_actors } from "../actor_storage/store.js";
-import { ensure_npc_exists, find_npcs } from "../npc_storage/store.js";
+import { ensure_actor_exists, find_actors, load_actor, create_actor_from_kind } from "../actor_storage/store.js";
+import { create_npc_from_kind, find_npcs, save_npc } from "../npc_storage/store.js";
+import { get_creation_state_path } from "../engine/paths.js";
+import { load_kind_definitions } from "../kind_storage/store.js";
+import { PROF_NAMES, STAT_VALUE_BLOCK } from "../character_rules/creation.js";
 
 const data_slot_number = 1; // hard set to 1 for now
 const visual_log_limit = 12;
@@ -63,15 +66,25 @@ function ensure_minimum_game_data(slot: number): void {
         }
     }
 
-    const npcs = find_npcs(slot, {});
+    const npcs = find_npcs(slot, {}).filter((n) => n.id !== "default_npc");
     if (npcs.length === 0) {
-        const created = ensure_npc_exists(slot, "default_npc");
+        const actor_id = actors[0]?.id ?? "henry_actor";
+        const actor = load_actor(slot, actor_id);
+        const actor_location = actor.ok
+            ? (actor.actor.location as Record<string, unknown>)
+            : { world_tile: { x: 0, y: 0 }, region_tile: { x: 0, y: 0 }, tile: { x: 0, y: 0 } };
+        const created = create_npc_from_kind(slot, { name: "stranger" });
         if (created.ok) {
-            debug_log("Boot: created default npc", { id: "default_npc" });
+            const npc = { ...created.npc, location: actor_location } as Record<string, unknown>;
+            const npc_id = String(npc.id ?? "");
+            if (npc_id) save_npc(slot, npc_id, npc);
+            debug_log("Boot: created npc", { id: npc_id || "(unknown)" });
         } else {
-            debug_warn("Boot: failed to create default npc", { error: created.error, todo: created.todo });
+            debug_warn("Boot: failed to create npc", { error: created.error, todo: created.todo });
         }
     }
+
+    // TODO: add local generation rules for NPCs when actors travel in populated places.
 }
 
 async function fetch_json(url: string, timeout_ms: number): Promise<unknown> {
@@ -205,6 +218,303 @@ type InputRequest = {
     sender?: string;
 };
 
+type CreationState = {
+    schema_version: 1;
+    active: boolean;
+    actor_id?: string;
+    step?: string;
+    data?: {
+        kind_id?: string;
+        name?: string;
+        stats?: Record<string, number>;
+        background?: string;
+        prof_picks?: string[];
+        gift_kind_choices?: string[];
+        gift_greater_choice?: string | null;
+    };
+};
+
+function read_creation_state(pathname: string): CreationState {
+    if (!fs.existsSync(pathname)) return { schema_version: 1, active: false };
+    const raw = fs.readFileSync(pathname, "utf-8");
+    try {
+        const parsed = JSON.parse(raw) as CreationState;
+        if (parsed?.schema_version === 1) return parsed;
+    } catch {
+        return { schema_version: 1, active: false };
+    }
+    return { schema_version: 1, active: false };
+}
+
+function write_creation_state(pathname: string, state: CreationState): void {
+    fs.writeFileSync(pathname, JSON.stringify(state, null, 2), "utf-8");
+}
+
+function list_kind_options(): string[] {
+    const defs = load_kind_definitions();
+    return defs.kinds
+        .filter((k) => String(k.id ?? "") !== "DEFAULT_KIND")
+        .map((k) => `${k.id} - ${k.name}`);
+}
+
+function parse_stat_assignment(input: string): Record<string, number> | null {
+    const pairs = input.split(/[ ,]+/).filter((p) => p.includes("="));
+    if (pairs.length < 6) return null;
+    const out: Record<string, number> = {};
+    for (const pair of pairs) {
+        const [raw_key, raw_val] = pair.split("=");
+        const key = String(raw_key ?? "").trim().toLowerCase();
+        const val = Number(raw_val);
+        if (!["con", "str", "dex", "wis", "int", "cha"].includes(key)) return null;
+        if (!Number.isFinite(val)) return null;
+        out[key] = val;
+    }
+    if (Object.keys(out).length !== 6) return null;
+    const used = Object.values(out).sort((a, b) => a - b);
+    const expected = [...STAT_VALUE_BLOCK].sort((a, b) => a - b);
+    for (let i = 0; i < expected.length; i++) {
+        if (used[i] !== expected[i]) return null;
+    }
+    return out;
+}
+
+function parse_prof_picks(input: string, pick_count: number): string[] | null {
+    const raw = input.split(/[\s,]+/).map((p) => p.trim()).filter((p) => p.length > 0);
+    if (raw.length !== pick_count) return null;
+    const counts: Record<string, number> = {};
+    const picks: string[] = [];
+    for (const entry of raw) {
+        const key = entry.toLowerCase();
+        if (!PROF_NAMES.includes(key)) return null;
+        counts[key] = (counts[key] ?? 0) + 1;
+        if (counts[key] > 2) return null;
+        picks.push(key);
+    }
+    return picks;
+}
+
+function parse_gift_choices(input: string, count: number, available: string[]): string[] | null {
+    const raw = input.split(/[,\n]+/).map((p) => p.trim()).filter((p) => p.length > 0);
+    if (raw.length !== count) return null;
+    const out: string[] = [];
+    for (const entry of raw) {
+        const match = available.find((g) => g.toLowerCase() === entry.toLowerCase());
+        if (!match) return null;
+        if (out.includes(match)) return null;
+        out.push(match);
+    }
+    return out;
+}
+
+function start_creation_flow(log_path: string, creation_path: string, actor_id: string): { user_message_id: string } {
+    const user_msg = append_log_message(log_path, actor_id, "/create");
+    const kinds = list_kind_options();
+    const state: CreationState = { schema_version: 1, active: true, actor_id, step: "kind", data: {} };
+    write_creation_state(creation_path, state);
+    append_log_message(log_path, "system", `Character creation started. Choose a kind id:\n${kinds.map((k) => `- ${k}`).join("\n")}`);
+    write_status_line(get_status_path(data_slot_number), "character creation: choose kind");
+    return { user_message_id: user_msg.id };
+}
+
+function handle_creation_input(
+    log_path: string,
+    creation_path: string,
+    actor_id: string,
+    text: string,
+    state: CreationState,
+): { user_message_id: string } {
+    const user_msg = append_log_message(log_path, actor_id, text);
+    const data = state.data ?? {};
+    const step = state.step ?? "kind";
+
+    if (text.trim().toLowerCase() === "/cancel") {
+        write_creation_state(creation_path, { schema_version: 1, active: false });
+        append_log_message(log_path, "system", "Character creation cancelled.");
+        write_status_line(get_status_path(data_slot_number), "character creation cancelled");
+        return { user_message_id: user_msg.id };
+    }
+
+    if (step === "kind") {
+        const defs = load_kind_definitions();
+        const match = defs.kinds.find((k) => String(k.id ?? "").toLowerCase() === text.trim().toLowerCase());
+        if (!match) {
+            append_log_message(log_path, "system", "Invalid kind id. Try again.");
+            return { user_message_id: user_msg.id };
+        }
+        data.kind_id = String(match.id);
+        state.step = "name";
+        state.data = data;
+        write_creation_state(creation_path, state);
+        append_log_message(log_path, "system", "Enter your character name:");
+        write_status_line(get_status_path(data_slot_number), "character creation: choose name");
+        return { user_message_id: user_msg.id };
+    }
+
+    if (step === "name") {
+        if (!text.trim()) {
+            append_log_message(log_path, "system", "Name cannot be empty. Enter your character name:");
+            return { user_message_id: user_msg.id };
+        }
+        data.name = text.trim();
+        state.step = "stats";
+        state.data = data;
+        write_creation_state(creation_path, state);
+        append_log_message(
+            log_path,
+            "system",
+            `Assign stats using: con=56 str=54 dex=52 wis=48 int=46 cha=44 (use each value once).\nValues: ${STAT_VALUE_BLOCK.join(", ")}`,
+        );
+        write_status_line(get_status_path(data_slot_number), "character creation: assign stats");
+        return { user_message_id: user_msg.id };
+    }
+
+    if (step === "stats") {
+        if (text.trim().toLowerCase() === "redo") {
+            append_log_message(log_path, "system", "Re-enter stat assignments:");
+            return { user_message_id: user_msg.id };
+        }
+        const stats = parse_stat_assignment(text);
+        if (!stats) {
+            append_log_message(log_path, "system", "Invalid stat assignment. Try again or type 'redo'.");
+            return { user_message_id: user_msg.id };
+        }
+        data.stats = stats;
+        state.step = "background";
+        state.data = data;
+        write_creation_state(creation_path, state);
+        append_log_message(log_path, "system", "Enter a background (one line):");
+        write_status_line(get_status_path(data_slot_number), "character creation: background");
+        return { user_message_id: user_msg.id };
+    }
+
+    if (step === "background") {
+        if (!text.trim()) {
+            append_log_message(log_path, "system", "Background cannot be empty. Enter a background:");
+            return { user_message_id: user_msg.id };
+        }
+        data.background = text.trim();
+        state.step = "profs";
+        state.data = data;
+        write_creation_state(creation_path, state);
+        append_log_message(
+            log_path,
+            "system",
+            `Pick 4 prof picks (comma-separated). Each prof can be chosen up to 2 times.\nProfs: ${PROF_NAMES.join(", ")}`,
+        );
+        write_status_line(get_status_path(data_slot_number), "character creation: profs");
+        return { user_message_id: user_msg.id };
+    }
+
+    if (step === "profs") {
+        if (text.trim().toLowerCase() === "redo") {
+            append_log_message(log_path, "system", "Re-enter 4 prof picks (comma-separated):");
+            return { user_message_id: user_msg.id };
+        }
+        const picks = parse_prof_picks(text, 4);
+        if (!picks) {
+            append_log_message(log_path, "system", "Invalid prof picks. Use 4 picks, max 2 per prof. Try again or type 'redo'.");
+            return { user_message_id: user_msg.id };
+        }
+        data.prof_picks = picks;
+        state.step = "gifts";
+        state.data = data;
+        write_creation_state(creation_path, state);
+
+        const kind = data.kind_id ? load_kind_definitions().kinds.find((k) => String(k.id) === data.kind_id) : null;
+        const gifts = Array.isArray(kind?.gift_of_kind) ? kind!.gift_of_kind.map((g: any) => String(g.name)) : [];
+        if (gifts.length === 0) {
+            state.step = "confirm";
+            write_creation_state(creation_path, state);
+            append_log_message(log_path, "system", "No kind gifts available. Type 'confirm' to create your character or 'redo' to restart.");
+            write_status_line(get_status_path(data_slot_number), "character creation: confirm");
+            return { user_message_id: user_msg.id };
+        }
+        append_log_message(log_path, "system", `Pick 2 gifts of kind (comma-separated):\n${gifts.map((g) => `- ${g}`).join("\n")}`);
+        write_status_line(get_status_path(data_slot_number), "character creation: gifts");
+        return { user_message_id: user_msg.id };
+    }
+
+    if (step === "gifts") {
+        const kind = data.kind_id ? load_kind_definitions().kinds.find((k) => String(k.id) === data.kind_id) : null;
+        const gifts = Array.isArray(kind?.gift_of_kind) ? kind!.gift_of_kind.map((g: any) => String(g.name)) : [];
+        const choices = parse_gift_choices(text, Math.min(2, gifts.length), gifts);
+        if (!choices) {
+            append_log_message(log_path, "system", "Invalid gift selection. Pick exactly 2 from the list.");
+            return { user_message_id: user_msg.id };
+        }
+        data.gift_kind_choices = choices;
+        const greater = Array.isArray(kind?.gift_of_greater_kind) ? kind!.gift_of_greater_kind.map((g: any) => String(g.name)) : [];
+        if (greater.length === 0) {
+            state.step = "confirm";
+            state.data = data;
+            write_creation_state(creation_path, state);
+            append_log_message(log_path, "system", "No greater gifts available. Type 'confirm' to create your character or 'redo' to restart.");
+            write_status_line(get_status_path(data_slot_number), "character creation: confirm");
+            return { user_message_id: user_msg.id };
+        }
+        state.step = "greater_gift";
+        state.data = data;
+        write_creation_state(creation_path, state);
+        append_log_message(log_path, "system", `Pick 1 gift of greater kind:\n${greater.map((g) => `- ${g}`).join("\n")}`);
+        write_status_line(get_status_path(data_slot_number), "character creation: greater gift");
+        return { user_message_id: user_msg.id };
+    }
+
+    if (step === "greater_gift") {
+        const kind = data.kind_id ? load_kind_definitions().kinds.find((k) => String(k.id) === data.kind_id) : null;
+        const greater = Array.isArray(kind?.gift_of_greater_kind) ? kind!.gift_of_greater_kind.map((g: any) => String(g.name)) : [];
+        const match = greater.find((g) => g.toLowerCase() === text.trim().toLowerCase());
+        if (!match) {
+            append_log_message(log_path, "system", "Invalid greater gift. Pick 1 from the list.");
+            return { user_message_id: user_msg.id };
+        }
+        data.gift_greater_choice = match;
+        state.step = "confirm";
+        state.data = data;
+        write_creation_state(creation_path, state);
+        append_log_message(log_path, "system", "Type 'confirm' to create your character or 'redo' to restart.");
+        write_status_line(get_status_path(data_slot_number), "character creation: confirm");
+        return { user_message_id: user_msg.id };
+    }
+
+    if (step === "confirm") {
+        if (text.trim().toLowerCase() === "redo") {
+            state.step = "kind";
+            state.data = {};
+            write_creation_state(creation_path, state);
+            append_log_message(log_path, "system", "Restarting creation. Choose a kind id:");
+            write_status_line(get_status_path(data_slot_number), "character creation: choose kind");
+            return { user_message_id: user_msg.id };
+        }
+        if (text.trim().toLowerCase() !== "confirm") {
+            append_log_message(log_path, "system", "Type 'confirm' to finish or 'redo' to restart.");
+            return { user_message_id: user_msg.id };
+        }
+        const input = {
+            actor_id,
+            name: data.name ?? actor_id,
+            kind_id: data.kind_id ?? "DEFAULT_KIND",
+            gift_kind_choices: data.gift_kind_choices ?? [],
+            gift_greater_choice: data.gift_greater_choice ?? null,
+            stats: data.stats,
+            prof_picks: data.prof_picks ?? [],
+            background: data.background,
+        };
+        const created = create_actor_from_kind(data_slot_number, input);
+        if (!created.ok) {
+            append_log_message(log_path, "system", `Character creation failed: ${created.todo}`);
+            return { user_message_id: user_msg.id };
+        }
+        write_creation_state(creation_path, { schema_version: 1, active: false });
+        append_log_message(log_path, "system", `Character created: ${created.actor.name ?? actor_id}`);
+        write_status_line(get_status_path(data_slot_number), "character creation complete");
+        return { user_message_id: user_msg.id };
+    }
+
+    append_log_message(log_path, "system", "Creation step not recognized. Type /create to restart.");
+    return { user_message_id: user_msg.id };
+}
+
 function start_http_server(log_path: string): void {
     const server = http.createServer((req, res) => {
         res.setHeader("Access-Control-Allow-Origin", "*");
@@ -257,6 +567,22 @@ function start_http_server(log_path: string): void {
                 const sender = typeof parsed?.sender === "string" && parsed.sender.trim().length > 0
                     ? parsed.sender.trim()
                     : "J";
+
+                const creation_path = get_creation_state_path(data_slot_number);
+                const creation_state = read_creation_state(creation_path);
+                if (creation_state.active && creation_state.actor_id === sender) {
+                    const handled = handle_creation_input(log_path, creation_path, sender, text, creation_state);
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, id: handled.user_message_id }));
+                    return;
+                }
+
+                if (text.trim().toLowerCase() === "/create") {
+                    const handled = start_creation_flow(log_path, creation_path, sender);
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, id: handled.user_message_id }));
+                    return;
+                }
 
                 current_state = "processing";
 

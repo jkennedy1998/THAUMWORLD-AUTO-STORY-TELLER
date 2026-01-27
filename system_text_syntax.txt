@@ -45,7 +45,7 @@ Reference model
   - tile.loc.world.market.5.12
 
 Data shapes (minimal stubs)
-- character: id, name, kind, size_mag, sleep_type, sleep_required_per_day, stats, profs, vigor, health, thaum, thaum_capacity, thaum_regen, calls, spell_slots, actions, partial_actions, senses, movement, temperature_range, carry_capacity, weight_penalty, evasion, fortitude, tags, inventory, equipment, location, languages, memory
+- character: id, name, kind, size_mag, sleep_type, sleep_required_per_day, stats, profs, vigor, health, thaum, thaum_capacity, thaum_regen, calls, spell_slots, actions, partial_actions, senses, movement, temperature_range, carry_capacity, weight_penalty, evasion, fortitude, tags, inventory, equipment, body_slots, location, languages, memory
 - npc: id, name, stats, profs, personality, memory
 - item: id, mag, tags, weight, size, hardness, conductivity
 - tile: id, coords, tags, temperature, contents
@@ -62,6 +62,8 @@ Data storage
 - character sheets for actors and npcs are JSON files
 - resource properties are stored as objects with current/max (and regen where applicable)
 - perk trees are stored in local_data\data_slot_default\perk_trees.jsonc (TODO: wire system)
+- world stores timed_event_active to indicate tile-scale play
+- background is stored in lore.backstory
 
 Derived overrides policy
 - derived_overrides stores delta values from formula outputs
@@ -69,6 +71,19 @@ Derived overrides policy
 - final_value = computed_value + override_delta
 - temporary buffs use SYSTEM.* adjustments, not derived_overrides
 - optional provenance: derived_override_sources.<field> = "perk:rapid_heal" or similar
+
+Derived effectors
+- derived_effectors is a per-field list of effectors that apply to derived calculations
+- keys are derived fields like: health_max, vigor_max, carry_capacity, evasion, naked_evasion
+- effector order: SHIFT then SCALE; round down
+
+Level 1 derived stats (baseline)
+- health max = 10 + CON bonus + effectors
+- vigor max = 1
+- carry capacity = (2 + size_mag + STR bonus + brawn mag + effectors) * 20
+- weight penalty = floor((armor_weight + max(0, inventory_weight - carry_capacity)) / 5)
+- naked evasion = 10 + DEX bonus
+- evasion = naked evasion - weight penalty
 
 Standard keys (common)
 - actor: ref
@@ -125,7 +140,7 @@ Roll object (explicit)
   - for multi-die or fixed rolls, base is required and nat may be null or a list
 
 Effector object
-- effector={type=SHIFT|SCALE, value=number, source=ref or string}
+- effector={type=SHIFT|SCALE, value=number, source_type=item|tag|tile|character|perk, source_ref=ref}
 - order: NAT/base -> SHIFT -> SCALE -> caps
 - rounding: always down
 
@@ -860,3 +875,34 @@ Language object
 
 Perk object
 - perk={name=string, perk_tree_path=string, perk_point_cost=number, granted_abilities=[string,...], prerequisites=[string,...]}
+Target rules
+- valid targets: character, body slot, item, tile, region tile, world tile
+- targeting generally requires AWARENESS for the target
+- touching implies awareness when pressure sense > 0
+
+Action target rules
+- USE: character, body slot, item, tile
+- ATTACK: character, body slot, item, tile
+- HELP: character (not self)
+- DEFEND: character
+- GRAPPLE: character
+- INSPECT: character, body slot, item, tile, region tile, world tile
+- COMMUNICATE: character, region tile
+- DODGE: character (self)
+- CRAFT: item (crafted item)
+- SLEEP: character (self)
+- REPAIR: character (self), body slot
+- MOVE: tile (timed event), region tile or world tile (extended)
+- WORK: item, tile, region tile
+- GUARD: tile, region tile, world tile
+- HOLD: inherits from held action
+Reference formats
+- body slot ref: actor.<id>.body_slots.HEAD (slot names uppercase)
+- tile ref: tile.<world_x>.<world_y>.<region_x>.<region_y>.<tile_x>.<tile_y>
+- region tile ref: region_tile.<world_x>.<world_y>.<region_x>.<region_y>
+- world tile ref: world_tile.<world_x>.<world_y>
+
+Tiles
+- tiles are tracked only during timed events
+- region tiles are the narrative encounter space for a story beat
+- world tiles represent travel across large regions

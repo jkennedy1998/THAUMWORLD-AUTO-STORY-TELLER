@@ -5,6 +5,8 @@ import { ensure_dir_exists, rand_base32_rfc } from "../engine/log_store.js";
 import { get_actor_dir, get_actor_path, get_default_actor_path, get_legacy_default_actor_path } from "../engine/paths.js";
 import { find_kind } from "../kind_storage/store.js";
 import { find_language } from "../language_storage/store.js";
+import { apply_level1_derived } from "../character_rules/derived.js";
+import { apply_prof_picks, make_empty_profs } from "../character_rules/creation.js";
 
 export type ActorLookupResult =
     | { ok: true; actor: Record<string, unknown>; path: string }
@@ -23,10 +25,15 @@ export type ActorSearchQuery = {
 };
 
 export type CreateActorFromKindInput = {
+    actor_id?: string;
     name: string;
     kind_id: string;
     gift_kind_choices: string[];
     gift_greater_choice: string | null;
+    stats?: Record<string, number>;
+    prof_picks?: string[];
+    background?: string;
+    age?: number;
 };
 
 function slugify_name(name: string): string {
@@ -145,7 +152,7 @@ export function create_actor_from_kind(slot: number, input: CreateActorFromKindI
         return { ok: false, error: "kind_not_found", todo: `Kind not found: ${input.kind_id}` };
     }
 
-    const actor_id = make_actor_id(input.name);
+    const actor_id = input.actor_id ?? make_actor_id(input.name);
     const actor = { ...template.actor, id: actor_id, name: input.name } as Record<string, unknown>;
 
     actor.kind = kind.id;
@@ -164,14 +171,19 @@ export function create_actor_from_kind(slot: number, input: CreateActorFromKindI
     }
     if (kind.temperature_range) actor.temperature_range = { ...kind.temperature_range };
 
-    const stats = (actor.stats as Record<string, unknown>) ?? {};
+    const stats = input.stats ? { ...input.stats } : ((actor.stats as Record<string, unknown>) ?? {});
     apply_stat_changes(stats, kind.stat_changes as Record<string, number> | undefined);
     actor.stats = stats;
+
+    if (input.age !== undefined) actor.age = input.age;
+    apply_background(actor, input.background);
 
     if (kind.languages && kind.languages.length > 0) {
         const languages = kind.languages.map(resolve_language_entry);
         actor.languages = languages;
     }
+
+    apply_body_slots(actor, kind.parts as Array<{ slot: string; critical?: boolean }> | undefined);
 
     if (actor.appearance && typeof actor.appearance === "object" && typeof kind.size_mag === "number") {
         (actor.appearance as Record<string, unknown>).size_mag = kind.size_mag;
@@ -183,6 +195,15 @@ export function create_actor_from_kind(slot: number, input: CreateActorFromKindI
         : [];
     const flaw_perks = Array.isArray(kind.flaw_of_kind) ? kind.flaw_of_kind : [];
     actor.perks = [...gift_perks, ...greater_perks, ...flaw_perks];
+
+    if (input.prof_picks && input.prof_picks.length > 0) {
+        const profs = apply_prof_picks(make_empty_profs(), input.prof_picks);
+        actor.profs = profs;
+    }
+
+    // TODO: incorporate personality and flavor choices during character creation.
+
+    apply_level1_derived(actor, { set_current_to_max: true });
 
     const actor_path = save_actor(slot, actor_id, actor);
     return { ok: true, actor, path: actor_path };
@@ -215,3 +236,20 @@ export function find_actors(slot: number, query: ActorSearchQuery): ActorSearchH
 }
 
 // TODO: implement character creation flow to populate actor sheets from rules
+function apply_body_slots(actor: Record<string, unknown>, parts: Array<{ slot: string; critical?: boolean }> | undefined): void {
+    if (!parts || parts.length === 0) return;
+    const slots: Record<string, unknown> = {};
+    for (const part of parts) {
+        const name = String(part.slot ?? "").toUpperCase();
+        if (!name) continue;
+        slots[name] = { name, critical: Boolean(part.critical) };
+    }
+    actor.body_slots = slots;
+}
+
+function apply_background(actor: Record<string, unknown>, background: string | undefined): void {
+    if (!background) return;
+    const lore = (actor.lore as Record<string, unknown>) ?? {};
+    lore.backstory = background;
+    actor.lore = lore;
+}

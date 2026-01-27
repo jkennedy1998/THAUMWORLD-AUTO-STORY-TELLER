@@ -23,6 +23,7 @@ export const APP_CONFIG = {
     roller_status_endpoint: 'http://localhost:8787/api/roller_status',
     roller_roll_endpoint: 'http://localhost:8787/api/roll',
     selected_data_slot: 1,
+    input_actor_id: 'henry_actor',
 } as const;
 
 export type AppState = {
@@ -118,7 +119,7 @@ export function create_app_state(): AppState {
             const res = await fetch(APP_CONFIG.interpreter_endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text: message, sender: 'J' }),
+                body: JSON.stringify({ text: message, sender: APP_CONFIG.input_actor_id }),
             });
 
             if (!res.ok) {
