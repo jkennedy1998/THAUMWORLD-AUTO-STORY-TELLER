@@ -43,7 +43,7 @@ const INTERPRETER_SYSTEM_PROMPT = [
     "If unsure, choose the smallest valid command that matches intent.",
     "All greetings or conversational speech must use COMMUNICATE, not SYSTEM.*.",
     "Bad: SYSTEM.APPLY_TAG(actor.tjem, \"player\", key=\"greeting\")",
-    "Good: actor.<id>.COMMUNICATE(tool=actor.<id>.voice, targets=[npc.default_npc], text=\"hello\", language=lang.common, senses=[pressure], tone=\"neutral\", contexts=[region_tile.0.0.0.0])",
+    "Good: actor.<id>.COMMUNICATE(tool=actor.<id>.voice, targets=[npc.default_npc], text=\"hello!\", language=lang.common, senses=[pressure], tone=\"neutral\", contexts=[region_tile.0.0.0.0], sense_context={signal_mag=1})",
     "Example: actor.MOVE(target=tile.loc.market.5.12, tool=actor.self.hands, mode=\"walk\")",
 ].join("\n");
 
@@ -60,7 +60,7 @@ const ITERATION_LIMIT = 5;
 const COMMAND_MAP: Record<string, string> = {
     "1": "henry_actor.ATTACK(target=npc.shopkeep, tool=henry_actor.inventory.item_9x3k2q, action_cost=FULL, roll={type=RESULT, dice=\"D20\", effectors=[], target_cr=10}, potency={type=POTENCY, mag=1, dice=\"1d2\", effectors=[]})",
     "2": "henry_actor.CRAFT(tool=henry_actor.inventory.item_kit_2mag, components=[henry_actor.inventory.item_ing_a1, henry_actor.inventory.item_ing_a2], result=henry_actor.inventory.item_potion_flinch, action_cost=EXTENDED, roll={type=RESULT, dice=\"D20\", effectors=[], target_cr=10}, tags=[{name=FLINCH, mag=2, info=[]}])",
-    "3": "henry_actor.COMMUNICATE(tool=henry_actor.voice, targets=[npc.shopkeep], text=\"hey, whats on the food menu today?\", language=lang.common, senses=[pressure], tone=\"curious\", contexts=[region_tile.0.0.0.0])",
+    "3": "henry_actor.COMMUNICATE(tool=henry_actor.voice, targets=[npc.shopkeep], text=\"hey, whats on the food menu today?\", language=lang.common, senses=[pressure], tone=\"curious\", contexts=[region_tile.0.0.0.0], sense_context={signal_mag=1})",
     "4": "henry_actor.MOVE(target=tile.loc.forest.10.12, tool=henry_actor.hands, mode=walk, action_cost=FULL)",
     "5": "henry_actor.USE(target=henry_actor.inventory.item_torch, tool=henry_actor.hands, action_cost=PARTIAL, roll={type=RESULT, dice=\"D20\", effectors=[], target_cr=0})",
     "6": "henry_actor.INSPECT(target=tile.loc.cave.4.9, tool=henry_actor.hands, roll={type=RESULT, dice=\"D20\", effectors=[], target_cr=10})",
@@ -377,6 +377,57 @@ function resolve_communication_senses(text: string): string[] {
     return ["pressure"];
 }
 
+function infer_sense_context(text: string, senses: string[]): Record<string, string | number> | null {
+    const lowered = text.toLowerCase();
+    const context: Record<string, string | number> = {};
+
+    if (/(yell|yelling|scream|screaming|alarm|explosion|booming|deafening)/.test(lowered)) {
+        context.signal_mag = 2;
+    } else if (/(shout|shouting|raised voice|slam|slammed|thunderous|loud)/.test(lowered)) {
+        context.signal_mag = 1;
+    }
+
+    if (/(bright|blinding|glare|glaring|beacon)/.test(lowered) && senses.includes("light")) {
+        context.signal_mag = Math.max(Number(context.signal_mag ?? 0), 1);
+    }
+    if (/(overpowering|pungent|reek|stench|smellier)/.test(lowered) && senses.includes("aroma")) {
+        context.signal_mag = Math.max(Number(context.signal_mag ?? 0), 1);
+    }
+    if (/(surging|overwhelming|intense magic|magical pressure)/.test(lowered) && senses.includes("thaumic")) {
+        context.signal_mag = Math.max(Number(context.signal_mag ?? 0), 1);
+    }
+    if (/(deafening|booming|explosion)/.test(lowered) && senses.includes("pressure")) {
+        context.signal_mag = Math.max(Number(context.signal_mag ?? 0), 1);
+    }
+
+    if (/(adjacent|next to|beside|right by)/.test(lowered)) {
+        context.distance_mag = 1;
+    } else if (/(across the room|across the chamber)/.test(lowered)) {
+        context.distance_mag = 2;
+    } else if (/(down the hall|down the hallway|across the hall)/.test(lowered)) {
+        context.distance_mag = 3;
+    }
+
+    if (/(leaves|paper|cloth|clothes|thin wall|thin walls|some armor)/.test(lowered) || lowered.includes("door")) {
+        context.thin_walls = 1;
+    }
+    if (/(tree trunk|stone wall|heavy timber|solid metal|cast wall)/.test(lowered)) {
+        context.thick_walls = 1;
+    }
+
+    if (Object.keys(context).length === 0) return null;
+    return context;
+}
+
+function format_sense_context(context: Record<string, string | number> | null): string {
+    if (!context) return "";
+    const entries = Object.entries(context)
+        .map(([k, v]) => `${k}=${typeof v === "number" ? v : v}`)
+        .join(", ");
+    if (!entries) return "";
+    return `, sense_context={${entries}}`;
+}
+
 function sanitize_quoted_text(text: string, max_len = 200): string {
     return text.replace(/"/g, "'").slice(0, max_len);
 }
@@ -385,8 +436,9 @@ function build_communicate_command(text: string): string {
     const actor_ref = get_active_actor_ref();
     const targets = resolve_communication_targets();
     const senses = resolve_communication_senses(text);
+    const context = infer_sense_context(text, senses);
     const sanitized = sanitize_quoted_text(text);
-    return `${actor_ref}.COMMUNICATE(tool=${actor_ref}.voice, targets=[${targets.join(", ")}], text="${sanitized}", language=lang.common, senses=[${senses.join(", ")}], tone="neutral", contexts=[region_tile.0.0.0.0])`;
+    return `${actor_ref}.COMMUNICATE(tool=${actor_ref}.voice, targets=[${targets.join(", ")}], text="${sanitized}", language=lang.common, senses=[${senses.join(", ")}], tone="neutral", contexts=[region_tile.0.0.0.0]${format_sense_context(context)})`;
 }
 
 function build_communicate_template(text: string): string {

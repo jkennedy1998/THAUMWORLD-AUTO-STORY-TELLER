@@ -119,3 +119,15 @@ export function get_default_npc_path(): string {
 export function get_legacy_default_npc_path(): string {
     return path.join(process.cwd(), "local_data", "data_slot_default", "default_npc.jsonc");
 }
+
+export function get_kind_definitions_path(): string {
+    return path.join(process.cwd(), "local_data", "data_slot_default", "kind_definitions.jsonc");
+}
+
+export function get_language_definitions_path(): string {
+    return path.join(process.cwd(), "local_data", "data_slot_default", "language_definitions.jsonc");
+}
+
+export function get_perk_trees_path(): string {
+    return path.join(process.cwd(), "local_data", "data_slot_default", "perk_trees.jsonc");
+}

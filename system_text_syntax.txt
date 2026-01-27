@@ -61,6 +61,7 @@ Data shapes (minimal stubs)
 Data storage
 - character sheets for actors and npcs are JSON files
 - resource properties are stored as objects with current/max (and regen where applicable)
+- perk trees are stored in local_data\data_slot_default\perk_trees.jsonc (TODO: wire system)
 
 Derived overrides policy
 - derived_overrides stores delta values from formula outputs
@@ -79,6 +80,13 @@ Standard keys (common)
 - task: ref
 - area: ref
 - text: string
+- languages: list of language objects
+- senses: list of sense names
+- sense_context: object
+- distance_mag: number
+- thin_walls: number
+- thick_walls: number
+- signal_mag: number
 - condition: object
 - mode: string
 - tags: list of tag object
@@ -154,6 +162,35 @@ Tag instances (runtime)
     applied_at={unit=TURN|ROUND|EXTENDED_ACTION, count=number},
     scope=CHARACTER|ITEM|TILE|TAG
   }
+
+Senses (range + clarity)
+- light range: DISTANCE MAG = LIGHT MAG + 2 (line of sight only)
+- pressure range: DISTANCE MAG = PRESSURE MAG + 1
+- aroma range: DISTANCE MAG = AROMA MAG + 1 (no line of sight)
+- thaumic range: DISTANCE MAG = THAUMIC MAG after wall penalties
+- falloff rule: if clear at distance N, then obscured at N+1
+- obscured means presence/direction only, not identity
+- signal_mag is applied to sense MAG before range and falloff
+
+Sense context (AI-inferred)
+- sense_context={distance_mag=number, thin_walls=number, thick_walls=number, signal_mag=number}
+- signal strength examples (+1 mag):
+  - slightly louder sound
+  - brighter light
+  - smellier smell
+  - more magical person
+- signal strength examples (+2 mag):
+  - yelling, alarm, explosion
+  - blinding light
+  - overpowering stench
+  - surging magic
+- wall thickness examples:
+  - thin: leaves, thin walls, paper, clothes, some armor
+  - thick: tree trunks, stone walls, heavy timber walls, very solid metal or cast walls
+- thaumic penalties: thin=-1 mag, thick=-2 mag (apply before range)
+
+Awareness clarity
+- SYSTEM.SET_AWARENESS(observer=ref, target=ref, clarity=obscured) adds AWARENESS tag info: [target_ref, "obscured"]
 
 Tag event system (time sensitive tracking)
 - events are tracked per chat and per timed event
@@ -818,3 +855,8 @@ Iteration model
 - REGION_TILE:
   - {width_tiles=1000, desc="a town or neighborhood, a cave system or distinct area"}
   - {world_tile_grid="10x10 REGION TILEs per WORLD TILE"}
+Language object
+- language={name=string, understood_senses=[{sense=pressure|light|aroma|thaumic, mag=number}, ...]}
+
+Perk object
+- perk={name=string, perk_tree_path=string, perk_point_cost=number, granted_abilities=[string,...], prerequisites=[string,...]}

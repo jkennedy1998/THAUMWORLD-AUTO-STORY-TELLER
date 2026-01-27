@@ -1,5 +1,9 @@
 import type { CommandNode, ValueNode } from "../system_syntax/index.js";
 import type { RuleResult } from "./types.js";
+import type { SenseClarity, SenseContext, SenseName } from "./senses.js";
+import { compute_sense_clarity, compute_sense_range_mag } from "./senses.js";
+import { load_actor } from "../actor_storage/store.js";
+import { load_npc } from "../npc_storage/store.js";
 
 function format_command_line(command: CommandNode): string {
     const args = Object.entries(command.args)
@@ -35,6 +39,102 @@ function get_identifier(value: ValueNode | undefined): string | null {
 function get_number(value: ValueNode | undefined): number | null {
     if (!value || value.type !== "number") return null;
     return value.value;
+}
+
+function get_string(value: ValueNode | undefined): string | null {
+    if (!value) return null;
+    if (value.type === "identifier") return value.value;
+    if (value.type === "string") return value.value;
+    return null;
+}
+
+function parse_subject_ref(subject: string): { type: "actor" | "npc"; id: string } | null {
+    if (subject.startsWith("actor.")) return { type: "actor", id: subject.split(".")[1] ?? "" };
+    if (subject.startsWith("npc.")) return { type: "npc", id: subject.split(".")[1] ?? "" };
+    if (subject.endsWith("_actor")) return { type: "actor", id: subject };
+    if (subject.endsWith("_npc")) return { type: "npc", id: subject };
+    return null;
+}
+
+function load_subject_senses(slot: number, subject: string): Record<string, number> | null {
+    const parsed = parse_subject_ref(subject);
+    if (!parsed || !parsed.id) return null;
+    if (parsed.type === "actor") {
+        const loaded = load_actor(slot, parsed.id);
+        if (!loaded.ok) return null;
+        return (loaded.actor.senses as Record<string, number>) ?? null;
+    }
+    const loaded = load_npc(slot, parsed.id);
+    if (!loaded.ok) return null;
+    return (loaded.npc.senses as Record<string, number>) ?? null;
+}
+
+function read_sense_context(args: Record<string, ValueNode>): SenseContext {
+    const ctx_node = args.sense_context;
+    if (!ctx_node || ctx_node.type !== "object") {
+        const distance_mag = get_number(args.distance_mag as ValueNode | undefined);
+        const thin_walls = get_number(args.thin_walls as ValueNode | undefined);
+        const thick_walls = get_number(args.thick_walls as ValueNode | undefined);
+        const signal_mag = get_number(args.signal_mag as ValueNode | undefined);
+        const sound_level = get_string(args.sound_level as ValueNode | undefined);
+        const out: SenseContext = {};
+        if (distance_mag !== null) out.distance_mag = distance_mag;
+        if (thin_walls !== null) out.thin_walls = thin_walls;
+        if (thick_walls !== null) out.thick_walls = thick_walls;
+        if (signal_mag !== null) out.signal_mag = signal_mag;
+        if (out.signal_mag === undefined && sound_level) {
+            if (sound_level === "slightly_louder") out.signal_mag = 1;
+            if (sound_level === "yelling") out.signal_mag = 2;
+        }
+        return out;
+    }
+
+    const entries = ctx_node.value;
+    const distance_mag = get_number(entries.distance_mag as ValueNode | undefined);
+    const thin_walls = get_number(entries.thin_walls as ValueNode | undefined);
+    const thick_walls = get_number(entries.thick_walls as ValueNode | undefined);
+    const signal_mag = get_number(entries.signal_mag as ValueNode | undefined);
+    const sound_level = get_string(entries.sound_level as ValueNode | undefined);
+    const out: SenseContext = {};
+    if (distance_mag !== null) out.distance_mag = distance_mag;
+    if (thin_walls !== null) out.thin_walls = thin_walls;
+    if (thick_walls !== null) out.thick_walls = thick_walls;
+    if (signal_mag !== null) out.signal_mag = signal_mag;
+    if (out.signal_mag === undefined && sound_level) {
+        if (sound_level === "slightly_louder") out.signal_mag = 1;
+        if (sound_level === "yelling") out.signal_mag = 2;
+    }
+    return out;
+}
+
+function parse_sense_list(value: ValueNode | undefined): SenseName[] {
+    if (!value || value.type !== "list") return [];
+    const out: SenseName[] = [];
+    for (const item of value.value) {
+        const name = get_string(item);
+        if (name === "light" || name === "pressure" || name === "aroma" || name === "thaumic") {
+            out.push(name);
+        }
+    }
+    return out;
+}
+
+function compute_awareness_clarity(slot: number, subject: string, senses: SenseName[], context: SenseContext): SenseClarity {
+    if (senses.length === 0) return "clear";
+    const subject_senses = load_subject_senses(slot, subject);
+    if (!subject_senses) return "clear";
+
+    let best: SenseClarity = "none";
+    for (const sense of senses) {
+        const mag = Number(subject_senses[sense]);
+        if (!Number.isFinite(mag)) continue;
+        const range_mag = compute_sense_range_mag(sense, mag, context);
+        const clarity = compute_sense_clarity(range_mag, context.distance_mag);
+        if (clarity === "clear") return "clear";
+        if (clarity === "obscured") best = "obscured";
+    }
+
+    return best;
 }
 
 function compute_roll(roll_node: ValueNode | undefined): ValueNode | undefined {
@@ -115,7 +215,7 @@ function roll_passes_check(command: CommandNode): boolean {
     return result >= target_cr;
 }
 
-export function apply_rules_stub(commands: CommandNode[]): RuleResult {
+export function apply_rules_stub(commands: CommandNode[], slot: number): RuleResult {
     const event_lines: string[] = [];
     const effect_lines: string[] = [];
 
@@ -166,9 +266,18 @@ export function apply_rules_stub(commands: CommandNode[]): RuleResult {
         if (command.verb === "COMMUNICATE") {
             const targets = command.args.targets;
             if (targets && targets.type === "list") {
+                const sense_list = parse_sense_list(command.args.senses as ValueNode | undefined);
+                const senses: SenseName[] = sense_list.length > 0 ? sense_list : ["pressure"];
+                const context = read_sense_context(command.args);
                 for (const t of targets.value) {
                     if (t.type === "identifier") {
-                        effect_lines.push(`SYSTEM.SET_AWARENESS(observer=${command.subject}, target=${t.value})`);
+                        const clarity = compute_awareness_clarity(slot, command.subject, senses, context);
+                        if (clarity === "none") continue;
+                        if (clarity === "obscured") {
+                            effect_lines.push(`SYSTEM.SET_AWARENESS(observer=${command.subject}, target=${t.value}, clarity=obscured)`);
+                        } else {
+                            effect_lines.push(`SYSTEM.SET_AWARENESS(observer=${command.subject}, target=${t.value})`);
+                        }
                     }
                 }
             }

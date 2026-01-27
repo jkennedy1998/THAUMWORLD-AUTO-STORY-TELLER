@@ -10,10 +10,14 @@
       "temperature_range": { "low": 0, "high": 0 },
       "movement": { "walk": 0, "climb": 0, "swim": 0, "fly": 0 },
       "senses": { "light": 0, "aroma": 0, "pressure": 0, "thaumic": 0 },
-      "body_slots": [],
-      "hand_slots": [],
       "languages": [
-        { "name": "apish", "understood_senses": ["pressure", "light"] }
+        {
+          "name": "apish",
+          "understood_senses": [
+            { "sense": "pressure", "mag": 3 },
+            { "sense": "light", "mag": 2 }
+          ]
+        }
       ],
       "base_stats": {
         "con": 50,
@@ -46,6 +50,262 @@
         "communication": 0
       },
       "notes": ""
+    },
+    {
+      "id": "APE_NAKED",
+      "name": "Naked Ape",
+      "greater_kind": "APE",
+      "parts": [
+        { "slot": "HEAD", "critical": true },
+        { "slot": "TORSO", "critical": true },
+        { "slot": "LEFT ARM" },
+        { "slot": "RIGHT ARM" },
+        { "slot": "LEFT LEG" },
+        { "slot": "RIGHT LEG" }
+      ],
+      "sleep_type": "SLEEP",
+      "sleep_required_per_day": 4,
+      "age": { "adulthood": 20, "decline": 40, "death": 50 },
+      "languages": [
+        { "name": "apish" }
+      ],
+      "size_mag": 3,
+      "senses": { "light": 2, "aroma": 1, "pressure": 2, "thaumic": 0 },
+      "movement": { "walk": 6, "climb": 1, "swim": 2, "fly": 0 },
+      "stat_changes": { "dex": 2 },
+      "diet": "omnivore",
+      "temperature_range": { "low": -1, "high": 1 },
+      "appearance": "Bipedal creatures resembling Earth's humans. Hair grows on the head and some of the body.",
+      "lore": "The smallest civilization of apes by number. Cultures revolve around trade, communication, and craft. Settled in the northeast of the Land of Fog and Snow, allied with the reptiles of the Clear Coasts.",
+      "gift_of_kind": [
+        {
+          "name": "CRAFTY KIND",
+          "perk_tree_path": "kind.gifts",
+          "perk_point_cost": 0,
+          "granted_abilities": ["PEAK 1 less for the CRAFT action (helps make +1 items more often)"],
+          "prerequisites": []
+        },
+        {
+          "name": "THE ENDURING APES",
+          "perk_tree_path": "kind.gifts",
+          "perk_point_cost": 0,
+          "granted_abilities": ["Require 3 SLEEP extended actions per 10 extended actions"],
+          "prerequisites": []
+        },
+        {
+          "name": "AMONG THE APES",
+          "perk_tree_path": "kind.gifts",
+          "perk_point_cost": 0,
+          "granted_abilities": ["Climb speed increases to 2"],
+          "prerequisites": []
+        },
+        {
+          "name": "FABULOUS FILANGIES",
+          "perk_tree_path": "kind.gifts",
+          "perk_point_cost": 0,
+          "granted_abilities": ["Gain +1 reroll when using the CRAFT sub action"],
+          "prerequisites": []
+        }
+      ],
+      "gift_of_greater_kind": [],
+      "flaw_of_kind": [
+        {
+          "name": "LONG WAY FROM HOME",
+          "perk_tree_path": "kind.flaws",
+          "perk_point_cost": 0,
+          "granted_abilities": ["Gain -1 reroll for RESULT and POTENCY rolls, favored against you"],
+          "prerequisites": []
+        }
+      ]
+    },
+    {
+      "id": "APE_MANED",
+      "name": "Maned Ape",
+      "greater_kind": "APE",
+      "parts": [
+        { "slot": "HEAD", "critical": true },
+        { "slot": "TORSO", "critical": true },
+        { "slot": "LEFT ARM" },
+        { "slot": "RIGHT ARM" },
+        { "slot": "LEFT LEG" },
+        { "slot": "RIGHT LEG" }
+      ],
+      "sleep_type": "SLEEP",
+      "sleep_required_per_day": 4,
+      "age": { "adulthood": 20, "decline": 35, "death": 55 },
+      "languages": [
+        { "name": "apish" }
+      ],
+      "size_mag": 3,
+      "senses": { "light": 2, "aroma": 1, "pressure": 2, "thaumic": 0 },
+      "movement": { "walk": 5, "climb": 3, "swim": 1, "fly": 0 },
+      "stat_changes": { "str": 2 },
+      "diet": "omnivore",
+      "appearance": "Bipedal creatures with long to medium straight or wavy hair covering most of their body. Faces, hands, and feet have little hair; full eyebrows are common.",
+      "lore": "Settled in the central western mountains of the Land of Fog and Snow. Rich black volcanic soil allows fertile farmland; many roads were paved by maned apes.",
+      "gift_of_kind": [
+        {
+          "name": "THE FIGHTING APES",
+          "perk_tree_path": "kind.gifts",
+          "perk_point_cost": 0,
+          "granted_abilities": ["Hands get +1 MAG to POTENCY for actions using STR"],
+          "prerequisites": []
+        },
+        {
+          "name": "APSOLUTE UNIT",
+          "perk_tree_path": "kind.gifts",
+          "perk_point_cost": 0,
+          "granted_abilities": ["Size becomes L- and STR increases by 1"],
+          "prerequisites": []
+        }
+      ],
+      "gift_of_greater_kind": [
+        {
+          "name": "CRAFTY KIND",
+          "perk_tree_path": "kind.greater_gifts",
+          "perk_point_cost": 0,
+          "granted_abilities": ["PEAK 1 less for the CRAFT action (helps make +1 items more often)"],
+          "prerequisites": []
+        }
+      ],
+      "flaw_of_kind": [
+        {
+          "name": "SURVIVALISTIC RAGE",
+          "perk_tree_path": "kind.flaws",
+          "perk_point_cost": 0,
+          "granted_abilities": ["When you take damage, gain 1 tag: AGGRO’D (target who damaged you, CR 10). +1 reroll to RESULT rolls against non-targets."],
+          "prerequisites": []
+        }
+      ]
+    },
+    {
+      "id": "APE_WOOLY",
+      "name": "Wooly Ape",
+      "greater_kind": "APE",
+      "parts": [
+        { "slot": "HEAD", "critical": true },
+        { "slot": "TORSO", "critical": true },
+        { "slot": "LEFT ARM" },
+        { "slot": "RIGHT ARM" },
+        { "slot": "LEFT LEG" },
+        { "slot": "RIGHT LEG" },
+        { "slot": "TAIL" }
+      ],
+      "sleep_type": "SLEEP",
+      "sleep_required_per_day": 4,
+      "age": { "adulthood": 25, "decline": 40, "death": 65 },
+      "languages": [
+        { "name": "apish" }
+      ],
+      "size_mag": 3,
+      "senses": { "light": 2, "aroma": 1, "pressure": 2, "thaumic": 0 },
+      "movement": { "walk": 5, "climb": 4, "swim": 3, "fly": 0 },
+      "stat_changes": { "con": 2 },
+      "diet": "omnivore",
+      "appearance": "Bipedal creatures with short to medium curly or fuzzy hair. Faces have little hair and a more bald brow than maned apes. Long arms aid climbing and defense.",
+      "lore": "Settled in the southeast of the Land of Fog and Snow, living among snow snoutlings and snow-bore hornlings.",
+      "gift_of_kind": [
+        {
+          "name": "REALLY LONG ARMS",
+          "perk_tree_path": "kind.gifts",
+          "perk_point_cost": 0,
+          "granted_abilities": ["Reach +1 tiles away"],
+          "prerequisites": []
+        },
+        {
+          "name": "NATURAL CLIMBER",
+          "perk_tree_path": "kind.gifts",
+          "perk_point_cost": 0,
+          "granted_abilities": ["Climbing counts as walking (affects sleep, getting knocked, and walking rules)"],
+          "prerequisites": []
+        },
+        {
+          "name": "FROM THE COLD SOUTH",
+          "perk_tree_path": "kind.gifts",
+          "perk_point_cost": 0,
+          "granted_abilities": ["Comfortable in -1 temperature MAG and gain -1 reroll against POTENCY rolls from FROST! tags"],
+          "prerequisites": []
+        }
+      ],
+      "gift_of_greater_kind": [
+        {
+          "name": "CRAFTY KIND",
+          "perk_tree_path": "kind.greater_gifts",
+          "perk_point_cost": 0,
+          "granted_abilities": ["PEAK 1 less for the CRAFT action (helps make +1 items more often)"],
+          "prerequisites": []
+        }
+      ],
+      "flaw_of_kind": [
+        {
+          "name": "SURVIVALISTIC FEAR",
+          "perk_tree_path": "kind.flaws",
+          "perk_point_cost": 0,
+          "granted_abilities": ["When you take damage, gain 1 tag: SCARED (target who damaged you, CR 10). Cannot move toward the target."],
+          "prerequisites": []
+        }
+      ]
+    },
+    {
+      "id": "RODENT_SNOW_SNOUTLING",
+      "name": "Snow Snoutling",
+      "greater_kind": "RODENT",
+      "parts": [
+        { "slot": "HEAD", "critical": true },
+        { "slot": "TORSO", "critical": true },
+        { "slot": "LEFT ARM" },
+        { "slot": "RIGHT ARM" },
+        { "slot": "LEFT LEG" },
+        { "slot": "RIGHT LEG" },
+        { "slot": "TAIL" }
+      ],
+      "sleep_type": "SLEEP",
+      "sleep_required_per_day": 4,
+      "age": { "adulthood": 15, "decline": 30, "death": 40 },
+      "languages": [
+        { "name": "rodish" }
+      ],
+      "size_mag": 2,
+      "senses": { "light": 2, "aroma": 2, "pressure": 2, "thaumic": 0 },
+      "movement": { "walk": 4, "climb": 4, "swim": 1, "fly": 0 },
+      "stat_changes": { "str": 2, "con": 2, "dex": -2 },
+      "diet": "herbivore (carbon-based plants)",
+      "appearance": "Short-haired rodent-like creatures with long snouts, thick insulating fur, strong arms, and tunneling capability.",
+      "lore": "Evolved in the southmost lands of the Land of Fog and Snow and the northmost lands of the Cold South. Built vast tunnel systems across the region.",
+      "gift_of_kind": [
+        {
+          "name": "LUSH COAT",
+          "perk_tree_path": "kind.gifts",
+          "perk_point_cost": 0,
+          "granted_abilities": ["-1 temperature threshold (low) and -1 reroll against POTENCY rolls from FROST! tags"],
+          "prerequisites": []
+        },
+        {
+          "name": "CAVE EYES",
+          "perk_tree_path": "kind.gifts",
+          "perk_point_cost": 0,
+          "granted_abilities": ["Light sense +1 in areas darker than daylight"],
+          "prerequisites": []
+        }
+      ],
+      "gift_of_greater_kind": [
+        {
+          "name": "SMELLY TIME",
+          "perk_tree_path": "kind.greater_gifts",
+          "perk_point_cost": 0,
+          "granted_abilities": ["Aroma sense increases by 1 MAG"],
+          "prerequisites": []
+        }
+      ],
+      "flaw_of_kind": [
+        {
+          "name": "HATRED OF THE BIG LIGHT",
+          "perk_tree_path": "kind.flaws",
+          "perk_point_cost": 0,
+          "granted_abilities": ["Light sense -1 in daylight and brighter"],
+          "prerequisites": []
+        }
+      ]
     }
   ]
 }

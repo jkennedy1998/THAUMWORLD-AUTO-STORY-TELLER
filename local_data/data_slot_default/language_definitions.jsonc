@@ -3,7 +3,17 @@
   "languages": [
     {
       "name": "apish",
-      "default_senses": ["pressure", "light"],
+      "default_senses": [
+        { "sense": "pressure", "mag": 3 },
+        { "sense": "light", "mag": 2 }
+      ],
+      "notes": ""
+    },
+    {
+      "name": "rodish",
+      "default_senses": [
+        { "sense": "pressure", "mag": 3 }
+      ],
       "notes": ""
     }
   ]

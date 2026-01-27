@@ -31,6 +31,7 @@ const RENDERER_SYSTEM_PROMPT = [
     "Output narrative only. Do not output system syntax or code.",
     "Use the provided effects/events and recent context.",
     "If details are missing, infer minimally and stay consistent.",
+    "If awareness is obscured, describe presence/direction only, not identity.",
     "Keep it concise and clear.",
 ].join("\n");
 
@@ -67,6 +68,17 @@ function format_list(label: string, items: string[]): string {
     return `${label}:\n${items.map((item) => `- ${item}`).join("\n")}`;
 }
 
+function extract_obscured_awareness(effects: string[]): string[] {
+    const matches: string[] = [];
+    for (const line of effects) {
+        if (!line.includes("SYSTEM.SET_AWARENESS")) continue;
+        if (!line.includes("clarity=obscured")) continue;
+        const target_match = line.match(/target=([^,\)]+)/);
+        if (target_match && target_match[1]) matches.push(target_match[1]);
+    }
+    return matches;
+}
+
 function build_renderer_prompt(params: {
     original_text: string;
     machine_text: string;
@@ -82,6 +94,11 @@ function build_renderer_prompt(params: {
     sections.push(format_list("System events", params.events));
     sections.push("");
     sections.push(format_list("System effects", params.effects));
+
+    const obscured = extract_obscured_awareness(params.effects);
+    if (obscured.length > 0) {
+        sections.push("", format_list("Awareness notes", obscured.map((t) => `obscured awareness of ${t}`)));
+    }
 
     if (params.machine_text.trim().length > 0) {
         sections.push("", "Machine text:", params.machine_text.trim());

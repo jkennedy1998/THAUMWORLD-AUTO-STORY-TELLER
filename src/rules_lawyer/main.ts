@@ -90,7 +90,7 @@ async function process_roll_result(outbox_path: string, log_path: string, msg: M
         const job_meta = (job.msg.meta as any) ?? {};
         const original_text = typeof job_meta?.original_text === "string" ? (job_meta.original_text as string) : "";
         const machine_text = typeof job_meta?.machine_text === "string" ? (job_meta.machine_text as string) : "";
-        const ruled = apply_rules_stub(job.commands);
+        const ruled = apply_rules_stub(job.commands, data_slot_number);
         const iteration = parse_stage_iteration(job.msg.stage);
         const output: MessageInput = {
             sender: "rules_lawyer",
@@ -222,7 +222,7 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
 
     const original_text = typeof (msg.meta as any)?.original_text === "string" ? ((msg.meta as any)?.original_text as string) : "";
     const machine_text = typeof (msg.meta as any)?.machine_text === "string" ? ((msg.meta as any)?.machine_text as string) : "";
-    const ruled = apply_rules_stub(commands);
+    const ruled = apply_rules_stub(commands, data_slot_number);
     const output: MessageInput = {
         sender: "rules_lawyer",
         content: "rule effects ready",

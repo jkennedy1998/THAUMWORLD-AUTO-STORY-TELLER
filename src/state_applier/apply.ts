@@ -91,10 +91,12 @@ function adjust_inventory(effect_id: string, target_path: string, item_ref: stri
     diffs.push({ effect_id, target: data.id ?? target_path, field: `inventory.${item_id}`, delta: mag, reason: "SYSTEM.ADJUST_INVENTORY" });
 }
 
-function apply_awareness(effect_id: string, target_path: string, target_ref: string, diffs: AppliedDiff[]): void {
+function apply_awareness(effect_id: string, target_path: string, target_ref: string, clarity: string | null, diffs: AppliedDiff[]): void {
     const data = read_jsonc(target_path);
     const tags = Array.isArray(data.tags) ? data.tags : [];
-    tags.push({ name: "AWARENESS", mag: 1, info: [target_ref] });
+    const info: string[] = [target_ref];
+    if (clarity === "obscured") info.push("obscured");
+    tags.push({ name: "AWARENESS", mag: 1, info });
     data.tags = tags;
     write_jsonc(target_path, data);
     diffs.push({ effect_id, target: data.id ?? target_path, field: "tags", delta: 1, reason: "SYSTEM.SET_AWARENESS" });
@@ -141,7 +143,8 @@ export function apply_effects(commands: CommandNode[], target_paths: Record<stri
                 warnings.push(`missing_observer_path:${observer_ref}`);
                 continue;
             }
-            apply_awareness(effect_id, observer_path, target_ref, diffs);
+            const clarity = get_identifier(cmd.args.clarity) ?? null;
+            apply_awareness(effect_id, observer_path, target_ref, clarity, diffs);
         } else {
             warnings.push(`unhandled_effect:${cmd.verb}`);
         }

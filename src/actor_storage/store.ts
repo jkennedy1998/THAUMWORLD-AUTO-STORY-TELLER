@@ -3,6 +3,8 @@ import * as path from "node:path";
 import { parse } from "jsonc-parser";
 import { ensure_dir_exists, rand_base32_rfc } from "../engine/log_store.js";
 import { get_actor_dir, get_actor_path, get_default_actor_path, get_legacy_default_actor_path } from "../engine/paths.js";
+import { find_kind } from "../kind_storage/store.js";
+import { find_language } from "../language_storage/store.js";
 
 export type ActorLookupResult =
     | { ok: true; actor: Record<string, unknown>; path: string }
@@ -18,6 +20,13 @@ export type ActorSearchQuery = {
     name?: string;
     kind?: string;
     tag_name?: string;
+};
+
+export type CreateActorFromKindInput = {
+    name: string;
+    kind_id: string;
+    gift_kind_choices: string[];
+    gift_greater_choice: string | null;
 };
 
 function slugify_name(name: string): string {
@@ -95,6 +104,86 @@ export function create_actor_from_template(slot: number, name: string): ActorLoo
 
     const actor_id = make_actor_id(name);
     const actor = { ...template.actor, id: actor_id, name };
+    const actor_path = save_actor(slot, actor_id, actor);
+    return { ok: true, actor, path: actor_path };
+}
+
+function apply_stat_changes(stats: Record<string, unknown>, changes: Record<string, number> | undefined): void {
+    if (!changes) return;
+    for (const [key, delta] of Object.entries(changes)) {
+        const current = Number(stats[key] ?? 0);
+        stats[key] = current + delta;
+    }
+}
+
+function resolve_language_entry(entry: { name: string; understood_senses?: { sense: string; mag: number }[] }): {
+    name: string;
+    understood_senses: { sense: string; mag: number }[];
+} {
+    if (entry.understood_senses && entry.understood_senses.length > 0) {
+        return { name: entry.name, understood_senses: entry.understood_senses };
+    }
+    const def = find_language(entry.name);
+    if (def && Array.isArray(def.default_senses)) {
+        return { name: entry.name, understood_senses: def.default_senses };
+    }
+    return { name: entry.name, understood_senses: [] };
+}
+
+function select_perks(perks: Record<string, unknown>[] | undefined, names: string[]): Record<string, unknown>[] {
+    if (!perks || perks.length === 0 || names.length === 0) return [];
+    const lowered = names.map((n) => n.toLowerCase());
+    return perks.filter((p) => typeof p.name === "string" && lowered.includes(p.name.toLowerCase()));
+}
+
+export function create_actor_from_kind(slot: number, input: CreateActorFromKindInput): ActorLookupResult {
+    const template = load_default_actor();
+    if (!template.ok) return template;
+
+    const kind = find_kind(input.kind_id);
+    if (!kind) {
+        return { ok: false, error: "kind_not_found", todo: `Kind not found: ${input.kind_id}` };
+    }
+
+    const actor_id = make_actor_id(input.name);
+    const actor = { ...template.actor, id: actor_id, name: input.name } as Record<string, unknown>;
+
+    actor.kind = kind.id;
+    if (typeof kind.size_mag === "number") actor.size_mag = kind.size_mag;
+    if (typeof kind.sleep_type === "string") actor.sleep_type = kind.sleep_type;
+    if (typeof kind.sleep_required_per_day === "number") actor.sleep_required_per_day = kind.sleep_required_per_day;
+    if (kind.senses) actor.senses = { ...kind.senses };
+    if (kind.movement) {
+        actor.movement = {
+            ...(actor.movement as Record<string, unknown>),
+            walk: kind.movement.walk ?? 0,
+            climb: kind.movement.climb ?? 0,
+            swim: kind.movement.swim ?? 0,
+            fly: kind.movement.fly ?? 0,
+        };
+    }
+    if (kind.temperature_range) actor.temperature_range = { ...kind.temperature_range };
+
+    const stats = (actor.stats as Record<string, unknown>) ?? {};
+    apply_stat_changes(stats, kind.stat_changes as Record<string, number> | undefined);
+    actor.stats = stats;
+
+    if (kind.languages && kind.languages.length > 0) {
+        const languages = kind.languages.map(resolve_language_entry);
+        actor.languages = languages;
+    }
+
+    if (actor.appearance && typeof actor.appearance === "object" && typeof kind.size_mag === "number") {
+        (actor.appearance as Record<string, unknown>).size_mag = kind.size_mag;
+    }
+
+    const gift_perks = select_perks(kind.gift_of_kind as Record<string, unknown>[] | undefined, input.gift_kind_choices);
+    const greater_perks = input.gift_greater_choice
+        ? select_perks(kind.gift_of_greater_kind as Record<string, unknown>[] | undefined, [input.gift_greater_choice])
+        : [];
+    const flaw_perks = Array.isArray(kind.flaw_of_kind) ? kind.flaw_of_kind : [];
+    actor.perks = [...gift_perks, ...greater_perks, ...flaw_perks];
+
     const actor_path = save_actor(slot, actor_id, actor);
     return { ok: true, actor, path: actor_path };
 }

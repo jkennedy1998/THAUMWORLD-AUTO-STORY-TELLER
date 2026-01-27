@@ -280,7 +280,7 @@
     },
     "tags": { "type": "array", "items": { "$ref": "#/definitions/tag" } },
     "character_mag": { "type": "number" },
-    "perks": { "type": "array", "items": { "type": "string" } },
+    "perks": { "type": "array", "items": { "$ref": "#/definitions/perk" } },
     "perk_points": { "$ref": "#/definitions/perk_points" },
     "memory": { "type": "array", "items": { "type": "string" } }
   },
@@ -314,9 +314,18 @@
       "additionalProperties": false,
       "properties": {
         "name": { "type": "string" },
-        "understood_senses": { "type": "array", "items": { "$ref": "#/definitions/sense" } }
+        "understood_senses": { "type": "array", "items": { "$ref": "#/definitions/language_sense" } }
       },
       "required": ["name", "understood_senses"]
+    },
+    "language_sense": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sense": { "$ref": "#/definitions/sense" },
+        "mag": { "type": "number" }
+      },
+      "required": ["sense", "mag"]
     },
     "perk_points": {
       "type": "object",
@@ -326,6 +335,18 @@
         "total": { "type": "number" }
       },
       "required": ["current", "total"]
+    },
+    "perk": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "perk_tree_path": { "type": "string" },
+        "perk_point_cost": { "type": "number" },
+        "granted_abilities": { "type": "array", "items": { "type": "string" } },
+        "prerequisites": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["name", "perk_tree_path", "perk_point_cost", "granted_abilities", "prerequisites"]
     }
   }
 }

@@ -12,7 +12,13 @@
   "sleep_type": "SLEEP",
   "sleep_required_per_day": 4,
   "languages": [
-    { "name": "apish", "understood_senses": ["pressure", "light"] }
+    {
+      "name": "apish",
+      "understood_senses": [
+        { "sense": "pressure", "mag": 3 },
+        { "sense": "light", "mag": 2 }
+      ]
+    }
   ],
   "lore": {
     "backstory": "",
