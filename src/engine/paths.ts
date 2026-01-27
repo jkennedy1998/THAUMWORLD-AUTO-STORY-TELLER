@@ -32,6 +32,16 @@ export function get_roller_status_path(slot: number): string {
     return path.join(get_data_slot_dir(slot), "roller_status.jsonc");
 }
 
+export function get_metrics_dir(slot: number): string {
+    // the path to metrics storage for a data slot
+    return path.join(get_data_slot_dir(slot), "metrics");
+}
+
+export function get_metrics_path(slot: number, name: string): string {
+    // the path to a specific metrics jsonc file
+    return path.join(get_metrics_dir(slot), `${name}.jsonc`);
+}
+
 export function get_npc_dir(slot: number): string {
     // the path to npc storage for a data slot
     return path.join(get_data_slot_dir(slot), "npcs");

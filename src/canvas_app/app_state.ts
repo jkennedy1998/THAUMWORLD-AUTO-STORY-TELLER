@@ -157,7 +157,7 @@ async function fetch_log_messages(slot: number): Promise<string[]> {
 
     const ordered = [...data.messages].reverse();
     const seen_ids = new Set<string>();
-    const last_interpreter_text_by_correlation = new Map<string, string>();
+    const last_renderer_text_by_correlation = new Map<string, string>();
 
     const filtered = ordered.filter((m) => {
         if (!m?.id) return false;
@@ -166,11 +166,11 @@ async function fetch_log_messages(slot: number): Promise<string[]> {
 
         const sender = (m.sender ?? '').toLowerCase();
         if (sender === 'j') return true;
-        if (sender === 'interpreter_ai') {
+        if (sender === 'renderer_ai') {
             const correlation = m.correlation_id ?? 'none';
             const content = (m.content ?? '').trim();
-            const last = last_interpreter_text_by_correlation.get(correlation);
-            last_interpreter_text_by_correlation.set(correlation, content);
+            const last = last_renderer_text_by_correlation.get(correlation);
+            last_renderer_text_by_correlation.set(correlation, content);
             if (!content) return false;
             if (last !== undefined && last === content) return false;
             return true;
@@ -183,7 +183,12 @@ async function fetch_log_messages(slot: number): Promise<string[]> {
         if (pending_user_messages.has(m.id)) pending_user_messages.delete(m.id);
     }
 
-    const from_log = filtered.map((m) => `${m.sender}: ${m.content}`);
+    const from_log = filtered.map((m) => {
+        const sender = (m.sender ?? '').toLowerCase();
+        if (sender === 'renderer_ai') return `ASSISTANT: ${m.content}`;
+        if (sender === 'j') return `J: ${m.content}`;
+        return `${m.sender}: ${m.content}`;
+    });
     const pending = Array.from(pending_user_messages.values()).map((content) => `J: ${content}`);
     return [...from_log, ...pending];
 }

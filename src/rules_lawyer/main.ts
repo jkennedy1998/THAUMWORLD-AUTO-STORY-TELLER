@@ -87,6 +87,9 @@ async function process_roll_result(outbox_path: string, log_path: string, msg: M
     }
 
     if (Object.keys(job.pending_rolls).length === 0) {
+        const job_meta = (job.msg.meta as any) ?? {};
+        const original_text = typeof job_meta?.original_text === "string" ? (job_meta.original_text as string) : "";
+        const machine_text = typeof job_meta?.machine_text === "string" ? (job_meta.machine_text as string) : "";
         const ruled = apply_rules_stub(job.commands);
         const iteration = parse_stage_iteration(job.msg.stage);
         const output: MessageInput = {
@@ -98,6 +101,8 @@ async function process_roll_result(outbox_path: string, log_path: string, msg: M
             meta: {
                 events: ruled.event_lines,
                 effects: ruled.effect_lines,
+                original_text,
+                machine_text,
             },
         };
         if (job.msg.correlation_id) output.correlation_id = job.msg.correlation_id;
@@ -215,6 +220,8 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
         return;
     }
 
+    const original_text = typeof (msg.meta as any)?.original_text === "string" ? ((msg.meta as any)?.original_text as string) : "";
+    const machine_text = typeof (msg.meta as any)?.machine_text === "string" ? ((msg.meta as any)?.machine_text as string) : "";
     const ruled = apply_rules_stub(commands);
     const output: MessageInput = {
         sender: "rules_lawyer",
@@ -225,6 +232,8 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
         meta: {
             events: ruled.event_lines,
             effects: ruled.effect_lines,
+            original_text,
+            machine_text,
         },
     };
 

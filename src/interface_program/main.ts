@@ -1,6 +1,8 @@
 import * as readline from "node:readline";
 import * as http from "node:http";
-import { debug_log } from "../shared/debug.js";
+import { spawn, type ChildProcess } from "node:child_process";
+import { debug_log, debug_warn } from "../shared/debug.js";
+import { ollama_chat } from "../shared/ollama_client.js";
 
 import { get_data_slot_dir, get_inbox_path, get_item_dir, get_log_path, get_outbox_path, get_status_path, get_world_dir, get_roller_status_path } from "../engine/paths.js";
 import { read_inbox, clear_inbox, ensure_inbox_exists, append_inbox_message } from "../engine/inbox_store.js";
@@ -14,15 +16,26 @@ import type { MessageEnvelope } from "../engine/types.js";
 import type { LogFile } from "../engine/types.js";
 import { ensure_status_exists, read_status, write_status_line } from "../engine/status_store.js";
 import { ensure_roller_status_exists, read_roller_status, write_roller_status } from "../engine/roller_status_store.js";
+import { ensure_actor_exists, find_actors } from "../actor_storage/store.js";
+import { ensure_npc_exists, find_npcs } from "../npc_storage/store.js";
 
 const data_slot_number = 1; // hard set to 1 for now
 const visual_log_limit = 12;
 const HTTP_PORT = 8787;
 // const ENABLE_CLI_LOG = false;
+const OLLAMA_HOST = process.env.OLLAMA_HOST ?? "http://localhost:11434";
+const INTERPRETER_MODEL = process.env.INTERPRETER_MODEL ?? "llama3.2:latest";
+const RENDERER_MODEL = process.env.RENDERER_MODEL ?? "llama3.2:latest";
+// gpt-oss:20b is installed; swap back if you want higher quality.
+const OLLAMA_BOOT_TIMEOUT_MS = 12_000;
+const OLLAMA_WARMUP_TIMEOUT_MS = 600_000;
+const OLLAMA_WARMUP_KEEP_ALIVE = "30m";
 
 let current_state: "awaiting_user" | "processing" | "error" = "awaiting_user";
 let message_buffer = ""; // message construction buffer
 let incoming_message = ""; // received text from other programs (routing)
+let ollama_process: ChildProcess | null = null;
+let ollama_spawned = false;
 
 // other programs/applications can send this program text (a string)
 function receive_text_from_other_program(text: string): void {
@@ -38,6 +51,154 @@ function flush_incoming_messages(): void {
 
 // print last N lines of the log in a minimal "visual log" window
 function render_visual_log(_log: LogFile, _last_n: number): void {}
+
+function ensure_minimum_game_data(slot: number): void {
+    const actors = find_actors(slot, {});
+    if (actors.length === 0) {
+        const created = ensure_actor_exists(slot, "henry_actor");
+        if (created.ok) {
+            debug_log("Boot: created default actor", { id: "henry_actor" });
+        } else {
+            debug_warn("Boot: failed to create default actor", { error: created.error, todo: created.todo });
+        }
+    }
+
+    const npcs = find_npcs(slot, {});
+    if (npcs.length === 0) {
+        const created = ensure_npc_exists(slot, "default_npc");
+        if (created.ok) {
+            debug_log("Boot: created default npc", { id: "default_npc" });
+        } else {
+            debug_warn("Boot: failed to create default npc", { error: created.error, todo: created.todo });
+        }
+    }
+}
+
+async function fetch_json(url: string, timeout_ms: number): Promise<unknown> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeout_ms);
+    try {
+        const res = await fetch(url, { signal: controller.signal });
+        if (!res.ok) throw new Error(`http_${res.status}`);
+        return res.json();
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+async function check_ollama_server(host: string): Promise<{ ok: boolean; models: string[] }> {
+    try {
+        const data = (await fetch_json(`${host}/api/tags`, 2000)) as { models?: Array<{ name?: string }> };
+        const models = Array.isArray(data?.models)
+            ? data.models.map((m) => String(m?.name ?? "")).filter((m) => m.length > 0)
+            : [];
+        return { ok: true, models };
+    } catch {
+        return { ok: false, models: [] };
+    }
+}
+
+async function wait_for_ollama(host: string, timeout_ms: number): Promise<{ ok: boolean; models: string[] }> {
+    const start = Date.now();
+    while (Date.now() - start < timeout_ms) {
+        const status = await check_ollama_server(host);
+        if (status.ok) return status;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    return { ok: false, models: [] };
+}
+
+async function ensure_ollama_running(): Promise<void> {
+    debug_log("Ollama: checking server", { host: OLLAMA_HOST });
+    const initial = await check_ollama_server(OLLAMA_HOST);
+    if (initial.ok) {
+        debug_log("Ollama: server already running", { models: initial.models.length });
+        return;
+    }
+
+    debug_log("Ollama: starting local server");
+    try {
+        ollama_process = spawn("ollama", ["serve"], { stdio: "ignore", windowsHide: true });
+        ollama_spawned = true;
+    } catch (err) {
+        debug_warn("Ollama: failed to spawn", { error: err instanceof Error ? err.message : String(err) });
+        return;
+    }
+
+    const ready = await wait_for_ollama(OLLAMA_HOST, OLLAMA_BOOT_TIMEOUT_MS);
+    if (!ready.ok) {
+        debug_warn("Ollama: server did not respond in time", { host: OLLAMA_HOST });
+        return;
+    }
+
+    debug_log("Ollama: server ready", { models: ready.models.length });
+}
+
+async function warmup_interpreter_model(): Promise<void> {
+    if (!INTERPRETER_MODEL) return;
+    debug_log("Ollama: warming interpreter model", { model: INTERPRETER_MODEL });
+    try {
+        const response = await ollama_chat({
+            host: OLLAMA_HOST,
+            model: INTERPRETER_MODEL,
+            messages: [{ role: "user", content: "Warm up only. Reply OK." }],
+            keep_alive: OLLAMA_WARMUP_KEEP_ALIVE,
+            timeout_ms: OLLAMA_WARMUP_TIMEOUT_MS,
+            options: { temperature: 0 },
+        });
+        debug_log("Ollama: warmup ok", { model: response.model, chars: response.content.length });
+    } catch (err) {
+        debug_warn("Ollama: warmup failed", {
+            model: INTERPRETER_MODEL,
+            error: err instanceof Error ? err.message : String(err),
+        });
+    }
+}
+
+async function warmup_renderer_model(): Promise<void> {
+    if (!RENDERER_MODEL) return;
+    debug_log("Ollama: warming renderer model", { model: RENDERER_MODEL });
+    try {
+        const response = await ollama_chat({
+            host: OLLAMA_HOST,
+            model: RENDERER_MODEL,
+            messages: [{ role: "user", content: "Warm up only. Reply OK." }],
+            keep_alive: OLLAMA_WARMUP_KEEP_ALIVE,
+            timeout_ms: OLLAMA_WARMUP_TIMEOUT_MS,
+            options: { temperature: 0 },
+        });
+        debug_log("Ollama: warmup ok", { model: response.model, chars: response.content.length });
+    } catch (err) {
+        debug_warn("Ollama: warmup failed", {
+            model: RENDERER_MODEL,
+            error: err instanceof Error ? err.message : String(err),
+        });
+    }
+}
+
+async function boot_ai_services(): Promise<void> {
+    await ensure_ollama_running();
+    await warmup_interpreter_model();
+    await warmup_renderer_model();
+}
+
+function shutdown_ollama_if_spawned(): void {
+    if (!ollama_spawned || !ollama_process) return;
+    debug_log("Ollama: stopping spawned server");
+    try {
+        ollama_process.kill();
+    } catch (err) {
+        debug_warn("Ollama: failed to stop", { error: err instanceof Error ? err.message : String(err) });
+    }
+}
+
+function log_ai_config(): void {
+    debug_log("AI config", {
+        host: OLLAMA_HOST,
+        interpreter_model: INTERPRETER_MODEL,
+        renderer_model: RENDERER_MODEL,
+    });
+}
 
 type InputRequest = {
     text: string;
@@ -338,6 +499,7 @@ function initialize(): { log_path: string; inbox_path: string; outbox_path: stri
     ensure_dir_exists(world_dir);
     ensure_dir_exists(item_dir);
     ensure_roller_status_exists(roller_status_path);
+    ensure_minimum_game_data(data_slot_number);
 
     write_status_line(status_path, "awaiting actor input");
 
@@ -389,6 +551,8 @@ function run_cli(log_path: string): void {
 
 // ---- boot ----
 const { log_path, inbox_path, outbox_path } = initialize();
+log_ai_config();
+void boot_ai_services();
 start_http_server(log_path);
 
 
@@ -399,3 +563,17 @@ setInterval(() => {
 
 
 run_cli(log_path);
+
+process.on("SIGINT", () => {
+    shutdown_ollama_if_spawned();
+    process.exit(0);
+});
+
+process.on("SIGTERM", () => {
+    shutdown_ollama_if_spawned();
+    process.exit(0);
+});
+
+process.on("exit", () => {
+    shutdown_ollama_if_spawned();
+});

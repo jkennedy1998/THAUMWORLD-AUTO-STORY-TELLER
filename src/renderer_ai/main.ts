@@ -6,13 +6,166 @@ import { create_message, try_set_message_status } from "../engine/message.js";
 import type { MessageInput } from "../engine/message.js";
 import { append_log_envelope } from "../engine/log_store.js";
 import type { MessageEnvelope } from "../engine/types.js";
-import { debug_log } from "../shared/debug.js";
+import { debug_log, debug_content, debug_warn } from "../shared/debug.js";
+import { ollama_chat, type OllamaMessage } from "../shared/ollama_client.js";
+import { append_metric } from "../engine/metrics_store.js";
 
 const data_slot_number = 1;
 const POLL_MS = 800;
+const OLLAMA_HOST = process.env.OLLAMA_HOST ?? "http://localhost:11434";
+const RENDERER_MODEL = process.env.RENDERER_MODEL ?? "llama3.2:latest";
+// gpt-oss:20b is installed; swap back if you want higher quality.
+const RENDERER_TIMEOUT_MS_RAW = Number(process.env.RENDERER_TIMEOUT_MS ?? 600_000);
+const RENDERER_TIMEOUT_MS = Number.isFinite(RENDERER_TIMEOUT_MS_RAW) ? RENDERER_TIMEOUT_MS_RAW : 180_000;
+const RENDERER_HISTORY_LIMIT = 12;
+const RENDERER_KEEP_ALIVE = "30m";
+const RENDERER_TEMPERATURE = 0.7;
+
+type ChatTurn = { role: "user" | "assistant"; content: string };
+
+const renderer_sessions = new Map<string, ChatTurn[]>();
+
+const RENDERER_SYSTEM_PROMPT = [
+    "You are the Renderer AI.",
+    "Convert system effects and events into readable narrative for the player.",
+    "Output narrative only. Do not output system syntax or code.",
+    "Use the provided effects/events and recent context.",
+    "If details are missing, infer minimally and stay consistent.",
+    "Keep it concise and clear.",
+].join("\n");
 
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function get_session_key(msg: MessageEnvelope): string {
+    const raw = typeof msg.correlation_id === "string" && msg.correlation_id.length > 0 ? msg.correlation_id : msg.id;
+    return String(raw ?? msg.id);
+}
+
+function get_session_history(session_key: string): ChatTurn[] {
+    return renderer_sessions.get(session_key) ?? [];
+}
+
+function append_session_turn(session_key: string, user_text: string, assistant_text: string): void {
+    const history = [...get_session_history(session_key)];
+    history.push({ role: "user", content: user_text }, { role: "assistant", content: assistant_text });
+    if (history.length > RENDERER_HISTORY_LIMIT) {
+        history.splice(0, history.length - RENDERER_HISTORY_LIMIT);
+    }
+    renderer_sessions.set(session_key, history);
+}
+
+function strip_code_fences(text: string): string {
+    const fence_regex = /```[a-zA-Z]*\s*([\s\S]*?)```/g;
+    if (!fence_regex.test(text)) return text;
+    return text.replace(fence_regex, "$1");
+}
+
+function format_list(label: string, items: string[]): string {
+    if (items.length === 0) return `${label}:\n- none`;
+    return `${label}:\n${items.map((item) => `- ${item}`).join("\n")}`;
+}
+
+function build_renderer_prompt(params: {
+    original_text: string;
+    machine_text: string;
+    events: string[];
+    effects: string[];
+}): string {
+    const sections: string[] = [];
+    // TODO: add a third contextual summary of the last 10 turns.
+    if (params.original_text.trim().length > 0) {
+        sections.push("Player input:", params.original_text.trim(), "");
+    }
+
+    sections.push(format_list("System events", params.events));
+    sections.push("");
+    sections.push(format_list("System effects", params.effects));
+
+    if (params.machine_text.trim().length > 0) {
+        sections.push("", "Machine text:", params.machine_text.trim());
+    }
+
+    sections.push("", "Write the narrative response for the player.");
+    return sections.join("\n").trim();
+}
+
+async function run_renderer_ai(params: {
+    msg: MessageEnvelope;
+    original_text: string;
+    machine_text: string;
+    events: string[];
+    effects: string[];
+}): Promise<string> {
+    const session_key = get_session_key(params.msg);
+    const history = get_session_history(session_key);
+    const started = Date.now();
+    const user_prompt = build_renderer_prompt({
+        original_text: params.original_text,
+        machine_text: params.machine_text,
+        events: params.events,
+        effects: params.effects,
+    });
+
+    const messages: OllamaMessage[] = [
+        { role: "system", content: RENDERER_SYSTEM_PROMPT },
+        ...history,
+        { role: "user", content: user_prompt },
+    ];
+
+    debug_log("RendererAI: request", {
+        model: RENDERER_MODEL,
+        session: session_key,
+        history: history.length,
+    });
+
+    try {
+        const response = await ollama_chat({
+            host: OLLAMA_HOST,
+            model: RENDERER_MODEL,
+            messages,
+            keep_alive: RENDERER_KEEP_ALIVE,
+            timeout_ms: RENDERER_TIMEOUT_MS,
+            options: { temperature: RENDERER_TEMPERATURE },
+        });
+
+        debug_log("RendererAI: response", {
+            model: response.model,
+            session: session_key,
+            duration_ms: response.duration_ms,
+            chars: response.content.length,
+        });
+
+        const cleaned = strip_code_fences(response.content).trim();
+        append_session_turn(session_key, user_prompt, cleaned.length > 0 ? cleaned : response.content.trim());
+        append_metric(data_slot_number, "renderer_ai", {
+            at: new Date().toISOString(),
+            model: response.model,
+            ok: true,
+            duration_ms: response.duration_ms,
+            stage: "render",
+            session: session_key,
+        });
+        return cleaned;
+    } catch (err) {
+        const duration_ms = Date.now() - started;
+        debug_warn("RendererAI: request failed", {
+            model: RENDERER_MODEL,
+            session: session_key,
+            error: err instanceof Error ? err.message : String(err),
+        });
+        append_metric(data_slot_number, "renderer_ai", {
+            at: new Date().toISOString(),
+            model: RENDERER_MODEL,
+            ok: false,
+            duration_ms,
+            stage: "render",
+            session: session_key,
+            error: err instanceof Error ? err.message : String(err),
+        });
+        return "";
+    }
 }
 
 function update_outbox_message(outbox_path: string, updated: MessageEnvelope): void {
@@ -32,14 +185,25 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
     update_outbox_message(outbox_path, processing.message);
     append_log_envelope(log_path, processing.message);
 
-    const effects = (msg.meta as any)?.effects as string[] | undefined;
-    const events = (msg.meta as any)?.events as string[] | undefined;
+    const meta = (msg.meta as Record<string, unknown> | undefined) ?? {};
+    const effects = Array.isArray(meta?.effects) ? (meta.effects as string[]) : [];
+    const events = Array.isArray(meta?.events) ? (meta.events as string[]) : [];
+    const original_text = typeof meta?.original_text === "string" ? (meta.original_text as string) : "";
+    const machine_text = typeof meta?.machine_text === "string" ? (meta.machine_text as string) : "";
 
-    if (effects && effects.length > 0) {
+    if (effects.length > 0) {
         debug_log("Renderer: effects", { id: msg.id, effects });
     }
 
-    const content = "rendered narrative stub";
+    const response_text = await run_renderer_ai({
+        msg: processing.message,
+        original_text,
+        machine_text,
+        events,
+        effects,
+    });
+    const content = response_text.length > 0 ? response_text : "Narration unavailable.";
+    debug_content("Renderer Out", content);
     const output: MessageInput = {
         sender: "renderer_ai",
         content,
@@ -47,8 +211,8 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
         status: "sent",
         reply_to: msg.id,
         meta: {
-            events: events ?? [],
-            effects: effects ?? [],
+            events,
+            effects,
         },
     };
 
@@ -59,6 +223,10 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
 
     const done = try_set_message_status(processing.message, "done");
     if (done.ok) {
+        done.message.meta = {
+            ...(done.message.meta ?? {}),
+            rendered: true,
+        };
         update_outbox_message(outbox_path, done.message);
         append_log_envelope(log_path, done.message);
     }
@@ -68,9 +236,12 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
 
 async function tick(outbox_path: string, inbox_path: string, log_path: string): Promise<void> {
     const outbox = read_outbox(outbox_path);
-    const candidates = outbox.messages.filter(
-        (m) => m.stage?.startsWith("ruling_") && m.status === "sent",
-    );
+    const candidates = outbox.messages.filter((m) => {
+        if (!m.stage?.startsWith("ruling_")) return false;
+        if ((m.meta as any)?.rendered === true) return false;
+        if (m.status === "sent" || m.status === "done") return true;
+        return false;
+    });
 
     if (candidates.length > 0) {
         debug_log("Renderer: candidates", { count: candidates.length });
@@ -97,6 +268,12 @@ function initialize(): { outbox_path: string; inbox_path: string; log_path: stri
 
 const { outbox_path, inbox_path, log_path } = initialize();
 debug_log("Renderer: booted", { outbox_path, inbox_path });
+    debug_log("RendererAI: config", {
+        model: RENDERER_MODEL,
+        host: OLLAMA_HOST,
+        history_limit: RENDERER_HISTORY_LIMIT,
+        timeout_ms: RENDERER_TIMEOUT_MS,
+    });
 
 setInterval(() => {
     void tick(outbox_path, inbox_path, log_path);
