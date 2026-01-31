@@ -6,7 +6,7 @@ import { create_message, try_set_message_status } from "../engine/message.js";
 import type { MessageInput } from "../engine/message.js";
 import { append_log_envelope } from "../engine/log_store.js";
 import type { MessageEnvelope } from "../engine/types.js";
-import { debug_log, debug_content, debug_warn } from "../shared/debug.js";
+import { debug_log, debug_content, debug_warn, log_ai_io_terminal, log_ai_io_file } from "../shared/debug.js";
 import { find_actors, load_actor } from "../actor_storage/store.js";
 import { find_npcs } from "../npc_storage/store.js";
 import { is_timed_event_active } from "../world_storage/store.js";
@@ -743,6 +743,36 @@ async function run_interpreter_ai(params: {
 
         const sanitized = sanitize_machine_text(response.content);
         const stored_output = sanitized.length > 0 ? sanitized : response.content.trim();
+        
+        // AI I/O Logging
+        const fullPrompt = messages.map(m => `${m.role}: ${m.content}`).join('\n');
+        log_ai_io_terminal(
+            'interpreter',
+            params.text,
+            stored_output,
+            response.duration_ms,
+            session_key
+        );
+        log_ai_io_file(data_slot_number, {
+            timestamp: new Date().toISOString(),
+            service: 'interpreter',
+            session_id: session_key,
+            input_summary: params.text,
+            output_summary: stored_output,
+            duration_ms: response.duration_ms,
+            prompt_chars: fullPrompt.length,
+            response_chars: response.content.length,
+            full_prompt: fullPrompt,
+            full_response: response.content,
+            metadata: {
+                model: response.model,
+                is_refinement: params.is_refinement,
+                history_length: history.length,
+                intent: params.intent,
+                action_verb: params.action_verb,
+            }
+        });
+        
         append_session_turn(session_key, user_prompt, stored_output);
         append_metric(data_slot_number, "interpreter_ai", {
             at: new Date().toISOString(),

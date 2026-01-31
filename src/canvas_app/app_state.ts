@@ -1,6 +1,6 @@
 import { make_fill_module } from '../mono_ui/modules/fill_module.js';
 import { make_button_module } from '../mono_ui/modules/button_module.js';
-import { make_text_window_module } from '../mono_ui/modules/window_module.js';
+import { make_text_window_module, type TextWindowMessage } from '../mono_ui/modules/window_module.js';
 import { make_input_module } from '../mono_ui/modules/input_module.js';
 import { make_roller_module } from '../mono_ui/modules/roller_module.js';
 import type { Module, Rgb } from '../mono_ui/types.js';
@@ -33,7 +33,7 @@ export type AppState = {
 
 type WindowFeed = {
     window_id: string;
-    fetch_messages: () => Promise<string[]>;
+    fetch_messages: () => Promise<(string | TextWindowMessage)[]>;
 };
 
 export function create_app_state(): AppState {
@@ -41,7 +41,7 @@ export function create_app_state(): AppState {
     const DEEP_RED: Rgb = get_color_by_name('deep_red').rgb;
 
     const ui_state = {
-        text_windows: new Map<string, { messages: string[]; rev: number }>(),
+        text_windows: new Map<string, { messages: (string | TextWindowMessage)[]; rev: number }>(),
         roller: {
             spinner: "|",
             last_roll: "",
@@ -51,7 +51,7 @@ export function create_app_state(): AppState {
         },
     };
 
-    function set_text_window_messages(id: string, messages: string[]) {
+    function set_text_window_messages(id: string, messages: (string | TextWindowMessage)[]) {
         const cur = ui_state.text_windows.get(id);
         if (!cur) {
             ui_state.text_windows.set(id, { messages: [...messages], rev: 1 });
@@ -61,7 +61,7 @@ export function create_app_state(): AppState {
         }
     }
 
-    function append_text_window_message(id: string, message: string) {
+    function append_text_window_message(id: string, message: string | TextWindowMessage) {
         const cur = ui_state.text_windows.get(id);
         if (!cur) {
             ui_state.text_windows.set(id, { messages: [message], rev: 1 });
@@ -137,7 +137,7 @@ export function create_app_state(): AppState {
         }
     }
 
-async function fetch_log_messages(slot: number): Promise<string[]> {
+async function fetch_log_messages(slot: number): Promise<(string | TextWindowMessage)[]> {
     const res = await fetch(`${APP_CONFIG.interpreter_log_endpoint}?slot=${slot}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
@@ -176,6 +176,7 @@ async function fetch_log_messages(slot: number): Promise<string[]> {
             if (last !== undefined && last === content) return false;
             return true;
         }
+        if (sender === 'hint') return true;
         if (m.type === 'user_input') return true;
         return false;
     });
@@ -184,13 +185,16 @@ async function fetch_log_messages(slot: number): Promise<string[]> {
         if (pending_user_messages.has(m.id)) pending_user_messages.delete(m.id);
     }
 
-    const from_log = filtered.map((m) => {
+    const from_log = filtered.map((m): string | TextWindowMessage => {
         const sender = (m.sender ?? '').toLowerCase();
-        if (sender === 'renderer_ai') return `ASSISTANT: ${m.content}`;
-        if (sender === 'j') return `J: ${m.content}`;
-        return `${m.sender}: ${m.content}`;
+        if (sender === 'hint') {
+            return { content: `💡 ${m.content}`, sender: 'hint' };
+        }
+        if (sender === 'renderer_ai') return { content: `ASSISTANT: ${m.content}`, sender: 'assistant' };
+        if (sender === 'j') return { content: `J: ${m.content}`, sender: 'user' };
+        return { content: `${m.sender}: ${m.content}`, sender: 'system' };
     });
-    const pending = Array.from(pending_user_messages.values()).map((content) => `J: ${content}`);
+    const pending = Array.from(pending_user_messages.values()).map((content): TextWindowMessage => ({ content: `J: ${content}`, sender: 'user' }));
     return [...from_log, ...pending];
 }
 
@@ -241,6 +245,7 @@ async function fetch_log_messages(slot: number): Promise<string[]> {
             text_rgb: get_color_by_name('off_white').rgb,
             bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
             base_weight_index: 3,
+            hint_rgb: get_color_by_name('pale_yellow').rgb,
         }),
 
         make_text_window_module({

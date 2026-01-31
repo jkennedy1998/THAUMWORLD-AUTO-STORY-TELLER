@@ -6,7 +6,7 @@ import { create_message, try_set_message_status } from "../engine/message.js";
 import type { MessageInput } from "../engine/message.js";
 import { append_log_envelope } from "../engine/log_store.js";
 import type { MessageEnvelope } from "../engine/types.js";
-import { debug_log, debug_content, debug_warn } from "../shared/debug.js";
+import { debug_log, debug_content, debug_warn, debug_pipeline, debug_error, DEBUG_LEVEL, log_ai_io_terminal, log_ai_io_file } from "../shared/debug.js";
 import { ollama_chat, type OllamaMessage } from "../shared/ollama_client.js";
 import { append_metric } from "../engine/metrics_store.js";
 
@@ -155,6 +155,37 @@ async function run_renderer_ai(params: {
         });
 
         const cleaned = strip_code_fences(response.content).trim();
+        
+        // AI I/O Logging
+        const fullPrompt = messages.map(m => `${m.role}: ${m.content}`).join('\n');
+        const inputSummary = params.original_text || params.events.join(', ').slice(0, 50);
+        log_ai_io_terminal(
+            'renderer',
+            inputSummary,
+            cleaned,
+            response.duration_ms,
+            session_key
+        );
+        log_ai_io_file(data_slot_number, {
+            timestamp: new Date().toISOString(),
+            service: 'renderer',
+            session_id: session_key,
+            input_summary: inputSummary,
+            output_summary: cleaned,
+            duration_ms: response.duration_ms,
+            prompt_chars: fullPrompt.length,
+            response_chars: response.content.length,
+            full_prompt: fullPrompt,
+            full_response: response.content,
+            metadata: {
+                model: response.model,
+                event_count: params.events.length,
+                effect_count: params.effects.length,
+                original_text: params.original_text,
+                machine_text: params.machine_text,
+            }
+        });
+        
         append_session_turn(session_key, user_prompt, cleaned.length > 0 ? cleaned : response.content.trim());
         append_metric(data_slot_number, "renderer_ai", {
             at: new Date().toISOString(),
@@ -236,7 +267,8 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
     if (msg.correlation_id !== undefined) output.correlation_id = msg.correlation_id;
     const rendered = create_message(output);
     append_inbox_message(inbox_path, rendered);
-    debug_log("Renderer: output sent", { id: rendered.id, stage: rendered.stage });
+    append_log_envelope(log_path, rendered);
+    debug_log("Renderer: output sent to inbox and log", { id: rendered.id, stage: rendered.stage, content: rendered.content });
 
     const done = try_set_message_status(processing.message, "done");
     if (done.ok) {
@@ -252,20 +284,44 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
 }
 
 async function tick(outbox_path: string, inbox_path: string, log_path: string): Promise<void> {
-    const outbox = read_outbox(outbox_path);
-    const candidates = outbox.messages.filter((m) => {
-        if (!m.stage?.startsWith("ruling_")) return false;
-        if ((m.meta as any)?.rendered === true) return false;
-        if (m.status === "sent" || m.status === "done") return true;
-        return false;
-    });
+    try {
+        const outbox = read_outbox(outbox_path);
+        
+        if (DEBUG_LEVEL >= 4) {
+            debug_pipeline("Renderer", "polling", { messageCount: outbox.messages.length });
+        }
+        
+        const candidates = outbox.messages.filter((m) => {
+            if (!m.stage?.startsWith("applied_")) return false;
+            if ((m.meta as any)?.rendered === true) return false;
+            if (m.status === "sent" || m.status === "done") return true;
+            return false;
+        });
 
-    if (candidates.length > 0) {
-        debug_log("Renderer: candidates", { count: candidates.length });
-    }
+        if (candidates.length > 0) {
+            debug_pipeline("Renderer", `found ${candidates.length} applied candidates`, {
+                ids: candidates.map(m => m.id),
+                stages: candidates.map(m => m.stage),
+                statuses: candidates.map(m => m.status)
+            });
+        }
 
-    for (const msg of candidates) {
-        await process_message(outbox_path, inbox_path, log_path, msg);
+        for (const msg of candidates) {
+            debug_pipeline("Renderer", "processing message", { 
+                id: msg.id, 
+                stage: msg.stage, 
+                status: msg.status,
+                sender: msg.sender 
+            });
+            
+            try {
+                await process_message(outbox_path, inbox_path, log_path, msg);
+            } catch (err) {
+                debug_error("Renderer", `Failed to process message ${msg.id}`, err);
+            }
+        }
+    } catch (err) {
+        debug_error("Renderer", "Tick failed", err);
     }
 }
 

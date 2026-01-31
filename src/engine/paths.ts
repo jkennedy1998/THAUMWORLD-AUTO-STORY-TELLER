@@ -42,6 +42,16 @@ export function get_metrics_path(slot: number, name: string): string {
     return path.join(get_metrics_dir(slot), `${name}.jsonc`);
 }
 
+export function get_ai_io_log_dir(slot: number): string {
+    // the path to AI I/O log storage for a data slot
+    return path.join(get_data_slot_dir(slot), "ai_io_logs");
+}
+
+export function get_ai_io_log_path(slot: number, name: string): string {
+    // the path to a specific AI I/O log jsonc file
+    return path.join(get_ai_io_log_dir(slot), `${name}.jsonc`);
+}
+
 export function get_npc_dir(slot: number): string {
     // the path to npc storage for a data slot
     return path.join(get_data_slot_dir(slot), "npcs");

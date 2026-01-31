@@ -223,11 +223,13 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
     const original_text = typeof (msg.meta as any)?.original_text === "string" ? ((msg.meta as any)?.original_text as string) : "";
     const machine_text = typeof (msg.meta as any)?.machine_text === "string" ? ((msg.meta as any)?.machine_text as string) : "";
     const ruled = apply_rules_stub(commands, data_slot_number);
+    
+    // Create ruling message with pending_state_apply status for StateApplier
     const output: MessageInput = {
         sender: "rules_lawyer",
         content: "rule effects ready",
         stage: `ruling_${iteration}`,
-        status: "sent",
+        status: "pending_state_apply",  // Mark for StateApplier to process
         reply_to: msg.id,
         meta: {
             events: ruled.event_lines,
@@ -240,12 +242,14 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
     if (msg.correlation_id !== undefined) output.correlation_id = msg.correlation_id;
     const ruled_msg = create_message(output);
     append_outbox_message(outbox_path, ruled_msg);
-    debug_log("RulesLawyer: output sent", { id: ruled_msg.id, stage: ruled_msg.stage });
+    debug_log("RulesLawyer: created ruling message with pending_state_apply", { id: ruled_msg.id, stage: ruled_msg.stage });
 
+    // Mark original brokered message as done
     const done = try_set_message_status(processing.message, "done");
     if (done.ok) {
         update_outbox_message(outbox_path, done.message);
         append_log_envelope(log_path, done.message);
+        debug_log("RulesLawyer: marked brokered message as done", { id: done.message.id });
     }
 
     await sleep(0);

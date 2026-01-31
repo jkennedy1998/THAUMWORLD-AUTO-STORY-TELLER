@@ -3,8 +3,13 @@ import { rect_width, rect_height } from "../types.js";
 import { draw_border } from "../padding.js";
 import { get_color_by_name } from "../colors.js";
 
+export type TextWindowMessage = {
+    content: string;
+    sender?: string;
+};
+
 export type TextWindowSource = {
-    messages: string[];
+    messages: (string | TextWindowMessage)[];
     rev: number; // increment when messages change
 };
 
@@ -20,6 +25,7 @@ export type TextWindowOptions = {
     border_rgb?: Rgb;
     bg?: { char: string; rgb: Rgb };
     base_weight_index?: number; // 0..7
+    hint_rgb?: Rgb; // color for 'hint' sender messages
 };
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -32,9 +38,12 @@ type BorderMarkers = {
     right?: string;
 };
 
-function wrap_messages(messages: string[], width: number): string[] {
-    const lines: string[] = [];
+type LineInfo = { text: string; sender: string | undefined };
+
+function wrap_messages(messages: (string | TextWindowMessage)[], width: number): LineInfo[] {
+    const lines: LineInfo[] = [];
     if (width <= 0) return lines;
+    if (!Array.isArray(messages)) return lines;  // Safety check for undefined/non-array
 
     const push_blank_between = true;
 
@@ -43,10 +52,10 @@ function wrap_messages(messages: string[], width: number): string[] {
     const cp_len = (s: string) => to_cp(s).length;
     const cp_slice = (s: string, start: number, end?: number) => to_cp(s).slice(start, end).join("");
 
-    const push_wrapped_paragraph = (paragraph: string) => {
+    const push_wrapped_paragraph = (paragraph: string, sender: string | undefined) => {
         // Preserve truly empty lines
         if (paragraph.length === 0) {
-            lines.push("");
+            lines.push({ text: "", sender });
             return;
         }
 
@@ -56,7 +65,7 @@ function wrap_messages(messages: string[], width: number): string[] {
         let line = "";
 
         const flush_line = () => {
-            lines.push(line);
+            lines.push({ text: line, sender });
             line = "";
         };
 
@@ -70,7 +79,7 @@ function wrap_messages(messages: string[], width: number): string[] {
                 let rest = w;
                 while (cp_len(rest) > width) {
                     const take = Math.max(1, width - 1);
-                    lines.push(cp_slice(rest, 0, take) + "-");
+                    lines.push({ text: cp_slice(rest, 0, take) + "-", sender });
                     rest = cp_slice(rest, take);
                 }
                 line = rest;
@@ -95,24 +104,26 @@ function wrap_messages(messages: string[], width: number): string[] {
         for (const w of words) add_word(w);
 
         if (words.length === 0) {
-            lines.push("");
+            lines.push({ text: "", sender });
         } else if (line.length > 0) {
-            lines.push(line);
+            lines.push({ text: line, sender });
         }
     };
 
     for (let mi = 0; mi < messages.length; mi++) {
         const msg = messages[mi] ?? "";
+        const content = typeof msg === "string" ? msg : msg.content;
+        const sender = typeof msg === "string" ? undefined : msg.sender;
 
         // Preserve user newlines: wrap each paragraph independently.
-        const paragraphs = msg.split("\n");
+        const paragraphs = content.split("\n");
 
         for (let pi = 0; pi < paragraphs.length; pi++) {
-            push_wrapped_paragraph(paragraphs[pi] ?? "");
+            push_wrapped_paragraph(paragraphs[pi] ?? "", sender);
         }
 
         if (push_blank_between && mi !== messages.length - 1) {
-            lines.push("");
+            lines.push({ text: "", sender });
         }
     }
 
@@ -127,7 +138,7 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
     // derived layout cache
     let cached_rev = -1;
     let cached_width = -1;
-    let cached_lines: string[] = [];
+    let cached_lines: LineInfo[] = [];
 
     function base_weight(): number {
         const w = opts.base_weight_index ?? 3;
@@ -171,6 +182,7 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
         Draw(c: Canvas): void {
             const border_rgb = opts.border_rgb ?? get_color_by_name("light_gray").rgb;
             const text_rgb = opts.text_rgb ?? get_color_by_name("off_white").rgb;
+            const hint_rgb = opts.hint_rgb ?? get_color_by_name("pale_yellow").rgb;
             const w_base = base_weight();
 
             // optional bg fill behind everything
@@ -210,7 +222,7 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
             );
 
 
-            // clear text area so old chars don’t linger
+            // clear text area so old chars don't linger
             // If the module has a bg, clear to bg; otherwise clear to space (default canvas bg).
             if (opts.bg) {
                 c.fill_rect(text_r, { char: opts.bg.char, rgb: opts.bg.rgb, style: "regular", weight_index: w_base });
@@ -222,17 +234,21 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
             // render visible lines
             for (let row = 0; row < text_h; row++) {
                 const line_i = scroll_y + row;
-                const line = cached_lines[line_i] ?? "";
+                const line_info = cached_lines[line_i];
+                const line_text = line_info?.text ?? "";
+                const line_sender = line_info?.sender;
+                // Use hint color for 'hint' sender, otherwise use default text color
+                const line_rgb = line_sender === "hint" ? hint_rgb : text_rgb;
                 // Rect is bottom-left coordinates (y0 bottom, y1 top). We render top-down:
                 const y_top = text_r.y1;
                 const y = y_top - row;
-                const cps = Array.from(line);
+                const cps = Array.from(line_text);
                 for (let col = 0; col < text_w; col++) {
                     const ch = cps[col] ?? " ";
 
                     const x = text_r.x0 + col;
 
-                    c.set(x, y, { char: ch, rgb: text_rgb, style: "regular", weight_index: w_base });
+                    c.set(x, y, { char: ch, rgb: line_rgb, style: "regular", weight_index: w_base });
                 }
             }
         },

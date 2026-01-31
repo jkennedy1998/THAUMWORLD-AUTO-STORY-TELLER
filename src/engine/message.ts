@@ -23,8 +23,9 @@ function can_transition_status(from: MessageStatus | undefined, to: MessageStatu
     if (from === undefined) return to === 'sent' || to === 'queued';
     if (from === 'queued') return to === 'sent' || to === 'processing' || to === 'error';
     if (from === 'sent') return to === 'processing' || to === 'error';
-    if (from === 'processing') return to === 'done' || to === 'error' || is_awaiting_roll(to);
+    if (from === 'processing') return to === 'done' || to === 'pending_state_apply' || to === 'error' || is_awaiting_roll(to);
     if (is_awaiting_roll(from)) return to === 'processing' || to === 'done' || to === 'error';
+    if (from === 'pending_state_apply') return to === 'processing' || to === 'error';  // StateApplier processes pending messages
     return false;
 }
 

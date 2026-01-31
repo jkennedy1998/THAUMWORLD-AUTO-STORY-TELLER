@@ -278,32 +278,121 @@ function parse_stat_assignment(input: string): Record<string, number> | null {
     return out;
 }
 
-function parse_prof_picks(input: string, pick_count: number): string[] | null {
+type ProfValidationResult = {
+    valid: boolean;
+    invalid_profs: string[];
+    wrong_count: boolean;
+    entered_count: number;
+    too_many_duplicates: boolean;
+    duplicate_profs: string[];
+    picks?: string[];
+};
+
+function validate_prof_picks(input: string, required_count: number): ProfValidationResult {
     const raw = input.split(/[\s,]+/).map((p) => p.trim()).filter((p) => p.length > 0);
-    if (raw.length !== pick_count) return null;
-    const counts: Record<string, number> = {};
-    const picks: string[] = [];
+    const result: ProfValidationResult = {
+        valid: false,
+        invalid_profs: [],
+        wrong_count: raw.length !== required_count,
+        entered_count: raw.length,
+        too_many_duplicates: false,
+        duplicate_profs: [],
+    };
+
+    // Check each prof is valid
     for (const entry of raw) {
         const key = entry.toLowerCase();
-        if (!PROF_NAMES.includes(key)) return null;
-        counts[key] = (counts[key] ?? 0) + 1;
-        if (counts[key] > 2) return null;
-        picks.push(key);
+        if (!PROF_NAMES.includes(key)) {
+            result.invalid_profs.push(entry);
+        }
     }
-    return picks;
+
+    // Check for too many duplicates
+    const counts: Record<string, number> = {};
+    for (const entry of raw) {
+        const key = entry.toLowerCase();
+        counts[key] = (counts[key] ?? 0) + 1;
+        if (counts[key] > 2) {
+            result.too_many_duplicates = true;
+            if (!result.duplicate_profs.includes(key)) {
+                result.duplicate_profs.push(key);
+            }
+        }
+    }
+
+    result.valid = result.invalid_profs.length === 0 &&
+                   !result.wrong_count &&
+                   !result.too_many_duplicates;
+
+    if (result.valid) {
+        result.picks = raw.map((p) => p.toLowerCase());
+    }
+
+    return result;
+}
+
+function parse_prof_picks(input: string, pick_count: number): string[] | null {
+    const validation = validate_prof_picks(input, pick_count);
+    return validation.valid ? validation.picks ?? null : null;
+}
+
+type GiftValidationResult = {
+    valid: boolean;
+    invalid_gifts: string[];
+    wrong_count: boolean;
+    entered_count: number;
+    duplicates: string[];
+    choices?: string[];
+};
+
+function validate_gift_choices(input: string, required_count: number, available: string[]): GiftValidationResult {
+    const raw = input.split(/[,\n]+/).map((p) => p.trim()).filter((p) => p.length > 0);
+    const result: GiftValidationResult = {
+        valid: false,
+        invalid_gifts: [],
+        wrong_count: raw.length !== required_count,
+        entered_count: raw.length,
+        duplicates: [],
+    };
+
+    const chosen: string[] = [];
+    const seen = new Set<string>();
+
+    for (const entry of raw) {
+        const match = available.find((g) => g.toLowerCase() === entry.toLowerCase());
+        if (!match) {
+            result.invalid_gifts.push(entry);
+        } else {
+            if (seen.has(match.toLowerCase())) {
+                result.duplicates.push(match);
+            } else {
+                seen.add(match.toLowerCase());
+                chosen.push(match);
+            }
+        }
+    }
+
+    result.valid = result.invalid_gifts.length === 0 &&
+                   !result.wrong_count &&
+                   result.duplicates.length === 0;
+
+    if (result.valid) {
+        result.choices = chosen;
+    }
+
+    return result;
 }
 
 function parse_gift_choices(input: string, count: number, available: string[]): string[] | null {
-    const raw = input.split(/[,\n]+/).map((p) => p.trim()).filter((p) => p.length > 0);
-    if (raw.length !== count) return null;
-    const out: string[] = [];
-    for (const entry of raw) {
-        const match = available.find((g) => g.toLowerCase() === entry.toLowerCase());
-        if (!match) return null;
-        if (out.includes(match)) return null;
-        out.push(match);
-    }
-    return out;
+    const validation = validate_gift_choices(input, count, available);
+    return validation.valid ? validation.choices ?? null : null;
+}
+
+function format_gift_display(gift: Record<string, unknown>): string {
+    const name = String(gift.name ?? "Unknown Gift");
+    const abilities = Array.isArray(gift.granted_abilities) ? gift.granted_abilities : [];
+    const description = abilities.join(" | ") || "No description available";
+    return `${name} :\n${description}`;
 }
 
 function start_creation_flow(log_path: string, creation_path: string, actor_id: string): { user_message_id: string } {
@@ -312,6 +401,7 @@ function start_creation_flow(log_path: string, creation_path: string, actor_id: 
     const state: CreationState = { schema_version: 1, active: true, actor_id, step: "kind", data: {} };
     write_creation_state(creation_path, state);
     append_log_message(log_path, "system", `Character creation started. Choose a kind id:\n${kinds.map((k) => `- ${k}`).join("\n")}`);
+    append_log_message(log_path, "hint", `Example: ${kinds[0] ?? "human"}`);
     write_status_line(get_status_path(data_slot_number), "character creation: choose kind");
     return { user_message_id: user_msg.id };
 }
@@ -346,6 +436,7 @@ function handle_creation_input(
         state.data = data;
         write_creation_state(creation_path, state);
         append_log_message(log_path, "system", "Enter your character name:");
+        append_log_message(log_path, "hint", "Example: Aldric Thorne");
         write_status_line(get_status_path(data_slot_number), "character creation: choose name");
         return { user_message_id: user_msg.id };
     }
@@ -364,6 +455,7 @@ function handle_creation_input(
             "system",
             `Assign stats using: con=56 str=54 dex=52 wis=48 int=46 cha=44 (use each value once).\nValues: ${STAT_VALUE_BLOCK.join(", ")}`,
         );
+        append_log_message(log_path, "hint", "Example: con=56 str=54 dex=52 wis=48 int=46 cha=44");
         write_status_line(get_status_path(data_slot_number), "character creation: assign stats");
         return { user_message_id: user_msg.id };
     }
@@ -383,6 +475,7 @@ function handle_creation_input(
         state.data = data;
         write_creation_state(creation_path, state);
         append_log_message(log_path, "system", "Enter a background (one line):");
+        append_log_message(log_path, "hint", "Example: I grew up in a small village on the edge of the forest...");
         write_status_line(get_status_path(data_slot_number), "character creation: background");
         return { user_message_id: user_msg.id };
     }
@@ -401,6 +494,7 @@ function handle_creation_input(
             "system",
             `Pick 4 prof picks (comma-separated). Each prof can be chosen up to 2 times.\nProfs: ${PROF_NAMES.join(", ")}`,
         );
+        append_log_message(log_path, "hint", "Example: quiet, perception, athletics, arcana");
         write_status_line(get_status_path(data_slot_number), "character creation: profs");
         return { user_message_id: user_msg.id };
     }
@@ -408,40 +502,87 @@ function handle_creation_input(
     if (step === "profs") {
         if (text.trim().toLowerCase() === "redo") {
             append_log_message(log_path, "system", "Re-enter 4 prof picks (comma-separated):");
+            append_log_message(log_path, "system", `Available profs: ${PROF_NAMES.join(", ")}`);
+            append_log_message(log_path, "hint", "Example: quiet, perception, athletics, arcana");
             return { user_message_id: user_msg.id };
         }
-        const picks = parse_prof_picks(text, 4);
-        if (!picks) {
-            append_log_message(log_path, "system", "Invalid prof picks. Use 4 picks, max 2 per prof. Try again or type 'redo'.");
+        const validation = validate_prof_picks(text, 4);
+        if (!validation.valid) {
+            // Show specific error message
+            if (validation.invalid_profs.length > 0) {
+                append_log_message(log_path, "system", `Invalid prof(s): ${validation.invalid_profs.join(", ")}. Check spelling.`);
+            } else if (validation.wrong_count) {
+                append_log_message(log_path, "system", `You entered ${validation.entered_count} profs, but need exactly 4.`);
+            } else if (validation.too_many_duplicates) {
+                append_log_message(log_path, "system", `You can only pick the same prof twice maximum. Duplicates: ${validation.duplicate_profs.join(", ")}`);
+            }
+            // Show available profs once (user can scroll)
+            append_log_message(log_path, "system", `Available profs: ${PROF_NAMES.join(", ")}`);
+            append_log_message(log_path, "hint", "Example: quiet, perception, athletics, arcana");
             return { user_message_id: user_msg.id };
         }
+        const picks = validation.picks!;
         data.prof_picks = picks;
         state.step = "gifts";
         state.data = data;
         write_creation_state(creation_path, state);
 
         const kind = data.kind_id ? load_kind_definitions().kinds.find((k) => String(k.id) === data.kind_id) : null;
-        const gifts = Array.isArray(kind?.gift_of_kind) ? kind!.gift_of_kind.map((g: any) => String(g.name)) : [];
+        const gifts = Array.isArray(kind?.gift_of_kind) ? kind!.gift_of_kind : [];
+        const gift_names = gifts.map((g: any) => String(g.name));
         if (gifts.length === 0) {
             state.step = "confirm";
             write_creation_state(creation_path, state);
             append_log_message(log_path, "system", "No kind gifts available. Type 'confirm' to create your character or 'redo' to restart.");
+            append_log_message(log_path, "hint", "Example: confirm");
             write_status_line(get_status_path(data_slot_number), "character creation: confirm");
             return { user_message_id: user_msg.id };
         }
-        append_log_message(log_path, "system", `Pick 2 gifts of kind (comma-separated):\n${gifts.map((g) => `- ${g}`).join("\n")}`);
+        append_log_message(log_path, "system", "Pick 2 gifts of kind (comma-separated):");
+        append_log_message(log_path, "system", "Available gifts:");
+        for (const gift of gifts) {
+            append_log_message(log_path, "system", format_gift_display(gift as Record<string, unknown>));
+        }
+        append_log_message(log_path, "hint", `Example: ${gift_names.slice(0, 2).join(", ")}`);
         write_status_line(get_status_path(data_slot_number), "character creation: gifts");
         return { user_message_id: user_msg.id };
     }
 
     if (step === "gifts") {
         const kind = data.kind_id ? load_kind_definitions().kinds.find((k) => String(k.id) === data.kind_id) : null;
-        const gifts = Array.isArray(kind?.gift_of_kind) ? kind!.gift_of_kind.map((g: any) => String(g.name)) : [];
-        const choices = parse_gift_choices(text, Math.min(2, gifts.length), gifts);
-        if (!choices) {
-            append_log_message(log_path, "system", "Invalid gift selection. Pick exactly 2 from the list.");
+        const gifts = Array.isArray(kind?.gift_of_kind) ? kind!.gift_of_kind : [];
+        const gift_names = gifts.map((g: any) => String(g.name));
+        const required_count = Math.min(2, gift_names.length);
+
+        if (text.trim().toLowerCase() === "redo") {
+            append_log_message(log_path, "system", "Re-enter 2 gifts of kind (comma-separated):");
+            append_log_message(log_path, "system", "Available gifts:");
+            for (const gift of gifts) {
+                append_log_message(log_path, "system", format_gift_display(gift as Record<string, unknown>));
+            }
+            append_log_message(log_path, "hint", `Example: ${gift_names.slice(0, 2).join(", ")}`);
             return { user_message_id: user_msg.id };
         }
+
+        const validation = validate_gift_choices(text, required_count, gift_names);
+        if (!validation.valid) {
+            // Show specific error message
+            if (validation.invalid_gifts.length > 0) {
+                append_log_message(log_path, "system", `Invalid gift(s): ${validation.invalid_gifts.join(", ")}. Check spelling.`);
+            } else if (validation.wrong_count) {
+                append_log_message(log_path, "system", `You entered ${validation.entered_count} gifts, but need exactly ${required_count}.`);
+            } else if (validation.duplicates.length > 0) {
+                append_log_message(log_path, "system", `You cannot pick the same gift twice. Duplicates: ${validation.duplicates.join(", ")}`);
+            }
+            // Show available gifts formatted (user can scroll)
+            append_log_message(log_path, "system", "Available gifts:");
+            for (const gift of gifts) {
+                append_log_message(log_path, "system", format_gift_display(gift as Record<string, unknown>));
+            }
+            append_log_message(log_path, "hint", `Example: ${gift_names.slice(0, 2).join(", ")}`);
+            return { user_message_id: user_msg.id };
+        }
+        const choices = validation.choices!;
         data.gift_kind_choices = choices;
         const greater = Array.isArray(kind?.gift_of_greater_kind) ? kind!.gift_of_greater_kind.map((g: any) => String(g.name)) : [];
         if (greater.length === 0) {
@@ -449,23 +590,48 @@ function handle_creation_input(
             state.data = data;
             write_creation_state(creation_path, state);
             append_log_message(log_path, "system", "No greater gifts available. Type 'confirm' to create your character or 'redo' to restart.");
+            append_log_message(log_path, "hint", "Example: confirm");
             write_status_line(get_status_path(data_slot_number), "character creation: confirm");
             return { user_message_id: user_msg.id };
         }
+        const greater_gifts = Array.isArray(kind?.gift_of_greater_kind) ? kind!.gift_of_greater_kind : [];
+        const greater_names = greater_gifts.map((g: any) => String(g.name));
         state.step = "greater_gift";
         state.data = data;
         write_creation_state(creation_path, state);
-        append_log_message(log_path, "system", `Pick 1 gift of greater kind:\n${greater.map((g) => `- ${g}`).join("\n")}`);
+        append_log_message(log_path, "system", "Pick 1 gift of greater kind:");
+        append_log_message(log_path, "system", "Available greater gifts:");
+        for (const gift of greater_gifts) {
+            append_log_message(log_path, "system", format_gift_display(gift as Record<string, unknown>));
+        }
+        append_log_message(log_path, "hint", `Example: ${greater_names[0] ?? "fey ancestry"}`);
         write_status_line(get_status_path(data_slot_number), "character creation: greater gift");
         return { user_message_id: user_msg.id };
     }
 
     if (step === "greater_gift") {
         const kind = data.kind_id ? load_kind_definitions().kinds.find((k) => String(k.id) === data.kind_id) : null;
-        const greater = Array.isArray(kind?.gift_of_greater_kind) ? kind!.gift_of_greater_kind.map((g: any) => String(g.name)) : [];
-        const match = greater.find((g) => g.toLowerCase() === text.trim().toLowerCase());
+        const greater_gifts = Array.isArray(kind?.gift_of_greater_kind) ? kind!.gift_of_greater_kind : [];
+        const greater_names = greater_gifts.map((g: any) => String(g.name));
+        
+        if (text.trim().toLowerCase() === "redo") {
+            append_log_message(log_path, "system", "Re-enter 1 gift of greater kind:");
+            append_log_message(log_path, "system", "Available greater gifts:");
+            for (const gift of greater_gifts) {
+                append_log_message(log_path, "system", format_gift_display(gift as Record<string, unknown>));
+            }
+            append_log_message(log_path, "hint", `Example: ${greater_names[0] ?? "fey ancestry"}`);
+            return { user_message_id: user_msg.id };
+        }
+        
+        const match = greater_names.find((g) => g.toLowerCase() === text.trim().toLowerCase());
         if (!match) {
-            append_log_message(log_path, "system", "Invalid greater gift. Pick 1 from the list.");
+            append_log_message(log_path, "system", `Invalid greater gift: "${text.trim()}". Check spelling.`);
+            append_log_message(log_path, "system", "Available greater gifts:");
+            for (const gift of greater_gifts) {
+                append_log_message(log_path, "system", format_gift_display(gift as Record<string, unknown>));
+            }
+            append_log_message(log_path, "hint", `Example: ${greater_names[0] ?? "fey ancestry"}`);
             return { user_message_id: user_msg.id };
         }
         data.gift_greater_choice = match;
@@ -473,6 +639,7 @@ function handle_creation_input(
         state.data = data;
         write_creation_state(creation_path, state);
         append_log_message(log_path, "system", "Type 'confirm' to create your character or 'redo' to restart.");
+        append_log_message(log_path, "hint", "Example: confirm");
         write_status_line(get_status_path(data_slot_number), "character creation: confirm");
         return { user_message_id: user_msg.id };
     }
@@ -483,11 +650,14 @@ function handle_creation_input(
             state.data = {};
             write_creation_state(creation_path, state);
             append_log_message(log_path, "system", "Restarting creation. Choose a kind id:");
+            const kinds = list_kind_options();
+            append_log_message(log_path, "hint", `Example: ${kinds[0] ?? "human"}`);
             write_status_line(get_status_path(data_slot_number), "character creation: choose kind");
             return { user_message_id: user_msg.id };
         }
         if (text.trim().toLowerCase() !== "confirm") {
             append_log_message(log_path, "system", "Type 'confirm' to finish or 'redo' to restart.");
+            append_log_message(log_path, "hint", "Example: confirm");
             return { user_message_id: user_msg.id };
         }
         const input = {
@@ -728,6 +898,41 @@ function start_http_server(log_path: string): void {
             return;
         }
 
+        if (url.pathname === "/api/health") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            // Check if services are responsive by checking recent log activity
+            try {
+                const log = read_log(log_path);
+                const recentMessages = log.messages.slice(-10);
+                const serviceActivity: Record<string, number> = {};
+                
+                for (const msg of recentMessages) {
+                    const sender = msg.sender?.toLowerCase() ?? 'unknown';
+                    serviceActivity[sender] = (serviceActivity[sender] ?? 0) + 1;
+                }
+
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ 
+                    ok: true, 
+                    status: "healthy",
+                    services: {
+                        interface_program: true,
+                        recent_activity: serviceActivity,
+                        total_recent_messages: recentMessages.length
+                    }
+                }));
+            } catch (err: any) {
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: err?.message ?? "health_check_failed" }));
+            }
+            return;
+        }
+
         if (url.pathname !== "/api/input") {
             res.writeHead(404, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: false, error: "not_found" }));
@@ -771,6 +976,8 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
                     sender: routed.log.sender,
                     stage: routed.log.stage,
                     status: routed.log.status,
+                    hasOutbox: !!routed.outbox,
+                    outboxStage: routed.outbox?.stage,
                 });
 
                 write_status_line(
