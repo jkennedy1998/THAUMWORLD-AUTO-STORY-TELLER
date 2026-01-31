@@ -88,6 +88,15 @@ export function route_message(message: MessageEnvelope): RouteResult {
     } else if (is_renderer && stage.startsWith("rendered_")) {
         // Renderer outputs rendered_* stage - log only, no routing needed
         result = { log: message };
+    } else if (stage.startsWith("npc_response")) {
+        // NPC AI responses - route to outbox for renderer to display
+        result = {
+            log: message,
+            outbox: {
+                ...message,
+                status: "sent",
+            },
+        };
     } else {
         result = { log: message };
     }

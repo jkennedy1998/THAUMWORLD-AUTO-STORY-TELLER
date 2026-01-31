@@ -162,3 +162,129 @@ export function log_ai_io_file(
         }
     }
 }
+
+// Standardized Error Logging System
+export type ErrorLogEntry = {
+    timestamp: string;
+    service: string;
+    operation: string;
+    severity: 'error' | 'warning' | 'critical';
+    context: Record<string, unknown>;
+    error: {
+        message: string;
+        stack?: string | undefined;
+        type?: string | undefined;
+    };
+    correlation_id?: string;
+    message_id?: string;
+};
+
+export function log_service_error(
+    service: string,
+    operation: string,
+    context: Record<string, unknown>,
+    err: unknown,
+    severity: 'error' | 'warning' | 'critical' = 'error'
+): void {
+    // Always log errors (DEBUG_LEVEL >= 1)
+    if (DEBUG_LEVEL < 1) return;
+    
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    const stack = err instanceof Error ? err.stack : undefined;
+    const errorType = err instanceof Error ? err.constructor.name : 'Unknown';
+    
+    // Console output with color coding
+    const color = severity === 'critical' ? ANSI.red : severity === 'error' ? ANSI.red : ANSI.yellow;
+    const severityLabel = severity.toUpperCase();
+    
+    console.error(`${color}[${service}] ${severityLabel} in ${operation}${ANSI.reset}`);
+    console.error(`${color}  Context: ${JSON.stringify(context)}${ANSI.reset}`);
+    console.error(`${color}  Error: ${errorMsg}${ANSI.reset}`);
+    
+    if (stack && DEBUG_LEVEL >= 4) {
+        console.error(`${ANSI.gray}  Stack: ${stack}${ANSI.reset}`);
+    }
+    
+    // File logging (DEBUG_LEVEL >= 2)
+    if (DEBUG_LEVEL >= 2 && typeof process !== 'undefined') {
+        try {
+            const fs = require('fs');
+            const path = require('path');
+            
+            const data_slot = (context as any)?.slot ?? 1;
+            const logDir = path.join(process.cwd(), 'local_data', `data_slot_${data_slot}`, 'logs');
+            
+            if (!fs.existsSync(logDir)) {
+                fs.mkdirSync(logDir, { recursive: true });
+            }
+            
+            const logFile = path.join(logDir, 'error_log.jsonc');
+            
+            let errorLog: { schema_version: number; entries: ErrorLogEntry[] } = { 
+                schema_version: 1, 
+                entries: [] 
+            };
+            
+            if (fs.existsSync(logFile)) {
+                try {
+                    const content = fs.readFileSync(logFile, 'utf-8');
+                    errorLog = JSON.parse(content);
+                } catch {
+                    // Start fresh if corrupted
+                }
+            }
+            
+            const entry: ErrorLogEntry = {
+                timestamp: new Date().toISOString(),
+                service,
+                operation,
+                severity,
+                context,
+                error: {
+                    message: errorMsg,
+                    stack: DEBUG_LEVEL >= 4 ? stack : undefined,
+                    type: errorType
+                },
+                correlation_id: (context as any)?.correlation_id,
+                message_id: (context as any)?.message_id
+            };
+            
+            errorLog.entries.push(entry);
+            
+            // Keep last 500 errors
+            if (errorLog.entries.length > 500) {
+                errorLog.entries = errorLog.entries.slice(-500);
+            }
+            
+            fs.writeFileSync(logFile, JSON.stringify(errorLog, null, 2), 'utf-8');
+        } catch (fileErr) {
+            // If file logging fails, at least we have console output
+            console.error(`${ANSI.red}[ERROR_LOG] Failed to write error log: ${fileErr}${ANSI.reset}`);
+        }
+    }
+}
+
+// Convenience function for critical errors
+export function log_critical_error(
+    service: string,
+    operation: string,
+    context: Record<string, unknown>,
+    err: unknown
+): void {
+    log_service_error(service, operation, context, err, 'critical');
+}
+
+// Convenience function for warnings
+export function log_warning(
+    service: string,
+    operation: string,
+    context: Record<string, unknown>,
+    message: string
+): void {
+    if (DEBUG_LEVEL < 2) return;
+    
+    const color = ANSI.yellow;
+    console.warn(`${color}[${service}] WARNING in ${operation}${ANSI.reset}`);
+    console.warn(`${color}  Context: ${JSON.stringify(context)}${ANSI.reset}`);
+    console.warn(`${color}  Message: ${message}${ANSI.reset}`);
+}

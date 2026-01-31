@@ -5,9 +5,12 @@ import { create_message, try_set_message_status } from "../engine/message.js";
 import type { MessageInput } from "../engine/message.js";
 import type { MessageEnvelope } from "../engine/types.js";
 import { debug_log, debug_error, debug_pipeline, DEBUG_LEVEL } from "../shared/debug.js";
+import { isCurrentSession, getSessionMeta } from "../shared/session.js";
 import { parse_machine_text } from "../system_syntax/index.js";
 import { resolve_references } from "../reference_resolver/resolver.js";
 import { apply_effects } from "./apply.js";
+import { find_npcs, load_npc, save_npc } from "../npc_storage/store.js";
+import { load_actor } from "../actor_storage/store.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -74,6 +77,126 @@ function update_outbox_message_atomic(outbox_path: string, updated: MessageEnvel
 // Keep old function for backwards compatibility, but use atomic version
 function update_outbox_message(outbox_path: string, updated: MessageEnvelope): void {
     update_outbox_message_atomic(outbox_path, updated);
+}
+
+// Apply AWARENESS tags to NPCs when player communicates
+// Per THAUMWORLD rules: NPCs gain awareness when player makes sensible actions (communicating)
+function apply_awareness_tags(events: string[] | undefined): number {
+    if (!events || events.length === 0) return 0;
+    
+    let appliedCount = 0;
+    
+    for (const event of events) {
+        if (!event.includes("COMMUNICATE")) continue;
+        
+        // Extract actor ID from event (e.g., "actor.henry_actor.COMMUNICATE")
+        const actorMatch = event.match(/actor\.(\w+)\.COMMUNICATE/);
+        if (!actorMatch || !actorMatch[1]) continue;
+        
+        const actorId = actorMatch[1];
+        
+        // Load actor to get their location
+        const actorResult = load_actor(data_slot_number, actorId);
+        if (!actorResult.ok) continue;
+        
+        const actor = actorResult.actor;
+        const actorLocation = actor.location as { 
+            region_tile?: { x: number; y: number }; 
+            tile?: { x: number; y: number };
+        };
+        
+        if (!actorLocation?.region_tile) continue;
+        
+        // Find all NPCs in the same region
+        const nearbyNpcs = find_npcs(data_slot_number, {}).filter(npcHit => {
+            if (npcHit.id === "default_npc") return false;
+            
+            const npcResult = load_npc(data_slot_number, npcHit.id);
+            if (!npcResult.ok) return false;
+            
+            const npc = npcResult.npc as { 
+                location?: { region_tile?: { x: number; y: number } } 
+            };
+            const npcRegion = npc.location?.region_tile;
+            
+            if (!npcRegion) return false;
+            
+            // Check if in same region
+            return (
+                npcRegion.x === actorLocation.region_tile!.x &&
+                npcRegion.y === actorLocation.region_tile!.y
+            );
+        });
+        
+        // Apply AWARENESS tag to each nearby NPC
+        for (const npcHit of nearbyNpcs) {
+            const npcResult = load_npc(data_slot_number, npcHit.id);
+            if (!npcResult.ok) continue;
+            
+            const npc = npcResult.npc as Record<string, unknown>;
+            const tags = (npc.tags || []) as Array<Record<string, unknown>>;
+            
+            // Check if already has awareness of this actor
+            const actorRef = `actor.${actorId}`;
+            const hasAwareness = tags.some(tag => 
+                tag.name === "AWARENESS" &&
+                Array.isArray(tag.info) &&
+                tag.info.includes(actorRef)
+            );
+            
+            if (!hasAwareness) {
+                // Add AWARENESS tag
+                const newTag = {
+                    name: "AWARENESS",
+                    info: [actorRef],
+                    created_at: new Date().toISOString()
+                };
+                
+                tags.push(newTag);
+                npc.tags = tags;
+                
+                // Save updated NPC
+                save_npc(data_slot_number, npcHit.id, npc);
+                appliedCount++;
+                
+                if (DEBUG_LEVEL >= 3) {
+                    debug_pipeline("StateApplier", `Applied AWARENESS tag to ${npcHit.id}`, {
+                        npc: npcHit.id,
+                        target: actorRef
+                    });
+                }
+            }
+        }
+        
+        // Also apply bidirectional awareness: player gains awareness of NPCs
+        // This is done by adding tags to the actor as well
+        const actorTags = (actor.tags || []) as Array<Record<string, unknown>>;
+        for (const npcHit of nearbyNpcs) {
+            const npcRef = `npc.${npcHit.id}`;
+            const hasNpcAwareness = actorTags.some(tag =>
+                tag.name === "AWARENESS" &&
+                Array.isArray(tag.info) &&
+                tag.info.includes(npcRef)
+            );
+            
+            if (!hasNpcAwareness) {
+                const newTag = {
+                    name: "AWARENESS",
+                    info: [npcRef],
+                    created_at: new Date().toISOString()
+                };
+                actorTags.push(newTag);
+            }
+        }
+        
+        if (actorTags.length > (actor.tags || []).length) {
+            actor.tags = actorTags;
+            // Actor storage needs save function - for now, skip actor save
+            // TODO: Add save_actor function
+        }
+    }
+    
+    return appliedCount;
 }
 
 async function process_message(outbox_path: string, log_path: string, msg: MessageEnvelope): Promise<void> {
@@ -165,8 +288,19 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
         debug_pipeline("StateApplier", `  [2/4] No effects to apply`, { id: msg.id });
     }
 
-    // Step 3: Create applied_1 message ONLY if effects were applied
-    if (effectsApplied > 0) {
+    // Step 3: Apply awareness tags for COMMUNICATE events
+    const events = (msg.meta as any)?.events as string[] | undefined;
+    const hasCommunicateEvents = events?.some(e => e.includes("COMMUNICATE")) ?? false;
+    
+    if (hasCommunicateEvents) {
+        const awarenessApplied = apply_awareness_tags(events);
+        if (awarenessApplied > 0) {
+            debug_pipeline("StateApplier", `  [2.5/4] Applied ${awarenessApplied} awareness tags`, { id: msg.id });
+        }
+    }
+    
+    // Step 4: Create applied_1 message if effects were applied OR if there are communication events
+    if (effectsApplied > 0 || hasCommunicateEvents) {
         const output: MessageInput = {
             sender: "state_applier",
             content: "state applied",
@@ -174,7 +308,11 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
             status: "sent",
             reply_to: msg.id,
             meta: {
+                ...getSessionMeta(),
                 effects_applied: effectsApplied,
+                events: events,
+                original_text: (msg.meta as any)?.original_text,
+                machine_text: (msg.meta as any)?.machine_text,
             },
         };
 
@@ -183,10 +321,11 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
         debug_pipeline("StateApplier", `  [3/4] Created applied_1 message`, { 
             id: msg.id,
             effectsApplied,
+            hasCommunicateEvents,
             replyTo: msg.id
         });
     } else {
-        debug_pipeline("StateApplier", `  [3/4] SKIPPED applied_1 (no effects)`, { id: msg.id });
+        debug_pipeline("StateApplier", `  [3/4] SKIPPED applied_1 (no effects or communication events)`, { id: msg.id });
     }
 
     // Step 4: Mark original message as done
@@ -233,6 +372,7 @@ async function tick(outbox_path: string, log_path: string): Promise<void> {
             if (!m.stage?.startsWith("ruling_")) return false;
             // Only process messages specifically marked for state application
             if (m.status !== "pending_state_apply") return false;
+            if (!isCurrentSession(m)) return false;
             return true;
         });
 

@@ -178,6 +178,8 @@ async function fetch_log_messages(slot: number): Promise<(string | TextWindowMes
         }
         if (sender === 'hint') return true;
         if (m.type === 'user_input') return true;
+        if (sender.startsWith('npc.')) return true;  // Show NPC responses
+        if (sender === 'state_applier') return true;  // Show state applier messages
         return false;
     });
 
@@ -192,6 +194,13 @@ async function fetch_log_messages(slot: number): Promise<(string | TextWindowMes
         }
         if (sender === 'renderer_ai') return { content: `ASSISTANT: ${m.content}`, sender: 'assistant' };
         if (sender === 'j') return { content: `J: ${m.content}`, sender: 'user' };
+        if (sender.startsWith('npc.')) {
+            const npcName = sender.replace('npc.', '').toUpperCase();
+            return { content: `${npcName}: ${m.content}`, sender: 'npc' };
+        }
+        if (sender === 'state_applier') {
+            return { content: `[STATE] ${m.content}`, sender: 'state' };
+        }
         return { content: `${m.sender}: ${m.content}`, sender: 'system' };
     });
     const pending = Array.from(pending_user_messages.values()).map((content): TextWindowMessage => ({ content: `J: ${content}`, sender: 'user' }));
@@ -246,6 +255,8 @@ async function fetch_log_messages(slot: number): Promise<(string | TextWindowMes
             bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
             base_weight_index: 3,
             hint_rgb: get_color_by_name('pale_yellow').rgb,
+            npc_rgb: get_color_by_name('pumpkin').rgb,
+            state_rgb: get_color_by_name('dark_gray').rgb,
         }),
 
         make_text_window_module({

@@ -7,6 +7,7 @@ import type { MessageInput } from "../engine/message.js";
 import { append_log_envelope } from "../engine/log_store.js";
 import type { MessageEnvelope } from "../engine/types.js";
 import { debug_log, debug_content, debug_warn, debug_pipeline, debug_error, DEBUG_LEVEL, log_ai_io_terminal, log_ai_io_file } from "../shared/debug.js";
+import { isCurrentSession, getSessionMeta } from "../shared/session.js";
 import { ollama_chat, type OllamaMessage } from "../shared/ollama_client.js";
 import { append_metric } from "../engine/metrics_store.js";
 
@@ -259,6 +260,7 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
         status: "sent",
         reply_to: msg.id,
         meta: {
+            ...getSessionMeta(),
             events,
             effects,
         },
@@ -294,7 +296,7 @@ async function tick(outbox_path: string, inbox_path: string, log_path: string): 
         const candidates = outbox.messages.filter((m) => {
             if (!m.stage?.startsWith("applied_")) return false;
             if ((m.meta as any)?.rendered === true) return false;
-            if (m.status === "sent" || m.status === "done") return true;
+            if ((m.status === "sent" || m.status === "done") && isCurrentSession(m)) return true;
             return false;
         });
 

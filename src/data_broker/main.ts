@@ -1,6 +1,6 @@
 import { get_data_slot_dir, get_inbox_path, get_log_path, get_outbox_path, get_status_path } from "../engine/paths.js";
 import { ensure_dir_exists, ensure_log_exists } from "../engine/log_store.js";
-import { ensure_inbox_exists, append_inbox_message } from "../engine/inbox_store.js";
+import { ensure_inbox_exists, append_inbox_message, read_inbox } from "../engine/inbox_store.js";
 import { ensure_outbox_exists, read_outbox, write_outbox, prune_outbox_messages, append_outbox_message } from "../engine/outbox_store.js";
 import { create_message, try_set_message_status } from "../engine/message.js";
 import type { MessageInput } from "../engine/message.js";
@@ -13,6 +13,7 @@ import { resolve_references } from "../reference_resolver/resolver.js";
 import { ensure_status_exists, write_status_line } from "../engine/status_store.js";
 import { ensure_actor_exists } from "../actor_storage/store.js";
 import { ensure_region_tile, ensure_world_tile } from "../world_storage/store.js";
+import { isCurrentSession, getSessionMeta } from "../shared/session.js";
 
 const data_slot_number = 1;
 const POLL_MS = 800;
@@ -182,6 +183,7 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
                     original_text,
                     iteration,
                     band_aid: true,
+                    ...getSessionMeta(),
                 },
             };
             if (msg.correlation_id !== undefined) brokered_input.correlation_id = msg.correlation_id;
@@ -213,6 +215,7 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
                 machine_text: machine_text ?? "",
                 should_create_data,
                 should_create_from_scratch,
+                ...getSessionMeta(),
             },
         };
 
@@ -259,6 +262,7 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
                     original_text,
                     iteration,
                     band_aid: true,
+                    ...getSessionMeta(),
                 },
             };
             if (msg.correlation_id !== undefined) brokered_input.correlation_id = msg.correlation_id;
@@ -290,6 +294,7 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
                 original_text,
                 should_create_data,
                 should_create_from_scratch,
+                ...getSessionMeta(),
             },
         };
 
@@ -343,6 +348,7 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
                 original_text,
                 should_create_data,
                 should_create_from_scratch,
+                ...getSessionMeta(),
             },
         };
 
@@ -380,6 +386,7 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
             should_create_from_scratch,
             original_text,
             iteration,
+            ...getSessionMeta(),
         },
     };
 
@@ -402,13 +409,22 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
 }
 
 async function tick(outbox_path: string, inbox_path: string, log_path: string): Promise<void> {
+    // Check both outbox and inbox for interpreted messages
     const outbox = read_outbox(outbox_path);
-    const candidates = outbox.messages.filter(
-        (m) => m.stage?.startsWith("interpreted_") && m.status === "sent",
+    const inbox = read_inbox(inbox_path);
+    
+    const outbox_candidates = outbox.messages.filter(
+        (m) => m.stage?.startsWith("interpreted_") && m.status === "sent" && isCurrentSession(m),
     );
+    
+    const inbox_candidates = inbox.messages.filter(
+        (m) => m.stage?.startsWith("interpreted_") && m.status === "sent" && isCurrentSession(m),
+    );
+    
+    const candidates = [...outbox_candidates, ...inbox_candidates];
 
     if (candidates.length > 0) {
-        debug_log("DataBroker: candidates", { count: candidates.length });
+        debug_log("DataBroker: candidates", { count: candidates.length, from_outbox: outbox_candidates.length, from_inbox: inbox_candidates.length });
     }
 
     for (const msg of candidates) {

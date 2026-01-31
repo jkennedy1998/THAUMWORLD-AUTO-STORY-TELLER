@@ -14,6 +14,7 @@ import { append_metric } from "../engine/metrics_store.js";
 import { ollama_chat, type OllamaMessage } from "../shared/ollama_client.js";
 import { get_status_path } from "../engine/paths.js";
 import { ensure_status_exists, write_status_line } from "../engine/status_store.js";
+import { isCurrentSession, getSessionMeta } from "../shared/session.js";
 
 const data_slot_number = 1;
 const POLL_MS = 800;
@@ -39,13 +40,15 @@ const INTERPRETER_SYSTEM_PROMPT = [
     "All arguments must be named key=value pairs. Positional args are forbidden.",
     "Subjects are refs (actor, npc, item, tile, etc). Verbs are uppercase actions or SYSTEM.*.",
     "Strings must be double-quoted. Lists use [a, b]. Objects use {k=v}.",
-    "Use actor.<id> (from the active actor in the save slot) as the subject.",
+    "CRITICAL: The SUBJECT is ALWAYS the active player actor (actor.<id>), NEVER an NPC.",
+    "When the user says something like 'hello shopkeep' or 'shopkeep are you there?', they are talking TO shopkeep, not AS shopkeep.",
+    "The player actor is the one performing the COMMUNICATE action, and the NPC is the TARGET.",
     "Action verbs: USE, ATTACK, HELP, DEFEND, GRAPPLE, INSPECT, COMMUNICATE, DODGE, CRAFT, SLEEP, REPAIR, MOVE, WORK, GUARD, HOLD.",
     "System verbs: SYSTEM.APPLY_TAG, SYSTEM.REMOVE_TAG, SYSTEM.ADJUST_RESOURCE, SYSTEM.ADJUST_STAT, SYSTEM.APPLY_DAMAGE, SYSTEM.APPLY_HEAL, SYSTEM.ADVANCE_TIME (and other SYSTEM.* verbs).",
     "If unsure, choose the smallest valid command that matches intent.",
     "All greetings or conversational speech must use COMMUNICATE, not SYSTEM.*.",
-    "Bad: SYSTEM.APPLY_TAG(actor.tjem, \"player\", key=\"greeting\")",
-    "Good: actor.<id>.COMMUNICATE(tool=actor.<id>.voice, targets=[npc.<id>], text=\"hello!\", language=lang.common, senses=[pressure], tone=\"neutral\", contexts=[region_tile.0.0.0.0], sense_context={signal_mag=1})",
+    "Bad: actor.shopkeep.COMMUNICATE(tool=actor.shopkeep.voice, targets=[actor.player], text=\"yes\")",
+    "Good: actor.player.COMMUNICATE(tool=actor.player.voice, targets=[npc.shopkeep], text=\"hello!\", language=lang.common, senses=[pressure], tone=\"neutral\", contexts=[region_tile.0.0.0.0], sense_context={signal_mag=1})",
     "Example: actor.MOVE(target=tile.loc.market.5.12, tool=actor.self.hands, mode=\"walk\")",
 ].join("\n");
 
@@ -101,6 +104,57 @@ function format_error_list(errors: unknown[]): string {
         .join("\n");
 }
 
+// Detect if text contains an NPC name/ID and restructure for clarity
+function preprocess_communication_text(text: string): { processed: string; detected_target: string | null; actor_ref: string } {
+    const actor_ref = get_active_actor_ref();
+    const actor_id = get_active_actor_id();
+    const npcs = find_npcs(data_slot_number, {}).filter((n) => n.id !== "default_npc");
+    const lowered = text.toLowerCase().trim();
+    
+    for (const npc of npcs) {
+        const npcName = npc.name?.toLowerCase() ?? "";
+        const npcId = npc.id?.toLowerCase() ?? "";
+        
+        // Check if text starts with NPC name or ID
+        if (npcName && lowered.startsWith(npcName)) {
+            // Restructure: "shopkeep are you there?" -> "As actor.henry_actor, say to shopkeep: are you there?"
+            const rest = text.slice(npcName.length).trim();
+            return { 
+                processed: `As ${actor_ref} (actor ID: ${actor_id}), say to ${npc.name}: "${rest}"`, 
+                detected_target: npc.id,
+                actor_ref
+            };
+        }
+        if (npcId && lowered.startsWith(npcId)) {
+            const rest = text.slice(npcId.length).trim();
+            return { 
+                processed: `As ${actor_ref} (actor ID: ${actor_id}), say to ${npc.name || npc.id}: "${rest}"`, 
+                detected_target: npc.id,
+                actor_ref
+            };
+        }
+        
+        // Check if text CONTAINS NPC name (for greetings like "hello Grenda")
+        if (npcName && lowered.includes(npcName)) {
+            // Restructure: "hello Grenda, how are you?" -> "As actor.henry_actor, say to Grenda: "hello, how are you?"
+            return { 
+                processed: `As ${actor_ref} (actor ID: ${actor_id}), say to ${npc.name}: "${text}"`, 
+                detected_target: npc.id,
+                actor_ref
+            };
+        }
+        if (npcId && lowered.includes(npcId)) {
+            return { 
+                processed: `As ${actor_ref} (actor ID: ${actor_id}), say to ${npc.name || npc.id}: "${text}"`, 
+                detected_target: npc.id,
+                actor_ref
+            };
+        }
+    }
+    
+    return { processed: text, detected_target: null, actor_ref };
+}
+
 function build_interpreter_prompt(params: {
     text: string;
     is_refinement: boolean;
@@ -111,8 +165,11 @@ function build_interpreter_prompt(params: {
     action_verb: ActionVerb | null;
     action_template: string | undefined;
 }): string {
+    // Pre-process communication text to clarify actor vs target
+    const { processed } = preprocess_communication_text(params.text);
+    
     if (!params.is_refinement) {
-        const base = ["Human input:", params.text, "", "Return machine text only."];
+        const base = ["Human input:", processed, "", "Return machine text only."];
         if (params.intent === "action" && params.action_template && params.action_verb) {
             base.push("", `Use ${params.action_verb} for this intent.`, "Template:", params.action_template);
         }
@@ -390,9 +447,26 @@ function get_active_actor_ref(): string {
     return `actor.${actor_id}`;
 }
 
-function resolve_communication_targets(): string[] {
-    // TODO: replace with sense-range filtering and local NPC generation rules.
+function resolve_communication_targets(text: string): string[] {
+    // First, try to extract NPC name from the text itself
     const npcs = find_npcs(data_slot_number, {}).filter((n) => n.id !== "default_npc");
+    const lowered = text.toLowerCase();
+    
+    // Look for NPC names or IDs in the text
+    for (const npc of npcs) {
+        const npcName = npc.name?.toLowerCase() ?? "";
+        const npcId = npc.id?.toLowerCase() ?? "";
+        
+        // Check if NPC name or ID appears in the text
+        if (npcName && lowered.includes(npcName)) {
+            return [`npc.${npc.id}`];
+        }
+        if (npcId && lowered.includes(npcId)) {
+            return [`npc.${npc.id}`];
+        }
+    }
+    
+    // Fallback: use first available NPC
     if (npcs.length === 0) return [];
     const sorted = [...npcs].sort((a, b) => a.id.localeCompare(b.id));
     const candidate = sorted[0]?.id ?? "";
@@ -528,7 +602,7 @@ function sanitize_quoted_text(text: string, max_len = 200): string {
 
 function build_communicate_command(text: string): string {
     const actor_ref = get_active_actor_ref();
-    const targets = resolve_communication_targets();
+    const targets = resolve_communication_targets(text);
     const senses = resolve_communication_senses(text);
     const context = infer_sense_context(text, senses);
     const sanitized = sanitize_quoted_text(text);
@@ -829,6 +903,7 @@ function post_tweak(text: string, original: MessageEnvelope): MessageEnvelope {
         reply_to: original.id,
         stage: "interpreted_1",
         status: "done",
+        meta: getSessionMeta(),
     };
 
     if (original.correlation_id !== undefined) input.correlation_id = original.correlation_id;
@@ -981,7 +1056,7 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
 async function tick(outbox_path: string, inbox_path: string, log_path: string): Promise<void> {
     const outbox = read_outbox(outbox_path);
     const candidates = outbox.messages.filter(
-        (m) => m.stage === "interpreter_ai" && m.status === "sent",
+        (m) => m.stage === "interpreter_ai" && m.status === "sent" && isCurrentSession(m),
     );
 
     if (candidates.length > 0) {

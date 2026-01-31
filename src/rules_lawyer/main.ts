@@ -10,9 +10,11 @@ import { debug_log, debug_waiting_roll } from "../shared/debug.js";
 import { apply_rules_stub } from "./effects.js";
 import type { CommandNode } from "../system_syntax/index.js";
 import { make_log_id } from "../engine/log_store.js";
+import { isCurrentSession, getSessionMeta, SESSION_ID } from "../shared/session.js";
 
 const data_slot_number = 1;
 const POLL_MS = 800;
+const ITERATION_LIMIT = 5;
 
 type PendingJob = {
     msg: MessageEnvelope;
@@ -21,6 +23,10 @@ type PendingJob = {
 };
 
 const pending_jobs: Record<string, PendingJob> = {};
+
+// Track the highest brokered iteration seen for each correlation_id
+// This helps determine which ruling should be marked for state application
+const maxBrokeredIterations = new Map<string, number>();
 
 function is_actor_subject(subject: string): boolean {
     return subject.startsWith("actor.") || subject.endsWith("_actor");
@@ -92,23 +98,41 @@ async function process_roll_result(outbox_path: string, log_path: string, msg: M
         const machine_text = typeof job_meta?.machine_text === "string" ? (job_meta.machine_text as string) : "";
         const ruled = apply_rules_stub(job.commands, data_slot_number);
         const iteration = parse_stage_iteration(job.msg.stage);
+        
+        // Determine if this is the final iteration for this correlation_id
+        const correlationId = job.msg.correlation_id || job.msg.id;
+        const maxIteration = maxBrokeredIterations.get(correlationId) || iteration;
+        const isFinalIteration = iteration >= maxIteration || iteration >= ITERATION_LIMIT;
+        
+        // Only mark final iteration for state application
+        const rulingStatus = isFinalIteration ? "pending_state_apply" : "superseded";
+        
         const output: MessageInput = {
             sender: "rules_lawyer",
             content: "rule effects ready",
             stage: `ruling_${iteration}`,
-            status: "sent",
+            status: rulingStatus,
             reply_to: job.msg.id,
             meta: {
+                ...getSessionMeta(),
                 events: ruled.event_lines,
                 effects: ruled.effect_lines,
                 original_text,
                 machine_text,
+                is_final_ruling: isFinalIteration,
             },
         };
         if (job.msg.correlation_id) output.correlation_id = job.msg.correlation_id;
         const ruled_msg = create_message(output);
         append_outbox_message(outbox_path, ruled_msg);
-        debug_log("RulesLawyer: output sent", { id: ruled_msg.id, stage: ruled_msg.stage });
+        debug_log("RulesLawyer: output sent", { 
+            id: ruled_msg.id, 
+            stage: ruled_msg.stage, 
+            status: rulingStatus,
+            iteration,
+            maxIteration,
+            isFinal: isFinalIteration 
+        });
 
         const done_job = try_set_message_status(job.msg, "done");
         if (done_job.ok) {
@@ -192,6 +216,7 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
                 status: "sent",
                 reply_to: msg.id,
                 meta: {
+                    ...getSessionMeta(),
                     roll_id,
                     dice,
                     rolled_by_player: is_actor_subject(cmd.subject),
@@ -224,25 +249,42 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
     const machine_text = typeof (msg.meta as any)?.machine_text === "string" ? ((msg.meta as any)?.machine_text as string) : "";
     const ruled = apply_rules_stub(commands, data_slot_number);
     
-    // Create ruling message with pending_state_apply status for StateApplier
+    // Determine if this is the final iteration for this correlation_id
+    const correlationId = msg.correlation_id || msg.id;
+    const maxIteration = maxBrokeredIterations.get(correlationId) || iteration;
+    const isFinalIteration = iteration >= maxIteration || iteration >= ITERATION_LIMIT;
+    
+    // Only mark final iteration for state application
+    // Earlier iterations are marked as "sent" but won't be processed by StateApplier
+    const rulingStatus = isFinalIteration ? "pending_state_apply" : "superseded";
+    
     const output: MessageInput = {
         sender: "rules_lawyer",
         content: "rule effects ready",
         stage: `ruling_${iteration}`,
-        status: "pending_state_apply",  // Mark for StateApplier to process
+        status: rulingStatus,
         reply_to: msg.id,
         meta: {
+            ...getSessionMeta(),
             events: ruled.event_lines,
             effects: ruled.effect_lines,
             original_text,
             machine_text,
+            is_final_ruling: isFinalIteration,
         },
     };
 
     if (msg.correlation_id !== undefined) output.correlation_id = msg.correlation_id;
     const ruled_msg = create_message(output);
     append_outbox_message(outbox_path, ruled_msg);
-    debug_log("RulesLawyer: created ruling message with pending_state_apply", { id: ruled_msg.id, stage: ruled_msg.stage });
+    debug_log("RulesLawyer: created ruling message", { 
+        id: ruled_msg.id, 
+        stage: ruled_msg.stage, 
+        status: rulingStatus,
+        iteration,
+        maxIteration,
+        isFinal: isFinalIteration 
+    });
 
     // Mark original brokered message as done
     const done = try_set_message_status(processing.message, "done");
@@ -257,13 +299,43 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
 
 async function tick(outbox_path: string, log_path: string): Promise<void> {
     const outbox = read_outbox(outbox_path);
+    
+    // Debug: Log session matching
+    const allBrokered = outbox.messages.filter(m => m.stage?.startsWith("brokered_"));
+    const withSentStatus = allBrokered.filter(m => m.status === "sent");
+    const withSession = withSentStatus.filter(m => isCurrentSession(m));
+    
+    if (allBrokered.length > 0) {
+        debug_log("RulesLawyer: tick debug", {
+            totalMessages: outbox.messages.length,
+            brokeredMessages: allBrokered.length,
+            withSentStatus: withSentStatus.length,
+            withCurrentSession: withSession.length,
+            mySessionId: SESSION_ID,
+            sampleMessageSession: allBrokered[0]?.meta?.session_id,
+            sampleMessageStage: allBrokered[0]?.stage,
+            sampleMessageStatus: allBrokered[0]?.status,
+        });
+    }
+    
     const candidates = outbox.messages.filter(
-        (m) => m.stage?.startsWith("brokered_") && m.status === "sent",
+        (m) => m.stage?.startsWith("brokered_") && m.status === "sent" && isCurrentSession(m),
     );
 
     const roll_results = outbox.messages.filter(
         (m) => m.stage?.startsWith("roll_result_") && m.status === "sent",
     );
+
+    // Track max brokered iteration for each correlation_id
+    // This helps us determine which ruling should be marked for state application
+    for (const msg of candidates) {
+        const correlationId = msg.correlation_id || msg.id;
+        const iteration = parse_stage_iteration(msg.stage);
+        const currentMax = maxBrokeredIterations.get(correlationId) || 0;
+        if (iteration > currentMax) {
+            maxBrokeredIterations.set(correlationId, iteration);
+        }
+    }
 
     if (candidates.length > 0) {
         debug_log("RulesLawyer: candidates", { count: candidates.length });

@@ -493,7 +493,9 @@ export function apply_rules_stub(commands: CommandNode[], slot: number): RuleRes
                             event_lines.push(`NOTE.INVALID_TARGET(verb=${command.verb}, target=${t.value})`);
                             continue;
                         }
-                        if (!has_target_awareness(slot, command.subject, t.value)) {
+                        // For COMMUNICATE: Check if TARGET (NPC) has awareness of SUBJECT (player)
+                        // Per THAUMWORLD rules: NPC must be aware of player to receive communication
+                        if (!has_target_awareness(slot, t.value, command.subject)) {
                             event_lines.push(`NOTE.NO_AWARENESS(target=${t.value})`);
                             continue;
                         }

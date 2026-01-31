@@ -26,6 +26,8 @@ export type TextWindowOptions = {
     bg?: { char: string; rgb: Rgb };
     base_weight_index?: number; // 0..7
     hint_rgb?: Rgb; // color for 'hint' sender messages
+    npc_rgb?: Rgb; // color for NPC messages
+    state_rgb?: Rgb; // color for state applier messages
 };
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -237,8 +239,11 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
                 const line_info = cached_lines[line_i];
                 const line_text = line_info?.text ?? "";
                 const line_sender = line_info?.sender;
-                // Use hint color for 'hint' sender, otherwise use default text color
-                const line_rgb = line_sender === "hint" ? hint_rgb : text_rgb;
+                // Determine color based on sender type
+                let line_rgb = text_rgb;
+                if (line_sender === "hint") line_rgb = hint_rgb;
+                else if (line_sender === "npc") line_rgb = opts.npc_rgb ?? text_rgb;
+                else if (line_sender === "state") line_rgb = opts.state_rgb ?? text_rgb;
                 // Rect is bottom-left coordinates (y0 bottom, y1 top). We render top-down:
                 const y_top = text_r.y1;
                 const y = y_top - row;

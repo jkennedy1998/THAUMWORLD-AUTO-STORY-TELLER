@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { debug_log, debug_warn } from "../shared/debug.js";
 import { ollama_chat } from "../shared/ollama_client.js";
+import { isCurrentSession, getSessionMeta } from "../shared/session.js";
 
 import { get_data_slot_dir, get_inbox_path, get_item_dir, get_log_path, get_outbox_path, get_status_path, get_world_dir, get_roller_status_path } from "../engine/paths.js";
 import { read_inbox, clear_inbox, ensure_inbox_exists, append_inbox_message } from "../engine/inbox_store.js";
@@ -762,6 +763,7 @@ function start_http_server(log_path: string): void {
                     type: "user_input",
                     status: "queued",
                     correlation_id: create_correlation_id(),
+                    meta: getSessionMeta(),
                 });
 
                 append_inbox_message(inbox_path, inbound);
