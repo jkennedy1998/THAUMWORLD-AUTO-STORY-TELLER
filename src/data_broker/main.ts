@@ -15,10 +15,11 @@ import { ensure_actor_exists } from "../actor_storage/store.js";
 import { ensure_region_tile, ensure_world_tile, load_region, get_region_by_coords, list_regions } from "../world_storage/store.js";
 import { isCurrentSession, getSessionMeta } from "../shared/session.js";
 import { debug_log as broker_debug, debug_warn } from "../shared/debug.js";
+import { SERVICE_CONFIG } from "../shared/constants.js";
 
-const data_slot_number = 1;
-const POLL_MS = 800;
-const ITERATION_LIMIT = 5;
+const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+const POLL_MS = SERVICE_CONFIG.POLL_MS.DATA_BROKER;
+const ITERATION_LIMIT = SERVICE_CONFIG.MAX_BROKER_ITERATIONS;
 
 // Track processed interpreted message IDs to prevent duplicate processing
 // This prevents race conditions where the same message gets processed multiple times

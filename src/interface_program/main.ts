@@ -5,6 +5,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { debug_log, debug_warn } from "../shared/debug.js";
 import { ollama_chat } from "../shared/ollama_client.js";
 import { isCurrentSession, getSessionMeta, SESSION_ID } from "../shared/session.js";
+import { SERVICE_CONFIG } from "../shared/constants.js";
 
 import { get_data_slot_dir, get_inbox_path, get_item_dir, get_log_path, get_outbox_path, get_status_path, get_world_dir, get_roller_status_path } from "../engine/paths.js";
 import { read_inbox, clear_inbox, ensure_inbox_exists, append_inbox_message } from "../engine/inbox_store.js";
@@ -23,7 +24,7 @@ import { get_creation_state_path } from "../engine/paths.js";
 import { load_kind_definitions } from "../kind_storage/store.js";
 import { PROF_NAMES, STAT_VALUE_BLOCK } from "../character_rules/creation.js";
 
-const data_slot_number = 1; // hard set to 1 for now
+const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
 const visual_log_limit = 12;
 const HTTP_PORT = 8787;
 // const ENABLE_CLI_LOG = false;

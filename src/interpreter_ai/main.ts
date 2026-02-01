@@ -15,9 +15,10 @@ import { ollama_chat, type OllamaMessage } from "../shared/ollama_client.js";
 import { get_status_path } from "../engine/paths.js";
 import { ensure_status_exists, write_status_line } from "../engine/status_store.js";
 import { isCurrentSession, getSessionMeta } from "../shared/session.js";
+import { ACTION_VERBS, SERVICE_CONFIG } from "../shared/constants.js";
 
-const data_slot_number = 1;
-const POLL_MS = 800;
+const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+const POLL_MS = SERVICE_CONFIG.POLL_MS.INTERPRETER;
 const OLLAMA_HOST = process.env.OLLAMA_HOST ?? "http://localhost:11434";
 const INTERPRETER_MODEL = process.env.INTERPRETER_MODEL ?? "llama3.2:latest";
 // gpt-oss:20b is installed; swap back if you want higher quality.
@@ -386,22 +387,8 @@ function sanitize_machine_text(text: string): string {
     return cleaned;
 }
 
-type ActionVerb =
-    | "USE"
-    | "ATTACK"
-    | "HELP"
-    | "DEFEND"
-    | "GRAPPLE"
-    | "INSPECT"
-    | "COMMUNICATE"
-    | "DODGE"
-    | "CRAFT"
-    | "SLEEP"
-    | "REPAIR"
-    | "MOVE"
-    | "WORK"
-    | "GUARD"
-    | "HOLD";
+// Use shared ActionVerb type from constants
+import type { ActionVerb } from "../shared/constants.js";
 
 type Intent = "system" | "action" | "unknown";
 

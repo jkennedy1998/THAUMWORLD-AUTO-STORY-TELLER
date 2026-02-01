@@ -8,9 +8,10 @@ import type { MessageEnvelope } from "../engine/types.js";
 import { debug_log, debug_roll } from "../shared/debug.js";
 import { roll_expr } from "../rules_lawyer/dice.js";
 import { ensure_roller_status_exists, read_roller_status, write_roller_status } from "../engine/roller_status_store.js";
+import { SERVICE_CONFIG } from "../shared/constants.js";
 
-const data_slot_number = 1;
-const POLL_MS = 800;
+const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+const POLL_MS = SERVICE_CONFIG.POLL_MS.ROLLER;
 const SPINNER_FRAMES = ["|", "/", "-", "\\"];
 
 type RollRequest = {

@@ -24,9 +24,10 @@ import {
 import type { MessageEnvelope } from "../engine/types.js";
 import * as fs from "node:fs";
 import { parse } from "jsonc-parser";
+import { SERVICE_CONFIG } from "../shared/constants.js";
 
-const data_slot_number = 1;
-const POLL_MS = 500; // Poll every 500ms for responsive turn management
+const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+const POLL_MS = SERVICE_CONFIG.POLL_MS.TURN_MANAGER;
 
 // Track which events we've already processed to avoid duplicates
 const processedEventIds = new Set<string>();

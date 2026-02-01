@@ -11,10 +11,11 @@ import { apply_rules_stub } from "./effects.js";
 import type { CommandNode } from "../system_syntax/index.js";
 import { make_log_id } from "../engine/log_store.js";
 import { isCurrentSession, getSessionMeta, SESSION_ID } from "../shared/session.js";
+import { SERVICE_CONFIG } from "../shared/constants.js";
 
-const data_slot_number = 1;
-const POLL_MS = 800;
-const ITERATION_LIMIT = 5;
+const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+const POLL_MS = SERVICE_CONFIG.POLL_MS.RULES_LAWYER;
+const ITERATION_LIMIT = SERVICE_CONFIG.MAX_BROKER_ITERATIONS;
 
 type PendingJob = {
     msg: MessageEnvelope;

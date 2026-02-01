@@ -11,11 +11,12 @@ import { append_metric } from "../engine/metrics_store.js";
 import { find_npcs, load_npc } from "../npc_storage/store.js";
 import { load_actor } from "../actor_storage/store.js";
 import { isCurrentSession, getSessionMeta } from "../shared/session.js";
+import { SERVICE_CONFIG } from "../shared/constants.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-const data_slot_number = 1;
-const POLL_MS = 800;
+const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+const POLL_MS = SERVICE_CONFIG.POLL_MS.NPC_AI;
 const OLLAMA_HOST = process.env.OLLAMA_HOST ?? "http://localhost:11434";
 const NPC_AI_MODEL = process.env.NPC_AI_MODEL ?? "llama3.2:latest";
 const NPC_AI_TIMEOUT_MS_RAW = Number(process.env.NPC_AI_TIMEOUT_MS ?? 120_000);

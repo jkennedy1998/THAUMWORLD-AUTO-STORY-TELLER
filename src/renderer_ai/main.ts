@@ -8,11 +8,12 @@ import { append_log_envelope } from "../engine/log_store.js";
 import type { MessageEnvelope } from "../engine/types.js";
 import { debug_log, debug_content, debug_warn, debug_pipeline, debug_error, DEBUG_LEVEL, log_ai_io_terminal, log_ai_io_file } from "../shared/debug.js";
 import { isCurrentSession, getSessionMeta } from "../shared/session.js";
+import { ACTION_VERBS, SERVICE_CONFIG } from "../shared/constants.js";
 import { ollama_chat, type OllamaMessage } from "../shared/ollama_client.js";
 import { append_metric } from "../engine/metrics_store.js";
 
-const data_slot_number = 1;
-const POLL_MS = 800;
+const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+const POLL_MS = SERVICE_CONFIG.POLL_MS.RENDERER;
 const OLLAMA_HOST = process.env.OLLAMA_HOST ?? "http://localhost:11434";
 const RENDERER_MODEL = process.env.RENDERER_MODEL ?? "llama3.2:latest";
 // gpt-oss:20b is installed; swap back if you want higher quality.
@@ -81,7 +82,8 @@ function extract_obscured_awareness(effects: string[]): string[] {
 }
 
 // Action-specific narrative generators for THAUMWORLD
-// TODO: Add remaining verbs: HELP, DEFEND, GRAPPLE, DODGE, CRAFT, SLEEP, REPAIR, WORK, GUARD, HOLD
+// Current implementation covers: INSPECT, ATTACK, COMMUNICATE, MOVE, USE
+// TODO: Add remaining generators from ACTION_VERBS constant
 
 function generateInspectNarrativePrompt(params: {
     original_text: string;

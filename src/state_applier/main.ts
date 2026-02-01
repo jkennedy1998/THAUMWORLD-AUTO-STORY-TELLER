@@ -6,6 +6,7 @@ import type { MessageInput } from "../engine/message.js";
 import type { MessageEnvelope } from "../engine/types.js";
 import { debug_log, debug_error, debug_pipeline, DEBUG_LEVEL } from "../shared/debug.js";
 import { isCurrentSession, getSessionMeta } from "../shared/session.js";
+import { ACTION_VERBS, SERVICE_CONFIG } from "../shared/constants.js";
 import { parse_machine_text } from "../system_syntax/index.js";
 import { resolve_references } from "../reference_resolver/resolver.js";
 import { apply_effects } from "./apply.js";
@@ -14,8 +15,8 @@ import { load_actor } from "../actor_storage/store.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-const data_slot_number = 1;
-const POLL_MS = 800;
+const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+const POLL_MS = SERVICE_CONFIG.POLL_MS.STATE_APPLIER;
 
 // Track last logged state to prevent spam
 let lastLoggedState: {
@@ -29,13 +30,6 @@ function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// THAUMWORLD Action Verbs for narrative generation
-const THAUMWORLD_ACTION_VERBS = [
-    "ATTACK", "COMMUNICATE", "INSPECT", "MOVE", "USE", 
-    "HELP", "DEFEND", "GRAPPLE", "DODGE", "CRAFT", 
-    "SLEEP", "REPAIR", "WORK", "GUARD", "HOLD"
-];
-
 /**
  * Extract the action verb from events array
  * Returns the verb (e.g., "INSPECT", "ATTACK") or null if not found
@@ -44,7 +38,7 @@ function extractActionVerb(events: string[] | undefined): string | null {
     if (!events || events.length === 0) return null;
     
     for (const event of events) {
-        for (const verb of THAUMWORLD_ACTION_VERBS) {
+        for (const verb of ACTION_VERBS) {
             // Match pattern: actor.<id>.VERB( or npc.<id>.VERB(
             if (event.includes(`.${verb}(`)) {
                 return verb;
