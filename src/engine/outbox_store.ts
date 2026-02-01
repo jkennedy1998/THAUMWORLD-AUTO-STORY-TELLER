@@ -62,3 +62,13 @@ export function append_outbox_message(outbox_path: string, message: MessageEnvel
     write_outbox(outbox_path, pruned);
     return message;
 }
+
+export function update_outbox_message(outbox_path: string, message: MessageEnvelope): MessageEnvelope {
+    const outbox = read_outbox(outbox_path);
+    const index = outbox.messages.findIndex(m => m.id === message.id);
+    if (index >= 0) {
+        outbox.messages[index] = message;
+        write_outbox(outbox_path, outbox);
+    }
+    return message;
+}

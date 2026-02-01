@@ -12,6 +12,7 @@ import { resolve_references } from "../reference_resolver/resolver.js";
 import { apply_effects } from "./apply.js";
 import { find_npcs, load_npc, save_npc } from "../npc_storage/store.js";
 import { load_actor } from "../actor_storage/store.js";
+import { add_event_to_memory, get_working_memory } from "../context_manager/index.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -341,6 +342,49 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
         const awarenessApplied = apply_awareness_tags(events);
         if (awarenessApplied > 0) {
             debug_pipeline("StateApplier", `  [2.5/4] Applied ${awarenessApplied} awareness tags`, { id: msg.id });
+        }
+    }
+    
+    // Step 3.5: Record events to working memory for timed events
+    const correlation_id = msg.correlation_id;
+    if (correlation_id && events && events.length > 0) {
+        // Try to find working memory by correlation_id (which is often the event_id)
+        const memory = get_working_memory(data_slot_number, correlation_id);
+        if (memory) {
+            // Extract event details from the first event
+            const firstEvent = events[0];
+            const actor_match = firstEvent.match(/^(actor|npc)\.([^\.]+)/);
+            const verb_match = firstEvent.match(/\.([A-Z_]+)\(/);
+            const target_match = firstEvent.match(/target=([^,)]+)/);
+            
+            if (actor_match && verb_match) {
+                const actor_ref = `${actor_match[1]}.${actor_match[2]}`;
+                const action = verb_match[1];
+                const target = target_match ? target_match[1] : undefined;
+                
+                // Determine emotional tone based on action
+                let emotional_tone = "neutral";
+                if (action === "ATTACK") emotional_tone = "tense";
+                else if (action === "COMMUNICATE") emotional_tone = "conversational";
+                else if (action === "DEFEND") emotional_tone = "defensive";
+                else if (action === "HELP") emotional_tone = "supportive";
+                
+                // Add to working memory
+                add_event_to_memory(data_slot_number, correlation_id, {
+                    turn: memory.recent_events.length + 1,
+                    actor: actor_ref,
+                    action,
+                    target,
+                    outcome: effectsApplied > 0 ? "succeeded" : "attempted",
+                    emotional_tone
+                });
+                
+                debug_pipeline("StateApplier", `  [2.6/4] Recorded event to working memory`, {
+                    event_id: correlation_id,
+                    actor: actor_ref,
+                    action
+                });
+            }
         }
     }
     

@@ -8,7 +8,7 @@ import { isCurrentSession, getSessionMeta, SESSION_ID } from "../shared/session.
 import { SERVICE_CONFIG } from "../shared/constants.js";
 
 import { get_data_slot_dir, get_inbox_path, get_item_dir, get_log_path, get_outbox_path, get_status_path, get_world_dir, get_roller_status_path } from "../engine/paths.js";
-import { read_inbox, clear_inbox, ensure_inbox_exists, append_inbox_message } from "../engine/inbox_store.js";
+import { read_inbox, clear_inbox, ensure_inbox_exists, append_inbox_message, write_inbox } from "../engine/inbox_store.js";
 import { ensure_outbox_exists } from "../engine/outbox_store.js";
 import { ensure_dir_exists, ensure_log_exists, read_log, append_log_envelope, append_log_message } from "../engine/log_store.js";
 import { append_outbox_message } from "../engine/outbox_store.js";
@@ -973,17 +973,59 @@ function start_http_server(log_path: string): void {
 
 // repeatedly check tasks that take time using current_state (shell)
 // Breath is the stage coordinator for routing and state transitions.
+// Track which messages have been displayed to prevent duplicates
+const displayedMessageIds = new Set<string>();
+
 function Breath(log_path: string, inbox_path: string, outbox_path: string): void {
     try {
         flush_incoming_messages();
 
-        // drain inbox.jsonc
+        // Read inbox without clearing
         const inbox = read_inbox(inbox_path);
-        if (inbox.messages.length > 0) {
-            for (let i = inbox.messages.length - 1; i >= 0; i--) {
-                const msg = inbox.messages[i];
-                if (!msg) continue;
+        if (inbox.messages.length === 0) return;
 
+        const messagesToKeep: typeof inbox.messages = [];
+        const messagesToRemove: typeof inbox.messages = [];
+
+        for (const msg of inbox.messages) {
+            if (!msg) continue;
+
+            // Skip if already displayed
+            if (displayedMessageIds.has(msg.id)) {
+                messagesToRemove.push(msg);
+                continue;
+            }
+
+            // Check if this is a displayable message (NPC response, renderer output)
+            const isDisplayable = 
+                msg.stage === "npc_response" ||
+                msg.stage === "rendered_1" ||
+                msg.sender?.startsWith("npc.") ||
+                msg.sender === "renderer_ai";
+
+            // Check if this is user input that needs routing
+            const isUserInput = 
+                msg.type === "user_input" ||
+                msg.sender?.toLowerCase() === "j" ||
+                (msg.stage !== "npc_response" && 
+                 msg.stage !== "rendered_1" &&
+                 !msg.sender?.startsWith("npc.") &&
+                 msg.sender !== "renderer_ai");
+
+            if (isDisplayable) {
+                // Display to user
+                displayMessageToUser(msg, log_path);
+                displayedMessageIds.add(msg.id);
+                messagesToRemove.push(msg);
+                
+                debug_log("Breath: displayed message to user", {
+                    id: msg.id,
+                    sender: msg.sender,
+                    stage: msg.stage,
+                    preview: msg.content?.slice(0, 50)
+                });
+            } else if (isUserInput) {
+                // Route through pipeline
                 const normalized: MessageEnvelope = {
                     ...msg,
                     created_at: msg.created_at ?? new Date().toISOString(),
@@ -1001,7 +1043,6 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
                     id: routed.log.id,
                     sender: routed.log.sender,
                     stage: routed.log.stage,
-                    status: routed.log.status,
                     hasOutbox: !!routed.outbox,
                     outboxStage: routed.outbox?.stage,
                 });
@@ -1025,18 +1066,45 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
                     );
                 }
 
-                if (msg.sender?.toLowerCase() === "interpreter_ai") {
-                }
+                messagesToRemove.push(msg);
+            } else {
+                // Unknown message type, keep for now
+                messagesToKeep.push(msg);
             }
-
-            clear_inbox(inbox_path);
         }
 
-        // visual log disabled; use UI windows instead
+        // Rewrite inbox with only messages to keep
+        if (messagesToRemove.length > 0) {
+            inbox.messages = messagesToKeep;
+            write_inbox(inbox_path, inbox);
+            
+            debug_log("Breath: inbox cleaned", {
+                removed: messagesToRemove.length,
+                kept: messagesToKeep.length
+            });
+        }
+
+        // Prune displayed message IDs if getting too large
+        if (displayedMessageIds.size > 1000) {
+            const idsArray = Array.from(displayedMessageIds);
+            displayedMessageIds.clear();
+            idsArray.slice(-500).forEach(id => displayedMessageIds.add(id));
+        }
     } catch (err) {
         current_state = "error";
         console.error(err);
     }
+}
+
+// Display message to user (placeholder - actual UI integration needed)
+function displayMessageToUser(msg: MessageEnvelope, log_path: string): void {
+    // Log the message content for now
+    // In real implementation, this would update the UI
+    const prefix = msg.stage === "npc_response" ? "[NPC]" : "[System]";
+    append_log_message(log_path, "display", `${prefix} ${msg.sender}: ${msg.content}`);
+    
+    // TODO: Integrate with actual UI display system
+    // This is where the message would be shown to the player
 }
 
 // run on boot (shell)

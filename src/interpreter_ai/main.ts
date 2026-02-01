@@ -77,6 +77,13 @@ function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Generate unique conversation ID
+function generate_conversation_id(): string {
+    const timestamp = Date.now();
+    const random = Math.random().toString(36).substring(2, 8);
+    return `conv_${timestamp}_${random}`;
+}
+
 function pre_tweak(msg: MessageEnvelope): MessageEnvelope {
     return msg;
 }
@@ -1086,6 +1093,13 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
     };
     response_msg.stage = is_refinement ? `interpreted_${next_iteration}` : "interpreted_1";
     response_msg.status = "sent";
+    
+    // Add conversation threading for COMMUNICATE actions
+    if (detected.verb === "COMMUNICATE") {
+        response_msg.conversation_id = msg.conversation_id || generate_conversation_id();
+        response_msg.turn_number = (msg.turn_number || 0) + 1;
+        response_msg.role = "player";
+    }
 
     // TODO: send to data broker program here instead of inbox
     append_inbox_message(inbox_path, response_msg);

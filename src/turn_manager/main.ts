@@ -18,13 +18,18 @@ import {
     check_all_done,
     mark_actor_left_region,
     is_actor_in_region,
-    get_active_actor_ref,
-    type WorldStore
+    get_active_actor_ref
 } from "../world_storage/store.js";
+import type { WorldStore } from "../world_storage/store.js";
 import type { MessageEnvelope } from "../engine/types.js";
 import * as fs from "node:fs";
 import { parse } from "jsonc-parser";
 import { SERVICE_CONFIG } from "../shared/constants.js";
+import { build_working_memory, add_event_to_memory, get_working_memory, cleanup_expired_memories } from "../context_manager/index.js";
+import type { TimedEventType } from "../shared/constants.js";
+import { initialize_turn_state, roll_initiative as roll_initiative_state_machine, transition_phase, get_turn_state, is_turn_timer_expired, get_turn_summary, type TurnState } from "./state_machine.js";
+import { validate_action, can_perform_action, type ActorState } from "./validator.js";
+import { hold_action, check_triggers, process_reaction, clear_event_reactions, create_trigger, type ReactionRequest } from "./reactions.js";
 
 const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
 const POLL_MS = SERVICE_CONFIG.POLL_MS.TURN_MANAGER;
@@ -428,6 +433,70 @@ async function process_trigger_messages(outbox_path: string, inbox_path: string,
                     await roll_initiative(data_slot_number, new_store);
                 }
                 
+                // ===== PHASE 5: INITIALIZE TURN STATE MACHINE =====
+                try {
+                    // Initialize turn state
+                    const turn_state = initialize_turn_state(
+                        result.event_id,
+                        event_type as TimedEventType,
+                        participants,
+                        { turn_duration_limit_ms: 60000 } // 60 second turn limit
+                    );
+                    
+                    // Roll initiative
+                    const initiative_scores = new Map<string, number>();
+                    for (const participant of participants) {
+                        const dex = get_actor_dex(data_slot_number, participant);
+                        const roll = roll_d20();
+                        const bonus = get_dex_bonus(dex);
+                        initiative_scores.set(participant, roll + bonus + 50); // Base 50 + roll + bonus
+                    }
+                    
+                    roll_initiative_state_machine(turn_state, initiative_scores);
+                    
+                    debug_log("TurnManager: turn state initialized", { 
+                        event_id: result.event_id, 
+                        participants: participants.length,
+                        first_actor: turn_state.current_actor_ref,
+                        phase: turn_state.phase
+                    });
+                    
+                    // Create turn announcement with initiative order
+                    const turn_announcement: MessageInput = {
+                        sender: "turn_manager",
+                        content: `Turn order: ${turn_state.initiative_order.map(ref => {
+                            const parts = ref.split(".");
+                            return parts[1] || ref;
+                        }).join(", ")}`,
+                        stage: "turn_order",
+                        status: "sent",
+                        meta: {
+                            event_id: result.event_id,
+                            initiative_order: turn_state.initiative_order,
+                            first_actor: turn_state.current_actor_ref
+                        }
+                    };
+                    append_inbox_message(inbox_path, create_message(turn_announcement));
+                    
+                } catch (err) {
+                    debug_log("TurnManager: failed to initialize turn state", { error: err instanceof Error ? err.message : String(err) });
+                }
+                
+                // Build working memory for this timed event
+                try {
+                    const region_id = `region.${location.world_x}_${location.world_y}_${location.region_x}_${location.region_y}`;
+                    await build_working_memory(
+                        data_slot_number,
+                        result.event_id,
+                        event_type as TimedEventType,
+                        region_id,
+                        participants
+                    );
+                    debug_log("TurnManager: working memory built", { event_id: result.event_id, participants: participants.length });
+                } catch (err) {
+                    debug_log("TurnManager: failed to build working memory", { error: err instanceof Error ? err.message : String(err) });
+                }
+                
                 // Create start announcement
                 const start_announcement: MessageInput = {
                     sender: "turn_manager",
@@ -452,8 +521,20 @@ async function process_trigger_messages(outbox_path: string, inbox_path: string,
 }
 
 // Main polling loop
+let lastMemoryCleanup = 0;
+
 async function tick(outbox_path: string, inbox_path: string, log_path: string): Promise<void> {
     try {
+        // Periodic memory cleanup (every 60 seconds)
+        const now = Date.now();
+        if (now - lastMemoryCleanup > 60000) {
+            const cleaned = cleanup_expired_memories(data_slot_number);
+            if (cleaned > 0) {
+                debug_log("TurnManager: cleaned up expired memories", { removed: cleaned });
+            }
+            lastMemoryCleanup = now;
+        }
+        
         // Process any new trigger messages
         await process_trigger_messages(outbox_path, inbox_path, log_path);
         
@@ -467,7 +548,15 @@ async function tick(outbox_path: string, inbox_path: string, log_path: string): 
         // Check for region exits
         await check_region_exits(data_slot_number, store);
         
-        // Process turn advancement
+        // ===== PHASE 5: PROCESS TURN STATE MACHINE =====
+        if (store.event_id) {
+            const turn_state = get_turn_state(store.event_id);
+            if (turn_state) {
+                await process_turn_phases(data_slot_number, store.event_id, turn_state, inbox_path, log_path);
+            }
+        }
+        
+        // Legacy turn advancement (kept for compatibility)
         await process_turn_advancement(data_slot_number, store);
         
         // Refresh store state after potential changes
@@ -479,6 +568,174 @@ async function tick(outbox_path: string, inbox_path: string, log_path: string): 
         
     } catch (err) {
         log_service_error("turn_manager", "tick", {}, err);
+    }
+}
+
+// ===== PHASE 5: TURN STATE MACHINE PROCESSING =====
+
+async function process_turn_phases(
+    slot: number,
+    event_id: string,
+    turn_state: TurnState,
+    inbox_path: string,
+    log_path: string
+): Promise<void> {
+    try {
+        // Check turn timer
+        if (is_turn_timer_expired(turn_state)) {
+            debug_log("TurnManager", `Turn timer expired for ${turn_state.current_actor_ref}`, {
+                event_id,
+                turn: turn_state.current_turn
+            });
+            
+            // Auto-skip turn
+            transition_phase(turn_state, "TURN_END");
+            
+            const skip_announcement: MessageInput = {
+                sender: "turn_manager",
+                content: `${turn_state.current_actor_ref}'s turn timed out and was skipped.`,
+                stage: "turn_skip",
+                status: "sent",
+                meta: {
+                    event_id,
+                    skipped_actor: turn_state.current_actor_ref,
+                    turn: turn_state.current_turn
+                }
+            };
+            append_inbox_message(inbox_path, create_message(skip_announcement));
+        }
+        
+        // Process based on current phase
+        switch (turn_state.phase) {
+            case "TURN_START":
+                // Announce turn start
+                const turn_announcement: MessageInput = {
+                    sender: "turn_manager",
+                    content: `Turn ${turn_state.current_turn}: ${turn_state.current_actor_ref}`,
+                    stage: "turn_start",
+                    status: "sent",
+                    meta: {
+                        event_id,
+                        turn: turn_state.current_turn,
+                        actor: turn_state.current_actor_ref,
+                        round: turn_state.round_number,
+                        time_remaining: turn_state.turn_time_remaining_ms
+                    }
+                };
+                append_inbox_message(inbox_path, create_message(turn_announcement));
+                
+                // Transition to action selection
+                transition_phase(turn_state, "ACTION_SELECTION");
+                break;
+                
+            case "ACTION_SELECTION":
+                // Wait for action input (player) or NPC decision
+                // This is handled by other services (interpreter, npc_ai)
+                // Turn manager just waits in this phase
+                break;
+                
+            case "ACTION_RESOLUTION":
+                // Action is being resolved
+                // This is handled by state_applier
+                // After resolution, transition to turn end
+                // (State applier should signal completion)
+                break;
+                
+            case "TURN_END":
+                // Process any held action triggers
+                const held_reactions = check_triggers(
+                    event_id,
+                    `turn_end_${turn_state.current_turn}`,
+                    turn_state.current_turn,
+                    { actor_ref: turn_state.current_actor_ref }
+                );
+                
+                if (held_reactions.length > 0) {
+                    // Process reactions
+                    for (const reaction of held_reactions) {
+                        const result = process_reaction(reaction, (actor, action, target) => {
+                            // Simple validation - in full implementation would check properly
+                            return true;
+                        });
+                        
+                        debug_log("TurnManager", `Processed reaction: ${result.message}`, {
+                            event_id,
+                            reactor: reaction.reactor_ref,
+                            success: result.success
+                        });
+                    }
+                }
+                
+                // Transition to event end check (which may start next turn)
+                transition_phase(turn_state, "EVENT_END_CHECK");
+                break;
+                
+            case "EVENT_END_CHECK":
+                // Check end conditions
+                const should_end = await check_event_end_conditions(slot, event_id, turn_state);
+                if (should_end) {
+                    transition_phase(turn_state, "EVENT_END");
+                    
+                    // Clear reactions
+                    clear_event_reactions(event_id);
+                    
+                    // End the timed event
+                    end_timed_event(slot);
+                    
+                    const end_announcement: MessageInput = {
+                        sender: "turn_manager",
+                        content: `${turn_state.event_type} has ended.`,
+                        stage: "timed_event_end",
+                        status: "sent",
+                        meta: {
+                            event_id,
+                            event_type: turn_state.event_type,
+                            rounds: turn_state.round_number,
+                            final_turn: turn_state.current_turn
+                        }
+                    };
+                    append_inbox_message(inbox_path, create_message(end_announcement));
+                    append_log_message(log_path, "system", `Timed event ended: ${event_id}`);
+                }
+                break;
+        }
+        
+        // Log turn summary periodically
+        if (turn_state.current_turn % 5 === 0) {
+            const summary = get_turn_summary(turn_state);
+            debug_log("TurnManager", "Turn summary", summary);
+        }
+        
+    } catch (err) {
+        log_service_error("turn_manager", "process_turn_phases", { event_id }, err);
+    }
+}
+
+async function check_event_end_conditions(
+    slot: number,
+    event_id: string,
+    turn_state: TurnState
+): Promise<boolean> {
+    // Check different end conditions based on event type
+    switch (turn_state.event_type) {
+        case "combat":
+            // End if all enemies defeated or all allies defeated
+            // This would check working memory or world state
+            // For now, end after 20 turns max
+            return turn_state.round_number >= 20;
+            
+        case "conversation":
+            // End if conversation naturally concludes
+            // Or after 10 turns
+            return turn_state.round_number >= 10;
+            
+        case "exploration":
+            // End if time limit reached or objective found
+            // Or after 15 turns
+            return turn_state.round_number >= 15;
+            
+        default:
+            return false;
     }
 }
 

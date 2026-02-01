@@ -125,6 +125,9 @@ export const MEMORY_BUDGETS = {
 
 // Service configuration
 export const SERVICE_CONFIG = {
+    // Default data slot
+    DEFAULT_DATA_SLOT: 1,
+    
     // Polling intervals (ms)
     POLL_MS: {
         INTERFACE: 2000,

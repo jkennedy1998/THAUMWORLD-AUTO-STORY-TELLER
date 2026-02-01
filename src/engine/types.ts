@@ -16,6 +16,12 @@ export type MessageEnvelope = {
     status?: MessageStatus;
     flags?: string[];
     meta?: Record<string, unknown>;
+    
+    // Conversation threading (Phase 1)
+    conversation_id?: string; // Groups related messages
+    turn_number?: number; // Order within conversation
+    displayed?: boolean; // Whether user has seen this message
+    role?: "player" | "npc" | "system" | "renderer"; // Who/what generated this
 };
 
 export type LogMessage = MessageEnvelope;
@@ -36,3 +42,54 @@ export type OutboxFile = {
 };
 
 export const BASE32_RFC_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+// Conversation threading types (Phase 1)
+export type ConversationParticipant = {
+    ref: string; // actor.henry_actor or npc.grenda
+    name: string;
+    joined_at: string; // ISO timestamp
+    left_at?: string; // ISO timestamp if they left
+    role: "active" | "passive" | "eavesdropper"; // active = speaking, passive = listening, eavesdropper = overhearing
+};
+
+export type ConversationMessage = {
+    turn: number;
+    message_id: string; // Reference to MessageEnvelope.id
+    speaker: string;
+    text: string;
+    timestamp: string;
+    emotional_tone?: string;
+    action_verb?: string;
+};
+
+export type Conversation = {
+    id: string;
+    schema_version: 1;
+    
+    // Metadata
+    started_at: string;
+    ended_at?: string;
+    region_id: string; // Where conversation happens
+    event_id?: string; // If part of timed event
+    
+    // Participants
+    participants: ConversationParticipant[];
+    
+    // Content
+    messages: ConversationMessage[];
+    
+    // Topics & state
+    topics_discussed: string[];
+    unresolved_points: string[];
+    agreements_reached: string[];
+    conflicts_raised: string[];
+    
+    // Status
+    status: "active" | "paused" | "ended";
+    last_activity: string; // ISO timestamp
+};
+
+export type ConversationFile = {
+    schema_version: 1;
+    conversations: Conversation[];
+};

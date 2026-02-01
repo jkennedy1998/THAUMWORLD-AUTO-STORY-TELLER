@@ -1,7 +1,7 @@
 import { get_data_slot_dir, get_log_path, get_inbox_path, get_outbox_path, get_npc_path, get_actor_path } from "../engine/paths.js";
 import { ensure_dir_exists, ensure_log_exists, append_log_message, append_log_envelope } from "../engine/log_store.js";
 import { ensure_inbox_exists, append_inbox_message } from "../engine/inbox_store.js";
-import { ensure_outbox_exists, read_outbox, write_outbox, prune_outbox_messages } from "../engine/outbox_store.js";
+import { ensure_outbox_exists, read_outbox, write_outbox, prune_outbox_messages, update_outbox_message } from "../engine/outbox_store.js";
 import { create_message, try_set_message_status } from "../engine/message.js";
 import type { MessageInput } from "../engine/message.js";
 import type { MessageEnvelope } from "../engine/types.js";
@@ -12,6 +12,16 @@ import { find_npcs, load_npc } from "../npc_storage/store.js";
 import { load_actor } from "../actor_storage/store.js";
 import { isCurrentSession, getSessionMeta } from "../shared/session.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
+import { get_working_memory, format_memory_for_ai } from "../context_manager/index.js";
+import { filter_memory_for_action, format_filtered_memory } from "../context_manager/relevance.js";
+import { checkScriptedResponse, buildDecisionContext, type MatchedScriptedResponse } from "./decision_tree.js";
+import { findTemplate, getTemplateResponse, detectSituation } from "./template_db.js";
+import { getAvailableActions, buildNPCState, type AvailableAction } from "./action_selector.js";
+import { applySway, applySwayToActions, createSwayFromCommunication, getActiveSway, describeSwayEffects } from "./sway_system.js";
+import { start_conversation, add_message, end_conversation, get_conversation } from "../conversation_manager/archive.js";
+import { format_for_ai } from "../conversation_manager/formatter.js";
+import { summarize_for_npc, get_important_memories } from "../conversation_manager/summarizer.js";
+import { get_memories_about, remembers_entity, get_relationship_status, add_conversation_memory, get_formatted_memories } from "../npc_storage/memory.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -53,8 +63,97 @@ function append_session_turn(session_key: string, user_text: string, assistant_t
     npc_sessions.set(session_key, history);
 }
 
+// ===== DECISION HIERARCHY: Scripted → Template → AI =====
+
+type DecisionResult = 
+    | { type: "scripted"; response: MatchedScriptedResponse }
+    | { type: "template"; action: string; dialogue: string }
+    | { type: "ai"; reason: string };
+
+/**
+ * Determine NPC response using decision hierarchy
+ * 1. Check scripted responses (emergency, combat, social)
+ * 2. Check template database (archetype-specific)
+ * 3. Fall back to AI if needed
+ */
+function determineResponse(
+    npc: any,
+    player_text: string,
+    situation: {
+        is_combat: boolean;
+        has_been_attacked: boolean;
+        nearby_hostiles: number;
+        nearby_allies: number;
+        is_direct_target: boolean;
+    },
+    available_actions: AvailableAction[]
+): DecisionResult {
+    // Step 1: Check scripted responses (highest priority)
+    const decision_context = buildDecisionContext(
+        {
+            id: npc.id,
+            name: npc.name,
+            role: npc.role || "unknown",
+            personality: npc.personality ? JSON.stringify(npc.personality) : "neutral",
+            stats: npc.stats
+        },
+        player_text,
+        {
+            is_combat: situation.is_combat,
+            has_been_attacked: situation.has_been_attacked,
+            nearby_hostiles: situation.nearby_hostiles,
+            nearby_allies: situation.nearby_allies,
+            action_verb: available_actions[0]?.verb,
+            target_ref: situation.is_direct_target ? "player" : undefined
+        }
+    );
+    
+    const scripted = checkScriptedResponse(decision_context);
+    if (scripted.matched && scripted.priority >= 7) {
+        // High priority scripted responses (emergency, combat)
+        return { type: "scripted", response: scripted };
+    }
+    
+    // Step 2: Check template database
+    const archetype = npc.role || "villager";
+    const detected_situation = detectSituation(player_text);
+    const health = npc.stats?.health;
+    const health_percent = health ? (health.current / health.max) * 100 : 100;
+    
+    const template = findTemplate(archetype, detected_situation, {
+        is_combat: situation.is_combat,
+        health_percent,
+        time_of_day: "day" // TODO: Get actual time
+    });
+    
+    if (template && template.priority >= 5) {
+        // Template found with good priority
+        return { 
+            type: "template", 
+            action: template.action,
+            dialogue: getTemplateResponse(template)
+        };
+    }
+    
+    // Step 3: Use AI for complex situations
+    // - Low priority scripted/template responses
+    // - Questions requiring knowledge
+    // - Emotional situations
+    // - Multi-turn conversations
+    let ai_reason = "Complex situation requiring AI";
+    if (scripted.matched && scripted.priority < 7) {
+        ai_reason = `Scripted response too generic (priority ${scripted.priority})`;
+    } else if (template && template.priority < 5) {
+        ai_reason = `Template too generic (priority ${template.priority})`;
+    } else if (!template) {
+        ai_reason = "No matching template found";
+    }
+    
+    return { type: "ai", reason: ai_reason };
+}
+
 // Build NPC system prompt based on character sheet
-function build_npc_prompt(npc: any, player_text: string, can_perceive: boolean, clarity: string): string {
+function build_npc_prompt(npc: any, player_text: string, can_perceive: boolean, clarity: string, memory_context?: string): string {
     const personality = npc.personality || {};
     const lore = npc.lore || {};
     const appearance = npc.appearance || {};
@@ -91,6 +190,11 @@ function build_npc_prompt(npc: any, player_text: string, can_perceive: boolean, 
     // Appearance if notable
     if (appearance.distinguishing_features) {
         prompt_parts.push(`Notable features: ${appearance.distinguishing_features}`);
+    }
+    
+    // Working memory context (if available)
+    if (memory_context && memory_context.length > 0) {
+        prompt_parts.push(`\n${memory_context}`);
     }
     
     // Perception context
@@ -243,6 +347,33 @@ async function process_communication(
     }
     
     const player_location = actor_result.actor.location as { region_tile?: { x: number; y: number }; tile?: { x: number; y: number } };
+    const player_ref = `actor.${actor_id}`;
+    
+    // ===== PHASE 4: CONVERSATION TRACKING =====
+    
+    // Get or create conversation
+    let conversation_id = msg.conversation_id;
+    let conversation = conversation_id ? get_conversation(data_slot_number, conversation_id) : null;
+    
+    if (!conversation && conversation_id) {
+        // Conversation ID exists but conversation not found, create new
+        const player_loc = player_location as { world_tile?: { x: number; y: number }; region_tile?: { x: number; y: number } };
+        const region_id = `region.${player_loc.world_tile?.x ?? 0}_${player_loc.world_tile?.y ?? 0}_${player_loc.region_tile?.x ?? 0}_${player_loc.region_tile?.y ?? 0}`;
+        const initial_participants = [player_ref];
+        conversation = start_conversation(data_slot_number, conversation_id, region_id, initial_participants, undefined);
+    }
+    
+    // Add player message to conversation
+    if (conversation && conversation_id) {
+        add_message(
+            data_slot_number,
+            conversation_id,
+            player_ref,
+            original_text,
+            "neutral", // TODO: Detect emotional tone
+            "COMMUNICATE"
+        );
+    }
     
     // Parse targets from machine text
     const targets_match = machine_text.match(/targets=\[([^\]]+)\]/);
@@ -321,95 +452,285 @@ async function process_communication(
             clarity: perception.clarity
         });
         
-        // Build prompt
-        const prompt = build_npc_prompt(npc, original_text, perception.can_perceive, perception.clarity);
+        // ===== PHASE 3: DECISION HIERARCHY =====
         
-        // Get session history
-        const session_key = get_session_key(npc_hit.id, correlation_id);
-        const history = get_session_history(session_key);
+        // Get available actions for this NPC
+        const npc_state = buildNPCState(
+            {
+                id: npc_hit.id,
+                stats: (npc as Record<string, unknown>).stats as { health?: { current: number; max: number } } | undefined,
+                body_slots: (npc as Record<string, unknown>).body_slots as Record<string, unknown> | undefined,
+                hand_slots: (npc as Record<string, unknown>).hand_slots as Record<string, string> | undefined,
+                tags: (npc as Record<string, unknown>).tags as Array<{ name: string }> | undefined,
+                personality: (npc as Record<string, unknown>).personality ? JSON.stringify((npc as Record<string, unknown>).personality) : "neutral",
+                role: (npc as Record<string, unknown>).role as string || "unknown"
+            },
+            {
+                nearby_allies: nearby_npcs.length - 1, // Exclude self
+                nearby_enemies: 0, // TODO: Track hostiles
+                is_in_combat: false // TODO: Check combat state
+            }
+        );
         
-        const messages: OllamaMessage[] = [
-            { role: "system", content: "You are roleplaying as an NPC in a fantasy world. Stay in character." },
-            ...history,
-            { role: "user", content: prompt }
-        ];
+        let available_actions = getAvailableActions(npc_state);
         
-        try {
-            const response = await ollama_chat({
-                host: OLLAMA_HOST,
-                model: NPC_AI_MODEL,
-                messages,
-                keep_alive: NPC_AI_KEEP_ALIVE,
-                timeout_ms: NPC_AI_TIMEOUT_MS,
-                options: { temperature: NPC_AI_TEMPERATURE },
-            });
-            
-            const npc_response = response.content.trim();
-            
-            // Log AI I/O
-            log_ai_io_terminal(
-                'interpreter', // Using interpreter type for NPC responses
-                `${npc.name} responding to: ${original_text.slice(0, 30)}...`,
-                npc_response,
-                response.duration_ms,
-                session_key
-            );
-            
-            // Store to session
-            append_session_turn(session_key, original_text, npc_response);
-            
-            // Create response message
-            const output: MessageInput = {
-                sender: `npc.${npc_hit.id}`,
-                content: npc_response,
-                stage: "npc_response",
-                status: "sent",
-                reply_to: msg.id,
-                correlation_id: correlation_id,
-                meta: {
-                    ...getSessionMeta(),
-                    npc_id: npc_hit.id,
-                    npc_name: npc.name,
-                    target_actor: actor_id,
-                    communication_context: original_text,
-                    is_direct_response: is_direct_target,
-                    perception_clarity: perception.clarity,
-                },
-            };
-            
-            const response_msg = create_message(output);
-            append_inbox_message(inbox_path, response_msg);
-            
-            debug_pipeline("NPC_AI", `Created response from ${npc.name}`, {
-                msg_id: response_msg.id,
-                response_preview: npc_response.slice(0, 50)
-            });
-            
-            // Mark as responded
-            responded_npcs.add(npc_hit.id);
-            
-            // Log metric
-            append_metric(data_slot_number, "npc_ai", {
-                at: new Date().toISOString(),
-                model: response.model,
-                ok: true,
-                duration_ms: response.duration_ms,
-                stage: "npc_response",
-                session: session_key,
-            });
-            
-        } catch (err) {
-            debug_error("NPC_AI", `Failed to generate response for ${npc.name}`, err);
-            append_metric(data_slot_number, "npc_ai", {
-                at: new Date().toISOString(),
-                model: NPC_AI_MODEL,
-                ok: false,
-                duration_ms: Date.now() - started,
-                stage: "npc_response",
-                session: session_key,
-                error: err instanceof Error ? err.message : String(err),
+        // Apply sway from player communication
+        const sway = createSwayFromCommunication(original_text, player_ref, npc_state.personality);
+        if (sway) {
+            applySway(npc_hit.id, sway);
+            debug_pipeline("NPC_AI", `Applied ${sway.type} sway to ${npc.name}`, {
+                magnitude: sway.magnitude,
+                reason: sway.reason
             });
         }
+        
+        // Get active sway and apply to actions
+        const active_sway = getActiveSway(npc_hit.id);
+        if (active_sway.length > 0) {
+            available_actions = applySwayToActions(available_actions, active_sway, npc_state.personality);
+            debug_pipeline("NPC_AI", `Applied sway to ${npc.name}'s actions`, {
+                sway_description: describeSwayEffects(active_sway, npc_state.personality),
+                top_action: available_actions[0]?.verb
+            });
+        }
+        
+        // Determine response using decision hierarchy
+        const decision = determineResponse(
+            npc,
+            original_text,
+            {
+                is_combat: false, // TODO: Check combat state
+                has_been_attacked: false, // TODO: Check recent events
+                nearby_hostiles: 0,
+                nearby_allies: nearby_npcs.length - 1,
+                is_direct_target: is_direct_target
+            },
+            available_actions
+        );
+        
+        let npc_response: string;
+        let decision_source: string;
+        let ai_duration_ms = 0;
+        
+        switch (decision.type) {
+            case "scripted":
+                npc_response = decision.response.dialogue;
+                decision_source = `scripted (${decision.response.action}, priority ${decision.response.priority})`;
+                debug_pipeline("NPC_AI", `Using scripted response for ${npc.name}`, {
+                    action: decision.response.action,
+                    priority: decision.response.priority,
+                    reasoning: decision.response.reasoning
+                });
+                break;
+                
+            case "template":
+                npc_response = decision.dialogue;
+                decision_source = `template (${decision.action})`;
+                debug_pipeline("NPC_AI", `Using template response for ${npc.name}`, {
+                    action: decision.action
+                });
+                break;
+                
+            case "ai":
+                // Get working memory for context if available
+                let memory_context = "";
+                if (correlation_id) {
+                    const memory = get_working_memory(data_slot_number, correlation_id);
+                    if (memory) {
+                        // Filter memory for COMMUNICATE action from NPC's perspective
+                        const npc_ref = `npc.${npc_hit.id}`;
+                        const filtered = filter_memory_for_action(memory, "COMMUNICATE", npc_ref);
+                        memory_context = format_filtered_memory(filtered);
+                    }
+                }
+                
+                // Build prompt with working memory context
+                const prompt = build_npc_prompt(npc, original_text, perception.can_perceive, perception.clarity, memory_context);
+                
+                // Get session history
+                const session_key = get_session_key(npc_hit.id, correlation_id);
+                const history = get_session_history(session_key);
+                
+                const messages: OllamaMessage[] = [
+                    { role: "system", content: "You are roleplaying as an NPC in a fantasy world. Stay in character." },
+                    ...history,
+                    { role: "user", content: prompt }
+                ];
+                
+                try {
+                    const ai_start = Date.now();
+                    const response = await ollama_chat({
+                        host: OLLAMA_HOST,
+                        model: NPC_AI_MODEL,
+                        messages,
+                        keep_alive: NPC_AI_KEEP_ALIVE,
+                        timeout_ms: NPC_AI_TIMEOUT_MS,
+                        options: { temperature: NPC_AI_TEMPERATURE },
+                    });
+                    ai_duration_ms = Date.now() - ai_start;
+                    
+                    npc_response = response.content.trim();
+                    decision_source = `AI (${decision.reason})`;
+                    
+                    // Log AI I/O
+                    log_ai_io_terminal(
+                        'interpreter',
+                        `${npc.name} responding to: ${original_text.slice(0, 30)}...`,
+                        npc_response,
+                        ai_duration_ms,
+                        session_key
+                    );
+                } catch (err) {
+                    debug_error("NPC_AI", `AI call failed for ${npc.name}`, err);
+                    // Fallback to template if available, otherwise generic
+                    const fallback_template = findTemplate(String(npc.role || "villager"), "greeting", {
+                        is_combat: false,
+                        health_percent: 100
+                    });
+                    npc_response = fallback_template 
+                        ? getTemplateResponse(fallback_template)
+                        : "*nods silently*";
+                    decision_source = "fallback (AI error)";
+                }
+                break;
+        }
+        
+        // Store to session (for all response types)
+        const session_key = get_session_key(npc_hit.id, correlation_id);
+        append_session_turn(session_key, original_text, npc_response);
+        
+        // ===== PHASE 4: ADD TO CONVERSATION =====
+        if (conversation) {
+            const npc_ref = `npc.${npc_hit.id}`;
+            
+            // Add NPC to participants if not already there
+            if (!conversation.participants.some(p => p.ref === npc_ref)) {
+                // Participant added implicitly by add_message
+            }
+            
+            // Add NPC response to conversation
+            if (conversation_id) {
+                add_message(
+                    data_slot_number,
+                    conversation_id,
+                    npc_ref,
+                    npc_response,
+                    "neutral", // TODO: Detect emotional tone
+                    decision.type === "scripted" ? decision.response.action : 
+                    decision.type === "template" ? decision.action : "COMMUNICATE"
+                );
+            }
+            
+            // Check if we should summarize (every 10 messages)
+            if (conversation.messages.length % 10 === 0 && conversation.messages.length > 0) {
+                // Summarize asynchronously (don't block response)
+                summarize_conversation_for_npc(data_slot_number, conversation, npc_hit.id, npc.name, npc.personality ? JSON.stringify(npc.personality) : "neutral").catch(err => {
+                    debug_error("NPC_AI", "Failed to summarize conversation", { error: err });
+                });
+            }
+        }
+        
+        // ===== PHASE 4: INCLUDE LONG-TERM MEMORY IN PROMPT =====
+        // Get memories about the player
+        const npc_mem_ref = `npc.${npc_hit.id}`;
+        const memories = get_memories_about(data_slot_number, npc_mem_ref, player_ref, { limit: 3 });
+        
+        // Check if NPC remembers the player
+        const knows_player = remembers_entity(data_slot_number, npc_mem_ref, player_ref);
+        const relationship = get_relationship_status(data_slot_number, npc_mem_ref, player_ref);
+        
+        if (knows_player) {
+            debug_pipeline("NPC_AI", `${npc.name} remembers player`, {
+                relationship: relationship.status,
+                memory_count: relationship.memory_count
+            });
+        }
+        
+        // Create response message with conversation threading
+        const output: MessageInput = {
+            sender: `npc.${npc_hit.id}`,
+            content: npc_response,
+            stage: "npc_response",
+            status: "sent",
+            reply_to: msg.id,
+            correlation_id: correlation_id,
+            // Inherit conversation from triggering message
+            conversation_id: msg.conversation_id,
+            turn_number: (msg.turn_number || 0) + 1,
+            role: "npc",
+            meta: {
+                ...getSessionMeta(),
+                npc_id: npc_hit.id,
+                npc_name: npc.name,
+                target_actor: actor_id,
+                communication_context: original_text,
+                is_direct_response: is_direct_target,
+                perception_clarity: perception.clarity,
+                decision_source: decision_source,
+                available_actions: available_actions.slice(0, 3).map(a => a.verb),
+            },
+        };
+        
+        const response_msg = create_message(output);
+        append_inbox_message(inbox_path, response_msg);
+        
+        debug_pipeline("NPC_AI", `Created response from ${npc.name}`, {
+            msg_id: response_msg.id,
+            decision_source: decision_source,
+            response_preview: npc_response.slice(0, 50)
+        });
+        
+        // Mark as responded
+        responded_npcs.add(npc_hit.id);
+        
+        // Log metric
+        append_metric(data_slot_number, "npc_ai", {
+            at: new Date().toISOString(),
+            model: decision.type === "ai" ? NPC_AI_MODEL : "decision_hierarchy",
+            ok: true,
+            duration_ms: ai_duration_ms,
+            stage: "npc_response",
+            session: session_key,
+        });
+    }
+}
+
+// ===== PHASE 4: CONVERSATION SUMMARIZATION =====
+
+async function summarize_conversation_for_npc(
+    slot: number,
+    conversation: import("../conversation_manager/archive.js").ConversationArchive,
+    npc_id: string,
+    npc_name: string,
+    npc_personality: string
+): Promise<void> {
+    const npc_ref = `npc.${npc_id}`;
+    
+    // Import here to avoid circular dependencies
+    const { summarize_for_npc } = await import("../conversation_manager/summarizer.js");
+    const { add_conversation_memory } = await import("../npc_storage/memory.js");
+    
+    const summary = await summarize_for_npc(
+        slot,
+        conversation,
+        npc_ref,
+        npc_name,
+        npc_personality
+    );
+    
+    if (summary) {
+        // Add to NPC's long-term memory
+        const related_entities = conversation.participants
+            .filter(p => p.ref !== npc_ref)
+            .map(p => p.ref);
+        
+        add_conversation_memory(slot, npc_ref, summary, related_entities);
+        
+        debug_log("NPC_AI", `Added conversation memory for ${npc_name}`, {
+            conversation_id: conversation.conversation_id,
+            importance: summary.importance_score,
+            emotion: summary.emotion
+        });
     }
 }
 
@@ -442,12 +763,18 @@ async function tick(outbox_path: string, inbox_path: string, log_path: string): 
         for (const msg of candidates) {
             try {
                 // Mark as processing to prevent duplicate handling
-                try_set_message_status(outbox_path, msg.id, "processing");
+                const processing = try_set_message_status(msg, "processing");
+                if (processing.ok) {
+                    update_outbox_message(outbox_path, processing.message);
+                }
                 
                 await process_communication(outbox_path, inbox_path, log_path, msg);
                 
                 // Mark as done after successful processing
-                try_set_message_status(outbox_path, msg.id, "done");
+                const done = try_set_message_status(msg, "done");
+                if (done.ok) {
+                    update_outbox_message(outbox_path, done.message);
+                }
             } catch (err) {
                 debug_error("NPC_AI", `Failed to process communication ${msg.id}`, err);
                 // Don't mark as done on error - will retry next poll

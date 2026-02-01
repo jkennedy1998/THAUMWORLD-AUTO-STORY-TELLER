@@ -32,12 +32,13 @@ type TimedEventEffect = {
     effect_args: Record<string, unknown>;
 };
 
-type WorldStore = {
+export type WorldStore = {
     schema_version: number;
     world_tiles: Record<string, WorldTile>;
     timed_event_active?: boolean;
     
     // Timed Event State
+    event_id?: string;  // Alias for timed_event_id
     timed_event_id?: string;
     timed_event_type?: "combat" | "conversation" | "exploration";
     timed_event_start_time?: string;  // ISO timestamp
