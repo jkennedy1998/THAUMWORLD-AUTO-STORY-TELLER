@@ -1,7 +1,7 @@
 import type { CommandNode, ValueNode } from "../system_syntax/index.js";
 import { load_actor, load_default_actor } from "../actor_storage/store.js";
 import { load_npc } from "../npc_storage/store.js";
-import { get_region_tile, get_world_tile } from "../world_storage/store.js";
+import { get_region_tile, get_world_tile, load_region } from "../world_storage/store.js";
 import type { ResolvedRef, ResolverOptions, ResolverResult } from "./types.js";
 
 function collect_identifiers(value: ValueNode, out: string[]): void {
@@ -110,6 +110,29 @@ function resolve_region_tile_ref(ref: string, options: ResolverOptions, result: 
     result.resolved[ref] = resolved;
 }
 
+// New function to resolve regions by ID (for new region file system)
+function resolve_region_ref(ref: string, options: ResolverOptions, result: ResolverResult): void {
+    const parts = parse_ref_parts(ref);
+    const region_id = parts[1] ?? "";
+    if (!region_id) return;
+
+    const resolved: ResolvedRef = { ref, id: region_id, type: "region" };
+    const loaded = load_region(options.slot, region_id);
+    if (!loaded.ok) {
+        if (options.use_representative_data) {
+            resolved.representative = true;
+            result.warnings.push({ ref, message: loaded.error });
+            result.resolved[ref] = resolved;
+            return;
+        }
+        result.errors.push({ ref, reason: "region_not_found", path: loaded.error });
+        return;
+    }
+
+    resolved.path = loaded.path;
+    result.resolved[ref] = resolved;
+}
+
 function resolve_tile_ref(ref: string, options: ResolverOptions, result: ResolverResult): void {
     const parts = parse_ref_parts(ref);
     const world_x = Number(parts[1]);
@@ -200,6 +223,10 @@ function resolve_ref(ref: string, options: ResolverOptions, result: ResolverResu
     }
     if (ref.startsWith("region_tile.")) {
         resolve_region_tile_ref(ref, options, result);
+        return;
+    }
+    if (ref.startsWith("region.")) {
+        resolve_region_ref(ref, options, result);
         return;
     }
     if (ref.startsWith("tile.")) {

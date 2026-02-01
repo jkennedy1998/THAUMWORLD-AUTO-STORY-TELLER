@@ -58,9 +58,8 @@ Data: local_data/data_slot_1/
 
 **Files to modify:**
 1. `docs/EFFECTS.md` - Document the effect
-2. `src/system_syntax/index.ts` - Add to VALID_EFFECTS
-3. `src/rules_lawyer/effects.ts` - Add handler
-4. `src/state_applier/apply.ts` - Add implementation
+2. `src/rules_lawyer/effects.ts` - Add handler (parser auto-handles SYSTEM.*)
+3. `src/state_applier/apply.ts` - Add implementation
 
 **Template for rules_lawyer:**
 ```typescript

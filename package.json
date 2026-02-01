@@ -14,6 +14,7 @@
     "renderer_dev": "tsx src/renderer_ai/main.ts",
     "roller_dev": "tsx src/roller/main.ts",
     "state_applier_dev": "tsx src/state_applier/main.ts",
+    "turn_manager_dev": "tsx src/turn_manager/main.ts",
     "build": "tsc",
     "start": "node dist/interface_program/main.js",
     "format": "prettier . --write",

@@ -80,33 +80,139 @@ function extract_obscured_awareness(effects: string[]): string[] {
     return matches;
 }
 
+// Action-specific narrative generators for THAUMWORLD
+// TODO: Add remaining verbs: HELP, DEFEND, GRAPPLE, DODGE, CRAFT, SLEEP, REPAIR, WORK, GUARD, HOLD
+
+function generateInspectNarrativePrompt(params: {
+    original_text: string;
+    events: string[];
+    effects: string[];
+}): string {
+    const target = params.events[0]?.match(/target=([^,)]+)/)?.[1] || "the area";
+    const hasFindings = params.effects.length > 0;
+    
+    return `The player is inspecting ${target}.
+${hasFindings 
+    ? "They discover something noteworthy. Describe what they find in detail."
+    : "They find nothing of particular interest. Describe the mundane details of what they observe."}
+
+Write a descriptive narrative (1-3 sentences) of what they see, hear, or notice.
+Use sensory details appropriate to the location.
+Write in second person ("You see...", "You notice...").
+Keep it immersive and atmospheric.`;
+}
+
+function generateAttackNarrativePrompt(params: {
+    original_text: string;
+    events: string[];
+    effects: string[];
+}): string {
+    const target = params.events[0]?.match(/target=([^,)]+)/)?.[1] || "the target";
+    const weapon = params.events[0]?.match(/tool=([^,)]+)/)?.[1]?.split('.').pop() || "their weapon";
+    const damageEffects = params.effects.filter(e => e.includes("APPLY_DAMAGE"));
+    const hit = damageEffects.length > 0;
+    
+    return `The player attacks ${target} using ${weapon}.
+${hit 
+    ? "The attack connects and deals damage. Describe the impact and the target's reaction."
+    : "The attack misses or fails to connect. Describe the near-miss or the target's evasion."}
+
+Write a dynamic combat narrative (1-3 sentences).
+Use active, visceral language.
+Describe the motion of the attack and the immediate result.
+Write in second person ("You swing...", "Your strike...").`;
+}
+
+function generateCommunicateNarrativePrompt(params: {
+    original_text: string;
+    events: string[];
+    effects: string[];
+}): string {
+    const text = params.events[0]?.match(/text="([^"]+)"/)?.[1] || params.original_text || "something";
+    const targets = params.events[0]?.match(/targets=\[([^\]]*)\]/)?.[1];
+    const hasTarget = targets && targets.length > 0 && !targets.includes("[]");
+    
+    return `The player says: "${text}"
+${hasTarget 
+    ? "They are speaking to someone present. Describe how they deliver the message and the context."
+    : "They speak but there's no one around to hear. Describe their words echoing into the silence."}
+
+Write a narrative (1-3 sentences) describing the communication.
+Include the tone and manner of speaking.
+${hasTarget ? "Set up the scene for the NPC's response." : "Convey the emptiness or solitude of the moment."}
+Write in second person.`;
+}
+
+function generateMoveNarrativePrompt(params: {
+    original_text: string;
+    events: string[];
+    effects: string[];
+}): string {
+    const destination = params.events[0]?.match(/target=([^,)]+)/)?.[1] || "a new location";
+    const mode = params.events[0]?.match(/mode="([^"]+)"/)?.[1] || "walk";
+    
+    return `The player ${mode}s toward ${destination}.
+
+Write a travel narrative (1-3 sentences) describing their movement.
+Describe the terrain, the journey, and their arrival.
+Use sensory details about the environment.
+Write in second person ("You make your way...", "You arrive at...").`;
+}
+
+function generateUseNarrativePrompt(params: {
+    original_text: string;
+    events: string[];
+    effects: string[];
+}): string {
+    const tool = params.events[0]?.match(/tool=([^,)]+)/)?.[1]?.split('.').pop() || "the item";
+    const hasEffects = params.effects.length > 0;
+    
+    return `The player uses ${tool}.
+${hasEffects 
+    ? "The item produces a noticeable effect. Describe what happens when they use it."
+    : "They attempt to use it but nothing significant occurs."}
+
+Write an item interaction narrative (1-3 sentences).
+Describe the physical interaction and any results.
+Write in second person.`;
+}
+
+function generateGenericNarrativePrompt(params: {
+    original_text: string;
+    events: string[];
+    effects: string[];
+}): string {
+    return `The player attempts: "${params.original_text || 'an action'}"
+
+Something happens but produces no significant effects or changes.
+Write a brief narrative (1-3 sentences) acknowledging the attempt.
+Describe why nothing notable occurs (wrong context, no target, already done, etc.).
+Keep it informative but atmospheric.
+Write in second person.`;
+}
+
 function build_renderer_prompt(params: {
     original_text: string;
     machine_text: string;
     events: string[];
     effects: string[];
+    action_verb: string | null;
 }): string {
-    const sections: string[] = [];
-    // TODO: add a third contextual summary of the last 10 turns.
-    if (params.original_text.trim().length > 0) {
-        sections.push("Player input:", params.original_text.trim(), "");
+    // Route to action-specific narrative generator
+    switch (params.action_verb) {
+        case "INSPECT":
+            return generateInspectNarrativePrompt(params);
+        case "ATTACK":
+            return generateAttackNarrativePrompt(params);
+        case "COMMUNICATE":
+            return generateCommunicateNarrativePrompt(params);
+        case "MOVE":
+            return generateMoveNarrativePrompt(params);
+        case "USE":
+            return generateUseNarrativePrompt(params);
+        default:
+            return generateGenericNarrativePrompt(params);
     }
-
-    sections.push(format_list("System events", params.events));
-    sections.push("");
-    sections.push(format_list("System effects", params.effects));
-
-    const obscured = extract_obscured_awareness(params.effects);
-    if (obscured.length > 0) {
-        sections.push("", format_list("Awareness notes", obscured.map((t) => `obscured awareness of ${t}`)));
-    }
-
-    if (params.machine_text.trim().length > 0) {
-        sections.push("", "Machine text:", params.machine_text.trim());
-    }
-
-    sections.push("", "Write the narrative response for the player.");
-    return sections.join("\n").trim();
 }
 
 async function run_renderer_ai(params: {
@@ -115,6 +221,7 @@ async function run_renderer_ai(params: {
     machine_text: string;
     events: string[];
     effects: string[];
+    action_verb: string | null;
 }): Promise<string> {
     const session_key = get_session_key(params.msg);
     const history = get_session_history(session_key);
@@ -124,6 +231,7 @@ async function run_renderer_ai(params: {
         machine_text: params.machine_text,
         events: params.events,
         effects: params.effects,
+        action_verb: params.action_verb,
     });
 
     const messages: OllamaMessage[] = [
@@ -239,10 +347,13 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
     const events = Array.isArray(meta?.events) ? (meta.events as string[]) : [];
     const original_text = typeof meta?.original_text === "string" ? (meta.original_text as string) : "";
     const machine_text = typeof meta?.machine_text === "string" ? (meta.machine_text as string) : "";
+    const action_verb = typeof meta?.action_verb === "string" ? (meta.action_verb as string) : null;
 
     if (effects.length > 0) {
         debug_log("Renderer: effects", { id: msg.id, effects });
     }
+    
+    debug_log("Renderer: action detected", { id: msg.id, action_verb: action_verb || "unknown" });
 
     const response_text = await run_renderer_ai({
         msg: processing.message,
@@ -250,6 +361,7 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
         machine_text,
         events,
         effects,
+        action_verb,
     });
     const content = response_text.length > 0 ? response_text : "Narration unavailable.";
     debug_content("Renderer Out", content);

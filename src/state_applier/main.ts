@@ -17,8 +17,59 @@ import * as path from "node:path";
 const data_slot_number = 1;
 const POLL_MS = 800;
 
+// Track last logged state to prevent spam
+let lastLoggedState: {
+    messageCount: number;
+    stageBreakdown: string;
+    statusBreakdown: string;
+    timestamp: number;
+} | null = null;
+
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// THAUMWORLD Action Verbs for narrative generation
+const THAUMWORLD_ACTION_VERBS = [
+    "ATTACK", "COMMUNICATE", "INSPECT", "MOVE", "USE", 
+    "HELP", "DEFEND", "GRAPPLE", "DODGE", "CRAFT", 
+    "SLEEP", "REPAIR", "WORK", "GUARD", "HOLD"
+];
+
+/**
+ * Extract the action verb from events array
+ * Returns the verb (e.g., "INSPECT", "ATTACK") or null if not found
+ */
+function extractActionVerb(events: string[] | undefined): string | null {
+    if (!events || events.length === 0) return null;
+    
+    for (const event of events) {
+        for (const verb of THAUMWORLD_ACTION_VERBS) {
+            // Match pattern: actor.<id>.VERB( or npc.<id>.VERB(
+            if (event.includes(`.${verb}(`)) {
+                return verb;
+            }
+        }
+    }
+    return null;
+}
+
+/**
+ * Extract target from event string
+ * Parses patterns like: target=region_tile.0.0.0.0 or target=npc.goblin
+ */
+function extractTarget(event: string): string | null {
+    const targetMatch = event.match(/target=([^,)]+)/);
+    return targetMatch ? targetMatch[1] : null;
+}
+
+/**
+ * Extract tool from event string
+ * Parses patterns like: tool=actor.henry_actor.hands
+ */
+function extractTool(event: string): string | null {
+    const toolMatch = event.match(/tool=([^,)]+)/);
+    return toolMatch ? toolMatch[1] : null;
 }
 
 function update_outbox_message_atomic(outbox_path: string, updated: MessageEnvelope): boolean {
@@ -299,34 +350,38 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
         }
     }
     
-    // Step 4: Create applied_1 message if effects were applied OR if there are communication events
-    if (effectsApplied > 0 || hasCommunicateEvents) {
-        const output: MessageInput = {
-            sender: "state_applier",
-            content: "state applied",
-            stage: "applied_1",
-            status: "sent",
-            reply_to: msg.id,
-            meta: {
-                ...getSessionMeta(),
-                effects_applied: effectsApplied,
-                events: events,
-                original_text: (msg.meta as any)?.original_text,
-                machine_text: (msg.meta as any)?.machine_text,
-            },
-        };
+    // Step 4: ALWAYS create applied_1 message for every ruling
+    // This ensures Renderer AI can generate narrative for ALL actions
+    const actionVerb = extractActionVerb(events);
+    
+    const output: MessageInput = {
+        sender: "state_applier",
+        content: "state applied",
+        stage: "applied_1",
+        status: "sent",
+        reply_to: msg.id,
+        meta: {
+            ...getSessionMeta(),
+            effects_applied: effectsApplied,
+            effects: effects || [],
+            events: events || [],
+            original_text: (msg.meta as any)?.original_text,
+            machine_text: (msg.meta as any)?.machine_text,
+            ruling_stage: msg.stage,
+            is_final_ruling: (msg.meta as any)?.is_final_ruling,
+            action_verb: actionVerb,
+        },
+    };
 
-        if (msg.correlation_id) output.correlation_id = msg.correlation_id;
-        append_outbox_message(outbox_path, create_message(output));
-        debug_pipeline("StateApplier", `  [3/4] Created applied_1 message`, { 
-            id: msg.id,
-            effectsApplied,
-            hasCommunicateEvents,
-            replyTo: msg.id
-        });
-    } else {
-        debug_pipeline("StateApplier", `  [3/4] SKIPPED applied_1 (no effects or communication events)`, { id: msg.id });
-    }
+    if (msg.correlation_id) output.correlation_id = msg.correlation_id;
+    append_outbox_message(outbox_path, create_message(output));
+    debug_pipeline("StateApplier", `  [3/4] Created applied_1 message`, { 
+        id: msg.id,
+        effectsApplied,
+        hasCommunicateEvents,
+        actionVerb,
+        replyTo: msg.id
+    });
 
     // Step 4: Mark original message as done
     const done = try_set_message_status(processing.message, "done");
@@ -349,7 +404,7 @@ async function tick(outbox_path: string, log_path: string): Promise<void> {
     try {
         const outbox = read_outbox(outbox_path);
         
-        // VERBOSE LOGGING: Log every poll with detailed breakdown
+        // Log poll results only when state changes (prevents spam)
         if (DEBUG_LEVEL >= 3) {
             const stageBreakdown: Record<string, number> = {};
             const statusBreakdown: Record<string, number> = {};
@@ -361,10 +416,28 @@ async function tick(outbox_path: string, log_path: string): Promise<void> {
                 statusBreakdown[status] = (statusBreakdown[status] || 0) + 1;
             }
             
-            debug_pipeline("StateApplier", `POLL - ${outbox.messages.length} messages in outbox`, {
-                byStage: stageBreakdown,
-                byStatus: statusBreakdown
-            });
+            // Create state signature for comparison
+            const currentState = {
+                messageCount: outbox.messages.length,
+                stageBreakdown: JSON.stringify(stageBreakdown),
+                statusBreakdown: JSON.stringify(statusBreakdown),
+                timestamp: Date.now()
+            };
+            
+            // Only log if state changed or it's been more than 30 seconds
+            const shouldLog = !lastLoggedState || 
+                currentState.messageCount !== lastLoggedState.messageCount ||
+                currentState.stageBreakdown !== lastLoggedState.stageBreakdown ||
+                currentState.statusBreakdown !== lastLoggedState.statusBreakdown ||
+                (currentState.timestamp - lastLoggedState.timestamp) > 30000;
+            
+            if (shouldLog) {
+                debug_pipeline("StateApplier", `POLL - ${outbox.messages.length} messages in outbox`, {
+                    byStage: stageBreakdown,
+                    byStatus: statusBreakdown
+                });
+                lastLoggedState = currentState;
+            }
         }
         
         // Clean architecture: Only process messages marked as pending_state_apply by RulesLawyer

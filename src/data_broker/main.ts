@@ -12,15 +12,100 @@ import type { CommandNode } from "../system_syntax/index.js";
 import { resolve_references } from "../reference_resolver/resolver.js";
 import { ensure_status_exists, write_status_line } from "../engine/status_store.js";
 import { ensure_actor_exists } from "../actor_storage/store.js";
-import { ensure_region_tile, ensure_world_tile } from "../world_storage/store.js";
+import { ensure_region_tile, ensure_world_tile, load_region, get_region_by_coords, list_regions } from "../world_storage/store.js";
 import { isCurrentSession, getSessionMeta } from "../shared/session.js";
+import { debug_log as broker_debug, debug_warn } from "../shared/debug.js";
 
 const data_slot_number = 1;
 const POLL_MS = 800;
 const ITERATION_LIMIT = 5;
 
+// Track processed interpreted message IDs to prevent duplicate processing
+// This prevents race conditions where the same message gets processed multiple times
+const processedInterpretedIds = new Set<string>();
+
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Machine text normalization functions to handle syntax variations
+// These fix common errors in LLM-generated machine text
+
+function normalize_machine_text(text: string): string {
+    if (!text || text.trim().length === 0) return text;
+    
+    let normalized = text;
+    
+    // Fix 1: Replace JSON-style colons with equals in object literals
+    // Match {key: value} and convert to {key=value}
+    // But be careful not to break valid syntax like http:// or time stamps
+    normalized = normalized.replace(/\{([^{}]*)\}/g, (match, content) => {
+        // Replace colons that are between identifiers and values
+        const fixed = content.replace(/([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*/g, '$1=');
+        return '{' + fixed + '}';
+    });
+    
+    // Fix 2: Handle targets=[{ref: npc.x}] pattern specifically
+    // Convert to targets=[npc.x] - simpler and valid
+    normalized = normalized.replace(
+        /targets=\[\{ref[:=]\s*([^}]+)\}\]/g,
+        'targets=[$1]'
+    );
+    
+    // Fix 3: Remove trailing commas in lists and objects
+    normalized = normalized.replace(/,(\s*[}\]])/g, '$1');
+    
+    // Fix 4: Fix double equals (sometimes LLM generates key==value)
+    normalized = normalized.replace(/==/g, '=');
+    
+    // Fix 5: Ensure spaces around equals for readability (optional but helpful)
+    // normalized = normalized.replace(/([^=])=([^=])/g, '$1=$2');
+    
+    return normalized;
+}
+
+function aggressively_normalize_machine_text(text: string): string {
+    let normalized = normalize_machine_text(text);
+    
+    // More aggressive fixes for stubborn cases
+    
+    // Fix: Replace any remaining colons in value positions with equals
+    // This is more aggressive and might catch cases the first pass missed
+    normalized = normalized.replace(/([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1=');
+    
+    // Fix: Handle nested objects that might have been missed
+    // Multiple passes for nested structures
+    for (let i = 0; i < 3; i++) {
+        const prev = normalized;
+        normalized = normalized.replace(/\{([^{}]*)\}/g, (match, content) => {
+            const fixed = content.replace(/([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*/g, '$1=');
+            return '{' + fixed + '}';
+        });
+        if (normalized === prev) break; // No more changes
+    }
+    
+    return normalized;
+}
+
+function log_syntax_normalization(original: string, normalized: string): void {
+    if (original !== normalized) {
+        const changes: string[] = [];
+        if (original.includes(':') && !normalized.includes(':')) {
+            changes.push('colons_to_equals');
+        }
+        if (/targets=\[\{ref:/.test(original)) {
+            changes.push('simplified_targets');
+        }
+        if (/,\s*[}\]]/.test(original)) {
+            changes.push('removed_trailing_commas');
+        }
+        
+        debug_warn("DataBroker: machine_text normalized", {
+            changes,
+            original_preview: original.substring(0, 100),
+            normalized_preview: normalized.substring(0, 100)
+        });
+    }
 }
 
 function parse_stage_iteration(stage: string | undefined): number {
@@ -120,17 +205,41 @@ function create_missing_entities(
             }
         }
 
-        if (err.reason === "region_tile_missing") {
+        if (err.reason === "region_tile_missing" || err.reason === "region_not_found_at_coords") {
             const parts = parse_ref_parts(err.ref);
             const world_x = Number(parts[1]);
             const world_y = Number(parts[2]);
             const region_x = Number(parts[3]);
             const region_y = Number(parts[4]);
             if (![world_x, world_y, region_x, region_y].every((n) => Number.isFinite(n))) continue;
-            const created_region = ensure_region_tile(data_slot_number, world_x, world_y, region_x, region_y);
-            if (created_region.ok) {
+            
+            // Try to load from new region file system first
+            const loaded_region = get_region_by_coords(data_slot_number, world_x, world_y, region_x, region_y);
+            if (loaded_region.ok) {
                 created += 1;
-                notes.push(`created region_tile ${world_x},${world_y}.${region_x},${region_y}`);
+                notes.push(`loaded region ${loaded_region.region_id} at ${world_x},${world_y}.${region_x},${region_y}`);
+                broker_debug("DataBroker: loaded region from file", { 
+                    region_id: loaded_region.region_id,
+                    coords: { world_x, world_y, region_x, region_y }
+                });
+            } else {
+                // Fall back to legacy creation
+                const created_region = ensure_region_tile(data_slot_number, world_x, world_y, region_x, region_y);
+                if (created_region.ok) {
+                    created += 1;
+                    notes.push(`created region_tile ${world_x},${world_y}.${region_x},${region_y}`);
+                }
+            }
+        }
+        
+        if (err.reason === "region_not_found") {
+            // Try to load the region by ID directly
+            const region_id = err.ref.replace("region.", "");
+            const loaded = load_region(data_slot_number, region_id);
+            if (loaded.ok) {
+                created += 1;
+                notes.push(`loaded region ${region_id}`);
+                broker_debug("DataBroker: loaded region by ID", { region_id });
             }
         }
     }
@@ -148,6 +257,12 @@ function update_outbox_message(outbox_path: string, updated: MessageEnvelope): v
 }
 
 async function process_message(outbox_path: string, inbox_path: string, log_path: string, msg: MessageEnvelope): Promise<void> {
+    // Check if this message was already processed (prevents duplicate brokered messages)
+    if (processedInterpretedIds.has(msg.id)) {
+        debug_log("DataBroker: skipping already processed message", { id: msg.id });
+        return;
+    }
+    
     debug_log("DataBroker: received", { id: msg.id, status: msg.status, stage: msg.stage });
     const iteration = parse_stage_iteration(msg.stage);
     const original_text = typeof (msg.meta as any)?.original_text === "string" ? ((msg.meta as any)?.original_text as string) : "";
@@ -235,7 +350,40 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
     }
 
     write_status_line(get_status_path(data_slot_number), `data broker pass ${iteration}: parsing`);
-    const parsed = parse_machine_text(machine_text);
+    
+    // Normalize machine text to fix common syntax errors before parsing
+    const normalized_text = normalize_machine_text(machine_text);
+    log_syntax_normalization(machine_text, normalized_text);
+    
+    let parsed = parse_machine_text(normalized_text);
+    
+    // If parse fails, try aggressive normalization
+    if (parsed.errors.length > 0) {
+        debug_log("DataBroker: initial parse failed, trying aggressive normalization", { 
+            id: msg.id, 
+            errors: parsed.errors,
+            text_preview: normalized_text.substring(0, 100)
+        });
+        
+        const aggressively_normalized = aggressively_normalize_machine_text(normalized_text);
+        const reparsed = parse_machine_text(aggressively_normalized);
+        
+        if (reparsed.errors.length === 0) {
+            debug_log("DataBroker: aggressive normalization succeeded", { id: msg.id });
+            parsed = reparsed;
+            parsed.warnings.push({
+                code: "W_SYNTAX_NORMALIZED",
+                message: "Machine text syntax was auto-corrected",
+                line: 1,
+                column: 1
+            });
+        } else {
+            debug_log("DataBroker: aggressive normalization also failed", { 
+                id: msg.id, 
+                errors: reparsed.errors 
+            });
+        }
+    }
 
     if (parsed.errors.length > 0) {
         debug_log("DataBroker: parse errors", { id: msg.id, errors: parsed.errors });
@@ -249,7 +397,7 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
                 status: "sent",
                 reply_to: msg.id,
                 meta: {
-                    machine_text,
+                    machine_text: normalized_text,
                     commands: parsed.commands,
                     resolved: resolved.resolved,
                     warnings: [
@@ -405,30 +553,79 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
         append_log_envelope(log_path, done.message);
     }
 
+    // Mark this interpreted message as processed to prevent duplicates
+    processedInterpretedIds.add(msg.id);
+    debug_log("DataBroker: added to processed set", { id: msg.id, totalProcessed: processedInterpretedIds.size });
+
     await sleep(0);
 }
 
+// Track tick count for heartbeat logging
+let tickCount = 0;
+const HEARTBEAT_INTERVAL = 10; // Log heartbeat every 10 ticks (approx 8 seconds)
+
 async function tick(outbox_path: string, inbox_path: string, log_path: string): Promise<void> {
-    // Check both outbox and inbox for interpreted messages
-    const outbox = read_outbox(outbox_path);
-    const inbox = read_inbox(inbox_path);
-    
-    const outbox_candidates = outbox.messages.filter(
-        (m) => m.stage?.startsWith("interpreted_") && m.status === "sent" && isCurrentSession(m),
-    );
-    
-    const inbox_candidates = inbox.messages.filter(
-        (m) => m.stage?.startsWith("interpreted_") && m.status === "sent" && isCurrentSession(m),
-    );
-    
-    const candidates = [...outbox_candidates, ...inbox_candidates];
+    try {
+        tickCount++;
+        
+        // Check both outbox and inbox for interpreted messages
+        let outbox;
+        let inbox;
+        
+        try {
+            outbox = read_outbox(outbox_path);
+        } catch (err) {
+            debug_log("DataBroker: ERROR reading outbox", { error: err instanceof Error ? err.message : String(err) });
+            return;
+        }
+        
+        try {
+            inbox = read_inbox(inbox_path);
+        } catch (err) {
+            debug_log("DataBroker: ERROR reading inbox", { error: err instanceof Error ? err.message : String(err) });
+            return;
+        }
+        
+        // Log heartbeat periodically to show we're alive
+        if (tickCount % HEARTBEAT_INTERVAL === 0) {
+            debug_log("DataBroker: heartbeat", { 
+                tickCount, 
+                outboxMessages: outbox.messages.length,
+                inboxMessages: inbox.messages.length,
+                sessionId: (await import("../shared/session.js")).SESSION_ID
+            });
+        }
+        
+        const outbox_candidates = outbox.messages.filter(
+            (m) => m.stage?.startsWith("interpreted_") && m.status === "sent" && isCurrentSession(m),
+        );
+        
+        const inbox_candidates = inbox.messages.filter(
+            (m) => m.stage?.startsWith("interpreted_") && m.status === "sent" && isCurrentSession(m),
+        );
+        
+        const candidates = [...outbox_candidates, ...inbox_candidates];
 
-    if (candidates.length > 0) {
-        debug_log("DataBroker: candidates", { count: candidates.length, from_outbox: outbox_candidates.length, from_inbox: inbox_candidates.length });
-    }
+        if (candidates.length > 0) {
+            debug_log("DataBroker: candidates", { count: candidates.length, from_outbox: outbox_candidates.length, from_inbox: inbox_candidates.length });
+        }
 
-    for (const msg of candidates) {
-        await process_message(outbox_path, inbox_path, log_path, msg);
+        for (const msg of candidates) {
+            try {
+                await process_message(outbox_path, inbox_path, log_path, msg);
+            } catch (err) {
+                debug_log("DataBroker: ERROR processing message", { 
+                    id: msg.id, 
+                    error: err instanceof Error ? err.message : String(err),
+                    stack: err instanceof Error ? err.stack : undefined
+                });
+            }
+        }
+    } catch (err) {
+        debug_log("DataBroker: CRITICAL ERROR in tick", { 
+            error: err instanceof Error ? err.message : String(err),
+            stack: err instanceof Error ? err.stack : undefined
+        });
     }
 }
 
@@ -449,8 +646,17 @@ function initialize(): { outbox_path: string; inbox_path: string; log_path: stri
 }
 
 const { outbox_path, inbox_path, log_path } = initialize();
-debug_log("DataBroker: booted", { outbox_path, inbox_path });
+debug_log("DataBroker: booted", { outbox_path, inbox_path, pollMs: POLL_MS });
+debug_log("DataBroker: starting polling loop", { interval: POLL_MS });
 
-setInterval(() => {
+// Start the polling loop with error handling
+const intervalId = setInterval(() => {
     void tick(outbox_path, inbox_path, log_path);
 }, POLL_MS);
+
+// Log that interval was set
+debug_log("DataBroker: polling interval set", { intervalId: intervalId.toString() });
+
+// Also run first tick immediately to process any pending messages
+debug_log("DataBroker: running initial tick");
+void tick(outbox_path, inbox_path, log_path);

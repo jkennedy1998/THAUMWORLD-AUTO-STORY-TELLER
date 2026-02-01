@@ -36,20 +36,40 @@ const INTERPRETER_SYSTEM_PROMPT = [
     "You are the Interpreter AI for a tabletop RPG system.",
     "Convert human input into strict machine-readable system text.",
     "Output ONLY machine text. One command per line. No prose. No markdown.",
-    "Syntax: <subject>.<VERB>(key=value, ...).",
-    "All arguments must be named key=value pairs. Positional args are forbidden.",
-    "Subjects are refs (actor, npc, item, tile, etc). Verbs are uppercase actions or SYSTEM.*.",
-    "Strings must be double-quoted. Lists use [a, b]. Objects use {k=v}.",
+    "",
+    "CRITICAL SYNTAX RULES (FOLLOW EXACTLY):",
+    "1. Format: <subject>.<VERB>(key=value, key2=value2)",
+    "2. ALWAYS use equals sign (=) between key and value: targets=[npc.glenda]",
+    "3. NEVER use colon (:) for key-value pairs: {ref: value} is WRONG",
+    "4. CORRECT object syntax: {type=RESULT, amount=8}",
+    "5. WRONG object syntax: {type: RESULT, amount: 8}",
+    "6. Lists use commas: [npc.glenda, npc.thorn]",
+    "7. No trailing commas: [a, b,] is WRONG, use [a, b]",
+    "8. All strings must be double-quoted: text=\"hello\"",
+    "9. Subjects are refs: actor.<id>, npc.<id>, item.<id>, tile.<x>.<y>.<rx>.<ry>.<tx>.<ty>",
+    "10. Verbs are UPPERCASE: ATTACK, COMMUNICATE, INSPECT, MOVE, etc.",
+    "",
     "CRITICAL: The SUBJECT is ALWAYS the active player actor (actor.<id>), NEVER an NPC.",
-    "When the user says something like 'hello shopkeep' or 'shopkeep are you there?', they are talking TO shopkeep, not AS shopkeep.",
-    "The player actor is the one performing the COMMUNICATE action, and the NPC is the TARGET.",
+    "When the user says 'hello shopkeep', they are talking TO shopkeep, not AS shopkeep.",
+    "The player actor performs the action, NPCs are TARGETS.",
+    "",
     "Action verbs: USE, ATTACK, HELP, DEFEND, GRAPPLE, INSPECT, COMMUNICATE, DODGE, CRAFT, SLEEP, REPAIR, MOVE, WORK, GUARD, HOLD.",
-    "System verbs: SYSTEM.APPLY_TAG, SYSTEM.REMOVE_TAG, SYSTEM.ADJUST_RESOURCE, SYSTEM.ADJUST_STAT, SYSTEM.APPLY_DAMAGE, SYSTEM.APPLY_HEAL, SYSTEM.ADVANCE_TIME (and other SYSTEM.* verbs).",
-    "If unsure, choose the smallest valid command that matches intent.",
-    "All greetings or conversational speech must use COMMUNICATE, not SYSTEM.*.",
-    "Bad: actor.shopkeep.COMMUNICATE(tool=actor.shopkeep.voice, targets=[actor.player], text=\"yes\")",
-    "Good: actor.player.COMMUNICATE(tool=actor.player.voice, targets=[npc.shopkeep], text=\"hello!\", language=lang.common, senses=[pressure], tone=\"neutral\", contexts=[region_tile.0.0.0.0], sense_context={signal_mag=1})",
-    "Example: actor.MOVE(target=tile.loc.market.5.12, tool=actor.self.hands, mode=\"walk\")",
+    "System verbs: SYSTEM.APPLY_TAG, SYSTEM.REMOVE_TAG, SYSTEM.ADJUST_RESOURCE, SYSTEM.ADJUST_STAT, SYSTEM.APPLY_DAMAGE, SYSTEM.APPLY_HEAL, SYSTEM.ADVANCE_TIME.",
+    "",
+    "EXAMPLES OF CORRECT SYNTAX:",
+    "✓ actor.player.COMMUNICATE(tool=actor.player.voice, targets=[npc.shopkeep], text=\"hello!\", language=lang.common, senses=[pressure], tone=\"neutral\", contexts=[region_tile.0.0.0.0])",
+    "✓ actor.player.ATTACK(target=npc.goblin, tool=actor.player.hands, action_cost=FULL)",
+    "✓ actor.player.INSPECT(target=region_tile.0.0.0.0, tool=actor.player.hands)",
+    "✓ SYSTEM.APPLY_DAMAGE(target=npc.goblin, amount=8, type=slashing)",
+    "",
+    "EXAMPLES OF WRONG SYNTAX (NEVER DO THIS):",
+    "✗ actor.shopkeep.COMMUNICATE(...) - Shopkeep is NPC, not subject",
+    "✗ targets=[{ref: npc.glenda}] - Uses colon instead of equals",
+    "✗ {type: RESULT, mag: 1} - Uses colons, should be {type=RESULT, amount=1}",
+    "✗ [npc.glenda, npc.thorn,] - Trailing comma",
+    "",
+    "If unsure, choose the simplest valid command that matches intent.",
+    "All greetings or conversational speech must use COMMUNICATE verb.",
 ].join("\n");
 
 function sleep(ms: number): Promise<void> {
@@ -63,15 +83,15 @@ function pre_tweak(msg: MessageEnvelope): MessageEnvelope {
 const ITERATION_LIMIT = 5;
 
 const COMMAND_MAP: Record<string, string> = {
-    "1": "henry_actor.ATTACK(target=npc.shopkeep, tool=henry_actor.inventory.item_9x3k2q, action_cost=FULL, roll={type=RESULT, dice=\"D20\", effectors=[], target_cr=10}, potency={type=POTENCY, mag=1, dice=\"1d2\", effectors=[]})",
-    "2": "henry_actor.CRAFT(tool=henry_actor.inventory.item_kit_2mag, components=[henry_actor.inventory.item_ing_a1, henry_actor.inventory.item_ing_a2], result=henry_actor.inventory.item_potion_flinch, action_cost=EXTENDED, roll={type=RESULT, dice=\"D20\", effectors=[], target_cr=10}, tags=[{name=FLINCH, mag=2, info=[]}])",
-    "3": "henry_actor.COMMUNICATE(tool=henry_actor.voice, targets=[npc.shopkeep], text=\"hey, whats on the food menu today?\", language=lang.common, senses=[pressure], tone=\"curious\", contexts=[region_tile.0.0.0.0], sense_context={signal_mag=1})",
+    "1": "henry_actor.ATTACK(target=npc.shopkeep, tool=henry_actor.inventory.item_9x3k2q, action_cost=FULL, roll={type=RESULT, dice=\"D20\", effectors=[], target_cr=10}, potency={type=POTENCY, amount=1, dice=\"1d2\", effectors=[]})",
+    "2": "henry_actor.CRAFT(tool=henry_actor.inventory.item_kit_2mag, components=[henry_actor.inventory.item_ing_a1, henry_actor.inventory.item_ing_a2], result=henry_actor.inventory.item_potion_flinch, action_cost=EXTENDED, roll={type=RESULT, dice=\"D20\", effectors=[], target_cr=10}, tags=[{name=FLINCH, amount=2, info=[]}])",
+    "3": "henry_actor.COMMUNICATE(tool=henry_actor.voice, targets=[npc.shopkeep], text=\"hey, whats on the food menu today?\", language=lang.common, senses=[pressure], tone=\"curious\", contexts=[region_tile.0.0.0.0], sense_context={signal_amount=1})",
     "4": "henry_actor.MOVE(target=region_tile.0.0.0.0, tool=henry_actor.hands, mode=walk, action_cost=FULL)",
     "5": "henry_actor.USE(target=henry_actor.inventory.item_torch, tool=henry_actor.hands, action_cost=PARTIAL, roll={type=RESULT, dice=\"D20\", effectors=[], target_cr=0})",
     "6": "henry_actor.INSPECT(target=region_tile.0.0.0.0, tool=henry_actor.hands, roll={type=RESULT, dice=\"D20\", effectors=[], target_cr=10})",
     "7": "henry_actor.GRAPPLE(target=npc.shopkeep, tool=henry_actor.hands, roll={type=RESULT, dice=\"D20\", effectors=[], target_cr=12}, size_delta=0, action_cost=FULL)",
-    "8": "henry_actor.DEFEND(target=henry_actor, tool=henry_actor.hands, potency={type=POTENCY, mag=1, dice=\"1d2\", effectors=[]}, potency_applies_to=henry_actor.evasion, duration=1, unit=TURN)",
-    "9": "henry_actor.SLEEP(tool=henry_actor.body, potency={type=POTENCY, mag=1, dice=\"1d2\", effectors=[]}, consumes=[{resource=VIGOR, mag=1, optional=true}], action_cost=EXTENDED)",
+    "8": "henry_actor.DEFEND(target=henry_actor, tool=henry_actor.hands, potency={type=POTENCY, amount=1, dice=\"1d2\", effectors=[]}, potency_applies_to=henry_actor.evasion, duration=1, unit=TURN)",
+    "9": "henry_actor.SLEEP(tool=henry_actor.body, potency={type=POTENCY, amount=1, dice=\"1d2\", effectors=[]}, consumes=[{resource=VIGOR, amount=1, optional=true}], action_cost=EXTENDED)",
     "10": "henry_actor.HOLD(tool=henry_actor.hands, verb=ATTACK, action_cost=FULL, condition={type=ACTION, target=npc.shopkeep.action, op=EQUALS, value=\"open_mouth\"})",
 };
 
@@ -600,6 +620,45 @@ function sanitize_quoted_text(text: string, max_len = 200): string {
     return text.replace(/"/g, "'").slice(0, max_len);
 }
 
+// Post-process machine text to fix common syntax errors
+function validate_and_fix_machine_text(text: string): string {
+    if (!text || text.trim().length === 0) return text;
+    
+    let fixed = text;
+    
+    // Fix 1: Replace JSON-style colons with equals in objects
+    // Match {key: value} and convert to {key=value}
+    fixed = fixed.replace(/\{([^{}]*)\}/g, (match, content) => {
+        const fixedContent = content.replace(/([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*/g, '$1=');
+        return '{' + fixedContent + '}';
+    });
+    
+    // Fix 2: Handle targets=[{ref: npc.x}] pattern - simplify to targets=[npc.x]
+    fixed = fixed.replace(
+        /targets=\[\{ref[:=]\s*([^}]+)\}\]/g,
+        'targets=[$1]'
+    );
+    
+    // Fix 3: Remove trailing commas
+    fixed = fixed.replace(/,(\s*[}\]])/g, '$1');
+    
+    // Fix 4: Fix double equals
+    fixed = fixed.replace(/==/g, '=');
+    
+    // Fix 5: Ensure no spaces in refs like "npc. glenda" -> "npc.glenda"
+    fixed = fixed.replace(/(actor|npc|item|tile|region|world_tile)\.\s+/g, '$1.');
+    
+    // Log if we made changes
+    if (fixed !== text) {
+        debug_warn("Interpreter: machine_text auto-corrected", {
+            original: text.substring(0, 100),
+            fixed: fixed.substring(0, 100)
+        });
+    }
+    
+    return fixed;
+}
+
 function build_communicate_command(text: string): string {
     const actor_ref = get_active_actor_ref();
     const targets = resolve_communication_targets(text);
@@ -816,7 +875,9 @@ async function run_interpreter_ai(params: {
         });
 
         const sanitized = sanitize_machine_text(response.content);
-        const stored_output = sanitized.length > 0 ? sanitized : response.content.trim();
+        // Post-process to fix any syntax errors in the generated machine text
+        const validated = validate_and_fix_machine_text(sanitized);
+        const stored_output = validated.length > 0 ? validated : sanitized.length > 0 ? sanitized : response.content.trim();
         
         // AI I/O Logging
         const fullPrompt = messages.map(m => `${m.role}: ${m.content}`).join('\n');

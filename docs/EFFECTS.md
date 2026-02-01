@@ -501,14 +501,8 @@ Base Damage: 8
 
 **Step 1:** Document in this file
 
-**Step 2:** Add parser support in `src/system_syntax/index.ts`
-```typescript
-const VALID_EFFECTS = [
-    'SYSTEM.APPLY_DAMAGE',
-    'SYSTEM.APPLY_HEAL',
-    'SYSTEM.YOUR_NEW_EFFECT',  // Add here
-];
-```
+**Step 2:** Ensure parser supports the new SYSTEM verb
+The parser automatically handles any `SYSTEM.<VERB>` pattern. No changes needed to `src/system_syntax/index.ts` unless you're adding new syntax patterns.
 
 **Step 3:** Add rules lawyer handler in `src/rules_lawyer/effects.ts`
 ```typescript

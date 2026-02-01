@@ -28,6 +28,10 @@ const pending_jobs: Record<string, PendingJob> = {};
 // This helps determine which ruling should be marked for state application
 const maxBrokeredIterations = new Map<string, number>();
 
+// Track processed brokered message IDs to prevent duplicate processing
+// This prevents race conditions where the same message gets processed multiple times
+const processedBrokeredIds = new Set<string>();
+
 function is_actor_subject(subject: string): boolean {
     return subject.startsWith("actor.") || subject.endsWith("_actor");
 }
@@ -171,6 +175,12 @@ function update_outbox_message(outbox_path: string, updated: MessageEnvelope): v
 }
 
 async function process_message(outbox_path: string, log_path: string, msg: MessageEnvelope): Promise<void> {
+    // Check if this message was already processed (prevents duplicate rulings)
+    if (processedBrokeredIds.has(msg.id)) {
+        debug_log("RulesLawyer: skipping already processed message", { id: msg.id });
+        return;
+    }
+    
     debug_log("RulesLawyer: received", { id: msg.id, status: msg.status, stage: msg.stage });
 
     const processing = try_set_message_status(msg, "processing");
@@ -294,59 +304,109 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
         debug_log("RulesLawyer: marked brokered message as done", { id: done.message.id });
     }
 
+    // Mark this brokered message as processed to prevent duplicates
+    processedBrokeredIds.add(msg.id);
+    debug_log("RulesLawyer: added to processed set", { id: msg.id, totalProcessed: processedBrokeredIds.size });
+
     await sleep(0);
 }
 
+// Track tick count for heartbeat logging
+let tickCount = 0;
+const HEARTBEAT_INTERVAL = 10; // Log heartbeat every 10 ticks (approx 8 seconds)
+
 async function tick(outbox_path: string, log_path: string): Promise<void> {
-    const outbox = read_outbox(outbox_path);
-    
-    // Debug: Log session matching
-    const allBrokered = outbox.messages.filter(m => m.stage?.startsWith("brokered_"));
-    const withSentStatus = allBrokered.filter(m => m.status === "sent");
-    const withSession = withSentStatus.filter(m => isCurrentSession(m));
-    
-    if (allBrokered.length > 0) {
-        debug_log("RulesLawyer: tick debug", {
-            totalMessages: outbox.messages.length,
-            brokeredMessages: allBrokered.length,
-            withSentStatus: withSentStatus.length,
-            withCurrentSession: withSession.length,
-            mySessionId: SESSION_ID,
-            sampleMessageSession: allBrokered[0]?.meta?.session_id,
-            sampleMessageStage: allBrokered[0]?.stage,
-            sampleMessageStatus: allBrokered[0]?.status,
-        });
-    }
-    
-    const candidates = outbox.messages.filter(
-        (m) => m.stage?.startsWith("brokered_") && m.status === "sent" && isCurrentSession(m),
-    );
-
-    const roll_results = outbox.messages.filter(
-        (m) => m.stage?.startsWith("roll_result_") && m.status === "sent",
-    );
-
-    // Track max brokered iteration for each correlation_id
-    // This helps us determine which ruling should be marked for state application
-    for (const msg of candidates) {
-        const correlationId = msg.correlation_id || msg.id;
-        const iteration = parse_stage_iteration(msg.stage);
-        const currentMax = maxBrokeredIterations.get(correlationId) || 0;
-        if (iteration > currentMax) {
-            maxBrokeredIterations.set(correlationId, iteration);
+    try {
+        tickCount++;
+        
+        let outbox;
+        try {
+            outbox = read_outbox(outbox_path);
+        } catch (err) {
+            debug_log("RulesLawyer: ERROR reading outbox", { error: err instanceof Error ? err.message : String(err) });
+            return;
         }
-    }
+        
+        // Log heartbeat periodically to show we're alive
+        if (tickCount % HEARTBEAT_INTERVAL === 0) {
+            const allBrokered = outbox.messages.filter(m => m.stage?.startsWith("brokered_"));
+            debug_log("RulesLawyer: heartbeat", { 
+                tickCount, 
+                totalMessages: outbox.messages.length,
+                brokeredMessages: allBrokered.length,
+                sessionId: SESSION_ID
+            });
+        }
+        
+        // Debug: Log session matching
+        const allBrokered = outbox.messages.filter(m => m.stage?.startsWith("brokered_"));
+        const withSentStatus = allBrokered.filter(m => m.status === "sent");
+        const withSession = withSentStatus.filter(m => isCurrentSession(m));
+        
+        if (allBrokered.length > 0) {
+            debug_log("RulesLawyer: tick debug", {
+                totalMessages: outbox.messages.length,
+                brokeredMessages: allBrokered.length,
+                withSentStatus: withSentStatus.length,
+                withCurrentSession: withSession.length,
+                mySessionId: SESSION_ID,
+                sampleMessageSession: allBrokered[0]?.meta?.session_id,
+                sampleMessageStage: allBrokered[0]?.stage,
+                sampleMessageStatus: allBrokered[0]?.status,
+            });
+        }
+        
+        const candidates = outbox.messages.filter(
+            (m) => m.stage?.startsWith("brokered_") && m.status === "sent" && isCurrentSession(m),
+        );
 
-    if (candidates.length > 0) {
-        debug_log("RulesLawyer: candidates", { count: candidates.length });
-    }
+        const roll_results = outbox.messages.filter(
+            (m) => m.stage?.startsWith("roll_result_") && m.status === "sent",
+        );
 
-    for (const msg of candidates) {
-        await process_message(outbox_path, log_path, msg);
-    }
+        // Track max brokered iteration for each correlation_id
+        // This helps us determine which ruling should be marked for state application
+        for (const msg of candidates) {
+            const correlationId = msg.correlation_id || msg.id;
+            const iteration = parse_stage_iteration(msg.stage);
+            const currentMax = maxBrokeredIterations.get(correlationId) || 0;
+            if (iteration > currentMax) {
+                maxBrokeredIterations.set(correlationId, iteration);
+            }
+        }
 
-    for (const msg of roll_results) {
-        await process_roll_result(outbox_path, log_path, msg);
+        if (candidates.length > 0) {
+            debug_log("RulesLawyer: candidates", { count: candidates.length });
+        }
+
+        for (const msg of candidates) {
+            try {
+                await process_message(outbox_path, log_path, msg);
+            } catch (err) {
+                debug_log("RulesLawyer: ERROR processing message", { 
+                    id: msg.id, 
+                    error: err instanceof Error ? err.message : String(err),
+                    stack: err instanceof Error ? err.stack : undefined
+                });
+            }
+        }
+
+        for (const msg of roll_results) {
+            try {
+                await process_roll_result(outbox_path, log_path, msg);
+            } catch (err) {
+                debug_log("RulesLawyer: ERROR processing roll result", { 
+                    id: msg.id, 
+                    error: err instanceof Error ? err.message : String(err),
+                    stack: err instanceof Error ? err.stack : undefined
+                });
+            }
+        }
+    } catch (err) {
+        debug_log("RulesLawyer: CRITICAL ERROR in tick", { 
+            error: err instanceof Error ? err.message : String(err),
+            stack: err instanceof Error ? err.stack : undefined
+        });
     }
 }
 
@@ -365,8 +425,17 @@ function initialize(): { outbox_path: string; log_path: string } {
 }
 
 const { outbox_path, log_path } = initialize();
-debug_log("RulesLawyer: booted", { outbox_path, log_path });
+debug_log("RulesLawyer: booted", { outbox_path, log_path, pollMs: POLL_MS });
+debug_log("RulesLawyer: starting polling loop", { interval: POLL_MS, sessionId: SESSION_ID });
 
-setInterval(() => {
+// Start the polling loop with error handling
+const intervalId = setInterval(() => {
     void tick(outbox_path, log_path);
 }, POLL_MS);
+
+// Log that interval was set
+debug_log("RulesLawyer: polling interval set", { intervalId: intervalId.toString() });
+
+// Also run first tick immediately to process any pending messages
+debug_log("RulesLawyer: running initial tick");
+void tick(outbox_path, log_path);

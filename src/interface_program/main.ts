@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { debug_log, debug_warn } from "../shared/debug.js";
 import { ollama_chat } from "../shared/ollama_client.js";
-import { isCurrentSession, getSessionMeta } from "../shared/session.js";
+import { isCurrentSession, getSessionMeta, SESSION_ID } from "../shared/session.js";
 
 import { get_data_slot_dir, get_inbox_path, get_item_dir, get_log_path, get_outbox_path, get_status_path, get_world_dir, get_roller_status_path } from "../engine/paths.js";
 import { read_inbox, clear_inbox, ensure_inbox_exists, append_inbox_message } from "../engine/inbox_store.js";
@@ -922,6 +922,7 @@ function start_http_server(log_path: string): void {
                 res.end(JSON.stringify({ 
                     ok: true, 
                     status: "healthy",
+                    session_id: SESSION_ID,
                     services: {
                         interface_program: true,
                         recent_activity: serviceActivity,
@@ -931,6 +932,28 @@ function start_http_server(log_path: string): void {
             } catch (err: any) {
                 res.writeHead(500, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ ok: false, error: err?.message ?? "health_check_failed" }));
+            }
+            return;
+        }
+
+        if (url.pathname === "/api/health/session") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            // Dedicated session health endpoint
+            try {
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ 
+                    ok: true, 
+                    session_id: SESSION_ID,
+                    status: "session_active"
+                }));
+            } catch (err: any) {
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: err?.message ?? "session_check_failed" }));
             }
             return;
         }
@@ -1040,6 +1063,9 @@ function initialize(): { log_path: string; inbox_path: string; outbox_path: stri
 
     append_log_message(log_path, "SYSTEM", "INTERFACE_PROGRAM booted");
 
+    // Verify session ID on startup
+    debug_log(`[Session] Interface Program session: ${SESSION_ID}`);
+    
     return { log_path, inbox_path, outbox_path };
 }
 

@@ -34,18 +34,9 @@ SYSTEM.APPLY_POISON(target=npc.goblin, amount=2, duration=5, type=poison)
 - Creates POISONED tag on target
 ```
 
-### Step 2: Add Parser Support
+### Step 2: Parser Support (Automatic)
 
-Edit `src/system_syntax/index.ts`:
-```typescript
-// In parse_machine_text, ensure POISON is recognized as valid effect
-const VALID_EFFECTS = [
-    'SYSTEM.APPLY_DAMAGE',
-    'SYSTEM.APPLY_HEAL',
-    'SYSTEM.APPLY_POISON',  // Add this
-    // ... other effects
-];
-```
+The parser automatically handles any `SYSTEM.<VERB>` pattern. No changes needed to `src/system_syntax/index.ts` for new effects.
 
 ### Step 3: Add Rules Lawyer Handler
 

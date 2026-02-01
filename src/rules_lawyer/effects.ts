@@ -4,7 +4,7 @@ import type { SenseClarity, SenseContext, SenseName } from "./senses.js";
 import { compute_sense_clarity, compute_sense_range_mag } from "./senses.js";
 import { load_actor } from "../actor_storage/store.js";
 import { load_npc } from "../npc_storage/store.js";
-import { is_timed_event_active } from "../world_storage/store.js";
+import { is_timed_event_active, get_timed_event_state, get_active_actor_ref, ensure_world_exists, save_world_store, type WorldStore } from "../world_storage/store.js";
 
 function format_command_line(command: CommandNode): string {
     const args = Object.entries(command.args)
@@ -247,6 +247,88 @@ function load_subject_senses(slot: number, subject: string): Record<string, numb
     return (loaded.npc.senses as Record<string, number>) ?? null;
 }
 
+// Check if actor has required actions available during timed event
+function check_action_cost(
+    slot: number,
+    subject: string,
+    action_cost: string | null
+): { allowed: true } | { allowed: false; reason: string } {
+    // If no timed event is active, allow all actions
+    if (!is_timed_event_active(slot)) {
+        return { allowed: true };
+    }
+    
+    // Get current timed event state
+    const store = get_timed_event_state(slot);
+    if (!store?.initiative_order) {
+        return { allowed: true };
+    }
+    
+    // Check if it's this actor's turn
+    const active_actor = get_active_actor_ref(slot);
+    if (active_actor !== subject) {
+        return { allowed: false, reason: `NOT_YOUR_TURN (current: ${active_actor?.split(".")[1] ?? "unknown"})` };
+    }
+    
+    // Find actor in initiative order
+    const entry = store.initiative_order.find(e => e.actor_ref === subject);
+    if (!entry) {
+        return { allowed: false, reason: "NOT_IN_INITIATIVE" };
+    }
+    
+    if (entry.status !== "active") {
+        return { allowed: false, reason: `ALREADY_${entry.status.toUpperCase()}` };
+    }
+    
+    // Check action costs
+    if (action_cost === "FULL") {
+        if (entry.actions_remaining <= 0) {
+            return { allowed: false, reason: "NO_FULL_ACTIONS_REMAINING" };
+        }
+    } else if (action_cost === "PARTIAL") {
+        if (entry.partial_actions_remaining <= 0 && entry.actions_remaining <= 0) {
+            return { allowed: false, reason: "NO_ACTIONS_REMAINING" };
+        }
+    }
+    // EXTENDED actions don't consume turn actions
+    
+    return { allowed: true };
+}
+
+// Consume actions from actor's turn
+function consume_actions(
+    slot: number,
+    subject: string,
+    action_cost: string | null
+): boolean {
+    const store = get_timed_event_state(slot);
+    if (!store?.initiative_order) return false;
+    
+    const entry = store.initiative_order.find(e => e.actor_ref === subject);
+    if (!entry) return false;
+    
+    if (action_cost === "FULL") {
+        entry.actions_remaining = Math.max(0, entry.actions_remaining - 1);
+    } else if (action_cost === "PARTIAL") {
+        // Use partial action first, then full action if needed
+        if (entry.partial_actions_remaining > 0) {
+            entry.partial_actions_remaining = Math.max(0, entry.partial_actions_remaining - 1);
+        } else if (entry.actions_remaining > 0) {
+            entry.actions_remaining = Math.max(0, entry.actions_remaining - 1);
+        }
+    }
+    
+    // Save updated state
+    const world = ensure_world_exists(slot);
+    if (world.ok) {
+        const world_store = world.world as WorldStore;
+        world_store.initiative_order = store.initiative_order;
+        return save_world_store(slot, world_store);
+    }
+    
+    return false;
+}
+
 function read_sense_context(args: Record<string, ValueNode>): SenseContext {
     const ctx_node = args.sense_context;
     if (!ctx_node || ctx_node.type !== "object") {
@@ -404,6 +486,14 @@ export function apply_rules_stub(commands: CommandNode[], slot: number): RuleRes
 
         const target_ref = get_identifier(command.args.target);
         const targets_list = command.args.targets;
+        const action_cost = get_identifier(command.args.action_cost);
+
+        // Check action cost during timed events
+        const action_check = check_action_cost(slot, command.subject, action_cost);
+        if (!action_check.allowed) {
+            event_lines.push(`NOTE.ACTION_NOT_ALLOWED(reason=${action_check.reason})`);
+            continue;
+        }
 
         if (command.verb === "CRAFT") {
             const result_ref = get_identifier(command.args.result);
@@ -527,6 +617,11 @@ export function apply_rules_stub(commands: CommandNode[], slot: number): RuleRes
 
         if (command.verb === "HOLD" || command.verb === "WORK") {
             // TODO: implement HOLD/WORK rules
+        }
+
+        // Consume actions if we're in a timed event and action was successful
+        if (is_timed_event_active(slot) && action_cost) {
+            consume_actions(slot, command.subject, action_cost);
         }
     }
 
