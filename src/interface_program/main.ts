@@ -20,6 +20,7 @@ import { ensure_status_exists, read_status, write_status_line } from "../engine/
 import { ensure_roller_status_exists, read_roller_status, write_roller_status } from "../engine/roller_status_store.js";
 import { ensure_actor_exists, find_actors, load_actor, create_actor_from_kind } from "../actor_storage/store.js";
 import { create_npc_from_kind, find_npcs, save_npc } from "../npc_storage/store.js";
+import { get_timed_event_state } from "../world_storage/store.js";
 import { get_creation_state_path } from "../engine/paths.js";
 import { load_kind_definitions } from "../kind_storage/store.js";
 import { PROF_NAMES, STAT_VALUE_BLOCK } from "../character_rules/creation.js";
@@ -758,13 +759,23 @@ function start_http_server(log_path: string): void {
 
                 current_state = "processing";
 
+                // Check if timed event is active and use event_id as correlation_id
+                const timed_event = get_timed_event_state(data_slot_number);
+                const correlation_id = timed_event?.timed_event_active && timed_event?.event_id
+                    ? timed_event.event_id
+                    : create_correlation_id();
+
                 const inbound = create_message({
                     sender,
                     content: text,
                     type: "user_input",
                     status: "queued",
-                    correlation_id: create_correlation_id(),
-                    meta: getSessionMeta(),
+                    correlation_id,
+                    meta: {
+                        ...getSessionMeta(),
+                        timed_event_active: timed_event?.timed_event_active || false,
+                        event_id: timed_event?.event_id || null
+                    },
                 });
 
                 append_inbox_message(inbox_path, inbound);

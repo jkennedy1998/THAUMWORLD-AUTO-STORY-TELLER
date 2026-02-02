@@ -12,6 +12,8 @@ import type { CommandNode } from "../system_syntax/index.js";
 import { resolve_references } from "../reference_resolver/resolver.js";
 import { ensure_status_exists, write_status_line } from "../engine/status_store.js";
 import { ensure_actor_exists } from "../actor_storage/store.js";
+import { load_actor } from "../actor_storage/store.js";
+import { find_npcs, load_npc } from "../npc_storage/store.js";
 import { ensure_region_tile, ensure_world_tile, load_region, get_region_by_coords, list_regions } from "../world_storage/store.js";
 import { isCurrentSession, getSessionMeta } from "../shared/session.js";
 import { debug_log as broker_debug, debug_warn } from "../shared/debug.js";
@@ -52,6 +54,9 @@ function normalize_machine_text(text: string): string {
         /targets=\[\{ref[:=]\s*([^}]+)\}\]/g,
         'targets=[$1]'
     );
+
+    // Fix 2b: Strip accidental property access in npc refs (npc.foo.id -> npc.foo)
+    normalized = normalized.replace(/npc\.([a-zA-Z0-9_]+)\.id\b/g, 'npc.$1');
     
     // Fix 3: Remove trailing commas in lists and objects
     normalized = normalized.replace(/,(\s*[}\]])/g, '$1');
@@ -63,6 +68,130 @@ function normalize_machine_text(text: string): string {
     // normalized = normalized.replace(/([^=])=([^=])/g, '$1=$2');
     
     return normalized;
+}
+
+// Fuzzy matching helpers (for resolving misspelled NPC ids)
+function levenshteinDistance(a: string, b: string): number {
+    const aa = a.toLowerCase();
+    const bb = b.toLowerCase();
+    const dp: number[][] = [];
+    for (let i = 0; i <= bb.length; i++) {
+        dp[i] = [];
+        for (let j = 0; j <= aa.length; j++) dp[i]![j] = 0;
+    }
+    for (let i = 0; i <= bb.length; i++) dp[i]![0] = i;
+    for (let j = 0; j <= aa.length; j++) dp[0]![j] = j;
+    for (let i = 1; i <= bb.length; i++) {
+        for (let j = 1; j <= aa.length; j++) {
+            if (bb.charAt(i - 1) === aa.charAt(j - 1)) {
+                dp[i]![j] = dp[i - 1]![j - 1]!;
+            } else {
+                dp[i]![j] = Math.min(
+                    dp[i - 1]![j - 1]! + 1,
+                    dp[i]![j - 1]! + 1,
+                    dp[i - 1]![j]! + 1,
+                );
+            }
+        }
+    }
+    return dp[bb.length]![aa.length]!;
+}
+
+function normalize_npc_token(ref: string): string {
+    let token = ref.trim();
+    if (token.startsWith('npc.')) token = token.slice('npc.'.length);
+    if (token.endsWith('.id')) token = token.slice(0, -'.id'.length);
+    return token;
+}
+
+function get_party_region_npc_ids(commands: CommandNode[]): string[] {
+    // Best-effort: derive region from the first actor subject.
+    const actor_subject = commands.find(c => c.subject.startsWith('actor.'))?.subject;
+    if (!actor_subject) return [];
+    const actor_id = actor_subject.split('.').slice(1).join('.');
+    const loaded = load_actor(data_slot_number, actor_id);
+    if (!loaded.ok) return [];
+    const location = (loaded.actor.location as any) ?? {};
+    const wx = Number(location?.world_tile?.x ?? 0);
+    const wy = Number(location?.world_tile?.y ?? 0);
+    const rx = Number(location?.region_tile?.x ?? 0);
+    const ry = Number(location?.region_tile?.y ?? 0);
+    const region = get_region_by_coords(data_slot_number, wx, wy, rx, ry);
+    if (!region.ok) return [];
+    const npcs_present = (region.region as any)?.contents?.npcs_present;
+    if (!Array.isArray(npcs_present)) return [];
+    const ids: string[] = [];
+    for (const entry of npcs_present) {
+        const npc_id = typeof entry?.npc_id === 'string' ? entry.npc_id : '';
+        if (!npc_id) continue;
+        ids.push(normalize_npc_token(npc_id));
+    }
+    return ids;
+}
+
+function find_best_npc_match(raw: string, preferred_ids: string[]): { id: string; score: number } | null {
+    const needle = normalize_npc_token(raw);
+    if (!needle) return null;
+
+    const all = find_npcs(data_slot_number, {}).filter(n => n.id !== 'default_npc');
+    if (all.length === 0) return null;
+
+    const maxDistance = needle.length <= 5 ? 1 : 2;
+
+    function score_candidates(candidates: { id: string; name: string; path: string }[]): { best: { id: string; score: number } | null; second: number } {
+        let best: { id: string; score: number } | null = null;
+        let secondBestScore = Number.POSITIVE_INFINITY;
+        for (const npc of candidates) {
+            const npc_id = npc.id;
+            const npc_name = npc.name;
+            let score = levenshteinDistance(needle, npc_id);
+            if (npc_name) score = Math.min(score, levenshteinDistance(needle, npc_name));
+            if (!best || score < best.score) {
+                secondBestScore = best ? best.score : secondBestScore;
+                best = { id: npc_id, score };
+            } else if (score < secondBestScore) {
+                secondBestScore = score;
+            }
+        }
+        return { best, second: secondBestScore };
+    }
+
+    // Prefer NPCs in the current region first; fall back to all NPCs if no strong match.
+    const preferred = preferred_ids.length > 0 ? all.filter(n => preferred_ids.includes(n.id)) : [];
+    const preferred_scored = preferred.length > 0 ? score_candidates(preferred) : { best: null, second: Number.POSITIVE_INFINITY };
+    const preferred_ok = preferred_scored.best && preferred_scored.best.score <= maxDistance;
+
+    const scored = preferred_ok ? preferred_scored : score_candidates(all);
+    if (!scored.best || scored.best.score > maxDistance) return null;
+    if (scored.second !== Number.POSITIVE_INFINITY && (scored.second - scored.best.score) < 1) {
+        return null;
+    }
+    return scored.best;
+}
+
+function autocorrect_npc_refs(machine_text: string, commands: CommandNode[], errors: Array<{ ref: string; reason: string }>): { updated_text: string; notes: string[] } {
+    const npc_errors = errors.filter(e => e.reason === 'npc_not_found' && e.ref.startsWith('npc.'));
+    if (npc_errors.length === 0) return { updated_text: machine_text, notes: [] };
+
+    const preferred_ids = get_party_region_npc_ids(commands);
+    let updated = machine_text;
+    const notes: string[] = [];
+
+    for (const err of npc_errors) {
+        const raw_id = normalize_npc_token(err.ref);
+        const match = find_best_npc_match(raw_id, preferred_ids);
+        if (!match) continue;
+        const from = raw_id;
+        const to = match.id;
+
+        // Replace npc.<from> and npc.<from>.id occurrences
+        const re_plain = new RegExp(`\\bnpc\\.${from}\\b`, 'g');
+        const re_id = new RegExp(`\\bnpc\\.${from}\\.id\\b`, 'g');
+        updated = updated.replace(re_id, `npc.${to}`).replace(re_plain, `npc.${to}`);
+        notes.push(`npc_autocorrect:${from}->${to}`);
+    }
+
+    return { updated_text: updated, notes };
 }
 
 function aggressively_normalize_machine_text(text: string): string {
@@ -303,6 +432,9 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
                 },
             };
             if (msg.correlation_id !== undefined) brokered_input.correlation_id = msg.correlation_id;
+            if (msg.conversation_id !== undefined) brokered_input.conversation_id = msg.conversation_id;
+            if (msg.turn_number !== undefined) brokered_input.turn_number = msg.turn_number;
+            if (msg.role !== undefined) brokered_input.role = msg.role;
             const brokered = create_message(brokered_input);
             append_outbox_message(outbox_path, brokered);
             debug_log("DataBroker: band_aid brokered sent", { id: brokered.id, stage: brokered.stage });
@@ -336,6 +468,9 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
         };
 
         if (msg.correlation_id !== undefined) error_input.correlation_id = msg.correlation_id;
+        if (msg.conversation_id !== undefined) error_input.conversation_id = msg.conversation_id;
+        if (msg.turn_number !== undefined) error_input.turn_number = msg.turn_number;
+        if (msg.role !== undefined) error_input.role = msg.role;
 
         const error_msg = create_message(error_input);
         append_inbox_message(inbox_path, error_msg);
@@ -356,7 +491,9 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
     const normalized_text = normalize_machine_text(machine_text);
     log_syntax_normalization(machine_text, normalized_text);
     
-    let parsed = parse_machine_text(normalized_text);
+    // This is the machine text we'll actually operate on (may be auto-corrected)
+    let effective_text = normalized_text;
+    let parsed = parse_machine_text(effective_text);
     
     // If parse fails, try aggressive normalization
     if (parsed.errors.length > 0) {
@@ -366,12 +503,13 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
             text_preview: normalized_text.substring(0, 100)
         });
         
-        const aggressively_normalized = aggressively_normalize_machine_text(normalized_text);
+        const aggressively_normalized = aggressively_normalize_machine_text(effective_text);
         const reparsed = parse_machine_text(aggressively_normalized);
         
         if (reparsed.errors.length === 0) {
             debug_log("DataBroker: aggressive normalization succeeded", { id: msg.id });
             parsed = reparsed;
+            effective_text = aggressively_normalized;
             parsed.warnings.push({
                 code: "W_SYNTAX_NORMALIZED",
                 message: "Machine text syntax was auto-corrected",
@@ -415,6 +553,9 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
                 },
             };
             if (msg.correlation_id !== undefined) brokered_input.correlation_id = msg.correlation_id;
+            if (msg.conversation_id !== undefined) brokered_input.conversation_id = msg.conversation_id;
+            if (msg.turn_number !== undefined) brokered_input.turn_number = msg.turn_number;
+            if (msg.role !== undefined) brokered_input.role = msg.role;
             const brokered = create_message(brokered_input);
             append_outbox_message(outbox_path, brokered);
             debug_log("DataBroker: band_aid brokered sent", { id: brokered.id, stage: brokered.stage });
@@ -448,6 +589,9 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
         };
 
         if (msg.correlation_id !== undefined) error_input.correlation_id = msg.correlation_id;
+        if (msg.conversation_id !== undefined) error_input.conversation_id = msg.conversation_id;
+        if (msg.turn_number !== undefined) error_input.turn_number = msg.turn_number;
+        if (msg.role !== undefined) error_input.role = msg.role;
 
         const error_msg = create_message(error_input);
 
@@ -479,6 +623,41 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
             resolved = resolve_entities(parsed.commands, { use_representative_data: false });
         }
     }
+    // Attempt NPC auto-correction before raising a resolve error.
+    // This fixes cases like npc.glenda -> npc.grenda when the NPC exists locally.
+    if (resolved.errors.length > 0 && !should_create_from_scratch && iteration < ITERATION_LIMIT) {
+        const corrected = autocorrect_npc_refs(effective_text, parsed.commands, resolved.errors);
+        if (corrected.updated_text !== effective_text && corrected.notes.length > 0) {
+            debug_warn("DataBroker: auto-corrected npc refs", {
+                id: msg.id,
+                notes: corrected.notes,
+                preview_before: effective_text.substring(0, 120),
+                preview_after: corrected.updated_text.substring(0, 120)
+            });
+            
+            const prev_parse_warnings = parsed.warnings;
+            const reparsed = parse_machine_text(corrected.updated_text);
+            if (reparsed.errors.length === 0) {
+                const reresolved = resolve_entities(reparsed.commands, { use_representative_data: should_create_from_scratch });
+                if (reresolved.errors.length === 0) {
+                    effective_text = corrected.updated_text;
+                    // Preserve previous parse warnings and add autocorrect notes
+                    reparsed.warnings = [
+                        ...prev_parse_warnings,
+                        ...corrected.notes.map((n) => ({
+                            code: "W_NPC_AUTOCORRECT",
+                            message: n,
+                            line: 1,
+                            column: 1,
+                        })),
+                    ];
+                    parsed = reparsed;
+                    resolved = reresolved;
+                }
+            }
+        }
+    }
+
     if (resolved.errors.length > 0 && !should_create_from_scratch) {
         debug_log("DataBroker: resolve errors", { id: msg.id, errors: resolved.errors, warnings: resolved.warnings });
         write_status_line(get_status_path(data_slot_number), `data broker pass ${iteration}: resolve error`);
@@ -493,7 +672,7 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
                 error_reason: "resolve_error",
                 errors: resolved.errors,
                 warnings: resolved.warnings,
-                machine_text,
+                machine_text: effective_text,
                 original_text,
                 should_create_data,
                 should_create_from_scratch,
@@ -501,7 +680,10 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
             },
         };
 
-        if (msg.correlation_id !== undefined) error_input.correlation_id = msg.correlation_id;
+    if (msg.correlation_id !== undefined) error_input.correlation_id = msg.correlation_id;
+    if (msg.conversation_id !== undefined) error_input.conversation_id = msg.conversation_id;
+    if (msg.turn_number !== undefined) error_input.turn_number = msg.turn_number;
+    if (msg.role !== undefined) error_input.role = msg.role;
 
         const error_msg = create_message(error_input);
 
@@ -527,7 +709,7 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
         status: "sent",
         reply_to: msg.id,
         meta: {
-            machine_text,
+            machine_text: effective_text,
             commands: parsed.commands,
             resolved: resolved.resolved,
             warnings: [...parsed.warnings, ...resolved.warnings],
@@ -540,6 +722,9 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
     };
 
     if (msg.correlation_id !== undefined) brokered_input.correlation_id = msg.correlation_id;
+    if (msg.conversation_id !== undefined) brokered_input.conversation_id = msg.conversation_id;
+    if (msg.turn_number !== undefined) brokered_input.turn_number = msg.turn_number;
+    if (msg.role !== undefined) brokered_input.role = msg.role;
 
     const brokered = create_message(brokered_input);
 

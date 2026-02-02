@@ -128,6 +128,9 @@ async function process_roll_result(outbox_path: string, log_path: string, msg: M
             },
         };
         if (job.msg.correlation_id) output.correlation_id = job.msg.correlation_id;
+        if (job.msg.conversation_id !== undefined) output.conversation_id = job.msg.conversation_id;
+        if (job.msg.turn_number !== undefined) output.turn_number = job.msg.turn_number;
+        if (job.msg.role !== undefined) output.role = job.msg.role;
         const ruled_msg = create_message(output);
         append_outbox_message(outbox_path, ruled_msg);
         debug_log("RulesLawyer: output sent", { 
@@ -286,6 +289,9 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
     };
 
     if (msg.correlation_id !== undefined) output.correlation_id = msg.correlation_id;
+    if (msg.conversation_id !== undefined) output.conversation_id = msg.conversation_id;
+    if (msg.turn_number !== undefined) output.turn_number = msg.turn_number;
+    if (msg.role !== undefined) output.role = msg.role;
     const ruled_msg = create_message(output);
     append_outbox_message(outbox_path, ruled_msg);
     debug_log("RulesLawyer: created ruling message", { 

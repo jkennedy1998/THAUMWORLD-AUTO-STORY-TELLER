@@ -1,7 +1,7 @@
 import { get_data_slot_dir, get_log_path, get_inbox_path, get_outbox_path, get_npc_path, get_actor_path } from "../engine/paths.js";
 import { ensure_dir_exists, ensure_log_exists, append_log_message, append_log_envelope } from "../engine/log_store.js";
 import { ensure_inbox_exists, append_inbox_message } from "../engine/inbox_store.js";
-import { ensure_outbox_exists, read_outbox, write_outbox, prune_outbox_messages, update_outbox_message } from "../engine/outbox_store.js";
+import { ensure_outbox_exists, read_outbox, write_outbox, prune_outbox_messages, update_outbox_message, remove_duplicate_messages } from "../engine/outbox_store.js";
 import { create_message, try_set_message_status } from "../engine/message.js";
 import type { MessageInput } from "../engine/message.js";
 import type { MessageEnvelope } from "../engine/types.js";
@@ -624,7 +624,13 @@ async function process_communication(
             // Check if we should summarize (every 10 messages)
             if (conversation.messages.length % 10 === 0 && conversation.messages.length > 0) {
                 // Summarize asynchronously (don't block response)
-                summarize_conversation_for_npc(data_slot_number, conversation, npc_hit.id, npc.name, npc.personality ? JSON.stringify(npc.personality) : "neutral").catch(err => {
+                const npc_name = typeof (npc as any)?.name === "string" ? ((npc as any).name as string) : npc_hit.id;
+                const personality_text = (() => {
+                    const p = (npc as any)?.personality;
+                    const json = p ? JSON.stringify(p) : "";
+                    return typeof json === "string" && json.length > 0 ? json : "neutral";
+                })();
+                summarize_conversation_for_npc(data_slot_number, conversation, npc_hit.id, npc_name, personality_text).catch(err => {
                     debug_error("NPC_AI", "Failed to summarize conversation", { error: err });
                 });
             }
@@ -673,6 +679,10 @@ async function process_communication(
         
         const response_msg = create_message(output);
         append_inbox_message(inbox_path, response_msg);
+
+        // The canvas UI reads /api/log (log.jsonc), not inbox.jsonc.
+        // Log NPC responses directly so they appear in the in-game window.
+        append_log_envelope(log_path, response_msg);
         
         debug_pipeline("NPC_AI", `Created response from ${npc.name}`, {
             msg_id: response_msg.id,
@@ -738,12 +748,15 @@ async function tick(outbox_path: string, inbox_path: string, log_path: string): 
     try {
         const outbox = read_outbox(outbox_path);
         
-        // Look for applied_1 messages that contain COMMUNICATE events
-        // Only process messages with status "sent" - skip "processing" and "done"
+        // Look for applied_* messages that contain COMMUNICATE events.
+        // NOTE: renderer_ai may mark messages as processing/done quickly, so we must not rely on
+        // seeing status="sent" here; instead use a meta flag to ensure idempotency.
         const candidates = outbox.messages.filter((m) => {
             if (!m.stage?.startsWith("applied_")) return false;
-            if (m.status !== "sent") return false;  // Only process if not yet handled
             if (!isCurrentSession(m)) return false;  // Only process messages from current session
+            if ((m.meta as any)?.npc_processed === true) return false;
+            // Accept sent/done/processing to avoid race with renderer_ai
+            if (m.status !== "sent" && m.status !== "done" && m.status !== "processing") return false;
             
             // Check if it has COMMUNICATE-related events
             const events = (m.meta as any)?.events as string[] || [];
@@ -754,27 +767,37 @@ async function tick(outbox_path: string, inbox_path: string, log_path: string): 
             return has_communicate;
         });
         
+        // Deduplicate by message ID to prevent processing same message multiple times
+        const seen_ids = new Set<string>();
+        const unique_candidates = candidates.filter(msg => {
+            if (seen_ids.has(msg.id)) {
+                return false;
+            }
+            seen_ids.add(msg.id);
+            return true;
+        });
+        
         if (candidates.length > 0 && DEBUG_LEVEL >= 3) {
-            debug_pipeline("NPC_AI", `Found ${candidates.length} communication candidates`, {
-                ids: candidates.map(m => m.id)
+            const filtered_count = candidates.length - unique_candidates.length;
+            debug_pipeline("NPC_AI", `Found ${unique_candidates.length} communication candidates${filtered_count > 0 ? ` (filtered ${filtered_count} duplicates)` : ""}`, {
+                ids: unique_candidates.map(m => m.id)
             });
         }
         
-        for (const msg of candidates) {
+        for (const msg of unique_candidates) {
             try {
-                // Mark as processing to prevent duplicate handling
+                // Mark as processing to prevent duplicate handling (best-effort)
                 const processing = try_set_message_status(msg, "processing");
-                if (processing.ok) {
-                    update_outbox_message(outbox_path, processing.message);
-                }
+                if (processing.ok) update_outbox_message(outbox_path, processing.message);
                 
                 await process_communication(outbox_path, inbox_path, log_path, msg);
                 
-                // Mark as done after successful processing
+                // Mark as npc_processed so we never handle this applied_* message twice.
+                // Keep existing status if already done.
                 const done = try_set_message_status(msg, "done");
-                if (done.ok) {
-                    update_outbox_message(outbox_path, done.message);
-                }
+                const final_msg = done.ok ? done.message : msg;
+                final_msg.meta = { ...(final_msg.meta ?? {}), npc_processed: true };
+                update_outbox_message(outbox_path, final_msg);
             } catch (err) {
                 debug_error("NPC_AI", `Failed to process communication ${msg.id}`, err);
                 // Don't mark as done on error - will retry next poll
@@ -797,6 +820,12 @@ function initialize(): { outbox_path: string; inbox_path: string; log_path: stri
     ensure_log_exists(log_path);
     ensure_inbox_exists(inbox_path);
     ensure_outbox_exists(outbox_path);
+
+    // Clean up any duplicate messages from previous sessions
+    const removed = remove_duplicate_messages(outbox_path);
+    if (removed > 0) {
+        debug_log("NPC_AI", `Cleaned ${removed} duplicate messages on startup`);
+    }
 
     return { outbox_path, inbox_path, log_path };
 }

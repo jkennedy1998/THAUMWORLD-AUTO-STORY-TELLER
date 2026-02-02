@@ -11,6 +11,7 @@ import { find_actors, load_actor } from "../actor_storage/store.js";
 import { find_npcs } from "../npc_storage/store.js";
 import { is_timed_event_active } from "../world_storage/store.js";
 import { append_metric } from "../engine/metrics_store.js";
+import * as crypto from "node:crypto";
 import { ollama_chat, type OllamaMessage } from "../shared/ollama_client.js";
 import { get_status_path } from "../engine/paths.js";
 import { ensure_status_exists, write_status_line } from "../engine/status_store.js";
@@ -77,11 +78,14 @@ function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Generate unique conversation ID
-function generate_conversation_id(): string {
-    const timestamp = Date.now();
-    const random = Math.random().toString(36).substring(2, 8);
-    return `conv_${timestamp}_${random}`;
+function generate_conversation_id_for_context(params: {
+    session_id: string;
+    region_ref: string;
+    primary_npc_id?: string | null;
+}): string {
+    const base = `${params.session_id}:${params.region_ref}:${params.primary_npc_id || "none"}`;
+    const hash = crypto.createHash("sha256").update(base).digest("hex").slice(0, 12);
+    return `conv_${hash}`;
 }
 
 function pre_tweak(msg: MessageEnvelope): MessageEnvelope {
@@ -177,6 +181,42 @@ function preprocess_communication_text(text: string): { processed: string; detec
                 detected_target: npc.id,
                 actor_ref
             };
+        }
+    }
+    
+    // Try fuzzy matching for misspellings (e.g., "glenda" vs "grenda")
+    const words = lowered.split(/[^a-z]+/).filter(w => w.length >= 3);
+    for (const word of words) {
+        for (const npc of npcs) {
+            const npcName = npc.name?.toLowerCase() ?? "";
+            const npcId = npc.id?.toLowerCase() ?? "";
+            
+            if (npcName && isSimilarName(word, npcName)) {
+                debug_log("Interpreter", "Fuzzy matched NPC in preprocessing", { 
+                    input: word, 
+                    matched: npcName, 
+                    npc_id: npc.id,
+                    distance: levenshteinDistance(word, npcName)
+                });
+                return { 
+                    processed: `As ${actor_ref} (actor ID: ${actor_id}), say to ${npc.name}: "${text}"`, 
+                    detected_target: npc.id,
+                    actor_ref
+                };
+            }
+            if (npcId && isSimilarName(word, npcId)) {
+                debug_log("Interpreter", "Fuzzy matched NPC id in preprocessing", { 
+                    input: word, 
+                    matched: npcId, 
+                    npc_id: npc.id,
+                    distance: levenshteinDistance(word, npcId)
+                });
+                return { 
+                    processed: `As ${actor_ref} (actor ID: ${actor_id}), say to ${npc.name || npc.id}: "${text}"`, 
+                    detected_target: npc.id,
+                    actor_ref
+                };
+            }
         }
     }
     
@@ -466,7 +506,7 @@ function resolve_communication_targets(text: string): string[] {
     const npcs = find_npcs(data_slot_number, {}).filter((n) => n.id !== "default_npc");
     const lowered = text.toLowerCase();
     
-    // Look for NPC names or IDs in the text
+    // Look for NPC names or IDs in the text (exact match)
     for (const npc of npcs) {
         const npcName = npc.name?.toLowerCase() ?? "";
         const npcId = npc.id?.toLowerCase() ?? "";
@@ -477,6 +517,24 @@ function resolve_communication_targets(text: string): string[] {
         }
         if (npcId && lowered.includes(npcId)) {
             return [`npc.${npc.id}`];
+        }
+    }
+    
+    // Try fuzzy matching for misspellings (e.g., "glenda" vs "grenda")
+    const words = lowered.split(/[^a-z]+/).filter(w => w.length >= 3);
+    for (const word of words) {
+        for (const npc of npcs) {
+            const npcName = npc.name?.toLowerCase() ?? "";
+            const npcId = npc.id?.toLowerCase() ?? "";
+            
+            if (npcName && isSimilarName(word, npcName)) {
+                debug_log("Interpreter", "Fuzzy matched NPC name", { input: word, matched: npcName, npc_id: npc.id });
+                return [`npc.${npc.id}`];
+            }
+            if (npcId && isSimilarName(word, npcId)) {
+                debug_log("Interpreter", "Fuzzy matched NPC id", { input: word, matched: npcId, npc_id: npc.id });
+                return [`npc.${npc.id}`];
+            }
         }
     }
     
@@ -702,13 +760,72 @@ function extract_explicit_ref(text: string): string | null {
     return null;
 }
 
+// Simple Levenshtein distance for fuzzy matching
+function levenshteinDistance(a: string, b: string): number {
+    const matrix: number[][] = [];
+    for (let i = 0; i <= b.length; i++) {
+        matrix[i] = [];
+        for (let j = 0; j <= a.length; j++) {
+            matrix[i]![j] = 0;
+        }
+    }
+    for (let i = 0; i <= b.length; i++) {
+        matrix[i]![0] = i;
+    }
+    for (let j = 0; j <= a.length; j++) {
+        matrix[0]![j] = j;
+    }
+    for (let i = 1; i <= b.length; i++) {
+        for (let j = 1; j <= a.length; j++) {
+            if (b.charAt(i - 1) === a.charAt(j - 1)) {
+                matrix[i]![j] = matrix[i - 1]![j - 1]!;
+            } else {
+                matrix[i]![j] = Math.min(
+                    matrix[i - 1]![j - 1]! + 1,
+                    matrix[i]![j - 1]! + 1,
+                    matrix[i - 1]![j]! + 1
+                );
+            }
+        }
+    }
+    return matrix[b.length]![a.length]!;
+}
+
+// Check if two strings are similar (within 2 edits for short names, 3 for longer)
+function isSimilarName(a: string, b: string): boolean {
+    const aLower = a.toLowerCase();
+    const bLower = b.toLowerCase();
+    
+    // Exact match
+    if (aLower === bLower) return true;
+    
+    // Substring match
+    if (aLower.includes(bLower) || bLower.includes(aLower)) return true;
+    
+    // Fuzzy match using Levenshtein distance
+    const maxDistance = Math.min(a.length, b.length) <= 5 ? 1 : 2;
+    return levenshteinDistance(aLower, bLower) <= maxDistance;
+}
+
 function resolve_npc_target_from_text(text: string): string | null {
     const npcs = find_npcs(data_slot_number, {}).filter((n) => n.id !== "default_npc");
     const lowered = text.toLowerCase();
+    
+    // First try exact substring matching
     for (const npc of npcs) {
         if (npc.name && lowered.includes(npc.name.toLowerCase())) return `npc.${npc.id}`;
         if (npc.id && lowered.includes(npc.id.toLowerCase())) return `npc.${npc.id}`;
     }
+    
+    // Then try fuzzy matching for misspellings (extract words from text)
+    const words = lowered.split(/[^a-z]+/).filter(w => w.length >= 3);
+    for (const word of words) {
+        for (const npc of npcs) {
+            if (npc.name && isSimilarName(word, npc.name)) return `npc.${npc.id}`;
+            if (npc.id && isSimilarName(word, npc.id)) return `npc.${npc.id}`;
+        }
+    }
+    
     return null;
 }
 
@@ -880,7 +997,9 @@ async function run_interpreter_ai(params: {
             params.text,
             stored_output,
             response.duration_ms,
-            session_key
+            session_key,
+            fullPrompt,
+            response.content
         );
         log_ai_io_file(data_slot_number, {
             timestamp: new Date().toISOString(),
@@ -1096,7 +1215,24 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
     
     // Add conversation threading for COMMUNICATE actions
     if (detected.verb === "COMMUNICATE") {
-        response_msg.conversation_id = msg.conversation_id || generate_conversation_id();
+        const meta_session_id = (msg.meta as any)?.session_id;
+        const session_id = typeof meta_session_id === "string" && meta_session_id.length > 0
+            ? meta_session_id
+            : (getSessionMeta() as any)?.session_id ?? "session";
+        const loc = get_actor_location();
+        const region_ref = build_region_tile_ref({
+            world_x: loc.world_x,
+            world_y: loc.world_y,
+            region_x: loc.region_x,
+            region_y: loc.region_y,
+        });
+        const pre = preprocess_communication_text(original_text);
+        const primary_npc_id = pre.detected_target;
+        response_msg.conversation_id = msg.conversation_id || generate_conversation_id_for_context({
+            session_id,
+            region_ref,
+            primary_npc_id,
+        });
         response_msg.turn_number = (msg.turn_number || 0) + 1;
         response_msg.role = "player";
     }

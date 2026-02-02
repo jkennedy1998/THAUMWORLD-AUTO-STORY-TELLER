@@ -11,6 +11,7 @@ import { isCurrentSession, getSessionMeta } from "../shared/session.js";
 import { ACTION_VERBS, SERVICE_CONFIG } from "../shared/constants.js";
 import { ollama_chat, type OllamaMessage } from "../shared/ollama_client.js";
 import { append_metric } from "../engine/metrics_store.js";
+import { get_region_by_coords } from "../world_storage/store.js";
 
 const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
 const POLL_MS = SERVICE_CONFIG.POLL_MS.RENDERER;
@@ -81,6 +82,29 @@ function extract_obscured_awareness(effects: string[]): string[] {
     return matches;
 }
 
+// Helper function to convert region_tile references to region names
+function resolveRegionName(target: string): string {
+    // Check if this is a region_tile reference
+    const regionMatch = target.match(/region_tile\.(\d+)\.(\d+)\.(\d+)\.(\d+)/);
+    if (regionMatch && regionMatch[1] && regionMatch[2] && regionMatch[3] && regionMatch[4]) {
+        const world_x = parseInt(regionMatch[1], 10);
+        const world_y = parseInt(regionMatch[2], 10);
+        const region_x = parseInt(regionMatch[3], 10);
+        const region_y = parseInt(regionMatch[4], 10);
+        const regionResult = get_region_by_coords(
+            data_slot_number,
+            world_x,
+            world_y,
+            region_x,
+            region_y
+        );
+        if (regionResult.ok) {
+            return regionResult.region.name || regionResult.region_id;
+        }
+    }
+    return target;
+}
+
 // Action-specific narrative generators for THAUMWORLD
 // Current implementation covers: INSPECT, ATTACK, COMMUNICATE, MOVE, USE
 // TODO: Add remaining generators from ACTION_VERBS constant
@@ -90,7 +114,8 @@ function generateInspectNarrativePrompt(params: {
     events: string[];
     effects: string[];
 }): string {
-    const target = params.events[0]?.match(/target=([^,)]+)/)?.[1] || "the area";
+    const rawTarget = params.events[0]?.match(/target=([^,)]+)/)?.[1] || "the area";
+    const target = resolveRegionName(rawTarget);
     const hasFindings = params.effects.length > 0;
     
     return `The player is inspecting ${target}.
@@ -109,7 +134,8 @@ function generateAttackNarrativePrompt(params: {
     events: string[];
     effects: string[];
 }): string {
-    const target = params.events[0]?.match(/target=([^,)]+)/)?.[1] || "the target";
+    const rawTarget = params.events[0]?.match(/target=([^,)]+)/)?.[1] || "the target";
+    const target = resolveRegionName(rawTarget);
     const weapon = params.events[0]?.match(/tool=([^,)]+)/)?.[1]?.split('.').pop() || "their weapon";
     const damageEffects = params.effects.filter(e => e.includes("APPLY_DAMAGE"));
     const hit = damageEffects.length > 0;
@@ -150,7 +176,8 @@ function generateMoveNarrativePrompt(params: {
     events: string[];
     effects: string[];
 }): string {
-    const destination = params.events[0]?.match(/target=([^,)]+)/)?.[1] || "a new location";
+    const rawDestination = params.events[0]?.match(/target=([^,)]+)/)?.[1] || "a new location";
+    const destination = resolveRegionName(rawDestination);
     const mode = params.events[0]?.match(/mode="([^"]+)"/)?.[1] || "walk";
     
     return `The player ${mode}s toward ${destination}.
@@ -275,7 +302,9 @@ async function run_renderer_ai(params: {
             inputSummary,
             cleaned,
             response.duration_ms,
-            session_key
+            session_key,
+            fullPrompt,
+            response.content
         );
         log_ai_io_file(data_slot_number, {
             timestamp: new Date().toISOString(),
@@ -357,6 +386,13 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
     
     debug_log("Renderer: action detected", { id: msg.id, action_verb: action_verb || "unknown" });
 
+    // Log the exact input being sent to renderer
+    console.log(`\n[RENDERER_AI] =========================================`);
+    console.log(`[RENDERER_AI] Input:  "${original_text}"`);
+    console.log(`[RENDERER_AI] Action: ${action_verb || "unknown"}`);
+    console.log(`[RENDERER_AI] Events: ${events.join(", ") || "none"}`);
+    console.log(`[RENDERER_AI] =========================================\n`);
+
     const response_text = await run_renderer_ai({
         msg: processing.message,
         original_text,
@@ -366,6 +402,12 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
         action_verb,
     });
     const content = response_text.length > 0 ? response_text : "Narration unavailable.";
+    
+    // Log the exact output from renderer
+    console.log(`\n[RENDERER_AI] =========================================`);
+    console.log(`[RENDERER_AI] Output: ${content.substring(0, 100)}${content.length > 100 ? "..." : ""}`);
+    console.log(`[RENDERER_AI] =========================================\n`);
+    
     debug_content("Renderer Out", content);
     const output: MessageInput = {
         sender: "renderer_ai",
@@ -381,6 +423,9 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
     };
 
     if (msg.correlation_id !== undefined) output.correlation_id = msg.correlation_id;
+    if (msg.conversation_id !== undefined) output.conversation_id = msg.conversation_id;
+    if (msg.turn_number !== undefined) output.turn_number = msg.turn_number;
+    output.role = "renderer";
     const rendered = create_message(output);
     append_inbox_message(inbox_path, rendered);
     append_log_envelope(log_path, rendered);
@@ -410,7 +455,8 @@ async function tick(outbox_path: string, inbox_path: string, log_path: string): 
         const candidates = outbox.messages.filter((m) => {
             if (!m.stage?.startsWith("applied_")) return false;
             if ((m.meta as any)?.rendered === true) return false;
-            if ((m.status === "sent" || m.status === "done") && isCurrentSession(m)) return true;
+            // Include sent, done, OR processing messages that aren't rendered yet
+            if ((m.status === "sent" || m.status === "done" || m.status === "processing") && isCurrentSession(m)) return true;
             return false;
         });
 

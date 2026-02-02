@@ -97,7 +97,9 @@ export function log_ai_io_terminal(
     input: string,
     output: string,
     duration_ms: number,
-    session_id?: string
+    session_id?: string,
+    full_input?: string,
+    full_output?: string
 ): void {
     if (DEBUG_LEVEL < 3) return;
     
@@ -114,6 +116,14 @@ export function log_ai_io_terminal(
     console.log(`${serviceColor}│ Output:${ANSI.reset} ${normalize_for_terminal(output, 50)}`);
     console.log(`${serviceColor}│ Time:${ANSI.reset}   ${duration_ms}ms`);
     console.log(`${serviceColor}└────────────────────────────────────────────────────────────┘${ANSI.reset}`);
+
+    // When DEBUG_LEVEL is high, show the full I/O payloads to help diagnose
+    if (DEBUG_LEVEL >= 4) {
+        const input_full = typeof full_input === 'string' ? full_input : input;
+        const output_full = typeof full_output === 'string' ? full_output : output;
+        console.log(`${ANSI.gray}[AI_IO] Full input:${ANSI.reset}\n${input_full}`);
+        console.log(`${ANSI.gray}[AI_IO] Full output:${ANSI.reset}\n${output_full}`);
+    }
 }
 
 export function log_ai_io_file(
@@ -121,46 +131,11 @@ export function log_ai_io_file(
     entry: AIIOLogEntry
 ): void {
     if (DEBUG_LEVEL < 4) return;
-    
-    // Only import fs when needed (Node.js only)
-    if (typeof process === 'undefined') return;
-    
-    try {
-        // Dynamic import to avoid browser issues
-        const fs = require('fs');
-        const path = require('path');
-        
-        const logDir = path.join(process.cwd(), 'local_data', `data_slot_${slot}`, 'ai_io_logs');
-        if (!fs.existsSync(logDir)) {
-            fs.mkdirSync(logDir, { recursive: true });
-        }
-        
-        const logFile = path.join(logDir, `${entry.service}_io.jsonc`);
-        
-        let logs: { schema_version: number; entries: AIIOLogEntry[] } = { schema_version: 1, entries: [] };
-        if (fs.existsSync(logFile)) {
-            try {
-                const content = fs.readFileSync(logFile, 'utf-8');
-                logs = JSON.parse(content);
-            } catch {
-                // Start fresh if file is corrupted
-            }
-        }
-        
-        logs.entries.push(entry);
-        
-        // Keep only last 100 entries to prevent file bloat
-        if (logs.entries.length > 100) {
-            logs.entries = logs.entries.slice(-100);
-        }
-        
-        fs.writeFileSync(logFile, JSON.stringify(logs, null, 2), 'utf-8');
-    } catch (err) {
-        // Silently fail - file logging is optional
-        if (DEBUG_LEVEL >= 4) {
-            console.error(`${ANSI.red}[AI_IO] Failed to write log: ${err}${ANSI.reset}`);
-        }
-    }
+    // NOTE: File logging disabled for browser/Electron safety.
+    // The dev stack runs Vite + Electron which may import this module in a browser context.
+    // Terminal logging + full I/O printing (DEBUG_LEVEL>=4) is sufficient for diagnosis.
+    void slot;
+    void entry;
 }
 
 // Standardized Error Logging System
@@ -205,63 +180,9 @@ export function log_service_error(
         console.error(`${ANSI.gray}  Stack: ${stack}${ANSI.reset}`);
     }
     
-    // File logging (DEBUG_LEVEL >= 2)
-    if (DEBUG_LEVEL >= 2 && typeof process !== 'undefined') {
-        try {
-            const fs = require('fs');
-            const path = require('path');
-            
-            const data_slot = (context as any)?.slot ?? 1;
-            const logDir = path.join(process.cwd(), 'local_data', `data_slot_${data_slot}`, 'logs');
-            
-            if (!fs.existsSync(logDir)) {
-                fs.mkdirSync(logDir, { recursive: true });
-            }
-            
-            const logFile = path.join(logDir, 'error_log.jsonc');
-            
-            let errorLog: { schema_version: number; entries: ErrorLogEntry[] } = { 
-                schema_version: 1, 
-                entries: [] 
-            };
-            
-            if (fs.existsSync(logFile)) {
-                try {
-                    const content = fs.readFileSync(logFile, 'utf-8');
-                    errorLog = JSON.parse(content);
-                } catch {
-                    // Start fresh if corrupted
-                }
-            }
-            
-            const entry: ErrorLogEntry = {
-                timestamp: new Date().toISOString(),
-                service,
-                operation,
-                severity,
-                context,
-                error: {
-                    message: errorMsg,
-                    stack: DEBUG_LEVEL >= 4 ? stack : undefined,
-                    type: errorType
-                },
-                correlation_id: (context as any)?.correlation_id,
-                message_id: (context as any)?.message_id
-            };
-            
-            errorLog.entries.push(entry);
-            
-            // Keep last 500 errors
-            if (errorLog.entries.length > 500) {
-                errorLog.entries = errorLog.entries.slice(-500);
-            }
-            
-            fs.writeFileSync(logFile, JSON.stringify(errorLog, null, 2), 'utf-8');
-        } catch (fileErr) {
-            // If file logging fails, at least we have console output
-            console.error(`${ANSI.red}[ERROR_LOG] Failed to write error log: ${fileErr}${ANSI.reset}`);
-        }
-    }
+    // NOTE: File logging disabled for browser/Electron safety.
+    // The dev stack runs Vite + Electron and may import this module in a browser context.
+    // Console logging is the primary diagnostic channel.
 }
 
 // Convenience function for critical errors

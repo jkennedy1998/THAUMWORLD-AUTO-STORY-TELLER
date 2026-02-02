@@ -1,6 +1,6 @@
 import { get_data_slot_dir, get_log_path, get_outbox_path } from "../engine/paths.js";
 import { ensure_dir_exists, ensure_log_exists, append_log_message, append_log_envelope } from "../engine/log_store.js";
-import { ensure_outbox_exists, read_outbox, write_outbox, prune_outbox_messages, append_outbox_message } from "../engine/outbox_store.js";
+import { ensure_outbox_exists, read_outbox, write_outbox, prune_outbox_messages, append_outbox_message, append_outbox_message_deduped } from "../engine/outbox_store.js";
 import { create_message, try_set_message_status } from "../engine/message.js";
 import type { MessageInput } from "../engine/message.js";
 import type { MessageEnvelope } from "../engine/types.js";
@@ -12,7 +12,8 @@ import { resolve_references } from "../reference_resolver/resolver.js";
 import { apply_effects } from "./apply.js";
 import { find_npcs, load_npc, save_npc } from "../npc_storage/store.js";
 import { load_actor } from "../actor_storage/store.js";
-import { add_event_to_memory, get_working_memory } from "../context_manager/index.js";
+import { add_event_to_memory, get_working_memory, build_working_memory } from "../context_manager/index.js";
+import { parse } from "jsonc-parser";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -55,7 +56,7 @@ function extractActionVerb(events: string[] | undefined): string | null {
  */
 function extractTarget(event: string): string | null {
     const targetMatch = event.match(/target=([^,)]+)/);
-    return targetMatch ? targetMatch[1] : null;
+    return targetMatch && targetMatch[1] ? targetMatch[1] : null;
 }
 
 /**
@@ -64,7 +65,7 @@ function extractTarget(event: string): string | null {
  */
 function extractTool(event: string): string | null {
     const toolMatch = event.match(/tool=([^,)]+)/);
-    return toolMatch ? toolMatch[1] : null;
+    return toolMatch && toolMatch[1] ? toolMatch[1] : null;
 }
 
 function update_outbox_message_atomic(outbox_path: string, updated: MessageEnvelope): boolean {
@@ -235,7 +236,8 @@ function apply_awareness_tags(events: string[] | undefined): number {
             }
         }
         
-        if (actorTags.length > (actor.tags || []).length) {
+        const originalTagsLen = Array.isArray((actor as any).tags) ? ((actor as any).tags as any[]).length : 0;
+        if (actorTags.length > originalTagsLen) {
             actor.tags = actorTags;
             // Actor storage needs save function - for now, skip actor save
             // TODO: Add save_actor function
@@ -345,22 +347,50 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
         }
     }
     
-    // Step 3.5: Record events to working memory for timed events
+    // Step 3.5: Record events to working memory for ALL actions
     const correlation_id = msg.correlation_id;
     if (correlation_id && events && events.length > 0) {
-        // Try to find working memory by correlation_id (which is often the event_id)
-        const memory = get_working_memory(data_slot_number, correlation_id);
-        if (memory) {
+        // Try to find working memory by correlation_id
+        let memory = get_working_memory(data_slot_number, correlation_id);
+        
+        // If no memory exists, create it on-demand for ANY action (not just timed events)
+        if (!memory) {
+            // Get region from current player location
+            const region_id = get_current_region(data_slot_number);
+            const participants = extract_participants_from_events(events);
+            
+            // Ensure player actor is always included
+            const player_ref = "actor.henry_actor";
+            if (!participants.includes(player_ref)) {
+                participants.unshift(player_ref);
+            }
+            
+            memory = await build_working_memory(
+                data_slot_number,
+                correlation_id,
+                detect_event_type(events),
+                region_id,
+                participants
+            );
+            
+            debug_pipeline("StateApplier", `  [2.6/4] Created working memory for session`, {
+                correlation_id,
+                region_id,
+                participant_count: participants.length
+            });
+        }
+        
+        if (memory && events.length > 0) {
             // Extract event details from the first event
             const firstEvent = events[0];
-            const actor_match = firstEvent.match(/^(actor|npc)\.([^\.]+)/);
-            const verb_match = firstEvent.match(/\.([A-Z_]+)\(/);
-            const target_match = firstEvent.match(/target=([^,)]+)/);
+            const actor_match = firstEvent?.match(/^(actor|npc)\.([^\.]+)/);
+            const verb_match = firstEvent?.match(/\.([A-Z_]+)\(/);
+            const target_match = firstEvent?.match(/target=([^,)]+)/);
             
-            if (actor_match && verb_match) {
+            if (actor_match && verb_match && actor_match[1] && actor_match[2] && verb_match[1]) {
                 const actor_ref = `${actor_match[1]}.${actor_match[2]}`;
-                const action = verb_match[1];
-                const target = target_match ? target_match[1] : undefined;
+                const action: string = verb_match[1];
+                const target = target_match?.[1];
                 
                 // Determine emotional tone based on action
                 let emotional_tone = "neutral";
@@ -369,17 +399,31 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
                 else if (action === "DEFEND") emotional_tone = "defensive";
                 else if (action === "HELP") emotional_tone = "supportive";
                 
-                // Add to working memory
-                add_event_to_memory(data_slot_number, correlation_id, {
+                // Build event object
+                const event_data: {
+                    turn: number;
+                    actor: string;
+                    action: string;
+                    outcome: string;
+                    emotional_tone: string;
+                    target?: string;
+                } = {
                     turn: memory.recent_events.length + 1,
                     actor: actor_ref,
                     action,
-                    target,
                     outcome: effectsApplied > 0 ? "succeeded" : "attempted",
                     emotional_tone
-                });
+                };
                 
-                debug_pipeline("StateApplier", `  [2.6/4] Recorded event to working memory`, {
+                // Only add target if it exists
+                if (target) {
+                    event_data.target = target;
+                }
+                
+                // Add to working memory
+                add_event_to_memory(data_slot_number, correlation_id, event_data);
+                
+                debug_pipeline("StateApplier", `  [2.7/4] Recorded event to working memory`, {
                     event_id: correlation_id,
                     actor: actor_ref,
                     action
@@ -392,7 +436,9 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
     // This ensures Renderer AI can generate narrative for ALL actions
     const actionVerb = extractActionVerb(events);
     
+    // Use deterministic ID based on parent message to prevent duplicates
     const output: MessageInput = {
+        id: `${msg.id}_applied`, // Deterministic ID
         sender: "state_applier",
         content: "state applied",
         stage: "applied_1",
@@ -412,7 +458,10 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
     };
 
     if (msg.correlation_id) output.correlation_id = msg.correlation_id;
-    append_outbox_message(outbox_path, create_message(output));
+    if (msg.conversation_id !== undefined) output.conversation_id = msg.conversation_id;
+    if (msg.turn_number !== undefined) output.turn_number = msg.turn_number;
+    if (msg.role !== undefined) output.role = msg.role;
+    append_outbox_message_deduped(outbox_path, create_message(output));
     debug_pipeline("StateApplier", `  [3/4] Created applied_1 message`, { 
         id: msg.id,
         effectsApplied,
@@ -523,6 +572,88 @@ async function tick(outbox_path: string, log_path: string): Promise<void> {
     } catch (err) {
         debug_error("StateApplier", "Tick failed", err);
     }
+}
+
+// Helper functions for working memory management
+
+function detect_event_type(events: string[]): "combat" | "conversation" | "exploration" {
+    const event_text = events.join(" ");
+    if (event_text.includes("ATTACK") || event_text.includes("DEFEND")) return "combat";
+    if (event_text.includes("COMMUNICATE")) return "conversation";
+    return "exploration";
+}
+
+function extract_participants_from_events(events: string[]): string[] {
+    const participants = new Set<string>();
+    for (const event of events) {
+        // Extract actor
+        const actor_match = event.match(/^(actor|npc)\.([^\.]+)/);
+        if (actor_match) {
+            participants.add(`${actor_match[1]}.${actor_match[2]}`);
+        }
+        // Extract target
+        const target_match = event.match(/target=(actor|npc)\.([^,)]+)/);
+        if (target_match) {
+            participants.add(`${target_match[1]}.${target_match[2]}`);
+        }
+    }
+    return Array.from(participants);
+}
+
+function get_current_region(slot: number): string {
+    // Get player location
+    const result = load_actor(slot, "henry_actor");
+    if (!result.ok || !result.actor.location) {
+        return "eden_crossroads"; // Default fallback
+    }
+    
+    const location = result.actor.location as { 
+        world_tile?: { x: number; y: number }; 
+        region_tile?: { x: number; y: number };
+    };
+    
+    const player_wx = location.world_tile?.x ?? 0;
+    const player_wy = location.world_tile?.y ?? 0;
+    const player_rx = location.region_tile?.x ?? 0;
+    const player_ry = location.region_tile?.y ?? 0;
+    
+    // Search for region file matching player coordinates
+    const regions_dir = path.join(get_data_slot_dir(slot), "regions");
+    if (fs.existsSync(regions_dir)) {
+        const files = fs.readdirSync(regions_dir).filter(f => f.endsWith('.jsonc'));
+        
+        for (const file of files) {
+            try {
+                const region_path = path.join(regions_dir, file);
+                const raw = fs.readFileSync(region_path, 'utf-8');
+                const region = parse(raw) as { 
+                    id: string; 
+                    world_coords?: { 
+                        world_x: number; 
+                        world_y: number; 
+                        region_x: number; 
+                        region_y: number; 
+                    };
+                };
+                
+                if (region.world_coords) {
+                    const wc = region.world_coords;
+                    if (wc.world_x === player_wx && 
+                        wc.world_y === player_wy && 
+                        wc.region_x === player_rx && 
+                        wc.region_y === player_ry) {
+                        return region.id;
+                    }
+                }
+            } catch (e) {
+                // Skip files that can't be parsed
+                continue;
+            }
+        }
+    }
+    
+    // Fallback to default region
+    return "eden_crossroads";
 }
 
 function initialize(): { outbox_path: string; log_path: string } {

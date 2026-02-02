@@ -1,6 +1,6 @@
 // moved from src/interface_program/main.ts during engine split
 
-export type MessageStatus = 'queued' | 'sent' | 'processing' | 'pending_state_apply' | 'done' | 'error' | `awaiting_roll_${number}`;
+export type MessageStatus = 'queued' | 'sent' | 'processing' | 'pending_state_apply' | 'done' | 'error' | 'superseded' | `awaiting_roll_${number}`;
 
 export type MessageEnvelope = {
     id: string; // "ISO : 000001 : randBase32RFC(6)"
