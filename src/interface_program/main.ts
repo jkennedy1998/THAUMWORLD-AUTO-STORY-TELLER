@@ -20,7 +20,8 @@ import { ensure_status_exists, read_status, write_status_line } from "../engine/
 import { ensure_roller_status_exists, read_roller_status, write_roller_status } from "../engine/roller_status_store.js";
 import { ensure_actor_exists, find_actors, load_actor, create_actor_from_kind } from "../actor_storage/store.js";
 import { create_npc_from_kind, find_npcs, save_npc } from "../npc_storage/store.js";
-import { get_timed_event_state } from "../world_storage/store.js";
+import { get_timed_event_state, get_region_by_coords } from "../world_storage/store.js";
+import { load_npc } from "../npc_storage/store.js";
 import { get_creation_state_path } from "../engine/paths.js";
 import { load_kind_definitions } from "../kind_storage/store.js";
 import { PROF_NAMES, STAT_VALUE_BLOCK } from "../character_rules/creation.js";
@@ -219,6 +220,9 @@ function log_ai_config(): void {
 type InputRequest = {
     text: string;
     sender?: string;
+    intent_verb?: string;
+    action_cost?: string;
+    target_ref?: string;
 };
 
 type CreationState = {
@@ -741,6 +745,10 @@ function start_http_server(log_path: string): void {
                     ? parsed.sender.trim()
                     : "J";
 
+                const intent_verb = typeof parsed?.intent_verb === "string" ? parsed.intent_verb.trim() : "";
+                const action_cost = typeof parsed?.action_cost === "string" ? parsed.action_cost.trim() : "";
+                const target_ref = typeof parsed?.target_ref === "string" ? parsed.target_ref.trim() : "";
+
                 const creation_path = get_creation_state_path(data_slot_number);
                 const creation_state = read_creation_state(creation_path);
                 if (creation_state.active && creation_state.actor_id === sender) {
@@ -774,7 +782,11 @@ function start_http_server(log_path: string): void {
                     meta: {
                         ...getSessionMeta(),
                         timed_event_active: timed_event?.timed_event_active || false,
-                        event_id: timed_event?.event_id || null
+                        event_id: timed_event?.event_id || null,
+                        // Optional UI overrides
+                        intent_verb: intent_verb || undefined,
+                        action_cost: action_cost || undefined,
+                        target_ref: target_ref || undefined,
                     },
                 });
 
@@ -944,6 +956,114 @@ function start_http_server(log_path: string): void {
             } catch (err: any) {
                 res.writeHead(500, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ ok: false, error: err?.message ?? "health_check_failed" }));
+            }
+            return;
+        }
+
+        if (url.pathname === "/api/targets") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+            if (!Number.isFinite(slot) || slot <= 0) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
+                return;
+            }
+
+            const actor_id = url.searchParams.get("actor_id") || "henry_actor";
+            try {
+                const actor_res = load_actor(slot, actor_id);
+                if (!actor_res.ok) {
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, targets: [] }));
+                    return;
+                }
+
+                const loc = (actor_res.actor.location as any) ?? {};
+                const wx = Number(loc?.world_tile?.x ?? 0);
+                const wy = Number(loc?.world_tile?.y ?? 0);
+                const rx = Number(loc?.region_tile?.x ?? 0);
+                const ry = Number(loc?.region_tile?.y ?? 0);
+                const region_res = get_region_by_coords(slot, wx, wy, rx, ry);
+
+                const targets: Array<{ ref: string; label: string; type: string }> = [];
+                const actor_label = typeof (actor_res.actor as any)?.name === "string" ? ((actor_res.actor as any).name as string) : actor_id;
+                targets.push({ ref: `actor.${actor_id}`, label: actor_label, type: "actor" });
+
+                // Awareness set: only include NPCs the actor is aware of.
+                const awareness = new Set<string>();
+                const tags = (actor_res.actor as any)?.tags;
+                if (Array.isArray(tags)) {
+                    for (const tag of tags) {
+                        if (tag?.name !== "AWARENESS") continue;
+                        const info = tag?.info;
+                        if (!Array.isArray(info)) continue;
+                        for (const entry of info) {
+                            if (typeof entry !== "string") continue;
+                            const norm = entry.toLowerCase();
+                            // Normalize npc.Old_Moss -> npc.old_moss
+                            const fixed = norm.startsWith("npc.") ? `npc.${norm.slice(4).replace(/[^a-z0-9_]/g, "_")}` : norm;
+                            awareness.add(fixed);
+                        }
+                    }
+                }
+
+                if (region_res.ok) {
+                    targets.push({ ref: `region_tile.${wx}.${wy}.${rx}.${ry}`, label: region_res.region.name ?? region_res.region_id, type: "region" });
+
+                    const npcs_present = (region_res.region as any)?.contents?.npcs_present;
+                    if (Array.isArray(npcs_present)) {
+                        for (const entry of npcs_present) {
+                            const npc_ref_raw = typeof entry?.npc_id === "string" ? entry.npc_id : "";
+                            const npc_id = npc_ref_raw.replace(/^npc\./, "");
+                            if (!npc_id) continue;
+                            const ref = `npc.${npc_id}`.toLowerCase();
+                            // Only show if actor is aware, unless awareness set is empty (fresh start)
+                            if (awareness.size > 0 && !awareness.has(ref)) continue;
+                            const npc_res = load_npc(slot, npc_id);
+                            const label = npc_res.ok ? (npc_res.npc.name ?? npc_id) : npc_id;
+                            targets.push({ ref: `npc.${npc_id}`, label, type: "npc" });
+                        }
+                    }
+
+                    // Also include NPCs whose saved location matches the actor's region, if actor is aware.
+                    // This supports followers or NPCs that move independently.
+                    try {
+                        const all_npcs = find_npcs(slot, {}).filter((n) => n.id !== "default_npc");
+                        for (const n of all_npcs) {
+                            const npc_id = n.id;
+                            if (!npc_id) continue;
+                            const ref = `npc.${npc_id}`.toLowerCase();
+                            if (awareness.size > 0 && !awareness.has(ref)) continue;
+                            const npc_res = load_npc(slot, npc_id);
+                            if (!npc_res.ok) continue;
+                            const nloc = (npc_res.npc as any)?.location;
+                            const nwx = Number(nloc?.world_tile?.x ?? NaN);
+                            const nwy = Number(nloc?.world_tile?.y ?? NaN);
+                            const nrx = Number(nloc?.region_tile?.x ?? NaN);
+                            const nry = Number(nloc?.region_tile?.y ?? NaN);
+                            if (nwx === wx && nwy === wy && nrx === rx && nry === ry) {
+                                // Dedup
+                                if (targets.some(t => t.type === "npc" && t.ref.toLowerCase() === `npc.${npc_id}`.toLowerCase())) continue;
+                                const label = typeof (npc_res.npc as any)?.name === "string" ? ((npc_res.npc as any).name as string) : npc_id;
+                                targets.push({ ref: `npc.${npc_id}`, label, type: "npc" });
+                            }
+                        }
+                    } catch {
+                        // ignore
+                    }
+                }
+
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, region: region_res.ok ? (region_res.region.name ?? region_res.region_id) : null, targets }));
+            } catch (err: any) {
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: err?.message ?? "failed_to_read" }));
             }
             return;
         }

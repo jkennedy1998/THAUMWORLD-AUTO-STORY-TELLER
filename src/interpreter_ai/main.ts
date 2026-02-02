@@ -232,12 +232,25 @@ function build_interpreter_prompt(params: {
     intent: Intent;
     action_verb: ActionVerb | null;
     action_template: string | undefined;
+    ui_intent_verb?: string | null;
+    ui_action_cost?: string | null;
+    ui_target_ref?: string | null;
 }): string {
     // Pre-process communication text to clarify actor vs target
     const { processed } = preprocess_communication_text(params.text);
     
     if (!params.is_refinement) {
-        const base = ["Human input:", processed, "", "Return machine text only."];
+        const base = ["Human input:", processed];
+        if (params.ui_intent_verb || params.ui_action_cost || params.ui_target_ref) {
+            base.push(
+                "",
+                "UI overrides (trust these over ambiguous language):",
+                `- intent_verb: ${params.ui_intent_verb ?? "(none)"}`,
+                `- action_cost: ${params.ui_action_cost ?? "(none)"}`,
+                `- target_ref: ${params.ui_target_ref ?? "(none)"}`,
+            );
+        }
+        base.push("", "Return machine text only.");
         if (params.intent === "action" && params.action_template && params.action_verb) {
             base.push("", `Use ${params.action_verb} for this intent.`, "Template:", params.action_template);
         }
@@ -436,41 +449,24 @@ function sanitize_machine_text(text: string): string {
 
 // Use shared ActionVerb type from constants
 import type { ActionVerb } from "../shared/constants.js";
+import { infer_action_verb_hint, tokenize_intent, is_question_like } from "../shared/intent_hint.js";
 
 type Intent = "system" | "action" | "unknown";
 
 function detect_action_verb(text: string): ActionVerb | null {
-    const lowered = text.toLowerCase();
-    const verb_keywords: Array<{ verb: ActionVerb; keywords: string[] }> = [
-        { verb: "COMMUNICATE", keywords: ["say", "ask", "tell", "speak", "talk", "hello", "hi ", "hey", "greet", "whisper", "shout", "yell", "signal", "smoke"] },
-        { verb: "INSPECT", keywords: ["inspect", "look", "examine", "search", "scan", "survey", "check", "observe"] },
-        { verb: "MOVE", keywords: ["move", "go", "walk", "run", "travel", "head", "approach", "enter", "leave"] },
-        { verb: "ATTACK", keywords: ["attack", "hit", "strike", "stab", "shoot", "kill", "punch", "slash", "swing"] },
-        { verb: "USE", keywords: ["use", "light", "ignite", "drink", "eat", "equip", "unequip", "wield", "wear", "consume"] },
-        { verb: "HELP", keywords: ["help", "assist", "aid"] },
-        { verb: "DEFEND", keywords: ["defend", "block", "parry"] },
-        { verb: "GRAPPLE", keywords: ["grapple", "grab", "wrestle"] },
-        { verb: "DODGE", keywords: ["dodge", "evade", "duck"] },
-        { verb: "CRAFT", keywords: ["craft", "make", "build", "forge", "brew"] },
-        { verb: "SLEEP", keywords: ["sleep", "rest", "nap"] },
-        { verb: "REPAIR", keywords: ["repair", "fix", "mend"] },
-        { verb: "WORK", keywords: ["work", "labor"] },
-        { verb: "GUARD", keywords: ["guard", "watch"] },
-        { verb: "HOLD", keywords: ["hold", "ready", "prepare"] },
-    ];
-
-    for (const entry of verb_keywords) {
-        if (entry.keywords.some((kw) => lowered.includes(kw))) return entry.verb;
-    }
+    const hint = infer_action_verb_hint(text);
+    if (hint.verb) return hint.verb;
     return null;
 }
 
 function detect_intent(text: string): { intent: Intent; verb: ActionVerb | null } {
-    const lowered = text.toLowerCase();
-    const system_keywords = ["system", "apply", "tag", "set", "adjust", "remove", "add", "give", "take"];
-    if (system_keywords.some((kw) => lowered.includes(kw))) return { intent: "system", verb: null };
+    const tokens = tokenize_intent(text);
+    const system_tokens = new Set(["system", "apply", "tag", "set", "adjust", "remove", "add", "give", "take"]);
+    if (tokens.some((t) => system_tokens.has(t))) return { intent: "system", verb: null };
+
     const verb = detect_action_verb(text);
     if (verb) return { intent: "action", verb };
+    if (is_question_like(text)) return { intent: "unknown", verb: null };
     return { intent: "unknown", verb: null };
 }
 
@@ -940,6 +936,9 @@ async function run_interpreter_ai(params: {
     intent: Intent;
     action_verb: ActionVerb | null;
     action_template: string | undefined;
+    ui_intent_verb?: string | null;
+    ui_action_cost?: string | null;
+    ui_target_ref?: string | null;
 }): Promise<string> {
     const session_key = get_session_key(params.msg);
     const history = get_session_history(session_key);
@@ -953,6 +952,9 @@ async function run_interpreter_ai(params: {
         intent: params.intent,
         action_verb: params.action_verb,
         action_template: params.action_template,
+        ui_intent_verb: params.ui_intent_verb ?? null,
+        ui_action_cost: params.ui_action_cost ?? null,
+        ui_target_ref: params.ui_target_ref ?? null,
     });
 
     const messages: OllamaMessage[] = [
@@ -1127,11 +1129,132 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
     write_status_line(get_status_path(data_slot_number), "the interpreter is thinking");
 
     const error_list = Array.isArray(meta?.errors) ? (meta?.errors as unknown[]) : [];
-    const detected = detect_intent(original_text);
+    // UI overrides (optional)
+    const override_verb_raw = (meta as any)?.intent_verb;
+    const override_verb = typeof override_verb_raw === "string" && override_verb_raw.length > 0 ? override_verb_raw.toUpperCase() : "";
+    const detected_base = detect_intent(original_text);
+    const detected = (override_verb && (ACTION_VERBS as readonly string[]).includes(override_verb))
+        ? { intent: "action" as const, verb: override_verb as ActionVerb }
+        : detected_base;
+
+    // Log intent detection details (helps diagnose misclassification like go/goals)
+    const hint = infer_action_verb_hint(original_text);
+    debug_log("Interpreter: intent hint", {
+        id: msg.id,
+        override_verb: override_verb || null,
+        detected_intent: detected.intent,
+        detected_verb: detected.verb,
+        hint_verb: hint.verb,
+        hint_matched: hint.matched_keyword,
+        hint_mode: hint.matched_mode,
+        ambiguous: hint.ambiguous || false,
+        candidates: hint.candidates,
+    });
+
+    // Clarification loop: if intent/target is unclear, ask once and do not emit machine text.
+    // This prevents speculative actions and improves tabletop pacing.
+    const requires_target = new Set<ActionVerb>(["COMMUNICATE", "ATTACK", "GRAPPLE", "HELP"]);
+    const has_ui_target = typeof (meta as any)?.target_ref === "string" && String((meta as any)?.target_ref).length > 0;
+    const has_explicit_target_in_text = resolve_npc_target_from_text(original_text) !== null;
+    if (detected.intent !== "action" || !detected.verb) {
+        if (is_question_like(original_text)) {
+            const hint_msg = create_message({
+                sender: "hint",
+                content: "Unclear action. Pick an intent (buttons) and/or target (use @name), then resend.",
+                stage: "hint_1",
+                status: "sent",
+                reply_to: msg.id,
+                meta: getSessionMeta(),
+            });
+            if (msg.correlation_id !== undefined) hint_msg.correlation_id = msg.correlation_id;
+            append_log_envelope(log_path, hint_msg);
+        }
+    } else if (requires_target.has(detected.verb) && !has_ui_target && !has_explicit_target_in_text) {
+        const hint_msg = create_message({
+            sender: "hint",
+            content: `Missing target for ${detected.verb}. Use @name (or /target name), then resend.`,
+            stage: "hint_1",
+            status: "sent",
+            reply_to: msg.id,
+            meta: getSessionMeta(),
+        });
+        if (msg.correlation_id !== undefined) hint_msg.correlation_id = msg.correlation_id;
+        append_log_envelope(log_path, hint_msg);
+
+        const done = try_set_message_status(processing.message, "done");
+        if (done.ok) {
+            update_outbox_message(outbox_path, done.message);
+            append_log_envelope(log_path, done.message);
+        }
+        return;
+    }
     const action_template = detected.intent === "action" && detected.verb
         ? build_action_template(detected.verb, original_text)
         : undefined;
     const actor_ref = get_active_actor_ref();
+
+    // If the UI provided a specific target, prefer using it directly in a local fallback.
+    const ui_target_ref_raw = (meta as any)?.target_ref;
+    const ui_target_ref = typeof ui_target_ref_raw === "string" && ui_target_ref_raw.length > 0 ? ui_target_ref_raw : "";
+    const ui_cost_raw = (meta as any)?.action_cost;
+    const ui_cost = typeof ui_cost_raw === "string" && ui_cost_raw.length > 0 ? ui_cost_raw.toUpperCase() : "";
+
+    if (detected.intent === "action" && detected.verb && ui_target_ref) {
+        // Build deterministic machine text for common targeted verbs.
+        // This avoids LLM ambiguity and prevents mis-parses from UI tokens.
+        let local_text = "";
+        if (detected.verb === "COMMUNICATE") {
+            const sanitized = sanitize_quoted_text(original_text);
+            const action_cost = ui_cost || "FULL";
+            local_text = `${actor_ref}.COMMUNICATE(tool=${actor_ref}.voice, targets=[${ui_target_ref}], text="${sanitized}", action_cost=${action_cost}, language=lang.common, senses=[pressure], tone="neutral", contexts=[region_tile.0.0.0.0])`;
+        } else if (detected.verb === "ATTACK") {
+            const action_cost = ui_cost || "FULL";
+            local_text = `${actor_ref}.ATTACK(target=${ui_target_ref}, tool=${actor_ref}.hands, action_cost=${action_cost})`;
+        } else if (detected.verb === "HELP") {
+            const action_cost = ui_cost || "PARTIAL";
+            local_text = `${actor_ref}.HELP(target=${ui_target_ref}, tool=${actor_ref}.hands, action_cost=${action_cost})`;
+        } else if (detected.verb === "GRAPPLE") {
+            const action_cost = ui_cost || "FULL";
+            local_text = `${actor_ref}.GRAPPLE(target=${ui_target_ref}, tool=${actor_ref}.hands, action_cost=${action_cost})`;
+        } else if (detected.verb === "USE") {
+            const action_cost = ui_cost || "PARTIAL";
+            local_text = `${actor_ref}.USE(target=${ui_target_ref}, tool=${actor_ref}.hands, action_cost=${action_cost})`;
+        } else if (detected.verb === "INSPECT") {
+            const action_cost = ui_cost || "PARTIAL";
+            local_text = `${actor_ref}.INSPECT(target=${ui_target_ref}, tool=${actor_ref}.hands, action_cost=${action_cost}, contexts=[region_tile.0.0.0.0])`;
+        } else if (detected.verb === "MOVE") {
+            const action_cost = ui_cost || "FULL";
+            local_text = `${actor_ref}.MOVE(target=${ui_target_ref}, tool=${actor_ref}.hands, mode="walk", action_cost=${action_cost})`;
+        }
+
+        if (local_text) {
+            debug_log("Interpreter: using UI target override", { id: msg.id, verb: detected.verb, target_ref: ui_target_ref, action_cost: ui_cost || null });
+            const response_msg = post_tweak(local_text, processing.message);
+            response_msg.content = local_text;
+            response_msg.meta = {
+                ...(response_msg.meta ?? {}),
+                machine_text: local_text,
+                original_text,
+                error_reason,
+                error_iteration: bounded_error_iteration,
+                errors: error_list,
+            };
+            response_msg.stage = is_refinement ? `interpreted_${next_iteration}` : "interpreted_1";
+            response_msg.status = "sent";
+            if (processing.message.correlation_id !== undefined) response_msg.correlation_id = processing.message.correlation_id;
+            if ((processing.message as any).conversation_id !== undefined) (response_msg as any).conversation_id = (processing.message as any).conversation_id;
+            // Send onward via inbox (data broker consumes from inbox)
+            append_inbox_message(inbox_path, response_msg);
+            append_log_envelope(log_path, response_msg);
+
+            const done = try_set_message_status(processing.message, "done");
+            if (done.ok) {
+                update_outbox_message(outbox_path, done.message);
+                append_log_envelope(log_path, done.message);
+            }
+            return;
+        }
+    }
     const response_text = await run_interpreter_ai({
         msg: processing.message,
         text: original_text,
@@ -1142,6 +1265,9 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
         intent: detected.intent,
         action_verb: detected.verb,
         action_template,
+        ui_intent_verb: override_verb || null,
+        ui_action_cost: typeof (meta as any)?.action_cost === "string" ? ((meta as any).action_cost as string) : null,
+        ui_target_ref: typeof (meta as any)?.target_ref === "string" ? ((meta as any).target_ref as string) : null,
     });
     const sanitized = sanitize_machine_text(response_text);
     let normalized = normalize_machine_text(sanitized, actor_ref, false);

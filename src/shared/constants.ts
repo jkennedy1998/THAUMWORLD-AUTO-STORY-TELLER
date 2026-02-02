@@ -81,6 +81,7 @@ export type TimedEventType = typeof TIMED_EVENT_TYPES[keyof typeof TIMED_EVENT_T
 
 // Action costs
 export const ACTION_COSTS = {
+    FREE: "FREE",
     FULL: "FULL",
     PARTIAL: "PARTIAL",
     EXTENDED: "EXTENDED"

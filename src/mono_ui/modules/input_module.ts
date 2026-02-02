@@ -13,6 +13,9 @@ export type InputModuleOptions = {
     // called on submit
     on_submit: (target_id: string, message: string) => void;
 
+    // called whenever the input buffer changes
+    on_change?: (message: string) => void;
+
     // optional: expose a submit trigger to external modules
     bind_submit?: (submit: () => void) => void;
 
@@ -107,12 +110,14 @@ export function make_input_module(opts: InputModuleOptions): Module {
         if (cps.length === 0) return;
         cps.pop();
         buffer = cps.join("");
+        opts.on_change?.(buffer);
     }
 
     function insert_text(t: string) {
         // treat tab as spaces to keep tile-grid clean
         const cleaned = t.replace(/\t/g, "    ");
         buffer = buffer + cleaned;
+        opts.on_change?.(buffer);
     }
 
     function submit() {
@@ -120,6 +125,7 @@ export function make_input_module(opts: InputModuleOptions): Module {
         if (msg.length === 0) return;
         opts.on_submit(opts.target_id, msg);
         buffer = "";
+        opts.on_change?.(buffer);
     }
 
     function draw_cursor(c: Canvas, x: number, y: number) {

@@ -64,6 +64,59 @@ World (Infinite / Sphere of Quads)
 **Goal:** Unblock working memory and message pipeline
 **Status:** In Progress
 
+#### P0.0: Tabletop Pacing + Intent/Targeting Guardrails (ADDED)
+**Priority:** CRITICAL
+
+This sub-phase fixes the largest tabletop-experience regressions:
+- One player input can currently trigger multiple internal interpretations/refinements, producing multiple narrations/NPC replies.
+- UI targeting tokens like `@Name` can reach the machine-text parser and cause rapid retry/refinement loops.
+
+**Design Decisions (Confirmed):**
+- **A. UI mentions**: `@Name` is treated as UI targeting, not literal text. If valid, the UI removes the token and sends `target_ref` separately.
+- **B. Timed events**: During initiative-based play, multiple NPC messages per round are expected. Outside timed events, a single player input should behave atomically.
+- **C. NPC triggers**: NPCs may respond to any relevant action (not only COMMUNICATE) if they are aware and the action targets them or occurs nearby.
+- **D. Clarify loop**: When intent/target is unclear, the system asks for clarification (and pauses) rather than speculating.
+- **Targeting rule**: If `@Name` doesn’t match a nearby/loaded target, warn and ask user to choose from available targets (no cross-region telepathy).
+
+**Implementation Pieces:**
+
+1) **UI: Mention-based targeting (no parser pollution)**
+- Detect `@Name` anywhere in the typed message.
+- If `Name` matches a known target, strip it from the outgoing text and send `target_ref`.
+- If not found, warn in status window and keep text unchanged.
+
+2) **UI: Intent override + action cost override**
+- One intent per message (buttons), plus action_cost buttons: `FREE`, `PARTIAL`, `FULL`, `EXTENDED`.
+- Auto-suggest intent 1s after the user stops typing (non-AI keyword/token matcher).
+- If no intent hint and no override, show a one-time pre-send warning in the status window:
+  - `your message does not contain an action type hint` → brief pause → `waiting for actor response`
+
+3) **UI: Targeting panel (text-only for now)**
+- A new window lists possible targets in the current region (NPCs present, current region, self).
+- Support commands:
+  - `@name <message>` sets target for that message
+  - `/target <name>` sets persistent target
+  - `/target` clears persistent target
+
+4) **Backend: Targets endpoint**
+- Add `GET /api/targets?slot=&actor_id=` returning region label and nearby targets.
+
+5) **Pipeline: Atomic action packets (non-timed mode)**
+- Add an `action_packet_id` derived from the inbound user message id.
+- Services propagate it across stages.
+- Outside timed events: only one final applied message should render + trigger NPC responses.
+- Earlier variants are marked `superseded` and ignored by renderer/npc.
+
+6) **Timed events exception (initiative mode)**
+- When a timed event is active, allow multiple NPC outputs per round in initiative order.
+- Still keep per-message idempotency: an NPC responds at most once per action packet.
+
+7) **Clarification workflow**
+- If intent is unknown or target missing for verbs that require it:
+  - emit a `hint` message that asks a single clarifying question
+  - do not generate multiple alternative actions
+
+
 #### P0.1: Fix Working Memory Region Resolution ✅ COMPLETED
 **Files Modified:**
 - `src/interface_program/main.ts` - Use timed event ID as correlation_id
