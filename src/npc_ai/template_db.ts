@@ -221,10 +221,24 @@ const villagerTemplates: NPCTemplate[] = [
         situation: "question_about_rumors",
         action: "COMMUNICATE",
         responses: [
-            "They say strange lights in the old ruins at night...",
-            "The miller's daughter went missing last week. Odd business.",
-            "Bandits on the east road, or so I've heard.",
-            "The mayor's been acting strange lately. Secret meetings."
+            "People are whispering again. Trouble has a way of finding this place.",
+            "I've heard talk of dangers on the roads. Best keep your eyes open.",
+            "Rumors travel faster than carts. I wouldn't stake my life on any of them.",
+            "Nothing solid. Just uneasy talk and a lot of looking over shoulders."
+        ],
+        conditions: { requires_peace: true },
+        priority: 5
+    },
+    {
+        id: "villager_question_general",
+        archetype: "villager",
+        situation: "question",
+        action: "COMMUNICATE",
+        responses: [
+            "Hard to say. What exactly are you asking?",
+            "Maybe. Maybe not. Say it plain for me.",
+            "I don't know about all that. What do you need?",
+            "I've got my own worries. What's this about?"
         ],
         conditions: { requires_peace: true },
         priority: 5
@@ -256,6 +270,51 @@ const villagerTemplates: NPCTemplate[] = [
         ],
         conditions: { requires_combat: true },
         priority: 8
+    }
+];
+
+// ===== ELDER TEMPLATES (for sages, elders, lorekeepers) =====
+
+const elderTemplates: NPCTemplate[] = [
+    {
+        id: "elder_greeting",
+        archetype: "elder",
+        situation: "greeting",
+        action: "COMMUNICATE",
+        responses: [
+            "Ah. Another set of footsteps at the crossroads. Speak, and be quick about it.",
+            "Evening, traveler. The valley listens more than people do.",
+            "If you've come for a story, sit. If you've come for truth, stand."
+        ],
+        conditions: { requires_peace: true },
+        priority: 6
+    },
+    {
+        id: "elder_question",
+        archetype: "elder",
+        situation: "question",
+        action: "COMMUNICATE",
+        responses: [
+            "You're asking the right shape of question. Now tell me what you're really after.",
+            "Goals change with the wind. Whose goals do you mean?",
+            "If you want my counsel, give me the details you won't say out loud.",
+            "I've watched this place long enough to know: intent matters more than words."
+        ],
+        conditions: { requires_peace: true },
+        priority: 6
+    },
+    {
+        id: "elder_question_about_rumors",
+        archetype: "elder",
+        situation: "question_about_rumors",
+        action: "COMMUNICATE",
+        responses: [
+            "Rumors are smoke. Still... smoke comes from somewhere.",
+            "People whisper. The land whispers too. Listen for the difference.",
+            "If you hear fear in a rumor, look for the hand that profits from it."
+        ],
+        conditions: { requires_peace: true },
+        priority: 6
     }
 ];
 
@@ -358,6 +417,7 @@ const allTemplates: NPCTemplate[] = [
     ...shopkeeperTemplates,
     ...guardTemplates,
     ...villagerTemplates,
+    ...elderTemplates,
     ...nobleTemplates,
     ...innkeeperTemplates
 ];
@@ -382,11 +442,13 @@ export function findTemplate(
         t.situation === situation
     );
     
-    // If no exact match, try partial situation match
+    // If no exact match, allow fallback to less-specific templates.
+    // IMPORTANT: Never match a more-specific template when the detected situation is generic.
+    // Example: situation="question" should NOT match "question_about_rumors".
     if (matches.length === 0) {
-        matches = allTemplates.filter(t => 
+        matches = allTemplates.filter(t =>
             t.archetype === archetype &&
-            t.situation.includes(situation)
+            (situation.startsWith(t.situation) || t.situation === "general")
         );
     }
     
@@ -419,7 +481,7 @@ export function findTemplate(
  */
 export function getTemplateResponse(template: NPCTemplate): string {
     const index = Math.floor(Math.random() * template.responses.length);
-    return template.responses[index];
+    return template.responses[index] ?? template.responses[0] ?? "...";
 }
 
 /**

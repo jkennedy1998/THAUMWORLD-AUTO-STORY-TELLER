@@ -37,7 +37,7 @@ The system successfully processed player input through the complete message pipe
 - All messages logged to `log.jsonc` with full metadata
 - Actor files accessed successfully (`henry_actor.jsonc`)
 - Region data loaded (`eden_crossroads.jsonc`)
-- NPC files accessed (`grenda.jsonc`, `old_moss.jsonc`)
+- NPC files accessed (`grenda.jsonc`, `gunther.jsonc`)
 - Metrics tracked in dedicated files
 
 ### ⚠️ Critical Issues Found
@@ -148,7 +148,7 @@ murmur, a soothing accompaniment to the stillness."
 - World coordinates resolved correctly
 
 **NPC Data:**
-- `grenda.jsonc` and `old_moss.jsonc` accessed
+- `grenda.jsonc` and `gunther.jsonc` accessed
 - Personality traits loaded
 - Awareness tags applied correctly (AWARENESS system working)
 

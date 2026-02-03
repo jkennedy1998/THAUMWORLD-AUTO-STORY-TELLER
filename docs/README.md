@@ -8,23 +8,36 @@ Complete documentation for the THAUMWORLD automated RPG system.
 
 If you're an AI agent working on this system, start here:
 
-1. **Read [ARCHITECTURE.md](./ARCHITECTURE.md)** - System overview with ASCII diagrams
-2. **Read [SERVICES.md](./SERVICES.md)** - All 8 services documented
-3. **Read [STAGES.md](./STAGES.md)** - Message flow and contracts
-4. **See [examples/](./examples/)** - Working code samples
+1. **Read [INDEX.md](./INDEX.md)** - Master documentation index and navigation
+2. **Read [ARCHITECTURE.md](./ARCHITECTURE.md)** - System overview with ASCII diagrams
+3. **Read [SERVICES.md](./SERVICES.md)** - All 8 services documented
+4. **Read [STAGES.md](./STAGES.md)** - Message flow and contracts
+5. **See [CHANGELOG.md](./CHANGELOG.md)** - Recent changes and fixes
+6. **See [examples/](./examples/)** - Working code samples
 
 ## Documentation Structure
 
 ```
 docs/
+├── INDEX.md                 # Master documentation index and navigation
+├── CHANGELOG.md             # Recent changes and fixes
+├── README.md                # This file - project overview
 ├── ARCHITECTURE.md          # System overview, data flow, ASCII diagrams
 ├── SERVICES.md              # All services: purpose, contracts, handoffs
 ├── STAGES.md                # Stage definitions, status transitions
-├── EFFECTS.md               # THAUMWORLD RPG effect system (TODO)
-├── ERROR_HANDLING.md        # Error logging standards (TODO)
-├── AI_AGENT_GUIDE.md        # Quick reference for AI agents (TODO)
-└── examples/
-    └── README.md            # 5 working code examples
+├── DEVELOPER_GUIDE.md       # Complete developer guide
+├── AI_AGENT_GUIDE.md        # Quick reference for AI agents
+├── MACHINE_TEXT_SYNTAX.md   # Command syntax specification
+├── EFFECTS.md               # THAUMWORLD RPG effect system
+├── TIMED_EVENTS.md          # Timed event system
+├── ERROR_HANDLING.md        # Error handling standards
+├── TROUBLESHOOTING.md       # Common issues and solutions
+├── AI_PROMPTS.md            # AI prompt templates
+├── CLEANUP_SUMMARY.md       # Documentation cleanup record
+├── examples/
+│   └── README.md            # Working code examples
+└── archive/
+    └── README.md            # Historical phase summaries
 ```
 
 ## System Overview

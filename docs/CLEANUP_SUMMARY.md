@@ -1,104 +1,96 @@
-# Phase 0 Cleanup Summary
+# Documentation Cleanup Summary
 
-**Date:** February 1, 2026  
-**Status:** ✅ COMPLETED  
-**Scope:** Standardize constants across all services before implementing working memory system
+**Date:** February 2, 2026  
+**Status:** ✅ COMPLETE
 
----
+## Overview
 
-## Changes Made
-
-### 1. Created Shared Constants File
-**File:** `src/shared/constants.ts` (NEW)
-
-**Contents:**
-- `ACTION_VERBS` - All 15 THAUMWORLD action verbs
-- `TOOL_REQUIRED_VERBS` - Subset requiring tool argument
-- `MESSAGE_STAGES` - Pipeline stage names
-- `MESSAGE_STATUSES` - Message state values
-- `TIMED_EVENT_TYPES` - Combat, conversation, exploration
-- `ACTION_COSTS` - FULL, PARTIAL, EXTENDED
-- `REFERENCE_TYPES` - actor, npc, item, tile, etc.
-- `SYSTEM_EFFECTS` - All SYSTEM.* effect verbs
-- `MEMORY_BUDGETS` - Working memory limits
-- `SERVICE_CONFIG` - Polling intervals, retry config, limits
-- `DEBUG_LEVELS` - Standardized debug levels
-- `DEFAULT_DATA_SLOT` - Default slot number
-
-### 2. Updated All Services to Use Shared Constants
-
-| Service | Changes |
-|---------|---------|
-| **state_applier** | Uses ACTION_VERBS, SERVICE_CONFIG.POLL_MS |
-| **interpreter_ai** | Uses shared ActionVerb type, SERVICE_CONFIG |
-| **renderer_ai** | Uses SERVICE_CONFIG, updated TODO comment |
-| **data_broker** | Uses SERVICE_CONFIG for polling and limits |
-| **npc_ai** | Uses SERVICE_CONFIG |
-| **rules_lawyer** | Uses SERVICE_CONFIG |
-| **turn_manager** | Uses SERVICE_CONFIG |
-| **roller** | Uses SERVICE_CONFIG |
-| **interface_program** | Uses SERVICE_CONFIG |
-
-**Pattern Applied:**
-```typescript
-// BEFORE:
-const data_slot_number = 1;
-const POLL_MS = 800;
-const ITERATION_LIMIT = 5;
-
-// AFTER:
-const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
-const POLL_MS = SERVICE_CONFIG.POLL_MS.<SERVICE_NAME>;
-const ITERATION_LIMIT = SERVICE_CONFIG.MAX_BROKER_ITERATIONS;
-```
-
-### 3. Removed Duplicate Definitions
-
-**Before:** Action verbs defined in 3+ places:
-- `src/interpreter_ai/main.ts` line 46
-- `src/state_applier/main.ts` lines 33-37
-- `src/renderer_ai/main.ts` line 84
-
-**After:** Single source of truth in `src/shared/constants.ts`
+Consolidated and organized project documentation for better navigability and maintenance.
 
 ---
 
-## Benefits
+## Actions Taken
 
-1. **Single Source of Truth** - Change constant in one place, affects all services
-2. **Type Safety** - Shared TypeScript types prevent drift
-3. **Configuration** - Easy to tune polling intervals, limits, etc.
-4. **Maintainability** - New services can import constants instead of redefining
-5. **Consistency** - All services use same values
+### 1. Created New Documentation Files
+
+**docs/INDEX.md** (NEW)
+- Master documentation index and navigation hub
+- Quick links for AI agents and developers  
+- Project status overview
+- Consolidated pointers to all documentation
+
+**docs/CHANGELOG.md** (NEW)
+- Consolidated change log with all recent fixes
+- Historical phase summaries
+- Organized by date and category
+- Clear before/after comparisons
+
+**docs/archive/README.md** (NEW)
+- Archive directory guide
+- Historical phase development record
+- Reference to current documentation
+
+### 2. Consolidated Fix Documentation
+
+**Files Consolidated into CHANGELOG.md:**
+- ✅ CONTINUITY_FIXES_SUMMARY.md
+- ✅ NPC_CONSISTENCY_FIX.md  
+- ✅ SESSION_ANALYSIS_2026-02-01.md
+- ✅ CLEANUP_SUMMARY.md (Phase 0 - Feb 1)
+
+### 3. Preserved Core Documentation
+
+**Active Documentation (12 files):**
+- README.md - Project overview and setup
+- INDEX.md - Master documentation index
+- CHANGELOG.md - Recent changes and fixes
+- ARCHITECTURE.md - System design and data flow
+- SERVICES.md - Service definitions and contracts
+- STAGES.md - Pipeline stage definitions
+- DEVELOPER_GUIDE.md - Complete developer guide
+- AI_AGENT_GUIDE.md - AI agent quick reference
+- MACHINE_TEXT_SYNTAX.md - Command syntax specification
+- EFFECTS.md - Effect system documentation
+- TIMED_EVENTS.md - Timed event system
+- ERROR_HANDLING.md - Error handling standards
+- TROUBLESHOOTING.md - Common issues and solutions
+- AI_PROMPTS.md - AI prompt templates
+
+**Note:** docs/examples/README.md preserved as working code examples
 
 ---
 
-## Testing
+## Result
 
-**Status:** System works as before (slightly buggy but responding)
+**Before Cleanup:** 27+ scattered documentation files
+**After Cleanup:** 
+- 14 active core documentation files
+- 3 new consolidated files
+- 11 historical phase documents in archive/
 
-**Verification:**
-- ✅ All services still boot successfully
-- ✅ Message pipeline still flows
-- ✅ NPCs still respond
-- ✅ No breaking changes to logic
-
----
-
-## Next Steps
-
-Ready to proceed with **Phase 1: Foundation** from IMPLEMENTATION_PLAN.md:
-1. Fix message display issues (messages not reaching inbox)
-2. Add conversation threading
-3. Data broker enhancements
-
-The codebase is now clean and ready for the working memory architecture implementation.
+**Benefits:**
+- ✅ Cleaner navigation
+- ✅ Single source of truth for recent changes
+- ✅ Historical context preserved
+- ✅ Easier for new AI agents to onboard
+- ✅ Better maintainability
 
 ---
 
-## Notes
+## Quick Navigation
 
-- No legacy path fallbacks removed yet (can be done later)
-- No interface program split yet (can be done during Phase 1)
-- Pre-existing LSP errors in interface_program/main.ts unrelated to cleanup
-- All changes are import/constant replacements only - no logic changes
+**For AI Agents:** Start with `docs/INDEX.md`
+**For Developers:** Start with `docs/README.md`  
+**For Recent Changes:** See `docs/CHANGELOG.md`
+**For Project History:** Check `docs/archive/README.md`
+
+---
+
+## Historical Note
+
+Previous cleanup (Phase 0, Feb 1, 2026):
+- Created shared constants file (`src/shared/constants.ts`)
+- Standardized constants across all 9 services
+- Removed duplicate definitions
+- See CHANGELOG.md for details
+

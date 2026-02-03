@@ -7,6 +7,11 @@ export type ButtonOptions = {
     label: string;              // monospace text
     rgb: Rgb;                   // label color
     bg?: { char: string; rgb: Rgb }; // optional background fill
+
+    // Optional dynamic styling
+    get_rgb?: () => Rgb;
+    get_bg?: () => { char: string; rgb: Rgb } | undefined;
+    get_base_weight_index?: () => number;
     // baseline typographic weight for this button
     // 0..7, default = 3 (regular-ish)
     base_weight_index?: number;
@@ -34,6 +39,7 @@ export function make_button_module(opts: ButtonOptions): Module {
     }
 
     function base_weight(): number {
+        if (opts.get_base_weight_index) return clamp_wi(opts.get_base_weight_index());
         return clamp_wi(opts.base_weight_index ?? 3);
     }
 
@@ -68,7 +74,8 @@ export function make_button_module(opts: ButtonOptions): Module {
             const ch = label.charAt(i); // always a string ('' if out of range)
             if (!ch) continue;
 
-            c.set(x, y, { char: ch, rgb: opts.rgb, style: 'regular', weight_index: current_label_weight_index() });
+            const rgb = opts.get_rgb ? opts.get_rgb() : opts.rgb;
+            c.set(x, y, { char: ch, rgb, style: 'regular', weight_index: current_label_weight_index() });
 
         }
 
@@ -82,15 +89,14 @@ export function make_button_module(opts: ButtonOptions): Module {
         Draw(c: Canvas): void {
             if (click_boost_frames > 0) click_boost_frames--;
 
-            if (opts.bg) {
-
-                c.fill_rect(rect, { char: opts.bg.char, rgb: opts.bg.rgb, style: 'regular' });
-            }
+            const bg = opts.get_bg ? opts.get_bg() : opts.bg;
+            if (bg) c.fill_rect(rect, { char: bg.char, rgb: bg.rgb, style: 'regular' });
 
             // minimal state visibility (no real decor yet):
             // top-left marker: H = hovered, P = pressed
-            if (hovered) c.set(rect.x0, rect.y1, { char: 'H', rgb: opts.rgb, style: 'regular', weight_index: 5 });
-            if (pressed) c.set(rect.x0 + 1, rect.y1, { char: 'P', rgb: opts.rgb, style: 'regular', weight_index: 7 });
+            const rgb = opts.get_rgb ? opts.get_rgb() : opts.rgb;
+            if (hovered) c.set(rect.x0, rect.y1, { char: 'H', rgb, style: 'regular', weight_index: 5 });
+            if (pressed) c.set(rect.x0 + 1, rect.y1, { char: 'P', rgb, style: 'regular', weight_index: 7 });
 
 
             draw_label(c);

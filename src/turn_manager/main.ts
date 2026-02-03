@@ -30,6 +30,7 @@ import type { TimedEventType } from "../shared/constants.js";
 import { initialize_turn_state, roll_initiative as roll_initiative_state_machine, transition_phase, get_turn_state, is_turn_timer_expired, get_turn_summary, type TurnState } from "./state_machine.js";
 import { validate_action, can_perform_action, type ActorState } from "./validator.js";
 import { hold_action, check_triggers, process_reaction, clear_event_reactions, create_trigger, type ReactionRequest } from "./reactions.js";
+import { append_timed_event_memory_journal } from "../npc_ai/timed_event_journal.js";
 
 const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
 const POLL_MS = SERVICE_CONFIG.POLL_MS.TURN_MANAGER;
@@ -48,13 +49,13 @@ function get_actor_dex(slot: number, actor_ref: string): number {
         const actor_id = actor_ref.replace("actor.", "");
         const result = load_actor(slot, actor_id);
         if (result.ok) {
-            return (result.actor.stats?.dex as number) ?? 50;
+            return Number((result.actor as any)?.stats?.dex ?? 50);
         }
     } else if (actor_ref.startsWith("npc.")) {
         const npc_id = actor_ref.replace("npc.", "");
         const result = load_npc(slot, npc_id);
         if (result.ok) {
-            return (result.npc.stats?.dex as number) ?? 50;
+            return Number((result.npc as any)?.stats?.dex ?? 50);
         }
     }
     return 50; // Default DEX
@@ -228,7 +229,7 @@ async function process_npc_turn(slot: number, actor_ref: string, store: WorldSto
     if (store.timed_event_type === "combat") {
         // In combat, NPCs might attack or defend
         const actions = ["prepares to attack", "takes a defensive stance", "assesses the situation", "waits for an opening"];
-        action_text = actions[Math.floor(Math.random() * actions.length)];
+        action_text = actions[Math.floor(Math.random() * actions.length)] ?? "";
     } else if (store.timed_event_type === "conversation") {
         // In conversation, NPCs respond
         action_text = "listens attentively";
@@ -337,6 +338,29 @@ async function check_event_end(slot: number, store: WorldStore): Promise<void> {
         
         append_inbox_message(inbox_path, create_message(end_announcement));
         append_log_message(log_path, "system", `Timed event ended: ${store.timed_event_type} (${store.current_turn} turns)`);
+
+        // NPC memory journal: summarize what each NPC would remember from this timed event
+        try {
+            const event_id = store.timed_event_id;
+            const event_type = store.timed_event_type;
+            const region = store.event_region ?? null;
+            const participants = Array.isArray(store.initiative_order)
+                ? store.initiative_order.map((e: any) => String(e?.actor_ref ?? "")).filter((s) => s.length > 0)
+                : [];
+            if (event_id && event_type && participants.length > 0) {
+                for (const ref of participants) {
+                    if (!ref.startsWith("npc.")) continue;
+                    void append_timed_event_memory_journal(slot, ref, {
+                        event_id,
+                        event_type,
+                        participants,
+                        region,
+                    });
+                }
+            }
+        } catch (err) {
+            log_service_error("turn_manager", "npc_memory_journal_end", { event_id: store.timed_event_id }, err);
+        }
         
         // End the event
         end_timed_event(slot);
@@ -388,7 +412,8 @@ async function process_trigger_messages(outbox_path: string, inbox_path: string,
                 // Parse target from event strings like "actor.henry_actor.ATTACK(target=npc.goblin, ...)"
                 const target_match = event.match(/target=(actor\.[^,)]+|npc\.[^,)]+)/);
                 if (target_match) {
-                    const target = target_match[1];
+                    const target = target_match[1] ?? "";
+                    if (!target) continue;
                     if (!participants.includes(target)) {
                         participants.push(target);
                     }
@@ -401,7 +426,8 @@ async function process_trigger_messages(outbox_path: string, inbox_path: string,
             }
             
             // Get region from first participant
-            const first_participant = participants[0];
+            const first_participant = participants[0] ?? "";
+            if (!first_participant) continue;
             const location = get_actor_location(data_slot_number, first_participant);
             
             if (!location) {
@@ -647,7 +673,7 @@ async function process_turn_phases(
                     event_id,
                     `turn_end_${turn_state.current_turn}`,
                     turn_state.current_turn,
-                    { actor_ref: turn_state.current_actor_ref }
+                    { actor_ref: turn_state.current_actor_ref ?? undefined }
                 );
                 
                 if (held_reactions.length > 0) {
@@ -680,6 +706,24 @@ async function process_turn_phases(
                     clear_event_reactions(event_id);
                     
                     // End the timed event
+                    // NPC memory journal: summarize what each NPC would remember from this timed event
+                    try {
+                        const store = get_timed_event_state(slot);
+                        const region = store?.event_region ?? null;
+                        const participants = Array.isArray(turn_state.initiative_order) ? turn_state.initiative_order : [];
+                        for (const ref of participants) {
+                            if (!ref.startsWith("npc.")) continue;
+                            void append_timed_event_memory_journal(slot, ref, {
+                                event_id,
+                                event_type: turn_state.event_type,
+                                participants,
+                                region,
+                            });
+                        }
+                    } catch (err) {
+                        log_service_error("turn_manager", "npc_memory_journal_end", { event_id }, err);
+                    }
+
                     end_timed_event(slot);
                     
                     const end_announcement: MessageInput = {

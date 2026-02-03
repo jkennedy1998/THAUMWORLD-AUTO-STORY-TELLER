@@ -20,7 +20,9 @@
     "format": "prettier . --write",
     "canvas_dev": "vite",
     "canvas_build": "vite build",
-    "canvas_preview": "vite preview"
+    "canvas_preview": "vite preview",
+    "wipe": "node scripts/wipe_memory.js",
+    "wipe:slot1": "node scripts/wipe_memory.js --slot=1"
   },
   "repository": {
     "type": "git",

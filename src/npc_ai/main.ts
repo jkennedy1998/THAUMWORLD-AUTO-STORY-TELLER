@@ -8,7 +8,7 @@ import type { MessageEnvelope } from "../engine/types.js";
 import { debug_log, debug_error, debug_pipeline, DEBUG_LEVEL, log_ai_io_terminal, log_ai_io_file } from "../shared/debug.js";
 import { ollama_chat, type OllamaMessage } from "../shared/ollama_client.js";
 import { append_metric } from "../engine/metrics_store.js";
-import { find_npcs, load_npc } from "../npc_storage/store.js";
+import { find_npcs, load_npc, save_npc } from "../npc_storage/store.js";
 import { load_actor } from "../actor_storage/store.js";
 import { isCurrentSession, getSessionMeta } from "../shared/session.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
@@ -24,6 +24,8 @@ import { summarize_for_npc, get_important_memories } from "../conversation_manag
 import { get_memories_about, remembers_entity, get_relationship_status, add_conversation_memory, get_formatted_memories } from "../npc_storage/memory.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { is_timed_event_active, get_timed_event_state, get_region_by_coords } from "../world_storage/store.js";
+import { consolidate_npc_memory_journal_if_needed, append_non_timed_conversation_journal } from "./timed_event_journal.js";
 
 const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
 const POLL_MS = SERVICE_CONFIG.POLL_MS.NPC_AI;
@@ -38,6 +40,9 @@ const NPC_AI_TEMPERATURE = 0.8;
 const responded_npcs = new Set<string>();
 let last_communication_id: string | null = null;
 
+// Track which NPC journals have been consolidated for a given timed event
+const consolidated_for_event = new Map<string, Set<string>>();
+
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -45,6 +50,34 @@ function sleep(ms: number): Promise<void> {
 type ChatTurn = { role: "user" | "assistant"; content: string };
 const npc_sessions = new Map<string, ChatTurn[]>();
 const SESSION_LIMIT = 10;
+
+// Idle timeout summarization for non-timed conversations
+const NPC_IDLE_SUMMARY_MS_RAW = Number(process.env.NPC_IDLE_SUMMARY_MS ?? 60_000);
+const NPC_IDLE_SUMMARY_MS = Number.isFinite(NPC_IDLE_SUMMARY_MS_RAW) ? NPC_IDLE_SUMMARY_MS_RAW : 60_000;
+const npc_idle_timers = new Map<string, NodeJS.Timeout>();
+
+function clear_idle_timer(npc_id: string): void {
+    const t = npc_idle_timers.get(npc_id);
+    if (t) {
+        clearTimeout(t);
+        npc_idle_timers.delete(npc_id);
+    }
+}
+
+function schedule_idle_summary(slot: number, npc_id: string, npc_name: string, conversation_id: string | null, transcript: string, region_label: string | null): void {
+    clear_idle_timer(npc_id);
+    const ref = `npc.${npc_id}`;
+    const timer = setTimeout(() => {
+        npc_idle_timers.delete(npc_id);
+        void append_non_timed_conversation_journal(slot, ref, {
+            region_label: region_label ?? undefined,
+            conversation_id,
+            transcript,
+        });
+    }, NPC_IDLE_SUMMARY_MS);
+    npc_idle_timers.set(npc_id, timer);
+    debug_log("NPC_AI", `Scheduled idle memory summary for ${npc_name}`, { npc_id, ms: NPC_IDLE_SUMMARY_MS });
+}
 
 function get_session_key(npc_id: string, correlation_id: string): string {
     return `${npc_id}:${correlation_id}`;
@@ -115,8 +148,31 @@ function determineResponse(
     }
     
     // Step 2: Check template database
-    const archetype = npc.role || "villager";
+    const archetype = (() => {
+        const role = typeof npc.role === "string" ? npc.role : "";
+        if (role) return role;
+        const title = typeof npc.title === "string" ? npc.title.toLowerCase() : "";
+        const goal = typeof npc.personality?.story_goal === "string" ? npc.personality.story_goal.toLowerCase() : "";
+        if (title.includes("elder") || goal.includes("protect") || goal.includes("knowledge")) return "elder";
+        if (title.includes("shop") || title.includes("shopkeep")) return "shopkeeper";
+        return "villager";
+    })();
     const detected_situation = detectSituation(player_text);
+
+    // If the player is asking an open-ended/identity/goals question directly, prefer AI over templates.
+    // Templates are good for quick flavor, but this style of question should reflect personality + memory.
+    const lowered = player_text.toLowerCase();
+    const is_big_question = situation.is_direct_target && detected_situation === "question" && (
+        lowered.includes("goal") ||
+        lowered.includes("remember") ||
+        lowered.includes("world") ||
+        lowered.includes("why") ||
+        lowered.includes("who are") ||
+        lowered.includes("what are you")
+    );
+    if (is_big_question) {
+        return { type: "ai", reason: "Direct open-ended question" };
+    }
     const health = npc.stats?.health;
     const health_percent = health ? (health.current / health.max) * 100 : 100;
     
@@ -196,6 +252,26 @@ function build_npc_prompt(npc: any, player_text: string, can_perceive: boolean, 
     if (memory_context && memory_context.length > 0) {
         prompt_parts.push(`\n${memory_context}`);
     }
+
+    // NPC sheet memories (journal + recent memory_sheet) can be relevant to decision making.
+    // Use strict participant refs (actor.* / npc.*). Avoid the word "player" for multiplayer readiness.
+    const mem_entries = Array.isArray(npc.memory) ? npc.memory.filter((x: any) => typeof x === "string") as string[] : [];
+    if (mem_entries.length > 0) {
+        prompt_parts.push(`\nNPC MEMORY JOURNAL (recent):`);
+        for (const entry of mem_entries.slice(-2)) {
+            prompt_parts.push(`- ${entry}`);
+        }
+    }
+
+    const sheet = npc.memory_sheet || {};
+    const recent_sheet = Array.isArray(sheet.recent_memories) ? sheet.recent_memories : [];
+    if (recent_sheet.length > 0) {
+        prompt_parts.push(`\nNPC MEMORY SHEET (recent):`);
+        for (const m of recent_sheet.slice(0, 3)) {
+            const summary = typeof m?.summary === "string" ? m.summary : "";
+            if (summary) prompt_parts.push(`- ${summary}`);
+        }
+    }
     
     // Perception context
     if (!can_perceive) {
@@ -212,6 +288,7 @@ function build_npc_prompt(npc: any, player_text: string, can_perceive: boolean, 
     prompt_parts.push(`Keep response to 1-2 sentences.`);
     prompt_parts.push(`If you can't perceive them well, show confusion or ignore them.`);
     prompt_parts.push(`Never break character. Never mention game mechanics.`);
+    prompt_parts.push(`Do not use the word "player". Refer to others as actor.<id> or npc.<id> when possible.`);
     
     return prompt_parts.join("\n");
 }
@@ -431,6 +508,21 @@ async function process_communication(
         
         const npc = npc_result.npc;
         const is_direct_target = direct_targets.includes(npc_hit.id);
+
+        // If a timed event is active and this NPC is being engaged, consolidate its memory journal before the conversation continues.
+        if (is_direct_target && is_timed_event_active(data_slot_number)) {
+            const store = get_timed_event_state(data_slot_number);
+            const event_id = typeof store?.timed_event_id === "string" ? store.timed_event_id : "";
+            if (event_id) {
+                const set = consolidated_for_event.get(event_id) ?? new Set<string>();
+                if (!set.has(npc_hit.id)) {
+                    set.add(npc_hit.id);
+                    consolidated_for_event.set(event_id, set);
+                    clear_idle_timer(npc_hit.id);
+                    void consolidate_npc_memory_journal_if_needed(data_slot_number, `npc.${npc_hit.id}`);
+                }
+            }
+        }
         
         // Check if NPC should respond
         if (!should_npc_respond(npc, is_direct_target)) {
@@ -445,6 +537,9 @@ async function process_communication(
             // Can't perceive and not directly addressed - skip
             continue;
         }
+        
+        // Mark as responded IMMEDIATELY to prevent duplicate processing in rapid ticks
+        responded_npcs.add(npc_hit.id);
         
         debug_pipeline("NPC_AI", `Generating response for ${npc.name}`, {
             npc_id: npc_hit.id,
@@ -598,6 +693,30 @@ async function process_communication(
         // Store to session (for all response types)
         const session_key = get_session_key(npc_hit.id, correlation_id);
         append_session_turn(session_key, original_text, npc_response);
+
+        // If a timed event is active, consolidate journal now (before long conversations) and cancel idle timers.
+        if (is_timed_event_active(data_slot_number)) {
+            clear_idle_timer(npc_hit.id);
+            void consolidate_npc_memory_journal_if_needed(data_slot_number, `npc.${npc_hit.id}`);
+        } else {
+            // Non-timed: schedule an idle summarization so the NPC's long-term memory updates.
+            const region_label = (() => {
+                const loc = (npc as any)?.location;
+                const wx = Number(loc?.world_tile?.x ?? 0);
+                const wy = Number(loc?.world_tile?.y ?? 0);
+                const rx = Number(loc?.region_tile?.x ?? 0);
+                const ry = Number(loc?.region_tile?.y ?? 0);
+                const region = get_region_by_coords(data_slot_number, wx, wy, rx, ry);
+                return region.ok ? (String((region.region as any)?.name ?? "") || region.region_id) : null;
+            })();
+            const npc_name = typeof (npc as any)?.name === "string" ? ((npc as any).name as string) : npc_hit.id;
+            const npc_ref = `npc.${npc_hit.id}`;
+            const history = get_session_history(session_key)
+                .map(t => `${t.role === 'user' ? player_ref : npc_ref}: ${t.content}`)
+                .join("\n");
+            const conv_id = typeof (msg as any).conversation_id === "string" ? ((msg as any).conversation_id as string) : null;
+            schedule_idle_summary(data_slot_number, npc_hit.id, npc_name, conv_id, history, region_label);
+        }
         
         // ===== PHASE 4: ADD TO CONVERSATION =====
         if (conversation) {
@@ -683,15 +802,45 @@ async function process_communication(
         // The canvas UI reads /api/log (log.jsonc), not inbox.jsonc.
         // Log NPC responses directly so they appear in the in-game window.
         append_log_envelope(log_path, response_msg);
+
+        // Persist a lightweight memory onto the NPC sheet (in npc JSONC)
+        // This is separate from npc_memories/ long-term store; it's a "sheet summary" for gameplay.
+        try {
+            const npc_sheet = load_npc(data_slot_number, npc_hit.id);
+            if (npc_sheet.ok) {
+                const npc_obj = npc_sheet.npc as Record<string, unknown>;
+                const mem = (npc_obj.memory_sheet as Record<string, unknown>) ?? {};
+                const recent = Array.isArray(mem.recent_memories) ? (mem.recent_memories as Record<string, unknown>[]) : [];
+
+        const npc_ref = `npc.${npc_hit.id}`;
+        const summary = `${player_ref}: ${original_text} | ${npc_ref}: ${npc_response}`;
+                const entry: Record<string, unknown> = {
+                    at: new Date().toISOString(),
+                    type: "conversation",
+                    summary: summary.slice(0, 400),
+                    related_entities: [player_ref],
+                    importance: original_text.toLowerCase().includes("goals") ? 6 : 3,
+                };
+
+                // Replace with latest entry to prevent unbounded growth.
+                mem.recent_memories = [entry];
+
+                const known = Array.isArray(mem.known_actors) ? (mem.known_actors as string[]) : [];
+                if (!known.includes(player_ref)) known.unshift(player_ref);
+                mem.known_actors = known.slice(0, 20);
+
+                npc_obj.memory_sheet = mem;
+                save_npc(data_slot_number, npc_hit.id, npc_obj);
+            }
+        } catch {
+            // ignore
+        }
         
         debug_pipeline("NPC_AI", `Created response from ${npc.name}`, {
             msg_id: response_msg.id,
             decision_source: decision_source,
             response_preview: npc_response.slice(0, 50)
         });
-        
-        // Mark as responded
-        responded_npcs.add(npc_hit.id);
         
         // Log metric
         append_metric(data_slot_number, "npc_ai", {
@@ -748,7 +897,7 @@ async function tick(outbox_path: string, inbox_path: string, log_path: string): 
     try {
         const outbox = read_outbox(outbox_path);
         
-        // Look for applied_* messages that contain COMMUNICATE events.
+        // Look for applied_* messages that contain events worth reacting to.
         // NOTE: renderer_ai may mark messages as processing/done quickly, so we must not rely on
         // seeing status="sent" here; instead use a meta flag to ensure idempotency.
         const candidates = outbox.messages.filter((m) => {
@@ -757,14 +906,22 @@ async function tick(outbox_path: string, inbox_path: string, log_path: string): 
             if ((m.meta as any)?.npc_processed === true) return false;
             // Accept sent/done/processing to avoid race with renderer_ai
             if (m.status !== "sent" && m.status !== "done" && m.status !== "processing") return false;
-            
-            // Check if it has COMMUNICATE-related events
+
             const events = (m.meta as any)?.events as string[] || [];
-            const has_communicate = events.some(e => 
-                e.includes("COMMUNICATE") || e.includes("SET_AWARENESS")
-            );
+            // Ignore invalid-target outcomes; NPCs should not react to failed parsing/targeting
+            if (events.some(e => e.includes("NOTE.INVALID_TARGET"))) return false;
+            // Prefer final rulings when available
+            const is_final = (m.meta as any)?.is_final_ruling;
+            if (typeof is_final === "boolean" && is_final === false) return false;
             
-            return has_communicate;
+            // NPCs can react to any salient state change they care about.
+            // v1: react if the event targets an npc.* or is an overtly social/violent verb.
+            const salient_verbs = ["COMMUNICATE", "ATTACK", "GRAPPLE", "HELP", "USE", "DEFEND", "DODGE"];
+            const has_salient = events.some(e => {
+                if (e.includes("target=npc.")) return true;
+                return salient_verbs.some(v => e.includes(`.${v}(`));
+            });
+            return has_salient;
         });
         
         // Deduplicate by message ID to prevent processing same message multiple times
@@ -786,6 +943,12 @@ async function tick(outbox_path: string, inbox_path: string, log_path: string): 
         
         for (const msg of unique_candidates) {
             try {
+                // Skip if already being processed by another tick
+                if (msg.status === "processing") {
+                    debug_pipeline("NPC_AI", `Skipping message already being processed`, { id: msg.id });
+                    continue;
+                }
+                
                 // Mark as processing to prevent duplicate handling (best-effort)
                 const processing = try_set_message_status(msg, "processing");
                 if (processing.ok) update_outbox_message(outbox_path, processing.message);

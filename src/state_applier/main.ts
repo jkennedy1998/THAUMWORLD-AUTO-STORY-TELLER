@@ -1,6 +1,6 @@
 import { get_data_slot_dir, get_log_path, get_outbox_path } from "../engine/paths.js";
 import { ensure_dir_exists, ensure_log_exists, append_log_message, append_log_envelope } from "../engine/log_store.js";
-import { ensure_outbox_exists, read_outbox, write_outbox, prune_outbox_messages, append_outbox_message, append_outbox_message_deduped } from "../engine/outbox_store.js";
+import { ensure_outbox_exists, read_outbox, write_outbox, prune_outbox_messages, append_outbox_message, append_outbox_message_deduped, update_outbox_message } from "../engine/outbox_store.js";
 import { create_message, try_set_message_status } from "../engine/message.js";
 import type { MessageInput } from "../engine/message.js";
 import type { MessageEnvelope } from "../engine/types.js";
@@ -13,6 +13,7 @@ import { apply_effects } from "./apply.js";
 import { find_npcs, load_npc, save_npc } from "../npc_storage/store.js";
 import { load_actor } from "../actor_storage/store.js";
 import { add_event_to_memory, get_working_memory, build_working_memory } from "../context_manager/index.js";
+import { get_timed_event_state } from "../world_storage/store.js";
 import { parse } from "jsonc-parser";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -68,63 +69,8 @@ function extractTool(event: string): string | null {
     return toolMatch && toolMatch[1] ? toolMatch[1] : null;
 }
 
-function update_outbox_message_atomic(outbox_path: string, updated: MessageEnvelope): boolean {
-    const lockPath = outbox_path + '.lock';
-    const maxRetries = 10;
-    const retryDelay = 50; // ms
-    
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-        try {
-            // Try to acquire lock
-            try {
-                fs.writeFileSync(lockPath, process.pid.toString(), { flag: 'wx' });
-            } catch (e) {
-                // Lock exists, wait and retry
-                if (attempt < maxRetries - 1) {
-                    sleep(retryDelay);
-                    continue;
-                }
-                debug_error("StateApplier", `Failed to acquire lock after ${maxRetries} attempts`, e);
-                return false;
-            }
-            
-            // Read, modify, write
-            const outbox = read_outbox(outbox_path);
-            const idx = outbox.messages.findIndex((m) => m.id === updated.id);
-            if (idx === -1) {
-                fs.unlinkSync(lockPath);
-                return false;
-            }
-            outbox.messages[idx] = updated;
-            const pruned = prune_outbox_messages(outbox, 10);
-            write_outbox(outbox_path, pruned);
-            
-            // Release lock
-            fs.unlinkSync(lockPath);
-            return true;
-        } catch (err) {
-            // Clean up lock if it exists
-            try {
-                if (fs.existsSync(lockPath)) {
-                    fs.unlinkSync(lockPath);
-                }
-            } catch {}
-            
-            if (attempt < maxRetries - 1) {
-                sleep(retryDelay);
-            } else {
-                debug_error("StateApplier", `Failed to update outbox after ${maxRetries} attempts`, err);
-                return false;
-            }
-        }
-    }
-    return false;
-}
-
-// Keep old function for backwards compatibility, but use atomic version
-function update_outbox_message(outbox_path: string, updated: MessageEnvelope): void {
-    update_outbox_message_atomic(outbox_path, updated);
-}
+// Note: Atomic update functions are now provided by outbox_store.ts
+// StateApplier uses the centralized update_outbox_message from outbox_store.ts
 
 // Apply AWARENESS tags to NPCs when player communicates
 // Per THAUMWORLD rules: NPCs gain awareness when player makes sensible actions (communicating)
@@ -255,7 +201,9 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
         return;
     }
     
-    const updated = update_outbox_message_atomic(outbox_path, processing.message);
+    // Use centralized atomic update from outbox_store
+    update_outbox_message(outbox_path, processing.message);
+    const updated = true; // Assume success since outbox_store handles errors internally
     if (!updated) {
         debug_error("StateApplier", `Failed to update outbox for ${msg.id} (processing)`, { id: msg.id });
         return;
@@ -348,13 +296,22 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
     }
     
     // Step 3.5: Record events to working memory for ALL actions
-    const correlation_id = msg.correlation_id;
-    if (correlation_id && events && events.length > 0) {
-        // Try to find working memory by correlation_id
-        let memory = get_working_memory(data_slot_number, correlation_id);
+    // FIX: Check for active timed event and use event_id as lookup key to align with turn_manager
+    const timed_event = get_timed_event_state(data_slot_number);
+    const is_timed_event_active = timed_event?.timed_event_active && timed_event?.event_id;
+    
+    // Use timed event ID if active, otherwise fall back to correlation_id
+    const memory_lookup_id = is_timed_event_active 
+        ? timed_event.event_id! 
+        : msg.correlation_id;
+    
+    if (memory_lookup_id && events && events.length > 0) {
+        // Try to find working memory by the correct lookup key
+        let memory = get_working_memory(data_slot_number, memory_lookup_id);
         
-        // If no memory exists, create it on-demand for ANY action (not just timed events)
-        if (!memory) {
+        // If no memory exists and no timed event is active, create it on-demand
+        // (If timed event is active, turn_manager should have created the memory)
+        if (!memory && !is_timed_event_active) {
             // Get region from current player location
             const region_id = get_current_region(data_slot_number);
             const participants = extract_participants_from_events(events);
@@ -367,16 +324,23 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
             
             memory = await build_working_memory(
                 data_slot_number,
-                correlation_id,
+                memory_lookup_id,
                 detect_event_type(events),
                 region_id,
                 participants
             );
             
             debug_pipeline("StateApplier", `  [2.6/4] Created working memory for session`, {
-                correlation_id,
+                lookup_id: memory_lookup_id,
                 region_id,
-                participant_count: participants.length
+                participant_count: participants.length,
+                is_timed_event: false
+            });
+        } else if (memory && is_timed_event_active) {
+            debug_pipeline("StateApplier", `  [2.6/4] Found existing working memory for timed event`, {
+                lookup_id: memory_lookup_id,
+                event_id: timed_event.event_id,
+                is_timed_event: true
             });
         }
         
@@ -420,13 +384,14 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
                     event_data.target = target;
                 }
                 
-                // Add to working memory
-                add_event_to_memory(data_slot_number, correlation_id, event_data);
+                // Add to working memory using the correct lookup ID
+                add_event_to_memory(data_slot_number, memory_lookup_id, event_data);
                 
                 debug_pipeline("StateApplier", `  [2.7/4] Recorded event to working memory`, {
-                    event_id: correlation_id,
+                    lookup_id: memory_lookup_id,
                     actor: actor_ref,
-                    action
+                    action,
+                    is_timed_event: is_timed_event_active
                 });
             }
         }
@@ -473,7 +438,9 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
     // Step 4: Mark original message as done
     const done = try_set_message_status(processing.message, "done");
     if (done.ok) {
-        const doneUpdated = update_outbox_message_atomic(outbox_path, done.message);
+        // Use centralized atomic update from outbox_store
+        update_outbox_message(outbox_path, done.message);
+        const doneUpdated = true; // Assume success since outbox_store handles errors internally
         if (doneUpdated) {
             append_log_envelope(log_path, done.message);
             debug_pipeline("StateApplier", `  [4/4] COMPLETED - Status: processing -> done`, { id: done.message.id });

@@ -1,7 +1,7 @@
 import { get_data_slot_dir, get_inbox_path, get_log_path, get_outbox_path } from "../engine/paths.js";
 import { ensure_dir_exists, ensure_log_exists } from "../engine/log_store.js";
 import { ensure_inbox_exists, append_inbox_message } from "../engine/inbox_store.js";
-import { ensure_outbox_exists, read_outbox, write_outbox, prune_outbox_messages } from "../engine/outbox_store.js";
+import { ensure_outbox_exists, read_outbox, write_outbox, prune_outbox_messages, update_outbox_message } from "../engine/outbox_store.js";
 import { create_message, try_set_message_status } from "../engine/message.js";
 import type { MessageInput } from "../engine/message.js";
 import { append_log_envelope } from "../engine/log_store.js";
@@ -81,9 +81,10 @@ function sleep(ms: number): Promise<void> {
 function generate_conversation_id_for_context(params: {
     session_id: string;
     region_ref: string;
-    primary_npc_id?: string | null;
 }): string {
-    const base = `${params.session_id}:${params.region_ref}:${params.primary_npc_id || "none"}`;
+    // FIX: Removed primary_npc_id from hash to prevent conversation fragmentation
+    // All participants in same session/region now share one conversation thread
+    const base = `${params.session_id}:${params.region_ref}`;
     const hash = crypto.createHash("sha256").update(base).digest("hex").slice(0, 12);
     return `conv_${hash}`;
 }
@@ -1087,14 +1088,7 @@ function post_tweak(text: string, original: MessageEnvelope): MessageEnvelope {
     return create_message(input);
 }
 
-function update_outbox_message(outbox_path: string, updated: MessageEnvelope): void {
-    const outbox = read_outbox(outbox_path);
-    const idx = outbox.messages.findIndex((m) => m.id === updated.id);
-    if (idx === -1) return;
-    outbox.messages[idx] = updated;
-    const pruned = prune_outbox_messages(outbox, 10);
-    write_outbox(outbox_path, pruned);
-}
+// Note: update_outbox_message is now imported from outbox_store.ts for consistency
 
 async function process_message(outbox_path: string, inbox_path: string, log_path: string, msg: MessageEnvelope): Promise<void> {
     debug_log("Interpreter: received", { id: msg.id, status: msg.status, stage: msg.stage });
@@ -1352,12 +1346,11 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
             region_x: loc.region_x,
             region_y: loc.region_y,
         });
-        const pre = preprocess_communication_text(original_text);
-        const primary_npc_id = pre.detected_target;
+        // FIX: Removed primary_npc_id from conversation ID generation
+        // All participants in same session/region now share one conversation thread
         response_msg.conversation_id = msg.conversation_id || generate_conversation_id_for_context({
             session_id,
             region_ref,
-            primary_npc_id,
         });
         response_msg.turn_number = (msg.turn_number || 0) + 1;
         response_msg.role = "player";

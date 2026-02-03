@@ -55,6 +55,7 @@ export function create_app_state(): AppState {
             last_infer_timer: null as number | null,
             targets: [] as Array<{ ref: string; label: string; type: string }>,
             region_label: null as string | null,
+            targets_ready: false,
         },
         roller: {
             spinner: "|",
@@ -140,6 +141,16 @@ export function create_app_state(): AppState {
                 if (!data.ok) return;
                 ui_state.controls.targets = Array.isArray(data.targets) ? data.targets : [];
                 ui_state.controls.region_label = typeof data.region === 'string' ? data.region : null;
+                ui_state.controls.targets_ready = true;
+
+                // Validate persistent selected target
+                if (ui_state.controls.selected_target) {
+                    const valid = ui_state.controls.targets.some(t => t.ref.toLowerCase() === ui_state.controls.selected_target!.toLowerCase());
+                    if (!valid) {
+                        ui_state.controls.selected_target = null;
+                        flash_status(['target no longer valid (choose again)'], 1200);
+                    }
+                }
 
                 // Update targets window text
                 const targets_lines: string[] = [];
@@ -181,6 +192,12 @@ export function create_app_state(): AppState {
 
     async function send_to_interpreter(message: string): Promise<void> {
         try {
+            // Ensure targets are loaded at least once before sending so targeting is reliable.
+            if (!ui_state.controls.targets_ready) {
+                flash_status(['loading targets...'], 800);
+                await new Promise((r) => setTimeout(r, 250));
+            }
+
             // Local targeting commands (do not send to backend)
             const trimmed = message.trim();
             if (trimmed.toLowerCase().startsWith('/target ')) {
@@ -239,6 +256,8 @@ export function create_app_state(): AppState {
 
                 if (matched) {
                     target_ref = matched.ref;
+                    // Persist selection so the UI reflects targeting for subsequent actions.
+                    ui_state.controls.selected_target = matched.ref;
                     // strip '@' from the first token only; keep the name readable
                     words[i] = first;
                     outgoing = words.join(' ');
@@ -248,6 +267,16 @@ export function create_app_state(): AppState {
                 }
 
                 break; // one target per message for now
+            }
+
+            // Validate target immediately before sending
+            if (target_ref) {
+                const valid = ui_state.controls.targets.some(t => t.ref.toLowerCase() === target_ref!.toLowerCase());
+                if (!valid) {
+                    ui_state.controls.selected_target = null;
+                    target_ref = null;
+                    flash_status(['target no longer valid (choose again)'], 1200);
+                }
             }
 
             // Warn once if there is no intent hint and no override.
@@ -526,21 +555,21 @@ export function create_app_state(): AppState {
         }),
 
         // Action intent buttons (one per action type)
-        make_button_module({ id: 'verb_use', rect: { x0: 88, y0: 7, x1: 93, y1: 9 }, label: 'USE', rgb: WHITE, bg: { char: '-', rgb: get_color_by_name('dark_gray').rgb }, OnPress() { ui_state.controls.override_intent = 'USE'; flash_status(['intent: USE'], 800); } }),
-        make_button_module({ id: 'verb_atk', rect: { x0: 94, y0: 7, x1: 99, y1: 9 }, label: 'ATK', rgb: WHITE, bg: { char: '-', rgb: get_color_by_name('dark_gray').rgb }, OnPress() { ui_state.controls.override_intent = 'ATTACK'; flash_status(['intent: ATTACK'], 800); } }),
-        make_button_module({ id: 'verb_hlp', rect: { x0: 100, y0: 7, x1: 105, y1: 9 }, label: 'HLP', rgb: WHITE, bg: { char: '-', rgb: get_color_by_name('dark_gray').rgb }, OnPress() { ui_state.controls.override_intent = 'HELP'; flash_status(['intent: HELP'], 800); } }),
-        make_button_module({ id: 'verb_def', rect: { x0: 106, y0: 7, x1: 112, y1: 9 }, label: 'DEF', rgb: WHITE, bg: { char: '-', rgb: get_color_by_name('dark_gray').rgb }, OnPress() { ui_state.controls.override_intent = 'DEFEND'; flash_status(['intent: DEFEND'], 800); } }),
-        make_button_module({ id: 'verb_grp', rect: { x0: 113, y0: 7, x1: 118, y1: 9 }, label: 'GRP', rgb: WHITE, bg: { char: '-', rgb: get_color_by_name('dark_gray').rgb }, OnPress() { ui_state.controls.override_intent = 'GRAPPLE'; flash_status(['intent: GRAPPLE'], 800); } }),
-        make_button_module({ id: 'verb_ins', rect: { x0: 88, y0: 10, x1: 93, y1: 12 }, label: 'INS', rgb: WHITE, bg: { char: '-', rgb: get_color_by_name('dark_gray').rgb }, OnPress() { ui_state.controls.override_intent = 'INSPECT'; flash_status(['intent: INSPECT'], 800); } }),
-        make_button_module({ id: 'verb_com', rect: { x0: 94, y0: 10, x1: 101, y1: 12 }, label: 'COM', rgb: WHITE, bg: { char: '-', rgb: get_color_by_name('dark_gray').rgb }, OnPress() { ui_state.controls.override_intent = 'COMMUNICATE'; flash_status(['intent: COMMUNICATE'], 800); } }),
-        make_button_module({ id: 'verb_mov', rect: { x0: 102, y0: 10, x1: 107, y1: 12 }, label: 'MOV', rgb: WHITE, bg: { char: '-', rgb: get_color_by_name('dark_gray').rgb }, OnPress() { ui_state.controls.override_intent = 'MOVE'; flash_status(['intent: MOVE'], 800); } }),
-        make_button_module({ id: 'verb_ddg', rect: { x0: 108, y0: 10, x1: 112, y1: 12 }, label: 'DDG', rgb: WHITE, bg: { char: '-', rgb: get_color_by_name('dark_gray').rgb }, OnPress() { ui_state.controls.override_intent = 'DODGE'; flash_status(['intent: DODGE'], 800); } }),
-        make_button_module({ id: 'verb_crf', rect: { x0: 113, y0: 10, x1: 118, y1: 12 }, label: 'CRF', rgb: WHITE, bg: { char: '-', rgb: get_color_by_name('dark_gray').rgb }, OnPress() { ui_state.controls.override_intent = 'CRAFT'; flash_status(['intent: CRAFT'], 800); } }),
-        make_button_module({ id: 'verb_slp', rect: { x0: 88, y0: 13, x1: 93, y1: 15 }, label: 'SLP', rgb: WHITE, bg: { char: '-', rgb: get_color_by_name('dark_gray').rgb }, OnPress() { ui_state.controls.override_intent = 'SLEEP'; flash_status(['intent: SLEEP'], 800); } }),
-        make_button_module({ id: 'verb_rpr', rect: { x0: 94, y0: 13, x1: 99, y1: 15 }, label: 'RPR', rgb: WHITE, bg: { char: '-', rgb: get_color_by_name('dark_gray').rgb }, OnPress() { ui_state.controls.override_intent = 'REPAIR'; flash_status(['intent: REPAIR'], 800); } }),
-        make_button_module({ id: 'verb_wrk', rect: { x0: 100, y0: 13, x1: 105, y1: 15 }, label: 'WRK', rgb: WHITE, bg: { char: '-', rgb: get_color_by_name('dark_gray').rgb }, OnPress() { ui_state.controls.override_intent = 'WORK'; flash_status(['intent: WORK'], 800); } }),
-        make_button_module({ id: 'verb_grd', rect: { x0: 106, y0: 13, x1: 112, y1: 15 }, label: 'GRD', rgb: WHITE, bg: { char: '-', rgb: get_color_by_name('dark_gray').rgb }, OnPress() { ui_state.controls.override_intent = 'GUARD'; flash_status(['intent: GUARD'], 800); } }),
-        make_button_module({ id: 'verb_hld', rect: { x0: 113, y0: 13, x1: 118, y1: 15 }, label: 'HLD', rgb: WHITE, bg: { char: '-', rgb: get_color_by_name('dark_gray').rgb }, OnPress() { ui_state.controls.override_intent = 'HOLD'; flash_status(['intent: HOLD'], 800); } }),
+        make_button_module({ id: 'verb_use', rect: { x0: 88, y0: 7, x1: 93, y1: 9 }, label: 'USE', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'USE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'USE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'USE'; flash_status(['intent: USE'], 800); } }),
+        make_button_module({ id: 'verb_atk', rect: { x0: 94, y0: 7, x1: 99, y1: 9 }, label: 'ATK', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'ATTACK' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'ATTACK' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'ATTACK'; flash_status(['intent: ATTACK'], 800); } }),
+        make_button_module({ id: 'verb_hlp', rect: { x0: 100, y0: 7, x1: 105, y1: 9 }, label: 'HLP', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'HELP' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'HELP' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'HELP'; flash_status(['intent: HELP'], 800); } }),
+        make_button_module({ id: 'verb_def', rect: { x0: 106, y0: 7, x1: 112, y1: 9 }, label: 'DEF', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'DEFEND' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'DEFEND' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'DEFEND'; flash_status(['intent: DEFEND'], 800); } }),
+        make_button_module({ id: 'verb_grp', rect: { x0: 113, y0: 7, x1: 118, y1: 9 }, label: 'GRP', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'GRAPPLE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'GRAPPLE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'GRAPPLE'; flash_status(['intent: GRAPPLE'], 800); } }),
+        make_button_module({ id: 'verb_ins', rect: { x0: 88, y0: 10, x1: 93, y1: 12 }, label: 'INS', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'INSPECT' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'INSPECT' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'INSPECT'; flash_status(['intent: INSPECT'], 800); } }),
+        make_button_module({ id: 'verb_com', rect: { x0: 94, y0: 10, x1: 101, y1: 12 }, label: 'COM', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'COMMUNICATE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'COMMUNICATE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'COMMUNICATE'; flash_status(['intent: COMMUNICATE'], 800); } }),
+        make_button_module({ id: 'verb_mov', rect: { x0: 102, y0: 10, x1: 107, y1: 12 }, label: 'MOV', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'MOVE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'MOVE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'MOVE'; flash_status(['intent: MOVE'], 800); } }),
+        make_button_module({ id: 'verb_ddg', rect: { x0: 108, y0: 10, x1: 112, y1: 12 }, label: 'DDG', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'DODGE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'DODGE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'DODGE'; flash_status(['intent: DODGE'], 800); } }),
+        make_button_module({ id: 'verb_crf', rect: { x0: 113, y0: 10, x1: 118, y1: 12 }, label: 'CRF', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'CRAFT' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'CRAFT' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'CRAFT'; flash_status(['intent: CRAFT'], 800); } }),
+        make_button_module({ id: 'verb_slp', rect: { x0: 88, y0: 13, x1: 93, y1: 15 }, label: 'SLP', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'SLEEP' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'SLEEP' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'SLEEP'; flash_status(['intent: SLEEP'], 800); } }),
+        make_button_module({ id: 'verb_rpr', rect: { x0: 94, y0: 13, x1: 99, y1: 15 }, label: 'RPR', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'REPAIR' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'REPAIR' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'REPAIR'; flash_status(['intent: REPAIR'], 800); } }),
+        make_button_module({ id: 'verb_wrk', rect: { x0: 100, y0: 13, x1: 105, y1: 15 }, label: 'WRK', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'WORK' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'WORK' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'WORK'; flash_status(['intent: WORK'], 800); } }),
+        make_button_module({ id: 'verb_grd', rect: { x0: 106, y0: 13, x1: 112, y1: 15 }, label: 'GRD', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'GUARD' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'GUARD' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'GUARD'; flash_status(['intent: GUARD'], 800); } }),
+        make_button_module({ id: 'verb_hld', rect: { x0: 113, y0: 13, x1: 118, y1: 15 }, label: 'HLD', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'HOLD' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'HOLD' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'HOLD'; flash_status(['intent: HOLD'], 800); } }),
         make_button_module({ id: 'verb_clear', rect: { x0: 88, y0: 16, x1: 99, y1: 18 }, label: 'CLEAR', rgb: get_color_by_name('pale_yellow').rgb, bg: { char: '.', rgb: get_color_by_name('dark_gray').rgb }, OnPress() { ui_state.controls.override_intent = null; ui_state.controls.override_cost = null; flash_status(['overrides cleared'], 800); } }),
 
         make_roller_module({

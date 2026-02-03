@@ -60,7 +60,7 @@ Format: `npc.<npc_id>`
 
 Examples:
 - `npc.grenda`
-- `npc.old_moss`
+- `npc.gunther`
 - `npc.thorn`
 - `npc.sister_bramble`
 

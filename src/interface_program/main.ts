@@ -1006,7 +1006,7 @@ function start_http_server(log_path: string): void {
                         for (const entry of info) {
                             if (typeof entry !== "string") continue;
                             const norm = entry.toLowerCase();
-                            // Normalize npc.Old_Moss -> npc.old_moss
+                            // Normalize npc.Gunther -> npc.gunther
                             const fixed = norm.startsWith("npc.") ? `npc.${norm.slice(4).replace(/[^a-z0-9_]/g, "_")}` : norm;
                             awareness.add(fixed);
                         }

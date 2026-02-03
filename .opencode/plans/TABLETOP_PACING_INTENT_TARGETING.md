@@ -83,7 +83,7 @@ Response format:
   "targets": [
     { "ref": "actor.henry_actor", "label": "Henry", "type": "actor" },
     { "ref": "region_tile.0.0.0.0", "label": "Eden Crossroads", "type": "region" },
-    { "ref": "npc.old_moss", "label": "Old Moss", "type": "npc" }
+    { "ref": "npc.gunther", "label": "Gunther", "type": "npc" }
   ]
 }
 ```
@@ -122,7 +122,7 @@ When intent is unknown or required target missing:
 
 Examples:
 - "what are your goals?" (no target)
-  - hint: "Who are you asking? Try `@old_moss what are your goals?` or `/target old_moss`."
+  - hint: "Who are you asking? Try `@gunther what are your goals?` or `/target gunther`."
 - "attack" (no target)
   - hint: "Who are you attacking? Pick a target from the targets list."
 

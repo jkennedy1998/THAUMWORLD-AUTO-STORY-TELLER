@@ -1,7 +1,7 @@
 import { get_data_slot_dir, get_inbox_path, get_log_path, get_outbox_path, get_roller_status_path } from "../engine/paths.js";
 import { ensure_dir_exists, ensure_log_exists, append_log_envelope } from "../engine/log_store.js";
 import { ensure_inbox_exists } from "../engine/inbox_store.js";
-import { ensure_outbox_exists, read_outbox, write_outbox, prune_outbox_messages, append_outbox_message } from "../engine/outbox_store.js";
+import { ensure_outbox_exists, read_outbox, write_outbox, prune_outbox_messages, append_outbox_message, update_outbox_message } from "../engine/outbox_store.js";
 import { create_message, try_set_message_status } from "../engine/message.js";
 import type { MessageInput } from "../engine/message.js";
 import type { MessageEnvelope } from "../engine/types.js";
@@ -29,14 +29,7 @@ function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function update_outbox_message(outbox_path: string, updated: MessageEnvelope): void {
-    const outbox = read_outbox(outbox_path);
-    const idx = outbox.messages.findIndex((m) => m.id === updated.id);
-    if (idx === -1) return;
-    outbox.messages[idx] = updated;
-    const pruned = prune_outbox_messages(outbox, 10);
-    write_outbox(outbox_path, pruned);
-}
+// Note: update_outbox_message is now imported from outbox_store.ts for consistency
 
 function next_spinner(): string {
     spinner_index = (spinner_index + 1) % SPINNER_FRAMES.length;

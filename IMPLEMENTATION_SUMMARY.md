@@ -1,5 +1,10 @@
 # Implementation Summary: Universal Action Resolution
 
+**Note:** This document details a specific implementation phase. For the complete project documentation, see:
+- [docs/INDEX.md](./docs/INDEX.md) - Master documentation index
+- [docs/CHANGELOG.md](./docs/CHANGELOG.md) - Recent changes and fixes
+- [docs/README.md](./docs/README.md) - Project overview
+
 ## Changes Made
 
 ### 1. State Applier (`src/state_applier/main.ts`)
