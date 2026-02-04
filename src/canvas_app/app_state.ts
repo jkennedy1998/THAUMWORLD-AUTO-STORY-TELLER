@@ -136,6 +136,11 @@ export function create_app_state(): AppState {
                 const data = (await res.json()) as {
                     ok: boolean;
                     region?: string | null;
+                    place?: string | null;
+                    place_id?: string | null;
+                    world_coords?: { x: number; y: number };
+                    region_coords?: { x: number; y: number };
+                    places?: Array<{ ref: string; label: string; id: string }>;
                     targets?: Array<{ ref: string; label: string; type: string }>;
                 };
                 if (!data.ok) return;
@@ -154,6 +159,11 @@ export function create_app_state(): AppState {
 
                 // Update targets window text
                 const targets_lines: string[] = [];
+                const placeName = data.place ?? 'Wilderness';
+                const worldX = data.world_coords?.x ?? 0;
+                const worldY = data.world_coords?.y ?? 0;
+                targets_lines.push(`[place] ${placeName}`);
+                targets_lines.push(`[world] ${worldX}, ${worldY}`);
                 targets_lines.push(`[region] ${ui_state.controls.region_label ?? 'unknown'}`);
                 const verb = ui_state.controls.override_intent ?? ui_state.controls.suggested_intent;
                 if (verb) {
@@ -170,9 +180,25 @@ export function create_app_state(): AppState {
                     targets_lines.push(`[target] (none)`);
                 }
                 targets_lines.push('');
+                targets_lines.push('Places in region (type /target name):');
+                const places = data.places ?? [];
+                if (places.length === 0) {
+                    targets_lines.push('- (none nearby)');
+                } else {
+                    for (const p of places) {
+                        const is_current = p.id === data.place_id ? ' [here]' : '';
+                        targets_lines.push(`- ${p.label}${is_current}`);
+                    }
+                }
+                targets_lines.push('');
                 targets_lines.push('Targets (type @name or /target name):');
-                for (const t of ui_state.controls.targets) {
-                    if (t.type === 'npc') targets_lines.push(`- ${t.label} (${t.ref})`);
+                const npc_targets = ui_state.controls.targets.filter(t => t.type === 'npc');
+                if (npc_targets.length === 0) {
+                    targets_lines.push('- (none visible)');
+                } else {
+                    for (const t of npc_targets) {
+                        targets_lines.push(`- ${t.label} (${t.ref})`);
+                    }
                 }
                 set_text_window_messages('targets', targets_lines);
             } catch {

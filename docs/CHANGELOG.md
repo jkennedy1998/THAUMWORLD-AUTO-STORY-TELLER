@@ -48,6 +48,132 @@ All notable changes and fixes to the THAUMWORLD AUTO STORY TELLER project.
 #### Added
 - **Memory Wipe Script** - `npm run wipe`
   - Clears working memory, conversations, NPC memories
+
+### Place System Implementation (IN PROGRESS)
+
+#### Phase 1: Foundation ✅ COMPLETE
+- **Type Definitions** - Complete data model
+  - Place, PlaceCoordinates, TileGrid types
+  - PlaceConnection graph structure
+  - Entity positioning (NPCs, actors, items on tiles)
+  - Environment properties (lighting, terrain, cover)
+  - File: `src/types/place.ts`
+
+- **Storage System** - File-based place storage
+  - Load/save places from JSONC files
+  - List places by region
+  - Default place management
+  - Files: `src/place_storage/store.ts`
+
+- **Utility Functions** - Place operations
+  - Tile distance calculations
+  - Entity positioning in places
+  - Proximity detection (nearby entities)
+  - Place connections and navigation
+  - Entity movement between places
+  - Files: `src/place_storage/utils.ts`
+
+- **Default Places** - Generated for existing regions
+  - Eden Crossroads: Square, Tavern, Grenda's Shop
+  - Eden Whispering Woods: Clearing
+  - Eden Stone Circle: Stone Circle
+  - Eden Commons: Village Green
+  - File: `scripts/create_default_places.ts`
+
+- **Documentation** - Phase 1 complete
+  - PLACE_SYSTEM_PHASE1_COMPLETE.md
+
+#### Phase 2: Reference Resolution ✅ COMPLETE
+- **Reference Resolver Updates**
+  - Added `place` and `place_tile` reference types
+  - `resolve_place_ref()` - Resolves `place.<region>.<place_id>`
+  - `resolve_place_tile_ref()` - Resolves specific tile coordinates
+  - Validates place existence and tile bounds
+  - Files: `src/reference_resolver/resolver.ts`, `src/reference_resolver/types.ts`
+
+- **Data Broker Integration**
+  - Place loading in `create_missing_entities()`
+  - Handles "place_not_found" errors
+  - Logs missing places for manual creation
+  - File: `src/data_broker/main.ts`
+
+- **Supported Reference Formats**
+  - `place.eden_crossroads.tavern_common`
+  - `place_tile.eden_crossroads.tavern_common.10.15`
+  - Full validation and error handling
+
+#### Phase 3: NPC Place Awareness ✅ COMPLETE
+- **NPC Location Utilities**
+  - `src/npc_storage/location.ts` - 20+ place-aware functions
+  - `get_npc_place_id()` - Get NPC's current place
+  - `is_npc_in_place()` - Check place membership  
+  - `get_distance_between_npcs()` - Calculate distance in same place
+  - `migrate_npc_location_to_place()` - Migration helpers
+
+- **NPC AI Place Filtering**
+  - Updated `can_npc_perceive_player()` - Now checks place_id first
+  - Distance-based perception (≤2 clear, ≤8 normal, ≤15 obscured)
+  - Updated `process_communication()` - Filters NPCs by place
+  - Different places = NPCs can't perceive each other
+  - Debug logging for place-based filtering decisions
+
+- **Migration Script**
+  - `scripts/migrate_npcs_to_places.ts` - Bulk migration tool
+  - Auto-assigns NPCs to default places by region
+  - Specific mappings: Gunther→Square, Grenda→Shop
+  - Detailed reporting and validation
+
+- **Backward Compatibility**
+  - Legacy NPCs without place_id still work
+  - Falls back to region-based detection
+  - Warning logs for unmigrated NPCs
+
+#### Phase 4: Time, Schedules & Movement ✅ COMPLETE
+- **Global Time Tracking**
+  - `src/time_system/tracker.ts` - Complete game time system
+  - Minutes, hours, days, months, years
+  - 6-month calendar (Thawmelt through Deepwinter)
+  - Time advancement and formatting functions
+  - Time of day categories (dawn, morning, afternoon, dusk, evening, night)
+
+- **NPC Schedule System**
+  - `src/npc_storage/schedule_types.ts` - Schedule data model
+  - `src/npc_storage/schedule_manager.ts` - Schedule execution
+  - 5-6 daily activities per NPC (sleep, work, meals, social)
+  - Time-based place transitions
+  - Schedule overrides for emergencies/events
+  - Schedule update system (job changes, lifestyle changes)
+
+- **Movement & Travel System**
+  - `src/travel/movement.ts` - Complete travel mechanics
+  - Tile-level movement (walk, run, sneak, crawl speeds)
+  - Place-to-place travel (validates connections)
+  - Regional travel (advances time)
+  - Schedule-based automatic NPC movement
+  - Travel time calculations
+
+- **Schedule Documentation**
+  - `docs/SCHEDULE_SYSTEM_TODO.md` - Comprehensive expansion plans
+  - Schedule templates (profession-based)
+  - Dynamic schedule generation plans
+  - Interruption and emergency handling
+  - Schedule coordination (NPC meetings)
+
+#### Phase 5-8: (See PLACE_SYSTEM_PLAN.md)
+- Travel system
+- Migration & Biomes
+- Awareness & perception
+- Tiles & pathfinding
+- Integration & polish
+
+### Code Quality
+
+#### Cleaned
+- **TODO Comments** - Cleared completed TODOs
+  - Removed: save_actor TODO (function exists)
+  - Updated: Data broker and interpreter comments to reflect working architecture
+  - Created: TODO_CLEANUP_SUMMARY.md tracking 17 remaining TODOs
+  - Files: `src/state_applier/main.ts`, `src/data_broker/main.ts`, `src/interpreter_ai/main.ts`
   - Resets message queues for clean testing
   - File: `scripts/wipe_memory.js`
 

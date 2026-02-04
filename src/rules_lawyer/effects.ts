@@ -194,7 +194,7 @@ function has_target_awareness(slot: number, subject: string, target_ref: string)
     return false;
 }
 
-type TargetType = "character" | "body_slot" | "item" | "tile" | "region_tile" | "world_tile" | "unknown";
+type TargetType = "character" | "body_slot" | "item" | "tile" | "region_tile" | "world_tile" | "place" | "place_tile" | "unknown";
 
 function classify_target_type(target_ref: string): TargetType {
     if (target_ref.startsWith("actor.") || target_ref.startsWith("npc.")) {
@@ -205,6 +205,8 @@ function classify_target_type(target_ref: string): TargetType {
     if (target_ref.startsWith("tile.")) return "tile";
     if (target_ref.startsWith("region_tile.")) return "region_tile";
     if (target_ref.startsWith("world_tile.")) return "world_tile";
+    if (target_ref.startsWith("place_tile.")) return "place_tile";
+    if (target_ref.startsWith("place.")) return "place";
     return "unknown";
 }
 
@@ -225,6 +227,7 @@ function is_allowed_target_for_verb(verb: string, target_type: TargetType, subje
     if (verb === "MOVE") {
         if (target_type === "tile") return is_timed_event_active(slot);
         if (target_type === "region_tile" || target_type === "world_tile") return !is_timed_event_active(slot);
+        if (target_type === "place" || target_type === "place_tile") return true; // Always allow moving to places
         return false;
     }
     if (verb === "WORK") return ["item", "tile", "region_tile"].includes(target_type);
@@ -491,7 +494,8 @@ export function apply_rules_stub(commands: CommandNode[], slot: number): RuleRes
         // Check action cost during timed events
         const action_check = check_action_cost(slot, command.subject, action_cost);
         if (!action_check.allowed) {
-            event_lines.push(`NOTE.ACTION_NOT_ALLOWED(reason=${action_check.reason})`);
+            const reason = "reason" in action_check ? action_check.reason : "unknown";
+            event_lines.push(`NOTE.ACTION_NOT_ALLOWED(reason=${reason})`);
             continue;
         }
 
@@ -524,7 +528,8 @@ export function apply_rules_stub(commands: CommandNode[], slot: number): RuleRes
                 event_lines.push(`NOTE.INVALID_TARGET(verb=${command.verb}, target=${target_ref})`);
                 continue;
             }
-            if (!has_target_awareness(slot, command.subject, target_ref)) {
+            // Only check awareness for character targets (actors/npcs), not places or tiles
+            if (target_type === "character" && !has_target_awareness(slot, command.subject, target_ref)) {
                 event_lines.push(`NOTE.NO_AWARENESS(target=${target_ref})`);
                 continue;
             }

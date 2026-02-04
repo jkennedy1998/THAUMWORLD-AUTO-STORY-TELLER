@@ -15,9 +15,11 @@
 2. **[README.md](./README.md)** - Project overview and setup
 3. **[MACHINE_TEXT_SYNTAX.md](./MACHINE_TEXT_SYNTAX.md)** - Syntax specification
 4. **[examples/README.md](./examples/README.md)** - Code examples
+5. **[TODO_CLEANUP_SUMMARY.md](./TODO_CLEANUP_SUMMARY.md)** - TODO status and cleanup record
 
 ### Recent Changes
 - **[CHANGELOG.md](./CHANGELOG.md)** - Recent fixes and improvements (Feb 2026)
+- **[PLACE_SYSTEM_PLAN.md](./PLACE_SYSTEM_PLAN.md)** - NEW: Place system implementation plan
 - **[archive/](./archive/)** - Historical phase summaries and old documents
 
 ## Documentation Cleanup (Feb 2, 2026)

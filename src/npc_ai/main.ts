@@ -9,6 +9,7 @@ import { debug_log, debug_error, debug_pipeline, DEBUG_LEVEL, log_ai_io_terminal
 import { ollama_chat, type OllamaMessage } from "../shared/ollama_client.js";
 import { append_metric } from "../engine/metrics_store.js";
 import { find_npcs, load_npc, save_npc } from "../npc_storage/store.js";
+import { get_npc_place_id, are_npcs_in_same_place, get_npc_location } from "../npc_storage/location.js";
 import { load_actor } from "../actor_storage/store.js";
 import { isCurrentSession, getSessionMeta } from "../shared/session.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
@@ -25,6 +26,7 @@ import { get_memories_about, remembers_entity, get_relationship_status, add_conv
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { is_timed_event_active, get_timed_event_state, get_region_by_coords } from "../world_storage/store.js";
+import { load_place } from "../place_storage/store.js";
 import { consolidate_npc_memory_journal_if_needed, append_non_timed_conversation_journal } from "./timed_event_journal.js";
 
 const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
@@ -47,13 +49,29 @@ function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-type ChatTurn = { role: "user" | "assistant"; content: string };
-const npc_sessions = new Map<string, ChatTurn[]>();
-const SESSION_LIMIT = 10;
+// Hierarchical Conversation Context Types
+// Supports 5 verbatim turns + summary of older conversation
+type ChatTurn = { 
+    role: "user" | "assistant"; 
+    content: string;
+    speaker_ref: string;  // actor.<id> or npc.<id>
+    timestamp: string;
+};
+
+type ConversationContext = {
+    recent_turns: ChatTurn[];      // Last 5 verbatim turns
+    summary: string;               // Condensed summary of older turns (AI-generated)
+    total_turns: number;           // Track total for debugging
+};
+
+const npc_sessions = new Map<string, ConversationContext>();
+const VERBATIM_LIMIT = 5;  // Keep 5 recent turns verbatim
+const MERGE_BATCH = 3;     // Merge oldest 3 when exceeding limit
 
 // Idle timeout summarization for non-timed conversations
-const NPC_IDLE_SUMMARY_MS_RAW = Number(process.env.NPC_IDLE_SUMMARY_MS ?? 60_000);
-const NPC_IDLE_SUMMARY_MS = Number.isFinite(NPC_IDLE_SUMMARY_MS_RAW) ? NPC_IDLE_SUMMARY_MS_RAW : 60_000;
+// Timer starts only when player does non-communication actions (not COMMUNICATE)
+const NPC_IDLE_SUMMARY_MS_RAW = Number(process.env.NPC_IDLE_SUMMARY_MS ?? 180_000);
+const NPC_IDLE_SUMMARY_MS = Number.isFinite(NPC_IDLE_SUMMARY_MS_RAW) ? NPC_IDLE_SUMMARY_MS_RAW : 180_000;
 const npc_idle_timers = new Map<string, NodeJS.Timeout>();
 
 function clear_idle_timer(npc_id: string): void {
@@ -64,16 +82,29 @@ function clear_idle_timer(npc_id: string): void {
     }
 }
 
-function schedule_idle_summary(slot: number, npc_id: string, npc_name: string, conversation_id: string | null, transcript: string, region_label: string | null): void {
+function schedule_idle_summary(slot: number, npc_id: string, npc_name: string, conversation_id: string | null, session_key: string | null, region_label: string | null): void {
     clear_idle_timer(npc_id);
     const ref = `npc.${npc_id}`;
     const timer = setTimeout(() => {
         npc_idle_timers.delete(npc_id);
+        
+        // Get final conversation context before clearing
+        const ctx = session_key ? npc_sessions.get(session_key) : null;
+        const transcript = ctx 
+            ? `Summary: ${ctx.summary}\nRecent: ${ctx.recent_turns.map(t => `${get_speaker_name(t.speaker_ref)}: ${t.content}`).join('\n')}`
+            : "";
+        
         void append_non_timed_conversation_journal(slot, ref, {
             region_label: region_label ?? undefined,
             conversation_id,
             transcript,
         });
+        
+        // Clear session to free memory
+        if (session_key) {
+            npc_sessions.delete(session_key);
+            debug_log("NPC_AI", `Cleared conversation session for ${npc_name}`, { session_key });
+        }
     }, NPC_IDLE_SUMMARY_MS);
     npc_idle_timers.set(npc_id, timer);
     debug_log("NPC_AI", `Scheduled idle memory summary for ${npc_name}`, { npc_id, ms: NPC_IDLE_SUMMARY_MS });
@@ -83,17 +114,149 @@ function get_session_key(npc_id: string, correlation_id: string): string {
     return `${npc_id}:${correlation_id}`;
 }
 
-function get_session_history(session_key: string): ChatTurn[] {
-    return npc_sessions.get(session_key) ?? [];
+function get_session_context(session_key: string): ConversationContext | undefined {
+    return npc_sessions.get(session_key);
 }
 
-function append_session_turn(session_key: string, user_text: string, assistant_text: string): void {
-    const history = [...get_session_history(session_key)];
-    history.push({ role: "user", content: user_text }, { role: "assistant", content: assistant_text });
-    if (history.length > SESSION_LIMIT) {
-        history.splice(0, history.length - SESSION_LIMIT);
+function get_session_history(session_key: string): ChatTurn[] {
+    const ctx = npc_sessions.get(session_key);
+    return ctx ? ctx.recent_turns : [];
+}
+
+async function append_session_turn(
+    session_key: string, 
+    user_text: string, 
+    assistant_text: string,
+    user_ref: string,
+    npc_ref: string,
+    npc_name: string,
+    npc_personality: string
+): Promise<void> {
+    let ctx = npc_sessions.get(session_key);
+    if (!ctx) {
+        ctx = { recent_turns: [], summary: "", total_turns: 0 };
     }
-    npc_sessions.set(session_key, history);
+    
+    // Add new turns (user then assistant)
+    const now = new Date().toISOString();
+    ctx.recent_turns.push(
+        { role: "user", content: user_text, speaker_ref: user_ref, timestamp: now },
+        { role: "assistant", content: assistant_text, speaker_ref: npc_ref, timestamp: now }
+    );
+    ctx.total_turns += 2;
+    
+    // If we exceed verbatim limit, merge oldest batch into summary
+    if (ctx.recent_turns.length > VERBATIM_LIMIT) {
+        const to_merge = ctx.recent_turns.splice(0, MERGE_BATCH);
+        
+        // Generate AI summary of merged turns from NPC's perspective
+        const merge_summary = await generate_turns_summary(
+            to_merge, 
+            npc_name, 
+            npc_personality,
+            ctx.summary
+        );
+        
+        // Append to existing summary
+        ctx.summary = ctx.summary 
+            ? `${ctx.summary} ${merge_summary}`
+            : merge_summary;
+        
+        // Truncate if gets too long (keep last 400 chars)
+        if (ctx.summary.length > 400) {
+            ctx.summary = ctx.summary.slice(-400);
+        }
+    }
+    
+    npc_sessions.set(session_key, ctx);
+}
+
+// Generate AI summary of conversation turns from NPC's perspective
+async function generate_turns_summary(
+    turns: ChatTurn[],
+    npc_name: string,
+    npc_personality: string,
+    existing_summary: string
+): Promise<string> {
+    // Build conversation text
+    const conversation_text = turns
+        .map(t => `${get_speaker_name(t.speaker_ref)}: ${t.content}`)
+        .join("\n");
+    
+    const prompt = `You are ${npc_name}. ${npc_personality ? `Personality: ${npc_personality}` : ""}
+
+${existing_summary ? `Previous context: ${existing_summary}\n\nNew exchanges:` : "Summarize these exchanges from your perspective:"}
+
+${conversation_text}
+
+Provide a brief 1-sentence summary of what was discussed and how you feel about it. Focus on key facts and emotional reactions. Be concise.`;
+
+    try {
+        const response = await ollama_chat({
+            host: OLLAMA_HOST,
+            model: NPC_AI_MODEL,
+            messages: [
+                { role: "system", content: "You are an NPC summarizing a conversation from your perspective." },
+                { role: "user", content: prompt }
+            ],
+            timeout_ms: 15000,
+            options: { temperature: 0.7 },
+        });
+        
+        return response.content.trim();
+    } catch (err) {
+        // Fallback to simple concatenation if AI fails
+        return turns.map(t => t.content).join(" | ");
+    }
+}
+
+// Resolve speaker ref to actual name
+function get_speaker_name(speaker_ref: string): string {
+    // Handle npc.<id>
+    if (speaker_ref.startsWith("npc.")) {
+        const npc_id = speaker_ref.slice(4);
+        const result = load_npc(data_slot_number, npc_id);
+        if (result.ok && result.npc.name) {
+            return String(result.npc.name);
+        }
+        return npc_id;
+    }
+    
+    // Handle actor.<id>
+    if (speaker_ref.startsWith("actor.")) {
+        const actor_id = speaker_ref.slice(6);
+        const result = load_actor(data_slot_number, actor_id);
+        if (result.ok && result.actor.name) {
+            return String(result.actor.name);
+        }
+        return actor_id;
+    }
+    
+    return speaker_ref;
+}
+
+// Build conversation context for prompt with hierarchical structure
+function build_conversation_context(session_key: string): string {
+    const ctx = npc_sessions.get(session_key);
+    if (!ctx) return "";
+    
+    const parts: string[] = [];
+    
+    // Add summary if exists
+    if (ctx.summary) {
+        parts.push(`SUMMARY: ${ctx.summary}`);
+    }
+    
+    // Add verbatim recent turns with speaker names
+    if (ctx.recent_turns.length > 0) {
+        parts.push("RECENT:");
+        for (const turn of ctx.recent_turns) {
+            const speaker_name = get_speaker_name(turn.speaker_ref);
+            parts.push(`${speaker_name}: ${turn.content}`);
+        }
+    }
+    
+    return parts.join("\n");
 }
 
 // ===== DECISION HIERARCHY: Scripted → Template → AI =====
@@ -209,131 +372,108 @@ function determineResponse(
 }
 
 // Build NPC system prompt based on character sheet
-function build_npc_prompt(npc: any, player_text: string, can_perceive: boolean, clarity: string, memory_context?: string): string {
+// TODO: Inject random local and world lore based on incoming action, target, and location
+// through the smart injector system. This will help keep the world THAUMWORLD-oriented.
+// TODO: Include perception notes into NPC AI with culling events to their senses
+function build_npc_prompt(npc: any, player_text: string, can_perceive: boolean, memory_context?: string, player_location?: string, npc_location?: string): string {
     const personality = npc.personality || {};
-    const lore = npc.lore || {};
     const appearance = npc.appearance || {};
     
     let prompt_parts: string[] = [];
     
-    // Identity
+    // Identity (always included, compact)
     prompt_parts.push(`You are ${npc.name}${npc.title ? `, ${npc.title}` : ''}.`);
     
-    // Role/Goal
-    if (personality.story_goal) {
-        prompt_parts.push(`Your role: ${personality.story_goal}`);
+    // Role/Goal (only if defined and not generic)
+    if (personality.story_goal && npc.role !== 'villager') {
+        prompt_parts.push(`Goal: ${personality.story_goal}`);
     }
     
-    // Personality traits
-    const traits: string[] = [];
-    if (personality.fear) traits.push(`fear: ${personality.fear}`);
-    if (personality.flaw) traits.push(`flaw: ${personality.flaw}`);
-    if (personality.passion) traits.push(`passionate about: ${personality.passion}`);
-    if (personality.hobby) traits.push(`hobby: ${personality.hobby}`);
-    if (traits.length > 0) {
-        prompt_parts.push(`Personality: ${traits.join(', ')}`);
+    // Personality traits (smart injection - only relevant ones)
+    const relevant_traits = get_relevant_personality_traits(player_text, personality);
+    if (relevant_traits.length > 0) {
+        prompt_parts.push(`Traits: ${relevant_traits.join(', ')}`);
     }
     
-    // Triggers
-    const triggers: string[] = [];
-    if (personality.happy_triggers) triggers.push(`made happy by: ${personality.happy_triggers}`);
-    if (personality.angry_triggers) triggers.push(`angered by: ${personality.angry_triggers}`);
-    if (personality.sad_triggers) triggers.push(`saddened by: ${personality.sad_triggers}`);
-    if (triggers.length > 0) {
-        prompt_parts.push(`Triggers: ${triggers.join('; ')}`);
+    // Appearance if notable and player can see them clearly
+    if (appearance.distinguishing_features && can_perceive) {
+        prompt_parts.push(`Features: ${appearance.distinguishing_features}`);
     }
     
-    // Appearance if notable
-    if (appearance.distinguishing_features) {
-        prompt_parts.push(`Notable features: ${appearance.distinguishing_features}`);
-    }
-    
-    // Working memory context (if available)
+    // Memory context with tight culling and random outside memories
     if (memory_context && memory_context.length > 0) {
         prompt_parts.push(`\n${memory_context}`);
     }
 
-    // NPC sheet memories (journal + recent memory_sheet) can be relevant to decision making.
-    // Use strict participant refs (actor.* / npc.*). Avoid the word "player" for multiplayer readiness.
-    const mem_entries = Array.isArray(npc.memory) ? npc.memory.filter((x: any) => typeof x === "string") as string[] : [];
-    if (mem_entries.length > 0) {
-        prompt_parts.push(`\nNPC MEMORY JOURNAL (recent):`);
-        for (const entry of mem_entries.slice(-2)) {
-            prompt_parts.push(`- ${entry}`);
-        }
-    }
-
-    const sheet = npc.memory_sheet || {};
-    const recent_sheet = Array.isArray(sheet.recent_memories) ? sheet.recent_memories : [];
-    if (recent_sheet.length > 0) {
-        prompt_parts.push(`\nNPC MEMORY SHEET (recent):`);
-        for (const m of recent_sheet.slice(0, 3)) {
-            const summary = typeof m?.summary === "string" ? m.summary : "";
-            if (summary) prompt_parts.push(`- ${summary}`);
+    // Location context (condensed)
+    if (npc_location && player_location) {
+        if (npc_location !== player_location) {
+            prompt_parts.push(`\nYou are in ${npc_location}; they claim to be in ${player_location}.`);
         }
     }
     
-    // Perception context
+    // Smart perception injection - only when cannot perceive
+    // Perception is place-based only: same place = can perceive, different place = cannot
     if (!can_perceive) {
-        prompt_parts.push(`\nCURRENT SITUATION: You cannot perceive who is speaking to you. You might hear muffled sounds or sense a presence but cannot identify the source.`);
-    } else if (clarity === "obscured") {
-        prompt_parts.push(`\nCURRENT SITUATION: You can sense someone nearby but cannot see them clearly. You hear their voice but details are unclear.`);
-    } else {
-        prompt_parts.push(`\nCURRENT SITUATION: You can clearly see and hear the player.`);
+        prompt_parts.push(`\nYou sense someone nearby but cannot perceive them clearly.`);
     }
     
-    // Response instruction
-    prompt_parts.push(`\nSomeone says: "${player_text}"`);
-    prompt_parts.push(`\nRespond as ${npc.name} would, staying true to your personality.`);
-    prompt_parts.push(`Keep response to 1-2 sentences.`);
-    prompt_parts.push(`If you can't perceive them well, show confusion or ignore them.`);
-    prompt_parts.push(`Never break character. Never mention game mechanics.`);
-    prompt_parts.push(`Do not use the word "player". Refer to others as actor.<id> or npc.<id> when possible.`);
+    // Compact response instruction (consolidated from 7 lines to 2)
+    prompt_parts.push(`\n"${player_text}" — Reply in character as ${npc.name}, 1-2 sentences. Stay in world; never break character or mention game mechanics.`);
     
     return prompt_parts.join("\n");
 }
 
-// Check if NPC can perceive the player
-function can_npc_perceive_player(npc: any, player_location: any, player_ref: string): { can_perceive: boolean; clarity: string } {
-    // Phase 1: Check if NPC has AWARENESS tag for player (per THAUMWORLD rules)
-    const tags = npc.tags || [];
-    const hasAwarenessTag = tags.some((tag: Record<string, unknown>) => 
-        tag.name === "AWARENESS" &&
-        Array.isArray(tag.info) &&
-        tag.info.includes(player_ref)
-    );
+// Get personality traits relevant to the player's input
+function get_relevant_personality_traits(player_text: string, personality: any): string[] {
+    const traits: string[] = [];
+    const text_lower = player_text.toLowerCase();
     
-    if (hasAwarenessTag) {
-        // Has awareness - determine clarity based on location
-        const npc_region = npc.location?.region_tile;
-        const player_region = player_location?.region_tile;
-        
-        if (npc_region && player_region &&
-            npc_region.x === player_region.x && 
-            npc_region.y === player_region.y) {
-            // Same region - check if same tile for clarity
-            const npc_tile = npc.location?.tile;
-            const player_tile = player_location?.tile;
-            
-            if (npc_tile && player_tile && 
-                npc_tile.x === player_tile.x && 
-                npc_tile.y === player_tile.y) {
-                return { can_perceive: true, clarity: "clear" };
-            }
-            
-            return { can_perceive: true, clarity: "obscured" };
-        }
-        
-        // Player left region - awareness persists but can't perceive well
-        return { can_perceive: false, clarity: "none" };
+    // Check for trigger matches
+    if (personality.happy_triggers && text_lower.includes(personality.happy_triggers.toLowerCase())) {
+        traits.push(`happy about: ${personality.happy_triggers}`);
+    }
+    if (personality.angry_triggers && text_lower.includes(personality.angry_triggers.toLowerCase())) {
+        traits.push(`angered by: ${personality.angry_triggers}`);
+    }
+    if (personality.sad_triggers && text_lower.includes(personality.sad_triggers.toLowerCase())) {
+        traits.push(`saddened by: ${personality.sad_triggers}`);
     }
     
-    // Phase 2: No awareness tag yet - check for initial contact via senses
+    // Include core traits only if they might affect response
+    if (personality.fear && (text_lower.includes('fear') || text_lower.includes('scare') || text_lower.includes('afraid'))) {
+        traits.push(`fear: ${personality.fear}`);
+    }
+    if (personality.passion && (text_lower.includes(personality.passion.toLowerCase()) || Math.random() < 0.3)) {
+        traits.push(`passion: ${personality.passion}`);
+    }
+    
+    return traits;
+}
+
+// Check if NPC can perceive the player
+// Simplified: Place-based perception only - same place = can perceive, different place = cannot
+function can_npc_perceive_player(npc: any, player_location: any, player_ref: string): { can_perceive: boolean } {
+    // Get place-aware locations
+    const npc_place_id = get_npc_place_id(npc);
+    const player_place_id = player_location?.place_id;
+    
+    debug_log("NPC_AI", `Perception check - npc_place: ${npc_place_id}, player_place: ${player_place_id}`);
+    
+    // Place System: Check if both in same place
+    if (npc_place_id && player_place_id) {
+        const can_perceive = npc_place_id === player_place_id;
+        debug_log("NPC_AI", `Place-based perception: ${can_perceive}`);
+        return { can_perceive };
+    }
+    
+    // Legacy fallback: Region-based checking for NPCs without place_id
     const npc_region = npc.location?.region_tile;
     const player_region = player_location?.region_tile;
     
     if (!npc_region || !player_region) {
-        return { can_perceive: false, clarity: "none" };
+        debug_log("NPC_AI", `Missing region data - cannot perceive`);
+        return { can_perceive: false };
     }
     
     const same_region = (
@@ -341,28 +481,8 @@ function can_npc_perceive_player(npc: any, player_location: any, player_ref: str
         npc_region.y === player_region.y
     );
     
-    if (!same_region) {
-        return { can_perceive: false, clarity: "none" };
-    }
-    
-    // Check senses - pressure is default for hearing
-    const pressure_sense = npc.senses?.pressure ?? 0;
-    
-    if (pressure_sense > 0) {
-        // Same tile = clear, same region = obscured
-        const npc_tile = npc.location?.tile;
-        const player_tile = player_location?.tile;
-        
-        if (npc_tile && player_tile && 
-            npc_tile.x === player_tile.x && 
-            npc_tile.y === player_tile.y) {
-            return { can_perceive: true, clarity: "clear" };
-        }
-        
-        return { can_perceive: true, clarity: "obscured" };
-    }
-    
-    return { can_perceive: false, clarity: "none" };
+    debug_log("NPC_AI", `Region-based perception: ${same_region}`);
+    return { can_perceive: same_region };
 }
 
 // Determine if NPC should respond based on personality
@@ -423,7 +543,11 @@ async function process_communication(
         return;
     }
     
-    const player_location = actor_result.actor.location as { region_tile?: { x: number; y: number }; tile?: { x: number; y: number } };
+    const player_location = actor_result.actor.location as { 
+        region_tile?: { x: number; y: number }; 
+        tile?: { x: number; y: number };
+        place_id?: string;  // Added for Place System
+    };
     const player_ref = `actor.${actor_id}`;
     
     // ===== PHASE 4: CONVERSATION TRACKING =====
@@ -468,23 +592,67 @@ async function process_communication(
         }
     }
     
-    // Find all NPCs in same region
-    const nearby_npcs = find_npcs(data_slot_number, {}).filter(npc_hit => {
+    // Find all NPCs - filter by place first, then region for backward compatibility
+    const all_npcs = find_npcs(data_slot_number, {});
+    
+    // Get player's place_id if available (Place System)
+    const player_place_id = player_location?.place_id;
+    
+    const nearby_npcs = all_npcs.filter(npc_hit => {
         if (npc_hit.id === "default_npc") return false;
         const npc_result = load_npc(data_slot_number, npc_hit.id);
-        if (!npc_result.ok) return false;
+        if (!npc_result.ok) {
+            debug_log("NPC_AI", `Failed to load NPC ${npc_hit.id}`);
+            return false;
+        }
         
-        const npc = npc_result.npc as { location?: { region_tile?: { x: number; y: number }; tile?: { x: number; y: number } } };
-        const npc_region = npc.location?.region_tile;
+        const npc = npc_result.npc;
+        
+        // Place System: Filter by place_id if available
+        const npc_place_id = get_npc_place_id(npc);
+        
+        debug_log("NPC_AI", `Checking NPC ${npc_hit.id} - player_place: ${player_place_id}, npc_place: ${npc_place_id}`);
+        
+        if (player_place_id && npc_place_id) {
+            // Both have place_id - must be in same place
+            const same_place = npc_place_id === player_place_id;
+            if (!same_place) {
+                debug_pipeline("NPC_AI", `NPC ${npc_hit.id} in different place, skipping`, {
+                    npc_place: npc_place_id,
+                    player_place: player_place_id
+                });
+            } else {
+                debug_log("NPC_AI", `NPC ${npc_hit.id} is in same place!`);
+            }
+            return same_place;
+        }
+        
+        // Legacy fallback: Region-based filtering
+        const npc_region = (npc as any).location?.region_tile;
         const player_region = player_location?.region_tile;
         
-        if (!npc_region || !player_region) return false;
+        if (!npc_region || !player_region) {
+            debug_log("NPC_AI", `NPC ${npc_hit.id} or player missing region data`);
+            return false;
+        }
         
-        return npc_region.x === player_region.x && npc_region.y === player_region.y;
+        const same_region = npc_region.x === player_region.x && npc_region.y === player_region.y;
+        if (same_region && player_place_id && !npc_place_id) {
+            debug_pipeline("NPC_AI", `NPC ${npc_hit.id} in same region but no place_id (needs migration)`, {
+                region: player_region
+            });
+        }
+        
+        if (same_region) {
+            debug_log("NPC_AI", `NPC ${npc_hit.id} is in same region (legacy mode)`);
+        }
+        
+        return same_region;
     });
     
-    debug_pipeline("NPC_AI", `Found ${nearby_npcs.length} NPCs in region`, {
+    debug_pipeline("NPC_AI", `Found ${nearby_npcs.length} NPCs nearby`, {
         region: player_location?.region_tile,
+        place: player_place_id,
         npcs: nearby_npcs.map(n => n.id)
     });
     
@@ -525,16 +693,20 @@ async function process_communication(
         }
         
         // Check if NPC should respond
-        if (!should_npc_respond(npc, is_direct_target)) {
+        const should_respond = should_npc_respond(npc, is_direct_target);
+        debug_log("NPC_AI", `should_npc_respond for ${npc_hit.id}: ${should_respond}, is_direct_target: ${is_direct_target}`);
+        if (!should_respond) {
             continue;
         }
         
         // Check perception using AWARENESS tags (per THAUMWORLD rules)
         const player_ref = `actor.${actor_id}`;
         const perception = can_npc_perceive_player(npc, player_location, player_ref);
+        debug_log("NPC_AI", `can_npc_perceive_player for ${npc_hit.id}: ${perception.can_perceive}, player_place: ${player_location?.place_id}`);
         
         if (!perception.can_perceive && !is_direct_target) {
             // Can't perceive and not directly addressed - skip
+            debug_log("NPC_AI", `Skipping ${npc_hit.id} - can't perceive and not direct target`);
             continue;
         }
         
@@ -544,7 +716,7 @@ async function process_communication(
         debug_pipeline("NPC_AI", `Generating response for ${npc.name}`, {
             npc_id: npc_hit.id,
             is_direct_target,
-            clarity: perception.clarity
+            can_perceive: perception.can_perceive
         });
         
         // ===== PHASE 3: DECISION HIERARCHY =====
@@ -627,20 +799,61 @@ async function process_communication(
                 break;
                 
             case "ai":
-                // Get working memory for context if available
+                // Build hierarchical conversation context
                 let memory_context = "";
                 if (correlation_id) {
-                    const memory = get_working_memory(data_slot_number, correlation_id);
-                    if (memory) {
-                        // Filter memory for COMMUNICATE action from NPC's perspective
-                        const npc_ref = `npc.${npc_hit.id}`;
-                        const filtered = filter_memory_for_action(memory, "COMMUNICATE", npc_ref);
-                        memory_context = format_filtered_memory(filtered);
+                    // Get conversation context from session (hierarchical: summary + recent turns)
+                    const session_key = get_session_key(npc_hit.id, correlation_id);
+                    const conversation_ctx = build_conversation_context(session_key);
+                    
+                    // Get random outside memories for variance
+                    const npc_mem_ref = `npc.${npc_hit.id}`;
+                    const all_memories = get_memories_about(data_slot_number, npc_mem_ref, player_ref, { limit: 10 });
+                    const outside_memories = all_memories.filter((m: any) => {
+                        // Filter out memories that are part of current conversation
+                        const is_current_conv = m.conversation_id === conversation_id;
+                        return !is_current_conv;
+                    });
+                    
+                    // Pick 1-2 random outside memories for variety
+                    const shuffled = outside_memories.sort(() => Math.random() - 0.5);
+                    const selected_random = shuffled.slice(0, Math.min(2, shuffled.length));
+                    
+                    // Build memory context: conversation history + random outside memories
+                    const memory_parts: string[] = [];
+                    if (conversation_ctx) {
+                        memory_parts.push(conversation_ctx);
+                    }
+                    if (selected_random.length > 0) {
+                        const random_text = selected_random.map((m: any) => m.summary).join('; ');
+                        memory_parts.push(`\nRecall: ${random_text}`);
+                    }
+                    
+                    memory_context = memory_parts.join('\n');
+                }
+                
+                // Get location names for context
+                const npc_place_id = get_npc_place_id(npc);
+                let npc_location_name = "unknown";
+                let player_location_name = "unknown";
+                
+                if (npc_place_id) {
+                    const placeResult = load_place(data_slot_number, npc_place_id);
+                    if (placeResult.ok) {
+                        npc_location_name = placeResult.place.name || npc_place_id;
                     }
                 }
                 
-                // Build prompt with working memory context
-                const prompt = build_npc_prompt(npc, original_text, perception.can_perceive, perception.clarity, memory_context);
+                const player_place_id = player_location?.place_id;
+                if (player_place_id) {
+                    const placeResult = load_place(data_slot_number, player_place_id);
+                    if (placeResult.ok) {
+                        player_location_name = placeResult.place.name || player_place_id;
+                    }
+                }
+                
+                // Build prompt with working memory context and location awareness
+                const prompt = build_npc_prompt(npc, original_text, perception.can_perceive, memory_context, player_location_name, npc_location_name);
                 
                 // Get session history
                 const session_key = get_session_key(npc_hit.id, correlation_id);
@@ -692,31 +905,17 @@ async function process_communication(
         
         // Store to session (for all response types)
         const session_key = get_session_key(npc_hit.id, correlation_id);
-        append_session_turn(session_key, original_text, npc_response);
+        const npc_ref = `npc.${npc_hit.id}`;
+        const npc_name = typeof (npc as any).name === "string" ? ((npc as any).name as string) : npc_hit.id;
+        const npc_personality = (npc as any).personality ? JSON.stringify((npc as any).personality) : "";
+        await append_session_turn(session_key, original_text, npc_response, player_ref, npc_ref, npc_name, npc_personality);
 
-        // If a timed event is active, consolidate journal now (before long conversations) and cancel idle timers.
-        if (is_timed_event_active(data_slot_number)) {
-            clear_idle_timer(npc_hit.id);
-            void consolidate_npc_memory_journal_if_needed(data_slot_number, `npc.${npc_hit.id}`);
-        } else {
-            // Non-timed: schedule an idle summarization so the NPC's long-term memory updates.
-            const region_label = (() => {
-                const loc = (npc as any)?.location;
-                const wx = Number(loc?.world_tile?.x ?? 0);
-                const wy = Number(loc?.world_tile?.y ?? 0);
-                const rx = Number(loc?.region_tile?.x ?? 0);
-                const ry = Number(loc?.region_tile?.y ?? 0);
-                const region = get_region_by_coords(data_slot_number, wx, wy, rx, ry);
-                return region.ok ? (String((region.region as any)?.name ?? "") || region.region_id) : null;
-            })();
-            const npc_name = typeof (npc as any)?.name === "string" ? ((npc as any).name as string) : npc_hit.id;
-            const npc_ref = `npc.${npc_hit.id}`;
-            const history = get_session_history(session_key)
-                .map(t => `${t.role === 'user' ? player_ref : npc_ref}: ${t.content}`)
-                .join("\n");
-            const conv_id = typeof (msg as any).conversation_id === "string" ? ((msg as any).conversation_id as string) : null;
-            schedule_idle_summary(data_slot_number, npc_hit.id, npc_name, conv_id, history, region_label);
-        }
+        // Track this actor's active session for idle timer management
+        // Timer will only start when player does a non-communication action
+        actor_sessions.set(player_ref, session_key);
+        
+        // Note: Idle timer is NOT scheduled here - it starts only on non-communication actions
+        // This allows conversations to continue indefinitely until player does something else
         
         // ===== PHASE 4: ADD TO CONVERSATION =====
         if (conversation) {
@@ -790,7 +989,7 @@ async function process_communication(
                 target_actor: actor_id,
                 communication_context: original_text,
                 is_direct_response: is_direct_target,
-                perception_clarity: perception.clarity,
+                can_perceive: perception.can_perceive,
                 decision_source: decision_source,
                 available_actions: available_actions.slice(0, 3).map(a => a.verb),
             },
@@ -803,28 +1002,50 @@ async function process_communication(
         // Log NPC responses directly so they appear in the in-game window.
         append_log_envelope(log_path, response_msg);
 
-        // Persist a lightweight memory onto the NPC sheet (in npc JSONC)
-        // This is separate from npc_memories/ long-term store; it's a "sheet summary" for gameplay.
+        // Persist conversation context to NPC memory_sheet
+        // Stores hierarchical conversation threads (summary + recent turns) for continuity
         try {
             const npc_sheet = load_npc(data_slot_number, npc_hit.id);
             if (npc_sheet.ok) {
                 const npc_obj = npc_sheet.npc as Record<string, unknown>;
                 const mem = (npc_obj.memory_sheet as Record<string, unknown>) ?? {};
-                const recent = Array.isArray(mem.recent_memories) ? (mem.recent_memories as Record<string, unknown>[]) : [];
-
-        const npc_ref = `npc.${npc_hit.id}`;
-        const summary = `${player_ref}: ${original_text} | ${npc_ref}: ${npc_response}`;
-                const entry: Record<string, unknown> = {
-                    at: new Date().toISOString(),
-                    type: "conversation",
-                    summary: summary.slice(0, 400),
-                    related_entities: [player_ref],
-                    importance: original_text.toLowerCase().includes("goals") ? 6 : 3,
-                };
-
-                // Replace with latest entry to prevent unbounded growth.
-                mem.recent_memories = [entry];
-
+                
+                // Get current conversation context from session
+                const session_key = get_session_key(npc_hit.id, correlation_id);
+                const ctx = npc_sessions.get(session_key);
+                
+                if (ctx) {
+                    // Build conversation thread entry
+                    const thread_entry: Record<string, unknown> = {
+                        at: new Date().toISOString(),
+                        type: "conversation_thread",
+                        with: player_ref,
+                        summary: ctx.summary.slice(0, 200),  // Keep summary compact
+                        recent_turns: ctx.recent_turns.slice(-3).map(t => ({  // Store last 3 turns
+                            speaker: t.speaker_ref,
+                            text: t.content.slice(0, 100)  // Truncate for storage
+                        })),
+                        total_exchanges: ctx.total_turns
+                    };
+                    
+                    // Maintain conversation_threads array (keep last 5 active threads)
+                    const threads = Array.isArray(mem.conversation_threads) 
+                        ? mem.conversation_threads as Record<string, unknown>[]
+                        : [];
+                    
+                    // Update existing thread for this player or add new
+                    const existing_idx = threads.findIndex((t: any) => t.with === player_ref);
+                    if (existing_idx >= 0) {
+                        threads[existing_idx] = thread_entry;
+                    } else {
+                        threads.push(thread_entry);
+                    }
+                    
+                    // Keep only last 5 threads to prevent bloat
+                    mem.conversation_threads = threads.slice(-5);
+                }
+                
+                // Update known actors
                 const known = Array.isArray(mem.known_actors) ? (mem.known_actors as string[]) : [];
                 if (!known.includes(player_ref)) known.unshift(player_ref);
                 mem.known_actors = known.slice(0, 20);
@@ -893,40 +1114,121 @@ async function summarize_conversation_for_npc(
     }
 }
 
+// Track which actor is in which conversation session
+const actor_sessions = new Map<string, string>(); // actor_ref -> session_key
+
+// Handle non-communication actions - triggers idle timer for active conversations
+async function process_non_communication_action(
+    msg: MessageEnvelope
+): Promise<void> {
+    const events = (msg.meta as any)?.events as string[] || [];
+    const machine_text = (msg.meta as any)?.machine_text as string || "";
+    
+    // Find non-COMMUNICATE events
+    const non_comm_events = events.filter(e => {
+        const action_match = e.match(/actor\.\w+\.(\w+)/);
+        if (!action_match) return false;
+        const action = action_match[1];
+        return action && action !== "COMMUNICATE";
+    });
+    
+    if (non_comm_events.length === 0) return;
+    
+    // Extract actor from machine text
+    const actor_match = machine_text.match(/actor\.(\w+)\.\w+/);
+    if (!actor_match || !actor_match[1]) return;
+    
+    const actor_id = actor_match[1];
+    const actor_ref = `actor.${actor_id}`;
+    
+    // Check if this actor has active conversation sessions
+    const session_key = actor_sessions.get(actor_ref);
+    if (!session_key) return;
+    
+    // Extract NPC ID from session key (format: "npc_id:correlation_id")
+    const npc_id = session_key.split(":")[0];
+    if (!npc_id) return;
+    
+    debug_log("NPC_AI", `Non-communication action detected, scheduling idle timer for ${npc_id}`, {
+        actor: actor_ref,
+        action: non_comm_events[0],
+        session_key
+    });
+    
+    // Load NPC to get name and location
+    const npc_result = load_npc(data_slot_number, npc_id);
+    if (!npc_result.ok) return;
+    
+    const npc = npc_result.npc;
+    const npc_name = typeof (npc as any).name === "string" ? ((npc as any).name as string) : npc_id;
+    
+    // Get region label
+    const region_label = (() => {
+        const loc = (npc as any)?.location;
+        const wx = Number(loc?.world_tile?.x ?? 0);
+        const wy = Number(loc?.world_tile?.y ?? 0);
+        const rx = Number(loc?.region_tile?.x ?? 0);
+        const ry = Number(loc?.region_tile?.y ?? 0);
+        const region = get_region_by_coords(data_slot_number, wx, wy, rx, ry);
+        return region.ok ? (String((region.region as any)?.name ?? "") || region.region_id) : null;
+    })();
+    
+    // Schedule idle timer
+    schedule_idle_summary(data_slot_number, npc_id, npc_name, null, session_key, region_label);
+    
+    // Remove from tracking
+    actor_sessions.delete(actor_ref);
+}
+
 async function tick(outbox_path: string, inbox_path: string, log_path: string): Promise<void> {
     try {
+        // Drain outbox for messages that need NPC responses
         const outbox = read_outbox(outbox_path);
+        const messages = outbox.messages;
         
-        // Look for applied_* messages that contain events worth reacting to.
-        // NOTE: renderer_ai may mark messages as processing/done quickly, so we must not rely on
-        // seeing status="sent" here; instead use a meta flag to ensure idempotency.
-        const candidates = outbox.messages.filter((m) => {
-            if (!m.stage?.startsWith("applied_")) return false;
-            if (!isCurrentSession(m)) return false;  // Only process messages from current session
-            if ((m.meta as any)?.npc_processed === true) return false;
-            // Accept sent/done/processing to avoid race with renderer_ai
-            if (m.status !== "sent" && m.status !== "done" && m.status !== "processing") return false;
-
-            const events = (m.meta as any)?.events as string[] || [];
-            // Ignore invalid-target outcomes; NPCs should not react to failed parsing/targeting
-            if (events.some(e => e.includes("NOTE.INVALID_TARGET"))) return false;
-            // Prefer final rulings when available
-            const is_final = (m.meta as any)?.is_final_ruling;
-            if (typeof is_final === "boolean" && is_final === false) return false;
+        debug_log("NPC_AI", `Tick started - checking ${messages.length} messages`);
+        
+        // Process non-communication actions first (triggers idle timers)
+        for (const msg of messages) {
+            const msg_any = msg as any;
+            if (msg_any.meta?.npc_processed) continue;
+            const meta = msg_any.meta;
+            if (meta?.events?.some((e: string) => !e.includes("COMMUNICATE") && e.includes("actor."))) {
+                await process_non_communication_action(msg);
+            }
+        }
+        
+        // Filter to messages that need NPC responses
+        const candidates = messages.filter((msg: any) => {
+            // Skip if already processed by NPC AI
+            if (msg.meta?.npc_processed) {
+                debug_log("NPC_AI", `Skipping message ${msg.id} - already npc_processed`);
+                return false;
+            }
             
-            // NPCs can react to any salient state change they care about.
-            // v1: react if the event targets an npc.* or is an overtly social/violent verb.
-            const salient_verbs = ["COMMUNICATE", "ATTACK", "GRAPPLE", "HELP", "USE", "DEFEND", "DODGE"];
-            const has_salient = events.some(e => {
-                if (e.includes("target=npc.")) return true;
-                return salient_verbs.some(v => e.includes(`.${v}(`));
-            });
-            return has_salient;
+            // Process both "applied" messages AND "done" messages that haven't been npc_processed yet
+            // The state_applier marks messages as "done" before NPC AI sees them
+            const is_ready = msg.status === "applied" || msg.status === "applied_1" || msg.status === "applied_2" || 
+                            (msg.status === "done" && !msg.meta?.npc_processed);
+            if (!is_ready) {
+                debug_log("NPC_AI", `Skipping message ${msg.id} - status ${msg.status} not ready`);
+                return false;
+            }
+            
+            // Check if message has communication context
+            const meta = msg.meta;
+            if (!meta?.original_text && !meta?.events?.some((e: string) => e.includes("COMMUNICATE"))) {
+                debug_log("NPC_AI", `Skipping message ${msg.id} - no communication context`);
+                return false;
+            }
+            
+            debug_log("NPC_AI", `Found candidate message ${msg.id} - status: ${msg.status}`);
+            return true;
         });
         
         // Deduplicate by message ID to prevent processing same message multiple times
         const seen_ids = new Set<string>();
-        const unique_candidates = candidates.filter(msg => {
+        const unique_candidates = candidates.filter((msg: any) => {
             if (seen_ids.has(msg.id)) {
                 return false;
             }
@@ -937,7 +1239,7 @@ async function tick(outbox_path: string, inbox_path: string, log_path: string): 
         if (candidates.length > 0 && DEBUG_LEVEL >= 3) {
             const filtered_count = candidates.length - unique_candidates.length;
             debug_pipeline("NPC_AI", `Found ${unique_candidates.length} communication candidates${filtered_count > 0 ? ` (filtered ${filtered_count} duplicates)` : ""}`, {
-                ids: unique_candidates.map(m => m.id)
+                ids: unique_candidates.map((m: any) => m.id)
             });
         }
         

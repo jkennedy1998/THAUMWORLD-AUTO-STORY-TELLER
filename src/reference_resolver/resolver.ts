@@ -2,6 +2,7 @@ import type { CommandNode, ValueNode } from "../system_syntax/index.js";
 import { load_actor, load_default_actor } from "../actor_storage/store.js";
 import { load_npc } from "../npc_storage/store.js";
 import { get_region_tile, get_world_tile, load_region } from "../world_storage/store.js";
+import { load_place } from "../place_storage/store.js";
 import type { ResolvedRef, ResolverOptions, ResolverResult } from "./types.js";
 
 function collect_identifiers(value: ValueNode, out: string[]): void {
@@ -202,6 +203,96 @@ function resolve_item_ref(ref: string, options: ResolverOptions, result: Resolve
     result.resolved[ref] = resolved;
 }
 
+/**
+ * Resolve a place reference
+ * Format: place.<region_id>.<place_id>
+ * Example: place.eden_crossroads.tavern_common
+ */
+function resolve_place_ref(ref: string, options: ResolverOptions, result: ResolverResult): void {
+    const parts = parse_ref_parts(ref);
+    // Format: place.<region_id>.<place_id>
+    // region_id may contain underscores, so we join all middle parts
+    if (parts.length < 3) {
+        result.errors.push({ ref, reason: "invalid_place_ref_format", path: "Expected: place.<region_id>.<place_id>" });
+        return;
+    }
+    
+    const place_id = parts.slice(1).join("_"); // Join all parts after "place"
+    
+    const resolved: ResolvedRef = { ref, id: place_id, type: "place" };
+    const loaded = load_place(options.slot, place_id);
+    
+    if (!loaded.ok) {
+        if (options.use_representative_data) {
+            resolved.representative = true;
+            result.warnings.push({ ref, message: loaded.error });
+            result.resolved[ref] = resolved;
+            return;
+        }
+        result.errors.push({ ref, reason: loaded.error, path: loaded.details as string });
+        return;
+    }
+
+    resolved.path = loaded.path;
+    result.resolved[ref] = resolved;
+}
+
+/**
+ * Resolve a place_tile reference
+ * Format: place_tile.<region_id>.<place_id>.<x>.<y>
+ * Example: place_tile.eden_crossroads.tavern_common.5.10
+ */
+function resolve_place_tile_ref(ref: string, options: ResolverOptions, result: ResolverResult): void {
+    const parts = parse_ref_parts(ref);
+    // Format: place_tile.<region_id>.<place_id>.<x>.<y>
+    if (parts.length < 5) {
+        result.errors.push({ ref, reason: "invalid_place_tile_ref_format", path: "Expected: place_tile.<region_id>.<place_id>.<x>.<y>" });
+        return;
+    }
+    
+    const x = Number(parts[parts.length - 2]);
+    const y = Number(parts[parts.length - 1]);
+    const place_id = parts.slice(1, parts.length - 2).join("_");
+    
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        result.errors.push({ ref, reason: "invalid_tile_coordinates", path: `x=${x}, y=${y}` });
+        return;
+    }
+    
+    const resolved: ResolvedRef = { 
+        ref, 
+        id: `${place_id}_tile_${x}_${y}`, 
+        type: "place_tile" 
+    };
+    
+    // Verify the place exists
+    const loaded = load_place(options.slot, place_id);
+    
+    if (!loaded.ok) {
+        if (options.use_representative_data) {
+            resolved.representative = true;
+            result.warnings.push({ ref, message: `Place ${place_id} not found, using representative` });
+            result.resolved[ref] = resolved;
+            return;
+        }
+        result.errors.push({ ref, reason: "place_not_found", path: loaded.error });
+        return;
+    }
+
+    // Verify coordinates are within bounds
+    if (x < 0 || x >= loaded.place.tile_grid.width || y < 0 || y >= loaded.place.tile_grid.height) {
+        result.errors.push({ 
+            ref, 
+            reason: "tile_out_of_bounds", 
+            path: `x=${x}, y=${y}, width=${loaded.place.tile_grid.width}, height=${loaded.place.tile_grid.height}` 
+        });
+        return;
+    }
+
+    resolved.path = loaded.path;
+    result.resolved[ref] = resolved;
+}
+
 function resolve_ref(ref: string, options: ResolverOptions, result: ResolverResult): void {
     if (!ref.includes(".")) {
         if (ref.endsWith("_actor")) {
@@ -231,6 +322,14 @@ function resolve_ref(ref: string, options: ResolverOptions, result: ResolverResu
     }
     if (ref.startsWith("tile.")) {
         resolve_tile_ref(ref, options, result);
+        return;
+    }
+    if (ref.startsWith("place_tile.")) {
+        resolve_place_tile_ref(ref, options, result);
+        return;
+    }
+    if (ref.startsWith("place.")) {
+        resolve_place_ref(ref, options, result);
         return;
     }
     if (ref.includes("item_")) {

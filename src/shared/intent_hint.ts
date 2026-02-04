@@ -36,7 +36,7 @@ const VERB_KEYWORDS: Array<{ verb: ActionVerb; keywords: string[]; phrases?: str
     // INSPECT
     { verb: "INSPECT", keywords: ["inspect", "look", "examine", "search", "scan", "survey", "check", "observe"], phrases: ["look around", "look at", "examine the"] },
     // MOVE
-    { verb: "MOVE", keywords: ["move", "go", "walk", "run", "travel", "head", "approach", "enter", "leave", "north", "south", "east", "west"], phrases: ["go to", "walk to", "head to"] },
+    { verb: "MOVE", keywords: ["move", "go", "walk", "run", "travel", "head", "approach", "enter", "leave", "got", "arrived", "reach", "came", "heading", "moving"], phrases: ["go to", "walk to", "head to", "got to", "arrived at", "reached the"] },
     // ATTACK
     { verb: "ATTACK", keywords: ["attack", "hit", "strike", "stab", "shoot", "kill", "punch", "slash", "swing"], phrases: ["attack the", "hit the"] },
     // USE

@@ -22,6 +22,7 @@ import { ensure_actor_exists, find_actors, load_actor, create_actor_from_kind } 
 import { create_npc_from_kind, find_npcs, save_npc } from "../npc_storage/store.js";
 import { get_timed_event_state, get_region_by_coords } from "../world_storage/store.js";
 import { load_npc } from "../npc_storage/store.js";
+import { load_place, list_places_in_region } from "../place_storage/store.js";
 import { get_creation_state_path } from "../engine/paths.js";
 import { load_kind_definitions } from "../kind_storage/store.js";
 import { PROF_NAMES, STAT_VALUE_BLOCK } from "../character_rules/creation.js";
@@ -1031,9 +1032,10 @@ function start_http_server(log_path: string): void {
                         }
                     }
 
-                    // Also include NPCs whose saved location matches the actor's region, if actor is aware.
-                    // This supports followers or NPCs that move independently.
+                    // Also include NPCs whose saved location matches the actor's PLACE (Place System)
+                    // This filters NPCs to only show those in the same place as the player
                     try {
+                        const actor_place_id = (actor_res.actor as any)?.location?.place_id;
                         const all_npcs = find_npcs(slot, {}).filter((n) => n.id !== "default_npc");
                         for (const n of all_npcs) {
                             const npc_id = n.id;
@@ -1043,24 +1045,83 @@ function start_http_server(log_path: string): void {
                             const npc_res = load_npc(slot, npc_id);
                             if (!npc_res.ok) continue;
                             const nloc = (npc_res.npc as any)?.location;
-                            const nwx = Number(nloc?.world_tile?.x ?? NaN);
-                            const nwy = Number(nloc?.world_tile?.y ?? NaN);
-                            const nrx = Number(nloc?.region_tile?.x ?? NaN);
-                            const nry = Number(nloc?.region_tile?.y ?? NaN);
-                            if (nwx === wx && nwy === wy && nrx === rx && nry === ry) {
-                                // Dedup
-                                if (targets.some(t => t.type === "npc" && t.ref.toLowerCase() === `npc.${npc_id}`.toLowerCase())) continue;
-                                const label = typeof (npc_res.npc as any)?.name === "string" ? ((npc_res.npc as any).name as string) : npc_id;
-                                targets.push({ ref: `npc.${npc_id}`, label, type: "npc" });
+                            
+                            // Place System: Check if NPC is in same place
+                            const npc_place_id = nloc?.place_id;
+                            if (actor_place_id && npc_place_id) {
+                                // Both have place_id - must match
+                                if (npc_place_id !== actor_place_id) continue;
+                            } else {
+                                // Fallback: Check region match (legacy)
+                                const nwx = Number(nloc?.world_tile?.x ?? NaN);
+                                const nwy = Number(nloc?.world_tile?.y ?? NaN);
+                                const nrx = Number(nloc?.region_tile?.x ?? NaN);
+                                const nry = Number(nloc?.region_tile?.y ?? NaN);
+                                if (!(nwx === wx && nwy === wy && nrx === rx && nry === ry)) continue;
                             }
+                            
+                            // Dedup
+                            if (targets.some(t => t.type === "npc" && t.ref.toLowerCase() === `npc.${npc_id}`.toLowerCase())) continue;
+                            const label = typeof (npc_res.npc as any)?.name === "string" ? ((npc_res.npc as any).name as string) : npc_id;
+                            targets.push({ ref: `npc.${npc_id}`, label, type: "npc" });
                         }
                     } catch {
                         // ignore
                     }
                 }
 
+                // Get place information for response
+                const actor_place_id = (actor_res.actor as any)?.location?.place_id;
+                let place_name = null;
+                if (actor_place_id) {
+                    const place_res = load_place(slot, actor_place_id);
+                    if (place_res.ok) {
+                        place_name = place_res.place.name ?? actor_place_id;
+                    }
+                }
+                
+                // Get world tile coordinates
+                const world_x = (actor_res.actor as any)?.location?.world_tile?.x ?? 0;
+                const world_y = (actor_res.actor as any)?.location?.world_tile?.y ?? 0;
+                const region_x = (actor_res.actor as any)?.location?.region_tile?.x ?? 0;
+                const region_y = (actor_res.actor as any)?.location?.region_tile?.y ?? 0;
+                
+                // Get places in current region
+                const places_in_region: Array<{ ref: string; label: string; id: string }> = [];
+                if (region_res.ok && region_res.region_id) {
+                    const places_result = list_places_in_region(slot, region_res.region_id);
+                    if (places_result.ok) {
+                        for (const place_id of places_result.places) {
+                            const place_res = load_place(slot, place_id);
+                            if (place_res.ok) {
+                                // Build place reference: place.<region>.<place_suffix>
+                                const parts = place_id.split("_");
+                                if (parts.length >= 2) {
+                                    const place_suffix = parts.pop();
+                                    const region_id = parts.join("_");
+                                    const ref = `place.${region_id}.${place_suffix}`;
+                                    places_in_region.push({
+                                        ref,
+                                        label: place_res.place.name ?? place_id,
+                                        id: place_id
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                
                 res.writeHead(200, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: true, region: region_res.ok ? (region_res.region.name ?? region_res.region_id) : null, targets }));
+                res.end(JSON.stringify({ 
+                    ok: true, 
+                    region: region_res.ok ? (region_res.region.name ?? region_res.region_id) : null,
+                    place: place_name,
+                    place_id: actor_place_id,
+                    world_coords: { x: world_x, y: world_y },
+                    region_coords: { x: region_x, y: region_y },
+                    places: places_in_region,
+                    targets 
+                }));
             } catch (err: any) {
                 res.writeHead(500, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ ok: false, error: err?.message ?? "failed_to_read" }));

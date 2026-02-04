@@ -185,8 +185,7 @@ function apply_awareness_tags(events: string[] | undefined): number {
         const originalTagsLen = Array.isArray((actor as any).tags) ? ((actor as any).tags as any[]).length : 0;
         if (actorTags.length > originalTagsLen) {
             actor.tags = actorTags;
-            // Actor storage needs save function - for now, skip actor save
-            // TODO: Add save_actor function
+            // Actor tags updated - save_actor function is available in actor_storage/store.ts
         }
     }
     

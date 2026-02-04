@@ -12,7 +12,7 @@ export type ResolverWarning = {
 export type ResolvedRef = {
     ref: string;
     id: string;
-    type: "actor" | "npc" | "item" | "world_tile" | "region_tile" | "tile";
+    type: "actor" | "npc" | "item" | "world_tile" | "region_tile" | "tile" | "region" | "place" | "place_tile";
     owner_ref?: string;
     owner_type?: string;
     path?: string;

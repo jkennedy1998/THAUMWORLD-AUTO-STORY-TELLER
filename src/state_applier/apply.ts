@@ -102,6 +102,80 @@ function apply_awareness(effect_id: string, target_path: string, target_ref: str
     diffs.push({ effect_id, target: data.id ?? target_path, field: "tags", delta: 1, reason: "SYSTEM.SET_AWARENESS" });
 }
 
+// Parse tile reference and extract coordinates
+// Supports: region_tile.<world_x>.<world_y>.<region_x>.<region_y>
+//           place_tile.<region>.<place>.<x>.<y>
+function parse_tile_ref(tile_ref: string): { world_x?: number; world_y?: number; region_x?: number; region_y?: number; tile_x?: number; tile_y?: number; place_id?: string } | null {
+    const parts = tile_ref.split(".");
+    
+    // region_tile.world_x.world_y.region_x.region_y
+    if (parts[0] === "region_tile" && parts.length >= 5) {
+        const world_x = parts[1] ? parseInt(parts[1], 10) : NaN;
+        const world_y = parts[2] ? parseInt(parts[2], 10) : NaN;
+        const region_x = parts[3] ? parseInt(parts[3], 10) : NaN;
+        const region_y = parts[4] ? parseInt(parts[4], 10) : NaN;
+        if (!isNaN(world_x) && !isNaN(world_y) && !isNaN(region_x) && !isNaN(region_y)) {
+            return { world_x, world_y, region_x, region_y };
+        }
+    }
+    
+    // place_tile.region.place.x.y
+    if (parts[0] === "place_tile" && parts.length >= 5) {
+        const place_id = parts.slice(1, parts.length - 2).join("_");
+        const x_part = parts[parts.length - 2];
+        const y_part = parts[parts.length - 1];
+        const tile_x = x_part ? parseInt(x_part, 10) : NaN;
+        const tile_y = y_part ? parseInt(y_part, 10) : NaN;
+        if (!isNaN(tile_x) && !isNaN(tile_y)) {
+            return { place_id, tile_x, tile_y };
+        }
+    }
+    
+    // place.region.place (just the place itself, use default entry)
+    if (parts[0] === "place" && parts.length >= 3) {
+        const place_id = parts.slice(1).join("_");
+        return { place_id };
+    }
+    
+    return null;
+}
+
+function apply_occupancy(effect_id: string, target_path: string, tiles: string[], diffs: AppliedDiff[]): void {
+    if (tiles.length === 0) {
+        return;
+    }
+    
+    const data = read_jsonc(target_path);
+    const tile_ref = tiles[0]; // Use first tile
+    if (!tile_ref) {
+        return;
+    }
+    const coords = parse_tile_ref(tile_ref);
+    
+    if (!coords) {
+        return;
+    }
+    
+    // Update location fields
+    data.location = data.location ?? {};
+    
+    if (coords.world_x !== undefined) {
+        data.location.world_tile = { x: coords.world_x, y: coords.world_y };
+    }
+    if (coords.region_x !== undefined) {
+        data.location.region_tile = { x: coords.region_x, y: coords.region_y };
+    }
+    if (coords.tile_x !== undefined) {
+        data.location.tile = { x: coords.tile_x, y: coords.tile_y };
+    }
+    if (coords.place_id) {
+        data.location.place_id = coords.place_id;
+    }
+    
+    write_jsonc(target_path, data);
+    diffs.push({ effect_id, target: data.id ?? target_path, field: "location", delta: 1, reason: "SYSTEM.SET_OCCUPANCY" });
+}
+
 export function apply_effects(commands: CommandNode[], target_paths: Record<string, string>): ApplyResult {
     const diffs: AppliedDiff[] = [];
     const warnings: string[] = [];
@@ -145,6 +219,22 @@ export function apply_effects(commands: CommandNode[], target_paths: Record<stri
             }
             const clarity = get_identifier(cmd.args.clarity) ?? null;
             apply_awareness(effect_id, observer_path, target_ref, clarity, diffs);
+        } else if (cmd.verb === "SET_OCCUPANCY") {
+            // Parse tiles list from command args
+            const tiles_arg = cmd.args.tiles;
+            const tiles: string[] = [];
+            if (tiles_arg?.type === "list") {
+                for (const item of tiles_arg.value) {
+                    if (item.type === "identifier") {
+                        tiles.push(item.value);
+                    }
+                }
+            }
+            if (tiles.length === 0) {
+                warnings.push(`missing_tiles:${target_ref}`);
+                continue;
+            }
+            apply_occupancy(effect_id, target_path, tiles, diffs);
         } else {
             warnings.push(`unhandled_effect:${cmd.verb}`);
         }

@@ -12,6 +12,8 @@ import { ACTION_VERBS, SERVICE_CONFIG } from "../shared/constants.js";
 import { ollama_chat, type OllamaMessage } from "../shared/ollama_client.js";
 import { append_metric } from "../engine/metrics_store.js";
 import { get_region_by_coords } from "../world_storage/store.js";
+import { load_place } from "../place_storage/store.js";
+import { load_actor } from "../actor_storage/store.js";
 
 const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
 const POLL_MS = SERVICE_CONFIG.POLL_MS.RENDERER;
@@ -36,6 +38,8 @@ const RENDERER_SYSTEM_PROMPT = [
     "If details are missing, infer minimally and stay consistent.",
     "If awareness is obscured, describe presence/direction only, not identity.",
     "Keep it concise and clear.",
+    "NEVER add meta-commentary or break the 4th wall",
+    "Only describe what the player character experiences in the moment.",
 ].join("\n");
 
 function sleep(ms: number): Promise<void> {
@@ -98,11 +102,112 @@ function resolveRegionName(target: string): string {
             region_x,
             region_y
         );
-        if (regionResult.ok) {
-            return regionResult.region.name || regionResult.region_id;
+        if (regionResult.ok && regionResult.region.name) {
+            return regionResult.region.name as string;
+        }
+        // Fallback to coordinates if name not available
+        return `region at ${world_x}.${world_y}.${region_x}.${region_y}`;
+    }
+    
+    // Check if this is a place reference (e.g., place.eden_crossroads.tavern)
+    const placeMatch = target.match(/place\.([^.]+)\.([^.]+)/);
+    if (placeMatch) {
+        const placeId = `${placeMatch[1]}_${placeMatch[2]}`;
+        const placeResult = load_place(data_slot_number, placeId);
+        if (placeResult.ok && placeResult.place.name) {
+            return placeResult.place.name;
         }
     }
+    
     return target;
+}
+
+// Helper function to get place details for rich descriptions
+function getPlaceDetails(target: string, playerActorId?: string): { name: string; description: string; sensory: string; features: string } | null {
+    // Try to extract place_id from various reference formats
+    let placeId: string | null = null;
+    
+    // Format: place.<region>.<place>
+    const placeMatch = target.match(/place\.([^.]+\.[^.]+)$/);
+    if (placeMatch && placeMatch[1]) {
+        placeId = placeMatch[1].replace(/\./g, '_');
+    }
+    
+    // Format: place_tile.<region>.<place>.<x>.<y>
+    const placeTileMatch = target.match(/place_tile\.([^.]+\.[^.]+)\./);
+    if (placeTileMatch && placeTileMatch[1]) {
+        placeId = placeTileMatch[1].replace(/\./g, '_');
+    }
+    
+    // If target is a region_tile and player is provided, check if player is in a place in that region
+    if (!placeId && target.includes("region_tile.")) {
+        // Try to get the player's current place - default to henry_actor if not specified
+        const actorToCheck = playerActorId || "henry_actor";
+        const actorResult = load_actor(data_slot_number, actorToCheck);
+        if (actorResult.ok) {
+            const actorPlaceId = (actorResult.actor as any)?.location?.place_id;
+            if (actorPlaceId) {
+                placeId = actorPlaceId;
+            }
+        }
+    }
+    
+    // If no place reference found, try to get actor's current place
+    if (!placeId && target.includes("actor.")) {
+        // Extract actor ID and load their place
+        const actorMatch = target.match(/actor\.([^.]+)/);
+        if (actorMatch && actorMatch[1]) {
+            const actorResult = load_actor(data_slot_number, actorMatch[1]);
+            if (actorResult.ok) {
+                const actorPlaceId = (actorResult.actor as any)?.location?.place_id;
+                if (actorPlaceId) {
+                    placeId = actorPlaceId;
+                }
+            }
+        }
+    }
+    
+    if (!placeId) {
+        return null;
+    }
+    
+    const placeResult = load_place(data_slot_number, placeId);
+    if (!placeResult.ok) {
+        return null;
+    }
+    
+    const place = placeResult.place;
+    const desc = place.description;
+    
+    // Build sensory description
+    const sensoryParts: string[] = [];
+    if (desc?.sensory?.sight?.length) {
+        sensoryParts.push(`You see: ${desc.sensory.sight.join(', ')}.`);
+    }
+    if (desc?.sensory?.sound?.length) {
+        sensoryParts.push(`You hear: ${desc.sensory.sound.join(', ')}.`);
+    }
+    if (desc?.sensory?.smell?.length) {
+        sensoryParts.push(`The air smells of: ${desc.sensory.smell.join(', ')}.`);
+    }
+    if (desc?.sensory?.touch?.length) {
+        sensoryParts.push(`You feel: ${desc.sensory.touch.join(', ')}.`);
+    }
+    
+    // Build features list
+    const featureParts: string[] = [];
+    if (place.contents?.features?.length) {
+        for (const feature of place.contents.features) {
+            featureParts.push(`${feature.name}: ${feature.description}`);
+        }
+    }
+    
+    return {
+        name: place.name || placeId,
+        description: desc?.full || desc?.short || `You are in ${placeId}.`,
+        sensory: sensoryParts.join(' ') || 'The surroundings are unremarkable.',
+        features: featureParts.join('\n') || 'No notable features.'
+    };
 }
 
 // Action-specific narrative generators for THAUMWORLD
@@ -118,14 +223,32 @@ function generateInspectNarrativePrompt(params: {
     const target = resolveRegionName(rawTarget);
     const hasFindings = params.effects.length > 0;
     
-    return `The player is inspecting ${target}.
+    // Extract actor ID from event (e.g., "actor.henry_actor.INSPECT...")
+    const actorMatch = params.events[0]?.match(/actor\.([^.]+)\./);
+    const actorId = actorMatch?.[1];
+    
+    // Get place details for rich descriptions
+    const placeDetails = getPlaceDetails(rawTarget, actorId);
+    
+    let placeContext = "";
+    if (placeDetails) {
+        placeContext = `
+PLACE DETAILS:
+Name: ${placeDetails.name}
+Description: ${placeDetails.description}
+Sensory: ${placeDetails.sensory}
+Features: ${placeDetails.features}`;
+    }
+    
+    return `The player is inspecting ${target}.${placeContext}
 ${hasFindings 
-    ? "They discover something noteworthy. Describe what they find in detail."
-    : "They find nothing of particular interest. Describe the mundane details of what they observe."}
+    ? "They discover something noteworthy. Describe what they find in detail, incorporating the place's atmosphere and features."
+    : "They find nothing of particular interest. Describe the place using its sensory details and features."}
 
-Write a descriptive narrative (1-3 sentences) of what they see, hear, or notice.
-Use sensory details appropriate to the location.
-Write in second person ("You see...", "You notice...").
+Write a descriptive narrative (2-4 sentences) of what they see, hear, or notice.
+Use the sensory details provided above (sights, sounds, smells, textures).
+Mention specific features of the place if appropriate.
+Write in second person ("You see...", "You notice...", "The air smells of...").
 Keep it immersive and atmospheric.`;
 }
 
@@ -160,14 +283,35 @@ function generateCommunicateNarrativePrompt(params: {
     const targets = params.events[0]?.match(/targets=\[([^\]]*)\]/)?.[1];
     const hasTarget = targets && targets.length > 0 && !targets.includes("[]");
     
-    return `The player says: "${text}"
+    // Extract actor ID and get location context
+    const actorMatch = params.events[0]?.match(/actor\.([^.]+)\./);
+    const actorId = actorMatch?.[1];
+    let locationContext = "";
+    
+    if (actorId) {
+        const actorResult = load_actor(data_slot_number, actorId);
+        if (actorResult.ok) {
+            const placeId = (actorResult.actor as any)?.location?.place_id;
+            if (placeId) {
+                const placeResult = load_place(data_slot_number, placeId);
+                if (placeResult.ok) {
+                    const placeName = placeResult.place.name || placeId;
+                    locationContext = `\nCURRENT LOCATION: The player is in ${placeName}.`;
+                }
+            }
+        }
+    }
+    
+    return `The player says: "${text}"${locationContext}
 ${hasTarget 
-    ? "They are speaking to someone present. Describe how they deliver the message and the context."
-    : "They speak but there's no one around to hear. Describe their words echoing into the silence."}
+    ? "They are speaking to someone present in this location."
+    : "They speak but there's no one around to hear."}
 
-Write a narrative (1-3 sentences) describing the communication.
-Include the tone and manner of speaking.
-${hasTarget ? "Set up the scene for the NPC's response." : "Convey the emptiness or solitude of the moment."}
+Write a narrative (1-2 sentences) describing ONLY the act of speaking.
+Describe the tone, volume, and manner of speaking.
+DO NOT describe the surroundings or invent details not in the context.
+DO NOT add meta-commentary about what will happen next.
+${hasTarget ? "Set up that someone heard them." : "Convey the emptiness of the moment."}
 Write in second person.`;
 }
 
@@ -180,12 +324,29 @@ function generateMoveNarrativePrompt(params: {
     const destination = resolveRegionName(rawDestination);
     const mode = params.events[0]?.match(/mode="([^"]+)"/)?.[1] || "walk";
     
-    return `The player ${mode}s toward ${destination}.
+    // Extract actor ID from event (e.g., "actor.henry_actor.MOVE...")
+    const actorMatch = params.events[0]?.match(/actor\.([^.]+)\./);
+    const actorId = actorMatch?.[1];
+    
+    // Get place details for the destination
+    const placeDetails = getPlaceDetails(rawDestination, actorId);
+    
+    let placeContext = "";
+    if (placeDetails) {
+        placeContext = `
+DESTINATION DETAILS:
+Name: ${placeDetails.name}
+Description: ${placeDetails.description}
+Sensory: ${placeDetails.sensory}
+Features: ${placeDetails.features}`;
+    }
+    
+    return `The player ${mode}s toward ${destination}.${placeContext}
 
-Write a travel narrative (1-3 sentences) describing their movement.
-Describe the terrain, the journey, and their arrival.
-Use sensory details about the environment.
-Write in second person ("You make your way...", "You arrive at...").`;
+Write a travel narrative (2-4 sentences) describing their movement and arrival.
+Describe the journey briefly, then focus on their arrival and the new surroundings.
+${placeDetails ? "Use the sensory details and features of the destination provided above." : "Use sensory details about the environment."}
+Write in second person ("You make your way...", "You arrive at...", "Before you stands...").`;
 }
 
 function generateUseNarrativePrompt(params: {

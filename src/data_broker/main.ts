@@ -15,6 +15,7 @@ import { ensure_actor_exists } from "../actor_storage/store.js";
 import { load_actor } from "../actor_storage/store.js";
 import { find_npcs, load_npc } from "../npc_storage/store.js";
 import { ensure_region_tile, ensure_world_tile, load_region, get_region_by_coords, list_regions } from "../world_storage/store.js";
+import { load_place, create_basic_place } from "../place_storage/store.js";
 import { isCurrentSession, getSessionMeta } from "../shared/session.js";
 import { debug_log as broker_debug, debug_warn } from "../shared/debug.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
@@ -372,6 +373,21 @@ function create_missing_entities(
                 broker_debug("DataBroker: loaded region by ID", { region_id });
             }
         }
+
+        // Handle place references - try to load existing places
+        if (err.reason === "place_not_found") {
+            const place_id = err.ref.replace("place.", "");
+            const loaded = load_place(data_slot_number, place_id);
+            if (loaded.ok) {
+                created += 1;
+                notes.push(`loaded place ${place_id}`);
+                broker_debug("DataBroker: loaded place by ID", { place_id });
+            } else {
+                // Place doesn't exist - we could create a default place here
+                // but for now, just log that it needs to be created manually
+                notes.push(`place ${place_id} not found - requires manual creation`);
+            }
+        }
     }
 
     return { created, notes };
@@ -721,7 +737,7 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
 
     const brokered = create_message(brokered_input);
 
-    // TODO: send brokered_n message to rules_lawyer
+    // Send brokered message to outbox for rules_lawyer to process
     append_outbox_message(outbox_path, brokered);
     debug_log("DataBroker: brokered sent", { id: brokered.id, stage: brokered.stage });
     debug_broker_content("Broker Out", machine_text);

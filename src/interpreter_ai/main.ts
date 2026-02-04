@@ -8,8 +8,9 @@ import { append_log_envelope } from "../engine/log_store.js";
 import type { MessageEnvelope } from "../engine/types.js";
 import { debug_log, debug_content, debug_warn, log_ai_io_terminal, log_ai_io_file } from "../shared/debug.js";
 import { find_actors, load_actor } from "../actor_storage/store.js";
-import { find_npcs } from "../npc_storage/store.js";
+import { find_npcs, load_npc } from "../npc_storage/store.js";
 import { is_timed_event_active } from "../world_storage/store.js";
+import { list_all_places, load_place } from "../place_storage/store.js";
 import { append_metric } from "../engine/metrics_store.js";
 import * as crypto from "node:crypto";
 import { ollama_chat, type OllamaMessage } from "../shared/ollama_client.js";
@@ -141,8 +142,15 @@ function format_error_list(errors: unknown[]): string {
 function preprocess_communication_text(text: string): { processed: string; detected_target: string | null; actor_ref: string } {
     const actor_ref = get_active_actor_ref();
     const actor_id = get_active_actor_id();
-    const npcs = find_npcs(data_slot_number, {}).filter((n) => n.id !== "default_npc");
+    const location = get_actor_location();
+    const npcs = get_npcs_in_place(location.place_id);
     const lowered = text.toLowerCase().trim();
+    
+    debug_log("Interpreter", "Preprocessing communication", { 
+        text: text.substring(0, 50), 
+        place_id: location.place_id,
+        npcs_found: npcs.length 
+    });
     
     for (const npc of npcs) {
         const npcName = npc.name?.toLowerCase() ?? "";
@@ -238,7 +246,12 @@ function build_interpreter_prompt(params: {
     ui_target_ref?: string | null;
 }): string {
     // Pre-process communication text to clarify actor vs target
-    const { processed } = preprocess_communication_text(params.text);
+    // Only do this for COMMUNICATE or unknown intents, not for MOVE, ATTACK, etc.
+    let processed = params.text;
+    if (!params.ui_intent_verb || params.ui_intent_verb === "COMMUNICATE" || params.intent === "unknown") {
+        const result = preprocess_communication_text(params.text);
+        processed = result.processed;
+    }
     
     if (!params.is_refinement) {
         const base = ["Human input:", processed];
@@ -500,8 +513,15 @@ function get_active_actor_ref(): string {
 
 function resolve_communication_targets(text: string): string[] {
     // First, try to extract NPC name from the text itself
-    const npcs = find_npcs(data_slot_number, {}).filter((n) => n.id !== "default_npc");
+    const location = get_actor_location();
+    const npcs = get_npcs_in_place(location.place_id);
     const lowered = text.toLowerCase();
+    
+    debug_log("Interpreter", "Resolving communication targets", {
+        text: text.substring(0, 50),
+        place_id: location.place_id,
+        npcs_in_place: npcs.length
+    });
     
     // Look for NPC names or IDs in the text (exact match)
     for (const npc of npcs) {
@@ -547,11 +567,82 @@ function resolve_communication_targets(text: string): string[] {
     return [`npc.${normalized.id}`];
 }
 
-function get_actor_location(): { world_x: number; world_y: number; region_x: number; region_y: number; tile_x: number; tile_y: number } {
+// Common words to filter out when matching places
+const COMMON_WORDS = new Set(["i", "go", "to", "the", "a", "an", "at", "in", "on", "toward", "towards", "move", "walk", "head", "travel", "get", "got", "arrived", "reach", "came"]);
+
+// Resolve place names from text (e.g., "tavern", "shop", "square")
+function resolve_place_from_text(text: string): string | null {
+    const lowered = text.toLowerCase();
+    
+    // Extract meaningful words from input (filter out common words)
+    const search_words = lowered.split(/[^a-z]+/)
+        .map(w => w.trim())
+        .filter(w => w.length >= 3 && !COMMON_WORDS.has(w));
+    
+    if (search_words.length === 0) {
+        return null;
+    }
+    
+    const places_result = list_all_places(data_slot_number);
+    
+    if (!places_result.ok) {
+        return null;
+    }
+    
+    const place_ids = places_result.places;
+    
+    for (const place_id of place_ids) {
+        const place_result = load_place(data_slot_number, place_id);
+        if (!place_result.ok) continue;
+        
+        const place = place_result.place;
+        const place_name = place.name?.toLowerCase() ?? "";
+        const place_id_lower = place_id.toLowerCase();
+        
+        // Extract words from place ID (e.g., "eden_crossroads_tavern_common" -> ["eden", "crossroads", "tavern", "common"])
+        const id_words = place_id_lower.split(/[^a-z]+/).filter(w => w.length >= 3);
+        
+        // Extract words from place name
+        const name_words = place_name.split(/[^a-z]+/).filter(w => w.length >= 3);
+        
+        // Check each search word against place ID words and name words
+        for (const search_word of search_words) {
+            // Check ID words
+            for (const id_word of id_words) {
+                if (id_word === search_word || isSimilarName(id_word, search_word)) {
+                    debug_log("Interpreter", "Matched place ID word", { 
+                        text: text.substring(0, 50), 
+                        search_word,
+                        matched_word: id_word,
+                        place_id 
+                    });
+                    return build_place_ref(place_id);
+                }
+            }
+            
+            // Check name words
+            for (const name_word of name_words) {
+                if (name_word === search_word || isSimilarName(name_word, search_word)) {
+                    debug_log("Interpreter", "Matched place name word", { 
+                        text: text.substring(0, 50), 
+                        search_word,
+                        matched_word: name_word,
+                        place_id 
+                    });
+                    return build_place_ref(place_id);
+                }
+            }
+        }
+    }
+    
+    return null;
+}
+
+function get_actor_location(): { world_x: number; world_y: number; region_x: number; region_y: number; tile_x: number; tile_y: number; place_id: string | null } {
     const actor_id = get_active_actor_id();
     const loaded = load_actor(data_slot_number, actor_id);
     if (!loaded.ok) {
-        return { world_x: 0, world_y: 0, region_x: 0, region_y: 0, tile_x: 0, tile_y: 0 };
+        return { world_x: 0, world_y: 0, region_x: 0, region_y: 0, tile_x: 0, tile_y: 0, place_id: null };
     }
     const location = (loaded.actor.location as Record<string, any>) ?? {};
     const world_tile = location.world_tile ?? {};
@@ -564,6 +655,7 @@ function get_actor_location(): { world_x: number; world_y: number; region_x: num
         region_y: Number(region_tile.y ?? 0),
         tile_x: Number(tile.x ?? 0),
         tile_y: Number(tile.y ?? 0),
+        place_id: location.place_id ?? null,
     };
 }
 
@@ -573,6 +665,48 @@ function build_tile_ref(location: { world_x: number; world_y: number; region_x: 
 
 function build_region_tile_ref(location: { world_x: number; world_y: number; region_x: number; region_y: number }): string {
     return `region_tile.${location.world_x}.${location.world_y}.${location.region_x}.${location.region_y}`;
+}
+
+function build_place_ref(place_id: string): string {
+    // Parse place_id format: "region_place_suffix" -> "place.region.suffix"
+    const parts = place_id.split("_");
+    if (parts.length < 2) return `place.${place_id}`;
+    const place_suffix = parts.pop();
+    const region_id = parts.join("_");
+    return `place.${region_id}.${place_suffix}`;
+}
+
+function build_place_tile_ref(place_id: string, tile: { x: number; y: number }): string {
+    const parts = place_id.split("_");
+    if (parts.length < 2) return `place_tile.${place_id}.${tile.x}.${tile.y}`;
+    const place_suffix = parts.pop();
+    const region_id = parts.join("_");
+    return `place_tile.${region_id}.${place_suffix}.${tile.x}.${tile.y}`;
+}
+
+function get_npcs_in_place(place_id: string | null): { id: string; name: string; path: string }[] {
+    if (!place_id) {
+        // Fallback: return all NPCs if no place_id (for backward compatibility)
+        return find_npcs(data_slot_number, {}).filter((n) => n.id !== "default_npc");
+    }
+    
+    // Filter NPCs by place
+    const all_npcs = find_npcs(data_slot_number, {}).filter((n) => n.id !== "default_npc");
+    const npcs_in_place: { id: string; name: string; path: string }[] = [];
+    
+    for (const npc_hit of all_npcs) {
+        const npc_result = load_npc(data_slot_number, npc_hit.id);
+        if (!npc_result.ok) continue;
+        
+        const npc_location = (npc_result.npc.location as Record<string, any>) ?? {};
+        const npc_place_id = npc_location.place_id as string | undefined;
+        
+        if (npc_place_id === place_id) {
+            npcs_in_place.push(npc_hit);
+        }
+    }
+    
+    return npcs_in_place;
 }
 
 function build_adjacent_tile_ref(location: { world_x: number; world_y: number; region_x: number; region_y: number; tile_x: number; tile_y: number }): string {
@@ -600,11 +734,19 @@ function select_environment_target_ref(): string {
 }
 
 function resolve_nearby_npc_target(): string | null {
-    const npcs = find_npcs(data_slot_number, {}).filter((n) => n.id !== "default_npc");
-    if (npcs.length === 0) return null;
+    const location = get_actor_location();
+    const npcs = get_npcs_in_place(location.place_id);
+    
+    if (npcs.length === 0) {
+        debug_log("Interpreter", "No NPCs found in player's place", { place_id: location.place_id });
+        return null;
+    }
+    
     const sorted = [...npcs].sort((a, b) => a.id.localeCompare(b.id));
     const candidate = sorted[0]?.id ?? "";
     if (!candidate) return null;
+    
+    debug_log("Interpreter", "Found nearby NPC", { npc: candidate, place: location.place_id });
     return `npc.${candidate}`;
 }
 
@@ -728,7 +870,12 @@ function build_action_template(verb: ActionVerb, text: string): string {
     const actor_ref = get_active_actor_ref();
     if (verb === "COMMUNICATE") return build_communicate_template(text);
     if (verb === "INSPECT") return `${actor_ref}.INSPECT(target=region_tile.0.0.0.0, tool=${actor_ref}.hands, contexts=[region_tile.0.0.0.0])`;
-    if (verb === "MOVE") return `${actor_ref}.MOVE(target=region_tile.0.0.0.0, tool=${actor_ref}.hands, mode="walk", action_cost=FULL)`;
+    if (verb === "MOVE") {
+        // Try to resolve place from text for the template
+        const place_target = resolve_place_from_text(text);
+        const target = place_target ?? "region_tile.0.0.0.0";
+        return `${actor_ref}.MOVE(target=${target}, tool=${actor_ref}.hands, mode="walk", action_cost=FULL)`;
+    }
     if (verb === "SLEEP" || verb === "REPAIR") return `${actor_ref}.${verb}(tool=${actor_ref}.body, action_cost=EXTENDED)`;
     if (verb === "DEFEND") return `${actor_ref}.DEFEND(target=${actor_ref}, tool=${actor_ref}.hands, action_cost=FULL)`;
     if (verb === "DODGE") return `${actor_ref}.DODGE(target=${actor_ref}, tool=${actor_ref}.hands, action_cost=FULL)`;
@@ -805,8 +952,15 @@ function isSimilarName(a: string, b: string): boolean {
 }
 
 function resolve_npc_target_from_text(text: string): string | null {
-    const npcs = find_npcs(data_slot_number, {}).filter((n) => n.id !== "default_npc");
+    const location = get_actor_location();
+    const npcs = get_npcs_in_place(location.place_id);
     const lowered = text.toLowerCase();
+    
+    debug_log("Interpreter", "Resolving NPC target from text", {
+        text: text.substring(0, 50),
+        place_id: location.place_id,
+        npcs_available: npcs.length
+    });
     
     // First try exact substring matching
     for (const npc of npcs) {
@@ -883,7 +1037,9 @@ function build_action_fallback(verb: ActionVerb, text: string): string {
     }
 
     if (verb === "MOVE") {
-        const move_target = target_ref ?? select_environment_target_ref();
+        // Try to resolve place name from text first (e.g., "go to tavern")
+        const place_target = resolve_place_from_text(text);
+        const move_target = place_target ?? target_ref ?? select_environment_target_ref();
         return `${actor_ref}.MOVE(target=${move_target}, tool=${actor_ref}.hands, mode="walk", action_cost=FULL)`;
     }
 
@@ -1356,7 +1512,7 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
         response_msg.role = "player";
     }
 
-    // TODO: send to data broker program here instead of inbox
+    // Send interpreted message to inbox for data broker to process
     append_inbox_message(inbox_path, response_msg);
     debug_log("Interpreter: sent response", { reply_to: response_msg.reply_to, id: response_msg.id });
     write_status_line(get_status_path(data_slot_number), `interpreter pass ${response_msg.stage?.split("_")[1] ?? "1"}: translation ready`);
