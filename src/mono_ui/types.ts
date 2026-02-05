@@ -122,6 +122,7 @@ export type Module = {
     OnPointerDown?(e: PointerEvent): void;
     OnPointerUp?(e: PointerEvent): void;
     OnClick?(e: PointerEvent): void;
+    OnContextMenu?(e: PointerEvent): void;
     OnDragStart?(e: DragEvent): void;
     OnDragMove?(e: DragEvent): void;
     OnDragEnd?(e: DragEvent): void;

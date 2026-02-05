@@ -3,10 +3,13 @@ import { make_button_module } from '../mono_ui/modules/button_module.js';
 import { make_text_window_module, type TextWindowMessage } from '../mono_ui/modules/window_module.js';
 import { make_input_module } from '../mono_ui/modules/input_module.js';
 import { make_roller_module } from '../mono_ui/modules/roller_module.js';
+import { make_place_module } from '../mono_ui/modules/place_module.js';
 import type { Module, Rgb } from '../mono_ui/types.js';
+import type { Place } from '../types/place.js';
 import { debug_warn } from '../shared/debug.js';
 import { get_color_by_name } from '../mono_ui/colors.js';
 import { infer_action_verb_hint } from '../shared/intent_hint.js';
+import { load_actor, save_actor } from '../actor_storage/store.js';
 
 export const APP_CONFIG = {
     font_family: 'Martian Mono',
@@ -15,13 +18,14 @@ export const APP_CONFIG = {
     base_letter_spacing_mult: 0.08,
     weight_index_to_css: [100, 200, 300, 400, 500, 600, 700, 800] as const,
 
-    grid_width: 120,
-    grid_height: 44,
+    grid_width: 160,
+    grid_height: 50,
 
     interpreter_endpoint: 'http://localhost:8787/api/input',
     interpreter_log_endpoint: 'http://localhost:8787/api/log',
     interpreter_status_endpoint: 'http://localhost:8787/api/status',
     interpreter_targets_endpoint: 'http://localhost:8787/api/targets',
+    place_endpoint: 'http://localhost:8787/api/place',
     roller_status_endpoint: 'http://localhost:8787/api/roller_status',
     roller_roll_endpoint: 'http://localhost:8787/api/roll',
     selected_data_slot: 1,
@@ -64,6 +68,10 @@ export function create_app_state(): AppState {
             disabled: true,
             roll_id: null as string | null,
         },
+        place: {
+            current_place_id: null as string | null,
+            current_place: null as Place | null,
+        },
     };
 
     function set_text_window_messages(id: string, messages: (string | TextWindowMessage)[]) {
@@ -73,6 +81,44 @@ export function create_app_state(): AppState {
         } else {
             cur.messages = [...messages];
             cur.rev++;
+        }
+    }
+
+    function get_current_place(): Place | null {
+        return ui_state.place.current_place;
+    }
+
+    async function update_current_place(place_id: string | null): Promise<void> {
+        if (!place_id) {
+            ui_state.place.current_place_id = null;
+            ui_state.place.current_place = null;
+            return;
+        }
+
+        // Only update ID if it's different (triggers re-center)
+        const is_new_place = place_id !== ui_state.place.current_place_id;
+        if (is_new_place) {
+            ui_state.place.current_place_id = place_id;
+            // Reset view state for new place
+            ui_state.place.current_place = null;
+        }
+
+        // Fetch place data from API
+        try {
+            const url = `${APP_CONFIG.place_endpoint}?slot=${APP_CONFIG.selected_data_slot}&place_id=${encodeURIComponent(place_id)}`;
+            const res = await fetch(url);
+            if (!res.ok) {
+                throw new Error(`HTTP ${res.status}`);
+            }
+            const data = (await res.json()) as { ok: boolean; place?: Place };
+            if (data.ok && data.place) {
+                ui_state.place.current_place = data.place;
+            } else {
+                ui_state.place.current_place = null;
+            }
+        } catch (err) {
+            debug_warn('[mono_ui] failed to load place', place_id, err);
+            ui_state.place.current_place = null;
         }
     }
 
@@ -147,6 +193,10 @@ export function create_app_state(): AppState {
                 ui_state.controls.targets = Array.isArray(data.targets) ? data.targets : [];
                 ui_state.controls.region_label = typeof data.region === 'string' ? data.region : null;
                 ui_state.controls.targets_ready = true;
+
+                // Update current place view
+                const place_id = data.place_id ?? null;
+                await update_current_place(place_id);
 
                 // Validate persistent selected target
                 if (ui_state.controls.selected_target) {
@@ -249,7 +299,7 @@ export function create_app_state(): AppState {
 
             const targets_npc = ui_state.controls.targets.filter(t => t.type === 'npc');
 
-            function findTargetByName(name: string): { ref: string; label: string } | null {
+            const findTargetByName = (name: string): { ref: string; label: string } | null => {
                 const n = norm(name);
                 if (!n) return null;
                 const hit = targets_npc.find(t => {
@@ -258,7 +308,7 @@ export function create_app_state(): AppState {
                     return labelN === n || refN === n;
                 });
                 return hit ? { ref: hit.ref, label: hit.label } : null;
-            }
+            };
 
             // Scan tokens for @ mentions; support multi-word like "@Old Moss".
             for (let i = 0; i < words.length; i++) {
@@ -454,6 +504,62 @@ export function create_app_state(): AppState {
             char: '.',
             rgb: DEEP_RED,
             style: 'regular',
+        }),
+
+        make_place_module({
+            id: 'place',
+            rect: { x0: 120, y0: 1, x1: 158, y1: 48 },
+            get_place: get_current_place,
+            on_select_target: (target_ref: string): boolean => {
+                // Check if this target exists in the available targets list
+                const target = ui_state.controls.targets.find(t => 
+                    t.ref.toLowerCase() === target_ref.toLowerCase()
+                );
+                
+                if (target) {
+                    ui_state.controls.selected_target = target.ref;
+                    flash_status([`Target: ${target.label || target_ref}`], 1200);
+                    return true;
+                }
+                
+                // Target not in available list - could be out of range or not visible
+                return false;
+            },
+            on_actor_move: async (actor_ref: string, new_position: { x: number; y: number }): Promise<void> => {
+                // Persist actor position change via API
+                // This prevents the actor from snapping back when place data refreshes
+                const actor_id = actor_ref.replace('actor.', '');
+                const slot = APP_CONFIG.selected_data_slot;
+                
+                try {
+                    const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+                    const response = await fetch(
+                        `${base_url}/api/actor/move?slot=${slot}&actor_id=${encodeURIComponent(actor_id)}`,
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(new_position)
+                        }
+                    );
+                    
+                    if (!response.ok) {
+                        const error = await response.text();
+                        debug_warn('[mono_ui]', `Failed to save actor ${actor_id} position`, error);
+                    } else {
+                        debug_warn('[mono_ui]', `Actor ${actor_id} position saved to`, new_position);
+                    }
+                } catch (err) {
+                    debug_warn('[mono_ui]', `Error saving actor ${actor_id} position`, err);
+                }
+            },
+            border_rgb: get_color_by_name('light_gray').rgb,
+            bg_rgb: get_color_by_name('off_black').rgb,
+            floor_char: '.',
+            floor_rgb: get_color_by_name('dark_gray').rgb,
+            npc_rgb: get_color_by_name('vivid_yellow').rgb,  // Brighter yellow for visibility
+            actor_rgb: get_color_by_name('vivid_green').rgb,
+            grid_rgb: get_color_by_name('medium_gray').rgb,
+            initial_scale: 1,
         }),
 
         make_text_window_module({

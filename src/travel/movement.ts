@@ -24,6 +24,7 @@ import { get_npc_location, set_npc_location, update_npc_location } from "../npc_
 import { load_actor, save_actor } from "../actor_storage/store.js";
 import { load_npc, save_npc } from "../npc_storage/store.js";
 import { advance_time } from "../time_system/tracker.js";
+import { move_entity_in_index } from "../place_storage/entity_index.js";
 
 // Movement speeds (tiles per minute)
 const MOVEMENT_SPEEDS = {
@@ -235,6 +236,9 @@ export async function travel_between_places(
   } else {
     await set_actor_location(slot, entity_id, new_location);
   }
+  
+  // Update entity index for fast lookups
+  move_entity_in_index(slot, entity_ref, from_place_id, target_place_id);
   
   return {
     ok: true,

@@ -425,6 +425,20 @@ export class CanvasRuntime {
             };
         }, { passive: false });
 
+        this.canvas_el.addEventListener('contextmenu', (ev) => {
+            ev.preventDefault();
+
+            const t = this.mouse_to_tile(ev);
+            if (!t) return;
+
+            const top = this.route_to_top_module(t.x, t.y) ?? null;
+            if (top) {
+                top.OnContextMenu?.(
+                    this.make_pointer_event('click', t.x, t.y, ev, this.engine_canvas.get(t.x, t.y), 1),
+                );
+            }
+        });
+
         this.canvas_el.addEventListener('mouseup', (ev) => {
             const t = this.mouse_to_tile(ev);
             if (!t) {

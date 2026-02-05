@@ -2,7 +2,7 @@ import * as readline from "node:readline";
 import * as http from "node:http";
 import * as fs from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
-import { debug_log, debug_warn } from "../shared/debug.js";
+import { debug_log, debug_warn, debug_error } from "../shared/debug.js";
 import { ollama_chat } from "../shared/ollama_client.js";
 import { isCurrentSession, getSessionMeta, SESSION_ID } from "../shared/session.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
@@ -18,11 +18,13 @@ import type { MessageEnvelope } from "../engine/types.js";
 import type { LogFile } from "../engine/types.js";
 import { ensure_status_exists, read_status, write_status_line } from "../engine/status_store.js";
 import { ensure_roller_status_exists, read_roller_status, write_roller_status } from "../engine/roller_status_store.js";
-import { ensure_actor_exists, find_actors, load_actor, create_actor_from_kind } from "../actor_storage/store.js";
+import { ensure_actor_exists, find_actors, load_actor, save_actor, create_actor_from_kind } from "../actor_storage/store.js";
 import { create_npc_from_kind, find_npcs, save_npc } from "../npc_storage/store.js";
 import { get_timed_event_state, get_region_by_coords } from "../world_storage/store.js";
 import { load_npc } from "../npc_storage/store.js";
 import { load_place, list_places_in_region } from "../place_storage/store.js";
+import { get_npc_location } from "../npc_storage/location.js";
+import { get_entities_in_place } from "../place_storage/entity_index.js";
 import { get_creation_state_path } from "../engine/paths.js";
 import { load_kind_definitions } from "../kind_storage/store.js";
 import { PROF_NAMES, STAT_VALUE_BLOCK } from "../character_rules/creation.js";
@@ -961,6 +963,147 @@ function start_http_server(log_path: string): void {
             return;
         }
 
+        if (url.pathname === "/api/place") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+            if (!Number.isFinite(slot) || slot <= 0) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
+                return;
+            }
+
+            const place_id = url.searchParams.get("place_id");
+            if (!place_id) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_place_id" }));
+                return;
+            }
+
+            try {
+                // Load base place data
+                const place_res = load_place(slot, place_id);
+                if (!place_res.ok) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "place_not_found", details: place_res.error }));
+                    return;
+                }
+
+                const place = place_res.place;
+
+                // Debug: log place connections
+                debug_log("API", `/api/place: ${place_id} has ${place.connections?.length || 0} connections`, {
+                    connections: place.connections?.map((c: { target_place_id: string; direction: string }) => ({ 
+                        target: c.target_place_id, 
+                        direction: c.direction 
+                    }))
+                });
+
+                // Get entities in this place from the spatial index
+                const entity_refs = get_entities_in_place(slot, place_id);
+                debug_log("API", `/api/place: Found entities in ${place_id}`, {
+                    slot,
+                    npc_count: entity_refs.npcs.length,
+                    actor_count: entity_refs.actors.length
+                });
+
+                // Clear existing contents and populate from index
+                place.contents.npcs_present = [];
+                place.contents.actors_present = [];
+
+                // Load NPC data
+                for (const npc_ref of entity_refs.npcs) {
+                    const npc_id = npc_ref.replace("npc.", "");
+                    const npc_res = load_npc(slot, npc_id);
+                    if (!npc_res.ok) {
+                        debug_warn("API", `Failed to load NPC ${npc_id} for place ${place_id}`, { error: npc_res.error });
+                        continue;
+                    }
+
+                    const location = get_npc_location(npc_res.npc);
+                    if (!location?.tile) {
+                        debug_warn("API", `NPC ${npc_id} has no tile position`, { npc_ref });
+                        continue;
+                    }
+
+                    // Clamp NPC position to valid place bounds
+                    const clamped_location = {
+                        x: Math.max(0, Math.min(location.tile.x, place.tile_grid.width - 1)),
+                        y: Math.max(0, Math.min(location.tile.y, place.tile_grid.height - 1))
+                    };
+                    
+                    if (clamped_location.x !== location.tile.x || clamped_location.y !== location.tile.y) {
+                        debug_warn("API", `NPC ${npc_id} position clamped from (${location.tile.x},${location.tile.y}) to (${clamped_location.x},${clamped_location.y})`, {
+                            npc_ref,
+                            place_bounds: { w: place.tile_grid.width, h: place.tile_grid.height }
+                        });
+                    }
+
+                    place.contents.npcs_present.push({
+                        npc_ref,
+                        tile_position: clamped_location,
+                        status: "present",
+                        activity: "standing here"
+                    });
+                }
+
+                // Load Actor data
+                for (const actor_ref of entity_refs.actors) {
+                    const actor_id = actor_ref.replace("actor.", "");
+                    const actor_res = load_actor(slot, actor_id);
+                    if (!actor_res.ok) {
+                        debug_warn("API", `Failed to load actor ${actor_id} for place ${place_id}`, { error: actor_res.error });
+                        continue;
+                    }
+
+                    const actor = actor_res.actor;
+                    const location = (actor.location as { tile?: { x: number; y: number } })?.tile;
+                    if (!location) {
+                        debug_warn("API", `Actor ${actor_id} has no tile position`, { actor_ref });
+                        continue;
+                    }
+
+                    // Clamp actor position to valid place bounds
+                    const clamped_location = {
+                        x: Math.max(0, Math.min(location.x, place.tile_grid.width - 1)),
+                        y: Math.max(0, Math.min(location.y, place.tile_grid.height - 1))
+                    };
+                    
+                    if (clamped_location.x !== location.x || clamped_location.y !== location.y) {
+                        debug_warn("API", `Actor ${actor_id} position clamped from (${location.x},${location.y}) to (${clamped_location.x},${clamped_location.y})`, {
+                            actor_ref,
+                            place_bounds: { w: place.tile_grid.width, h: place.tile_grid.height }
+                        });
+                    }
+
+                    place.contents.actors_present.push({
+                        actor_ref,
+                        tile_position: clamped_location,
+                        status: "present"
+                    });
+                }
+
+                debug_log("API", `/api/place: Populated ${place_id}`, {
+                    slot,
+                    populated_npcs: place.contents.npcs_present.length,
+                    populated_actors: place.contents.actors_present.length
+                });
+
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, place }));
+            } catch (err: any) {
+                debug_error("API", `/api/place failed for ${place_id}`, err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: err?.message ?? "load_place_failed" }));
+            }
+            return;
+        }
+
         if (url.pathname === "/api/targets") {
             if (req.method !== "GET") {
                 res.writeHead(405, { "Content-Type": "application/json" });
@@ -1126,6 +1269,80 @@ function start_http_server(log_path: string): void {
                 res.writeHead(500, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ ok: false, error: err?.message ?? "failed_to_read" }));
             }
+            return;
+        }
+
+        if (url.pathname === "/api/actor/move") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+            if (!Number.isFinite(slot) || slot <= 0) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
+                return;
+            }
+
+            const actor_id = url.searchParams.get("actor_id");
+            if (!actor_id) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_actor_id" }));
+                return;
+            }
+
+            // Collect request body
+            let body = "";
+            req.on("data", (chunk: Buffer) => {
+                body += chunk.toString();
+            });
+            
+            req.on("end", () => {
+                try {
+                    const data = JSON.parse(body) as { x?: number; y?: number };
+                    
+                    if (typeof data.x !== "number" || typeof data.y !== "number") {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "invalid_position" }));
+                        return;
+                    }
+
+                    // Load and update actor
+                    const actor_res = load_actor(slot, actor_id);
+                    if (!actor_res.ok) {
+                        res.writeHead(404, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "actor_not_found" }));
+                        return;
+                    }
+
+                    const actor = actor_res.actor as Record<string, unknown>;
+                    if (!actor.location) {
+                        actor.location = {};
+                    }
+                    (actor.location as Record<string, unknown>).tile = { x: data.x, y: data.y };
+                    
+                    save_actor(slot, actor_id, actor);
+                    
+                    debug_log("API", `Actor ${actor_id} position updated`, { slot, x: data.x, y: data.y });
+                    
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, actor_id, position: { x: data.x, y: data.y } }));
+                } catch (err: any) {
+                    debug_error("API", `/api/actor/move failed for ${actor_id}`, err);
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? "move_failed" }));
+                }
+            });
+            
+            req.on("error", (err: any) => {
+                debug_error("API", `/api/actor/move request error for ${actor_id}`, err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "request_error" }));
+            });
+            
             return;
         }
 
