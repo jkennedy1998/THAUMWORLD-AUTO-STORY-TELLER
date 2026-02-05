@@ -7,6 +7,7 @@ import { make_place_module } from '../mono_ui/modules/place_module.js';
 import type { Module, Rgb } from '../mono_ui/types.js';
 import type { Place } from '../types/place.js';
 import { debug_warn } from '../shared/debug.js';
+import { init_npc_movement, init_place_movement, stop_place_movement } from '../npc_ai/movement_loop.js';
 import { get_color_by_name } from '../mono_ui/colors.js';
 import { infer_action_verb_hint } from '../shared/intent_hint.js';
 import { load_actor, save_actor } from '../actor_storage/store.js';
@@ -71,6 +72,7 @@ export function create_app_state(): AppState {
         place: {
             current_place_id: null as string | null,
             current_place: null as Place | null,
+            npc_movement_active: false,
         },
     };
 
@@ -89,6 +91,12 @@ export function create_app_state(): AppState {
     }
 
     async function update_current_place(place_id: string | null): Promise<void> {
+        // Stop movement for previous place if leaving
+        if (place_id !== ui_state.place.current_place_id && ui_state.place.current_place_id) {
+            stop_place_movement(ui_state.place.current_place_id);
+            ui_state.place.npc_movement_active = false;
+        }
+
         if (!place_id) {
             ui_state.place.current_place_id = null;
             ui_state.place.current_place = null;
@@ -113,6 +121,12 @@ export function create_app_state(): AppState {
             const data = (await res.json()) as { ok: boolean; place?: Place };
             if (data.ok && data.place) {
                 ui_state.place.current_place = data.place;
+                
+                // Initialize NPC movement for this place
+                if (is_new_place && data.place) {
+                    init_place_movement(place_id, data.place);
+                    ui_state.place.npc_movement_active = true;
+                }
             } else {
                 ui_state.place.current_place = null;
             }
@@ -194,9 +208,11 @@ export function create_app_state(): AppState {
                 ui_state.controls.region_label = typeof data.region === 'string' ? data.region : null;
                 ui_state.controls.targets_ready = true;
 
-                // Update current place view
+                // Update current place view (skip if NPC movement is active to prevent snap-back)
                 const place_id = data.place_id ?? null;
-                await update_current_place(place_id);
+                if (!ui_state.place.npc_movement_active) {
+                    await update_current_place(place_id);
+                }
 
                 // Validate persistent selected target
                 if (ui_state.controls.selected_target) {
@@ -736,6 +752,16 @@ export function create_app_state(): AppState {
     // Seed controls + targets windows
     set_text_window_messages('controls', ['[suggested] (none)', '[override intent] (none)', '[override cost] (none)']);
     set_text_window_messages('targets', ['[region] (loading...)', 'Targets will appear here.']);
+
+    // Initialize NPC movement system
+    init_npc_movement((updated_place: Place) => {
+        // Update the current place data so the renderer shows NPC movement
+        if (ui_state.place.current_place && ui_state.place.current_place.id === updated_place.id) {
+            ui_state.place.current_place = updated_place;
+            // Keep movement active since we're updating from movement system
+            ui_state.place.npc_movement_active = true;
+        }
+    });
 
     return {
         modules,

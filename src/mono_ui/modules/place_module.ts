@@ -3,6 +3,8 @@ import { rect_width, rect_height } from "../types.js";
 import { draw_border } from "../padding.js";
 import { get_color_by_name } from "../colors.js";
 import type { Place, PlaceNPC, PlaceActor, TilePosition } from "../../types/place.js";
+import { get_entity_path, start_entity_movement, register_place, unregister_place } from "../../shared/movement_engine.js";
+import { load_actor } from "../../actor_storage/store.js";
 
 // Debug logging helper - re-enabled with balanced output
 function debug_log_place(...args: any[]) {
@@ -121,21 +123,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   let particles: Particle[] = [];
   const PARTICLE_LIFESPAN_MS = 300;  // Particles live for 300ms (shorter to prevent buildup)
   
-  // Movement state for actor
-  let movement_state: MovementState = {
-    path: [],
-    current_index: 0,
-    start_time: 0,
-    last_move_time: 0,
-    is_moving: false
-  };
-  
-  // Local actor position cache - prevents race condition with API refreshes
-  // This stores the "source of truth" position during movement
-  let local_actor_position: TilePosition | null = null;
-  
-  // Movement speed: 10 tiles per second (100ms per tile) - faster!
-  const MOVEMENT_SPEED_MS = 100;
+  // Track current place for unified movement engine
+  let current_place_id: string | null = null;
 
   // Derived dimensions (excluding border)
   function inner_rect(): Rect {
@@ -325,6 +314,34 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     return true;
   }
 
+  // Get actor walk speed from their data
+  // Uses the unified movement engine's default if actor data unavailable
+  function get_actor_walk_speed(actor_ref: string): number {
+    // Extract actor_id from actor_ref (e.g., "actor.henry_actor" -> "henry_actor")
+    const actor_id = actor_ref.replace("actor.", "");
+    
+    // Try to load actor data to get their walk speed
+    try {
+      const result = load_actor(1, actor_id); // TODO: Use actual slot
+      if (result.ok && result.actor) {
+        const actor = result.actor as Record<string, unknown>;
+        const movement = actor.movement as Record<string, number> | undefined;
+        if (movement?.walk) {
+          // Convert tiles per turn to tiles per minute
+          // 4 tiles per turn = 40 tiles per minute (10 turns per minute)
+          // But we're using 300 tpm as base speed for faster gameplay
+          const tiles_per_turn = movement.walk;
+          return tiles_per_turn * 75; // 300 / 4 = 75x multiplier for faster speed
+        }
+      }
+    } catch (e) {
+      // Failed to load actor, use default
+    }
+    
+    // Default: 300 tiles per minute (5 tiles per second)
+    return 300;
+  }
+
   // Simple BFS pathfinding
   function find_path(
     start_x: number,
@@ -427,6 +444,35 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     // Clear background
     canvas.fill_rect(inner, { char: " ", rgb: bg_rgb });
 
+    // Pre-compute all path positions for rendering
+    const path_tiles = new Map<string, { color: "white" | "red" }>();
+    
+    // Add NPC paths
+    for (const npc of place.contents.npcs_present) {
+      const path_info = get_entity_path(npc.npc_ref);
+      if (path_info && path_info.show) {
+        for (const pos of path_info.path) {
+          const key = `${pos.x},${pos.y}`;
+          if (!path_tiles.has(key)) {
+            path_tiles.set(key, { color: path_info.color });
+          }
+        }
+      }
+    }
+    
+    // Add Actor paths
+    for (const actor of place.contents.actors_present) {
+      const path_info = get_entity_path(actor.actor_ref);
+      if (path_info && path_info.show) {
+        for (const pos of path_info.path) {
+          const key = `${pos.x},${pos.y}`;
+          if (!path_tiles.has(key)) {
+            path_tiles.set(key, { color: path_info.color });
+          }
+        }
+      }
+    }
+
     // Draw floor grid and entities
     for (let screen_y = inner.y0; screen_y <= inner.y1; screen_y++) {
       for (let screen_x = inner.x0; screen_x <= inner.x1; screen_x++) {
@@ -485,9 +531,27 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         }
 
         if (!found_entity) {
-          // Draw floor
-          const tile_char = view.scale > 2 ? "·" : floor_char;
-          canvas.set(screen_x, screen_y, { char: tile_char, rgb: floor_rgb });
+          // Check if this tile has a path
+          const tile_x = Math.floor(tile_start_x);
+          const tile_y = Math.floor(tile_start_y);
+          const path_key = `${tile_x},${tile_y}`;
+          const path_info = path_tiles.get(path_key);
+          
+          if (path_info) {
+            // Draw path dot
+            const path_rgb = path_info.color === "red" 
+              ? get_color_by_name("vivid_red").rgb 
+              : get_color_by_name("pale_yellow").rgb;
+            canvas.set(screen_x, screen_y, { 
+              char: "·", 
+              rgb: path_rgb,
+              weight_index: 2
+            });
+          } else {
+            // Draw floor
+            const tile_char = view.scale > 2 ? "·" : floor_char;
+            canvas.set(screen_x, screen_y, { char: tile_char, rgb: floor_rgb });
+          }
         }
       }
     }
@@ -717,69 +781,17 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         );
       }
 
-      // Update movement if active
-      if (movement_state.is_moving && movement_state.path.length > 0) {
-        const now = Date.now();
-        const time_since_last_move = now - movement_state.last_move_time;
-        
-        if (time_since_last_move >= MOVEMENT_SPEED_MS) {
-          // Time to move to next tile
-          const next_pos = movement_state.path[movement_state.current_index];
-          
-          if (!next_pos) {
-            // Safety check - end movement if no next position
-            movement_state.is_moving = false;
-            movement_state.path = [];
-          } else {
-            // Update local position (source of truth during movement)
-            local_actor_position = { x: next_pos.x, y: next_pos.y };
-            
-            // Spawn particle at new position
-            particles.push({
-              x: next_pos.x,
-              y: next_pos.y,
-              char: "·",
-              rgb: get_color_by_name("vivid_cyan").rgb,
-              created_at: now,
-              lifespan_ms: PARTICLE_LIFESPAN_MS
-            });
-            
-            debug_log_place("Actor moved to", { x: next_pos.x, y: next_pos.y });
-            
-            movement_state.current_index++;
-            movement_state.last_move_time = now;
-            
-            // Check if movement complete
-            if (movement_state.current_index >= movement_state.path.length) {
-              movement_state.is_moving = false;
-              movement_state.path = [];
-              
-              // Get actor reference for saving
-              const actor = place.contents.actors_present[0];
-              const actor_ref = actor?.actor_ref;
-              
-              debug_log_place("Movement complete - saving position", { actor_ref, final_position: local_actor_position });
-              
-              // Persist final position to storage
-              if (actor_ref && local_actor_position && config.on_actor_move) {
-                Promise.resolve(config.on_actor_move(actor_ref, local_actor_position)).catch(err => {
-                  debug_log_place("Error saving position:", err);
-                });
-              }
-            }
-          }
+      // Register place with unified movement engine if changed
+      if (place.id !== current_place_id) {
+        if (current_place_id) {
+          unregister_place(current_place_id);
         }
+        register_place(place.id, place);
+        current_place_id = place.id;
       }
 
-      // Apply local position to actor for rendering (prevents API refresh glitch)
-      if (local_actor_position && place.contents.actors_present.length > 0) {
-        const actor = place.contents.actors_present[0];
-        if (actor) {
-          actor.tile_position.x = local_actor_position.x;
-          actor.tile_position.y = local_actor_position.y;
-        }
-      }
-
+      // Unified movement engine handles all position updates
+      // Just need to render the current state
       draw_place(canvas, place);
     },
 
@@ -886,28 +898,42 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         return;
       }
 
-      // Set up movement
-      movement_state = {
-        path: path,
-        current_index: 0,
-        start_time: Date.now(),
-        last_move_time: Date.now(),
-        is_moving: true
-      };
-
-      // Initialize local position from actor's current position
-      // This prevents race conditions with API refreshes during movement
-      local_actor_position = { x: start_x, y: start_y };
-
-      // Show path particles
-      spawn_path_particles(path);
-
-      debug_log_place("Click-to-move: Path found, starting movement", {
-        from: { x: start_x, y: start_y },
-        to: { x: tile.x, y: tile.y },
-        path_length: path.length,
-        estimated_time_ms: path.length * MOVEMENT_SPEED_MS
-      });
+      // Use unified movement engine
+      // Get actor walk speed from their data
+      const tiles_per_minute = get_actor_walk_speed(actor.actor_ref);
+      
+      const started = start_entity_movement(
+        actor.actor_ref,
+        "actor",
+        place,
+        {
+          type: "move_to",
+          target_position: { x: tile.x, y: tile.y },
+          priority: 10,
+          reason: "Player commanded movement"
+        },
+        tiles_per_minute,
+        () => {
+          // On complete callback
+          debug_log_place("Movement complete", { actor_ref: actor.actor_ref });
+          if (config.on_actor_move) {
+            Promise.resolve(config.on_actor_move(actor.actor_ref, actor.tile_position)).catch(err => {
+              debug_log_place("Error saving position:", err);
+            });
+          }
+        }
+      );
+      
+      if (started) {
+        debug_log_place("Click-to-move: Path found, starting movement", {
+          from: { x: start_x, y: start_y },
+          to: { x: tile.x, y: tile.y },
+          path_length: path.length,
+          speed: tiles_per_minute
+        });
+      } else {
+        debug_log_place("Click-to-move: Path blocked", { x: tile.x, y: tile.y });
+      }
     },
 
     OnPointerLeave(): void {

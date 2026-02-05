@@ -264,21 +264,101 @@ type Particle = {
 - Show range indicator on hover
 
 ### 5.4 NPC/Actor Free Movement (Rimworld-style)
-**Status:** PENDING  
+**Status:** IN PROGRESS  
 **Implementation:**
-- **Non-timed event mode**: All entities move freely in real-time
-- **Movement AI**: NPCs move to fulfill tasks/goals
-- **Visualization**: 
-  - Smooth tile-by-tile movement
-  - Particle trail showing path taken
-  - Entities visible moving around the place
-- **Collision**: Cannot occupy same tile (queue or path around)
-- **Task System**: NPCs navigate to task locations autonomously
 
-**Files to Modify:**
-- `src/npc_ai/main.ts` - Add free movement behavior
-- `src/travel/movement.ts` - Real-time movement updates
-- `src/place_storage/entity_index.ts` - Update positions in real-time
+#### Core Philosophy
+NPCs live autonomously during non-timed events, making decisions based on:
+- **Personality & needs** (from NPC sheet)
+- **Schedule & routines** (from schedule_manager)
+- **Environmental context** (features, other NPCs, player actions)
+
+**AI Decision Frequency:**
+- **NOT called every frame** - uses efficient reassessment triggers
+- Reassess only when: action completes, path blocked, interrupted, or goal expires
+- Movement decisions use lightweight heuristics, not LLM
+- LLM only for complex narrative responses (already existing system)
+
+#### Movement State Tracking
+Each NPC maintains persistent state:
+```typescript
+NPCMovementState {
+  current_goal: Goal;           // What they're trying to do
+  current_action: Action;       // What they're doing right now
+  path: TilePosition[];         // Current path
+  is_moving: boolean;           // Actively moving?
+  last_reassess_time: number;   // When we last picked a new goal
+}
+```
+
+**Goal Types:**
+- `wander` - Random exploration (low priority)
+- `patrol` - Guard routes, shopkeeper circuits
+- `interact` - Go to feature and use it (sit, work, etc.)
+- `social` - Move toward conversation/interesting activity
+- `follow` - Follow target entity
+- `flee` - Move away from threat (high priority)
+- `rest` - Stand idle or sit
+
+#### Action Logging System (NEW)
+Every NPC maintains a **current activity log** in their sheet for AI narration:
+
+```typescript
+// Stored in npc.memory_sheet.current_activity
+CurrentActivity {
+  action_type: string;          // "walking", "sitting", "working", "talking"
+  description: string;          // "Walking to the bar counter"
+  target?: string;              // Feature, entity, or location
+  started_at: string;           // ISO timestamp
+  duration_ms?: number;         // How long action took
+  completed_at?: string;        // When finished
+  location: {                   // Where it happened
+    place_id: string;
+    tile: TilePosition;
+  };
+}
+
+// Activity history (last 10 activities)
+ActivityHistory: CurrentActivity[];
+```
+
+**Logged Activities:**
+- Movement: "Walked from (5,3) to (8,7)" → "Standing near the fireplace"
+- Interactions: "Sat on the wooden chair" → "Sitting by the window"
+- Social: "Approached npc.gunther" → "Talking with Gunther"
+- Schedule: "Started shift at the bar" → "Working behind the counter"
+
+**Benefits:**
+- AI can narrate what NPCs were doing when player arrives
+- NPCs reference their own recent actions in conversation
+- Creates sense of persistent, living world
+- No LLM calls needed - simple string generation
+
+#### Visualization
+- Smooth tile-by-tile movement at 1 tile/second
+- Particle trail showing path taken
+- NPCs cycle through render priority with actors
+- Activity status shown in hover tooltip: "Gunther - Sitting at table"
+
+#### Collision & Coordination
+- Cannot occupy same tile (queue or path around)
+- If blocked: wait 2s → try alternate path → pick new goal
+- Multiple NPCs: coordinate via path reservation system
+
+#### Files to Create/Modify:
+**New Files:**
+- `src/npc_ai/movement_state.ts` - State management per NPC
+- `src/npc_ai/goal_selector.ts` - Heuristic goal selection
+- `src/npc_ai/movement_loop.ts` - Real-time update service
+- `src/npc_ai/action_logger.ts` - Activity logging to NPC sheet
+- `src/npc_ai/path_coordinator.ts` - Multi-NPC collision avoidance
+
+**Modified Files:**
+- `src/npc_ai/main.ts` - Integrate movement state
+- `src/travel/movement.ts` - Add NPC pathfinding functions
+- `src/mono_ui/modules/place_module.ts` - Render moving NPCs
+- `src/npc_storage/store.ts` - Add activity log fields
+- `src/types/npc.ts` - Add CurrentActivity types
 
 ### 5.5 Movement Constraints
 **Status:** ✅ PARTIALLY COMPLETED  

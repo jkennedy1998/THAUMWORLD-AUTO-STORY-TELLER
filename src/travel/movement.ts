@@ -422,7 +422,202 @@ export async function update_npc_position_for_schedule(
   return { moved: false };
 }
 
-// TODO: Add pathfinding for tile movement
+// ============================================================================
+// NPC FREE MOVEMENT PATHFINDING
+// ============================================================================
+
+// Tile reservation system to prevent NPC collision
+// Map<place_id, Map<tile_key, npc_ref>>
+const tile_reservations = new Map<string, Map<string, string>>();
+
+function get_tile_key(x: number, y: number): string {
+  return `${x},${y}`;
+}
+
+/**
+ * Reserve a tile for an NPC
+ */
+export function reserve_tile(
+  place_id: string,
+  tile: TilePosition,
+  npc_ref: string
+): boolean {
+  if (!tile_reservations.has(place_id)) {
+    tile_reservations.set(place_id, new Map());
+  }
+  
+  const place_reservations = tile_reservations.get(place_id)!;
+  const key = get_tile_key(tile.x, tile.y);
+  
+  // Already reserved by someone else
+  if (place_reservations.has(key) && place_reservations.get(key) !== npc_ref) {
+    return false;
+  }
+  
+  place_reservations.set(key, npc_ref);
+  return true;
+}
+
+/**
+ * Release a tile reservation
+ */
+export function release_tile(
+  place_id: string,
+  tile: TilePosition,
+  npc_ref: string
+): void {
+  const place_reservations = tile_reservations.get(place_id);
+  if (!place_reservations) return;
+  
+  const key = get_tile_key(tile.x, tile.y);
+  const current_holder = place_reservations.get(key);
+  
+  // Only release if we hold the reservation
+  if (current_holder === npc_ref) {
+    place_reservations.delete(key);
+  }
+  
+  // Clean up empty maps
+  if (place_reservations.size === 0) {
+    tile_reservations.delete(place_id);
+  }
+}
+
+/**
+ * Get who has reserved a tile
+ */
+export function get_tile_reservation(
+  place_id: string,
+  tile: TilePosition
+): string | null {
+  const place_reservations = tile_reservations.get(place_id);
+  if (!place_reservations) return null;
+  
+  return place_reservations.get(get_tile_key(tile.x, tile.y)) ?? null;
+}
+
+/**
+ * Check if a tile is blocked by entities, features, or reservations
+ */
+export async function is_tile_blocked(
+  slot: number,
+  place: Place,
+  tile: TilePosition,
+  exclude_npc_ref?: string
+): Promise<boolean> {
+  // Check bounds
+  if (tile.x < 0 || tile.x >= place.tile_grid.width ||
+      tile.y < 0 || tile.y >= place.tile_grid.height) {
+    return true;
+  }
+  
+  // Check for other NPCs
+  for (const npc of place.contents.npcs_present) {
+    if (npc.npc_ref !== exclude_npc_ref &&
+        npc.tile_position.x === tile.x &&
+        npc.tile_position.y === tile.y) {
+      return true;
+    }
+  }
+  
+  // Check for actors (player characters)
+  for (const actor of place.contents.actors_present) {
+    if (actor.tile_position.x === tile.x &&
+        actor.tile_position.y === tile.y) {
+      return true;
+    }
+  }
+  
+  // Check for obstacle features
+  for (const feature of place.contents.features) {
+    if (feature.is_obstacle) {
+      for (const pos of feature.tile_positions) {
+        if (pos.x === tile.x && pos.y === tile.y) {
+          return true;
+        }
+      }
+    }
+  }
+  
+  // Check reservations
+  const reserved_by = get_tile_reservation(place.id, tile);
+  if (reserved_by && reserved_by !== exclude_npc_ref) {
+    return true;
+  }
+  
+  return false;
+}
+
+/**
+ * BFS pathfinding for NPCs
+ */
+export async function find_path_for_npc(
+  slot: number,
+  place: Place,
+  start: TilePosition,
+  goal: TilePosition,
+  npc_ref: string
+): Promise<TilePosition[] | null> {
+  // Quick check: already there?
+  if (start.x === goal.x && start.y === goal.y) {
+    return [];
+  }
+  
+  // BFS
+  const queue: Array<{ pos: TilePosition; path: TilePosition[] }> = [
+    { pos: start, path: [] }
+  ];
+  const visited = new Set<string>();
+  visited.add(get_tile_key(start.x, start.y));
+  
+  // 4-directional movement (cardinal directions only, like actors)
+  const directions = [
+    { x: 0, y: 1 },   // North
+    { x: 0, y: -1 },  // South
+    { x: 1, y: 0 },   // East
+    { x: -1, y: 0 },  // West
+  ];
+  
+  let iterations = 0;
+  const max_iterations = 1000; // Prevent infinite loops
+  
+  while (queue.length > 0 && iterations < max_iterations) {
+    iterations++;
+    const current = queue.shift()!;
+    
+    for (const dir of directions) {
+      const next: TilePosition = {
+        x: current.pos.x + dir.x,
+        y: current.pos.y + dir.y,
+      };
+      
+      const key = get_tile_key(next.x, next.y);
+      
+      // Skip if visited
+      if (visited.has(key)) continue;
+      visited.add(key);
+      
+      // Check if this is the goal
+      if (next.x === goal.x && next.y === goal.y) {
+        return [...current.path, next];
+      }
+      
+      // Check if blocked
+      const blocked = await is_tile_blocked(slot, place, next, npc_ref);
+      if (blocked) continue;
+      
+      // Add to queue
+      queue.push({
+        pos: next,
+        path: [...current.path, next],
+      });
+    }
+  }
+  
+  // No path found
+  return null;
+}
+
 // TODO: Add obstacle avoidance
 // TODO: Add stealth/sneak mechanics
 // TODO: Add fatigue system for long travel
