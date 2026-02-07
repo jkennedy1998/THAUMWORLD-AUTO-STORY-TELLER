@@ -27,6 +27,20 @@ export type PlaceModuleConfig = {
   // Allows persisting position change to storage
   on_actor_move?: (actor_ref: string, new_position: TilePosition) => Promise<void> | void;
 
+  // Inspection callback - called when user right-clicks to inspect
+  // Right-click cycles: Characters -> Items -> Tile
+  // Shift+Right-click forces tile inspection
+  on_inspect?: (target: {
+    type: "npc" | "actor" | "item" | "tile";
+    ref?: string;
+    place_id?: string;
+    tile_position: TilePosition;
+  }) => void;
+
+  // Place transition callback - called when user clicks on a door/connection
+  // Returns true if transition was successful, false otherwise
+  on_place_transition?: (target_place_id: string, direction: string) => Promise<boolean> | boolean;
+
   // Styling
   border_rgb?: Rgb;
   bg_rgb?: Rgb;
@@ -119,12 +133,20 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   const tile_cycle_state = new Map<string, EntityCycleState>();  // "x,y" -> state
   const CYCLE_INTERVAL_MS = 500;  // 0.5 seconds
 
+  // Inspection cycling state - tracks right-click inspect cycles per tile
+  const inspect_cycle_state = new Map<string, number>();  // "x,y" -> current index
+
   // Particle system
   let particles: Particle[] = [];
-  const PARTICLE_LIFESPAN_MS = 300;  // Particles live for 300ms (shorter to prevent buildup)
+  const PARTICLE_LIFESPAN_MS = 500;  // Particles live for 500ms per plan
   
   // Track current place for unified movement engine
   let current_place_id: string | null = null;
+  
+  // Track previous entity positions to detect movement and spawn footsteps
+  const previous_positions = new Map<string, TilePosition>();
+  // Track previous movement state to detect when movement starts
+  const previous_moving_state = new Map<string, boolean>();
 
   // Derived dimensions (excluding border)
   function inner_rect(): Rect {
@@ -407,7 +429,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     return [];
   }
 
-  // Spawn particles along a path
+  // Spawn particles along a path (pale yellow)
   function spawn_path_particles(path: TilePosition[]) {
     const now = Date.now();
     const path_rgb = get_color_by_name("pale_yellow").rgb;
@@ -421,6 +443,72 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         created_at: now,
         lifespan_ms: PARTICLE_LIFESPAN_MS
       });
+    }
+  }
+  
+  // Spawn movement particle at position (vivid cyan)
+  function spawn_movement_particle(pos: TilePosition) {
+    const now = Date.now();
+    const move_rgb = get_color_by_name("vivid_cyan").rgb;
+    
+    particles.push({
+      x: pos.x,
+      y: pos.y,
+      char: "·",
+      rgb: move_rgb,
+      created_at: now,
+      lifespan_ms: PARTICLE_LIFESPAN_MS
+    });
+  }
+  
+  // Check for entity movement and spawn footsteps
+  function check_entity_movement(place: Place) {
+    // Check actors
+    for (const actor of place.contents.actors_present) {
+      const prev = previous_positions.get(actor.actor_ref);
+      const was_moving = previous_moving_state.get(actor.actor_ref) || false;
+      const path_info = get_entity_path(actor.actor_ref);
+      const is_moving = !!path_info;
+      
+      // Check if just started moving (transition from not moving to moving)
+      if (!was_moving && is_moving && path_info) {
+        // Started moving, spawn path particles
+        spawn_path_particles(path_info.path);
+      }
+      
+      // Check if moved to new tile
+      if (prev && (prev.x !== actor.tile_position.x || prev.y !== actor.tile_position.y)) {
+        // Actor moved, spawn movement particle
+        spawn_movement_particle(actor.tile_position);
+      }
+      
+      // Update stored state
+      previous_positions.set(actor.actor_ref, { ...actor.tile_position });
+      previous_moving_state.set(actor.actor_ref, is_moving);
+    }
+    
+    // Check NPCs
+    for (const npc of place.contents.npcs_present) {
+      const prev = previous_positions.get(npc.npc_ref);
+      const was_moving = previous_moving_state.get(npc.npc_ref) || false;
+      const path_info = get_entity_path(npc.npc_ref);
+      const is_moving = !!path_info;
+      
+      // Check if just started moving (transition from not moving to moving)
+      if (!was_moving && is_moving && path_info) {
+        // Started moving, spawn path particles
+        spawn_path_particles(path_info.path);
+      }
+      
+      // Check if moved to new tile
+      if (prev && (prev.x !== npc.tile_position.x || prev.y !== npc.tile_position.y)) {
+        // NPC moved, spawn movement particle
+        spawn_movement_particle(npc.tile_position);
+      }
+      
+      // Update stored state
+      previous_positions.set(npc.npc_ref, { ...npc.tile_position });
+      previous_moving_state.set(npc.npc_ref, is_moving);
     }
   }
 
@@ -444,33 +532,15 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     // Clear background
     canvas.fill_rect(inner, { char: " ", rgb: bg_rgb });
 
-    // Pre-compute all path positions for rendering
-    const path_tiles = new Map<string, { color: "white" | "red" }>();
+    // Track previous positions to detect movement and spawn footsteps
+    const current_positions = new Map<string, TilePosition>();
     
-    // Add NPC paths
-    for (const npc of place.contents.npcs_present) {
-      const path_info = get_entity_path(npc.npc_ref);
-      if (path_info && path_info.show) {
-        for (const pos of path_info.path) {
-          const key = `${pos.x},${pos.y}`;
-          if (!path_tiles.has(key)) {
-            path_tiles.set(key, { color: path_info.color });
-          }
-        }
-      }
-    }
-    
-    // Add Actor paths
+    // Record current positions
     for (const actor of place.contents.actors_present) {
-      const path_info = get_entity_path(actor.actor_ref);
-      if (path_info && path_info.show) {
-        for (const pos of path_info.path) {
-          const key = `${pos.x},${pos.y}`;
-          if (!path_tiles.has(key)) {
-            path_tiles.set(key, { color: path_info.color });
-          }
-        }
-      }
+      current_positions.set(actor.actor_ref, { ...actor.tile_position });
+    }
+    for (const npc of place.contents.npcs_present) {
+      current_positions.set(npc.npc_ref, { ...npc.tile_position });
     }
 
     // Draw floor grid and entities
@@ -531,27 +601,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         }
 
         if (!found_entity) {
-          // Check if this tile has a path
-          const tile_x = Math.floor(tile_start_x);
-          const tile_y = Math.floor(tile_start_y);
-          const path_key = `${tile_x},${tile_y}`;
-          const path_info = path_tiles.get(path_key);
-          
-          if (path_info) {
-            // Draw path dot
-            const path_rgb = path_info.color === "red" 
-              ? get_color_by_name("vivid_red").rgb 
-              : get_color_by_name("pale_yellow").rgb;
-            canvas.set(screen_x, screen_y, { 
-              char: "·", 
-              rgb: path_rgb,
-              weight_index: 2
-            });
-          } else {
-            // Draw floor
-            const tile_char = view.scale > 2 ? "·" : floor_char;
-            canvas.set(screen_x, screen_y, { char: tile_char, rgb: floor_rgb });
-          }
+          // Draw floor
+          const tile_char = view.scale > 2 ? "·" : floor_char;
+          canvas.set(screen_x, screen_y, { char: tile_char, rgb: floor_rgb });
         }
       }
     }
@@ -663,6 +715,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
     }
 
+    // Check for entity movement and spawn footsteps
+    check_entity_movement(place);
+    
     // Draw particles (path visualization and effects)
     update_particles();
     for (const p of particles) {
@@ -921,17 +976,21 @@ export function make_place_module(config: PlaceModuleConfig): Module {
               debug_log_place("Error saving position:", err);
             });
           }
+        },
+        (path) => {
+          // On start callback - spawn path particles
+          spawn_path_particles(path);
+          
+          debug_log_place("Click-to-move: Path found, starting movement", {
+            from: { x: start_x, y: start_y },
+            to: { x: tile.x, y: tile.y },
+            path_length: path.length,
+            speed: tiles_per_minute
+          });
         }
       );
       
-      if (started) {
-        debug_log_place("Click-to-move: Path found, starting movement", {
-          from: { x: start_x, y: start_y },
-          to: { x: tile.x, y: tile.y },
-          path_length: path.length,
-          speed: tiles_per_minute
-        });
-      } else {
+      if (!started) {
         debug_log_place("Click-to-move: Path blocked", { x: tile.x, y: tile.y });
       }
     },
@@ -980,12 +1039,55 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           
           // Check if clicked near this door (within 1 tile)
           if (Math.abs(tile_x - door_tile_x) <= 1 && Math.abs(tile_y - door_tile_y) <= 1) {
-            debug_log_place("DOOR CLICKED:", {
+            debug_log_place("DOOR CLICKED (outside bounds):", {
               target_place_id: conn.target_place_id,
-              direction: conn.direction,
-              description: conn.description,
-              travel_time: conn.travel_time_seconds
+              direction: conn.direction
             });
+            
+            // Check if player is close enough to the door
+            const player = place.contents.actors_present[0];
+            if (player) {
+              const dist_to_door = Math.sqrt(
+                Math.pow(player.tile_position.x - door_tile_x, 2) + 
+                Math.pow(player.tile_position.y - door_tile_y, 2)
+              );
+              
+              // Must be within 2 tiles of door to travel
+              if (dist_to_door > 2) {
+                debug_log_place("DOOR: Player too far, pathing to door", {
+                  player_pos: player.tile_position,
+                  door_pos: { x: door_tile_x, y: door_tile_y },
+                  distance: dist_to_door
+                });
+                
+                // Path to the door first
+                const started = start_entity_movement(
+                  player.actor_ref,
+                  "actor",
+                  place,
+                  {
+                    type: "move_to",
+                    target_position: { x: door_tile_x, y: door_tile_y },
+                    priority: 10,
+                    reason: "Travel to door"
+                  },
+                  300
+                );
+                
+                if (!started) {
+                  debug_log_place("DOOR: Path to door blocked");
+                }
+                return;
+              }
+              
+              // Player is close enough - trigger place transition
+              if (config.on_place_transition) {
+                const result = config.on_place_transition(conn.target_place_id, conn.direction);
+                if (result) {
+                  return; // Transition handled
+                }
+              }
+            }
             return;
           }
         }
@@ -1019,12 +1121,55 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         
         // Check if clicked on or very near this door
         if (Math.abs(tile.x - door_tile_x) <= 1 && Math.abs(tile.y - door_tile_y) <= 1) {
-          debug_log_place("DOOR CLICKED:", {
+          debug_log_place("DOOR CLICKED (inside bounds):", {
             target_place_id: conn.target_place_id,
-            direction: conn.direction,
-            description: conn.description,
-            travel_time: conn.travel_time_seconds
+            direction: conn.direction
           });
+          
+          // Check if player is close enough to the door
+          const player = place.contents.actors_present[0];
+          if (player) {
+            const dist_to_door = Math.sqrt(
+              Math.pow(player.tile_position.x - door_tile_x, 2) + 
+              Math.pow(player.tile_position.y - door_tile_y, 2)
+            );
+            
+            // Must be within 2 tiles of door to travel
+            if (dist_to_door > 2) {
+              debug_log_place("DOOR: Player too far, pathing to door", {
+                player_pos: player.tile_position,
+                door_pos: { x: door_tile_x, y: door_tile_y },
+                distance: dist_to_door
+              });
+              
+              // Path to the door first
+              const started = start_entity_movement(
+                player.actor_ref,
+                "actor",
+                place,
+                {
+                  type: "move_to",
+                  target_position: { x: door_tile_x, y: door_tile_y },
+                  priority: 10,
+                  reason: "Travel to door"
+                },
+                300
+              );
+              
+              if (!started) {
+                debug_log_place("DOOR: Path to door blocked");
+              }
+              return;
+            }
+            
+            // Player is close enough - trigger place transition
+            if (config.on_place_transition) {
+              const result = config.on_place_transition(conn.target_place_id, conn.direction);
+              if (result) {
+                return; // Transition handled
+              }
+            }
+          }
           return;
         }
       }
@@ -1033,6 +1178,76 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const all_entities = get_all_entities_at(tile.x, tile.y, place);
       const entity = get_entity_at(tile.x, tile.y, place);
       
+      // Handle inspection if callback configured
+      if (config.on_inspect) {
+        const tile_key = `${tile.x},${tile.y}`;
+        
+        // Shift+Right-click forces tile inspection
+        if (e.shift) {
+          config.on_inspect({
+            type: "tile",
+            place_id: place.id,
+            tile_position: { x: tile.x, y: tile.y }
+          });
+          return;
+        }
+        
+        // Normal right-click: cycle through inspectable targets
+        // Order: Characters -> Items -> Tile
+        const inspectable_targets: Array<{ type: "npc" | "actor" | "item" | "tile"; ref?: string }> = [];
+        
+        // 1. Add characters (NPCs/Actors)
+        for (const ent of all_entities) {
+          const is_npc = "npc_ref" in ent;
+          inspectable_targets.push({
+            type: is_npc ? "npc" : "actor",
+            ref: is_npc 
+              ? (ent as PlaceNPC).npc_ref 
+              : (ent as PlaceActor).actor_ref
+          });
+        }
+        
+        // 2. Add items on ground (visible only)
+        const items_on_ground = place.contents.items_on_ground.filter(
+          item => item.tile_position.x === tile.x && item.tile_position.y === tile.y
+        );
+        for (const item of items_on_ground) {
+          inspectable_targets.push({
+            type: "item",
+            ref: item.item_ref
+          });
+        }
+        
+        // 3. Add tile itself
+        inspectable_targets.push({
+          type: "tile"
+        });
+        
+        if (inspectable_targets.length > 0) {
+          // Get current cycle index
+          let cycle_index = inspect_cycle_state.get(tile_key) || 0;
+          
+          // Get target at current index
+          const target = inspectable_targets[cycle_index % inspectable_targets.length];
+          
+          if (target) {
+            // Trigger inspection
+            config.on_inspect({
+              type: target.type,
+              ref: target.ref,
+              place_id: place.id,
+              tile_position: { x: tile.x, y: tile.y }
+            });
+            
+            // Advance cycle for next click
+            const next_index = (cycle_index + 1) % inspectable_targets.length;
+            inspect_cycle_state.set(tile_key, next_index);
+            return;
+          }
+        }
+      }
+      
+      // Fall back to target selection if no inspection or inspection didn't trigger
       if (entity && config.on_select_target) {
         const is_npc = "npc_ref" in entity;
         const ref = is_npc 

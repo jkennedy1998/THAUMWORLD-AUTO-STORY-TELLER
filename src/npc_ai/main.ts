@@ -1202,7 +1202,10 @@ async function tick(outbox_path: string, inbox_path: string, log_path: string): 
         const candidates = messages.filter((msg: any) => {
             // Skip if already processed by NPC AI
             if (msg.meta?.npc_processed) {
-                debug_log("NPC_AI", `Skipping message ${msg.id} - already npc_processed`);
+                // Only log at debug level 4+ to avoid spam
+                if (DEBUG_LEVEL >= 4) {
+                    debug_log("NPC_AI", `Skipping message ${msg.id} - already npc_processed`);
+                }
                 return false;
             }
             
@@ -1211,14 +1214,20 @@ async function tick(outbox_path: string, inbox_path: string, log_path: string): 
             const is_ready = msg.status === "applied" || msg.status === "applied_1" || msg.status === "applied_2" || 
                             (msg.status === "done" && !msg.meta?.npc_processed);
             if (!is_ready) {
-                debug_log("NPC_AI", `Skipping message ${msg.id} - status ${msg.status} not ready`);
+                // Only log at debug level 4+ to avoid spam - most messages aren't ready for NPC processing
+                if (DEBUG_LEVEL >= 4) {
+                    debug_log("NPC_AI", `Skipping message ${msg.id} - status ${msg.status} not ready`);
+                }
                 return false;
             }
             
             // Check if message has communication context
             const meta = msg.meta;
             if (!meta?.original_text && !meta?.events?.some((e: string) => e.includes("COMMUNICATE"))) {
-                debug_log("NPC_AI", `Skipping message ${msg.id} - no communication context`);
+                // Only log at debug level 4+ to avoid spam
+                if (DEBUG_LEVEL >= 4) {
+                    debug_log("NPC_AI", `Skipping message ${msg.id} - no communication context`);
+                }
                 return false;
             }
             

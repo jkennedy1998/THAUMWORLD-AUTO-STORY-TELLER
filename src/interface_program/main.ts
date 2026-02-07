@@ -20,9 +20,11 @@ import { ensure_status_exists, read_status, write_status_line } from "../engine/
 import { ensure_roller_status_exists, read_roller_status, write_roller_status } from "../engine/roller_status_store.js";
 import { ensure_actor_exists, find_actors, load_actor, save_actor, create_actor_from_kind } from "../actor_storage/store.js";
 import { create_npc_from_kind, find_npcs, save_npc } from "../npc_storage/store.js";
-import { get_timed_event_state, get_region_by_coords } from "../world_storage/store.js";
+import { get_timed_event_state, get_region_by_coords, is_timed_event_active } from "../world_storage/store.js";
+import { travel_between_places } from "../travel/movement.js";
 import { load_npc } from "../npc_storage/store.js";
-import { load_place, list_places_in_region } from "../place_storage/store.js";
+import { load_place, list_places_in_region, save_place, create_basic_place } from "../place_storage/store.js";
+import type { PlaceConnection } from "../types/place.js";
 import { get_npc_location } from "../npc_storage/location.js";
 import { get_entities_in_place } from "../place_storage/entity_index.js";
 import { get_creation_state_path } from "../engine/paths.js";
@@ -92,6 +94,212 @@ function ensure_minimum_game_data(slot: number): void {
     }
 
     // TODO: add local generation rules for NPCs when actors travel in populated places.
+    
+    // Ensure Eden Crossroads places exist with proper connections
+    ensure_eden_crossroads_places(slot);
+}
+
+/**
+ * Ensure Eden Crossroads region has places with proper connections
+ * This creates a connected hub area for testing
+ */
+function ensure_eden_crossroads_places(slot: number): void {
+    const region_id = "eden_crossroads";
+    
+    // Define the places in Eden Crossroads
+    const places_config = [
+        {
+            id: "eden_crossroads_square",
+            name: "Eden Crossroads Square",
+            is_default: true,
+            width: 15,
+            height: 15,
+            description: "A bustling town square at the crossroads of several paths. Merchants hawk their wares while townsfolk gather around the central fountain."
+        },
+        {
+            id: "eden_crossroads_grendas_shop",
+            name: "Grenda's General Goods",
+            is_default: false,
+            width: 10,
+            height: 10,
+            description: "A cozy shop filled with adventuring supplies, dried meats, and odd trinkets. The smell of leather and herbs fills the air."
+        },
+        {
+            id: "eden_crossroads_tavern",
+            name: "The Rusty Anchor Tavern",
+            is_default: false,
+            width: 12,
+            height: 12,
+            description: "A lively tavern with weathered wooden beams and the aroma of hearty stew. Sailors and locals share stories over frothy mugs."
+        },
+        {
+            id: "eden_crossroads_temple",
+            name: "Temple of the Dawn",
+            is_default: false,
+            width: 10,
+            height: 14,
+            description: "A serene temple with stained glass windows casting colorful light. The air is thick with incense and quiet contemplation."
+        }
+    ];
+    
+    // Define connections between places
+    const connections: Record<string, PlaceConnection[]> = {
+        "eden_crossroads_square": [
+            {
+                target_place_id: "eden_crossroads_grendas_shop",
+                direction: "north",
+                description: "A wooden door leads to Grenda's shop",
+                travel_time_seconds: 3
+            },
+            {
+                target_place_id: "eden_crossroads_tavern",
+                direction: "east",
+                description: "A swinging door leads to the tavern",
+                travel_time_seconds: 3
+            },
+            {
+                target_place_id: "eden_crossroads_temple",
+                direction: "west",
+                description: "An arched doorway leads to the temple",
+                travel_time_seconds: 4
+            }
+        ],
+        "eden_crossroads_grendas_shop": [
+            {
+                target_place_id: "eden_crossroads_square",
+                direction: "south",
+                description: "The shop door leads back to the square",
+                travel_time_seconds: 3
+            }
+        ],
+        "eden_crossroads_tavern": [
+            {
+                target_place_id: "eden_crossroads_square",
+                direction: "west",
+                description: "The tavern door leads back to the square",
+                travel_time_seconds: 3
+            }
+        ],
+        "eden_crossroads_temple": [
+            {
+                target_place_id: "eden_crossroads_square",
+                direction: "east",
+                description: "The temple exit leads back to the square",
+                travel_time_seconds: 4
+            }
+        ]
+    };
+    
+    // Create places if they don't exist
+    for (const config of places_config) {
+        const existing = load_place(slot, config.id);
+        if (!existing.ok) {
+            // Place doesn't exist, create it
+            const result = create_basic_place(slot, region_id, config.id, config.name, {
+                is_default: config.is_default,
+                width: config.width,
+                height: config.height
+            });
+            
+            if (result.ok) {
+                // Add description
+                result.place.description.short = config.name;
+                result.place.description.full = config.description;
+                
+                // Add connections
+                const place_connections = connections[config.id];
+                if (place_connections) {
+                    result.place.connections = place_connections;
+                }
+                
+                save_place(slot, result.place);
+                debug_log("Boot: created place", { id: config.id, name: config.name });
+            } else {
+                debug_warn("Boot: failed to create place", { id: config.id, error: "creation failed" });
+            }
+        } else {
+            // Place exists, check/update connections
+            const place = existing.place;
+            let needs_save = false;
+            
+            // Check if connections need to be added or updated
+            const config_connections = connections[config.id];
+            if (config_connections) {
+                // Check if we're missing any expected connections
+                const existing_targets = new Set(place.connections.map(c => c.target_place_id));
+                const expected_targets = new Set(config_connections.map(c => c.target_place_id));
+                
+                // Find missing connections
+                const missing = config_connections.filter(c => !existing_targets.has(c.target_place_id));
+                
+                if (missing.length > 0) {
+                    // Add missing connections
+                    place.connections.push(...missing);
+                    needs_save = true;
+                    debug_log("Boot: added missing connections to place", { 
+                        id: config.id, 
+                        added: missing.length,
+                        total: place.connections.length 
+                    });
+                }
+            }
+            
+            if (needs_save) {
+                save_place(slot, place);
+            }
+        }
+    }
+    
+    debug_log("Boot: Eden Crossroads places initialized");
+    
+    // Ensure NPCs are placed in their locations
+    ensure_npcs_in_places(slot);
+}
+
+/**
+ * Ensure all NPCs are placed in valid locations
+ */
+function ensure_npcs_in_places(slot: number): void {
+    const npcs = find_npcs(slot, {});
+    
+    for (const npc_data of npcs) {
+        const npc_id = npc_data.id;
+        const npc_res = load_npc(slot, npc_id);
+        
+        if (!npc_res.ok) continue;
+        
+        const npc = npc_res.npc as Record<string, unknown>;
+        const location = npc.location as Record<string, unknown>;
+        
+        // Check if NPC has a valid place_id
+        const place_id = location?.place_id as string;
+        
+        if (!place_id) {
+            // NPC has no location, place them in the default place (square)
+            const default_place_id = "eden_crossroads_square";
+            const place_res = load_place(slot, default_place_id);
+            
+            if (place_res.ok) {
+                // Update NPC location
+                npc.location = {
+                    world_tile: { x: 0, y: 0 },
+                    region_tile: { x: 0, y: 0 },
+                    place_id: default_place_id,
+                    tile: { 
+                        x: Math.floor(Math.random() * place_res.place.tile_grid.width),
+                        y: Math.floor(Math.random() * place_res.place.tile_grid.height)
+                    },
+                    elevation: 0
+                };
+                
+                save_npc(slot, npc_id, npc);
+                debug_log("Boot: placed NPC in default location", { 
+                    npc_id, 
+                    place_id: default_place_id 
+                });
+            }
+        }
+    }
 }
 
 async function fetch_json(url: string, timeout_ms: number): Promise<unknown> {
@@ -1094,13 +1302,94 @@ function start_http_server(log_path: string): void {
                     populated_actors: place.contents.actors_present.length
                 });
 
+                // Add timed event status to response
+                const timed_event = get_timed_event_state(slot);
+                
                 res.writeHead(200, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: true, place }));
+                res.end(JSON.stringify({ 
+                    ok: true, 
+                    place,
+                    timed_event_active: timed_event?.timed_event_active || false,
+                    timed_event_id: timed_event?.event_id || null
+                }));
             } catch (err: any) {
                 debug_error("API", `/api/place failed for ${place_id}`, err);
                 res.writeHead(500, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ ok: false, error: err?.message ?? "load_place_failed" }));
             }
+            return;
+        }
+
+        if (url.pathname === "/api/place/travel") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+            if (!Number.isFinite(slot) || slot <= 0) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
+                return;
+            }
+
+            // Check if timed event is active - disable travel during events
+            if (is_timed_event_active(slot)) {
+                res.writeHead(403, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ 
+                    ok: false, 
+                    error: "travel_disabled_during_event",
+                    message: "Cannot travel between places during a timed event"
+                }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+            req.on("end", async () => {
+                try {
+                    const data = JSON.parse(body);
+                    const entity_ref = data.entity_ref;
+                    const target_place_id = data.target_place_id;
+
+                    if (!entity_ref || !target_place_id) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                        return;
+                    }
+
+                    debug_log("API", `/api/place/travel: ${entity_ref} -> ${target_place_id}`);
+                    
+                    const result = await travel_between_places(slot, entity_ref, target_place_id);
+                    
+                    if (result.ok) {
+                        debug_log("API", `Travel successful: ${result.from_place_id} -> ${result.to_place_id}`);
+                        res.writeHead(200, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ 
+                            ok: true, 
+                            from_place_id: result.from_place_id,
+                            to_place_id: result.to_place_id,
+                            travel_time_seconds: result.travel_time_seconds,
+                            travel_description: result.travel_description
+                        }));
+                    } else {
+                        debug_warn("API", `Travel failed: ${result.error}`, { entity_ref, target_place_id });
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ 
+                            ok: false, 
+                            error: result.error,
+                            from_place_id: result.from_place_id,
+                            to_place_id: result.to_place_id
+                        }));
+                    }
+                } catch (err: any) {
+                    debug_error("API", `/api/place/travel request error`, err);
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? "travel_failed" }));
+                }
+            });
             return;
         }
 

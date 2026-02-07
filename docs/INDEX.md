@@ -1,71 +1,155 @@
 # Project Documentation Index
 
-**Last Updated:** February 2, 2026
+**Last Updated:** February 6, 2026
 
-## Quick Navigation
+## Quick Start
 
-### For AI Agents
-1. **[ARCHITECTURE.md](./ARCHITECTURE.md)** - System overview with diagrams
-2. **[SERVICES.md](./SERVICES.md)** - All 8 services documented  
-3. **[STAGES.md](./STAGES.md)** - Message flow and contracts
-4. **[AI_AGENT_GUIDE.md](./AI_AGENT_GUIDE.md)** - Quick reference for AI agents
+New to the project? Start here:
+1. **[README.md](./README.md)** - Project overview and setup
+2. **[ROADMAP.md](./ROADMAP.md)** - Current development priorities and next steps
+3. **[CHANGELOG.md](./CHANGELOG.md)** - Recent changes and current status
+4. **[guides/AI_AGENT_GUIDE.md](./guides/AI_AGENT_GUIDE.md)** - Quick reference for AI agents
 
-### For Developers
-1. **[DEVELOPER_GUIDE.md](./DEVELOPER_GUIDE.md)** - Complete developer guide
-2. **[README.md](./README.md)** - Project overview and setup
-3. **[MACHINE_TEXT_SYNTAX.md](./MACHINE_TEXT_SYNTAX.md)** - Syntax specification
-4. **[examples/README.md](./examples/README.md)** - Code examples
-5. **[TODO_CLEANUP_SUMMARY.md](./TODO_CLEANUP_SUMMARY.md)** - TODO status and cleanup record
+---
 
-### Recent Changes
-- **[CHANGELOG.md](./CHANGELOG.md)** - Recent fixes and improvements (Feb 2026)
-- **[PLACE_SYSTEM_PLAN.md](./PLACE_SYSTEM_PLAN.md)** - NEW: Place system implementation plan
-- **[archive/](./archive/)** - Historical phase summaries and old documents
+## System Status ✅ (Feb 6, 2026)
 
-## Documentation Cleanup (Feb 2, 2026)
+**The core system is operational and playable!**
 
-### Consolidated Files
-The following files were consolidated into this index:
+### Working Correctly
+- ✅ **Working Memory** - Events recorded properly
+- ✅ **Message Pipeline** - No duplication, proper flow
+- ✅ **Conversation Threading** - Session IDs consistent
+- ✅ **Place System** - NPCs check locations correctly
+- ✅ **NPC Autonomy** - Wandering and decision-making working
+- ✅ **Click-to-Move** - Player movement with pathfinding
+- ✅ **AI Integration** - NPCs generate contextual responses
 
-**Phase Summaries** → Moved to `archive/`
-- PHASE1_SUMMARY.md through PHASE7_FIXES.md
-- These document the historical development of the system
+### Current Focus
+1. 🟠 **Action Range System** - Range validation for all actions ([plans/2026_02_06_action_range_system.md](./plans/2026_02_06_action_range_system.md))
+2. 🟠 **Region Travel** - Travel between regions ([plans/2026_02_06_region_travel_system.md](./plans/2026_02_06_region_travel_system.md))
+3. 🟡 **INSPECT System** - Environmental inspection ([plans/2026_02_05_inspect_implementation_plan.md](./plans/2026_02_05_inspect_implementation_plan.md))
 
-**Fix Documentation** → Consolidated into CHANGELOG.md
-- CONTINUITY_FIXES_SUMMARY.md
-- NPC_CONSISTENCY_FIX.md
-- SESSION_ANALYSIS_2026-02-01.md
-- CLEANUP_SUMMARY.md
+See **[ROADMAP.md](./ROADMAP.md)** and **[Implementation Roadmap](./plans/2026_02_06_implementation_roadmap.md)** for detailed next steps.
 
-**Implementation Docs** → Moved to `archive/`
-- IMPLEMENTATION_PLAN.md
-- IMPLEMENTATION_SUMMARY.md
-- PHASE1_IMPLEMENTATION.md
+---
 
-### Active Core Documentation
-- ARCHITECTURE.md - System design and data flow
-- SERVICES.md - Service definitions and contracts
-- STAGES.md - Pipeline stage definitions
-- DEVELOPER_GUIDE.md - Development guide
-- AI_AGENT_GUIDE.md - AI agent quick reference
-- MACHINE_TEXT_SYNTAX.md - Command syntax
-- EFFECTS.md - Effect system (WIP)
-- TIMED_EVENTS.md - Timed event system
-- ERROR_HANDLING.md - Error handling standards
-- TROUBLESHOOTING.md - Common issues and solutions
-- AI_PROMPTS.md - AI prompt templates
+## Documentation Structure
+
+| Folder | Contents |
+|--------|----------|
+| **[design/](./design/)** | System architecture, services, and design decisions |
+| **[guides/](./guides/)** | Developer guides, troubleshooting, and AI references |
+| **[specs/](./specs/)** | Technical specifications and system standards |
+| **[plans/](./plans/)** | Active development plans |
+| **[todos/](./todos/)** | Active TODO lists and task tracking |
+| **[analysis/](./analysis/)** | Bug fixes, session analysis, and post-mortems |
+| **[archive/](./archive/)** | Completed documentation and historical records |
+| **[examples/](./examples/)** | Code examples and usage patterns |
+
+---
+
+## Core Documentation
+
+### System Design ([design/](./design/))
+- **[ARCHITECTURE.md](./design/ARCHITECTURE.md)** - System overview with diagrams
+- **[SERVICES.md](./design/SERVICES.md)** - All 8 services documented
+- **[STAGES.md](./design/STAGES.md)** - Message flow and contracts
+- **[assumptions.md](./design/assumptions.md)** - Project assumptions and constraints
+
+### Guides ([guides/](./guides/))
+- **[DEVELOPER_GUIDE.md](./guides/DEVELOPER_GUIDE.md)** - Complete developer guide
+- **[AI_AGENT_GUIDE.md](./guides/AI_AGENT_GUIDE.md)** - AI agent quick reference
+- **[AI_PROMPTS.md](./guides/AI_PROMPTS.md)** - Prompt templates and patterns
+- **[TROUBLESHOOTING.md](./guides/TROUBLESHOOTING.md)** - Common issues and solutions
+
+### Specifications ([specs/](./specs/))
+- **[EFFECTS.md](./specs/EFFECTS.md)** - Effect system specification
+- **[TIMED_EVENTS.md](./specs/TIMED_EVENTS.md)** - Timed event system
+- **[ERROR_HANDLING.md](./specs/ERROR_HANDLING.md)** - Error handling standards
+- **[MACHINE_TEXT_SYNTAX.md](./specs/MACHINE_TEXT_SYNTAX.md)** - Command syntax specification
+
+---
+
+## Active Development
+
+### High Priority ([plans/](./plans/))
+- **2026_02_06_action_range_system.md** - Range validation for all actions (COMPLETE Phase 5)
+- **2026_02_06_region_travel_system.md** - Region loading and travel system
+- **2026_02_06_implementation_roadmap.md** - Next steps and implementation order
+- **2026_02_02_place_system_plan.md** - Place system architecture (reference)
+
+### Medium Priority ([plans/](./plans/))
+- **2026_02_05_inspect_implementation_plan.md** - INSPECT action implementation (Phases 3-7)
+- **2026_02_02_phased_implementation_plan.md** - Region travel system (master roadmap)
+- **2026_02_02_tabletop_pacing_intent_targeting.md** - UI targeting and pacing
+- **2026_02_03_place_system_visual_guide.md** - Visual place system guide
+
+### TODOs ([todos/](./todos/))
+- **2026_02_02_action_verbs_todo.md** - Remaining action verbs to implement
+- **2026_02_02_schedule_system_todo.md** - Schedule system expansion plans
+
+### Analysis ([analysis/](./analysis/))
+- **CONTINUITY_FIXES_SUMMARY.md** - Continuity fixes documentation
+- **NPC_CONSISTENCY_FIX.md** - NPC consistency improvements
+- **PHASE7_FIXES.md** - Phase 7 bug fixes
+- **SESSION_ANALYSIS_2026-02-01.md** - Session analysis and findings
+
+---
+
+## Historical Documentation
+
+### Archive ([archive/](./archive/))
+Completed work organized by category:
+- **Phase Completion Reports** - PHASE1-6 summaries and completion docs
+- **Place System Phases** - PLACE_SYSTEM_PHASE1-4 completion docs
+- **Progress Reports** - Status updates and milestones
+- **Implementation Records** - Migration and implementation summaries
+- **Cleanup Records** - Documentation and TODO cleanup summaries
+- **Resolved Issues** - Fixed bugs and their solutions
+
+See **[archive/README.md](./archive/README.md)** for complete index.
+
+---
 
 ## Project Status
 
-**Current Phase:** Phase 7 - Continuity & Polish  
-**Status:** NPC AI working, continuity fixes complete, system stable
+**Current Phase:** Feature Development  
+**Status:** Core systems operational, adding features
 
-### Recent Achievements (Feb 2, 2026)
-✅ Fixed working memory system (correlation_id/event_id alignment)  
-✅ Fixed conversation threading (unified conversation IDs)  
-✅ Fixed message deduplication (atomic file operations)  
-✅ Fixed Gunther location data  
-✅ Removed duplicate update_outbox_message functions  
-✅ NPCs respond correctly without duplication  
+### What's Working (Feb 6, 2026)
+- ✅ Working memory records events correctly
+- ✅ No message duplication
+- ✅ Conversations thread properly
+- ✅ NPCs react only to local events
+- ✅ Click-to-move functional
+- ✅ NPC autonomous movement
+- ✅ AI generates contextual responses
 
-See [CHANGELOG.md](./CHANGELOG.md) for full details.
+### Current Focus
+🟠 **Complete Place Module** - Range system, NPC movement polish  
+🟠 **Region Travel** - Travel between regions  
+🟡 **INSPECT System** - Environmental inspection
+
+### Next Steps
+1. Complete Place Module Phase 5
+2. Implement region travel
+3. Add INSPECT action system
+4. Polish and optimize
+
+---
+
+## Finding Documentation
+
+**Looking for...**
+- **What's next?** → [ROADMAP.md](./ROADMAP.md)
+- **How the system works?** → [design/ARCHITECTURE.md](./design/ARCHITECTURE.md)
+- **How to develop?** → [guides/DEVELOPER_GUIDE.md](./guides/DEVELOPER_GUIDE.md)
+- **Current plans?** → [plans/](./plans/) - Place module and travel system
+- **What needs doing?** → [todos/](./todos/)
+- **What was completed?** → [archive/](./archive/)
+- **Bug fixes and analysis?** → [analysis/](./analysis/)
+
+---
+
+**Last Updated:** February 6, 2026

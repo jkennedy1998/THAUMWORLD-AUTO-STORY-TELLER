@@ -1,7 +1,11 @@
 # Tabletop Pacing, Intent, and Targeting - Design Plan
-**Version:** 1.0
-**Date:** February 2, 2026
-**Status:** Draft (Approved Direction)
+**Version:** 1.0  
+**Date:** 2026-02-02  
+**Status:** 🟡 APPROVED DESIGN - Ready for implementation  
+**Priority:** Medium  
+**File:** `docs/plans/2026_02_02_tabletop_pacing_intent_targeting.md`
+
+> **NOTE:** This is an approved design document. Implementation has not yet started.
 
 ---
 

@@ -21,16 +21,23 @@ import { find_path } from "../shared/pathfinding.js";
 // Store place data
 const place_data = new Map<string, Place>();
 const active_place_ids = new Set<string>();
+const wandering_timeouts = new Map<string, ReturnType<typeof setTimeout>>();
 let engine_initialized = false;
 
 // Callback for UI updates
 let on_place_update: ((place: Place) => void) | null = null;
+// Callback for spawning path particles
+let on_path_start: ((path: TilePosition[]) => void) | null = null;
 
 /**
  * Initialize NPC movement system
  */
-export function init_npc_movement(update_callback: (place: Place) => void): void {
+export function init_npc_movement(
+  update_callback: (place: Place) => void,
+  path_callback?: (path: TilePosition[]) => void
+): void {
   on_place_update = update_callback;
+  on_path_start = path_callback || null;
   
   if (!engine_initialized) {
     init_movement_engine((updated_place) => {
@@ -73,6 +80,18 @@ export function init_place_movement(place_id: string, place: Place): void {
 export function stop_place_movement(place_id: string): void {
   if (!active_place_ids.has(place_id)) {
     return;
+  }
+
+  // Cancel all wandering timeouts for NPCs in this place
+  const place = place_data.get(place_id);
+  if (place) {
+    for (const npc of place.contents.npcs_present) {
+      const timeout_id = wandering_timeouts.get(npc.npc_ref);
+      if (timeout_id) {
+        clearTimeout(timeout_id);
+        wandering_timeouts.delete(npc.npc_ref);
+      }
+    }
   }
 
   active_place_ids.delete(place_id);
@@ -124,7 +143,20 @@ function start_npc_wandering(place_id: string, npc_ref: string): void {
     reason: "Wandering around",
   };
   
-  const started = start_entity_movement(npc_ref, "npc", place, goal, tiles_per_minute);
+  const started = start_entity_movement(
+    npc_ref,
+    "npc",
+    place,
+    goal,
+    tiles_per_minute,
+    undefined, // on_complete
+    (path) => {
+      // on_start callback - spawn path particles
+      if (on_path_start) {
+        on_path_start(path);
+      }
+    }
+  );
 
   if (started) {
     debug_log("NPC_Movement", `${npc_ref} started wandering to (${target.x}, ${target.y})`);
@@ -133,14 +165,22 @@ function start_npc_wandering(place_id: string, npc_ref: string): void {
     // 300 tiles per minute = 200ms per tile (60000ms / 300 tiles)
     const ms_per_tile = 60000 / tiles_per_minute;
     const duration_ms = path_result.path.length * ms_per_tile;
-    setTimeout(() => {
+    const timeout_id = setTimeout(() => {
+      wandering_timeouts.delete(npc_ref);
       if (active_place_ids.has(place_id)) {
         start_npc_wandering(place_id, npc_ref);
       }
     }, duration_ms + 3000); // Add 3s pause between moves
+    
+    wandering_timeouts.set(npc_ref, timeout_id);
   } else {
     // Failed to start, try again later
-    setTimeout(() => start_npc_wandering(place_id, npc_ref), 2000);
+    const timeout_id = setTimeout(() => {
+      wandering_timeouts.delete(npc_ref);
+      start_npc_wandering(place_id, npc_ref);
+    }, 2000);
+    
+    wandering_timeouts.set(npc_ref, timeout_id);
   }
 }
 

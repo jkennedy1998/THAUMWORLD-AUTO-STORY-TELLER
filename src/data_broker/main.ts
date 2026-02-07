@@ -6,7 +6,7 @@ import { create_message, try_set_message_status } from "../engine/message.js";
 import type { MessageInput } from "../engine/message.js";
 import { append_log_envelope } from "../engine/log_store.js";
 import type { MessageEnvelope } from "../engine/types.js";
-import { debug_log, debug_broker_content } from "../shared/debug.js";
+import { debug_log, debug_broker_content, DEBUG_LEVEL } from "../shared/debug.js";
 import { parse_machine_text } from "../system_syntax/index.js";
 import type { CommandNode } from "../system_syntax/index.js";
 import { resolve_references } from "../reference_resolver/resolver.js";
@@ -398,7 +398,10 @@ function create_missing_entities(
 async function process_message(outbox_path: string, inbox_path: string, log_path: string, msg: MessageEnvelope): Promise<void> {
     // Check if this message was already processed (prevents duplicate brokered messages)
     if (processedInterpretedIds.has(msg.id)) {
-        debug_log("DataBroker: skipping already processed message", { id: msg.id });
+        // Only log at trace level to avoid spam - this is expected behavior
+        if (DEBUG_LEVEL >= 4) {
+            debug_log("DataBroker: skipping already processed message", { id: msg.id });
+        }
         return;
     }
     

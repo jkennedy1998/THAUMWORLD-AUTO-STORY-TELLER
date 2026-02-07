@@ -26,6 +26,56 @@ import { load_npc, save_npc } from "../npc_storage/store.js";
 import { advance_time } from "../time_system/tracker.js";
 import { move_entity_in_index } from "../place_storage/entity_index.js";
 
+/**
+ * Calculate the entry position (door position) based on direction
+ * Returns the tile position where someone should appear when entering from that direction
+ * 
+ * Direction indicates where the door leads TO from the current place.
+ * When entering a new place, we need to appear at the door that leads BACK.
+ * 
+ * Examples:
+ * - If direction is "north", the door is on the north edge (y = height - 1)
+ * - If direction is "south", the door is on the south edge (y = 0)
+ * - If direction is "east", the door is on the east edge (x = width - 1)
+ * - If direction is "west", the door is on the west edge (x = 0)
+ */
+function calculate_door_position(place: Place, direction: string): TilePosition {
+  const dir = direction.toLowerCase();
+  const width = place.tile_grid.width;
+  const height = place.tile_grid.height;
+  
+  // Calculate door position based on direction
+  // The door is positioned on the edge corresponding to the direction
+  if (dir.includes("north") || dir.includes("up") || dir.includes("forward")) {
+    // North door is on the top edge (max y index)
+    return {
+      x: Math.floor(width / 2),
+      y: height - 1
+    };
+  } else if (dir.includes("south") || dir.includes("down") || dir.includes("backward")) {
+    // South door is on the bottom edge (y = 0)
+    return {
+      x: Math.floor(width / 2),
+      y: 0
+    };
+  } else if (dir.includes("east") || dir.includes("right")) {
+    // East door is on the right edge (max x index)
+    return {
+      x: width - 1,
+      y: Math.floor(height / 2)
+    };
+  } else if (dir.includes("west") || dir.includes("left")) {
+    // West door is on the left edge (x = 0)
+    return {
+      x: 0,
+      y: Math.floor(height / 2)
+    };
+  } else {
+    // Default: use the place's default entry
+    return place.tile_grid.default_entry;
+  }
+}
+
 // Movement speeds (tiles per minute)
 const MOVEMENT_SPEEDS = {
   walk: 4,      // 4 tiles per minute (10 ft per minute)
@@ -205,6 +255,16 @@ export async function travel_between_places(
   }
   const to_place = to_place_result.place;
   
+  // Find the return connection (from target place back to source place)
+  // This tells us which direction we came from, so we know which door to place the entity at
+  const return_connection = to_place.connections.find(c => c.target_place_id === from_place_id);
+  
+  // Calculate entry position based on the return connection's direction
+  // If no return connection found, fall back to default entry
+  const entry_tile = return_connection 
+    ? calculate_door_position(to_place, return_connection.direction)
+    : to_place.tile_grid.default_entry;
+  
   // Remove from current place
   if (is_npc) {
     remove_npc_from_place(from_place, entity_ref);
@@ -213,8 +273,7 @@ export async function travel_between_places(
   }
   save_place(slot, from_place);
   
-  // Add to target place at default entry
-  const entry_tile = to_place.tile_grid.default_entry;
+  // Add to target place at the calculated entry position (near the door)
   if (is_npc) {
     add_npc_to_place(to_place, entity_ref, entry_tile);
   } else {

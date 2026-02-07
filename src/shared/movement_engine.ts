@@ -12,7 +12,7 @@
 
 import type { Place, TilePosition } from "../types/place.js";
 import { find_path, type PathResult } from "./pathfinding.js";
-import { debug_log } from "./debug.js";
+import { debug_log, DEBUG_LEVEL } from "./debug.js";
 
 // Default speed: 300 tiles per minute (5 tiles per second = 200ms per tile)
 // Faster for better gameplay feel
@@ -141,13 +141,18 @@ export function register_place(place_id: string, place: Place): void {
  * Unregister a place
  */
 export function unregister_place(place_id: string): void {
+  const place = active_places.get(place_id);
   active_places.delete(place_id);
   
-  // Clean up any movement states for this place
-  for (const [ref, state] of movement_states) {
-    if (state.entity_ref.includes(place_id) || 
-        (place_id && ref.includes(place_id))) {
-      movement_states.delete(ref);
+  // Clean up any movement states for entities in this place
+  if (place) {
+    // Remove all actor movement states
+    for (const actor of place.contents.actors_present) {
+      movement_states.delete(actor.actor_ref);
+    }
+    // Remove all NPC movement states
+    for (const npc of place.contents.npcs_present) {
+      movement_states.delete(npc.npc_ref);
     }
   }
 }
@@ -161,7 +166,8 @@ export function start_entity_movement(
   place: Place,
   goal: MovementGoal,
   speed_tpm: number = DEFAULT_SPEED_TPM,
-  on_complete?: () => void
+  on_complete?: () => void,
+  on_start?: (path: TilePosition[]) => void
 ): boolean {
   const current_pos = get_entity_position(place, entity_ref, entity_type);
   if (!current_pos) {
@@ -216,6 +222,11 @@ export function start_entity_movement(
     speed_tpm,
     ms_per_tile,
   });
+  
+  // Call on_start callback with the path for particle spawning
+  if (on_start) {
+    on_start(path_result.path);
+  }
   
   return true;
 }
@@ -414,7 +425,10 @@ function find_entity_place(entity_ref: string): Place | undefined {
       return place;
     }
   }
-  debug_log("MovementEngine", `${entity_ref} not found in any active place`);
+  // Only log at trace level to avoid spam - entity may have moved to inactive place
+  if (DEBUG_LEVEL >= 4) {
+    debug_log("MovementEngine", `${entity_ref} not found in any active place`);
+  }
   return undefined;
 }
 

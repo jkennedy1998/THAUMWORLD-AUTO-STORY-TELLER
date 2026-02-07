@@ -1,8 +1,12 @@
 # Place Module Development Plan
 
 **Date:** 2025-02-05  
-**Status:** Phase 3 Complete, Phase 5 In Progress  
+**Status:** SUPERSEDED - See PLACE_SYSTEM_PLAN.md (2026-02-02)  
 **File:** `docs/PLACE_MODULE_PLAN.md`
+
+> ⚠️ **NOTE:** This plan has been superseded by `PLACE_SYSTEM_PLAN.md` (dated 2026-02-02).  
+> The newer document contains the current canonical place system architecture.  
+> This file is preserved for historical reference only.
 
 ---
 

@@ -435,6 +435,12 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
     });
 
     // Step 4: Mark original message as done
+    debug_pipeline("StateApplier", `  [4/4] Marking ruling as done`, { 
+        id: msg.id,
+        stage: msg.stage,
+        effectsApplied,
+        hasCommunicateEvents 
+    });
     const done = try_set_message_status(processing.message, "done");
     if (done.ok) {
         // Use centralized atomic update from outbox_store
@@ -506,16 +512,27 @@ async function tick(outbox_path: string, log_path: string): Promise<void> {
             debug_pipeline("StateApplier", `FOUND ${candidates.length} CANDIDATES for processing`, {
                 ids: candidates.map(m => m.id),
                 stages: candidates.map(m => m.stage),
+                statuses: candidates.map(m => m.status),
                 correlationIds: candidates.map(m => m.correlation_id)
             });
-        } else if (DEBUG_LEVEL >= 3) {
-            // Log why no candidates found
+        } else if (DEBUG_LEVEL >= 4) {
+            // Only log at high debug level - this is expected when rulings are already processed
             const rulingMessages = outbox.messages.filter(m => m.stage?.startsWith("ruling_"));
             if (rulingMessages.length > 0) {
-                debug_pipeline("StateApplier", "NO CANDIDATES - ruling messages exist but wrong status", {
-                    rulingCount: rulingMessages.length,
-                    statuses: rulingMessages.map(m => ({ id: m.id, status: m.status }))
-                });
+                const pendingRulings = rulingMessages.filter(m => m.status === "pending_state_apply");
+                if (pendingRulings.length === 0) {
+                    // All rulings processed - this is normal, log at trace level only
+                    debug_log("StateApplier", "All rulings processed (normal)", {
+                        totalRulings: rulingMessages.length,
+                        done: rulingMessages.filter(m => m.status === "done").length
+                    });
+                } else {
+                    // Some rulings pending but not matching filter - investigate
+                    debug_pipeline("StateApplier", "PENDING RULINGS not matching filter", {
+                        pendingCount: pendingRulings.length,
+                        statuses: pendingRulings.map(m => ({ id: m.id, status: m.status }))
+                    });
+                }
             }
         }
 

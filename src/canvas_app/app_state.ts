@@ -6,11 +6,13 @@ import { make_roller_module } from '../mono_ui/modules/roller_module.js';
 import { make_place_module } from '../mono_ui/modules/place_module.js';
 import type { Module, Rgb } from '../mono_ui/types.js';
 import type { Place } from '../types/place.js';
-import { debug_warn } from '../shared/debug.js';
+import { debug_warn, debug_log } from '../shared/debug.js';
 import { init_npc_movement, init_place_movement, stop_place_movement } from '../npc_ai/movement_loop.js';
 import { get_color_by_name } from '../mono_ui/colors.js';
 import { infer_action_verb_hint } from '../shared/intent_hint.js';
 import { load_actor, save_actor } from '../actor_storage/store.js';
+import { parse_inspect_command } from '../inspection/text_parser.js';
+import { inspect_target, format_inspection_result, type InspectionTarget, type InspectorData } from '../inspection/data_service.js';
 
 export const APP_CONFIG = {
     font_family: 'Martian Mono',
@@ -371,6 +373,158 @@ export function create_app_state(): AppState {
                 }
             }
 
+            // Check if this is an inspection command
+            const inspect_parse = parse_inspect_command(outgoing);
+            
+            if (inspect_parse.is_inspect) {
+                // Handle inspection locally
+                const place = get_current_place();
+                if (!place) {
+                    flash_status(['Cannot inspect - no place loaded'], 1200);
+                    return;
+                }
+                
+                // Get target ref from parsed command or selected target
+                let inspect_target_ref = target_ref;
+                let inspect_target_type: 'npc' | 'actor' | 'item' | 'tile' = 'tile';
+                
+                if (inspect_parse.target_name && !inspect_target_ref) {
+                    // Check if it's a tile-related word
+                    const tile_words = ['floor', 'ground', 'wall', 'terrain', 'tile', 'surface'];
+                    const is_tile_inspection = tile_words.some(word => 
+                        inspect_parse.target_name?.toLowerCase().includes(word)
+                    );
+                    
+                    if (is_tile_inspection) {
+                        // For tile inspections, use the place's terrain type as the tile reference
+                        const terrain = place.environment?.terrain;
+                        if (terrain) {
+                            inspect_target_ref = terrain;
+                            inspect_target_type = 'tile';
+                        }
+                    } else {
+                        // Try to resolve target name from available targets (NPCs/Actors)
+                        const target = ui_state.controls.targets.find(t => 
+                            t.label.toLowerCase().includes(inspect_parse.target_name!.toLowerCase()) ||
+                            t.ref.toLowerCase().includes(inspect_parse.target_name!.toLowerCase())
+                        );
+                        if (target) {
+                            inspect_target_ref = target.ref;
+                            inspect_target_type = target.type === 'npc' ? 'npc' : 'actor';
+                        }
+                    }
+                }
+                
+                // Validate we have a target to inspect
+                if (!inspect_target_ref) {
+                    flash_status(['Cannot inspect - no matching target found'], 1200);
+                    return;
+                }
+                
+                // Load actor data for inspector info
+                const actor_result = load_actor(APP_CONFIG.selected_data_slot, APP_CONFIG.input_actor_id);
+                if (!actor_result.ok || !actor_result.actor) {
+                    flash_status(['Cannot inspect - actor data not found'], 1200);
+                    return;
+                }
+                
+                const actor = actor_result.actor as Record<string, any>;
+                const actor_location = actor.location as Record<string, any>;
+                
+                // Build inspector data
+                const inspector: InspectorData = {
+                    ref: `actor.${APP_CONFIG.input_actor_id}`,
+                    location: {
+                        world_x: actor_location?.world_tile?.x ?? 0,
+                        world_y: actor_location?.world_tile?.y ?? 0,
+                        region_x: actor_location?.region_tile?.x ?? 0,
+                        region_y: actor_location?.region_tile?.y ?? 0,
+                        x: actor_location?.x ?? 0,
+                        y: actor_location?.y ?? 0
+                    },
+                    senses: {
+                        light: (actor.senses?.light as number) ?? 0,
+                        pressure: (actor.senses?.pressure as number) ?? 0,
+                        aroma: (actor.senses?.aroma as number) ?? 0,
+                        thaumic: (actor.senses?.thaumic as number) ?? 0
+                    },
+                    stats: (actor.stats as Record<string, number>) ?? {},
+                    profs: (actor.profs as Record<string, number>) ?? {}
+                };
+                
+                // Build inspection target
+                let target_type: InspectionTarget['type'];
+                if (inspect_target_type === 'npc') {
+                    target_type = 'npc';
+                } else if (inspect_target_type === 'actor') {
+                    target_type = 'character';
+                } else if (inspect_target_type === ('item' as string)) {
+                    target_type = 'item';
+                } else {
+                    target_type = 'tile';
+                }
+                
+                const inspection_target: InspectionTarget = {
+                    type: target_type,
+                    ref: inspect_target_ref || '',
+                    place_id: place.id,
+                    tile_position: { x: inspector.location.x ?? 0, y: inspector.location.y ?? 0 }
+                };
+                
+                // Get target location
+                let target_location = inspector.location;
+                
+                // Show status that we're inspecting
+                const target_desc = inspect_target_ref ? inspect_target_ref.split('.').pop() :
+                                   inspect_target_type === 'tile' ? 'tile' : 'area';
+                flash_status([`Inspecting ${target_desc}...`], 1200);
+                
+                try {
+                    // Perform inspection
+                    const inspection_result = await inspect_target(
+                        inspector,
+                        inspection_target,
+                        {
+                            requested_keywords: inspect_parse.feature_keywords,
+                            max_features: 5,
+                            target_location,
+                            target_size_mag: 0
+                        }
+                    );
+                    
+                    // Format and display result
+                    const formatted_result = format_inspection_result(inspection_result);
+                    
+                    // Add to text window - split by lines and add each as separate message
+                    const result_lines = formatted_result.split('\n').filter(line => line.trim().length > 0);
+                    const current_messages = ui_state.text_windows.get('log')?.messages ?? [];
+                    
+                    // Add header
+                    const new_messages: (string | TextWindowMessage)[] = [
+                        ...current_messages,
+                        `[Inspection Result - ${target_desc}]`
+                    ];
+                    
+                    // Add each line of the result
+                    for (const line of result_lines) {
+                        new_messages.push(line);
+                    }
+                    
+                    // Add separator
+                    new_messages.push('---');
+                    
+                    set_text_window_messages('log', new_messages);
+                    
+                    // Update status
+                    flash_status([`Inspected ${target_desc}: ${inspection_result.clarity} clarity`], 2000);
+                } catch (err) {
+                    debug_warn('[app_state]', 'Inspection failed:', err);
+                    flash_status(['Inspection failed - check console'], 2000);
+                }
+                
+                return;
+            }
+
             // Warn once if there is no intent hint and no override.
             // Show warning briefly BEFORE sending, then return to normal status.
             const hint = infer_action_verb_hint(outgoing);
@@ -568,6 +722,194 @@ export function create_app_state(): AppState {
                     debug_warn('[mono_ui]', `Error saving actor ${actor_id} position`, err);
                 }
             },
+            on_inspect: async (target): Promise<void> => {
+                // Handle inspection from place module (right-click)
+                const place = get_current_place();
+                
+                if (!place) {
+                    flash_status(['No place loaded'], 1200);
+                    return;
+                }
+                
+                // Load actor data for inspector info
+                const actor_result = load_actor(APP_CONFIG.selected_data_slot, APP_CONFIG.input_actor_id);
+                if (!actor_result.ok || !actor_result.actor) {
+                    flash_status(['Cannot inspect - actor data not found'], 1200);
+                    return;
+                }
+                
+                const actor = actor_result.actor as Record<string, any>;
+                const actor_location = actor.location as Record<string, any>;
+                
+                // Build inspector data
+                const inspector: InspectorData = {
+                    ref: `actor.${APP_CONFIG.input_actor_id}`,
+                    location: {
+                        world_x: actor_location?.world_tile?.x ?? 0,
+                        world_y: actor_location?.world_tile?.y ?? 0,
+                        region_x: actor_location?.region_tile?.x ?? 0,
+                        region_y: actor_location?.region_tile?.y ?? 0,
+                        x: actor_location?.x ?? 0,
+                        y: actor_location?.y ?? 0
+                    },
+                    senses: {
+                        light: (actor.senses?.light as number) ?? 0,
+                        pressure: (actor.senses?.pressure as number) ?? 0,
+                        aroma: (actor.senses?.aroma as number) ?? 0,
+                        thaumic: (actor.senses?.thaumic as number) ?? 0
+                    },
+                    stats: (actor.stats as Record<string, number>) ?? {},
+                    profs: (actor.profs as Record<string, number>) ?? {}
+                };
+                
+                // For tile inspections from right-click, get the terrain type from place
+                let target_ref = target.ref;
+                if (target.type === 'tile' && !target_ref) {
+                    target_ref = place.environment?.terrain || '';
+                }
+                
+                // Validate we have a target ref
+                if (!target_ref) {
+                    flash_status(['Cannot inspect - unknown target type'], 1200);
+                    return;
+                }
+                
+                // Convert to InspectionTarget format
+                const inspection_target: InspectionTarget = {
+                    type: target.type === 'npc' ? 'npc' : 
+                          target.type === 'actor' ? 'character' : 
+                          target.type === 'item' ? 'item' : 'tile',
+                    ref: target_ref,
+                    place_id: place.id,
+                    tile_position: target.tile_position
+                };
+                
+                // Build target location (for tile inspection, use the tile position)
+                let target_location = inspector.location;
+                if (inspection_target.type === 'tile') {
+                    target_location = {
+                        ...inspector.location,
+                        x: target.tile_position.x,
+                        y: target.tile_position.y
+                    };
+                }
+                
+                // Show status that we're inspecting
+                const target_desc = target.ref ? target.ref.split('.').pop() : 'tile';
+                flash_status([`Inspecting ${target_desc}...`], 1200);
+                
+                try {
+                    // Perform inspection
+                    const inspection_result = await inspect_target(
+                        inspector,
+                        inspection_target,
+                        {
+                            max_features: 5,
+                            target_location,
+                            target_size_mag: 0
+                        }
+                    );
+                    
+                    // Format and display result
+                    const formatted_result = format_inspection_result(inspection_result);
+                    
+                    // Add to text window - split by lines and add each as separate message
+                    const result_lines = formatted_result.split('\n').filter(line => line.trim().length > 0);
+                    const current_messages = ui_state.text_windows.get('log')?.messages ?? [];
+                    
+                    // Add header
+                    const new_messages: (string | TextWindowMessage)[] = [
+                        ...current_messages,
+                        `[Inspection Result - ${target_desc}]`
+                    ];
+                    
+                    // Add each line of the result
+                    for (const line of result_lines) {
+                        new_messages.push(line);
+                    }
+                    
+                    // Add separator
+                    new_messages.push('---');
+                    
+                    set_text_window_messages('log', new_messages);
+                    
+                    // Show status
+                    flash_status([`Inspected ${target_desc}: ${inspection_result.clarity} clarity`], 2000);
+                } catch (err) {
+                    debug_warn('[app_state]', 'Inspection failed:', err);
+                    flash_status(['Inspection failed - check console'], 2000);
+                }
+            },
+            on_place_transition: async (target_place_id: string, direction: string): Promise<boolean> => {
+                // Handle place transition when user clicks on a door
+                const place = get_current_place();
+                if (!place) {
+                    flash_status(['No place loaded'], 1200);
+                    return false;
+                }
+                
+                // Check if timed event is active
+                const slot = APP_CONFIG.selected_data_slot;
+                const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+                
+                try {
+                    // First check timed event status
+                    const place_response = await fetch(
+                        `${base_url}/api/place?slot=${slot}&place_id=${encodeURIComponent(place.id)}`
+                    );
+                    
+                    if (!place_response.ok) {
+                        flash_status(['Failed to check place status'], 1200);
+                        return false;
+                    }
+                    
+                    const place_data = await place_response.json();
+                    if (place_data.timed_event_active) {
+                        flash_status(['Cannot travel during a timed event'], 2000);
+                        return false;
+                    }
+                    
+                    // Attempt the travel
+                    flash_status([`Traveling ${direction}...`], 1500);
+                    
+                    const travel_response = await fetch(
+                        `${base_url}/api/place/travel?slot=${slot}`,
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                entity_ref: `actor.${APP_CONFIG.input_actor_id}`,
+                                target_place_id: target_place_id
+                            })
+                        }
+                    );
+                    
+                    if (!travel_response.ok) {
+                        const error_data = await travel_response.json();
+                        if (error_data.error === 'travel_disabled_during_event') {
+                            flash_status(['Cannot travel during a timed event'], 2000);
+                        } else {
+                            flash_status([`Travel failed: ${error_data.error || 'unknown error'}`], 2000);
+                        }
+                        return false;
+                    }
+                    
+                    const travel_data = await travel_response.json();
+                    if (travel_data.ok) {
+                        flash_status([`Arrived at ${target_place_id.split('_').pop()}`], 2000);
+                        // Update current place to trigger reload
+                        await update_current_place(target_place_id);
+                        return true;
+                    } else {
+                        flash_status([`Travel failed: ${travel_data.error || 'unknown error'}`], 2000);
+                        return false;
+                    }
+                } catch (err) {
+                    debug_warn('[app_state]', 'Place transition failed:', err);
+                    flash_status(['Travel failed - check console'], 2000);
+                    return false;
+                }
+            },
             border_rgb: get_color_by_name('light_gray').rgb,
             bg_rgb: get_color_by_name('off_black').rgb,
             floor_char: '.',
@@ -702,23 +1044,17 @@ export function create_app_state(): AppState {
             OnPress() { ui_state.controls.override_cost = 'EXTENDED'; flash_status(['action cost: EXTENDED'], 800); },
         }),
 
-        // Action intent buttons (one per action type)
-        make_button_module({ id: 'verb_use', rect: { x0: 88, y0: 7, x1: 93, y1: 9 }, label: 'USE', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'USE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'USE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'USE'; flash_status(['intent: USE'], 800); } }),
-        make_button_module({ id: 'verb_atk', rect: { x0: 94, y0: 7, x1: 99, y1: 9 }, label: 'ATK', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'ATTACK' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'ATTACK' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'ATTACK'; flash_status(['intent: ATTACK'], 800); } }),
-        make_button_module({ id: 'verb_hlp', rect: { x0: 100, y0: 7, x1: 105, y1: 9 }, label: 'HLP', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'HELP' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'HELP' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'HELP'; flash_status(['intent: HELP'], 800); } }),
-        make_button_module({ id: 'verb_def', rect: { x0: 106, y0: 7, x1: 112, y1: 9 }, label: 'DEF', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'DEFEND' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'DEFEND' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'DEFEND'; flash_status(['intent: DEFEND'], 800); } }),
-        make_button_module({ id: 'verb_grp', rect: { x0: 113, y0: 7, x1: 118, y1: 9 }, label: 'GRP', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'GRAPPLE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'GRAPPLE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'GRAPPLE'; flash_status(['intent: GRAPPLE'], 800); } }),
-        make_button_module({ id: 'verb_ins', rect: { x0: 88, y0: 10, x1: 93, y1: 12 }, label: 'INS', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'INSPECT' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'INSPECT' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'INSPECT'; flash_status(['intent: INSPECT'], 800); } }),
-        make_button_module({ id: 'verb_com', rect: { x0: 94, y0: 10, x1: 101, y1: 12 }, label: 'COM', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'COMMUNICATE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'COMMUNICATE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'COMMUNICATE'; flash_status(['intent: COMMUNICATE'], 800); } }),
-        make_button_module({ id: 'verb_mov', rect: { x0: 102, y0: 10, x1: 107, y1: 12 }, label: 'MOV', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'MOVE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'MOVE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'MOVE'; flash_status(['intent: MOVE'], 800); } }),
-        make_button_module({ id: 'verb_ddg', rect: { x0: 108, y0: 10, x1: 112, y1: 12 }, label: 'DDG', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'DODGE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'DODGE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'DODGE'; flash_status(['intent: DODGE'], 800); } }),
-        make_button_module({ id: 'verb_crf', rect: { x0: 113, y0: 10, x1: 118, y1: 12 }, label: 'CRF', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'CRAFT' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'CRAFT' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'CRAFT'; flash_status(['intent: CRAFT'], 800); } }),
-        make_button_module({ id: 'verb_slp', rect: { x0: 88, y0: 13, x1: 93, y1: 15 }, label: 'SLP', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'SLEEP' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'SLEEP' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'SLEEP'; flash_status(['intent: SLEEP'], 800); } }),
-        make_button_module({ id: 'verb_rpr', rect: { x0: 94, y0: 13, x1: 99, y1: 15 }, label: 'RPR', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'REPAIR' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'REPAIR' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'REPAIR'; flash_status(['intent: REPAIR'], 800); } }),
-        make_button_module({ id: 'verb_wrk', rect: { x0: 100, y0: 13, x1: 105, y1: 15 }, label: 'WRK', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'WORK' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'WORK' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'WORK'; flash_status(['intent: WORK'], 800); } }),
-        make_button_module({ id: 'verb_grd', rect: { x0: 106, y0: 13, x1: 112, y1: 15 }, label: 'GRD', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'GUARD' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'GUARD' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'GUARD'; flash_status(['intent: GUARD'], 800); } }),
-        make_button_module({ id: 'verb_hld', rect: { x0: 113, y0: 13, x1: 118, y1: 15 }, label: 'HLD', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'HOLD' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'HOLD' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'HOLD'; flash_status(['intent: HOLD'], 800); } }),
-        make_button_module({ id: 'verb_clear', rect: { x0: 88, y0: 16, x1: 99, y1: 18 }, label: 'CLEAR', rgb: get_color_by_name('pale_yellow').rgb, bg: { char: '.', rgb: get_color_by_name('dark_gray').rgb }, OnPress() { ui_state.controls.override_intent = null; ui_state.controls.override_cost = null; flash_status(['overrides cleared'], 800); } }),
+        // Action intent buttons - Updated for Action Pipeline
+        // Only showing actions currently implemented in the Action Pipeline:
+        // - USE (handles all tool-based actions including attacks)
+        // - COMMUNICATE (talking to NPCs)
+        // - MOVE (movement)
+        // - INSPECT (looking at things)
+        make_button_module({ id: 'verb_use', rect: { x0: 88, y0: 7, x1: 96, y1: 9 }, label: 'USE', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'USE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'USE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'USE'; flash_status(['intent: USE (attack/talk/move with tool)'], 800); } }),
+        make_button_module({ id: 'verb_com', rect: { x0: 97, y0: 7, x1: 105, y1: 9 }, label: 'TALK', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'COMMUNICATE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'COMMUNICATE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'COMMUNICATE'; flash_status(['intent: COMMUNICATE'], 800); } }),
+        make_button_module({ id: 'verb_mov', rect: { x0: 106, y0: 7, x1: 113, y1: 9 }, label: 'MOVE', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'MOVE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'MOVE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'MOVE'; flash_status(['intent: MOVE'], 800); } }),
+        make_button_module({ id: 'verb_ins', rect: { x0: 114, y0: 7, x1: 118, y1: 9 }, label: 'LOOK', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'INSPECT' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'INSPECT' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'INSPECT'; flash_status(['intent: INSPECT'], 800); } }),
+        make_button_module({ id: 'verb_clear', rect: { x0: 88, y0: 10, x1: 99, y1: 12 }, label: 'CLEAR', rgb: get_color_by_name('pale_yellow').rgb, bg: { char: '.', rgb: get_color_by_name('dark_gray').rgb }, OnPress() { ui_state.controls.override_intent = null; ui_state.controls.override_cost = null; flash_status(['overrides cleared'], 800); } }),
 
         make_roller_module({
             id: 'roller',

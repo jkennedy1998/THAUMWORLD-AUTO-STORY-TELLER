@@ -1,0 +1,361 @@
+{
+  "schema_version": 1,
+  "tiles": [
+    {
+      "id": "wooden_floor",
+      "name": "Wooden Floor",
+      "category": "floor",
+      "display": {
+        "char": ".",
+        "color": "#8B4513",
+        "variant_chars": ["·", "▪"],
+        "animation": null
+      },
+      "walkable": true,
+      "blocks_sight": false,
+      "blocks_sound": false,
+      "inspection": {
+        "short": "Rough wooden planks worn smooth by countless footsteps.",
+        "full": "The floor is made of oak planks, weathered and stained with age. You can see scratches and scuff marks from furniture being moved. Some boards creak slightly underfoot.",
+        "features": [
+          {
+            "id": "floor_scratches",
+            "name": "Scratches",
+            "keywords": ["scratches", "marks", "scuffs"],
+            "description": "Deep gouges suggest heavy furniture was dragged recently.",
+            "requires_sense": "light",
+            "min_clarity": "clear"
+          },
+          {
+            "id": "loose_board",
+            "name": "Loose Board",
+            "keywords": ["board", "plank", "loose", "creak"],
+            "description": "One board creaks ominously when stepped on. It might be hiding something beneath.",
+            "requires_sense": "pressure",
+            "min_clarity": "vague",
+            "hidden": true,
+            "discovery_cr": 12,
+            "relevant_prof": "instinct",
+            "relevant_stat": "wis"
+          }
+        ],
+        "sensory": {
+          "light": ["Wooden planks", "Nail heads", "Dust in corners"],
+          "pressure": ["Creaking underfoot", "Hollow thud when knocked"],
+          "touch": ["Smooth grain", "Slight splinters at edges"],
+          "aroma": ["Wood polish", "Dust"]
+        }
+      },
+      "tags": ["wooden", "indoor", "flammable"]
+    },
+    {
+      "id": "stone_floor",
+      "name": "Stone Floor",
+      "category": "floor",
+      "display": {
+        "char": ".",
+        "color": "#696969",
+        "variant_chars": ["·", "▪"],
+        "animation": null
+      },
+      "walkable": true,
+      "blocks_sight": false,
+      "blocks_sound": false,
+      "inspection": {
+        "short": "Rough-hewn stone slabs fitted together.",
+        "full": "The floor consists of large stone slabs, worn smooth in the center from years of foot traffic. Moss grows in the cracks between stones.",
+        "features": [
+          {
+            "id": "moss_growth",
+            "name": "Moss Growth",
+            "keywords": ["moss", "plants", "growth"],
+            "description": "Green moss grows between the stones, suggesting dampness.",
+            "requires_sense": "light",
+            "min_clarity": "clear"
+          }
+        ],
+        "sensory": {
+          "light": ["Stone slabs", "Cracks with moss", "Wear patterns"],
+          "pressure": ["Solid thud when stepped on"],
+          "touch": ["Cold stone", "Rough texture"],
+          "aroma": ["Damp stone", "Moss"]
+        }
+      },
+      "tags": ["stone", "indoor", "outdoor"]
+    },
+    {
+      "id": "wooden_wall",
+      "name": "Wooden Wall",
+      "category": "wall",
+      "display": {
+        "char": "#",
+        "color": "#654321",
+        "variant_chars": ["▓", "▒"],
+        "animation": null
+      },
+      "walkable": false,
+      "blocks_sight": true,
+      "blocks_sound": true,
+      "inspection": {
+        "short": "A sturdy wall of wooden planks.",
+        "full": "The wall is constructed of vertical wooden planks, reinforced with horizontal beams. The wood is weathered but solid.",
+        "features": [
+          {
+            "id": "knot_hole",
+            "name": "Knot Hole",
+            "keywords": ["hole", "knot", "gap"],
+            "description": "A small gap where a knot fell out - you could peek through.",
+            "requires_sense": "light",
+            "min_clarity": "clear",
+            "hidden": true,
+            "discovery_cr": 8,
+            "relevant_prof": "accuracy",
+            "relevant_stat": "dex"
+          }
+        ],
+        "sensory": {
+          "light": ["Wooden planks", "Vertical grain", "Nail heads"],
+          "pressure": ["Solid when knocked"],
+          "touch": ["Rough wood", "Splinters"],
+          "aroma": ["Wood", "Dust"]
+        }
+      },
+      "tags": ["wooden", "wall", "indoor"]
+    },
+    {
+      "id": "stone_wall",
+      "name": "Stone Wall",
+      "category": "wall",
+      "display": {
+        "char": "#",
+        "color": "#808080",
+        "variant_chars": ["▓", "▒", "█"],
+        "animation": null
+      },
+      "walkable": false,
+      "blocks_sight": true,
+      "blocks_sound": true,
+      "inspection": {
+        "short": "A thick wall of fitted stone blocks.",
+        "full": "The wall is built from large stone blocks, expertly fitted together. Mortar holds the stones in place. The stones show signs of age and weathering.",
+        "features": [
+          {
+            "id": "loose_stone",
+            "name": "Loose Stone",
+            "keywords": ["stone", "loose", "brick"],
+            "description": "One stone seems slightly loose - it might be removable.",
+            "requires_sense": "pressure",
+            "min_clarity": "vague",
+            "hidden": true,
+            "discovery_cr": 10,
+            "relevant_prof": "instinct",
+            "relevant_stat": "wis"
+          }
+        ],
+        "sensory": {
+          "light": ["Stone blocks", "Mortar lines", "Weathering"],
+          "pressure": ["Solid, heavy sound when knocked"],
+          "touch": ["Cold stone", "Rough mortar"],
+          "aroma": ["Stone dust", "Age"]
+        }
+      },
+      "tags": ["stone", "wall", "indoor", "outdoor"]
+    },
+    {
+      "id": "wooden_table",
+      "name": "Wooden Table",
+      "category": "obstacle",
+      "display": {
+        "char": "T",
+        "color": "#8B4513",
+        "animation": null
+      },
+      "walkable": false,
+      "blocks_sight": false,
+      "blocks_sound": false,
+      "inspection": {
+        "short": "A sturdy wooden table, scarred from use.",
+        "full": "A heavy oak table, its surface scarred and stained from years of use. The legs are sturdy and well-crafted.",
+        "features": [
+          {
+            "id": "table_surface",
+            "name": "Table Surface",
+            "keywords": ["surface", "scratches", "stains"],
+            "description": "The surface bears knife marks, ink stains, and candle wax drippings.",
+            "requires_sense": "light",
+            "min_clarity": "vague"
+          }
+        ],
+        "sensory": {
+          "light": ["Scarred wood", "Stains", "Construction marks"],
+          "pressure": ["Solid when knocked"],
+          "touch": ["Smooth top", "Rough edges"],
+          "aroma": ["Wood", "Old meals"]
+        }
+      },
+      "interactions": [
+        {
+          "verb": "SEARCH",
+          "description": "Search under and around the table",
+          "time_seconds": 15
+        }
+      ],
+      "tags": ["wooden", "furniture", "cover"]
+    },
+    {
+      "id": "wooden_chair",
+      "name": "Wooden Chair",
+      "category": "obstacle",
+      "display": {
+        "char": "h",
+        "color": "#8B4513",
+        "animation": null
+      },
+      "walkable": false,
+      "blocks_sight": false,
+      "blocks_sound": false,
+      "inspection": {
+        "short": "A simple wooden chair.",
+        "full": "A basic wooden chair with a woven rush seat. It's sturdy but unremarkable.",
+        "features": [],
+        "sensory": {
+          "light": ["Simple construction", "Woven seat"],
+          "pressure": ["Creaks when moved"],
+          "touch": ["Smooth wood", "Textured seat"]
+        }
+      },
+      "tags": ["wooden", "furniture"]
+    },
+    {
+      "id": "grass_terrain",
+      "name": "Grass",
+      "category": "terrain",
+      "display": {
+        "char": "\"",
+        "color": "#228B22",
+        "variant_chars": ["'", ","],
+        "animation": null
+      },
+      "walkable": true,
+      "blocks_sight": false,
+      "blocks_sound": false,
+      "inspection": {
+        "short": "Tall grass swaying in the breeze.",
+        "full": "Wild grass grows thick here, waving gently in the wind. The blades are green and healthy.",
+        "features": [
+          {
+            "id": "trampled_path",
+            "name": "Trampled Path",
+            "keywords": ["path", "trampled", "track"],
+            "description": "The grass is flattened here, suggesting recent passage.",
+            "requires_sense": "light",
+            "min_clarity": "vague"
+          }
+        ],
+        "sensory": {
+          "light": ["Green blades", "Movement in wind"],
+          "pressure": ["Rustling"],
+          "touch": ["Soft", "Damp with dew"],
+          "aroma": ["Fresh grass", "Earth"]
+        }
+      },
+      "tags": ["grass", "outdoor", "flammable"]
+    },
+    {
+      "id": "dirt_terrain",
+      "name": "Dirt",
+      "category": "terrain",
+      "display": {
+        "char": ".",
+        "color": "#8B4513",
+        "variant_chars": [",", ";"],
+        "animation": null
+      },
+      "walkable": true,
+      "blocks_sight": false,
+      "blocks_sound": false,
+      "inspection": {
+        "short": "Bare earth, packed firm by travel.",
+        "full": "The ground here is packed dirt, showing signs of frequent travel. Footprints and wheel ruts mark the surface.",
+        "features": [
+          {
+            "id": "recent_tracks",
+            "name": "Recent Tracks",
+            "keywords": ["tracks", "footprints", "signs"],
+            "description": "Fresh footprints suggest someone passed recently.",
+            "requires_sense": "light",
+            "min_clarity": "clear"
+          }
+        ],
+        "sensory": {
+          "light": ["Packed earth", "Tracks", "Stones"],
+          "pressure": ["Firm underfoot"],
+          "touch": ["Dry", "Dusty"],
+          "aroma": ["Dust", "Earth"]
+        }
+      },
+      "tags": ["dirt", "outdoor"]
+    },
+    {
+      "id": "water_shallow",
+      "name": "Shallow Water",
+      "category": "water",
+      "display": {
+        "char": "~",
+        "color": "#4169E1",
+        "variant_chars": ["≈", "≋"],
+        "animation": "shimmer"
+      },
+      "walkable": true,
+      "blocks_sight": false,
+      "blocks_sound": false,
+      "inspection": {
+        "short": "Shallow water, clear and cool.",
+        "full": "Crystal clear water ripples gently. The bottom is visible - stones and sand. It's shallow enough to wade through.",
+        "features": [
+          {
+            "id": "stream_bottom",
+            "name": "Stream Bottom",
+            "keywords": ["bottom", "stones", "fish"],
+            "description": "Smooth stones and sand line the bottom. Small fish dart about.",
+            "requires_sense": "light",
+            "min_clarity": "clear"
+          }
+        ],
+        "sensory": {
+          "light": ["Clear water", "Ripples", "Stones below"],
+          "pressure": ["Gentle trickling"],
+          "touch": ["Cool", "Wet"],
+          "aroma": ["Fresh water"]
+        }
+      },
+      "tags": ["water", "outdoor", "shallow"]
+    },
+    {
+      "id": "water_deep",
+      "name": "Deep Water",
+      "category": "water",
+      "display": {
+        "char": "≈",
+        "color": "#00008B",
+        "variant_chars": ["~", "≋"],
+        "animation": "shimmer"
+      },
+      "walkable": false,
+      "blocks_sight": true,
+      "blocks_sound": false,
+      "inspection": {
+        "short": "Deep, dark water.",
+        "full": "The water here is deep and dark. The bottom is not visible. Swimming would be necessary to cross.",
+        "features": [],
+        "sensory": {
+          "light": ["Dark water", "No bottom visible"],
+          "pressure": ["Lapping sounds"],
+          "touch": ["Cold", "Deep"],
+          "aroma": ["Water", "Depth"]
+        }
+      },
+      "tags": ["water", "outdoor", "deep"]
+    }
+  ]
+}
