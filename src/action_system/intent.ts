@@ -12,6 +12,7 @@ export interface Location {
   region_y: number;
   x?: number;  // Tile coords within region
   y?: number;
+  place_id?: string;  // Place system identifier
 }
 
 // Action intent status

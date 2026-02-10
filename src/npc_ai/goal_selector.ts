@@ -310,6 +310,33 @@ function check_social_goal(
 }
 
 /**
+ * Generate conversation goal
+ * Called when NPC should engage with a speaker
+ */
+export function generate_conversation_goal(
+  npc_ref: string,
+  target_entity: string,
+  target_pos: TilePosition
+): Goal {
+  // Conversation position - within 1-2 tiles of target
+  // We want to face them but not stand on top of them
+  const conversation_pos = {
+    x: target_pos.x + (Math.random() > 0.5 ? 1 : -1),
+    y: target_pos.y
+  };
+  
+  return {
+    type: "converse",
+    target_entity,
+    target_position: conversation_pos,
+    priority: 7, // High priority, but can be interrupted by combat
+    created_at: Date.now(),
+    // No expires_at - conversation timeout is managed by conversation_state.ts
+    reason: `Responding to ${target_entity}`,
+  };
+}
+
+/**
  * Generate default goal based on personality
  */
 function generate_default_goal(

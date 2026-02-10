@@ -22,6 +22,7 @@ Thumbs.db
 
 # ---- Build / cache ----
 dist/
+dist_exe/
 build/
 out/
 coverage/

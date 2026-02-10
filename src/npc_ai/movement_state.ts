@@ -25,7 +25,8 @@ export type GoalType =
   | "social"      // Move toward others
   | "follow"      // Follow target entity
   | "flee"        // Move away from threat
-  | "rest";       // Stand/sit idle
+  | "rest"        // Stand/sit idle
+  | "converse";   // Engaged in conversation
 
 /** A goal the NPC is trying to achieve */
 export type Goal = {

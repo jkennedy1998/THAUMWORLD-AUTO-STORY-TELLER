@@ -13,6 +13,9 @@
 import type { Place, TilePosition } from "../types/place.js";
 import { find_path, type PathResult } from "./pathfinding.js";
 import { debug_log, DEBUG_LEVEL } from "./debug.js";
+import { update_facing_on_move } from "../npc_ai/facing_system.js";
+import { process_witness_movement, calculate_movement_detectability } from "../npc_ai/witness_integration.js";
+import { init_movement_state as init_npc_movement_state, set_goal as set_npc_goal, type Goal as NPCGoal } from "../npc_ai/movement_state.js";
 
 // Default speed: 300 tiles per minute (5 tiles per second = 200ms per tile)
 // Faster for better gameplay feel
@@ -70,8 +73,11 @@ export type EntityMovementState = {
   blocked_since?: number;
   failed_path?: boolean;
   
-  // Callback when complete
-  on_complete?: () => void;
+  // Callback when complete - receives final position
+  on_complete?: (final_position: TilePosition) => void;
+  
+  // Callback on each step - receives current position
+  on_step?: (position: TilePosition) => void;
 };
 
 // Store all entity movement states
@@ -135,6 +141,19 @@ export function stop_engine(): void {
  */
 export function register_place(place_id: string, place: Place): void {
   active_places.set(place_id, place);
+  
+  // Initialize NPC movement states for all NPCs in the place
+  // This ensures witness system can access movement state even when NPCs aren't moving
+  for (const npc of place.contents.npcs_present) {
+    const npc_ref = npc.npc_ref;
+    const position = npc.tile_position;
+    
+    // Only initialize if not already exists
+    if (!movement_states.has(npc_ref)) {
+      init_npc_movement_state(npc_ref, position);
+      debug_log("MovementEngine", `Initialized NPC movement state for ${npc_ref} at place registration`);
+    }
+  }
 }
 
 /**
@@ -166,8 +185,9 @@ export function start_entity_movement(
   place: Place,
   goal: MovementGoal,
   speed_tpm: number = DEFAULT_SPEED_TPM,
-  on_complete?: () => void,
-  on_start?: (path: TilePosition[]) => void
+  on_complete?: (final_position: TilePosition) => void,
+  on_start?: (path: TilePosition[]) => void,
+  on_step?: (position: TilePosition) => void
 ): boolean {
   const current_pos = get_entity_position(place, entity_ref, entity_type);
   if (!current_pos) {
@@ -199,9 +219,32 @@ export function start_entity_movement(
     path_color: path_result.blocked ? "red" : "white",
     failed_path: path_result.blocked,
     on_complete,
+    on_step,
   };
   
   movement_states.set(entity_ref, state);
+  
+  // Bridge to NPC movement state system for witness/reaction integration
+  if (entity_type === "npc") {
+    // Initialize NPC movement state if not exists
+    init_npc_movement_state(entity_ref, current_pos);
+    
+    // Convert movement engine goal to NPC AI goal format
+    const npc_goal: NPCGoal = {
+      type: goal.type === "wander" ? "wander" : 
+           goal.type === "patrol" ? "patrol" : 
+           goal.type === "follow" ? "follow" : 
+           goal.type === "flee" ? "flee" : "wander",
+      target_position: goal.target_position,
+      target_entity: goal.target_entity,
+      priority: goal.priority,
+      created_at: Date.now(),
+      reason: goal.reason,
+    };
+    
+    set_npc_goal(entity_ref, npc_goal, path_result.path);
+    debug_log("MovementEngine", `${entity_ref} bridged to NPC movement state`, { goal_type: npc_goal.type });
+  }
   
   if (path_result.blocked) {
     debug_log("MovementEngine", `${entity_ref} path blocked`, { 
@@ -303,6 +346,23 @@ async function engine_tick(): Promise<void> {
 }
 
 /**
+ * Get entity's current tile position
+ */
+function get_entity_current_tile(
+  place: Place,
+  entity_ref: string,
+  entity_type: "actor" | "npc"
+): TilePosition | null {
+  if (entity_type === "actor") {
+    const actor = place.contents.actors_present.find(a => a.actor_ref === entity_ref);
+    return actor?.tile_position ?? null;
+  } else {
+    const npc = place.contents.npcs_present.find(n => n.npc_ref === entity_ref);
+    return npc?.tile_position ?? null;
+  }
+}
+
+/**
  * Execute one movement step
  */
 async function execute_step(
@@ -318,14 +378,63 @@ async function execute_step(
     return;
   }
   
+  // Get current position before moving (for facing calculation)
+  const current_tile = get_entity_current_tile(place, entity_ref, state.entity_type);
+  
   // Move entity
   const success = move_entity_to_tile(place, entity_ref, state.entity_type, next_tile);
   
   if (success) {
+    // Update facing direction based on movement
+    if (current_tile) {
+      update_facing_on_move(entity_ref, current_tile, next_tile);
+    }
+    
+    // ===== WITNESS SYSTEM: Movement Detection =====
+    // Check if other entities should detect this movement
+    // Only NPCs detect movement (players don't need to detect NPC movement)
+    if (state.entity_type === "npc") {
+      // Get all other entities in the place
+      const other_npcs = place.contents.npcs_present.filter(n => n.npc_ref !== entity_ref);
+      const actors = place.contents.actors_present;
+      
+      // Calculate detectability based on step count and speed
+      const detectability = calculate_movement_detectability(
+        state.total_distance,
+        state.speed_tpm
+      );
+      
+      // Notify nearby observers every few steps
+      const should_notify = state.step_count % 3 === 0 || 
+                           state.step_count === 0 || 
+                           state.step_count >= state.total_distance - 1;
+      
+      if (should_notify) {
+        // Notify NPCs
+        other_npcs.forEach(npc => {
+          process_witness_movement(
+            npc.npc_ref,
+            entity_ref,
+            next_tile,
+            state.step_count,
+            state.total_distance
+          );
+        });
+        
+        // Log movement detection level
+        debug_log("MovementEngine", `${entity_ref} movement step ${state.step_count}/${state.total_distance}: ${detectability.description} (intensity: ${detectability.intensity}, range: ${detectability.range})`);
+      }
+    }
+    
     state.path_index++;
     state.step_count++;
     state.last_step_time = Date.now();
     state.next_step_time = state.last_step_time + state.ms_per_tile;
+    
+    // Call step callback if provided
+    if (state.on_step) {
+      state.on_step(next_tile);
+    }
     
     // Check if complete
     if (state.path_index >= state.path.length) {
@@ -388,6 +497,9 @@ function complete_movement(
   state.is_moving = false;
   state.show_path = false;
   
+  // Get final position before calling callback
+  const final_position = state.path[state.path.length - 1];
+  
   // Update status to present
   if (state.entity_type === "actor") {
     const actor = place.contents.actors_present.find(a => a.actor_ref === entity_ref);
@@ -397,9 +509,9 @@ function complete_movement(
     if (npc) npc.status = "present";
   }
   
-  // Call completion callback
-  if (state.on_complete) {
-    state.on_complete();
+  // Call completion callback with final position
+  if (state.on_complete && final_position) {
+    state.on_complete(final_position);
   }
   
   movement_states.delete(entity_ref);
@@ -407,12 +519,19 @@ function complete_movement(
   debug_log("MovementEngine", `${entity_ref} completed movement`, {
     steps: state.step_count,
     distance: state.total_distance,
+    final_position,
   });
+  
+  // Note: Position saving is handled by the caller via on_complete callback
+  // We don't save here because this code runs in browser context (no Node.js APIs)
   
   if (on_place_update) {
     on_place_update(place);
   }
 }
+
+// Note: Position saving to storage is handled by the caller via on_complete callback
+// The movement engine should not directly access storage since it runs in browser context
 
 /**
  * Find which place contains an entity

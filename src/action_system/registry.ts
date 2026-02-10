@@ -226,7 +226,7 @@ export const ACTION_REGISTRY: Record<ActionVerb, ActionDefinition> = {
     allowSelf: false,
     allowMultipleTargets: true,
     defaultCost: "FREE",
-    requiresTool: true,
+    requiresTool: false,
     defaultTool: "voice",
     validToolTypes: ["voice", "item"],
     perceptibility: {

@@ -5,6 +5,10 @@ import { get_color_by_name } from "../colors.js";
 import type { Place, PlaceNPC, PlaceActor, TilePosition } from "../../types/place.js";
 import { get_entity_path, start_entity_movement, register_place, unregister_place } from "../../shared/movement_engine.js";
 import { load_actor } from "../../actor_storage/store.js";
+import { DEBUG_VISION, register_particle_spawner, update_npc_debug_visuals } from "../vision_debugger.js";
+import { get_facing } from "../../npc_ai/facing_system.js";
+import { is_in_conversation } from "../../npc_ai/conversation_state.js";
+import { update_actor_position_in_place, set_npc_tracked_position } from "./movement_command_handler.js";
 
 // Debug logging helper - re-enabled with balanced output
 function debug_log_place(...args: any[]) {
@@ -139,6 +143,11 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   // Particle system
   let particles: Particle[] = [];
   const PARTICLE_LIFESPAN_MS = 500;  // Particles live for 500ms per plan
+  
+  // Register particle spawner with vision debugger
+  register_particle_spawner((particle) => {
+    particles.push(particle as Particle);
+  });
   
   // Track current place for unified movement engine
   let current_place_id: string | null = null;
@@ -718,6 +727,21 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     // Check for entity movement and spawn footsteps
     check_entity_movement(place);
     
+    // Update debug visuals for all NPCs (vision cones, facing, etc.)
+    for (const npc of place.contents.npcs_present) {
+      const npc_position = npc.tile_position;
+      const npc_facing = get_facing(npc.npc_ref);
+      // Check if NPC is in conversation via status (backend sets this to "busy")
+      const npc_in_conv = npc.status === "busy";
+      
+      // Debug logging for conversation state detection (always log when debug is on)
+      if (DEBUG_VISION.enabled) {
+        console.log(`[PlaceModule] ${npc.npc_ref} status="${npc.status}", in_conversation=${npc_in_conv}`);
+      }
+      
+      update_npc_debug_visuals(npc.npc_ref, npc_position, npc_facing, npc_in_conv);
+    }
+
     // Draw particles (path visualization and effects)
     update_particles();
     for (const p of particles) {
@@ -968,11 +992,16 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           reason: "Player commanded movement"
         },
         tiles_per_minute,
-        () => {
-          // On complete callback
-          debug_log_place("Movement complete", { actor_ref: actor.actor_ref });
+        (_final_position) => {
+          // On complete callback - receives final position from movement engine
+          debug_log_place("Movement complete", { actor_ref: actor.actor_ref, final_position: _final_position });
+          
+          // Track actor position for facing calculations
+          // Store in npc_actual_positions map (works for both NPCs and actors)
+          set_npc_tracked_position(actor.actor_ref, _final_position);
+          
           if (config.on_actor_move) {
-            Promise.resolve(config.on_actor_move(actor.actor_ref, actor.tile_position)).catch(err => {
+            Promise.resolve(config.on_actor_move(actor.actor_ref, _final_position)).catch(err => {
               debug_log_place("Error saving position:", err);
             });
           }
@@ -987,6 +1016,10 @@ export function make_place_module(config: PlaceModuleConfig): Module {
             path_length: path.length,
             speed: tiles_per_minute
           });
+        },
+        (current_position) => {
+          // On step callback - track position for facing calculations during movement
+          set_npc_tracked_position(actor.actor_ref, current_position);
         }
       );
       
@@ -1446,6 +1479,10 @@ export function make_place_module(config: PlaceModuleConfig): Module {
             place.tile_grid.default_entry.y,
             place
           );
+          break;
+        case "\\":
+          // Toggle vision debug mode (backslash key)
+          DEBUG_VISION.toggle();
           break;
       }
     },

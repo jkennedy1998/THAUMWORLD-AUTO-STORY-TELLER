@@ -30,6 +30,13 @@ import { get_entities_in_place } from "../place_storage/entity_index.js";
 import { get_creation_state_path } from "../engine/paths.js";
 import { load_kind_definitions } from "../kind_storage/store.js";
 import { PROF_NAMES, STAT_VALUE_BLOCK } from "../character_rules/creation.js";
+import { 
+  initializeActionPipeline, 
+  processPlayerAction, 
+  shouldUseActionPipeline,
+  formatActionResult 
+} from "./action_integration.js";
+import { createIntent } from "../action_system/intent.js";
 
 const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
 const visual_log_limit = 12;
@@ -48,6 +55,64 @@ let message_buffer = ""; // message construction buffer
 let incoming_message = ""; // received text from other programs (routing)
 let ollama_process: ChildProcess | null = null;
 let ollama_spawned = false;
+
+// Track active conversations for dynamic facing updates
+const active_conversations = new Map<string, {
+  npc_ref: string;
+  actor_ref: string;
+  started_at: number;
+  last_facing_update: number;
+}>();
+
+const FACING_UPDATE_INTERVAL_MS = 100; // Update facing every 100ms during conversation (more responsive)
+
+/**
+ * Start tracking a conversation for dynamic facing
+ */
+function start_conversation_tracking(npc_ref: string, actor_ref: string): void {
+  active_conversations.set(npc_ref, {
+    npc_ref,
+    actor_ref,
+    started_at: Date.now(),
+    last_facing_update: 0
+  });
+  console.log(`[ConversationTracking] Started tracking ${npc_ref} facing ${actor_ref}`);
+}
+
+/**
+ * Stop tracking a conversation
+ */
+function stop_conversation_tracking(npc_ref: string): void {
+  active_conversations.delete(npc_ref);
+  console.log(`[ConversationTracking] Stopped tracking ${npc_ref}`);
+}
+
+/**
+ * Update facing for all active conversations
+ * Call this periodically (e.g., every tick)
+ */
+async function update_conversation_facing(): Promise<void> {
+  const now = Date.now();
+  
+  if (active_conversations.size > 0) {
+    console.log(`[ConversationFacing] Updating ${active_conversations.size} conversations`);
+  }
+  
+  for (const [npc_ref, conv] of active_conversations) {
+    // Only update if enough time has passed
+    if (now - conv.last_facing_update < FACING_UPDATE_INTERVAL_MS) {
+      continue;
+    }
+    
+    // Update last facing time
+    conv.last_facing_update = now;
+    
+    // Send face command to keep NPC facing the actor
+    console.log(`[ConversationFacing] Sending face command for ${npc_ref} -> ${conv.actor_ref}`);
+    const { send_face_command } = await import("../npc_ai/movement_command_sender.js");
+    send_face_command(npc_ref, conv.actor_ref, "Maintain facing during conversation");
+  }
+}
 
 // other programs/applications can send this program text (a string)
 function receive_text_from_other_program(text: string): void {
@@ -1674,6 +1739,160 @@ function start_http_server(log_path: string): void {
 // Track which messages have been displayed to prevent duplicates
 const displayedMessageIds = new Set<string>();
 
+/**
+ * Parse user input and create an ActionIntent for the ActionPipeline
+ */
+function createActionIntentFromInput(text: string, sender: string): any | null {
+    const trimmed = text.trim();
+    const lower = trimmed.toLowerCase();
+    
+    console.log(`[ActionPipeline] Parsing input: "${trimmed}"`);
+    
+    // Get the player actor
+    const actor_result = load_actor(data_slot_number, "henry_actor");
+    if (!actor_result.ok || !actor_result.actor) {
+        console.log(`[ActionPipeline] Failed to load actor henry_actor`);
+        return null;
+    }
+    
+    const actor = actor_result.actor as any;
+    const actor_loc = actor.location;
+    
+    if (!actor_loc) {
+        console.log(`[ActionPipeline] Actor has no location`);
+        return null;
+    }
+    
+    const actor_location = {
+        world_x: actor_loc.world_tile?.x ?? 0,
+        world_y: actor_loc.world_tile?.y ?? 0,
+        region_x: actor_loc.region_tile?.x ?? 0,
+        region_y: actor_loc.region_tile?.y ?? 0,
+        x: actor_loc.tile?.x ?? 0,
+        y: actor_loc.tile?.y ?? 0,
+        place_id: actor_loc.place_id
+    };
+    
+    console.log(`[ActionPipeline] Actor location:`, actor_location);
+    
+    // Check for COMMUNICATE patterns
+    const say_match = trimmed.match(/^(?:say|shout|yell|whisper)\s+(.+)$/i);
+    const talk_match = trimmed.match(/^(?:talk|speak)\s+to\s+(\w+)\s+(.+)$/i);
+    const hello_match = trimmed.match(/^(?:hello|hi|hey)\s+(\w+).*$/i);
+    const name_greeting_match = trimmed.match(/^(\w+)\s+(?:hello|hi|hey|greetings)$/i);  // "grenda hello" format
+    
+    console.log(`[ActionPipeline] Pattern matches:`, {
+        say_match: !!say_match,
+        talk_match: !!talk_match,
+        hello_match: !!hello_match,
+        name_greeting_match: !!name_greeting_match
+    });
+    
+    let message: string | undefined;
+    let target_name: string | undefined;
+    let subtype = "NORMAL";
+    
+    if (say_match) {
+        message = say_match[1];
+        console.log(`[ActionPipeline] Matched SAY pattern: "${message}"`);
+        // Check volume keywords
+        if (lower.startsWith("shout") || lower.startsWith("yell")) {
+            subtype = "SHOUT";
+        } else if (lower.startsWith("whisper")) {
+            subtype = "WHISPER";
+        }
+    } else if (talk_match) {
+        target_name = talk_match[1];
+        message = talk_match[2];
+        console.log(`[ActionPipeline] Matched TALK pattern: target=${target_name}, message="${message}"`);
+    } else if (hello_match) {
+        target_name = hello_match[1];
+        message = trimmed;
+        console.log(`[ActionPipeline] Matched HELLO pattern: target=${target_name}, message="${message}"`);
+    } else if (name_greeting_match) {
+        target_name = name_greeting_match[1];
+        message = trimmed;
+        console.log(`[ActionPipeline] Matched NAME+GREETING pattern: target=${target_name}, message="${message}"`);
+    } else if (lower.match(/^(?:hello|hi|hey|greetings)/)) {
+        // Simple greeting without name - general communication
+        message = trimmed;
+        console.log(`[ActionPipeline] Matched simple greeting: "${message}"`);
+    }
+    
+    if (message) {
+        console.log(`[ActionPipeline] Creating intent with message: "${message}", target_name: ${target_name || "none"}`);
+        // Find target NPC if specified
+        let target_ref: string | undefined;
+        let target_location = actor_location;
+        
+        if (target_name) {
+            console.log(`[ActionPipeline] Looking for NPC with name: ${target_name}`);
+            // Look for NPC with matching name/ref
+            const all_npcs = find_npcs(data_slot_number, {});
+            console.log(`[ActionPipeline] Found ${all_npcs.length} NPCs total`);
+            
+            for (const npc_hit of all_npcs) {
+                if (npc_hit.id === "default_npc") continue;
+                const npc_id_lower = npc_hit.id.toLowerCase();
+                const target_lower = target_name.toLowerCase();
+                
+                console.log(`[ActionPipeline] Checking NPC: ${npc_hit.id} against target: ${target_name}`);
+                
+                if (npc_id_lower.includes(target_lower) || target_lower.includes(npc_id_lower)) {
+                    target_ref = `npc.${npc_hit.id}`;
+                    console.log(`[ActionPipeline] MATCHED! target_ref = ${target_ref}`);
+                    
+                    // Get NPC location
+                    const npc_result = load_npc(data_slot_number, npc_hit.id);
+                    if (npc_result.ok && npc_result.npc) {
+                        const npc_loc = get_npc_location(npc_result.npc);
+                        if (npc_loc) {
+                            target_location = {
+                                world_x: npc_loc.world_tile.x,
+                                world_y: npc_loc.world_tile.y,
+                                region_x: npc_loc.region_tile.x,
+                                region_y: npc_loc.region_tile.y,
+                                x: npc_loc.tile.x,
+                                y: npc_loc.tile.y,
+                                place_id: npc_loc.place_id
+                            };
+                            console.log(`[ActionPipeline] NPC location:`, target_location);
+                        }
+                    }
+                    break;
+                }
+            }
+            
+            if (!target_ref) {
+                console.log(`[ActionPipeline] No NPC matched target name: ${target_name}`);
+            }
+        }
+        
+        // Calculate distance if we have a target
+        let distance = 0;
+        if (target_ref) {
+            const dx = actor_location.x - target_location.x;
+            const dy = actor_location.y - target_location.y;
+            distance = Math.sqrt(dx * dx + dy * dy);
+            console.log(`[ActionPipeline] Distance to target: ${distance}`);
+        }
+        
+        return createIntent("actor.henry_actor", "COMMUNICATE", "player_input", {
+            actorLocation: actor_location,
+            targetRef: target_ref,
+            targetLocation: target_location,
+            parameters: {
+                subtype,
+                message,
+                distance,
+                targets: target_ref ? [target_ref] : []
+            }
+        });
+    }
+    
+    return null;
+}
+
 function Breath(log_path: string, inbox_path: string, outbox_path: string): void {
     try {
         flush_incoming_messages();
@@ -1723,7 +1942,54 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
                     preview: msg.content?.slice(0, 50)
                 });
             } else if (isUserInput) {
-                // Route through pipeline
+                // Check if this input should use ActionPipeline
+                const content = msg.content || "";
+                
+                console.log(`[Breath] Processing user input: "${content.slice(0, 50)}"`);
+                
+                const usePipeline = shouldUseActionPipeline(content);
+                console.log(`[Breath] shouldUseActionPipeline: ${usePipeline}`);
+                
+                if (usePipeline) {
+                    // Process through ActionPipeline for witness reactions, facing, etc.
+                    console.log(`[Breath] Processing through ActionPipeline...`);
+                    
+                    const intent = createActionIntentFromInput(content, msg.sender || "j");
+                    
+                    if (intent) {
+                        console.log(`[Breath] Created intent:`, { verb: intent.verb, target: intent.targetRef });
+                        
+                        // Process async but don't block routing
+                        processPlayerAction(data_slot_number, intent).then(result => {
+                            console.log(`[Breath] ActionPipeline completed:`, {
+                                success: result.success,
+                                verb: intent.verb,
+                                effectsCount: result.effects.length,
+                                observedBy: result.observedBy
+                            });
+                            
+                            // Log the action result
+                            if (result.success) {
+                                append_log_message(log_path, "system", `[Action] ${formatActionResult(result)}`);
+                                
+                                // If this is a COMMUNICATE action targeting an NPC, start tracking the conversation
+                                if (intent.verb === "COMMUNICATE" && intent.targetRef?.startsWith("npc.")) {
+                                    console.log(`[Breath] Starting conversation tracking for ${intent.targetRef}`);
+                                    start_conversation_tracking(intent.targetRef, intent.actorRef);
+                                    console.log(`[Breath] Active conversations: ${active_conversations.size}`);
+                                }
+                            }
+                        }).catch(err => {
+                            console.error(`[Breath] ActionPipeline error:`, err);
+                        });
+                    } else {
+                        console.log(`[Breath] No intent created from input`);
+                    }
+                } else {
+                    console.log(`[Breath] Input doesn't match ActionPipeline patterns`);
+                }
+                
+                // Continue with normal routing to Interpreter AI
                 const normalized: MessageEnvelope = {
                     ...msg,
                     created_at: msg.created_at ?? new Date().toISOString(),
@@ -1788,6 +2054,11 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
             displayedMessageIds.clear();
             idsArray.slice(-500).forEach(id => displayedMessageIds.add(id));
         }
+        
+        // Update facing for active conversations (keeps NPCs facing players during convo)
+        update_conversation_facing().catch(err => {
+            console.error("[Breath] Error updating conversation facing:", err);
+        });
     } catch (err) {
         current_state = "error";
         console.error(err);
@@ -1825,6 +2096,10 @@ function initialize(): { log_path: string; inbox_path: string; outbox_path: stri
     ensure_dir_exists(item_dir);
     ensure_roller_status_exists(roller_status_path);
     ensure_minimum_game_data(data_slot_number);
+    
+    // Initialize ActionPipeline for witness reactions and action processing
+    initializeActionPipeline(data_slot_number);
+    debug_log("Interface Program", "ActionPipeline initialized");
 
     write_status_line(status_path, "awaiting actor input");
 

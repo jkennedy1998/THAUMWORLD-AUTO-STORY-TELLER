@@ -1,6 +1,6 @@
 import { get_data_slot_dir, get_log_path, get_inbox_path, get_outbox_path, get_npc_path, get_actor_path } from "../engine/paths.js";
 import { ensure_dir_exists, ensure_log_exists, append_log_message, append_log_envelope } from "../engine/log_store.js";
-import { ensure_inbox_exists, append_inbox_message } from "../engine/inbox_store.js";
+import { ensure_inbox_exists, append_inbox_message, read_inbox, write_inbox } from "../engine/inbox_store.js";
 import { ensure_outbox_exists, read_outbox, write_outbox, prune_outbox_messages, update_outbox_message, remove_duplicate_messages } from "../engine/outbox_store.js";
 import { create_message, try_set_message_status } from "../engine/message.js";
 import type { MessageInput } from "../engine/message.js";
@@ -11,6 +11,7 @@ import { append_metric } from "../engine/metrics_store.js";
 import { find_npcs, load_npc, save_npc } from "../npc_storage/store.js";
 import { get_npc_place_id, are_npcs_in_same_place, get_npc_location } from "../npc_storage/location.js";
 import { load_actor } from "../actor_storage/store.js";
+import { get_movement_state } from "./movement_state.js";
 import { isCurrentSession, getSessionMeta } from "../shared/session.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
 import { get_working_memory, format_memory_for_ai } from "../context_manager/index.js";
@@ -28,6 +29,14 @@ import * as path from "node:path";
 import { is_timed_event_active, get_timed_event_state, get_region_by_coords } from "../world_storage/store.js";
 import { load_place } from "../place_storage/store.js";
 import { consolidate_npc_memory_journal_if_needed, append_non_timed_conversation_journal } from "./timed_event_journal.js";
+
+// Import witness system for real-time reactions
+import { process_witness_communication } from "./witness_integration.js";
+import { update_conversations } from "./witness_handler.js";
+
+// Import movement command sender for Phase 8: Unified Movement Authority
+import { send_wander_command } from "./movement_command_sender.js";
+import { is_in_conversation } from "./conversation_state.js";
 
 const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
 const POLL_MS = SERVICE_CONFIG.POLL_MS.NPC_AI;
@@ -713,6 +722,17 @@ async function process_communication(
         // Mark as responded IMMEDIATELY to prevent duplicate processing in rapid ticks
         responded_npcs.add(npc_hit.id);
         
+        // ===== WITNESS SYSTEM INTEGRATION =====
+        // Trigger real-time reaction through witness system
+        // Distance is 0 since they're in the same place
+        process_witness_communication(
+            `npc.${npc_hit.id}`,
+            player_ref,
+            original_text,
+            is_direct_target,
+            0  // Same place = effectively 0 distance
+        );
+        
         debug_pipeline("NPC_AI", `Generating response for ${npc.name}`, {
             npc_id: npc_hit.id,
             is_direct_target,
@@ -1180,8 +1200,216 @@ async function process_non_communication_action(
     actor_sessions.delete(actor_ref);
 }
 
+/**
+ * Phase 8: Unified Movement Authority
+ * 
+ * Backend decides when NPCs should wander and sends commands to renderer.
+ * This function runs every tick to manage NPC movement decisions.
+ * 
+ * Rules:
+ * - NPCs in conversation: DO NOT wander
+ * - NPCs already moving: DO NOT start new wandering  
+ * - NPCs idle for > 5 seconds: Send wander command
+ * - Minimum 8 seconds between wander commands to prevent snapping
+ */
+const npc_last_movement_decision = new Map<string, number>();
+const npc_last_wander_time = new Map<string, number>();
+const WANDER_CHECK_INTERVAL_MS = 1000; // Check every 1 second
+const MIN_IDLE_BEFORE_WANDER_MS = 2000; // Must be idle for 2 seconds before wandering
+const MIN_TIME_BETWEEN_WANDERS_MS = 8000; // Minimum 8 seconds between wander commands
+
+// Track all active NPC refs that need wandering
+const active_npc_refs = new Set<string>();
+
+async function process_npc_movement_decisions(): Promise<void> {
+    try {
+        const now = Date.now();
+        
+        // Get player's location to filter NPCs by place
+        // Only generate movement commands for NPCs in the same place as the player
+        // This prevents log spam from commands for NPCs the player can't see
+        const player_actor_result = load_actor(data_slot_number, "henry_actor");
+        const player_place_id = player_actor_result.ok 
+            ? (player_actor_result.actor as any)?.location?.place_id 
+            : null;
+        
+        if (!player_place_id) {
+            // No player location available, skip movement decisions
+            return;
+        }
+        
+        // Get all NPCs from storage to find active ones
+        const all_npcs = find_npcs(data_slot_number, {});
+        
+        // Add all NPCs to active tracking
+        for (const npc of all_npcs) {
+            const npc_ref = `npc.${npc.id}`;
+            active_npc_refs.add(npc_ref);
+        }
+        
+        // Process all active NPCs
+        for (const npc_ref of active_npc_refs) {
+            const last_check = npc_last_movement_decision.get(npc_ref) || 0;
+            
+            // Only check every WANDER_CHECK_INTERVAL_MS
+            if (now - last_check < WANDER_CHECK_INTERVAL_MS) {
+                continue;
+            }
+            
+            npc_last_movement_decision.set(npc_ref, now);
+            
+            // Filter: Only send commands for NPCs in the same place as the player
+            // This prevents generating commands for NPCs the player can't see
+            const npc_id = npc_ref.replace("npc.", "");
+            const npc_result = load_npc(data_slot_number, npc_id);
+            if (!npc_result.ok) continue;
+            
+            const npc_place_id = get_npc_place_id(npc_result.npc);
+            if (npc_place_id !== player_place_id) {
+                // NPC is not in the player's place - skip silently (no log spam)
+                continue;
+            }
+            
+            // Skip if in conversation (check both in-memory state and place data)
+            const in_conv = is_in_conversation(npc_ref);
+            
+            // Also check place data for "busy" status (set by witness handler in Interface Program)
+            let npc_status_in_place: string | undefined;
+            if (npc_place_id) {
+                const place_result = load_place(data_slot_number, npc_place_id);
+                if (place_result.ok && place_result.place) {
+                    const npc_in_place = place_result.place.contents.npcs_present.find(
+                        (n: any) => n.npc_ref === npc_ref
+                    );
+                    npc_status_in_place = npc_in_place?.status;
+                }
+            }
+            
+            const is_busy_in_place = npc_status_in_place === "busy";
+            
+            console.log(`[NPC_AI] ${npc_ref} in conversation: ${in_conv}, place status: ${npc_status_in_place}, busy: ${is_busy_in_place}`);
+            
+            if (in_conv || is_busy_in_place) {
+                console.log(`[NPC_AI] ${npc_ref} skipping wander - in conversation or busy`);
+                continue;
+            }
+            
+            // Check if NPC is already moving (prevents redundant commands)
+            const movement_state = get_movement_state(npc_ref);
+            if (movement_state?.is_moving) {
+                continue;
+            }
+            
+            // Check when we last sent a wander command
+            const last_wander = npc_last_wander_time.get(npc_ref) || 0;
+            const time_since_last_wander = now - last_wander;
+            
+            // Must wait minimum time between wander commands to prevent snapping
+            if (time_since_last_wander < MIN_TIME_BETWEEN_WANDERS_MS) {
+                continue;
+            }
+            
+            // Record this wander command
+            npc_last_wander_time.set(npc_ref, now);
+            
+            // Send wander command
+            send_wander_command(
+                npc_ref,
+                "Idle wandering - no conversation active",
+                3, // Normal intensity
+                6  // Normal range
+            );
+        }
+    } catch (err) {
+        debug_error("NPC_AI", "process_npc_movement_decisions failed", err);
+    }
+}
+
+/**
+ * Process NPC position updates from inbox
+ * Renderer sends these when NPCs complete movement
+ */
+async function process_npc_position_updates(inbox_path: string): Promise<void> {
+    try {
+        const inbox = read_inbox(inbox_path);
+        const position_updates = inbox.messages.filter((msg: any) => 
+            msg.type === "npc_position_update" && 
+            !msg.meta?.position_processed
+        );
+        
+        for (const msg of position_updates) {
+            try {
+                const update = JSON.parse(msg.content) as {
+                    npc_ref: string;
+                    position: { x: number; y: number };
+                    place_id: string;
+                };
+                
+                const npc_id = update.npc_ref.replace("npc.", "");
+                
+                // Validate position - reject (0,0) which indicates a bug
+                if (update.position.x === 0 && update.position.y === 0) {
+                    debug_log("NPC_AI", `REJECTED invalid position (0,0) for ${update.npc_ref} - not saving`);
+                    // Mark as processed to avoid retry loop
+                    msg.meta = { ...(msg.meta || {}), position_processed: true, rejected: true, reason: "zero_position" };
+                    continue;
+                }
+                
+                // Load NPC from storage
+                const npc_result = load_npc(data_slot_number, npc_id);
+                if (!npc_result.ok) {
+                    debug_log("NPC_AI", `Cannot save position for ${update.npc_ref} - NPC not found`);
+                    continue;
+                }
+                
+                const npc = npc_result.npc as Record<string, any>;
+                
+                // Get current position for logging
+                const old_pos = npc.location?.tile;
+                
+                // Update location
+                if (!npc.location) {
+                    npc.location = {};
+                }
+                npc.location.tile = {
+                    x: update.position.x,
+                    y: update.position.y
+                };
+                npc.location.place_id = update.place_id;
+                
+                // Save to storage
+                save_npc(data_slot_number, npc_id, npc);
+                
+                debug_log("NPC_AI", `Saved position for ${update.npc_ref}`, {
+                    x: update.position.x,
+                    y: update.position.y,
+                    place_id: update.place_id,
+                    moved_from: old_pos ? `(${old_pos.x}, ${old_pos.y})` : "(unknown)"
+                });
+                
+                // Mark as processed
+                msg.meta = { ...(msg.meta || {}), position_processed: true };
+                
+            } catch (err) {
+                debug_error("NPC_AI", "Failed to process position update", err);
+            }
+        }
+        
+        // Write updated inbox back
+        if (position_updates.length > 0) {
+            write_inbox(inbox_path, inbox);
+        }
+        
+    } catch (err) {
+        debug_error("NPC_AI", "process_npc_position_updates failed", err);
+    }
+}
+
 async function tick(outbox_path: string, inbox_path: string, log_path: string): Promise<void> {
     try {
+        // First, process position updates from renderer
+        await process_npc_position_updates(inbox_path);
+        
         // Drain outbox for messages that need NPC responses
         const outbox = read_outbox(outbox_path);
         const messages = outbox.messages;
@@ -1277,6 +1505,14 @@ async function tick(outbox_path: string, inbox_path: string, log_path: string): 
                 // Don't mark as done on error - will retry next poll
             }
         }
+        
+        // Check for conversation timeouts and clean up ended conversations
+        update_conversations();
+        
+        // Phase 8: Unified Movement Authority
+        // Backend decides when NPCs should wander and sends commands to renderer
+        // This runs every tick to ensure continuous wandering behavior
+        await process_npc_movement_decisions();
         
         await sleep(0);
     } catch (err) {

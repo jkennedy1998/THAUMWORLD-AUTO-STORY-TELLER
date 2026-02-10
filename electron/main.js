@@ -1,4 +1,6 @@
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, ipcMain } from 'electron';
+import { readFileSync, writeFileSync } from 'fs';
+import { join } from 'path';
 
 const DEV_URL = 'http://localhost:5173';
 
@@ -12,6 +14,7 @@ function create_window() {
         webPreferences: {
             contextIsolation: true,
             nodeIntegration: false,
+            preload: join(process.cwd(), 'electron', 'preload.js'),
         },
     });
 
@@ -36,6 +39,29 @@ function create_window() {
     
     console.log('[Electron] Window created successfully');
 }
+
+// IPC handlers for renderer communication
+ipcMain.handle('read-file', async (event, filePath) => {
+    try {
+        const content = readFileSync(filePath, 'utf-8');
+        return { success: true, content };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('write-file', async (event, filePath, content) => {
+    try {
+        writeFileSync(filePath, content, 'utf-8');
+        return { success: true };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('get-data-slot-dir', async (event, slot) => {
+    return join(process.cwd(), 'local_data', `data_slot_${slot}`);
+});
 
 app.whenReady().then(() => {
     create_window();

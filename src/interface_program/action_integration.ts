@@ -5,6 +5,7 @@ import { ActionPipeline, type ActionIntent, type ActionResult } from "../action_
 import { load_actor } from "../actor_storage/store.js";
 import { find_npcs, load_npc } from "../npc_storage/store.js";
 import { get_npc_location } from "../npc_storage/location.js";
+import { getAvailableTargets } from "../action_system/target_resolution.js";
 import { debug_log, debug_warn } from "../shared/debug.js";
 
 let pipeline: ActionPipeline | null = null;
@@ -17,8 +18,8 @@ function createPipelineDependencies(dataSlot: number) {
   return {
     // Get available targets at a location
     getAvailableTargets: async (location: any, radius: number) => {
-      // TODO: Implement proper target resolution
-      return [];
+      // Use the shared target resolution system
+      return getAvailableTargets(location, radius);
     },
     
     // Get actor location
@@ -136,6 +137,14 @@ export async function processPlayerAction(
       effectsCount: result.effects.length
     });
     
+    // If this is a COMMUNICATE action with a target, immediately face the target
+    // This provides immediate feedback before the NPC_AI service processes the witness event
+    if (intent.verb === "COMMUNICATE" && intent.targetRef && intent.targetRef.startsWith("npc.")) {
+      const { send_face_command } = await import("../npc_ai/movement_command_sender.js");
+      send_face_command(intent.targetRef, intent.actorRef, "Face speaker immediately on communication");
+      debug_log("ActionPipeline", "Sent immediate face command", { npc: intent.targetRef, actor: intent.actorRef });
+    }
+    
     return result;
   } catch (error) {
     debug_warn("ActionPipeline", "Action failed", {
@@ -173,6 +182,11 @@ export function shouldUseActionPipeline(input: string): boolean {
     /^(use|activate)\s+/,
     /^help\s*/,
     /^(north|south|east|west|up|down)$/,
+    /^(hello|hi|hey|greetings)/,  // Greeting at start
+    /^(talk|speak)\s+to\s+/,     // Talk to someone
+    /\b(hello|hi|hey|greetings)\b/, // Greeting anywhere in text (catches "grenda hello")
+    /\b(talk|speak|chat|converse)\b/, // Conversation verbs anywhere
+    /\b(bye|goodbye|farewell|see you)\b/, // Farewell patterns
   ];
   
   return actionPatterns.some(pattern => pattern.test(trimmed));

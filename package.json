@@ -22,7 +22,15 @@
     "canvas_build": "vite build",
     "canvas_preview": "vite preview",
     "wipe": "node scripts/wipe_memory.js",
-    "wipe:slot1": "node scripts/wipe_memory.js --slot=1"
+    "wipe:slot1": "node scripts/wipe_memory.js --slot=1",
+    "launch": "node scripts/launch_with_logs.js",
+    "launch:slot1": "node scripts/launch_with_logs.js --slot=1",
+    "launch:logs": "npm run build && npm run launch",
+    "dev:logs": "node scripts/dev_with_logs.js",
+    "dev:logs:slot1": "node scripts/dev_with_logs.js --slot=1",
+    "logs:view": "node scripts/view_logs.js",
+    "logs:clean": "node scripts/view_logs.js --clean",
+    "build:exe": "node scripts/build_exe.js"
   },
   "repository": {
     "type": "git",
@@ -47,6 +55,7 @@
     "vite": "^7.3.1",
     "concurrently": "^9.2.0",
     "electron": "^32.3.1",
-    "wait-on": "^7.2.0"
+    "wait-on": "^7.2.0",
+    "pkg": "^5.8.1"
   }
 }

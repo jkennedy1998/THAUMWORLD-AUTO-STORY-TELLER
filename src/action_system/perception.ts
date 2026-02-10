@@ -5,6 +5,7 @@ import type { ActionVerb } from "../shared/constants.js";
 import type { ActionIntent, ActionResult, Location } from "./intent.js";
 import { ACTION_REGISTRY } from "./registry.js";
 import { calculateDistance } from "./target_resolution.js";
+import { debug_log } from "../shared/debug.js";
 
 // Perception event types
 export type PerceptionEventType = 
@@ -62,8 +63,9 @@ export interface PerceptionEvent {
   urgency: number;          // 0-100
 }
 
-// Types of senses
-export type SenseType = "sight" | "hearing" | "smell" | "touch" | "pressure" | "magic";
+// Types of senses (4 canonical senses from inspection/clarity_system.ts)
+// light = sight/vision, pressure = sound + touch, aroma = smell, thaumic = magic
+export type SenseType = "light" | "pressure" | "aroma" | "thaumic";
 
 // Perception details vary by event type
 export type PerceptionDetails =
@@ -208,17 +210,17 @@ export async function checkPerception(
     return { canPerceive: false, clarity: "obscured", senses: [], distance, details: {} };
   }
   
-  // Determine which senses can perceive
+  // Determine which senses can perceive (using 4 canonical senses)
   const senses: SenseType[] = [];
   
   if (perceptibility.visual) {
     // TODO: Check line of sight, lighting, stealth
-    senses.push("sight");
+    senses.push("light");  // light = sight/vision
   }
   
   if (perceptibility.auditory) {
     // TODO: Check hearing range, stealth, obstacles
-    senses.push("hearing");
+    senses.push("pressure");  // pressure = sound vibrations (hearing)
   }
   
   if (senses.length === 0) {
@@ -389,28 +391,45 @@ export async function broadcastPerception(
   } = {}
 ): Promise<PerceptionEvent[]> {
   const actionDef = ACTION_REGISTRY[intent.verb];
-  if (!actionDef) return [];
+  if (!actionDef) {
+    debug_log("[Perception]", `No action def for ${intent.verb}`);
+    return [];
+  }
   
   // Only broadcast observable actions
   if (!actionDef.perceptibility.visual && !actionDef.perceptibility.auditory) {
+    debug_log("[Perception]", `Action ${intent.verb} not observable`);
     return [];
   }
   
   const radius = actionDef.perceptibility.radius;
   const events: PerceptionEvent[] = [];
   
-  // Get nearby characters (would use options.getCharactersInRange or default)
-  // For now, return empty - implement with your storage system
+  console.log(`[Perception] Broadcasting ${intent.verb} from ${intent.actorRef} with radius ${radius}`);
+  console.log(`[Perception] Actor location:`, intent.actorLocation);
+  
+  // Get nearby characters
   const nearbyCharacters: Array<{ ref: string; location: Location }> = [];
   
   if (options.getCharactersInRange) {
+    console.log(`[Perception] Calling getCharactersInRange...`);
     const chars = await options.getCharactersInRange(intent.actorLocation, radius);
+    console.log(`[Perception] getCharactersInRange returned ${chars.length} characters`);
+    for (const char of chars) {
+      console.log(`[Perception]   - ${char.ref} at (${char.location.x}, ${char.location.y})`);
+    }
     nearbyCharacters.push(...chars);
+    debug_log("[Perception]", `Found ${chars.length} characters in range`);
+  } else {
+    console.log(`[Perception] ERROR: No getCharactersInRange function provided!`);
+    debug_log("[Perception]", "No getCharactersInRange function provided!");
   }
   
   for (const observer of nearbyCharacters) {
     // Skip self-observation
     if (observer.ref === intent.actorRef) continue;
+    
+    debug_log("[Perception]", `Checking perception for observer: ${observer.ref}`);
     
     // Check perception
     const perception = await checkPerception(
@@ -420,6 +439,8 @@ export async function broadcastPerception(
       intent.actorLocation
     );
     
+    debug_log("[Perception]", `Perception result for ${observer.ref}:`, { canPerceive: perception.canPerceive, clarity: perception.clarity });
+    
     if (perception.canPerceive) {
       const event = createPerceptionEvent(observer.ref, intent, timing, perception, result);
       
@@ -427,9 +448,11 @@ export async function broadcastPerception(
       perceptionMemory.addPerception(observer.ref, event);
       
       events.push(event);
+      debug_log("[Perception]", `Created perception event for ${observer.ref}`);
     }
   }
   
+  debug_log("[Perception]", `Broadcast complete: ${events.length} observers perceived the action`);
   return events;
 }
 

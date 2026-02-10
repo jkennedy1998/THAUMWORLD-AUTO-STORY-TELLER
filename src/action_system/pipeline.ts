@@ -8,6 +8,9 @@ import { ACTION_REGISTRY, getActionDefinition } from "./registry.js";
 import type { TargetValidationResult, AvailableTarget } from "./target_resolution.js";
 import { resolveTarget, validateTarget, checkAwareness } from "./target_resolution.js";
 import { broadcastPerception, perceptionMemory, type PerceptionEvent } from "./perception.js";
+import { face_target } from "../npc_ai/facing_system.js";
+import { log_sense_broadcast } from "./sense_broadcast.js";
+import { process_witness_event } from "../npc_ai/witness_handler.js";
 import { validateToolRequirement, getActionTool } from "../tool_system/index.js";
 import { validateRange } from "../action_range/index.js";
 import { handleAction, type ActionContext } from "../action_handlers/index.js";
@@ -83,9 +86,12 @@ export class ActionPipeline {
   
   // Main processing method
   async process(intent: ActionIntent): Promise<ActionResult> {
+    console.log(`[ActionPipeline] START processing ${intent.verb} by ${intent.actorRef}`);
+    
     const actionDef = getActionDefinition(intent.verb);
     
     if (!actionDef) {
+      console.log(`[ActionPipeline] FAIL: Unknown action verb: ${intent.verb}`);
       return this.fail(intent, `Unknown action verb: ${intent.verb}`);
     }
     
@@ -93,47 +99,67 @@ export class ActionPipeline {
     
     try {
       // Stage 1: Target Resolution
+      console.log(`[ActionPipeline] Stage 1: Target Resolution`);
       intent = await this.stageTargetResolution(intent, actionDef);
       if (intent.status === "failed") {
+        console.log(`[ActionPipeline] Stage 1 FAILED: ${intent.failureReason}`);
         return this.fail(intent, intent.failureReason || "Target resolution failed");
       }
+      console.log(`[ActionPipeline] Stage 1 complete`);
       
       // Stage 2: Validation
       if (this.config.enableValidation) {
+        console.log(`[ActionPipeline] Stage 2: Validation`);
         intent = await this.stageValidation(intent, actionDef);
         if (intent.status === "failed") {
+          console.log(`[ActionPipeline] Stage 2 FAILED: ${intent.failureReason}`);
           return this.fail(intent, intent.failureReason || "Validation failed");
         }
+        console.log(`[ActionPipeline] Stage 2 complete`);
       }
       
       // Stage 3: Cost Check
       if (this.config.enableCostCheck) {
+        console.log(`[ActionPipeline] Stage 3: Cost Check`);
         intent = await this.stageCostCheck(intent, actionDef);
         if (intent.status === "failed") {
+          console.log(`[ActionPipeline] Stage 3 FAILED: ${intent.failureReason}`);
           return this.fail(intent, intent.failureReason || "Cannot afford action cost");
         }
+        console.log(`[ActionPipeline] Stage 3 complete`);
       }
       
       // Stage 4: Rules Check
       if (this.config.enableRulesCheck) {
+        console.log(`[ActionPipeline] Stage 4: Rules Check`);
         intent = await this.stageRulesCheck(intent, actionDef);
         if (intent.status === "failed") {
+          console.log(`[ActionPipeline] Stage 4 FAILED: ${intent.failureReason}`);
           return this.fail(intent, intent.failureReason || "Rules check failed");
         }
+        console.log(`[ActionPipeline] Stage 4 complete`);
       }
       
       // Stage 5: Broadcast Before Execution (perception)
+      console.log(`[ActionPipeline] Stage 5: Broadcast Before`);
       let perceptionEvents: PerceptionEvent[] = [];
       if (this.config.enablePerception) {
         perceptionEvents = await this.stageBroadcastBefore(intent);
+      } else {
+        console.log(`[ActionPipeline] Stage 5: SKIPPED (enablePerception: ${this.config.enablePerception})`);
       }
       
       // Stage 6: Execute
+      console.log(`[ActionPipeline] Stage 6: Execute`);
       const result = await this.stageExecution(intent, actionDef);
+      console.log(`[ActionPipeline] Stage 6: Execution complete, success: ${result.success}`);
       
       // Stage 7: Broadcast After Execution
+      console.log(`[ActionPipeline] Stage 7: Broadcast After (enablePerception: ${this.config.enablePerception})`);
       if (this.config.enablePerception) {
         await this.stageBroadcastAfter(intent, result);
+      } else {
+        console.log(`[ActionPipeline] Stage 7: SKIPPED (enablePerception: ${this.config.enablePerception})`);
       }
       
       this.log(`Action completed: ${intent.verb} - ${result.success ? "success" : "failed"}`);
@@ -549,11 +575,75 @@ export class ActionPipeline {
   
   // Stage 7: Broadcast After Execution
   private async stageBroadcastAfter(intent: ActionIntent, result: ActionResult): Promise<void> {
+    console.log(`[ActionPipeline] stageBroadcastAfter START for ${intent.verb}`);
     intent = setIntentStage(intent, "broadcast_after");
     
-    await broadcastPerception(intent, "after", result, {
+    // Update actor facing to face target if action was successful and has a target
+    if (result.success && intent.targetRef) {
+      console.log(`[ActionPipeline] Updating actor facing for successful action`);
+      this.updateActorFacing(intent);
+    }
+    
+    // Log sense broadcast for debugging
+    if (intent.actorLocation) {
+      console.log(`[ActionPipeline] Logging sense broadcast`);
+      log_sense_broadcast(
+        intent.actorRef,
+        intent.verb,
+        intent.parameters.subtype as string | undefined,
+        { x: intent.actorLocation.x ?? 0, y: intent.actorLocation.y ?? 0 }
+      );
+    }
+    
+    // Broadcast perception and get list of observers who perceived the action
+    console.log(`[ActionPipeline] Broadcasting perception after execution...`);
+    console.log(`[ActionPipeline] enablePerception: ${this.config.enablePerception}`);
+    console.log(`[ActionPipeline] getAvailableTargets exists: ${!!this.deps.getAvailableTargets}`);
+    const events = await broadcastPerception(intent, "after", result, {
       getCharactersInRange: this.deps.getAvailableTargets
     });
+    
+    console.log(`[ActionPipeline] Perception events: ${events.length} observers`);
+    
+    // Process witness reactions for each observer
+    for (const event of events) {
+      console.log(`[ActionPipeline] Processing witness event for: ${event.observerRef}`);
+      process_witness_event(event.observerRef, event);
+    }
+    
+    console.log(`[ActionPipeline] stageBroadcastAfter END for ${intent.verb}`);
+  }
+  
+  // Helper: Update actor facing toward target
+  private updateActorFacing(intent: ActionIntent): void {
+    const targetRef = intent.targetRef;
+    const targetLocation = intent.targetLocation;
+    const actorLocation = intent.actorLocation;
+    
+    if (!targetRef || !targetLocation || !actorLocation) return;
+    
+    // Only update facing for certain action types
+    const facingActions = ["COMMUNICATE", "USE", "INSPECT"];
+    if (!facingActions.includes(intent.verb)) return;
+    
+    // Only update if both positions are in the same tile space
+    if (
+      actorLocation.world_x === targetLocation.world_x &&
+      actorLocation.world_y === targetLocation.world_y &&
+      actorLocation.region_x === targetLocation.region_x &&
+      actorLocation.region_y === targetLocation.region_y &&
+      actorLocation.x !== undefined &&
+      actorLocation.y !== undefined &&
+      targetLocation.x !== undefined &&
+      targetLocation.y !== undefined
+    ) {
+      face_target(
+        intent.actorRef,
+        targetRef,
+        { x: targetLocation.x, y: targetLocation.y },
+        { x: actorLocation.x, y: actorLocation.y }
+      );
+    }
   }
   
   // Helper: Parse effect template

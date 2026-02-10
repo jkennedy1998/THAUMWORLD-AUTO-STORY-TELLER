@@ -7,7 +7,8 @@ import { make_place_module } from '../mono_ui/modules/place_module.js';
 import type { Module, Rgb } from '../mono_ui/types.js';
 import type { Place } from '../types/place.js';
 import { debug_warn, debug_log } from '../shared/debug.js';
-import { init_npc_movement, init_place_movement, stop_place_movement } from '../npc_ai/movement_loop.js';
+import { init_npc_movement, stop_place_movement } from '../npc_ai/movement_loop.js';
+import { start_movement_command_handler, set_command_handler_place } from '../mono_ui/modules/movement_command_handler.js';
 import { get_color_by_name } from '../mono_ui/colors.js';
 import { infer_action_verb_hint } from '../shared/intent_hint.js';
 import { load_actor, save_actor } from '../actor_storage/store.js';
@@ -124,11 +125,14 @@ export function create_app_state(): AppState {
             if (data.ok && data.place) {
                 ui_state.place.current_place = data.place;
                 
-                // Initialize NPC movement for this place
-                if (is_new_place && data.place) {
-                    init_place_movement(place_id, data.place);
-                    ui_state.place.npc_movement_active = true;
-                }
+                // Phase 8: Unified Movement Authority
+                // Frontend NO LONGER initializes place movement
+                // NPC_AI backend is the sole authority for movement decisions
+                // The backend will send movement commands via outbox
+                // Frontend just visualizes movement updates from the callback
+                
+                // Update movement command handler with new place
+                set_command_handler_place(data.place);
             } else {
                 ui_state.place.current_place = null;
             }
@@ -1098,6 +1102,10 @@ export function create_app_state(): AppState {
             ui_state.place.npc_movement_active = true;
         }
     });
+
+    // Phase 8: Unified Movement Authority
+    // Start listening for movement commands from NPC_AI backend
+    const stop_command_handler = start_movement_command_handler(100);
 
     return {
         modules,

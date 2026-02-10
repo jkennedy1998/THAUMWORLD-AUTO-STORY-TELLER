@@ -17,6 +17,8 @@ import {
   type MovementGoal,
 } from "../shared/movement_engine.js";
 import { find_path } from "../shared/pathfinding.js";
+import { is_in_conversation } from "./conversation_state.js";
+import { send_wander_command, send_stop_command } from "./movement_command_sender.js";
 
 // Store place data
 const place_data = new Map<string, Place>();
@@ -68,9 +70,26 @@ export function init_place_movement(place_id: string, place: Place): void {
     npc_count: place.contents.npcs_present.length,
   });
 
-  // Start wandering behavior for all NPCs
+  // Start wandering behavior for all NPCs (skip those in conversation)
   for (const npc of place.contents.npcs_present) {
-    start_npc_wandering(place_id, npc.npc_ref);
+    if (!is_in_conversation(npc.npc_ref)) {
+      start_npc_wandering(place_id, npc.npc_ref);
+    } else {
+      debug_log("NPC_Movement", `${npc.npc_ref} skipping initial wander - in conversation`);
+    }
+  }
+}
+
+/**
+ * Cancel any pending wandering timeout for an NPC
+ * Called when conversation starts to prevent wandering
+ */
+export function cancel_npc_wandering(npc_ref: string): void {
+  const timeout_id = wandering_timeouts.get(npc_ref);
+  if (timeout_id) {
+    clearTimeout(timeout_id);
+    wandering_timeouts.delete(npc_ref);
+    debug_log("NPC_Movement", `${npc_ref} cancelled pending wander`);
   }
 }
 
@@ -86,11 +105,7 @@ export function stop_place_movement(place_id: string): void {
   const place = place_data.get(place_id);
   if (place) {
     for (const npc of place.contents.npcs_present) {
-      const timeout_id = wandering_timeouts.get(npc.npc_ref);
-      if (timeout_id) {
-        clearTimeout(timeout_id);
-        wandering_timeouts.delete(npc.npc_ref);
-      }
+      cancel_npc_wandering(npc.npc_ref);
     }
   }
 
@@ -105,6 +120,12 @@ export function stop_place_movement(place_id: string): void {
  * Start an NPC wandering
  */
 function start_npc_wandering(place_id: string, npc_ref: string): void {
+  // Don't wander if NPC is in conversation
+  if (is_in_conversation(npc_ref)) {
+    debug_log("NPC_Movement", `${npc_ref} skipping wander - in conversation`);
+    return;
+  }
+
   const place = place_data.get(place_id);
   if (!place) return;
 
@@ -217,6 +238,35 @@ export function get_npc_path(npc_ref: string) {
  */
 export function is_npc_moving(npc_ref: string): boolean {
   return get_movement_state(npc_ref)?.is_moving ?? false;
+}
+
+/**
+ * Resume wandering for an NPC after conversation ends
+ * Called by witness system when conversation ends
+ */
+export function resume_npc_wandering(npc_ref: string): void {
+  // Find which place this NPC belongs to
+  for (const place_id of active_place_ids) {
+    const place = place_data.get(place_id);
+    if (place?.contents.npcs_present.some(n => n.npc_ref === npc_ref)) {
+      // Cancel any existing timeout first
+      const existing_timeout = wandering_timeouts.get(npc_ref);
+      if (existing_timeout) {
+        clearTimeout(existing_timeout);
+        wandering_timeouts.delete(npc_ref);
+      }
+      
+      // Start wandering after a short delay
+      const timeout_id = setTimeout(() => {
+        wandering_timeouts.delete(npc_ref);
+        start_npc_wandering(place_id, npc_ref);
+      }, 1000);
+      
+      wandering_timeouts.set(npc_ref, timeout_id);
+      debug_log("NPC_Movement", `${npc_ref} will resume wandering after conversation`);
+      return;
+    }
+  }
 }
 
 // Re-export types for compatibility

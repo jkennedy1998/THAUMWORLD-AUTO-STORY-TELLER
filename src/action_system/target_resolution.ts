@@ -5,6 +5,11 @@ import type { ActionVerb } from "../shared/constants.js";
 import type { TargetType, ActionDefinition } from "./registry.js";
 import { ACTION_REGISTRY, isValidTargetType } from "./registry.js";
 import type { ActionIntent, Location } from "./intent.js";
+import { get_entities_in_place } from "../place_storage/entity_index.js";
+import { load_npc } from "../npc_storage/store.js";
+import { load_actor } from "../actor_storage/store.js";
+import { get_npc_location } from "../npc_storage/location.js";
+import { SERVICE_CONFIG } from "../shared/constants.js";
 
 // Context for target resolution
 export interface TargetResolutionContext {
@@ -368,14 +373,129 @@ export async function resolveTarget(
   };
 }
 
-// Get available targets for a location (simplified - would query storage in real implementation)
+// Get available targets for a location
+// Queries the entity index to find NPCs and actors in the same place
 export async function getAvailableTargets(
   location: Location,
   radius: number = 50
 ): Promise<AvailableTarget[]> {
-  // This would query actor_storage and npc_storage for entities in range
-  // For now, return empty array - implement based on your storage system
-  return [];
+  console.log(`[getAvailableTargets] Called with location:`, location, `radius: ${radius}`);
+  
+  const data_slot = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+  const targets: AvailableTarget[] = [];
+  
+  // Need place_id to look up entities
+  const place_id = (location as any).place_id;
+  console.log(`[getAvailableTargets] place_id: ${place_id}`);
+  
+  if (!place_id) {
+    console.log(`[getAvailableTargets] No place_id, returning empty`);
+    return targets;
+  }
+  
+  // Get all entities in this place from the index
+  const entities = get_entities_in_place(data_slot, place_id);
+  console.log(`[getAvailableTargets] Found ${entities.npcs.length} NPCs and ${entities.actors.length} actors in place ${place_id}`);
+  
+  // Process NPCs
+  for (const npc_ref of entities.npcs) {
+    const npc_id = npc_ref.replace("npc.", "");
+    console.log(`[getAvailableTargets] Processing NPC: ${npc_id}`);
+    
+    const npc_result = load_npc(data_slot, npc_id);
+    
+    if (!npc_result.ok || !npc_result.npc) {
+      console.log(`[getAvailableTargets]   Failed to load NPC ${npc_id}`);
+      continue;
+    }
+    
+    const npc_location = get_npc_location(npc_result.npc);
+    if (!npc_location) {
+      console.log(`[getAvailableTargets]   No location for NPC ${npc_id}`);
+      continue;
+    }
+    
+    console.log(`[getAvailableTargets]   NPC ${npc_id} at tile (${npc_location.tile.x}, ${npc_location.tile.y})`);
+    
+    // Calculate distance (in tile space within the place)
+    const npc_tile_pos = npc_location.tile;
+    const actor_tile_pos = { x: location.x ?? 0, y: location.y ?? 0 };
+    const distance = Math.sqrt(
+      Math.pow(npc_tile_pos.x - actor_tile_pos.x, 2) +
+      Math.pow(npc_tile_pos.y - actor_tile_pos.y, 2)
+    );
+    
+    console.log(`[getAvailableTargets]   Distance: ${distance} (radius: ${radius})`);
+    
+    if (distance <= radius) {
+      console.log(`[getAvailableTargets]   ADDING ${npc_ref} to targets (distance ${distance} <= ${radius})`);
+      targets.push({
+        ref: npc_ref,
+        type: "character",
+        name: (npc_result.npc.name as string) || npc_id,
+        location: {
+          world_x: npc_location.world_tile.x,
+          world_y: npc_location.world_tile.y,
+          region_x: npc_location.region_tile.x,
+          region_y: npc_location.region_tile.y,
+          x: npc_tile_pos.x,
+          y: npc_tile_pos.y,
+          place_id: place_id
+        },
+        distance
+      });
+    } else {
+      console.log(`[getAvailableTargets]   SKIPPING ${npc_ref} (distance ${distance} > ${radius})`);
+    }
+  }
+  
+  // Process Actors
+  for (const actor_ref of entities.actors) {
+    const actor_id = actor_ref.replace("actor.", "");
+    const actor_result = load_actor(data_slot, actor_id);
+    
+    if (!actor_result.ok || !actor_result.actor) {
+      continue;
+    }
+    
+    const actor_loc = (actor_result.actor as any).location;
+    if (!actor_loc?.tile) {
+      continue;
+    }
+    
+    // Calculate distance
+    const actor_tile_pos = { x: location.x ?? 0, y: location.y ?? 0 };
+    const other_tile_pos = actor_loc.tile;
+    const distance = Math.sqrt(
+      Math.pow(other_tile_pos.x - actor_tile_pos.x, 2) +
+      Math.pow(other_tile_pos.y - actor_tile_pos.y, 2)
+    );
+    
+    if (distance <= radius) {
+      targets.push({
+        ref: actor_ref,
+        type: "character",
+        name: (actor_result.actor.name as string) || actor_id,
+        location: {
+          world_x: actor_loc.world_tile?.x ?? 0,
+          world_y: actor_loc.world_tile?.y ?? 0,
+          region_x: actor_loc.region_tile?.x ?? 0,
+          region_y: actor_loc.region_tile?.y ?? 0,
+          x: other_tile_pos.x,
+          y: other_tile_pos.y,
+          place_id: place_id
+        },
+        distance
+      });
+    }
+  }
+  
+  console.log(`[getAvailableTargets] COMPLETE: Returning ${targets.length} targets`);
+  for (const t of targets) {
+    console.log(`[getAvailableTargets]   - ${t.ref} at (${t.location.x}, ${t.location.y}) distance=${t.distance}`);
+  }
+  
+  return targets;
 }
 
 // Check if actor is aware of target
