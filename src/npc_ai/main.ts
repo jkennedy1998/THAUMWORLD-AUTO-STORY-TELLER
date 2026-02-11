@@ -521,14 +521,32 @@ async function process_communication(
     const started = Date.now();
     
     // Extract communication details from meta
-    const original_text = (msg.meta as any)?.original_text as string || "";
-    const machine_text = (msg.meta as any)?.machine_text as string || "";
-    const events = (msg.meta as any)?.events as string[] || [];
+    // Support both old format (meta.original_text + meta.machine_text) 
+    // and new format (content + meta.intent_verb from ActionPipeline)
+    const meta = msg.meta as any;
+    let original_text = meta?.original_text as string || "";
+    let machine_text = meta?.machine_text as string || "";
+    const events = meta?.events as string[] || [];
+    
+    // NEW: Handle direct COMMUNICATE messages from ActionPipeline
+    // These have meta.intent_verb === "COMMUNICATE" and content in msg.content
+    if (meta?.intent_verb === "COMMUNICATE" && !original_text) {
+        original_text = msg.content || "";
+        // Build machine_text from sender and target info
+        const sender_actor = msg.sender?.startsWith("actor.") ? msg.sender.replace("actor.", "") : msg.sender;
+        const target_npc = meta?.target_ref;
+        if (sender_actor) {
+            machine_text = `actor.${sender_actor}.COMMUNICATE(target=${target_npc || "broadcast"})`;
+        }
+    }
     
     // Find COMMUNICATE events to identify targets
     const communicate_events = events.filter(e => e.includes("COMMUNICATE"));
     
-    if (communicate_events.length === 0) {
+    // Also accept messages with intent_verb === "COMMUNICATE" even if no events
+    const has_communicate = communicate_events.length > 0 || meta?.intent_verb === "COMMUNICATE";
+    
+    if (!has_communicate) {
         debug_pipeline("NPC_AI", "No COMMUNICATE events found", { id: msg.id });
         return;
     }
@@ -537,14 +555,29 @@ async function process_communication(
     const correlation_id = msg.correlation_id ?? msg.id;
     
     // Find the player actor from the communication
-    // The machine text contains actor.<id>.COMMUNICATE
-    const actor_match = machine_text.match(/actor\.(\w+)\.COMMUNICATE/);
-    if (!actor_match || !actor_match[1]) {
-        debug_error("NPC_AI", "Could not identify actor from machine text", { machine_text });
+    // First try machine text, then fall back to sender
+    let actor_match = machine_text.match(/actor\.(\w+)\.COMMUNICATE/);
+    let actor_id: string | null = null;
+    
+    if (actor_match && actor_match[1]) {
+        actor_id = actor_match[1];
+    } else if (msg.sender?.startsWith("actor.")) {
+        // Extract from sender field
+        actor_id = msg.sender.replace("actor.", "");
+    } else if (msg.sender && !msg.sender.includes(".")) {
+        // Assume sender is just the actor ID
+        actor_id = msg.sender;
+    }
+    
+    if (!actor_id) {
+        debug_error("NPC_AI", "Could not identify actor from message", { 
+            machine_text, 
+            sender: msg.sender,
+            id: msg.id 
+        });
         return;
     }
     
-    const actor_id = actor_match[1];
     const actor_result = load_actor(data_slot_number, actor_id);
     
     if (!actor_result.ok) {
@@ -585,7 +618,7 @@ async function process_communication(
         );
     }
     
-    // Parse targets from machine text
+    // Parse targets from machine text or meta.target_ref
     const targets_match = machine_text.match(/targets=\[([^\]]+)\]/);
     const direct_targets: string[] = [];
     
@@ -598,6 +631,15 @@ async function process_communication(
                 const npc_id = t.replace("npc.", "");
                 direct_targets.push(npc_id);
             });
+        }
+    }
+    
+    // NEW: Also check meta.target_ref for direct target (from ActionPipeline)
+    const meta_target = (msg.meta as any)?.target_ref as string;
+    if (meta_target?.startsWith("npc.")) {
+        const npc_id = meta_target.replace("npc.", "");
+        if (!direct_targets.includes(npc_id)) {
+            direct_targets.push(npc_id);
         }
     }
     
@@ -1018,9 +1060,8 @@ async function process_communication(
         const response_msg = create_message(output);
         append_inbox_message(inbox_path, response_msg);
 
-        // The canvas UI reads /api/log (log.jsonc), not inbox.jsonc.
-        // Log NPC responses directly so they appear in the in-game window.
-        append_log_envelope(log_path, response_msg);
+        // Note: Breath function reads inbox and calls displayMessageToUser() 
+        // which writes to log. Don't write directly to log here to avoid duplicates.
 
         // Persist conversation context to NPC memory_sheet
         // Stores hierarchical conversation threads (summary + recent turns) for continuity
@@ -1437,10 +1478,13 @@ async function tick(outbox_path: string, inbox_path: string, log_path: string): 
                 return false;
             }
             
-            // Process both "applied" messages AND "done" messages that haven't been npc_processed yet
-            // The state_applier marks messages as "done" before NPC AI sees them
+            // Process messages that are ready for NPC response generation:
+            // - "applied" messages (processed by state_applier)
+            // - "done" messages that haven't been npc_processed yet
+            // - "sent" messages with COMMUNICATE intent (direct from ActionPipeline)
             const is_ready = msg.status === "applied" || msg.status === "applied_1" || msg.status === "applied_2" || 
-                            (msg.status === "done" && !msg.meta?.npc_processed);
+                            (msg.status === "done" && !msg.meta?.npc_processed) ||
+                            (msg.status === "sent" && (msg.meta as any)?.intent_verb === "COMMUNICATE");
             if (!is_ready) {
                 // Only log at debug level 4+ to avoid spam - most messages aren't ready for NPC processing
                 if (DEBUG_LEVEL >= 4) {
@@ -1451,7 +1495,11 @@ async function tick(outbox_path: string, inbox_path: string, log_path: string): 
             
             // Check if message has communication context
             const meta = msg.meta;
-            if (!meta?.original_text && !meta?.events?.some((e: string) => e.includes("COMMUNICATE"))) {
+            const has_communicate_context = 
+                meta?.original_text || 
+                meta?.events?.some((e: string) => e.includes("COMMUNICATE")) ||
+                (meta as any)?.intent_verb === "COMMUNICATE";
+            if (!has_communicate_context) {
                 // Only log at debug level 4+ to avoid spam
                 if (DEBUG_LEVEL >= 4) {
                     debug_log("NPC_AI", `Skipping message ${msg.id} - no communication context`);
@@ -1505,6 +1553,11 @@ async function tick(outbox_path: string, inbox_path: string, log_path: string): 
                 // Don't mark as done on error - will retry next poll
             }
         }
+        
+        // Note: Conversation responses are now handled entirely through process_communication()
+        // which is called above for all applied_COMMUNICATE messages.
+        // The witness system triggers real-time reactions via process_witness_communication()
+        // which sets up engagement state, but actual LLM responses come through process_communication().
         
         // Check for conversation timeouts and clean up ended conversations
         update_conversations();

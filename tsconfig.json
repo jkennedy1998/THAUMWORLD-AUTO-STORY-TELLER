@@ -46,6 +46,7 @@
     "vite.config.ts",
     "dist",
     "node_modules",
-    "scripts"
+    "scripts",
+    "archive"
   ]
 }

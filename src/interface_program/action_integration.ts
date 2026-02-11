@@ -167,32 +167,6 @@ export async function processPlayerAction(
 }
 
 /**
- * Check if ActionPipeline should handle this command
- * Returns true for simple commands that don't need LLM interpretation
- */
-export function shouldUseActionPipeline(input: string): boolean {
-  const trimmed = input.trim().toLowerCase();
-  
-  // List of action verbs that ActionPipeline handles well
-  const actionPatterns = [
-    /^(move|go|walk)\s+/,
-    /^(say|shout|yell|whisper)\s+/,
-    /^(attack|hit|strike|shoot)\s+/,
-    /^(look|inspect|examine)\s*/,
-    /^(use|activate)\s+/,
-    /^help\s*/,
-    /^(north|south|east|west|up|down)$/,
-    /^(hello|hi|hey|greetings)/,  // Greeting at start
-    /^(talk|speak)\s+to\s+/,     // Talk to someone
-    /\b(hello|hi|hey|greetings)\b/, // Greeting anywhere in text (catches "grenda hello")
-    /\b(talk|speak|chat|converse)\b/, // Conversation verbs anywhere
-    /\b(bye|goodbye|farewell|see you)\b/, // Farewell patterns
-  ];
-  
-  return actionPatterns.some(pattern => pattern.test(trimmed));
-}
-
-/**
  * Format action result for display
  */
 export function formatActionResult(result: ActionResult): string {

@@ -32,11 +32,22 @@ import { load_kind_definitions } from "../kind_storage/store.js";
 import { PROF_NAMES, STAT_VALUE_BLOCK } from "../character_rules/creation.js";
 import { 
   initializeActionPipeline, 
-  processPlayerAction, 
-  shouldUseActionPipeline,
+  processPlayerAction,
   formatActionResult 
 } from "./action_integration.js";
 import { createIntent } from "../action_system/intent.js";
+import { 
+  setActorTarget, 
+  clearActorTarget, 
+  getActorTarget,
+  hasValidTarget 
+} from "./target_state.js";
+import { 
+  setVolume, 
+  getVolume, 
+  handleCommunicationSubmit 
+} from "./communication_input.js";
+import type { VolumeLevel } from "./communication_input.js";
 
 const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
 const visual_log_limit = 12;
@@ -76,7 +87,6 @@ function start_conversation_tracking(npc_ref: string, actor_ref: string): void {
     started_at: Date.now(),
     last_facing_update: 0
   });
-  console.log(`[ConversationTracking] Started tracking ${npc_ref} facing ${actor_ref}`);
 }
 
 /**
@@ -84,7 +94,6 @@ function start_conversation_tracking(npc_ref: string, actor_ref: string): void {
  */
 function stop_conversation_tracking(npc_ref: string): void {
   active_conversations.delete(npc_ref);
-  console.log(`[ConversationTracking] Stopped tracking ${npc_ref}`);
 }
 
 /**
@@ -93,10 +102,6 @@ function stop_conversation_tracking(npc_ref: string): void {
  */
 async function update_conversation_facing(): Promise<void> {
   const now = Date.now();
-  
-  if (active_conversations.size > 0) {
-    console.log(`[ConversationFacing] Updating ${active_conversations.size} conversations`);
-  }
   
   for (const [npc_ref, conv] of active_conversations) {
     // Only update if enough time has passed
@@ -108,7 +113,6 @@ async function update_conversation_facing(): Promise<void> {
     conv.last_facing_update = now;
     
     // Send face command to keep NPC facing the actor
-    console.log(`[ConversationFacing] Sending face command for ${npc_ref} -> ${conv.actor_ref}`);
     const { send_face_command } = await import("../npc_ai/movement_command_sender.js");
     send_face_command(npc_ref, conv.actor_ref, "Maintain facing during conversation");
   }
@@ -1049,6 +1053,10 @@ function start_http_server(log_path: string): void {
                     ? timed_event.event_id
                     : create_correlation_id();
 
+                // Default to COMMUNICATE if no intent specified but we have a target and text
+                // This handles "hello grenda" style messages without explicit intent buttons
+                const effective_intent = intent_verb || (target_ref ? "COMMUNICATE" : undefined);
+                
                 const inbound = create_message({
                     sender,
                     content: text,
@@ -1060,7 +1068,7 @@ function start_http_server(log_path: string): void {
                         timed_event_active: timed_event?.timed_event_active || false,
                         event_id: timed_event?.event_id || null,
                         // Optional UI overrides
-                        intent_verb: intent_verb || undefined,
+                        intent_verb: effective_intent,
                         action_cost: action_cost || undefined,
                         target_ref: target_ref || undefined,
                     },
@@ -1626,6 +1634,52 @@ function start_http_server(log_path: string): void {
             return;
         }
 
+        // POST /api/target - Set communication target for actor
+        if (url.pathname === "/api/target") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+            req.on("end", () => {
+                try {
+                    const data = JSON.parse(body);
+                    const actor_ref = data.actor_ref || "actor.henry_actor";
+                    const target_ref = data.target_ref;
+                    const target_type = data.target_type || "npc";
+                    const target_name = data.target_name;
+
+                    if (!target_ref) {
+                        // Clear target
+                        clearActorTarget(actor_ref);
+                        res.writeHead(200, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: true, action: "cleared" }));
+                        return;
+                    }
+
+                    // Set target
+                    setActorTarget(actor_ref, target_ref, target_type, target_name);
+                    debug_log("[API]", `Target set for ${actor_ref}: ${target_ref} (${target_type})`);
+
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ 
+                        ok: true, 
+                        action: "set",
+                        actor_ref,
+                        target_ref,
+                        target_type 
+                    }));
+                } catch (err: any) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? "invalid_request" }));
+                }
+            });
+            return;
+        }
+
         if (url.pathname === "/api/actor/move") {
             if (req.method !== "POST") {
                 res.writeHead(405, { "Content-Type": "application/json" });
@@ -1742,157 +1796,6 @@ const displayedMessageIds = new Set<string>();
 /**
  * Parse user input and create an ActionIntent for the ActionPipeline
  */
-function createActionIntentFromInput(text: string, sender: string): any | null {
-    const trimmed = text.trim();
-    const lower = trimmed.toLowerCase();
-    
-    console.log(`[ActionPipeline] Parsing input: "${trimmed}"`);
-    
-    // Get the player actor
-    const actor_result = load_actor(data_slot_number, "henry_actor");
-    if (!actor_result.ok || !actor_result.actor) {
-        console.log(`[ActionPipeline] Failed to load actor henry_actor`);
-        return null;
-    }
-    
-    const actor = actor_result.actor as any;
-    const actor_loc = actor.location;
-    
-    if (!actor_loc) {
-        console.log(`[ActionPipeline] Actor has no location`);
-        return null;
-    }
-    
-    const actor_location = {
-        world_x: actor_loc.world_tile?.x ?? 0,
-        world_y: actor_loc.world_tile?.y ?? 0,
-        region_x: actor_loc.region_tile?.x ?? 0,
-        region_y: actor_loc.region_tile?.y ?? 0,
-        x: actor_loc.tile?.x ?? 0,
-        y: actor_loc.tile?.y ?? 0,
-        place_id: actor_loc.place_id
-    };
-    
-    console.log(`[ActionPipeline] Actor location:`, actor_location);
-    
-    // Check for COMMUNICATE patterns
-    const say_match = trimmed.match(/^(?:say|shout|yell|whisper)\s+(.+)$/i);
-    const talk_match = trimmed.match(/^(?:talk|speak)\s+to\s+(\w+)\s+(.+)$/i);
-    const hello_match = trimmed.match(/^(?:hello|hi|hey)\s+(\w+).*$/i);
-    const name_greeting_match = trimmed.match(/^(\w+)\s+(?:hello|hi|hey|greetings)$/i);  // "grenda hello" format
-    
-    console.log(`[ActionPipeline] Pattern matches:`, {
-        say_match: !!say_match,
-        talk_match: !!talk_match,
-        hello_match: !!hello_match,
-        name_greeting_match: !!name_greeting_match
-    });
-    
-    let message: string | undefined;
-    let target_name: string | undefined;
-    let subtype = "NORMAL";
-    
-    if (say_match) {
-        message = say_match[1];
-        console.log(`[ActionPipeline] Matched SAY pattern: "${message}"`);
-        // Check volume keywords
-        if (lower.startsWith("shout") || lower.startsWith("yell")) {
-            subtype = "SHOUT";
-        } else if (lower.startsWith("whisper")) {
-            subtype = "WHISPER";
-        }
-    } else if (talk_match) {
-        target_name = talk_match[1];
-        message = talk_match[2];
-        console.log(`[ActionPipeline] Matched TALK pattern: target=${target_name}, message="${message}"`);
-    } else if (hello_match) {
-        target_name = hello_match[1];
-        message = trimmed;
-        console.log(`[ActionPipeline] Matched HELLO pattern: target=${target_name}, message="${message}"`);
-    } else if (name_greeting_match) {
-        target_name = name_greeting_match[1];
-        message = trimmed;
-        console.log(`[ActionPipeline] Matched NAME+GREETING pattern: target=${target_name}, message="${message}"`);
-    } else if (lower.match(/^(?:hello|hi|hey|greetings)/)) {
-        // Simple greeting without name - general communication
-        message = trimmed;
-        console.log(`[ActionPipeline] Matched simple greeting: "${message}"`);
-    }
-    
-    if (message) {
-        console.log(`[ActionPipeline] Creating intent with message: "${message}", target_name: ${target_name || "none"}`);
-        // Find target NPC if specified
-        let target_ref: string | undefined;
-        let target_location = actor_location;
-        
-        if (target_name) {
-            console.log(`[ActionPipeline] Looking for NPC with name: ${target_name}`);
-            // Look for NPC with matching name/ref
-            const all_npcs = find_npcs(data_slot_number, {});
-            console.log(`[ActionPipeline] Found ${all_npcs.length} NPCs total`);
-            
-            for (const npc_hit of all_npcs) {
-                if (npc_hit.id === "default_npc") continue;
-                const npc_id_lower = npc_hit.id.toLowerCase();
-                const target_lower = target_name.toLowerCase();
-                
-                console.log(`[ActionPipeline] Checking NPC: ${npc_hit.id} against target: ${target_name}`);
-                
-                if (npc_id_lower.includes(target_lower) || target_lower.includes(npc_id_lower)) {
-                    target_ref = `npc.${npc_hit.id}`;
-                    console.log(`[ActionPipeline] MATCHED! target_ref = ${target_ref}`);
-                    
-                    // Get NPC location
-                    const npc_result = load_npc(data_slot_number, npc_hit.id);
-                    if (npc_result.ok && npc_result.npc) {
-                        const npc_loc = get_npc_location(npc_result.npc);
-                        if (npc_loc) {
-                            target_location = {
-                                world_x: npc_loc.world_tile.x,
-                                world_y: npc_loc.world_tile.y,
-                                region_x: npc_loc.region_tile.x,
-                                region_y: npc_loc.region_tile.y,
-                                x: npc_loc.tile.x,
-                                y: npc_loc.tile.y,
-                                place_id: npc_loc.place_id
-                            };
-                            console.log(`[ActionPipeline] NPC location:`, target_location);
-                        }
-                    }
-                    break;
-                }
-            }
-            
-            if (!target_ref) {
-                console.log(`[ActionPipeline] No NPC matched target name: ${target_name}`);
-            }
-        }
-        
-        // Calculate distance if we have a target
-        let distance = 0;
-        if (target_ref) {
-            const dx = actor_location.x - target_location.x;
-            const dy = actor_location.y - target_location.y;
-            distance = Math.sqrt(dx * dx + dy * dy);
-            console.log(`[ActionPipeline] Distance to target: ${distance}`);
-        }
-        
-        return createIntent("actor.henry_actor", "COMMUNICATE", "player_input", {
-            actorLocation: actor_location,
-            targetRef: target_ref,
-            targetLocation: target_location,
-            parameters: {
-                subtype,
-                message,
-                distance,
-                targets: target_ref ? [target_ref] : []
-            }
-        });
-    }
-    
-    return null;
-}
-
 function Breath(log_path: string, inbox_path: string, outbox_path: string): void {
     try {
         flush_incoming_messages();
@@ -1921,10 +1824,12 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
                 msg.sender === "renderer_ai";
 
             // Check if this is user input that needs routing
+            // Exclude system messages like position updates
             const isUserInput = 
                 msg.type === "user_input" ||
                 msg.sender?.toLowerCase() === "j" ||
-                (msg.stage !== "npc_response" && 
+                (msg.type !== "npc_position_update" &&
+                 msg.stage !== "npc_response" && 
                  msg.stage !== "rendered_1" &&
                  !msg.sender?.startsWith("npc.") &&
                  msg.sender !== "renderer_ai");
@@ -1935,6 +1840,11 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
                 displayedMessageIds.add(msg.id);
                 messagesToRemove.push(msg);
                 
+                // Debug logging for NPC messages specifically
+                if (msg.sender?.startsWith('npc.')) {
+                    console.log(`[Breath] Displaying NPC message from ${msg.sender}: "${msg.content?.slice(0, 50)}..."`);
+                }
+                
                 debug_log("Breath: displayed message to user", {
                     id: msg.id,
                     sender: msg.sender,
@@ -1942,54 +1852,63 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
                     preview: msg.content?.slice(0, 50)
                 });
             } else if (isUserInput) {
-                // Check if this input should use ActionPipeline
+                // NEW COMMUNICATION SYSTEM: All text input goes through COMMUNICATE action
                 const content = msg.content || "";
                 
                 console.log(`[Breath] Processing user input: "${content.slice(0, 50)}"`);
                 
-                const usePipeline = shouldUseActionPipeline(content);
-                console.log(`[Breath] shouldUseActionPipeline: ${usePipeline}`);
+                // Write user message to log immediately so it appears in UI
+                append_log_message(log_path, "j", content);
                 
-                if (usePipeline) {
-                    // Process through ActionPipeline for witness reactions, facing, etc.
-                    console.log(`[Breath] Processing through ActionPipeline...`);
+                // Use new communication input system
+                handleCommunicationSubmit(content, (intent) => {
+                    console.log(`[Breath] Created COMMUNICATE intent:`, {
+                        target: intent.targetRef || "(broadcast)",
+                        volume: intent.volume,
+                        message: intent.message.slice(0, 30)
+                    });
                     
-                    const intent = createActionIntentFromInput(content, msg.sender || "j");
-                    
-                    if (intent) {
-                        console.log(`[Breath] Created intent:`, { verb: intent.verb, target: intent.targetRef });
-                        
-                        // Process async but don't block routing
-                        processPlayerAction(data_slot_number, intent).then(result => {
-                            console.log(`[Breath] ActionPipeline completed:`, {
-                                success: result.success,
-                                verb: intent.verb,
-                                effectsCount: result.effects.length,
-                                observedBy: result.observedBy
-                            });
-                            
-                            // Log the action result
-                            if (result.success) {
-                                append_log_message(log_path, "system", `[Action] ${formatActionResult(result)}`);
-                                
-                                // If this is a COMMUNICATE action targeting an NPC, start tracking the conversation
-                                if (intent.verb === "COMMUNICATE" && intent.targetRef?.startsWith("npc.")) {
-                                    console.log(`[Breath] Starting conversation tracking for ${intent.targetRef}`);
-                                    start_conversation_tracking(intent.targetRef, intent.actorRef);
-                                    console.log(`[Breath] Active conversations: ${active_conversations.size}`);
-                                }
-                            }
-                        }).catch(err => {
-                            console.error(`[Breath] ActionPipeline error:`, err);
+                    // Process through ActionPipeline
+                    processPlayerAction(data_slot_number, intent).then(result => {
+                        console.log(`[Breath] ActionPipeline completed:`, {
+                            success: result.success,
+                            observedBy: result.observedBy?.length || 0
                         });
-                    } else {
-                        console.log(`[Breath] No intent created from input`);
-                    }
-                } else {
-                    console.log(`[Breath] Input doesn't match ActionPipeline patterns`);
-                }
+                        
+                        if (result.success) {
+                            append_log_message(log_path, "system", `[Action] ${formatActionResult(result)}`);
+                            
+                            // Write message to outbox so NPC_AI can generate LLM response
+                            // The ActionPipeline handles execution, but NPC_AI needs to see the message
+                            const outbox_msg: MessageEnvelope = {
+                                ...msg,
+                                status: "sent" as const,
+                                stage: "interpreter_ai" as const,
+                                meta: {
+                                    ...(msg.meta || {}),
+                                    intent_verb: "COMMUNICATE",
+                                    target_ref: intent.targetRef,
+                                    original_text: content,
+                                    processed_by_action_pipeline: true,
+                                },
+                            };
+                            append_outbox_message(outbox_path, outbox_msg);
+                            console.log(`[Breath] Message written to outbox for NPC_AI processing: ${msg.id}`);
+                        }
+                    }).catch(err => {
+                        console.error(`[Breath] ActionPipeline error:`, err);
+                    });
+                });
                 
-                // Continue with normal routing to Interpreter AI
+                // Mark as processed - don't continue with normal routing to avoid duplicates
+                // The outbox message will be written inside the callback after intent is created
+                displayedMessageIds.add(msg.id);
+                messagesToRemove.push(msg);
+                
+                // Note: We need to move the outbox writing into the callback below
+                // where 'intent' is available. See handleCommunicationSubmit callback.
+            } else {
+                // Continue with normal routing (for non-COMMUNICATE messages)
                 const normalized: MessageEnvelope = {
                     ...msg,
                     created_at: msg.created_at ?? new Date().toISOString(),
@@ -2031,9 +1950,6 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
                 }
 
                 messagesToRemove.push(msg);
-            } else {
-                // Unknown message type, keep for now
-                messagesToKeep.push(msg);
             }
         }
 
@@ -2065,15 +1981,17 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
     }
 }
 
-// Display message to user (placeholder - actual UI integration needed)
+// Display message to user - writes to log file so frontend can display it
 function displayMessageToUser(msg: MessageEnvelope, log_path: string): void {
-    // Log the message content for now
-    // In real implementation, this would update the UI
-    const prefix = msg.stage === "npc_response" ? "[NPC]" : "[System]";
-    append_log_message(log_path, "display", `${prefix} ${msg.sender}: ${msg.content}`);
+    // Use the actual sender (e.g., "npc.grenda", "renderer_ai") so frontend formats it correctly
+    // Frontend expects:
+    // - sender.startsWith('npc.') -> NPC response formatted as "NPCNAME: content"
+    // - sender === 'renderer_ai' -> Assistant response formatted as "ASSISTANT: content"
+    // - sender === 'j' or 'J' -> User message formatted as "J: content"
+    const sender = msg.sender || "system";
+    append_log_message(log_path, sender, msg.content);
     
-    // TODO: Integrate with actual UI display system
-    // This is where the message would be shown to the player
+    debug_log("Display", `Message displayed: ${sender}: ${msg.content?.slice(0, 50)}...`);
 }
 
 // run on boot (shell)
@@ -2166,6 +2084,68 @@ setInterval(() => {
 
 
 run_cli(log_path);
+
+// ============================================================================
+// CLICK HANDLERS (Called from frontend)
+// ============================================================================
+
+/**
+ * Handle left click on entity (select target)
+ * Called by frontend when user left-clicks an NPC, actor, or item
+ */
+export function handleEntityClick(entity_ref: string, entity_type: "npc" | "actor" | "item"): void {
+    const actor_ref = "actor.henry_actor"; // TODO: Get from session
+    
+    debug_log("[CLICK]", `Left click on ${entity_type}: ${entity_ref}`);
+    
+    // Set as target for communication
+    setActorTarget(actor_ref, entity_ref, entity_type);
+    
+    // TODO: Send command to frontend to update UI
+    // "Talking to: Grenda"
+}
+
+/**
+ * Handle right click (move/interact)
+ * Called by frontend when user right-clicks
+ */
+export function handleRightClick(x: number, y: number, entity_ref?: string): void {
+    if (entity_ref) {
+        // Right-clicked on specific entity - use it
+        debug_log("[CLICK]", `Right click on entity: ${entity_ref} at (${x}, ${y})`);
+        // TODO: Implement USE action for doors, items, etc.
+    } else {
+        // Right-clicked on ground - move there
+        debug_log("[CLICK]", `Right click on ground at (${x}, ${y})`);
+        // TODO: Implement MOVE action
+    }
+}
+
+/**
+ * Handle volume button click
+ * Called by frontend when user clicks volume buttons
+ */
+export function handleVolumeClick(volume: VolumeLevel): void {
+    debug_log("[CLICK]", `Volume button clicked: ${volume}`);
+    setVolume(volume);
+    
+    // TODO: Send command to frontend to update UI
+    // Highlight selected volume button
+}
+
+/**
+ * Handle submit communication
+ * Called by frontend when user clicks Send or presses Enter
+ */
+export function handleSubmitCommunication(text: string): void {
+    // This is handled in the Breath function via handleCommunicationSubmit
+    // But we could add a direct route here for UI-triggered submissions
+    debug_log("[CLICK]", `Submit communication: "${text.slice(0, 30)}"`);
+}
+
+// ============================================================================
+// PROCESS LIFECYCLE
+// ============================================================================
 
 process.on("SIGINT", () => {
     shutdown_ollama_if_spawned();

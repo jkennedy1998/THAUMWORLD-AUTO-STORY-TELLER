@@ -283,6 +283,14 @@ function execute_movement_command(msg: MovementCommandMessage): void {
       execute_status_command(npc_ref, command);
       break;
       
+    case "UI_HIGHLIGHT":
+      execute_ui_highlight_command(command);
+      break;
+      
+    case "UI_TARGET":
+      execute_ui_target_command(command);
+      break;
+      
     default:
       console.log(`[MovementCommandHandler] Unknown command type: ${(command as any).type}`);
   }
@@ -293,7 +301,6 @@ function execute_movement_command(msg: MovementCommandMessage): void {
  */
 function execute_stop_command(npc_ref: string): void {
   stop_entity_movement(npc_ref);
-  console.log(`[MovementCommandHandler] ${npc_ref} stopped`);
 }
 
 /**
@@ -577,7 +584,6 @@ function execute_face_command(npc_ref: string, cmd: any): void {
     const tracked_pos = npc_actual_positions.get(cmd.target_entity);
     if (tracked_pos) {
       target_pos = tracked_pos;
-      console.log(`[MovementCommandHandler] Using tracked position for ${cmd.target_entity}: (${target_pos.x}, ${target_pos.y})`);
     } else {
       // Check if target is an actor in place data
       const target_actor = current_place.contents.actors_present.find(
@@ -603,16 +609,12 @@ function execute_face_command(npc_ref: string, cmd: any): void {
   if (!target_pos && cmd.direction) {
     // Set facing directly by direction
     set_facing(npc_ref, cmd.direction);
-    console.log(`[MovementCommandHandler] ${npc_ref} facing direction ${cmd.direction}`);
     return;
   }
   
   // If we have a target position, calculate and set facing
   if (target_pos) {
     face_target(npc_ref, cmd.target_entity || "unknown", target_pos, npc_pos);
-    console.log(`[MovementCommandHandler] ${npc_ref} facing ${cmd.target_entity} at (${target_pos.x}, ${target_pos.y})`);
-  } else {
-    console.log(`[MovementCommandHandler] Cannot face ${npc_ref} - target not found: ${cmd.target_entity}`);
   }
 }
 
@@ -635,4 +637,22 @@ function execute_status_command(npc_ref: string, cmd: any): void {
   // Update the NPC's status
   npc.status = cmd.status;
   console.log(`[MovementCommandHandler] ${npc_ref} status updated to ${cmd.status}`);
+}
+
+/**
+ * Execute UI_HIGHLIGHT command - Show/hide visual highlight on entity
+ * Note: Highlighting is now handled internally by place_module.ts via set_target()
+ * This function logs the command for debugging purposes
+ */
+function execute_ui_highlight_command(cmd: any): void {
+  // Highlighting is handled by place_module.ts when user clicks entity
+}
+
+/**
+ * Execute UI_TARGET command - Update target display
+ * Note: Target display is now handled internally by place_module.ts
+ * This function logs the command for debugging purposes
+ */
+function execute_ui_target_command(cmd: any): void {
+  // Target display is handled by place_module.ts when user clicks entity
 }

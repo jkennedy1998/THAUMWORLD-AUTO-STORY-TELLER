@@ -338,12 +338,13 @@ function createPerceptionEvent(
       outcome: result.summary
     };
     
-    if (intent.verb === "COMMUNICATE" && intent.parameters.text) {
+    if (intent.verb === "COMMUNICATE" && (intent.parameters.message || intent.parameters.text)) {
       eventType = "communication";
+      const vol = intent.parameters.volume as string || "normal";
       details = {
-        messageText: intent.parameters.text as string,
+        messageText: (intent.parameters.message || intent.parameters.text) as string,
         language: intent.parameters.language as string || "common",
-        volume: "normal",
+        volume: (vol === "whisper" || vol === "shout" ? vol : "normal") as "whisper" | "normal" | "shout",
         understood: true
       };
     }
@@ -429,8 +430,6 @@ export async function broadcastPerception(
     // Skip self-observation
     if (observer.ref === intent.actorRef) continue;
     
-    debug_log("[Perception]", `Checking perception for observer: ${observer.ref}`);
-    
     // Check perception
     const perception = await checkPerception(
       observer.ref,
@@ -439,8 +438,6 @@ export async function broadcastPerception(
       intent.actorLocation
     );
     
-    debug_log("[Perception]", `Perception result for ${observer.ref}:`, { canPerceive: perception.canPerceive, clarity: perception.clarity });
-    
     if (perception.canPerceive) {
       const event = createPerceptionEvent(observer.ref, intent, timing, perception, result);
       
@@ -448,7 +445,6 @@ export async function broadcastPerception(
       perceptionMemory.addPerception(observer.ref, event);
       
       events.push(event);
-      debug_log("[Perception]", `Created perception event for ${observer.ref}`);
     }
   }
   

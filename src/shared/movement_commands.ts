@@ -26,7 +26,9 @@ export type MovementCommandType =
   | "NPC_FACE"      // Face a direction or entity
   | "NPC_PATROL"    // Follow a patrol route
   | "NPC_FLEE"      // Move away from threat
-  | "NPC_STATUS";   // Update NPC status (busy/present)
+  | "NPC_STATUS"    // Update NPC status (busy/present)
+  | "UI_HIGHLIGHT"  // Highlight entity in UI
+  | "UI_TARGET";    // Update target display
 
 /**
  * Base movement command interface
@@ -128,6 +130,30 @@ export interface NPCStatusCommand extends MovementCommand {
 }
 
 /**
+ * Visual Feedback Command
+ * Used for UI feedback, not movement
+ * These are separate from movement commands
+ */
+export interface UIHighlightCommand extends MovementCommand {
+  type: "UI_HIGHLIGHT";
+  target_entity: string; // Entity to highlight (using consistent naming)
+  highlight: boolean;    // true = highlight, false = remove
+  color?: string;        // Optional: "yellow", "red", etc.
+}
+
+/**
+ * Target Update Command
+ * Updates the target display in UI
+ * Shows "Talking to: Grenda" or similar
+ */
+export interface UITargetCommand extends MovementCommand {
+  type: "UI_TARGET";
+  source_actor: string;  // Who is targeting (using consistent naming)
+  target_entity?: string; // Who is being targeted (undefined = clear)
+  display_name?: string;  // Display name for UI
+}
+
+/**
  * Union type for all movement commands
  */
 export type AnyMovementCommand =
@@ -137,7 +163,9 @@ export type AnyMovementCommand =
   | NPCFaceCommand
   | NPCPatrolCommand
   | NPCFleeCommand
-  | NPCStatusCommand;
+  | NPCStatusCommand
+  | UIHighlightCommand
+  | UITargetCommand;
 
 /**
  * Message envelope for movement commands

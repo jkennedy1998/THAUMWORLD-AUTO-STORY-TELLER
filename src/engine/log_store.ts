@@ -86,6 +86,12 @@ export function append_log_message(log_path: string, sender: string, content: st
     // newest-first
     log.messages.unshift(msg);
 
+    // Rotate log if it gets too large (keep last 100 messages for cleaner UI)
+    const MAX_LOG_MESSAGES = 100;
+    if (log.messages.length > MAX_LOG_MESSAGES) {
+        log.messages = log.messages.slice(0, MAX_LOG_MESSAGES);
+    }
+
     write_log(log_path, log);
     return msg;
 }
@@ -93,6 +99,13 @@ export function append_log_message(log_path: string, sender: string, content: st
 export function append_log_envelope(log_path: string, message: MessageEnvelope): MessageEnvelope {
     const log = read_log(log_path);
     log.messages.unshift(message);
+    
+    // Rotate log if it gets too large (keep last 100 messages for cleaner UI)
+    const MAX_LOG_MESSAGES = 100;
+    if (log.messages.length > MAX_LOG_MESSAGES) {
+        log.messages = log.messages.slice(0, MAX_LOG_MESSAGES);
+    }
+    
     write_log(log_path, log);
     return message;
 }

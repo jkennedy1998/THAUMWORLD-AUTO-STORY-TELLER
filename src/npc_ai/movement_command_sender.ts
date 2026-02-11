@@ -218,3 +218,66 @@ export function send_status_command(
   console.log(`[MovementCommand] STATUS command result for ${npc_ref}: ${result}`);
   return result;
 }
+
+/**
+ * Send UI_HIGHLIGHT command - Highlight or unhighlight an entity
+ * Used for visual feedback when selecting targets
+ * 
+ * @param entity_ref - Entity to highlight (npc.<id> or actor.<id>)
+ * @param highlight - true to highlight, false to remove
+ * @param color - Optional color ("yellow", "red", "green")
+ * @param reason - Why highlighting
+ */
+export function send_highlight_command(
+  entity_ref: string,
+  highlight: boolean,
+  color: string = "yellow",
+  reason: string = "Target selection"
+): boolean {
+  debug_log("[MovementCommand]", `Sending HIGHLIGHT command for ${entity_ref}: ${highlight ? color : "off"}`);
+  
+  const result = send_movement_command(
+    entity_ref,
+    {
+      type: "UI_HIGHLIGHT",
+      target_entity: entity_ref,
+      highlight,
+      color,
+      reason,
+    }
+  );
+  
+  debug_log("[MovementCommand]", `HIGHLIGHT command result: ${result}`);
+  return result;
+}
+
+/**
+ * Send UI_TARGET command - Update target display
+ * Shows "Talking to: Grenda" in the UI
+ * 
+ * @param actor_ref - Who is targeting (e.g., "actor.henry")
+ * @param target_ref - Who is being targeted (e.g., "npc.grenda")
+ * @param target_name - Display name for UI
+ */
+export function send_target_command(
+  actor_ref: string,
+  target_ref: string | undefined,
+  target_name: string | undefined,
+  reason: string = "Target changed"
+): boolean {
+  debug_log("[MovementCommand]", `Sending TARGET command: ${actor_ref} → ${target_ref || "(none)"}`);
+  
+  const result = send_movement_command(
+    actor_ref,
+    {
+      type: "UI_TARGET",
+      source_actor: actor_ref,
+      target_entity: target_ref,
+      display_name: target_name,
+      reason,
+    }
+  );
+  
+  debug_log("[MovementCommand]", `TARGET command result: ${result}`);
+  return result;
+}

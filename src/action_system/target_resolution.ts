@@ -379,43 +379,32 @@ export async function getAvailableTargets(
   location: Location,
   radius: number = 50
 ): Promise<AvailableTarget[]> {
-  console.log(`[getAvailableTargets] Called with location:`, location, `radius: ${radius}`);
-  
   const data_slot = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
   const targets: AvailableTarget[] = [];
   
   // Need place_id to look up entities
   const place_id = (location as any).place_id;
-  console.log(`[getAvailableTargets] place_id: ${place_id}`);
-  
   if (!place_id) {
-    console.log(`[getAvailableTargets] No place_id, returning empty`);
     return targets;
   }
   
   // Get all entities in this place from the index
   const entities = get_entities_in_place(data_slot, place_id);
-  console.log(`[getAvailableTargets] Found ${entities.npcs.length} NPCs and ${entities.actors.length} actors in place ${place_id}`);
   
   // Process NPCs
   for (const npc_ref of entities.npcs) {
     const npc_id = npc_ref.replace("npc.", "");
-    console.log(`[getAvailableTargets] Processing NPC: ${npc_id}`);
     
     const npc_result = load_npc(data_slot, npc_id);
     
     if (!npc_result.ok || !npc_result.npc) {
-      console.log(`[getAvailableTargets]   Failed to load NPC ${npc_id}`);
       continue;
     }
     
     const npc_location = get_npc_location(npc_result.npc);
     if (!npc_location) {
-      console.log(`[getAvailableTargets]   No location for NPC ${npc_id}`);
       continue;
     }
-    
-    console.log(`[getAvailableTargets]   NPC ${npc_id} at tile (${npc_location.tile.x}, ${npc_location.tile.y})`);
     
     // Calculate distance (in tile space within the place)
     const npc_tile_pos = npc_location.tile;
@@ -425,10 +414,7 @@ export async function getAvailableTargets(
       Math.pow(npc_tile_pos.y - actor_tile_pos.y, 2)
     );
     
-    console.log(`[getAvailableTargets]   Distance: ${distance} (radius: ${radius})`);
-    
     if (distance <= radius) {
-      console.log(`[getAvailableTargets]   ADDING ${npc_ref} to targets (distance ${distance} <= ${radius})`);
       targets.push({
         ref: npc_ref,
         type: "character",
@@ -444,8 +430,6 @@ export async function getAvailableTargets(
         },
         distance
       });
-    } else {
-      console.log(`[getAvailableTargets]   SKIPPING ${npc_ref} (distance ${distance} > ${radius})`);
     }
   }
   

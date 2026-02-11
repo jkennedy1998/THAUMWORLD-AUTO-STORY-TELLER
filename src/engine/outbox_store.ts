@@ -34,12 +34,20 @@ export function prune_outbox_messages(outbox: OutboxFile, max_messages: number):
     let over = next.messages.length - max_messages;
     if (over <= 0) return next;
 
+    // First try to remove "done" messages
     for (let i = next.messages.length - 1; i >= 0 && over > 0; i--) {
         const msg = next.messages[i];
         if (msg?.status === "done") {
             next.messages.splice(i, 1);
             over--;
         }
+    }
+    
+    // If still over limit, remove oldest messages regardless of status
+    // Keep newest messages (at start of array), remove oldest (at end)
+    while (over > 0 && next.messages.length > 0) {
+        next.messages.pop();
+        over--;
     }
 
     return next;

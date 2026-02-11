@@ -23,8 +23,9 @@ echo Starting services...
 start "Interface Program" cmd /c "npx tsx src/interface_program/main.ts"
 timeout /t 1 /nobreak >nul
 
-start "Interpreter AI" cmd /c "npx tsx src/interpreter_ai/main.ts"
-timeout /t 1 /nobreak >nul
+REM ARCHIVED - interpreter_ai moved to archive/, communication system now in interface_program
+REM start "Interpreter AI" cmd /c "npx tsx src/interpreter_ai/main.ts"
+REM timeout /t 1 /nobreak >nul
 
 start "Data Broker" cmd /c "npx tsx src/data_broker/main.ts"
 timeout /t 1 /nobreak >nul

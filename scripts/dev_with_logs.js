@@ -174,7 +174,7 @@ function startDev() {
   // Core processes
   const processes = [
     { name: "interface", cmd: "tsx", args: ["src/interface_program/main.ts"] },
-    { name: "interpreter", cmd: "tsx", args: ["src/interpreter_ai/main.ts"] },
+    // { name: "interpreter", cmd: "tsx", args: ["src/interpreter_ai/main.ts"] },  // ARCHIVED - communication system now in interface_program
     { name: "data_broker", cmd: "tsx", args: ["src/data_broker/main.ts"] },
     { name: "rules_lawyer", cmd: "tsx", args: ["src/rules_lawyer/main.ts"] },
     { name: "renderer", cmd: "tsx", args: ["src/renderer_ai/main.ts"] },

@@ -5,9 +5,10 @@ import { make_input_module } from '../mono_ui/modules/input_module.js';
 import { make_roller_module } from '../mono_ui/modules/roller_module.js';
 import { make_place_module } from '../mono_ui/modules/place_module.js';
 import type { Module, Rgb } from '../mono_ui/types.js';
+import { handleEntityClick } from '../interface_program/frontend_api.js';
 import type { Place } from '../types/place.js';
 import { debug_warn, debug_log } from '../shared/debug.js';
-import { init_npc_movement, stop_place_movement } from '../npc_ai/movement_loop.js';
+import { init_npc_movement, stop_place_movement, is_npc_moving } from '../npc_ai/movement_loop.js';
 import { start_movement_command_handler, set_command_handler_place } from '../mono_ui/modules/movement_command_handler.js';
 import { get_color_by_name } from '../mono_ui/colors.js';
 import { infer_action_verb_hint } from '../shared/intent_hint.js';
@@ -81,6 +82,10 @@ export function create_app_state(): AppState {
 
     function set_text_window_messages(id: string, messages: (string | TextWindowMessage)[]) {
         const cur = ui_state.text_windows.get(id);
+        const npcCount = messages.filter(m => typeof m === 'object' && m.sender === 'npc').length;
+        if (npcCount > 0) {
+            console.log(`[set_text_window_messages] Setting ${messages.length} messages for '${id}' (${npcCount} NPC)`);
+        }
         if (!cur) {
             ui_state.text_windows.set(id, { messages: [...messages], rev: 1 });
         } else {
@@ -123,6 +128,28 @@ export function create_app_state(): AppState {
             }
             const data = (await res.json()) as { ok: boolean; place?: Place };
             if (data.ok && data.place) {
+                // Preserve current entity positions if they're moving
+                // This prevents snap-back when place data is refreshed during movement
+                const current_place = ui_state.place.current_place;
+                if (current_place && current_place.id === data.place.id) {
+                    // Sync NPC positions from current place to new place data
+                    for (const npc of data.place.contents.npcs_present) {
+                        const current_npc = current_place.contents.npcs_present.find(n => n.npc_ref === npc.npc_ref);
+                        if (current_npc && is_npc_moving(npc.npc_ref)) {
+                            // NPC is moving, preserve current position
+                            npc.tile_position = { ...current_npc.tile_position };
+                        }
+                    }
+                    // Sync actor positions
+                    for (const actor of data.place.contents.actors_present) {
+                        const current_actor = current_place.contents.actors_present.find(a => a.actor_ref === actor.actor_ref);
+                        if (current_actor) {
+                            // Preserve current actor position
+                            actor.tile_position = { ...current_actor.tile_position };
+                        }
+                    }
+                }
+                
                 ui_state.place.current_place = data.place;
                 
                 // Phase 8: Unified Movement Authority
@@ -153,7 +180,6 @@ export function create_app_state(): AppState {
     }
 
     const window_feeds: WindowFeed[] = [];
-    const pending_user_messages = new Map<string, string>();
 
     function flash_status(lines: string[], ms: number): void {
         ui_state.status_override.until_ms = Date.now() + ms;
@@ -554,8 +580,7 @@ export function create_app_state(): AppState {
             }
 
             const data = (await res.json()) as { ok: boolean; id?: string };
-            if (data.ok && data.id) {
-                pending_user_messages.set(data.id, message);
+            if (data.ok) {
                 void poll_window_feeds();
             }
 
@@ -568,8 +593,12 @@ export function create_app_state(): AppState {
     }
 
     async function fetch_log_messages(slot: number): Promise<(string | TextWindowMessage)[]> {
+    console.log(`[fetch_log_messages] Fetching from API...`);
     const res = await fetch(`${APP_CONFIG.interpreter_log_endpoint}?slot=${slot}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) {
+        console.error(`[fetch_log_messages] HTTP error: ${res.status}`);
+        throw new Error(`HTTP ${res.status}`);
+    }
 
     const data = (await res.json()) as {
         ok: boolean;
@@ -586,38 +615,92 @@ export function create_app_state(): AppState {
     };
     if (!data.ok || !Array.isArray(data.messages)) return [];
 
-    const ordered = [...data.messages].reverse();
+    // Limit message count to prevent old session data from cluttering the UI
+    // Take only the most recent 50 messages (approximately 1-2 conversations)
+    const MAX_MESSAGES = 50;
+    const recentMessages = data.messages.length > MAX_MESSAGES 
+        ? data.messages.slice(0, MAX_MESSAGES) 
+        : data.messages;
+
+    // Sort by timestamp extracted from id (format: "ISO : index : random") for chronological order
+    const sorted = [...recentMessages].sort((a, b) => {
+        const getTime = (m: { id: string }) => {
+            const idParts = m.id?.split(' : ');
+            if (idParts && idParts[0]) return new Date(idParts[0]).getTime();
+            return 0;
+        };
+        return getTime(a) - getTime(b);
+    });
+    
     const seen_ids = new Set<string>();
     const last_renderer_text_by_correlation = new Map<string, string>();
 
-    const filtered = ordered.filter((m) => {
+    // Filter out messages older than 30 minutes to prevent old session data from showing
+    const CUTOFF_TIME = Date.now() - (30 * 60 * 1000); // 30 minutes ago
+    
+    const filtered = sorted.filter((m: { id: string; sender: string; content: string; type?: string; correlation_id?: string; status?: string; stage?: string; meta?: Record<string, unknown> }) => {
         if (!m?.id) return false;
         if (seen_ids.has(m.id)) return false;
         seen_ids.add(m.id);
 
         const sender = (m.sender ?? '').toLowerCase();
+        const content = (m.content ?? '').trim();
+        
+        // Filter out empty messages
+        if (!content) return false;
+        
+        // Filter out messages older than 30 minutes (prevents old session data)
+        const idParts = m.id?.split(' : ');
+        if (idParts && idParts[0]) {
+            const msgTime = new Date(idParts[0]).getTime();
+            if (msgTime < CUTOFF_TIME) return false;
+        }
+        
+        // Allow NPC messages through (removed aggressive content-based dedup)
+        // ID-based dedup above is sufficient to prevent true duplicates
+        if (sender.startsWith('npc.')) return true;
+        
         if (sender === 'j') return true;
         if (sender === 'renderer_ai') {
             const correlation = m.correlation_id ?? 'none';
-            const content = (m.content ?? '').trim();
             const last = last_renderer_text_by_correlation.get(correlation);
             last_renderer_text_by_correlation.set(correlation, content);
-            if (!content) return false;
             if (last !== undefined && last === content) return false;
             return true;
         }
         if (sender === 'hint') return true;
         if (m.type === 'user_input') return true;
-        if (sender.startsWith('npc.')) return true;  // Show NPC responses
-        if (sender === 'state_applier') return true;  // Show state applier messages
+        if (sender === 'state_applier') return true;
         return false;
     });
 
-    for (const m of filtered) {
-        if (pending_user_messages.has(m.id)) pending_user_messages.delete(m.id);
+    // Debug logging for message filtering
+    const npcMessages = filtered.filter(m => (m.sender ?? '').toLowerCase().startsWith('npc.'));
+    console.log(`[fetch_log_messages] API returned ${data.messages.length} messages, after filtering: ${filtered.length} total, ${npcMessages.length} NPC`);
+    
+    // Log NPC message details for debugging
+    npcMessages.forEach(m => {
+        console.log(`[fetch_log_messages] NPC message: ${m.sender} - "${m.content?.substring(0, 40)}..."`);
+    });
+    
+    // Debug: Show which senders were filtered out
+    const filteredOut = sorted.filter(m => {
+        const sender = (m.sender ?? '').toLowerCase();
+        const content = (m.content ?? '').trim();
+        if (!content) return true;
+        if (sender.startsWith('npc.')) return false;
+        if (sender === 'j') return false;
+        if (sender === 'renderer_ai') return false;
+        if (sender === 'hint') return false;
+        if (m.type === 'user_input') return false;
+        if (sender === 'state_applier') return false;
+        return true;
+    });
+    if (filteredOut.length > 0) {
+        console.log(`[fetch_log_messages] Filtered out ${filteredOut.length} messages from:`, [...new Set(filteredOut.map(m => m.sender))]);
     }
 
-    const from_log = filtered.map((m): string | TextWindowMessage => {
+    const from_log = filtered.map((m: { sender: string; content: string }): string | TextWindowMessage => {
         const sender = (m.sender ?? '').toLowerCase();
         if (sender === 'hint') {
             return { content: `💡 ${m.content}`, sender: 'hint' };
@@ -633,8 +716,8 @@ export function create_app_state(): AppState {
         }
         return { content: `${m.sender}: ${m.content}`, sender: 'system' };
     });
-    const pending = Array.from(pending_user_messages.values()).map((content): TextWindowMessage => ({ content: `J: ${content}`, sender: 'user' }));
-    return [...from_log, ...pending];
+    
+    return from_log;
 }
 
     async function fetch_status_line(slot: number): Promise<string[]> {
@@ -693,6 +776,20 @@ export function create_app_state(): AppState {
                 if (target) {
                     ui_state.controls.selected_target = target.ref;
                     flash_status([`Target: ${target.label || target_ref}`], 1200);
+                    
+                    // Wire to backend communication system
+                    // Determine entity type from ref
+                    const entity_type = target_ref.startsWith('npc.') ? 'npc' : 
+                                       target_ref.startsWith('actor.') ? 'actor' : 'item';
+                    
+                    // Call backend handler to set target for communication
+                    try {
+                        handleEntityClick(target_ref, entity_type as "npc" | "actor" | "item");
+                        console.log(`[AppState] Wired target to backend: ${target_ref}`);
+                    } catch (err) {
+                        console.error(`[AppState] Failed to wire target: ${err}`);
+                    }
+                    
                     return true;
                 }
                 

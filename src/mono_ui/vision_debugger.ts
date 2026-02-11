@@ -27,6 +27,7 @@ export type Particle = {
   rgb: { r: number; g: number; b: number };
   created_at: number;
   lifespan_ms: number;
+  weight?: number; // Optional weight for rendering priority (higher = on top)
 };
 import { direction_to_arrow } from "../npc_ai/facing_system.js";
 import { get_cone_tiles, get_hearing_tiles } from "../npc_ai/cone_of_vision.js";
@@ -230,11 +231,6 @@ export function spawn_conversation_indicator(
 ): void {
   if (!DEBUG_VISION.enabled || !DEBUG_VISION.show_conversation_state) return;
   
-  // Log the conversation state for debugging
-  if (in_conversation) {
-    console.log(`[VisionDebug] ${npc_ref} showing IN CONVERSATION indicator`);
-  }
-  
   spawn_debug_particle({
     x: position.x,
     y: position.y + 1, // Below entity
@@ -243,7 +239,8 @@ export function spawn_conversation_indicator(
       ? { r: 255, g: 255, b: 255 }    // White for in conversation (uppercase O)
       : { r: 128, g: 128, b: 128 }, // Gray for not in conversation (lowercase o)
     created_at: Date.now(),
-    lifespan_ms: 1000
+    lifespan_ms: 1000,
+    weight: 10 // Highest weight to render on top of debug vision
   });
 }
 

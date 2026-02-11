@@ -157,7 +157,7 @@ if (fs.existsSync(outboxPath)) {
 
 const commands = [
   'tsx src/interface_program/main.ts',
-  'tsx src/interpreter_ai/main.ts',
+  // 'tsx src/interpreter_ai/main.ts',  // ARCHIVED - communication system now in interface_program
   'tsx src/data_broker/main.ts',
   'tsx src/rules_lawyer/main.ts',
   'tsx src/renderer_ai/main.ts',

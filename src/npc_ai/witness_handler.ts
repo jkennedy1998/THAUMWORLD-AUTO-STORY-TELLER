@@ -23,6 +23,8 @@ import {
   update_conversations as update_conversations_state
 } from "./conversation_state.js";
 
+import { load_npc } from "../npc_storage/store.js";
+
 import {
   get_movement_state,
   set_goal,
@@ -49,6 +51,44 @@ import {
 } from "./movement_command_sender.js";
 
 import {
+  ensure_outbox_exists,
+  read_outbox,
+  write_outbox
+} from "../engine/outbox_store.js";
+
+// Command throttling to prevent spam
+const last_command_time = new Map<string, number>();
+const MIN_COMMAND_INTERVAL_MS = 3000; // Minimum 3 seconds between commands
+const active_conversations = new Set<string>(); // Track NPCs already in conversation
+
+function should_send_command(npc_ref: string, command_type: string): boolean {
+  const key = `${npc_ref}:${command_type}`;
+  const now = Date.now();
+  const last_time = last_command_time.get(key) || 0;
+  
+  if (now - last_time < MIN_COMMAND_INTERVAL_MS) {
+    return false; // Too soon, don't send
+  }
+  
+  last_command_time.set(key, now);
+  return true;
+}
+
+function is_starting_conversation(npc_ref: string): boolean {
+  return active_conversations.has(npc_ref);
+}
+
+function mark_conversation_starting(npc_ref: string): void {
+  active_conversations.add(npc_ref);
+}
+
+function mark_conversation_ended(npc_ref: string): void {
+  active_conversations.delete(npc_ref);
+}
+
+import { get_outbox_path } from "../engine/paths.js";
+
+import {
   face_target
 } from "./facing_system.js";
 
@@ -57,6 +97,23 @@ import {
   can_hear,
   check_perception_with_senses
 } from "./cone_of_vision.js";
+
+import {
+  enterEngagement,
+  isEngaged,
+  updateEngagement,
+  endEngagement
+} from "./engagement_service.js";
+
+import {
+  calculateSocialResponse,
+  shouldRemember,
+  calculateMemoryImportance,
+  getDefaultPersonality,
+  logSocialCheck
+} from "./social_checks.js";
+
+import type { VolumeLevel } from "../interface_program/communication_input.js";
 
 import {
   load_place,
@@ -68,6 +125,7 @@ import {
 } from "../npc_storage/location.js";
 
 const data_slot = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+const outbox_path = get_outbox_path(data_slot);
 
 // Pattern to detect farewells
 const FAREWELL_PATTERN = /\b(goodbye|bye|farewell|see you|later|until)\b/i;
@@ -215,14 +273,19 @@ function handle_communication_perception(
   const is_very_close = event.distance <= 2;
   const should_respond = is_addressed || is_very_close;
   
+  console.log(`[WITNESS] Response check for ${observer_ref}:`, { 
+    is_addressed, 
+    is_very_close, 
+    distance: event.distance,
+    event_targetRef: event.targetRef,
+    observer_ref
+  });
   debug_log("[Witness]", `Response check for ${observer_ref}:`, { is_addressed, is_very_close, distance: event.distance });
   
   if (!should_respond) {
     debug_log("[Witness]", `${observer_ref} not responding - not addressed and not close enough`);
-    // Still face the speaker if nearby
-    if (event.distance <= 5) {
-      face_actor(observer_ref, event);
-    }
+    // Handle as bystander (might eavesdrop based on personality)
+    handle_bystander_reaction(observer_ref, event);
     return;
   }
   
@@ -237,7 +300,11 @@ function handle_communication_perception(
     if (conv && conv.target_entity === event.actorRef) {
       debug_log("[Witness]", `Extending conversation for ${observer_ref}`);
       update_conversation_timeout(observer_ref);
+      updateEngagement(observer_ref); // Also extend engagement
       face_actor(observer_ref, event);
+      // Note: NPC responses are handled by process_communication() in the main loop,
+      // which reads the original COMMUNICATE message from the outbox and generates
+      // contextual LLM responses using build_npc_prompt() and the full decision hierarchy.
     }
     // If talking to someone else, check if we should switch
     else if (conv && is_addressed) {
@@ -249,9 +316,100 @@ function handle_communication_perception(
     return;
   }
   
-  // Not in conversation - start one
+  // Not in conversation - check if NPC should engage
   debug_log("[Witness]", `Starting conversation for ${observer_ref} with ${event.actorRef}`);
   start_conversation_with_actor(observer_ref, event);
+  
+  // Also enter engagement state for better tracking
+  enterEngagement(observer_ref, event.actorRef, "participant");
+}
+
+/**
+ * Handle bystander reaction to communication
+ * NPCs who hear but aren't directly addressed
+ */
+function handle_bystander_reaction(
+  observer_ref: string,
+  event: PerceptionEvent
+): void {
+  // Skip if already in conversation
+  if (is_in_conversation(observer_ref) || isEngaged(observer_ref)) {
+    return;
+  }
+  
+  // Get message details
+  const message = (event.details as any)?.messageText || "";
+  const volume = (event.details as any)?.volume || "NORMAL";
+  
+  // Get personality for this NPC (includes shopkeeper info)
+  const personality = getDefaultPersonality(observer_ref);
+  
+  // Get NPC location for place context
+  const npc_id = observer_ref.replace("npc.", "");
+  const npc_result = load_npc(data_slot, npc_id);
+  let current_place_id: string | undefined;
+  if (npc_result.ok && npc_result.npc) {
+    const npc_location = get_npc_location(npc_result.npc);
+    current_place_id = npc_location?.place_id;
+  }
+  
+  // Check if this NPC was directly addressed
+  const is_direct_address = event.targetRef === observer_ref;
+  
+  // Calculate social response with place context
+  const result = calculateSocialResponse(
+    personality,
+    message,
+    volume as VolumeLevel,
+    event.distance,
+    event.actorRef,
+    0, // relationship_fondness
+    current_place_id,
+    is_direct_address
+  );
+  
+  logSocialCheck(observer_ref, result, {
+    message,
+    distance: event.distance,
+    volume: volume as VolumeLevel
+  });
+  
+  // Handle based on interest level
+  switch (result.response_type) {
+    case "join":
+      // High interest - join as participant
+      debug_log("[Witness]", `${observer_ref} is interested (${result.interest_level}) - joining conversation`);
+      enterEngagement(observer_ref, event.actorRef, "participant");
+      face_actor(observer_ref, event);
+      break;
+      
+    case "eavesdrop":
+      // Medium interest - eavesdrop as bystander
+      debug_log("[Witness]", `${observer_ref} is curious (${result.interest_level}) - eavesdropping`);
+      enterEngagement(observer_ref, event.actorRef, "bystander");
+      
+      // Determine if should remember this
+      if (shouldRemember(result.interest_level, false)) {
+        const importance = calculateMemoryImportance(
+          result.interest_level,
+          false,
+          message.toLowerCase().includes("secret")
+        );
+        debug_log("[Witness]", `${observer_ref} will remember this conversation (importance: ${importance})`);
+        // TODO: Store to memory system
+      }
+      break;
+      
+    case "ignore":
+    default:
+      // Low interest - ignore
+      debug_log("[Witness]", `${observer_ref} not interested (${result.interest_level}) - ignoring`);
+      // Just face if close
+      if (event.distance <= 5) {
+        face_actor(observer_ref, event);
+      }
+      break;
+  }
 }
 
 /**
@@ -265,8 +423,8 @@ function handle_movement_perception(
   // Only face if close and not busy
   if (event.distance > 5) return;
   
-  // Don't interrupt conversations
-  if (is_in_conversation(observer_ref)) return;
+  // Don't interrupt conversations or engagements
+  if (is_in_conversation(observer_ref) || isEngaged(observer_ref)) return;
   
   // Face the moving entity
   face_actor(observer_ref, event);
@@ -282,9 +440,33 @@ function start_conversation_with_actor(
   console.log(`[WITNESS] start_conversation_with_actor called for ${observer_ref}, actor: ${event.actorRef}`);
   debug_log("[Witness]", `start_conversation_with_actor called for ${observer_ref}`);
   
+  // Check if we already started a conversation with this NPC recently
+  if (is_starting_conversation(observer_ref)) {
+    debug_log("[Witness]", `Already starting conversation for ${observer_ref}, skipping`);
+    return;
+  }
+  
+  // Check if we're throttled (minimum time between conversation attempts)
+  if (!should_send_command(observer_ref, "conversation_start")) {
+    debug_log("[Witness]", `Throttled - too soon to start another conversation with ${observer_ref}`);
+    return;
+  }
+  
+  // Mark that we're starting a conversation (prevents duplicate calls)
+  mark_conversation_starting(observer_ref);
+  
+  // Get message from event details
+  const message_text = (event.details as any)?.messageText || "";
+  
+  // Note: NPC responses are handled by process_communication() in the main NPC_AI loop,
+  // which reads the original COMMUNICATE message from outbox and generates contextual
+  // LLM responses using build_npc_prompt() and the full decision hierarchy (scripted → template → AI).
+  // The witness system only handles engagement state (stop, face, timeout) and visual feedback.
+  
   const state = get_movement_state(observer_ref);
   if (!state) {
     debug_log("[Witness]", `No movement state for ${observer_ref}`);
+    mark_conversation_ended(observer_ref);
     return;
   }
   
@@ -388,6 +570,12 @@ function restore_previous_goal(npc_ref: string): void {
   
   // Send status command to renderer to update visual indicator
   send_status_command(npc_ref, "present", "Exiting conversation");
+  
+  // End engagement tracking
+  endEngagement(npc_ref, "conversation ended");
+  
+  // Clear conversation starting flag
+  mark_conversation_ended(npc_ref);
 }
 
 /**

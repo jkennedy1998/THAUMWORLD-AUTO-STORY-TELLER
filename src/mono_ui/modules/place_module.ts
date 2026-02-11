@@ -73,6 +73,13 @@ type HoveredTile = {
   entity?: PlaceNPC | PlaceActor;
 } | null;
 
+// Target tracking for communication - stores entity ref to follow movement
+type TargetedEntity = {
+  ref: string;  // e.g., "npc.grenda" or "actor.henry_actor"
+  type: "npc" | "actor" | "item";
+  entity?: PlaceNPC | PlaceActor;
+} | null;
+
 // Particle system for path visualization and effects
 type Particle = {
   x: number;           // Tile x position
@@ -81,6 +88,7 @@ type Particle = {
   rgb: Rgb;           // Color
   created_at: number;  // Timestamp (Date.now())
   lifespan_ms: number; // How long to live
+  weight?: number;     // Optional weight for rendering priority (higher = on top)
 };
 
 // Movement state
@@ -125,6 +133,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   };
 
   let hovered: HoveredTile = null;
+  let targeted: TargetedEntity = null; // Track selected target for communication (follows entity)
   let is_panning = false;
   let last_pointer_x = 0;
   let last_pointer_y = 0;
@@ -174,6 +183,60 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       width: rect_width(inner),
       height: rect_height(inner),
     };
+  }
+
+  // Target management for communication system
+  function set_target(entity_info: HoveredTile): void {
+    if (entity_info?.entity) {
+      const is_npc = 'npc_ref' in entity_info.entity;
+      const ref = is_npc ? (entity_info.entity as PlaceNPC).npc_ref : (entity_info.entity as PlaceActor).actor_ref;
+      const type = is_npc ? "npc" : "actor";
+      targeted = { ref, type, entity: entity_info.entity };
+      console.log(`[PlaceModule] Target SET: ${ref} (${type}) at (${entity_info.x}, ${entity_info.y})`);
+      
+      // Call the callback to notify app_state
+      if (config.on_select_target) {
+        config.on_select_target(ref);
+      }
+    } else if (entity_info) {
+      // Tile or item clicked - store position-based target
+      targeted = { ref: `tile.${entity_info.x}.${entity_info.y}`, type: "item" };
+      console.log(`[PlaceModule] Target set: tile at (${entity_info.x}, ${entity_info.y})`);
+    } else {
+      targeted = null;
+      console.log("[PlaceModule] Target cleared");
+    }
+  }
+
+  function clear_target(): void {
+    targeted = null;
+    console.log("[PlaceModule] Target cleared");
+  }
+
+  function get_target(): TargetedEntity | null {
+    return targeted;
+  }
+
+  // Get current position of targeted entity (follows movement)
+  function get_target_current_position(place: Place): { x: number; y: number } | null {
+    if (!targeted) return null;
+    
+    // Find entity in current place data (using correct property paths)
+    if (targeted.type === "npc" && place.contents?.npcs_present) {
+      const npc = place.contents.npcs_present.find(n => n.npc_ref === targeted!.ref);
+      if (npc) {
+        return npc.tile_position;
+      }
+    } else if (targeted.type === "actor" && place.contents?.actors_present) {
+      const actor = place.contents.actors_present.find(a => a.actor_ref === targeted!.ref);
+      if (actor) {
+        return actor.tile_position;
+      }
+    }
+    
+    // Entity not found in current place - target is invalid
+    console.log(`[PlaceModule] Target ${targeted.ref} not found in place contents`);
+    return null;
   }
 
   // Convert screen coord to tile coord
@@ -734,12 +797,23 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       // Check if NPC is in conversation via status (backend sets this to "busy")
       const npc_in_conv = npc.status === "busy";
       
-      // Debug logging for conversation state detection (always log when debug is on)
-      if (DEBUG_VISION.enabled) {
-        console.log(`[PlaceModule] ${npc.npc_ref} status="${npc.status}", in_conversation=${npc_in_conv}`);
-      }
-      
       update_npc_debug_visuals(npc.npc_ref, npc_position, npc_facing, npc_in_conv);
+      
+      // Draw conversation indicator (white "O") for busy NPCs
+      // This is a standard gameplay feature, not just debug
+      if (npc_in_conv) {
+        const indicator_x = inner.x0 + Math.floor((npc_position.x - view.offset_x) / view.scale);
+        const indicator_y = inner.y0 + Math.floor((npc_position.y + 1 - view.offset_y) / view.scale);
+        
+        if (indicator_x >= inner.x0 && indicator_x <= inner.x1 &&
+            indicator_y >= inner.y0 && indicator_y <= inner.y1) {
+          canvas.set(indicator_x, indicator_y, {
+            char: "O",
+            rgb: { r: 255, g: 255, b: 255 }, // White
+            weight_index: 7, // High weight to render on top
+          });
+        }
+      }
     }
 
     // Draw particles (path visualization and effects)
@@ -750,20 +824,45 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       
       if (screen_x >= inner.x0 && screen_x <= inner.x1 &&
           screen_y >= inner.y0 && screen_y <= inner.y1) {
-        // Only draw particle if tile doesn't have an entity
-        const existing = canvas.get(screen_x, screen_y);
-        if (existing && (existing.char === ' ' || existing.char === '.' || existing.char === '·')) {
-          canvas.set(screen_x, screen_y, {
-            char: p.char,
-            rgb: p.rgb,
-            weight_index: 4
-          });
-        }
+        // Draw particle with weight (higher weight = on top)
+        // Use particle's weight if specified, otherwise default to 4
+        const weight = p.weight ?? 4;
+        canvas.set(screen_x, screen_y, {
+          char: p.char,
+          rgb: p.rgb,
+          weight_index: weight
+        });
       }
     }
 
-    // Draw hover highlight
-    if (hovered) {
+    // Draw target highlight (follows entity movement) - draw BEFORE entities
+    const target_pos = get_target_current_position(place);
+    if (target_pos && targeted) {
+      const screen_x = inner.x0 + Math.floor((target_pos.x - view.offset_x) / view.scale);
+      const screen_y = inner.y0 + Math.floor((target_pos.y - view.offset_y) / view.scale);
+
+      if (screen_x >= inner.x0 && screen_x <= inner.x1 &&
+          screen_y >= inner.y0 && screen_y <= inner.y1) {
+        // Draw bright cyan highlight around target (clearly different from NPCs)
+        const cell = canvas.get(screen_x, screen_y);
+        if (cell) {
+          canvas.set(screen_x, screen_y, {
+            char: cell.char,
+            rgb: get_color_by_name("vivid_cyan").rgb, // Bright cyan - clearly visible
+            weight_index: 9, // Highest weight
+            style: "bold",
+          });
+        }
+      }
+    } else if (targeted) {
+      // Target no longer valid (entity left place or doesn't exist)
+      console.log(`[PlaceModule] Target ${targeted.ref} not found in place, clearing`);
+      clear_target();
+    }
+
+    // Draw hover highlight (on top of target if different)
+    const target_current_pos = get_target_current_position(place);
+    if (hovered && (!target_current_pos || hovered.x !== target_current_pos.x || hovered.y !== target_current_pos.y)) {
       const tile_x = hovered.x;
       const tile_y = hovered.y;
       const screen_x =
@@ -799,8 +898,20 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       info_x++;
     }
 
-    // Draw hover info at bottom
-    if (hovered && hovered.entity) {
+    // Draw target info at bottom (persistent, follows entity)
+    if (targeted) {
+      // Extract display name from ref (e.g., "npc.grenda" -> "grenda")
+      const display_name = targeted.ref.split('.').pop() || targeted.ref;
+      const target_text = `Talking to: ${display_name}`;
+      let target_x = inner.x0;
+      const target_y = inner.y0;
+      for (const char of target_text) {
+        if (target_x > inner.x1) break;
+        canvas.set(target_x, target_y, { char, rgb: get_color_by_name("pale_yellow").rgb, style: "bold" });
+        target_x++;
+      }
+    } else if (hovered && hovered.entity) {
+      // Draw hover info at bottom (only if no target)
       const is_npc = "npc_ref" in hovered.entity;
       const ref = is_npc
         ? (hovered.entity as PlaceNPC).npc_ref
@@ -940,7 +1051,21 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       // Check if clicked on an entity (NPC or actor)
       const entity = get_entity_at(tile.x, tile.y, place);
       if (entity) {
-        // Entity clicked - let the targeting system handle it
+        // Entity clicked - set as target for communication
+        const is_npc = "npc_ref" in entity;
+        const ref = is_npc
+          ? (entity as PlaceNPC).npc_ref
+          : (entity as PlaceActor).actor_ref;
+        
+        // Set internal target
+        set_target({ x: tile.x, y: tile.y, entity });
+        
+        // Call external target selection callback if provided
+        if (config.on_select_target) {
+          config.on_select_target(ref);
+        }
+        
+        console.log(`[PlaceModule] Target selected: ${ref}`);
         return;
       }
 

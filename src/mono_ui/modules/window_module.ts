@@ -129,6 +129,12 @@ function wrap_messages(messages: (string | TextWindowMessage)[], width: number):
         }
     }
 
+    // Debug logging for NPC messages
+    const npcLines = lines.filter(l => l.sender === 'npc');
+    if (npcLines.length > 0) {
+        console.log(`[wrap_messages] Wrapped ${messages.length} messages into ${lines.length} lines (${npcLines.length} NPC lines)`);
+    }
+
     return lines;
 }
 
@@ -234,6 +240,7 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
 
 
             // render visible lines
+            let npcLinesRendered = 0;
             for (let row = 0; row < text_h; row++) {
                 const line_i = scroll_y + row;
                 const line_info = cached_lines[line_i];
@@ -242,7 +249,10 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
                 // Determine color based on sender type
                 let line_rgb = text_rgb;
                 if (line_sender === "hint") line_rgb = hint_rgb;
-                else if (line_sender === "npc") line_rgb = opts.npc_rgb ?? text_rgb;
+                else if (line_sender === "npc") {
+                    line_rgb = opts.npc_rgb ?? text_rgb;
+                    npcLinesRendered++;
+                }
                 else if (line_sender === "state") line_rgb = opts.state_rgb ?? text_rgb;
                 // Rect is bottom-left coordinates (y0 bottom, y1 top). We render top-down:
                 const y_top = text_r.y1;
@@ -255,6 +265,11 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
 
                     c.set(x, y, { char: ch, rgb: line_rgb, style: "regular", weight_index: w_base });
                 }
+            }
+            
+            // Debug logging
+            if (npcLinesRendered > 0) {
+                console.log(`[window_module:${opts.id}] Rendered ${text_h} lines, ${npcLinesRendered} NPC lines visible (scroll: ${scroll_y}/${cached_lines.length})`);
             }
         },
 
