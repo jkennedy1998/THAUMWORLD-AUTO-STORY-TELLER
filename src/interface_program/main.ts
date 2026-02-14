@@ -10,7 +10,7 @@ import { SERVICE_CONFIG } from "../shared/constants.js";
 import { get_data_slot_dir, get_inbox_path, get_item_dir, get_log_path, get_outbox_path, get_status_path, get_world_dir, get_roller_status_path } from "../engine/paths.js";
 import { read_inbox, clear_inbox, ensure_inbox_exists, append_inbox_message, write_inbox } from "../engine/inbox_store.js";
 import { ensure_outbox_exists } from "../engine/outbox_store.js";
-import { ensure_dir_exists, ensure_log_exists, read_log, append_log_envelope, append_log_message } from "../engine/log_store.js";
+import { ensure_dir_exists, ensure_log_exists, read_log, append_log_envelope, append_log_message, prune_log_noise } from "../engine/log_store.js";
 import { append_outbox_message } from "../engine/outbox_store.js";
 import { create_correlation_id, create_message } from "../engine/message.js";
 import { route_message } from "../engine/router.js";
@@ -36,6 +36,8 @@ import {
   formatActionResult 
 } from "./action_integration.js";
 import { createIntent } from "../action_system/intent.js";
+import { format_inspection_result, type InspectorData, type InspectionResult } from "../inspection/data_service.js";
+import { extract_feature_keywords_for_inspection, extract_body_slot_for_inspection } from "../inspection/text_parser.js";
 import { 
   setActorTarget, 
   clearActorTarget, 
@@ -48,6 +50,14 @@ import {
   handleCommunicationSubmit 
 } from "./communication_input.js";
 import type { VolumeLevel } from "./communication_input.js";
+import { is_in_conversation as is_in_conversation_state } from "../npc_ai/conversation_state.js";
+import { choose_follow_tile } from "./conversation_follow.js";
+import {
+  get_response_eligible_by_action,
+  process_witness_event,
+  update_conversations as update_witness_conversations,
+} from "../npc_ai/witness_handler.js";
+import { load_time, format_short_time, type GameTime } from "../time_system/tracker.js";
 
 const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
 const visual_log_limit = 12;
@@ -67,54 +77,152 @@ let incoming_message = ""; // received text from other programs (routing)
 let ollama_process: ChildProcess | null = null;
 let ollama_spawned = false;
 
-// Track active conversations for dynamic facing updates
-const active_conversations = new Map<string, {
-  npc_ref: string;
-  actor_ref: string;
-  started_at: number;
-  last_facing_update: number;
-}>();
-
+// Facing update tracking for active conversations
 const FACING_UPDATE_INTERVAL_MS = 100; // Update facing every 100ms during conversation (more responsive)
-
-/**
- * Start tracking a conversation for dynamic facing
- */
-function start_conversation_tracking(npc_ref: string, actor_ref: string): void {
-  active_conversations.set(npc_ref, {
-    npc_ref,
-    actor_ref,
-    started_at: Date.now(),
-    last_facing_update: 0
-  });
-}
-
-/**
- * Stop tracking a conversation
- */
-function stop_conversation_tracking(npc_ref: string): void {
-  active_conversations.delete(npc_ref);
-}
+const last_facing_update = new Map<string, number>(); // npc_ref -> timestamp
+const last_follow_update = new Map<string, number>(); // npc_ref -> timestamp
 
 /**
  * Update facing for all active conversations
+ * Uses the conversation state from npc_ai/conversation_state to track active conversations
  * Call this periodically (e.g., every tick)
  */
 async function update_conversation_facing(): Promise<void> {
   const now = Date.now();
   
-  for (const [npc_ref, conv] of active_conversations) {
-    // Only update if enough time has passed
-    if (now - conv.last_facing_update < FACING_UPDATE_INTERVAL_MS) {
+  // Import conversation state functions dynamically to avoid circular dependencies
+  const { get_all_conversations } = await import("../npc_ai/conversation_state.js");
+  const { send_face_command, send_move_command } = await import("../npc_ai/movement_command_sender.js");
+  const { get_senses_for_action } = await import("../action_system/sense_broadcast.js");
+  
+  // Get all active conversations from the npc_ai system
+  const conversations = get_all_conversations();
+
+  // Conversation should maintain an audible/pressure distance by default.
+  // Use COMMUNICATE.NORMAL pressure broadcast range as the "keep within" threshold.
+  const pressure_range_tiles = (() => {
+    const broadcasts = get_senses_for_action("COMMUNICATE", "NORMAL");
+    const pressure = broadcasts.filter(b => b.sense === "pressure");
+    if (pressure.length === 0) return 3;
+    return Math.max(...pressure.map(p => p.range_tiles));
+  })();
+  
+  for (const conv of conversations) {
+    const npc_ref = conv.npc_ref;
+    const actor_ref = conv.target_entity;
+    
+    // Check if enough time has passed since last update
+    const last_update = last_facing_update.get(npc_ref) || 0;
+    if (now - last_update < FACING_UPDATE_INTERVAL_MS) {
       continue;
     }
     
     // Update last facing time
-    conv.last_facing_update = now;
+    last_facing_update.set(npc_ref, now);
     
     // Send face command to keep NPC facing the actor
-    const { send_face_command } = await import("../npc_ai/movement_command_sender.js");
-    send_face_command(npc_ref, conv.actor_ref, "Maintain facing during conversation");
+    send_face_command(npc_ref, actor_ref, "Maintain facing during conversation");
+
+    // Keep within pressure (hearing/touch) distance by approaching if too far.
+    // This uses stored tile positions (actor + npc) which are updated via movement APIs.
+    try {
+      const npc_id = npc_ref.replace("npc.", "");
+      const actor_id = actor_ref.replace("actor.", "");
+
+      const npc_res = load_npc(data_slot_number, npc_id);
+      const actor_res = load_actor(data_slot_number, actor_id);
+
+      const npc_loc = npc_res.ok ? (npc_res.npc as any)?.location : null;
+      const actor_loc = actor_res.ok ? (actor_res.actor as any)?.location : null;
+
+      const npc_tile = npc_loc?.tile;
+      const actor_tile = actor_loc?.tile;
+
+      const npc_place = npc_loc?.place_id;
+      const actor_place = actor_loc?.place_id;
+
+      if (!npc_tile || !actor_tile) continue;
+      if (npc_place && actor_place && npc_place !== actor_place) continue;
+
+      const dx = Number(actor_tile.x) - Number(npc_tile.x);
+      const dy = Number(actor_tile.y) - Number(npc_tile.y);
+      const dist = Math.sqrt(dx * dx + dy * dy);
+
+      // If we're already within pressure distance, don't try to move.
+      if (dist <= pressure_range_tiles) continue;
+
+      // Rate-limit move commands (avoid spamming the renderer outbox).
+      const last_follow = last_follow_update.get(npc_ref) || 0;
+      if (now - last_follow < 800) continue;
+      last_follow_update.set(npc_ref, now);
+
+      const ax = Number(actor_tile.x);
+      const ay = Number(actor_tile.y);
+
+      // Prefer orthogonal adjacency, then diagonals.
+      const candidates = [
+        { x: ax + 1, y: ay },
+        { x: ax - 1, y: ay },
+        { x: ax, y: ay + 1 },
+        { x: ax, y: ay - 1 },
+        { x: ax + 1, y: ay + 1 },
+        { x: ax + 1, y: ay - 1 },
+        { x: ax - 1, y: ay + 1 },
+        { x: ax - 1, y: ay - 1 },
+      ];
+
+      // Validate against place bounds and occupancy to avoid "stepping into" the actor tile
+      // via downstream clamping.
+      const occupied = new Set<string>();
+      let bounds: { width: number; height: number } | undefined;
+
+      if (actor_place) {
+        const place_res = load_place(data_slot_number, actor_place);
+        if (place_res.ok) {
+          const w = Number((place_res.place as any)?.tile_grid?.width ?? NaN);
+          const h = Number((place_res.place as any)?.tile_grid?.height ?? NaN);
+          if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
+            bounds = { width: w, height: h };
+          }
+
+          const npcs_present = (place_res.place as any)?.contents?.npcs_present;
+          const actors_present = (place_res.place as any)?.contents?.actors_present;
+          if (Array.isArray(npcs_present)) {
+            for (const n of npcs_present) {
+              if (n?.npc_ref === npc_ref) continue;
+              const t = n?.tile_position;
+              if (t && Number.isFinite(t.x) && Number.isFinite(t.y)) occupied.add(`${t.x},${t.y}`);
+            }
+          }
+          if (Array.isArray(actors_present)) {
+            for (const a of actors_present) {
+              const t = a?.tile_position;
+              if (t && Number.isFinite(t.x) && Number.isFinite(t.y)) occupied.add(`${t.x},${t.y}`);
+            }
+          }
+        }
+      }
+
+      const best = choose_follow_tile({
+        npc_tile: { x: Number(npc_tile.x), y: Number(npc_tile.y) },
+        actor_tile: { x: ax, y: ay },
+        bounds,
+        occupied,
+      });
+      if (!best) continue;
+      send_move_command(npc_ref, best, `Maintain conversation distance (pressure<=${pressure_range_tiles})`);
+    } catch {
+      // Ignore follow failures; facing updates are still useful.
+    }
+  }
+  
+  // Clean up stale facing entries for ended conversations
+  const active_npcs = new Set(conversations.map(c => c.npc_ref));
+  for (const npc_ref of last_facing_update.keys()) {
+    if (!active_npcs.has(npc_ref)) {
+      last_facing_update.delete(npc_ref);
+      last_follow_update.delete(npc_ref);
+    }
   }
 }
 
@@ -501,6 +609,7 @@ type InputRequest = {
     text: string;
     sender?: string;
     intent_verb?: string;
+    intent_subtype?: string;
     action_cost?: string;
     target_ref?: string;
 };
@@ -1026,8 +1135,20 @@ function start_http_server(log_path: string): void {
                     : "J";
 
                 const intent_verb = typeof parsed?.intent_verb === "string" ? parsed.intent_verb.trim() : "";
+                const intent_subtype = typeof parsed?.intent_subtype === "string" ? parsed.intent_subtype.trim() : "";
                 const action_cost = typeof parsed?.action_cost === "string" ? parsed.action_cost.trim() : "";
                 const target_ref = typeof parsed?.target_ref === "string" ? parsed.target_ref.trim() : "";
+
+                const ui_target_tile = (parsed as any)?.ui_target_tile;
+                const ui_target_tile_xy = (ui_target_tile && typeof ui_target_tile === "object")
+                    ? {
+                        x: Number((ui_target_tile as any).x),
+                        y: Number((ui_target_tile as any).y),
+                    }
+                    : null;
+                const ui_target_tile_safe = (ui_target_tile_xy && Number.isFinite(ui_target_tile_xy.x) && Number.isFinite(ui_target_tile_xy.y))
+                    ? { x: Math.round(ui_target_tile_xy.x), y: Math.round(ui_target_tile_xy.y) }
+                    : null;
 
                 const creation_path = get_creation_state_path(data_slot_number);
                 const creation_state = read_creation_state(creation_path);
@@ -1069,12 +1190,17 @@ function start_http_server(log_path: string): void {
                         event_id: timed_event?.event_id || null,
                         // Optional UI overrides
                         intent_verb: effective_intent,
+                        intent_subtype: intent_subtype || undefined,
                         action_cost: action_cost || undefined,
                         target_ref: target_ref || undefined,
+                        ui_target_tile: ui_target_tile_safe || undefined,
                     },
                 });
 
                 append_inbox_message(inbox_path, inbound);
+                // Also append the canonical user_input envelope to the log so the UI
+                // can group/dedup using correlation_id + session_id.
+                append_log_envelope(log_path, inbound);
                 current_state = "awaiting_user";
 
                 write_status_line(get_status_path(data_slot_number), "received actor input");
@@ -1173,8 +1299,10 @@ function start_http_server(log_path: string): void {
 
             try {
                 const log = read_log(get_log_path(slot));
+                const all = url.searchParams.get("all") === "1";
+                const messages = all ? log.messages : log.messages.filter((m) => isCurrentSession(m));
                 res.writeHead(200, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: true, messages: log.messages }));
+                res.end(JSON.stringify({ ok: true, messages }));
             } catch (err: any) {
                 res.writeHead(500, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ ok: false, error: err?.message ?? "read_failed" }));
@@ -1199,8 +1327,15 @@ function start_http_server(log_path: string): void {
 
             try {
                 const status = read_status(get_status_path(slot));
+                const time: GameTime | null = load_time(slot);
                 res.writeHead(200, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: true, status }));
+                res.end(JSON.stringify({
+                    ok: true,
+                    status,
+                    game_time: time,
+                    time_short: time ? format_short_time(time) : null,
+                    day: time ? time.day : null,
+                }));
             } catch (err: any) {
                 res.writeHead(500, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ ok: false, error: err?.message ?? "read_failed" }));
@@ -1293,6 +1428,14 @@ function start_http_server(log_path: string): void {
                     actor_count: entity_refs.actors.length
                 });
 
+                // Preserve existing NPC statuses before clearing (set by witness handler)
+                const existing_npcs = new Map<string, any>();
+                for (const npc of place.contents.npcs_present || []) {
+                    existing_npcs.set(npc.npc_ref, npc);
+                }
+
+                // Conversation status is ephemeral; avoid persisting stale "busy" across sessions.
+
                 // Clear existing contents and populate from index
                 place.contents.npcs_present = [];
                 place.contents.actors_present = [];
@@ -1325,10 +1468,17 @@ function start_http_server(log_path: string): void {
                         });
                     }
 
+                    // Preserve status from existing NPC (set by witness handler via update_npc_status_in_place)
+                    const existing_npc = existing_npcs.get(npc_ref);
+                    const raw_status = existing_npc?.status || "present";
+                    const npc_status = raw_status === "busy" && !is_in_conversation_state(npc_ref)
+                        ? "present"
+                        : raw_status;
+
                     place.contents.npcs_present.push({
                         npc_ref,
                         tile_position: clamped_location,
-                        status: "present",
+                        status: npc_status,
                         activity: "standing here"
                     });
                 }
@@ -1810,6 +1960,33 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
         for (const msg of inbox.messages) {
             if (!msg) continue;
 
+            // Renderer -> npc_ai position sync messages.
+            // interface_program is not the consumer; do not log or remove.
+            if (msg.type === "npc_position_update") {
+                messagesToKeep.push(msg);
+                continue;
+            }
+
+            // Renderer-sent perception events (movement, etc.).
+            // These are system messages and should not display or route as user input.
+            if (msg.type === "perception_event_batch") {
+                try {
+                    const parsed = JSON.parse(msg.content || "{}") as any;
+                    const events = Array.isArray(parsed?.events) ? parsed.events : [];
+                    for (const ev of events) {
+                        if (ev?.observerRef && ev?.verb) {
+                            process_witness_event(ev.observerRef, ev);
+                        }
+                    }
+                } catch (err) {
+                    console.error("[Breath] Failed to process perception_event_batch:", err);
+                }
+
+                displayedMessageIds.add(msg.id);
+                messagesToRemove.push(msg);
+                continue;
+            }
+
             // Skip if already displayed
             if (displayedMessageIds.has(msg.id)) {
                 messagesToRemove.push(msg);
@@ -1835,11 +2012,11 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
                  msg.sender !== "renderer_ai");
 
             if (isDisplayable) {
-                // Display to user
-                displayMessageToUser(msg, log_path);
+                // Displayable messages (renderer_ai output, npc_response) are already written to log.jsonc
+                // by their originating services. Avoid duplicating them here.
                 displayedMessageIds.add(msg.id);
                 messagesToRemove.push(msg);
-                
+                 
                 // Debug logging for NPC messages specifically
                 if (msg.sender?.startsWith('npc.')) {
                     console.log(`[Breath] Displaying NPC message from ${msg.sender}: "${msg.content?.slice(0, 50)}..."`);
@@ -1852,13 +2029,203 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
                     preview: msg.content?.slice(0, 50)
                 });
             } else if (isUserInput) {
-                // NEW COMMUNICATION SYSTEM: All text input goes through COMMUNICATE action
                 const content = msg.content || "";
+
+                const meta_any = (msg.meta as any) ?? {};
+                const intent_verb_raw = typeof meta_any.intent_verb === "string" ? meta_any.intent_verb : "";
+                const intent_verb = intent_verb_raw.trim().toUpperCase();
+
+                // INSPECT: deterministic findings + optional renderer narration
+                if (intent_verb === "INSPECT") {
+                    const sender_id = (msg.sender ?? "").trim();
+                    const actor_ref = sender_id.startsWith("actor.") ? sender_id : `actor.${sender_id}`;
+                    const actor_id = actor_ref.replace(/^actor\./, "");
+
+                    const target_ref = typeof meta_any.target_ref === "string" && meta_any.target_ref.trim().length > 0
+                        ? meta_any.target_ref.trim()
+                        : (getActorTarget(actor_ref)?.target_ref ?? null);
+
+                    if (!target_ref) {
+                        const err_msg = create_message({
+                            sender: "inspection",
+                            content: "INSPECT failed: no target selected",
+                            stage: "inspection_result",
+                            status: "sent",
+                            reply_to: msg.id,
+                            correlation_id: msg.correlation_id,
+                            meta: { ...getSessionMeta(), action_verb: "INSPECT" },
+                        });
+                        append_log_envelope(log_path, err_msg);
+                        displayedMessageIds.add(msg.id);
+                        messagesToRemove.push(msg);
+                        continue;
+                    }
+
+                    const actor_res = load_actor(data_slot_number, actor_id);
+                    if (!actor_res.ok || !actor_res.actor) {
+                        const err_msg = create_message({
+                            sender: "inspection",
+                            content: "INSPECT failed: actor data not found",
+                            stage: "inspection_result",
+                            status: "sent",
+                            reply_to: msg.id,
+                            correlation_id: msg.correlation_id,
+                            meta: { ...getSessionMeta(), action_verb: "INSPECT" },
+                        });
+                        append_log_envelope(log_path, err_msg);
+                        displayedMessageIds.add(msg.id);
+                        messagesToRemove.push(msg);
+                        continue;
+                    }
+
+                    const actor = actor_res.actor as any;
+                    const loc = actor.location ?? {};
+                    const actorLocation = {
+                        world_x: loc?.world_tile?.x ?? loc?.world_x ?? 0,
+                        world_y: loc?.world_tile?.y ?? loc?.world_y ?? 0,
+                        region_x: loc?.region_tile?.x ?? loc?.region_x ?? 0,
+                        region_y: loc?.region_tile?.y ?? loc?.region_y ?? 0,
+                        x: loc?.tile?.x ?? loc?.x,
+                        y: loc?.tile?.y ?? loc?.y,
+                        place_id: loc?.place_id,
+                    };
+
+                    const inspector_data: InspectorData = {
+                        ref: actor_ref,
+                        location: {
+                            world_x: actorLocation.world_x,
+                            world_y: actorLocation.world_y,
+                            region_x: actorLocation.region_x,
+                            region_y: actorLocation.region_y,
+                            x: typeof actorLocation.x === "number" ? actorLocation.x : 0,
+                            y: typeof actorLocation.y === "number" ? actorLocation.y : 0,
+                        },
+                        senses: {
+                            light: Number(actor?.senses?.light ?? 0) || 0,
+                            pressure: Number(actor?.senses?.pressure ?? 0) || 0,
+                            aroma: Number(actor?.senses?.aroma ?? 0) || 0,
+                            thaumic: Number(actor?.senses?.thaumic ?? 0) || 0,
+                        },
+                        stats: (actor?.stats ?? {}) as Record<string, number>,
+                        profs: (actor?.profs ?? actor?.proficiencies ?? {}) as Record<string, number>,
+                    };
+
+                    const lowered = content.toLowerCase();
+                    const requested_keywords = extract_feature_keywords_for_inspection(lowered);
+                    const body_slot = extract_body_slot_for_inspection(lowered);
+
+                    // Optional UI-provided tile position (for inspecting tiles that aren't in availableTargets).
+                    const ui_target_tile = meta_any.ui_target_tile;
+                    const has_ui_xy = ui_target_tile && typeof ui_target_tile === "object" &&
+                        Number.isFinite(Number(ui_target_tile.x)) && Number.isFinite(Number(ui_target_tile.y));
+
+                    const targetLocation = has_ui_xy
+                        ? {
+                            ...actorLocation,
+                            x: Math.round(Number(ui_target_tile.x)),
+                            y: Math.round(Number(ui_target_tile.y)),
+                          }
+                        : undefined;
+
+                    const cost_raw = typeof meta_any.action_cost === "string" ? meta_any.action_cost.trim().toUpperCase() : "";
+                    const actionCost = (cost_raw === "FREE" || cost_raw === "FULL" || cost_raw === "PARTIAL" || cost_raw === "EXTENDED")
+                        ? (cost_raw as any)
+                        : "PARTIAL";
+
+                    const intent = createIntent(actor_ref, "INSPECT" as any, "player_input", {
+                        actorType: "player",
+                        actorLocation,
+                        targetRef: target_ref,
+                        targetLocation,
+                        actionCost,
+                        parameters: {
+                            inspector_data,
+                            requested_keywords,
+                            body_slot,
+                            max_features: 5,
+                            target_size_mag: 0,
+                        },
+                        originalInput: content,
+                    });
+
+                    processPlayerAction(data_slot_number, intent).then((result) => {
+                        if (!result.success) {
+                            const fail = create_message({
+                                sender: "inspection",
+                                content: `INSPECT failed: ${result.failureReason ?? "unknown"}`,
+                                stage: "inspection_result",
+                                status: "sent",
+                                reply_to: msg.id,
+                                correlation_id: msg.correlation_id,
+                                meta: { ...getSessionMeta(), action_verb: "INSPECT" },
+                            });
+                            append_log_envelope(log_path, fail);
+                            return;
+                        }
+
+                        const eff = result.effects.find((e: any) => e?.type === "INSPECT") as any;
+                        const inspect_result = eff?.parameters?.inspection_result as InspectionResult | undefined;
+
+                        if (inspect_result) {
+                            const formatted = format_inspection_result(inspect_result);
+                            const findings = create_message({
+                                sender: "inspection",
+                                content: formatted,
+                                stage: "inspection_result",
+                                status: "sent",
+                                reply_to: msg.id,
+                                correlation_id: msg.correlation_id,
+                                meta: {
+                                    ...getSessionMeta(),
+                                    action_verb: "INSPECT",
+                                    actor_ref,
+                                    target_ref,
+                                    clarity: inspect_result.clarity,
+                                    sense_used: inspect_result.sense_used,
+                                },
+                            });
+                            append_log_envelope(log_path, findings);
+                        }
+
+                        // Also queue a renderer narration pass that is constrained to the structured inspect result.
+                        const outbox_msg: MessageEnvelope = {
+                            ...msg,
+                            status: "sent" as const,
+                            stage: "applied_INSPECT" as const,
+                            meta: {
+                                ...(msg.meta || {}),
+                                action_verb: "INSPECT",
+                                actor_ref,
+                                target_ref,
+                                original_text: content,
+                                processed_by_action_pipeline: true,
+                                renderer_context: {
+                                    actor_ref,
+                                    target_ref,
+                                    inspect_result: inspect_result || null,
+                                },
+                            },
+                        };
+                        append_outbox_message(outbox_path, outbox_msg);
+                    }).catch((err) => {
+                        console.error("[Breath] INSPECT pipeline error:", err);
+                    });
+
+                    displayedMessageIds.add(msg.id);
+                    messagesToRemove.push(msg);
+                    continue;
+                }
+
+                // NEW COMMUNICATION SYSTEM: All text input goes through COMMUNICATE action
+                const volume_override = (msg.meta as any)?.intent_subtype;
+                if (typeof volume_override === "string") {
+                    const v = volume_override.toUpperCase();
+                    if (v === "WHISPER" || v === "NORMAL" || v === "SHOUT") {
+                        setVolume(v as VolumeLevel);
+                    }
+                }
                 
                 console.log(`[Breath] Processing user input: "${content.slice(0, 50)}"`);
-                
-                // Write user message to log immediately so it appears in UI
-                append_log_message(log_path, "j", content);
                 
                 // Use new communication input system
                 handleCommunicationSubmit(content, (intent) => {
@@ -1869,29 +2236,79 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
                     });
                     
                     // Process through ActionPipeline
-                    processPlayerAction(data_slot_number, intent).then(result => {
+                     processPlayerAction(data_slot_number, intent).then(result => {
                         console.log(`[Breath] ActionPipeline completed:`, {
                             success: result.success,
                             observedBy: result.observedBy?.length || 0
                         });
                         
                         if (result.success) {
-                            append_log_message(log_path, "system", `[Action] ${formatActionResult(result)}`);
                             
-                            // Write message to outbox so NPC_AI can generate LLM response
-                            // The ActionPipeline handles execution, but NPC_AI needs to see the message
-                            const outbox_msg: MessageEnvelope = {
-                                ...msg,
-                                status: "sent" as const,
-                                stage: "interpreter_ai" as const,
-                                meta: {
-                                    ...(msg.meta || {}),
-                                    intent_verb: "COMMUNICATE",
-                                    target_ref: intent.targetRef,
-                                    original_text: content,
-                                    processed_by_action_pipeline: true,
-                                },
-                            };
+                            // Write message to outbox so NPC_AI can generate an LLM response.
+                            // ActionPipeline handles execution; this outbox envelope is the notification channel.
+                              const lower = content.toLowerCase();
+                              const conversation_phase = (/(\bbye\b|\bgoodbye\b|\bfarewell\b|\bsee you\b)/i).test(lower)
+                                ? "exit"
+                                : "mid";
+
+                              const observed_by_list = Array.isArray(result.observedBy) ? result.observedBy : [];
+                              const observed_npcs = observed_by_list
+                                .filter((r): r is string => typeof r === "string")
+                                .filter((r) => r.startsWith("npc."));
+
+                              // If this COMMUNICATE had no explicit target, allow a single observed NPC to respond.
+                              // This keeps early-game conversations flowing without enabling multi-NPC pile-on.
+                              const eligible_default = get_response_eligible_by_action(result.intentId);
+                              const direct_target = (
+                                intent.targetRef && observed_by_list.includes(intent.targetRef)
+                              ) ? [intent.targetRef] : [];
+
+                              // Response eligibility rules:
+                              // - If user explicitly targets an NPC, only that NPC may respond (prevents pile-on).
+                              // - If no explicit target:
+                              //   - If witness marked eligible responders, use that.
+                              //   - Else if exactly one NPC observed, allow that single NPC to respond.
+                              //   - Else if conversation_phase is exit and there are observed NPCs, allow exactly one observed NPC to respond
+                              //     (prevents dead-air on goodbyes without enabling multi-NPC pile-on).
+                              const response_eligible_by = intent.targetRef
+                                ? direct_target
+                                : (
+                                  (eligible_default.length === 0 && observed_npcs.length === 1)
+                                    ? observed_npcs
+                                    : (
+                                      (eligible_default.length === 0 && conversation_phase === "exit" && observed_npcs.length > 0)
+                                        ? [observed_npcs[0] as string]
+                                        : eligible_default
+                                    )
+                                );
+
+                              const outbox_msg: MessageEnvelope = {
+                                  ...msg,
+                                  status: "sent" as const,
+                                  // NOTE: `interpreter_ai` is archived. This is an ActionPipeline-driven COMMUNICATE.
+                                  stage: "applied_COMMUNICATE" as const,
+                                  meta: {
+                                      ...(msg.meta || {}),
+                                      action_verb: "COMMUNICATE",
+                                      actor_ref: intent.actorRef,
+                                      intent_verb: "COMMUNICATE",
+                                      intent_subtype: intent.volume,
+                                      target_ref: intent.targetRef,
+                                      original_text: content,
+                                      processed_by_action_pipeline: true,
+                                      observed_by: observed_by_list,
+                                      response_eligible_by,
+                                      conversation_phase,
+                                      renderer_context: {
+                                        actor_ref: intent.actorRef,
+                                        target_ref: intent.targetRef,
+                                        intent_subtype: intent.volume,
+                                        observed_by: observed_by_list,
+                                        response_eligible_by,
+                                        conversation_phase,
+                                      },
+                                  },
+                              };
                             append_outbox_message(outbox_path, outbox_msg);
                             console.log(`[Breath] Message written to outbox for NPC_AI processing: ${msg.id}`);
                         }
@@ -1953,14 +2370,18 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
             }
         }
 
-        // Rewrite inbox with only messages to keep
+        // Rewrite inbox by removing only the ids we consumed.
+        // This reduces cross-service clobbering when other services write to inbox concurrently.
         if (messagesToRemove.length > 0) {
-            inbox.messages = messagesToKeep;
-            write_inbox(inbox_path, inbox);
-            
+            const remove_ids = new Set(messagesToRemove.map((m) => m?.id).filter((id): id is string => typeof id === "string" && id.length > 0));
+            const latest = read_inbox(inbox_path);
+            const before = latest.messages.length;
+            latest.messages = latest.messages.filter((m) => !remove_ids.has(m.id));
+            write_inbox(inbox_path, latest);
+
             debug_log("Breath: inbox cleaned", {
-                removed: messagesToRemove.length,
-                kept: messagesToKeep.length
+                removed: before - latest.messages.length,
+                kept: latest.messages.length,
             });
         }
 
@@ -1975,24 +2396,22 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
         update_conversation_facing().catch(err => {
             console.error("[Breath] Error updating conversation facing:", err);
         });
+
+        // Advance witness-driven conversation timers and clean up ended conversations.
+        // This must run in the interface_program process because witness reactions are executed here.
+        try {
+            update_witness_conversations();
+        } catch (err) {
+            console.error("[Breath] Error updating witness conversations:", err);
+        }
     } catch (err) {
         current_state = "error";
         console.error(err);
     }
 }
 
-// Display message to user - writes to log file so frontend can display it
-function displayMessageToUser(msg: MessageEnvelope, log_path: string): void {
-    // Use the actual sender (e.g., "npc.grenda", "renderer_ai") so frontend formats it correctly
-    // Frontend expects:
-    // - sender.startsWith('npc.') -> NPC response formatted as "NPCNAME: content"
-    // - sender === 'renderer_ai' -> Assistant response formatted as "ASSISTANT: content"
-    // - sender === 'j' or 'J' -> User message formatted as "J: content"
-    const sender = msg.sender || "system";
-    append_log_message(log_path, sender, msg.content);
-    
-    debug_log("Display", `Message displayed: ${sender}: ${msg.content?.slice(0, 50)}...`);
-}
+// NOTE: displayMessageToUser() removed.
+// UI reads `log.jsonc`, and displayable messages are logged by their originating services.
 
 // run on boot (shell)
 function initialize(): { log_path: string; inbox_path: string; outbox_path: string } {
@@ -2007,6 +2426,7 @@ function initialize(): { log_path: string; inbox_path: string; outbox_path: stri
 
     ensure_dir_exists(data_slot_dir);
     ensure_log_exists(log_path);
+    prune_log_noise(log_path);
     ensure_inbox_exists(inbox_path);
     ensure_outbox_exists(outbox_path);
     ensure_status_exists(status_path);
@@ -2055,7 +2475,7 @@ function run_cli(log_path: string): void {
                 process.exit(0);
             }
 
-            // leave a comment to change current_state and send message to the INTERPRETER_AI when user sends a message
+            // CLI mode is preserved for manual smoke tests. The current build does not route through interpreter_ai.
             current_state = "processing";
             append_log_message(log_path, "J", trimmed);
 

@@ -247,10 +247,19 @@ function parse_relationship_line(line: string): ConversationSummary["relationshi
     const match = line.match(/^([^:]+):\s*(improved|worsened|unchanged)(?:\s*-\s*(.+))?$/i);
     
     if (match) {
+        const target = (match[1] ?? "").trim();
+        const change_raw = (match[2] ?? "unchanged").toLowerCase();
+        const reason = (match[3] ?? "").trim();
+        if (!target) return null;
+
+        const change = (change_raw === "improved" || change_raw === "worsened" || change_raw === "unchanged")
+            ? (change_raw as "improved" | "worsened" | "unchanged")
+            : "unchanged";
+
         return {
-            target_ref: match[1].trim().toLowerCase().replace(/\s+/g, "_"),
-            change: match[2].toLowerCase() as "improved" | "worsened" | "unchanged",
-            reason: match[3]?.trim() || ""
+            target_ref: target.toLowerCase().replace(/\s+/g, "_"),
+            change,
+            reason
         };
     }
     

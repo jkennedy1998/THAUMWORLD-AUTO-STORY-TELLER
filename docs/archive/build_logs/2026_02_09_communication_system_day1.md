@@ -8,8 +8,8 @@
 ## ✅ Completed: Archive Old Systems
 
 ### Deleted Files
-- ❌ `docs/archive/2026_02_09_conversation_system_integration_ARCHIVED.md`
-- ❌ `docs/archive/2026_02_09_conversation_tabletop_model_ARCHIVED.md`
+Historical note: earlier drafts were deleted/rolled up; the implemented plan is now:
+- ✅ `docs/archive/2026_02_09_conversation_system_IMPLEMENTED.md`
 
 ### Archived Directories
 - 📁 `src/interpreter_ai/` → `archive/interpreter_ai/`

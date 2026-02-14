@@ -4,10 +4,14 @@
  * Visualizes vision cones, hearing ranges, and sense broadcasts
  * using the existing particle system in the place module.
  * 
- * Press \ (backslash) to toggle debug mode
+ * Press \ (backslash) to toggle global renderer debug mode
+ * - H toggles hearing radius visualization
+ * - B toggles sense broadcast visualization
+ * - V toggles line-of-sight occlusion (shadow behind blockers)
  * 
  * Visual Guide:
  * - Yellow ▲ = Vision cone tiles (light sense)
+ * - Red ▲ = Occluded tiles inside cone (blocked by NPCs)
  * - Cyan ○ = Hearing range ring (pressure sense)  
  * - Orange ○ = Smell range (aroma sense)
  * - Magenta ✦ = Magic detection (thaumic sense)
@@ -29,8 +33,7 @@ export type Particle = {
   lifespan_ms: number;
   weight?: number; // Optional weight for rendering priority (higher = on top)
 };
-import { direction_to_arrow } from "../npc_ai/facing_system.js";
-import { get_cone_tiles, get_hearing_tiles } from "../npc_ai/cone_of_vision.js";
+import { direction_to_angle, direction_to_arrow } from "../npc_ai/facing_system.js";
 import { get_vision_cone } from "../npc_ai/cone_of_vision.js";
 import { debug_log } from "../shared/debug.js";
 
@@ -38,6 +41,7 @@ import { debug_log } from "../shared/debug.js";
 export const DEBUG_VISION = {
   enabled: false,
   show_vision_cones: true,
+  show_blocked_vision: false,
   show_hearing_ranges: false,
   show_sense_broadcasts: true,
   show_facing: true,
@@ -49,8 +53,32 @@ export const DEBUG_VISION = {
   }
 };
 
+export function set_debug_enabled(enabled: boolean): void {
+  DEBUG_VISION.enabled = enabled;
+  debug_log("VisionDebug", `Debug mode: ${DEBUG_VISION.enabled ? "ON" : "OFF"}`);
+}
+
+export function toggle_hearing_ranges(): void {
+  DEBUG_VISION.show_hearing_ranges = !DEBUG_VISION.show_hearing_ranges;
+  debug_log("VisionDebug", `Hearing ranges: ${DEBUG_VISION.show_hearing_ranges ? "ON" : "OFF"}`);
+}
+
+export function toggle_sense_broadcasts(): void {
+  DEBUG_VISION.show_sense_broadcasts = !DEBUG_VISION.show_sense_broadcasts;
+  debug_log("VisionDebug", `Sense broadcasts: ${DEBUG_VISION.show_sense_broadcasts ? "ON" : "OFF"}`);
+}
+
+export function toggle_blocked_vision(): void {
+  DEBUG_VISION.show_blocked_vision = !DEBUG_VISION.show_blocked_vision;
+  debug_log("VisionDebug", `LOS occlusion: ${DEBUG_VISION.show_blocked_vision ? "ON" : "OFF"}`);
+}
+
 /** Particle spawn function - set by place module */
 let spawn_particle_fn: ((particle: Particle) => void) | null = null;
+
+// Throttle maps (avoid spamming expensive particle fields)
+const last_hearing_spawn_by_ref = new Map<string, number>();
+const last_vision_spawn_by_ref = new Map<string, number>();
 
 /**
  * Register the particle spawn function from place module
@@ -87,14 +115,124 @@ function get_sense_color(sense: SenseType): { r: number; g: number; b: number } 
 export function spawn_vision_cone_particles(
   origin: TilePosition,
   direction: Direction,
-  entity_ref: string
+  entity_ref: string,
+  blockers?: Set<string>
 ): void {
   if (!DEBUG_VISION.enabled || !DEBUG_VISION.show_vision_cones) return;
+
+  // Throttle: cone outlines are stable and expensive to respawn every frame.
+  const now = Date.now();
+  const last = last_vision_spawn_by_ref.get(entity_ref) ?? 0;
+  if (now - last < 400) return;
+  last_vision_spawn_by_ref.set(entity_ref, now);
   
   const cone = get_vision_cone(entity_ref);
-  const tiles = get_cone_tiles(origin, direction, cone);
+
+  // Stroke-only: compute a stable wedge outline.
+  const center_angle = direction_to_angle(direction);
+  const half_angle_rad = (cone.angle_degrees * Math.PI) / 180 / 2;
+  const left_angle = center_angle - half_angle_rad;
+  const right_angle = center_angle + half_angle_rad;
+
+  const normalize_angle = (a: number): number => {
+    let out = a;
+    while (out > Math.PI) out -= Math.PI * 2;
+    while (out < -Math.PI) out += Math.PI * 2;
+    return out;
+  };
+
+  const keys = new Set<string>();
+  const outline: TilePosition[] = [];
+
+  const push_unique = (x: number, y: number) => {
+    const key = `${x},${y}`;
+    if (keys.has(key)) return;
+    keys.add(key);
+    outline.push({ x, y });
+  };
+
+  // Two edge rays
+  for (let r = 1; r <= cone.range_tiles; r++) {
+    push_unique(Math.round(origin.x + Math.cos(left_angle) * r), Math.round(origin.y + Math.sin(left_angle) * r));
+    push_unique(Math.round(origin.x + Math.cos(right_angle) * r), Math.round(origin.y + Math.sin(right_angle) * r));
+  }
+
+  // Outer arc
+  const arc_steps = Math.max(10, cone.range_tiles);
+  for (let i = 0; i <= arc_steps; i++) {
+    const t = i / arc_steps;
+    const a = left_angle + (right_angle - left_angle) * t;
+    push_unique(Math.round(origin.x + Math.cos(a) * cone.range_tiles), Math.round(origin.y + Math.sin(a) * cone.range_tiles));
+  }
+
+  // Optional: show LOS occlusion (shadow) inside the cone.
+  // For now, treat *NPC tiles* as opaque blockers.
+  if (DEBUG_VISION.show_blocked_vision && blockers && cone.angle_degrees > 0 && cone.range_tiles > 0) {
+    const ox = Number(origin.x);
+    const oy = Number(origin.y);
+    const range = cone.range_tiles;
+    const occluded = new Set<string>();
+
+    // Ray-cast within the cone. Once a ray hits a blocker tile, everything further out
+    // on that ray is marked occluded.
+    const ray_steps = Math.max(24, cone.range_tiles * 4);
+    for (let i = 0; i <= ray_steps; i++) {
+      const t = i / ray_steps;
+      const a = left_angle + (right_angle - left_angle) * t;
+      let hit = false;
+      for (let r = 1; r <= range; r++) {
+        const x = Math.round(ox + Math.cos(a) * r);
+        const y = Math.round(oy + Math.sin(a) * r);
+        const key = `${x},${y}`;
+        if (!hit && blockers.has(key)) {
+          // Blocker tile itself remains visible; start shadow behind it.
+          hit = true;
+          continue;
+        }
+        if (hit) occluded.add(key);
+      }
+    }
+
+    // Draw only the boundary of the occluded region (keeps it readable + avoids heavy fill).
+    const boundary = new Set<string>();
+    for (const key of occluded) {
+      const [xs, ys] = key.split(",");
+      const x = Number(xs);
+      const y = Number(ys);
+      const neighbors = [
+        `${x + 1},${y}`,
+        `${x - 1},${y}`,
+        `${x},${y + 1}`,
+        `${x},${y - 1}`,
+      ];
+      if (neighbors.some(n => !occluded.has(n))) boundary.add(key);
+    }
+
+    for (const key of boundary) {
+      const [xs, ys] = key.split(",");
+      const x = Number(xs);
+      const y = Number(ys);
+      const distance = Math.sqrt(
+        Math.pow(x - origin.x, 2) + Math.pow(y - origin.y, 2)
+      );
+      const opacity = 0.45 + (1 - Math.min(1, distance / cone.range_tiles)) * 0.35;
+      spawn_debug_particle({
+        x,
+        y,
+        char: "▲",
+        rgb: {
+          r: Math.floor(255 * opacity),
+          g: 0,
+          b: 0,
+        },
+        created_at: now,
+        lifespan_ms: 900,
+        weight: 4,
+      });
+    }
+  }
   
-  for (const tile of tiles) {
+  for (const tile of outline) {
     const distance = Math.sqrt(
       Math.pow(tile.x - origin.x, 2) + Math.pow(tile.y - origin.y, 2)
     );
@@ -111,8 +249,9 @@ export function spawn_vision_cone_particles(
         g: Math.floor(255 * opacity), 
         b: 0 
       },
-      created_at: Date.now(),
-      lifespan_ms: 2000
+      created_at: now,
+      lifespan_ms: 900,
+      weight: 2,
     });
   }
 }
@@ -125,17 +264,58 @@ export function spawn_hearing_range_particles(
   entity_ref: string
 ): void {
   if (!DEBUG_VISION.enabled || !DEBUG_VISION.show_hearing_ranges) return;
-  
-  const tiles = get_hearing_tiles(origin, entity_ref);
-  
-  for (const tile of tiles) {
+
+  // Throttle: a filled ring is expensive to spawn every frame.
+  const now = Date.now();
+  const last = last_hearing_spawn_by_ref.get(entity_ref) ?? 0;
+  if (now - last < 800) return;
+  last_hearing_spawn_by_ref.set(entity_ref, now);
+
+  const cone = get_vision_cone(entity_ref);
+  const hearing_range = cone.range_tiles * 0.6;
+  const r = Math.ceil(hearing_range);
+
+  const fill_keys = new Set<string>();
+  const fill_tiles: TilePosition[] = [];
+  for (let dx = -r; dx <= r; dx++) {
+    for (let dy = -r; dy <= r; dy++) {
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist <= hearing_range + 1e-6) {
+        const x = origin.x + dx;
+        const y = origin.y + dy;
+        const key = `${x},${y}`;
+        fill_keys.add(key);
+        fill_tiles.push({ x, y });
+      }
+    }
+  }
+
+  const outline_keys = new Set<string>();
+  for (const t of fill_tiles) {
+    const n = [
+      `${t.x + 1},${t.y}`,
+      `${t.x - 1},${t.y}`,
+      `${t.x},${t.y + 1}`,
+      `${t.x},${t.y - 1}`,
+    ];
+    if (n.some(k => !fill_keys.has(k))) {
+      outline_keys.add(`${t.x},${t.y}`);
+    }
+  }
+
+  // Outline ring
+  for (const key of outline_keys) {
+    const [xs, ys] = key.split(",");
+    const x = Number(xs);
+    const y = Number(ys);
     spawn_debug_particle({
-      x: tile.x,
-      y: tile.y,
+      x,
+      y,
       char: "○",
-      rgb: { r: 0, g: 255, b: 255 }, // Cyan
-      created_at: Date.now(),
-      lifespan_ms: 2000
+      rgb: { r: 0, g: 255, b: 255 },
+      created_at: now,
+      lifespan_ms: 1200,
+      weight: 2,
     });
   }
 }
@@ -152,21 +332,27 @@ export function spawn_sense_broadcast_particles(
   
   const color = get_sense_color(sense);
   
-  // Spawn burst particles
-  const particle_count = 8;
-  for (let i = 0; i < particle_count; i++) {
-    const angle = (i / particle_count) * 2 * Math.PI;
-    const distance = range * 0.7;
-    const x = Math.round(origin.x + Math.cos(angle) * distance);
-    const y = Math.round(origin.y + Math.sin(angle) * distance);
-    
+  // Outline ring at broadcast range.
+  const r = Math.max(1, Math.round(range));
+  const now = Date.now();
+  const circumference = Math.max(8, Math.floor(2 * Math.PI * r * 1.5));
+  const ring_keys = new Set<string>();
+  for (let i = 0; i < circumference; i++) {
+    const angle = (i / circumference) * 2 * Math.PI;
+    const x = Math.round(origin.x + Math.cos(angle) * range);
+    const y = Math.round(origin.y + Math.sin(angle) * range);
+    ring_keys.add(`${x},${y}`);
+  }
+  for (const key of ring_keys) {
+    const [xs, ys] = key.split(",");
     spawn_debug_particle({
-      x,
-      y,
+      x: Number(xs),
+      y: Number(ys),
       char: "✦",
       rgb: color,
-      created_at: Date.now(),
-      lifespan_ms: 1500
+      created_at: now,
+      lifespan_ms: 1400,
+      weight: 9,
     });
   }
   
@@ -176,8 +362,9 @@ export function spawn_sense_broadcast_particles(
     y: origin.y,
     char: "◆",
     rgb: color,
-    created_at: Date.now(),
-    lifespan_ms: 1500
+    created_at: now,
+    lifespan_ms: 1400,
+    weight: 10,
   });
 }
 
@@ -252,7 +439,8 @@ export function update_npc_debug_visuals(
   npc_ref: string,
   position: TilePosition,
   direction: Direction,
-  in_conversation: boolean
+  in_conversation: boolean,
+  blockers?: Set<string>
 ): void {
   if (!DEBUG_VISION.enabled) return;
   
@@ -261,7 +449,7 @@ export function update_npc_debug_visuals(
   }
   
   if (DEBUG_VISION.show_vision_cones) {
-    spawn_vision_cone_particles(position, direction, npc_ref);
+    spawn_vision_cone_particles(position, direction, npc_ref, blockers);
   }
   
   if (DEBUG_VISION.show_hearing_ranges) {

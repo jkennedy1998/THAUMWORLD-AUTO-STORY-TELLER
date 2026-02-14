@@ -50,19 +50,21 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
       {
         sense: "light",
         intensity: 3,
-        range_tiles: 10,
+        // Default to NORMAL if subtype is omitted.
+        range_tiles: 3,
         directional: true,
         penetrates_walls: false
       },
       {
         sense: "pressure",
         intensity: 5,
-        range_tiles: 10,
+        // Default to NORMAL if subtype is omitted.
+        range_tiles: 5,
         directional: false,
         penetrates_walls: true
       }
     ],
-    description: "Normal conversation, visible and audible within 10 tiles"
+    description: "Default conversation, visible within 3 tiles and audible within 5 tiles"
   },
   
   "COMMUNICATE.WHISPER": {
@@ -72,12 +74,13 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
       {
         sense: "pressure",
         intensity: 2,
-        range_tiles: 1,
+        // Distance MAG +1: MAG1 (adjacent) -> MAG2 (3 tiles)
+        range_tiles: 3,
         directional: false,
         penetrates_walls: true
       }
     ],
-    description: "Very quiet, only audible to adjacent targets"
+    description: "Very quiet, only audible within 3 tiles"
   },
   
   "COMMUNICATE.NORMAL": {
@@ -94,12 +97,13 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
       {
         sense: "pressure",
         intensity: 5,
-        range_tiles: 3,
+        // Distance MAG +1: MAG2 (3 tiles) -> MAG3 (5 tiles)
+        range_tiles: 5,
         directional: false,
         penetrates_walls: true
       }
     ],
-    description: "Normal conversation, visible and audible within 3 tiles"
+    description: "Normal conversation, visible and audible within 5 tiles"
   },
   
   "COMMUNICATE.SHOUT": {
@@ -116,7 +120,8 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
       {
         sense: "pressure",
         intensity: 8,
-        range_tiles: 10,
+        // Distance MAG +1: MAG4 (10 tiles) -> MAG5 (30 tiles)
+        range_tiles: 30,
         directional: false,
         penetrates_walls: true
       }
@@ -167,6 +172,28 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
       }
     ],
     description: "Running, highly visible, loud footsteps"
+  },
+
+  "MOVE.SNEAK": {
+    verb: "MOVE",
+    subtype: "SNEAK",
+    broadcasts: [
+      {
+        sense: "light",
+        intensity: 4,
+        range_tiles: 10,
+        directional: true,
+        penetrates_walls: false
+      },
+      {
+        sense: "pressure",
+        intensity: 1,
+        range_tiles: 3,
+        directional: false,
+        penetrates_walls: true
+      }
+    ],
+    description: "Sneaking, still visible but very quiet footsteps"
   },
   
   // COMBAT ACTIONS
@@ -470,6 +497,20 @@ export function log_sense_broadcast(
   ).join(", ");
   
   debug_log("SenseBroadcast", `${entity_ref} ${verb}${subtype ? "." + subtype : ""} at (${location.x},${location.y}): ${sense_names}`);
+
+  // Renderer-only ASCII visualization (safe no-op in Node/tests).
+  if (typeof window !== "undefined") {
+    void import("../mono_ui/vision_debugger.js")
+      .then(mod => {
+        const origin = { x: location.x, y: location.y };
+        for (const b of profile.broadcasts) {
+          mod.spawn_sense_broadcast_particles(origin, b.sense as SenseType, b.range_tiles);
+        }
+      })
+      .catch(() => {
+        // Ignore - mono_ui may not be available in this runtime.
+      });
+  }
 }
 
 /**

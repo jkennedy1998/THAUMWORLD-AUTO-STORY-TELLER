@@ -1,59 +1,25 @@
 # Active Development Plans
 
-This directory contains active development plans with standardized naming (`YYYY_MM_DD_title.md`).
+Plans are the single source of truth for “what we’re doing next” and “what is actually implemented/tested”. The newest plan(s) win.
 
-**Last Updated:** February 6, 2026
+Keep plans small and executable. If something matters, it belongs as a checkbox item here (not in ad-hoc build logs).
 
----
+## Naming
 
-## Active Plans
+- `YYYY_MM_DD_<topic>.md`
+- Example: `2026_02_05_inspect_implementation_plan.md`
 
-### System Design & Architecture
-- **2026_02_02_phased_implementation_plan.md** - Master roadmap (Region travel, 5 phases)
-  - Status: 🟡 IN PROGRESS - Phase 0 complete, Phases 1-5 in progress
-- **2026_02_02_tabletop_pacing_intent_targeting.md** - Pacing and intent targeting design
-  - Status: 🟡 APPROVED DESIGN - Ready for implementation
-- **2026_02_02_place_system_plan.md** - Place system architecture (8 phases)
-  - Status: 🟡 IN PROGRESS - Phases 1-2 implemented, Phases 3-8 pending
-- **2026_02_03_place_system_visual_guide.md** - Visual companion guide
-  - Status: 📖 REFERENCE DOCUMENT
+## Checklist Legend
 
-### Feature Implementation
-- **2026_02_05_inspect_implementation_plan.md** - INSPECT action implementation (7 phases)
-  - Status: 🟡 PARTIALLY IMPLEMENTED - Phases 1-2 complete, Phases 3-7 pending
+- `[ ]` not_started
+- `[~]` implemented
+- `[x]` tested
 
----
+## Design Rules
 
-## Plan Status Legend
-
-| Status | Meaning |
-|--------|---------|
-| 🟡 Draft | Initial planning phase |
-| 🟠 In Review | Ready for approval/feedback |
-| 🟢 Approved | Approved for implementation |
-| 🔵 In Progress | Currently being implemented |
-| 📖 Reference | Documentation/reference material |
-
----
-
-## Current Priorities
-
-1. **Complete Place System** - Finish Phases 3-8 (NPC awareness, travel, tiles)
-2. **Region Travel** - Implement Phases 1-5 (region connections, travel system)
-3. **INSPECT System** - Complete Phases 3-7 (senses, perception, hidden features)
-4. **Tabletop Pacing** - Implement approved design (UI targeting, intent system)
-
----
-
-## Naming Convention
-
-All plans use format: `YYYY_MM_DD_brief_descriptive_title.md`
-
-Examples:
-- `2026_02_02_place_system_plan.md` - Place system plan from Feb 2, 2026
-- `2026_02_05_inspect_implementation_plan.md` - Inspect plan from Feb 5, 2026
-
-This allows chronological sorting and clear versioning.
+- If plans overlap, cross-link them and declare a single source of truth.
+- Move completed/superseded plans to `docs/archive/`.
+- Prefer updating an existing plan over creating a new “log” file.
 
 ---
 
@@ -64,14 +30,13 @@ This allows chronological sorting and clear versioning.
 
 ---
 
-## Contributing
+## Current Active Plans
 
-When creating new plans:
-1. Use format: `YYYY_MM_DD_brief_descriptive_title.md`
-2. Include in header: Status, Date, Priority, File path
-3. Add status emoji and description
-4. Move to `docs/archive/` when complete or superseded
-
----
-
-**Last Updated:** February 6, 2026
+- `docs/plans/2026_02_13_advanced_npc_interactions_scheduler.md`
+- `docs/plans/2026_02_13_ui_improvements_log_time_audio_shaders.md`
+- `docs/plans/2026_02_14_item_system_unification.md`
+- `docs/plans/2026_02_12_npc_archetypes_and_interaction_phases.md`
+- `docs/plans/2026_02_06_action_range_system.md`
+- `docs/plans/2026_02_05_inspect_implementation_plan.md`
+- `docs/plans/2026_02_06_region_travel_system.md`
+- `docs/plans/2026_02_06_implementation_roadmap.md`

@@ -16,9 +16,11 @@ This document describes the AI prompt patterns used throughout THAUMWORLD for co
 
 ## Service Prompts
 
-### 1. Interpreter AI Prompt
+### 1. Interpreter AI Prompt (Archived)
 
-**Purpose:** Parse natural language into machine commands
+Current build note: `interpreter_ai` is archived. Player/NPC actions are created in `interface_program` and executed via the ActionPipeline; this prompt is preserved for historical reference only.
+
+**Purpose (legacy):** Parse natural language into machine commands
 
 **Pattern:**
 ```
@@ -49,7 +51,7 @@ OUTPUT:
 - Examples of input/output pairs
 - Explicit constraints
 
-**Location:** `src/interpreter_ai/main.ts`
+**Location:** `archive/interpreter_ai/` (archived in this build)
 
 ---
 

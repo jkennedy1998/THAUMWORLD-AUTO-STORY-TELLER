@@ -164,7 +164,7 @@ function pick_age(kind: Record<string, unknown>, provided?: number): { age: numb
         { min: adulthood, max: Math.max(adulthood, decline - 1) },
         { min: decline, max: Math.max(decline, death) },
     ];
-    const pick = brackets[Math.floor(Math.random() * brackets.length)] ?? brackets[1];
+    const pick = brackets[Math.floor(Math.random() * brackets.length)] ?? brackets[1] ?? brackets[0]!;
     const picked_age = pick.min + Math.floor(Math.random() * (pick.max - pick.min + 1));
     return { age: picked_age, adulthood };
 }

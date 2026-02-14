@@ -3,7 +3,7 @@
 **Date:** 2026-02-08  
 **Status:** ✅ IMPLEMENTATION COMPLETE  
 **Priority:** Medium  
-**File:** `docs/plans/2026_02_08_cmd_log_capture_and_launcher.md`
+**File:** `docs/archive/2026_02_08_cmd_log_capture_and_launcher.md`
 
 ---
 
@@ -832,4 +832,4 @@ npm run build:exe
 - [pkg documentation](https://github.com/vercel/pkg)
 - [Node.js child_process](https://nodejs.org/api/child_process.html)
 - [Ollama installation](https://ollama.ai)
-- [NPC Witness System](2026_02_07_npc_witness_reaction_system.md)
+- [NPC Witness System](2026_02_07_npc_witness_reaction_system_IMPLEMENTED.md)

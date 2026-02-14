@@ -268,7 +268,7 @@ setInterval(() => {
 
 Edit `package.json`:
 ```json
-"dev": "concurrently \"tsx src/interface_program/main.ts\" \"tsx src/interpreter_ai/main.ts\" \"tsx src/data_broker/main.ts\" \"tsx src/rules_lawyer/main.ts\" \"tsx src/renderer_ai/main.ts\" \"tsx src/roller/main.ts\" \"tsx src/state_applier/main.ts\" \"tsx src/npc_ai/main.ts\" \"tsx src/weather/main.ts\" \"vite\" \"wait-on http://localhost:5173 && electron .\""
+"dev": "concurrently \"tsx src/interface_program/main.ts\" \"tsx src/data_broker/main.ts\" \"tsx src/rules_lawyer/main.ts\" \"tsx src/renderer_ai/main.ts\" \"tsx src/roller/main.ts\" \"tsx src/state_applier/main.ts\" \"tsx src/npc_ai/main.ts\" \"tsx src/turn_manager/main.ts\" \"tsx src/weather/main.ts\" \"vite\" \"wait-on http://localhost:5173 && electron .\""
 ```
 
 ### Step 3: Update Router
@@ -505,6 +505,6 @@ npm run service_dev  # e.g., npc_ai_dev
 
 ## Next Steps
 
-- See [ARCHITECTURE.md](./ARCHITECTURE.md) for system overview
-- See [SERVICES.md](./SERVICES.md) for service details
-- See [STAGES.md](./STAGES.md) for stage documentation
+- See [ARCHITECTURE.md](../design/ARCHITECTURE.md) for system overview
+- See [SERVICES.md](../design/SERVICES.md) for service details
+- See [STAGES.md](../design/STAGES.md) for stage documentation

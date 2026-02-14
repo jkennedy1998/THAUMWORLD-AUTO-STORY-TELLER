@@ -1,4 +1,9 @@
-# NPC Movement Architecture & Conversation Bug Documentation
+# NPC Movement Dual-Authority Bug (Historical)
+
+**Date:** 2026-02-12 (inferred)
+**Status:** Retrospective
+
+This note is preserved for context. The core fix is already implemented (renderer-visible `NPC_STATUS` sync), but the writeup is still useful when debugging movement authority issues.
 
 ## Overview
 
@@ -80,7 +85,11 @@ This document explains the confusing dual-system architecture that causes NPCs t
 9. NPC moves on screen despite being in conversation
 ```
 
-**Key Issue:** The renderer's `NPC_Movement` system operates independently and doesn't know about the conversation state maintained in the NPC_AI backend.
+**Key Issue:** The renderer's movement/visual systems operate independently and can't read backend in-memory conversation state.
+
+**Fix (implemented):** Sync a lightweight conversation *visual* state via messages:
+- Backend emits `NPC_STATUS busy/present`.
+- Renderer maintains a stable per-NPC status map and uses it for debug `o/O` and conversation-facing.
 
 ---
 

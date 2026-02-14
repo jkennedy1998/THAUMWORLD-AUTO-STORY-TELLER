@@ -157,7 +157,30 @@ async function inspect_tile(
 ): Promise<InspectionResult> {
   // Get tile definition
   const tile_id = target.ref;
-  const tile_def = get_tile_definition(tile_id);
+  let tile_def = get_tile_definition(tile_id);
+
+  // Back-compat: some places store terrain as a shorthand ("dirt" vs "dirt_terrain").
+  if (!tile_def) {
+    const base = tile_id.startsWith("tile.") ? tile_id.slice("tile.".length) : tile_id;
+    const candidates: string[] = [];
+    if (base !== tile_id) candidates.push(base);
+    if (!base.includes("_")) {
+      candidates.push(`${base}_terrain`);
+      candidates.push(`${base}_floor`);
+    }
+    // Try common suffixes even when base has underscores.
+    candidates.push(`${base}_terrain`);
+    candidates.push(`${base}_floor`);
+
+    for (const c of candidates) {
+      tile_def = get_tile_definition(c);
+      if (tile_def) {
+        // mutate target.ref for downstream formatting
+        (target as any).ref = c;
+        break;
+      }
+    }
+  }
 
   if (!tile_def) {
     return {

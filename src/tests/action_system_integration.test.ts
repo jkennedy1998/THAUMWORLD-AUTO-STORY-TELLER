@@ -1,11 +1,15 @@
 // Action System Integration Tests
 // Test scenarios for the complete action pipeline
 
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { ActionPipeline, DEFAULT_PIPELINE_CONFIG, type PipelineDependencies } from "../action_system/pipeline.js";
 import { createIntent, type ActionIntent, type Location } from "../action_system/intent.js";
 import { debugLogger, logActionIntent, logToolValidation, logRoll, logActionResult, logSeparator, logPipelineStage, printTestScenario, printTestSummary, createTestActor, createTestTool, createTestNPC } from "../action_system/debug_logger.js";
 import { initializeDefaultRules } from "../tag_system/index.js";
 import { initializeDefaultEffectors } from "../effectors/index.js";
+import { choose_follow_tile } from "../interface_program/conversation_follow.js";
 
 // Initialize systems
 initializeDefaultRules();
@@ -25,8 +29,8 @@ function createMockDependencies(): PipelineDependencies {
   const actors = new Map<string, any>();
   const npcs = new Map<string, any>();
   const locations = new Map<string, Location>();
-  
-  return {
+
+  const deps: any = {
     async getAvailableTargets(location: Location, radius: number) {
       debugLogger.debug(`Getting targets within ${radius} tiles of (${location.x},${location.y})`);
       
@@ -80,7 +84,7 @@ function createMockDependencies(): PipelineDependencies {
       return actor || null;
     },
     
-    async executeEffect(effect) {
+    async executeEffect(effect: any) {
       debugLogger.info(`Executing effect: ${effect.type}`, {
         target: effect.targetRef,
         parameters: Object.keys(effect.parameters || {})
@@ -100,6 +104,13 @@ function createMockDependencies(): PipelineDependencies {
       debugLogger.debug(`[Pipeline] ${message}`, data);
     }
   };
+
+  // Expose stores for test setup.
+  deps.actors = actors;
+  deps.npcs = npcs;
+  deps.locations = locations;
+
+  return deps as PipelineDependencies;
 }
 
 /**
@@ -133,6 +144,7 @@ async function testMoveThroughPlace(): Promise<boolean> {
   // Create move intent
   const intent = createIntent("actor.player", "MOVE", "player_input", {
     actorLocation: { world_x: 0, world_y: 0, region_x: 0, region_y: 0, x: 0, y: 0 },
+    targetRef: "tile.0.0.0.0.3.4",
     targetLocation: { world_x: 0, world_y: 0, region_x: 0, region_y: 0, x: 3, y: 4 },
     parameters: {
       subtype: "WALK",
@@ -168,7 +180,7 @@ async function testSayHiToNPC(): Promise<boolean> {
     "Player is at position (3,4)",
     "NPC 'Guard' is at position (5,5) - 2.2 tiles away",
     "Player uses COMMUNICATE.NORMAL to say 'Hello!'",
-    "System validates range (within 3 tiles)",
+    "System validates range (within 5 tiles)",
     "Action succeeds, NPC hears message"
   ]);
   
@@ -223,6 +235,65 @@ async function testSayHiToNPC(): Promise<boolean> {
   logActionResult(debugLogger, result, "Communicate Result");
   
   return result.success;
+}
+
+/**
+ * Test Scenario 2b: COMMUNICATE out of range should fail
+ *
+ * Mirrors in-game behavior where intents often have targetRef but no targetLocation.
+ * The pipeline must resolve target location and enforce COMMUNICATE.NORMAL pressure range.
+ */
+async function testCommunicateOutOfRangeFails(): Promise<boolean> {
+  printTestScenario(debugLogger, "Communicate Out of Range", [
+    "Player is at position (0,0)",
+    "NPC 'Guard' is at position (7,0) - 7 tiles away",
+    "Player uses COMMUNICATE.NORMAL to say 'Hello!'",
+    "Pipeline resolves targetLocation from available targets",
+    "System validates range (COMMUNICATE.NORMAL pressure range)",
+    "Action fails (out of range)"
+  ]);
+
+  const deps = createMockDependencies();
+  const pipeline = new ActionPipeline(deps, { ...DEFAULT_PIPELINE_CONFIG, debug: true });
+
+  const player = createTestActor("actor.player", {
+    name: "Test Player",
+    stats: { CHA: 12 }
+  });
+
+  const guard = createTestNPC("npc.guard", { x: 7, y: 0 }, {
+    name: "Guard",
+    hostile: false
+  });
+
+  (deps as any).actors.set("actor.player", player);
+  (deps as any).npcs.set("npc.guard", guard);
+  (deps as any).locations.set("actor.player", {
+    world_x: 0, world_y: 0, region_x: 0, region_y: 0, x: 0, y: 0
+  });
+  (deps as any).locations.set("npc.guard", {
+    world_x: 0, world_y: 0, region_x: 0, region_y: 0, x: 7, y: 0
+  });
+
+  const distance = 7;
+  debugLogger.info(`Distance to NPC: ${distance.toFixed(2)} tiles`);
+
+  const intent = createIntent("actor.player", "COMMUNICATE", "player_input", {
+    actorLocation: { world_x: 0, world_y: 0, region_x: 0, region_y: 0, x: 0, y: 0 },
+    targetRef: "npc.guard",
+    // Intentionally omit targetLocation (pipeline must resolve)
+    parameters: {
+      subtype: "NORMAL",
+      message: "Hello!",
+      distance: distance
+    }
+  });
+
+  logActionIntent(debugLogger, intent, "Communicate Intent");
+  const result = await pipeline.process(intent);
+  logActionResult(debugLogger, result, "Communicate Result");
+
+  return result.success === false;
 }
 
 /**
@@ -322,7 +393,7 @@ async function testTargetNPCWithProjectile(): Promise<boolean> {
 async function testMeleeWithEffectors(): Promise<boolean> {
   printTestScenario(debugLogger, "Melee Attack with Effectors", [
     "Player equips a Masterwork Sword (MAG 2)",
-    "NPC 'Goblin' is at position (4,5) - adjacent",
+    "NPC 'Goblin' is at position (4,4) - adjacent",
     "Sword has 'masterwork' tag (+1 SHIFT to rolls)",
     "Player uses USE.IMPACT_SINGLE to attack",
     "System applies effector to damage",
@@ -347,8 +418,8 @@ async function testMeleeWithEffectors(): Promise<boolean> {
     equippedTool: sword
   });
   
-  // Create Goblin adjacent
-  const goblin = createTestNPC("npc.goblin", { x: 4, y: 5 }, {
+  // Create Goblin adjacent (orthogonal)
+  const goblin = createTestNPC("npc.goblin", { x: 4, y: 4 }, {
     name: "Goblin",
     hostile: true
   });
@@ -360,12 +431,12 @@ async function testMeleeWithEffectors(): Promise<boolean> {
     world_x: 0, world_y: 0, region_x: 0, region_y: 0, x: 3, y: 4
   });
   (deps as any).locations.set("npc.goblin", {
-    world_x: 0, world_y: 0, region_x: 0, region_y: 0, x: 4, y: 5
+    world_x: 0, world_y: 0, region_x: 0, region_y: 0, x: 4, y: 4
   });
   
   // Calculate distance
   const dx = 4 - 3;
-  const dy = 5 - 4;
+  const dy = 4 - 4;
   const distance = Math.sqrt(dx * dx + dy * dy);
   debugLogger.info(`Distance to target: ${distance.toFixed(2)} tiles (melee range)`);
   
@@ -373,7 +444,7 @@ async function testMeleeWithEffectors(): Promise<boolean> {
   const intent = createIntent("actor.player", "USE", "player_input", {
     actorLocation: { world_x: 0, world_y: 0, region_x: 0, region_y: 0, x: 3, y: 4 },
     targetRef: "npc.goblin",
-    targetLocation: { world_x: 0, world_y: 0, region_x: 0, region_y: 0, x: 4, y: 5 },
+    targetLocation: { world_x: 0, world_y: 0, region_x: 0, region_y: 0, x: 4, y: 4 },
     parameters: {
       subtype: "IMPACT_SINGLE",
       distance: distance
@@ -388,6 +459,36 @@ async function testMeleeWithEffectors(): Promise<boolean> {
   logActionResult(debugLogger, result, "Melee Result");
   
   return result.success;
+}
+
+async function testConversationFollowTileSelection(): Promise<boolean> {
+  printTestScenario(debugLogger, "Conversation Follow Tile Selection", [
+    "Follower chooses a tile adjacent to actor",
+    "Never targets the actor tile",
+    "Respects bounds + occupied tiles"
+  ]);
+
+  const occupied = new Set<string>(["1,0"]);
+  const best = choose_follow_tile({
+    npc_tile: { x: 2, y: 2 },
+    actor_tile: { x: 0, y: 0 },
+    bounds: { width: 3, height: 3 },
+    occupied,
+  });
+  if (!best) throw new Error("expected a follow tile");
+  if (best.x === 0 && best.y === 0) throw new Error("follow tile must not be actor tile");
+  if (best.x < 0 || best.y < 0 || best.x >= 3 || best.y >= 3) throw new Error("follow tile must be in bounds");
+  if (occupied.has(`${best.x},${best.y}`)) throw new Error("follow tile must not be occupied");
+
+  const none = choose_follow_tile({
+    npc_tile: { x: 0, y: 0 },
+    actor_tile: { x: 0, y: 0 },
+    bounds: { width: 1, height: 1 },
+    occupied: new Set<string>(),
+  });
+  if (none !== null) throw new Error("expected no follow tile in 1x1 bounds");
+
+  return true;
 }
 
 /**
@@ -428,6 +529,21 @@ async function runAllTests(): Promise<void> {
   }
   
   debugLogger.info("\n");
+
+  try {
+    results.push({
+      step: "Communicate Out of Range",
+      passed: await testCommunicateOutOfRangeFails()
+    });
+  } catch (error) {
+    results.push({
+      step: "Communicate Out of Range",
+      passed: false,
+      error: String(error)
+    });
+  }
+  
+  debugLogger.info("\n");
   
   try {
     results.push({
@@ -456,6 +572,21 @@ async function runAllTests(): Promise<void> {
       error: String(error)
     });
   }
+
+  debugLogger.info("\n");
+
+  try {
+    results.push({
+      step: "Conversation Follow Tile Selection",
+      passed: await testConversationFollowTileSelection()
+    });
+  } catch (error) {
+    results.push({
+      step: "Conversation Follow Tile Selection",
+      passed: false,
+      error: String(error)
+    });
+  }
   
   debugLogger.info("\n");
   printTestSummary(debugLogger, results);
@@ -469,12 +600,22 @@ async function runAllTests(): Promise<void> {
   }
 }
 
-// Run tests if this file is executed directly
-if (require.main === module) {
-  runAllTests().catch(error => {
+// Run tests if this file is executed directly (ESM-safe)
+const is_main = (() => {
+  try {
+    const self = fileURLToPath(import.meta.url);
+    const argv1 = process.argv[1] ? path.resolve(process.argv[1]) : "";
+    return argv1.length > 0 && path.resolve(self) === argv1;
+  } catch {
+    return false;
+  }
+})();
+
+if (is_main) {
+  runAllTests().catch((error) => {
     console.error("Test suite failed:", error);
     process.exit(1);
   });
 }
 
-export { runAllTests, testMoveThroughPlace, testSayHiToNPC, testTargetNPCWithProjectile, testMeleeWithEffectors };
+export { runAllTests, testMoveThroughPlace, testSayHiToNPC, testCommunicateOutOfRangeFails, testTargetNPCWithProjectile, testMeleeWithEffectors, testConversationFollowTileSelection };

@@ -12,7 +12,8 @@ import type { PerceptionEvent } from "../action_system/perception.js";
 import { is_timed_event_active } from "../world_storage/store.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
 import { debug_log } from "../shared/debug.js";
-import { is_action_detectable } from "../action_system/sense_broadcast.js";
+import { debug_event } from "../shared/debug_event.js";
+import { get_senses_for_action } from "../action_system/sense_broadcast.js";
 
 import {
   start_conversation,
@@ -20,15 +21,20 @@ import {
   is_in_conversation,
   get_conversation,
   update_conversation_timeout,
-  update_conversations as update_conversations_state
+  update_conversations as update_conversations_state,
+  get_conversation_count,
+  get_all_conversations
 } from "./conversation_state.js";
 
 import { load_npc } from "../npc_storage/store.js";
+import { get_npc_tile_position } from "../npc_storage/location.js";
+import { add_memory } from "../npc_storage/memory.js";
 
 import {
   get_movement_state,
   set_goal,
-  clear_goal
+  clear_goal,
+  init_movement_state
 } from "./movement_state.js";
 
 import {
@@ -60,6 +66,56 @@ import {
 const last_command_time = new Map<string, number>();
 const MIN_COMMAND_INTERVAL_MS = 3000; // Minimum 3 seconds between commands
 const active_conversations = new Set<string>(); // Track NPCs already in conversation
+
+// Response eligibility tracking (single communication pipeline)
+// Keyed by ActionPipeline actionId (== intent.id). Only NPCs that are participants
+// in the witness-driven conversation state are allowed to respond.
+const response_eligible_by_action = new Map<string, { created_at_ms: number; npcs: Set<string> }>();
+const RESPONSE_ELIGIBILITY_TTL_MS = 30_000;
+
+function prune_response_eligibility(now_ms: number = Date.now()): void {
+  for (const [action_id, entry] of response_eligible_by_action) {
+    if (now_ms - entry.created_at_ms > RESPONSE_ELIGIBILITY_TTL_MS) {
+      response_eligible_by_action.delete(action_id);
+    }
+  }
+}
+
+function note_response_eligible(action_id: string | undefined, npc_ref: string): void {
+  if (!action_id) return;
+  const now = Date.now();
+  prune_response_eligibility(now);
+  const existing = response_eligible_by_action.get(action_id);
+  if (existing) {
+    existing.npcs.add(npc_ref);
+    return;
+  }
+  response_eligible_by_action.set(action_id, {
+    created_at_ms: now,
+    npcs: new Set([npc_ref]),
+  });
+}
+
+export function get_response_eligible_by_action(action_id: string): string[] {
+  prune_response_eligibility();
+  const entry = response_eligible_by_action.get(action_id);
+  return entry ? Array.from(entry.npcs) : [];
+}
+
+function ensure_movement_state(observer_ref: string) {
+  const existing = get_movement_state(observer_ref);
+  if (existing) return existing;
+
+  // Movement state is in-memory; initialize from stored NPC tile position.
+  const npc_id = observer_ref.replace("npc.", "");
+  const npc_result = load_npc(data_slot, npc_id);
+  if (!npc_result.ok) return undefined;
+
+  const tile = get_npc_tile_position(npc_result.npc as any);
+  if (!tile) return undefined;
+
+  return init_movement_state(observer_ref, { x: tile.x, y: tile.y });
+}
 
 function should_send_command(npc_ref: string, command_type: string): boolean {
   const key = `${npc_ref}:${command_type}`;
@@ -95,14 +151,15 @@ import {
 import {
   can_see,
   can_hear,
-  check_perception_with_senses
 } from "./cone_of_vision.js";
 
 import {
   enterEngagement,
   isEngaged,
   updateEngagement,
-  endEngagement
+  endEngagement,
+  getEngagement,
+  getEngagedWith
 } from "./engagement_service.js";
 
 import {
@@ -112,6 +169,11 @@ import {
   getDefaultPersonality,
   logSocialCheck
 } from "./social_checks.js";
+
+import {
+  set_conversation_presence,
+  clear_conversation_presence,
+} from "../shared/conversation_presence_store.js";
 
 import type { VolumeLevel } from "../interface_program/communication_input.js";
 
@@ -138,7 +200,14 @@ export function process_witness_event(
   observer_ref: string,
   event: PerceptionEvent
 ): void {
-  console.log(`[WITNESS] process_witness_event called for ${observer_ref}, verb: ${event.verb}, actor: ${event.actorRef}`);
+  debug_event("WITNESS", "perception.event", {
+    observer_ref,
+    verb: event.verb,
+    actor_ref: event.actorRef,
+    target_ref: event.targetRef,
+    distance: event.distance,
+    visibility: event.actorVisibility
+  });
   debug_log("[Witness]", `Processing event for ${observer_ref}:`, { verb: event.verb, actor: event.actorRef });
   
   // Skip if in combat/timed event
@@ -162,12 +231,12 @@ export function process_witness_event(
  */
 function handle_perception_event(observer_ref: string, event: PerceptionEvent): void {
   // Skip if observer can't perceive
-  console.log(`[WITNESS] handle_perception_event checking can_npc_perceive for ${observer_ref}`);
+  debug_event("WITNESS", "perception.check", { observer_ref, verb: event.verb });
   if (!can_npc_perceive(observer_ref, event)) {
-    console.log(`[WITNESS] handle_perception_event: ${observer_ref} cannot perceive, returning`);
+    debug_event("WITNESS", "perception.rejected", { observer_ref, verb: event.verb });
     return;
   }
-  console.log(`[WITNESS] handle_perception_event: ${observer_ref} can perceive, handling ${event.verb}`);
+  debug_event("WITNESS", "perception.accepted", { observer_ref, verb: event.verb });
   
   // Handle based on event type
   switch (event.verb) {
@@ -191,11 +260,16 @@ function handle_perception_event(observer_ref: string, event: PerceptionEvent): 
  * Uses vision cones for light sense, 360-degree for pressure sense
  */
 function can_npc_perceive(observer_ref: string, event: PerceptionEvent): boolean {
-  console.log(`[WITNESS] can_npc_perceive: checking ${observer_ref}, visibility: ${event.actorVisibility}, distance: ${event.distance}`);
+  debug_event("WITNESS", "perception.can_npc_perceive", {
+    observer_ref,
+    visibility: event.actorVisibility,
+    distance: event.distance,
+    verb: event.verb
+  });
   
   // Must be able to perceive at all
   if (!event.actorVisibility || event.actorVisibility === "obscured") {
-    console.log(`[WITNESS] can_npc_perceive: ${observer_ref} failed visibility check`);
+    debug_event("WITNESS", "perception.visibility_failed", { observer_ref });
     return false;
   }
   
@@ -203,32 +277,100 @@ function can_npc_perceive(observer_ref: string, event: PerceptionEvent): boolean
   // For now, skip position-based checks if we don't have observer location
   // This will be enhanced when we integrate with entity storage
   
-  // Check if within detection range using sense broadcasting
-  const detection = is_action_detectable(
-    event.verb,
-    undefined, // subtype not stored in PerceptionEvent yet
-    event.distance
-  );
-  
-  console.log(`[WITNESS] can_npc_perceive: detection for ${event.verb} - detectable: ${detection.detectable}, sense: ${detection.best_sense}`);
-  
-  if (!detection.detectable) {
-    console.log(`[WITNESS] can_npc_perceive: ${observer_ref} failed detection check`);
+  // Choose the best sense that is both in-range and allowed by directional constraints.
+  // Prefer canonical event subtype; fall back to details when missing.
+  const details = event.details as any;
+  const subtype_raw: unknown = event.subtype ?? details?.subtype ?? details?.volume ?? details?.movement ?? undefined;
+  const subtype = typeof subtype_raw === "string" ? subtype_raw.toUpperCase() : undefined;
+
+  // Sense broadcast profiles are subtype-aware (e.g. USE.IMPACT_SINGLE), but PerceptionEvent
+  // doesn't currently carry subtype for all verbs. When we can't find a profile, fall back
+  // to the senses already computed by the perception system.
+  const broadcasts_raw = get_senses_for_action(event.verb, subtype);
+  const broadcasts = broadcasts_raw.length
+    ? broadcasts_raw
+    : (event.senses ?? []).map(sense => ({ sense, intensity: 1, range_tiles: Number.POSITIVE_INFINITY }));
+
+  if (broadcasts.length === 0) {
+    debug_event("WITNESS", "perception.detection_failed", {
+      observer_ref,
+      verb: event.verb,
+      reason: "no_senses",
+    });
+    return false;
+  }
+
+  // Positions (optional): used for vision cone/hearing capacity checks.
+  // Prefer explicit positions provided in event details (renderer -> backend batches),
+  // then fall back to local movement_state (backend-only), then storage init.
+  const details_pos = (details as any)?.observer_pos;
+  const observer_state = ensure_movement_state(observer_ref);
+  const observer_pos =
+    details_pos && typeof details_pos.x === "number" && typeof details_pos.y === "number"
+      ? { x: details_pos.x, y: details_pos.y }
+      : observer_state?.last_position;
+
+  const actor_pos =
+    typeof event.location?.x === "number" && typeof event.location?.y === "number"
+      ? { x: event.location.x, y: event.location.y }
+      : undefined;
+
+  let best_sense: string | null = null;
+  let detectable = false;
+
+  // Prefer higher-intensity senses first so "pressure" can win over "light" for speech, etc.
+  const candidates = broadcasts
+    .filter(b => event.distance <= b.range_tiles)
+    .sort((a, b) => (b.intensity ?? 0) - (a.intensity ?? 0));
+
+  for (const b of candidates) {
+
+    // Directional constraints
+    if (b.sense === "light") {
+      if (observer_pos && actor_pos) {
+        if (!can_see(observer_ref, observer_pos, actor_pos)) {
+          debug_event("WITNESS", "perception.vision_blocked", {
+            observer_ref,
+            verb: event.verb,
+            distance: event.distance,
+          });
+          continue;
+        }
+      }
+    }
+
+    if (b.sense === "pressure") {
+      // Hearing is omnidirectional but limited by the observer's hearing capacity.
+      if (observer_pos && actor_pos) {
+        if (!can_hear(observer_ref, observer_pos, actor_pos)) {
+          debug_event("WITNESS", "perception.hearing_blocked", {
+            observer_ref,
+            verb: event.verb,
+            distance: event.distance,
+          });
+          continue;
+        }
+      }
+    }
+
+    detectable = true;
+    best_sense = b.sense;
+    break;
+  }
+
+  debug_event("WITNESS", "perception.detection", {
+    observer_ref,
+    verb: event.verb,
+    detectable,
+    best_sense,
+  });
+
+  if (!detectable) {
+    debug_event("WITNESS", "perception.detection_failed", { observer_ref, verb: event.verb });
     return false;
   }
   
-  // Check if the detecting sense requires vision cone (light) or is omnidirectional (pressure)
-  if (detection.best_sense === "light") {
-    // Light sense requires being in vision cone
-    // TODO: Get observer position from storage and check can_see()
-    // For now, assume they can see if within range and facing roughly toward
-    // This will be properly implemented when we integrate full position tracking
-  }
-  
-  // Pressure sense works 360 degrees, just needs to be in range
-  // (already checked by is_action_detectable)
-  
-  console.log(`[WITNESS] can_npc_perceive: ${observer_ref} CAN perceive`);
+  debug_event("WITNESS", "perception.ok", { observer_ref, verb: event.verb });
   return true;
 }
 
@@ -240,7 +382,12 @@ function handle_communication_perception(
   observer_ref: string,
   event: PerceptionEvent
 ): void {
-  console.log(`[WITNESS] handle_communication_perception called for ${observer_ref}, event: ${event.verb} from ${event.actorRef}`);
+  debug_event("WITNESS", "communication.perceived", {
+    observer_ref,
+    actor_ref: event.actorRef,
+    target_ref: event.targetRef,
+    distance: event.distance
+  });
   debug_log("[Witness]", `Handling COMMUNICATE for ${observer_ref} from ${event.actorRef}`);
   
   // Don't react to own communications
@@ -258,12 +405,18 @@ function handle_communication_perception(
   // Check if farewell using pattern
   if (FAREWELL_PATTERN.test(message)) {
     debug_log("[Witness]", `Farewell detected from ${event.actorRef}`);
-    // If in conversation with this speaker, end it
+    // End conversation/engagement if the farewell is directed to this NPC or
+    // if this NPC is currently engaged with the speaker (even if conversation_state is missing).
+    const is_addressed = event.targetRef === observer_ref;
+    const engagement = getEngagement(observer_ref);
+    const engaged_with_speaker = !!engagement?.engaged_with?.includes(event.actorRef);
     const conv = get_conversation(observer_ref);
-    if (conv && conv.target_entity === event.actorRef) {
-      debug_log("[Witness]", `Ending conversation for ${observer_ref}`);
-      end_conversation(observer_ref);
-      restore_previous_goal(observer_ref);
+    const talking_to_speaker = !!conv && conv.target_entity === event.actorRef;
+
+    if (is_addressed || engaged_with_speaker || talking_to_speaker) {
+      debug_log("[Witness]", `Ending conversation for ${observer_ref} (farewell)`);
+      const ended_conv = end_conversation(observer_ref);
+      restore_previous_goal(observer_ref, ended_conv);
     }
     return;
   }
@@ -273,12 +426,12 @@ function handle_communication_perception(
   const is_very_close = event.distance <= 2;
   const should_respond = is_addressed || is_very_close;
   
-  console.log(`[WITNESS] Response check for ${observer_ref}:`, { 
-    is_addressed, 
-    is_very_close, 
+  debug_event("WITNESS", "communication.response_check", {
+    observer_ref,
+    is_addressed,
+    is_very_close,
     distance: event.distance,
-    event_targetRef: event.targetRef,
-    observer_ref
+    event_target_ref: event.targetRef,
   });
   debug_log("[Witness]", `Response check for ${observer_ref}:`, { is_addressed, is_very_close, distance: event.distance });
   
@@ -302,6 +455,15 @@ function handle_communication_perception(
       update_conversation_timeout(observer_ref);
       updateEngagement(observer_ref); // Also extend engagement
       face_actor(observer_ref, event);
+
+      // Sync cross-process conversation presence for movement decisions.
+      const updated = get_conversation(observer_ref);
+      if (updated) {
+        set_conversation_presence(data_slot, observer_ref, updated.target_entity, updated.timeout_at_ms);
+      }
+
+      // This NPC is a conversation participant and is therefore eligible to respond.
+      note_response_eligible(event.actionId, observer_ref);
       // Note: NPC responses are handled by process_communication() in the main loop,
       // which reads the original COMMUNICATE message from the outbox and generates
       // contextual LLM responses using build_npc_prompt() and the full decision hierarchy.
@@ -310,7 +472,8 @@ function handle_communication_perception(
     else if (conv && is_addressed) {
       debug_log("[Witness]", `Switching conversation for ${observer_ref} to ${event.actorRef}`);
       // Switch to new speaker
-      end_conversation(observer_ref);
+      const ended_conv = end_conversation(observer_ref);
+      restore_previous_goal(observer_ref, ended_conv);
       start_conversation_with_actor(observer_ref, event);
     }
     return;
@@ -379,8 +542,44 @@ function handle_bystander_reaction(
     case "join":
       // High interest - join as participant
       debug_log("[Witness]", `${observer_ref} is interested (${result.interest_level}) - joining conversation`);
+      start_conversation_with_actor(observer_ref, event);
       enterEngagement(observer_ref, event.actorRef, "participant");
       face_actor(observer_ref, event);
+
+      // Store a lightweight memory for joiners (they're attentive by choice).
+      if (message.trim().length > 0 && shouldRemember(result.interest_level, false)) {
+        const importance = Math.max(
+          1,
+          calculateMemoryImportance(
+            result.interest_level,
+            false,
+            message.toLowerCase().includes("secret")
+          )
+        );
+        try {
+          add_memory(data_slot, observer_ref, {
+            type: "conversation",
+            importance,
+            summary: `I overheard ${event.actorRef} speaking${event.targetRef ? ` to ${event.targetRef}` : ""}: "${message}"`,
+            details: [
+              `role=joiner`,
+              `volume=${String(volume)}`,
+              `distance=${event.distance.toFixed(2)}`,
+              `interest=${result.interest_level}`,
+              `perception_event_id=${event.id}`,
+              `action_id=${event.actionId}`,
+            ].join("\n"),
+            related_entities: [event.actorRef, ...(event.targetRef ? [event.targetRef] : [])],
+            location: current_place_id,
+            emotional_tone: "curious",
+          });
+        } catch (err) {
+          debug_event("WITNESS", "memory.store_failed", {
+            observer_ref,
+            reason: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       break;
       
     case "eavesdrop":
@@ -396,7 +595,32 @@ function handle_bystander_reaction(
           message.toLowerCase().includes("secret")
         );
         debug_log("[Witness]", `${observer_ref} will remember this conversation (importance: ${importance})`);
-        // TODO: Store to memory system
+
+        if (message.trim().length > 0) {
+          try {
+            add_memory(data_slot, observer_ref, {
+              type: "conversation",
+              importance: Math.max(1, importance),
+              summary: `I overheard ${event.actorRef} speaking${event.targetRef ? ` to ${event.targetRef}` : ""}: "${message}"`,
+              details: [
+                `role=bystander`,
+                `volume=${String(volume)}`,
+                `distance=${event.distance.toFixed(2)}`,
+                `interest=${result.interest_level}`,
+                `perception_event_id=${event.id}`,
+                `action_id=${event.actionId}`,
+              ].join("\n"),
+              related_entities: [event.actorRef, ...(event.targetRef ? [event.targetRef] : [])],
+              location: current_place_id,
+              emotional_tone: "curious",
+            });
+          } catch (err) {
+            debug_event("WITNESS", "memory.store_failed", {
+              observer_ref,
+              reason: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
       }
       break;
       
@@ -437,7 +661,10 @@ function start_conversation_with_actor(
   observer_ref: string,
   event: PerceptionEvent
 ): void {
-  console.log(`[WITNESS] start_conversation_with_actor called for ${observer_ref}, actor: ${event.actorRef}`);
+  debug_event("WITNESS", "conversation.start_requested", {
+    npc_ref: observer_ref,
+    actor_ref: event.actorRef,
+  });
   debug_log("[Witness]", `start_conversation_with_actor called for ${observer_ref}`);
   
   // Check if we already started a conversation with this NPC recently
@@ -463,7 +690,7 @@ function start_conversation_with_actor(
   // LLM responses using build_npc_prompt() and the full decision hierarchy (scripted → template → AI).
   // The witness system only handles engagement state (stop, face, timeout) and visual feedback.
   
-  const state = get_movement_state(observer_ref);
+  const state = ensure_movement_state(observer_ref);
   if (!state) {
     debug_log("[Witness]", `No movement state for ${observer_ref}`);
     mark_conversation_ended(observer_ref);
@@ -506,6 +733,12 @@ function start_conversation_with_actor(
     previous_goal,
     previous_path_state
   );
+
+  // Sync presence to disk so other processes (npc_ai) treat this NPC as in-conversation.
+  const conv = get_conversation(observer_ref);
+  if (conv) {
+    set_conversation_presence(data_slot, observer_ref, conv.target_entity, conv.timeout_at_ms);
+  }
   
   // Set conversation goal
   const target_pos = { x: event.location.x ?? 0, y: event.location.y ?? 0 };
@@ -516,13 +749,20 @@ function start_conversation_with_actor(
   face_actor(observer_ref, event);
   
   // Update NPC status to "busy" in place data so renderer shows conversation state
-  console.log(`[WITNESS] About to call update_npc_status_in_place for ${observer_ref} with status "busy"`);
+  debug_event("WITNESS", "npc_status.set", {
+    npc_ref: observer_ref,
+    status: "busy",
+    reason: "enter_conversation",
+  });
   update_npc_status_in_place(observer_ref, "busy");
   
   // Send status command to renderer for real-time visual indicator
-  console.log(`[WITNESS] About to call send_status_command for ${observer_ref} with status "busy"`);
   send_status_command(observer_ref, "busy", "Entering conversation");
-  console.log(`[WITNESS] Finished status updates for ${observer_ref}`);
+  // Status commands are the renderer-visible source of truth for conversation visuals.
+
+  // Single pipeline: if the witness system put this NPC into conversation, they are eligible
+  // to respond to this COMMUNICATE action.
+  note_response_eligible(event.actionId, observer_ref);
   
   debug_log("[Witness]", `${observer_ref} started conversation with ${event.actorRef}`);
 }
@@ -545,9 +785,17 @@ function face_actor(observer_ref: string, event: PerceptionEvent): void {
 /**
  * Restore previous goal after conversation ends
  */
-function restore_previous_goal(npc_ref: string): void {
-  const conv = get_conversation(npc_ref);
-  if (!conv) return;
+function restore_previous_goal(npc_ref: string, ended_conv?: any | null): void {
+  const conv = ended_conv ?? get_conversation(npc_ref);
+  if (!conv) {
+    // Even if we lost the conversation record, always clear the visual/engagement state.
+    update_npc_status_in_place(npc_ref, "present");
+    send_status_command(npc_ref, "present", "Exiting conversation");
+    clear_conversation_presence(data_slot, npc_ref);
+    endEngagement(npc_ref, "conversation ended");
+    mark_conversation_ended(npc_ref);
+    return;
+  }
 
   if (conv.previous_goal) {
     // Restore path if available
@@ -567,7 +815,8 @@ function restore_previous_goal(npc_ref: string): void {
   
   // Update NPC status back to "present" in place data
   update_npc_status_in_place(npc_ref, "present");
-  
+  clear_conversation_presence(data_slot, npc_ref);
+   
   // Send status command to renderer to update visual indicator
   send_status_command(npc_ref, "present", "Exiting conversation");
   
@@ -585,8 +834,8 @@ export function update_conversations(): void {
   const ended = update_conversations_state();
 
   // Restore goals for ended conversations
-  for (const npc_ref of ended) {
-    restore_previous_goal(npc_ref);
+  for (const conv of ended) {
+    restore_previous_goal(conv.npc_ref, conv);
   }
 }
 
@@ -595,9 +844,30 @@ export function update_conversations(): void {
  */
 export function force_end_conversation(npc_ref: string): void {
   if (is_in_conversation(npc_ref)) {
-    end_conversation(npc_ref);
-    restore_previous_goal(npc_ref);
+    const ended_conv = end_conversation(npc_ref);
+    restore_previous_goal(npc_ref, ended_conv);
     debug_log("Witness", `Force-ended conversation for ${npc_ref}`);
+  }
+}
+
+/**
+ * End all conversations (and engagement/status) involving an entity.
+ * Used when an actor leaves a place so NPCs stop following/being "busy".
+ */
+export function end_conversations_involving_entity(entity_ref: string, reason: string): void {
+  // End conversations tracked in conversation_state
+  for (const conv of get_all_conversations()) {
+    if (conv.target_entity === entity_ref || conv.participants.includes(entity_ref)) {
+      const ended_conv = end_conversation(conv.npc_ref);
+      restore_previous_goal(conv.npc_ref, ended_conv);
+      debug_log("Witness", `Ended conversation for ${conv.npc_ref} because ${entity_ref} (${reason})`);
+    }
+  }
+
+  // Also end any engagement-only cases (in case conversation_state was lost)
+  for (const npc_ref of getEngagedWith(entity_ref)) {
+    restore_previous_goal(npc_ref, null);
+    debug_log("Witness", `Ended engagement for ${npc_ref} because ${entity_ref} (${reason})`);
   }
 }
 
@@ -607,7 +877,6 @@ export function force_end_conversation(npc_ref: string): void {
 export function get_witness_debug_info(): {
   conversations_active: number;
 } {
-  const { get_conversation_count } = require("./conversation_state.js");
   return {
     conversations_active: get_conversation_count()
   };
@@ -615,57 +884,18 @@ export function get_witness_debug_info(): {
 
 /**
  * Update NPC status in place data
- * This ensures the renderer shows the correct status (busy when in conversation)
+ *
+ * NOTE: Status is an ephemeral, renderer-visible state and should be driven by `NPC_STATUS`
+ * commands. Persisting it to disk can cause stale "busy" flags across sessions.
  */
 function update_npc_status_in_place(
   npc_ref: string,
   status: "present" | "moving" | "busy" | "sleeping"
 ): void {
   try {
-    console.log(`[Witness] update_npc_status_in_place called for ${npc_ref} with status ${status}`);
-    
-    // Load NPC to get their location
-    const npc_id = npc_ref.replace("npc.", "");
-    const { load_npc } = require("../npc_storage/store.js");
-    const npc_result = load_npc(data_slot, npc_id);
-    
-    if (!npc_result.ok || !npc_result.npc) {
-      console.log(`[Witness] Failed to load NPC ${npc_ref}`);
-      return;
-    }
-    console.log(`[Witness] Loaded NPC ${npc_ref}`);
-    
-    // Get place_id from NPC location
-    const location = get_npc_location(npc_result.npc);
-    if (!location?.place_id) {
-      console.log(`[Witness] No place_id for ${npc_ref}`);
-      return;
-    }
-    console.log(`[Witness] NPC ${npc_ref} is in place ${location.place_id}`);
-    
-    // Load the place
-    const place_result = load_place(data_slot, location.place_id);
-    if (!place_result.ok || !place_result.place) {
-      console.log(`[Witness] Failed to load place ${location.place_id}`);
-      return;
-    }
-    
-    const place = place_result.place;
-    console.log(`[Witness] Loaded place ${place.id} with ${place.contents.npcs_present.length} NPCs`);
-    
-    // Find and update the NPC in the place
-    const npc_in_place = place.contents.npcs_present.find(
-      (n: any) => n.npc_ref === npc_ref
-    );
-    
-    if (npc_in_place) {
-      npc_in_place.status = status;
-      save_place(data_slot, place);
-      console.log(`[Witness] UPDATED ${npc_ref} status to ${status} in place ${place.id}`);
-    } else {
-      console.log(`[Witness] NPC ${npc_ref} not found in place ${place.id}`);
-    }
+    debug_event("WITNESS", "place_status.update_skipped", { npc_ref, status });
   } catch (err) {
+    // Keep as console.error so it shows regardless of debug level.
     console.error(`[Witness] ERROR updating ${npc_ref} status:`, err);
   }
 }

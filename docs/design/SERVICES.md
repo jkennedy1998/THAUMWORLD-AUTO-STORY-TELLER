@@ -2,6 +2,8 @@
 
 Complete reference for all system services, their contracts, and handoff points.
 
+Current build note (2026-02-13): `interpreter_ai` is archived. Player/NPC communication actions are created in `interface_program` and executed via the ActionPipeline.
+
 **System Reference:** [THAUMWORLD Rules](https://www.thaumworld.xyz/rules-index/)
 
 ## Service Overview
@@ -9,13 +11,14 @@ Complete reference for all system services, their contracts, and handoff points.
 | Service | Purpose | Poll Rate | Input Stage | Output Stage |
 |---------|---------|-----------|-------------|--------------|
 | interface_program | HTTP bridge + CLI | 2000ms (Breath) | HTTP/CLI | inbox |
-| interpreter_ai | Natural → Machine | 800ms | interpreter_ai | interpreted_1 |
+| interpreter_ai (archived) | Natural → Machine (legacy) | - | - | - |
 | data_broker | Resolve references | 800ms | interpreted_* | brokered_1 |
 | rules_lawyer | Apply RPG rules | 800ms | brokered_* | ruling_1 (pending_state_apply) |
 | state_applier | Modify game state | 800ms | ruling_* (pending_state_apply) | applied_1 |
 | renderer_ai | System → Narrative | 800ms | applied_* | rendered_1 |
 | npc_ai | NPC responses | 800ms | applied_* (COMMUNICATE) | npc_response |
 | roller | Dice rolling | 800ms | awaiting_roll_* | - |
+| turn_manager | Timed events + turns | 800ms | applied_* | timed_event updates |
 
 ---
 
@@ -41,25 +44,25 @@ Complete reference for all system services, their contracts, and handoff points.
 1. Receives user input
 2. Creates message with `type: "user_input"`
 3. Appends to `inbox.jsonc`
-4. Breath() polls and routes to `interpreter_ai` stage
+4. Breath() polls and handles ActionPipeline intents directly (COMMUNICATE/MOVE/USE/INSPECT)
 
 ### Output
-- **Location:** `inbox.jsonc` → `outbox.jsonc` (via router)
-- **Stage:** `interpreter_ai`
+- **Location:** `inbox.jsonc` → internal ActionPipeline + `outbox.jsonc` (for downstream services like npc_ai)
+- **Stage:** ActionPipeline emits coordination messages; legacy interpreter stage labels may exist in old data/logs
 - **Status:** `sent`
 - **Example:**
   ```jsonc
   {
     "sender": "henry_actor",
-    "content": "attack the goblin",
+    "content": "hello",
     "type": "user_input",
-    "stage": "interpreter_ai",
+    "stage": "applied_COMMUNICATE",
     "status": "sent"
   }
   ```
 
 ### Handoff
-**To:** interpreter_ai (via Breath router)
+**To:** ActionPipeline (in-process) and downstream services (npc_ai/renderer_ai)
 
 ### Data Files
 - `local_data/data_slot_1/inbox.jsonc` - User inputs
@@ -80,88 +83,12 @@ Complete reference for all system services, their contracts, and handoff points.
 
 ---
 
-## interpreter_ai
+## interpreter_ai (archived)
 
-**Purpose:** Convert natural language player input into machine-readable system commands using LLM.
+The legacy interpreter service is archived and not launched in this build.
 
-**Location:** `src/interpreter_ai/main.ts`
-
-**Reference:** [THAUMWORLD Actions](https://www.thaumworld.xyz/actions/)
-
-### Input
-- **Location:** `outbox.jsonc`
-- **Stage:** `interpreter_ai`
-- **Status:** `sent`
-- **Required Fields:**
-  - `content`: User's natural language text
-  - `sender`: Actor ID (e.g., "henry_actor")
-
-### Processing
-1. Loads actor context (stats, inventory, location)
-2. Builds prompt with system instructions + actor context
-3. Sends to LLM (ollama_chat)
-4. Parses response into machine text
-5. Sanitizes output (removes markdown, normalizes syntax)
-6. Stores conversation history (session-based)
-
-### System Prompt Key Points
-```
-You are the Interpreter AI for THAUMWORLD tabletop RPG.
-Convert human input into strict machine-readable system text.
-Output ONLY machine text. One command per line. No prose.
-Syntax: <subject>.<VERB>(key=value, ...)
-Subjects are refs (actor, npc, item, tile). Verbs are UPPERCASE.
-Action verbs: USE, ATTACK, HELP, DEFEND, GRAPPLE, INSPECT, COMMUNICATE, DODGE, CRAFT, SLEEP, REPAIR, MOVE, WORK, GUARD, HOLD
-System verbs: SYSTEM.APPLY_TAG, SYSTEM.REMOVE_TAG, SYSTEM.ADJUST_RESOURCE, etc.
-```
-
-### Output
-- **Location:** `inbox.jsonc` (via router)
-- **Stage:** `interpreted_1`
-- **Status:** `sent`
-- **Meta Fields:**
-  - `machine_text`: Generated system command(s)
-  - `original_text`: User's input (preserved)
-  - `error_reason`: If parsing failed
-  - `error_iteration`: Retry count
-
-**Example Output:**
-```jsonc
-{
-  "sender": "interpreter_ai",
-  "content": "actor.henry_actor.ATTACK(target=npc.goblin, tool=actor.henry_actor.sword)",
-  "stage": "interpreted_1",
-  "status": "sent",
-  "meta": {
-    "machine_text": "actor.henry_actor.ATTACK(target=npc.goblin, tool=actor.henry_actor.sword)",
-    "original_text": "attack the goblin with my sword"
-  }
-}
-```
-
-### Error Handling
-- Empty response → Retry with refinement prompt
-- Parse errors → Retry up to 5 iterations
-- After 5 failures → "band_aid" mode (best effort)
-
-### Handoff
-**To:** data_broker (via router)
-
-### Configuration
-```typescript
-const INTERPRETER_MODEL = "llama3.2:latest";
-const INTERPRETER_TIMEOUT_MS = 600_000; // 10 minutes
-const INTERPRETER_TEMPERATURE = 0.2; // Low creativity for precision
-const INTERPRETER_HISTORY_LIMIT = 12; // Session memory
-```
-
-### Debug Logging
-```
-[1] InterpreterAI: request { model, session, refinement, history }
-[1] InterpreterAI: response { model, session, duration_ms, chars }
-[1] Interpreter Out <machine_text>
-[1] Interpreter: sent response { reply_to, id }
-```
+Reference:
+- `docs/archive/2026_02_13_legacy_interpreter_pipeline_reference.md`
 
 ---
 
@@ -671,5 +598,5 @@ if (done.ok) {
 ## Next Steps
 
 - See [STAGES.md](./STAGES.md) for detailed stage documentation
-- See [EFFECTS.md](./EFFECTS.md) for THAUMWORLD effect system
+- See [EFFECTS.md](../specs/EFFECTS.md) for THAUMWORLD effect system
 - See [examples/](./examples/) for working code samples

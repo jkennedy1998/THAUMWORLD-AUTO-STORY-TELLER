@@ -179,6 +179,24 @@ export function getDefaultPersonality(npc_ref?: string): PersonalityProfile {
       interests: ["trade", "herbs", "potions", "customers", "news"]
     }
   };
+
+  // Other archetypal personalities (non-shopkeepers)
+  const special: Record<string, PersonalityProfile> = {
+    // Shop assistant: chatty enough to eavesdrop/join during testing.
+    "npc.mira": {
+      curiosity: 8,
+      extraversion: 6,
+      gossip_tendency: 8,
+      suspicious: 4,
+      interests: ["customers", "trade", "rumor", "secret", "news"],
+      is_shopkeeper: false,
+      home_place_id: "eden_crossroads_grendas_shop",
+    },
+  };
+
+  if (npc_ref && special[npc_ref]) {
+    return special[npc_ref];
+  }
   
   // Check if this NPC is a known shopkeeper
   if (npc_ref && shopkeepers[npc_ref]) {

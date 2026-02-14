@@ -28,7 +28,7 @@ import * as path from "node:path";
 import { get_outbox_path } from "../engine/paths.js";
 import { ensure_outbox_exists, read_outbox, write_outbox } from "../engine/outbox_store.js";
 import { debug_log } from "../shared/debug.js";
-import type { AnyMovementCommand, MovementCommandMessage } from "../shared/movement_commands.js";
+import type { AnyMovementCommand, AnyMovementCommandInput, MovementCommandMessage } from "../shared/movement_commands.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
 
 const data_slot = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
@@ -43,7 +43,7 @@ const data_slot = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
  */
 export function send_movement_command(
   npc_ref: string,
-  command: Omit<AnyMovementCommand, "npc_ref" | "timestamp">,
+  command: AnyMovementCommandInput,
   place_id?: string
 ): boolean {
   try {
@@ -280,4 +280,53 @@ export function send_target_command(
   
   debug_log("[MovementCommand]", `TARGET command result: ${result}`);
   return result;
+}
+
+/**
+ * Send UI_SENSE_BROADCAST command - Spawn broadcast particles for an entity.
+ */
+export function send_sense_broadcast_command(
+  entity_ref: string,
+  verb: string,
+  subtype: string | undefined,
+  reason: string,
+  place_id?: string
+): boolean {
+  debug_log("[MovementCommand]", `Sending SENSE_BROADCAST command for ${entity_ref}: ${verb}${subtype ? "." + subtype : ""}`);
+  return send_movement_command(
+    entity_ref,
+    {
+      type: "UI_SENSE_BROADCAST",
+      verb,
+      subtype,
+      reason,
+    },
+    place_id
+  );
+}
+
+/**
+ * Send UI_SOUND command - Play an SFX in the renderer.
+ */
+export function send_sound_command(
+  emitter_ref: string,
+  sound_id: string,
+  loudness: string | undefined,
+  reason: string,
+  place_id?: string
+): boolean {
+  debug_log("[MovementCommand]", `Sending SOUND command for ${emitter_ref}: ${sound_id}`);
+  return send_movement_command(
+    emitter_ref,
+    {
+      type: "UI_SOUND",
+      sound_id,
+      emitter_ref,
+      loudness,
+      channel: "sfx",
+      cooldown_ms: 120,
+      reason,
+    },
+    place_id
+  );
 }

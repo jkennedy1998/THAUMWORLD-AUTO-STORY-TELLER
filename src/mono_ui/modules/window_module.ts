@@ -1,4 +1,4 @@
-import type { Canvas, Module, Rect, Rgb, WheelEvent } from "../types.js";
+import type { Canvas, Module, Rect, Rgb, WheelEvent, DragEvent } from "../types.js";
 import { rect_width, rect_height } from "../types.js";
 import { draw_border } from "../padding.js";
 import { get_color_by_name } from "../colors.js";
@@ -6,6 +6,8 @@ import { get_color_by_name } from "../colors.js";
 export type TextWindowMessage = {
     content: string;
     sender?: string;
+    // Optional backing log id (lets the app correlate UI updates with source events).
+    id?: string;
 };
 
 export type TextWindowSource = {
@@ -54,7 +56,27 @@ function wrap_messages(messages: (string | TextWindowMessage)[], width: number):
     const cp_len = (s: string) => to_cp(s).length;
     const cp_slice = (s: string, start: number, end?: number) => to_cp(s).slice(start, end).join("");
 
-    const push_wrapped_paragraph = (paragraph: string, sender: string | undefined) => {
+    const badge_for_sender = (sender: string | undefined): { badge: string; indent: string; width: number } | null => {
+        if (!sender) return null;
+        const s = sender.toLowerCase();
+        // Fixed-width 3-char badges (keeps wrapping predictable)
+        const badge = s === "user" ? "U: "
+            : s === "assistant" ? "R: "
+            : s === "npc" ? "N: "
+            : s === "inspection" ? "I: "
+            : s === "hint" ? "!: "
+            : s === "state" ? "S: "
+            : s === "system" ? "?: "
+            : "?: ";
+        return { badge, indent: "   ", width: 3 };
+    };
+
+    const push_wrapped_paragraph = (
+        paragraph: string,
+        sender: string | undefined,
+        prefix: { badge: string; indent: string; width: number } | null,
+        first_line_ref: { first: boolean },
+    ) => {
         // Preserve truly empty lines
         if (paragraph.length === 0) {
             lines.push({ text: "", sender });
@@ -66,22 +88,37 @@ function wrap_messages(messages: (string | TextWindowMessage)[], width: number):
 
         let line = "";
 
+        const emit = (raw: string) => {
+            if (!prefix) {
+                lines.push({ text: raw, sender });
+                return;
+            }
+            if (first_line_ref.first) {
+                lines.push({ text: prefix.badge + raw, sender });
+                first_line_ref.first = false;
+            } else {
+                lines.push({ text: prefix.indent + raw, sender });
+            }
+        };
+
         const flush_line = () => {
-            lines.push({ text: line, sender });
+            emit(line);
             line = "";
         };
 
         const add_word = (w: string) => {
             const wlen = cp_len(w);
 
+            const avail = prefix ? Math.max(1, width - prefix.width) : width;
+
             // long word hyphenation by codepoints
-            if (wlen > width) {
+            if (wlen > avail) {
                 if (line.length > 0) flush_line();
 
                 let rest = w;
-                while (cp_len(rest) > width) {
-                    const take = Math.max(1, width - 1);
-                    lines.push({ text: cp_slice(rest, 0, take) + "-", sender });
+                while (cp_len(rest) > avail) {
+                    const take = Math.max(1, avail - 1);
+                    emit(cp_slice(rest, 0, take) + "-");
                     rest = cp_slice(rest, take);
                 }
                 line = rest;
@@ -95,7 +132,7 @@ function wrap_messages(messages: (string | TextWindowMessage)[], width: number):
 
             // +1 for space
             const next_len = cp_len(line) + 1 + wlen;
-            if (next_len <= width) {
+            if (next_len <= avail) {
                 line = line + " " + w;
             } else {
                 flush_line();
@@ -106,9 +143,9 @@ function wrap_messages(messages: (string | TextWindowMessage)[], width: number):
         for (const w of words) add_word(w);
 
         if (words.length === 0) {
-            lines.push({ text: "", sender });
+            emit("");
         } else if (line.length > 0) {
-            lines.push({ text: line, sender });
+            emit(line);
         }
     };
 
@@ -117,11 +154,14 @@ function wrap_messages(messages: (string | TextWindowMessage)[], width: number):
         const content = typeof msg === "string" ? msg : msg.content;
         const sender = typeof msg === "string" ? undefined : msg.sender;
 
+        const prefix = typeof msg === "string" ? null : badge_for_sender(sender);
+        const first_line_ref = { first: true };
+
         // Preserve user newlines: wrap each paragraph independently.
         const paragraphs = content.split("\n");
 
         for (let pi = 0; pi < paragraphs.length; pi++) {
-            push_wrapped_paragraph(paragraphs[pi] ?? "", sender);
+            push_wrapped_paragraph(paragraphs[pi] ?? "", sender, prefix, first_line_ref);
         }
 
         if (push_blank_between && mi !== messages.length - 1) {
@@ -142,6 +182,10 @@ function wrap_messages(messages: (string | TextWindowMessage)[], width: number):
 export function make_text_window_module(opts: TextWindowOptions): Module {
 
     let scroll_y = 0;
+
+    // Drag-to-pan (UI traversal): same feel as place module panning.
+    // Uses drag events so small pointer jitter doesn't scroll.
+    let is_drag_panning = false;
 
     // derived layout cache
     let cached_rev = -1;
@@ -248,7 +292,7 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
                 const line_sender = line_info?.sender;
                 // Determine color based on sender type
                 let line_rgb = text_rgb;
-                if (line_sender === "hint") line_rgb = hint_rgb;
+                if (line_sender === "hint" || line_sender === "inspection") line_rgb = hint_rgb;
                 else if (line_sender === "npc") {
                     line_rgb = opts.npc_rgb ?? text_rgb;
                     npcLinesRendered++;
@@ -281,6 +325,22 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
             // prefer sign-based scroll for stability across devices
             const step = dy > 0 ? 1 : -1;
             scroll_by(step);
+        },
+
+        OnDragStart(e: DragEvent): void {
+            if (e.buttons & 1) {
+                is_drag_panning = true;
+            }
+        },
+        OnDragMove(e: DragEvent): void {
+            if (!is_drag_panning) return;
+            if (!(e.buttons & 1)) return;
+
+            // Drag up (positive step_dy) scrolls down to newer lines.
+            scroll_by(e.step_dy);
+        },
+        OnDragEnd(_e: DragEvent): void {
+            is_drag_panning = false;
         },
     };
 }

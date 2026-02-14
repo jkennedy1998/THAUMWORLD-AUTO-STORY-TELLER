@@ -209,7 +209,7 @@ Error: Cannot parse machine text
 ```
 
 **Solutions:**
-1. Check prompt format in interpreter_ai
+1. Current build: `interpreter_ai` is archived. Check ActionPipeline + witness logs in `interface_program` instead.
 
 2. Add more explicit format instructions
 
@@ -752,7 +752,7 @@ When reporting issues:
 
 ### Resources
 
-- [Architecture Overview](./ARCHITECTURE.md)
+- [Architecture Overview](../design/ARCHITECTURE.md)
 - [Developer Guide](./DEVELOPER_GUIDE.md)
 - [AI Prompts](./AI_PROMPTS.md)
 - GitHub Issues: Report bugs

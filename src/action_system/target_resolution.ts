@@ -10,6 +10,8 @@ import { load_npc } from "../npc_storage/store.js";
 import { load_actor } from "../actor_storage/store.js";
 import { get_npc_location } from "../npc_storage/location.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
+import { DEBUG_LEVEL } from "../shared/debug.js";
+import { debug_event } from "../shared/debug_event.js";
 
 // Context for target resolution
 export interface TargetResolutionContext {
@@ -313,13 +315,19 @@ export async function resolveTarget(
 ): Promise<ActionIntent> {
   const actionDef = ACTION_REGISTRY[intent.verb];
   
-  // If action doesn't require target, return as-is
-  if (!actionDef || !actionDef.targetRequired) {
+  // If action doesn't require a target and none was provided, return as-is.
+  // If a targetRef *was* provided (e.g. directed COMMUNICATE), still resolve/validate it
+  // so downstream stages (range validation, awareness checks) have targetType/location.
+  if (!actionDef || (!actionDef.targetRequired && !intent.targetRef)) {
     return intent;
   }
   
   // If target already specified in intent, validate it
   if (intent.targetRef) {
+    // If the target is in the currently-available targets list, use its location.
+    // This is critical for range validation (COMMUNICATE, USE, etc.).
+    const explicit = availableTargets.find(t => t.ref === intent.targetRef);
+
     const validation = await validateTarget(
       intent.targetRef,
       actionDef,
@@ -330,7 +338,8 @@ export async function resolveTarget(
     if (validation.valid) {
       return {
         ...intent,
-        targetType: validation.type
+        targetType: validation.type ?? explicit?.type,
+        targetLocation: explicit?.location ?? intent.targetLocation,
       };
     }
     
@@ -474,9 +483,14 @@ export async function getAvailableTargets(
     }
   }
   
-  console.log(`[getAvailableTargets] COMPLETE: Returning ${targets.length} targets`);
-  for (const t of targets) {
-    console.log(`[getAvailableTargets]   - ${t.ref} at (${t.location.x}, ${t.location.y}) distance=${t.distance}`);
+  if (DEBUG_LEVEL >= 4) {
+    debug_event("TARGET_RESOLUTION", "available_targets.complete", {
+      count: targets.length,
+      radius,
+      x: location.x,
+      y: location.y,
+      place_id: place_id,
+    });
   }
   
   return targets;

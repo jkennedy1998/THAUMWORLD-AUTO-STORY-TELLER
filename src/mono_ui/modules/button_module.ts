@@ -1,4 +1,5 @@
 import type { Canvas, Module, Rect, Rgb, PointerEvent } from '../types.js';
+import { play_sfx } from '../sfx/sfx_player.js';
 
 export type ButtonOptions = {
     id: string;
@@ -19,6 +20,10 @@ export type ButtonOptions = {
 
     // called on click; you can branch on e.button and e.click_count
     OnPress?: (e: PointerEvent) => void;
+
+    // Optional UI SFX ids
+    sfx_down_id?: string;
+    sfx_up_id?: string;
 };
 
 export function make_button_module(opts: ButtonOptions): Module {
@@ -114,7 +119,10 @@ export function make_button_module(opts: ButtonOptions): Module {
 
         OnPointerDown(e: PointerEvent): void {
             // only treat left button as "press" by default
-            if (e.button === 0) pressed = true;
+            if (e.button === 0) {
+                pressed = true;
+                play_sfx(opts.sfx_down_id ?? 'ui_press', { channel: 'ui', cooldown_ms: 0 });
+            }
 
         },
 
@@ -129,6 +137,9 @@ export function make_button_module(opts: ButtonOptions): Module {
         OnClick(e: PointerEvent): void {
             // click feedback: +2 from base for a few frames
             click_boost_frames = CLICK_BOOST_FRAMES;
+
+            // Release sound only when it's a real click (no drag-away).
+            play_sfx(opts.sfx_up_id ?? 'ui_release', { channel: 'ui', cooldown_ms: 0 });
 
             // let right/middle/dblclick be handled by caller if they want
             opts.OnPress?.(e);

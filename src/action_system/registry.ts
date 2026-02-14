@@ -323,8 +323,8 @@ export const ACTION_REGISTRY: Record<ActionVerb, ActionDefinition> = {
     targetRange: 100,  // Can move far
     allowSelf: false,
     defaultCost: "FULL",
-    requiresTool: true,
-    defaultTool: "hands",  // Used for balance, climbing
+    requiresTool: false,
+    defaultTool: "hands",  // Informational only (no tool validation for MOVE)
     validToolTypes: ["hands", "item"],
     perceptibility: {
       visual: true,

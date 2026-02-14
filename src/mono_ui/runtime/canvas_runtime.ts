@@ -3,6 +3,9 @@ import { compose_modules } from '../compose.js';
 import type { Canvas, Cell, Module, PointerEvent, DragEvent, WheelEvent } from '../types.js';
 import { rect_contains } from '../types.js';
 import { debug_warn } from '../../shared/debug.js';
+import { toggle_ui_debug } from './ui_debug.js';
+import { set_debug_enabled as set_vision_debug_enabled } from '../vision_debugger.js';
+import { unlock_sfx } from '../sfx/sfx_player.js';
 
 export type CanvasRuntimeOptions = {
     canvas: HTMLCanvasElement;
@@ -72,6 +75,27 @@ export class CanvasRuntime {
     private readonly DBLCLICK_TILE_RADIUS = 1;
     private readonly DRAG_THRESHOLD_TILES = 1;
 
+    // Global UI pan (moves the entire canvas within the viewport).
+    // This replaces browser scrollbars for traversing the UI when the canvas is larger than the window.
+    // Global UI pan (moves the entire canvas within the viewport).
+    // Tile-locked: pans only in whole character-cell increments.
+    private pan_tiles_x = 0;
+    private pan_tiles_y = 0;
+    private pan_accum_px_x = 0;
+    private pan_accum_px_y = 0;
+    private pan_dirty = false;
+    private global_pan_active = false;
+    private last_pan_client_x = 0;
+    private last_pan_client_y = 0;
+    private space_down = false;
+
+    // Allow panning beyond strict canvas bounds (gives breathing room / "free space").
+    private readonly PAN_MARGIN_TILES = 10;
+
+    // Base translate (centered/snap-to-grid) computed from viewport + canvas size.
+    private base_pan_px_x = 0;
+    private base_pan_px_y = 0;
+
     constructor(opts: CanvasRuntimeOptions) {
         this.canvas_el = opts.canvas;
         const ctx = this.canvas_el.getContext('2d');
@@ -96,10 +120,31 @@ export class CanvasRuntime {
     set_scale(scale: number): void {
         this.scale = scale;
         this.resize_to_grid();
+
+        // Best-effort notification so the app shell can retune post-processing.
+        try {
+            window.dispatchEvent(new CustomEvent('thaumworld_ui_scale', { detail: { scale: this.scale } }));
+        } catch {
+            // ignore
+        }
     }
 
     get_scale(): number {
         return this.scale;
+    }
+
+    private clamp_scale(scale: number): number {
+        if (!Number.isFinite(scale)) return 1.0;
+        // Conservative clamp; this is UI-only and can be tuned later.
+        return Math.max(0.25, Math.min(6.0, scale));
+    }
+
+    private persist_scale_best_effort(scale: number): void {
+        try {
+            window.localStorage.setItem('thaumworld_ui_scale', String(scale));
+        } catch {
+            // ignore
+        }
     }
 
     set_modules(modules: Module[]): void {
@@ -245,6 +290,77 @@ export class CanvasRuntime {
 
         this.canvas_el.style.width = `${this.canvas_el.width}px`;
         this.canvas_el.style.height = `${this.canvas_el.height}px`;
+
+        this.recenter_or_clamp_pan();
+    }
+
+    private recenter_or_clamp_pan(): void {
+        const viewport = this.canvas_el.parentElement;
+        if (!viewport) return;
+
+        const vw = viewport.clientWidth;
+        const vh = viewport.clientHeight;
+        const cw = this.canvas_el.width;
+        const ch = this.canvas_el.height;
+
+        const { tile_w, tile_h } = this.get_metrics();
+
+        // Center baseline and snap to the tile grid.
+        const centered_x_raw = (vw - cw) / 2;
+        const centered_y_raw = (vh - ch) / 2;
+
+        const centered_x = Math.round(centered_x_raw / tile_w) * tile_w;
+        const centered_y = Math.round(centered_y_raw / tile_h) * tile_h;
+
+        this.base_pan_px_x = centered_x;
+        this.base_pan_px_y = centered_y;
+
+        if (!this.pan_dirty) {
+            this.pan_tiles_x = 0;
+            this.pan_tiles_y = 0;
+            this.pan_accum_px_x = 0;
+            this.pan_accum_px_y = 0;
+        }
+
+        const mx = this.PAN_MARGIN_TILES * tile_w;
+        const my = this.PAN_MARGIN_TILES * tile_h;
+
+        const desired_x = this.base_pan_px_x + this.pan_tiles_x * tile_w;
+        const desired_y = this.base_pan_px_y + this.pan_tiles_y * tile_h;
+
+        const min_x = Math.min(this.base_pan_px_x - mx, vw - cw - mx);
+        const max_x = Math.max(this.base_pan_px_x + mx, 0 + mx);
+        const min_y = Math.min(this.base_pan_px_y - my, vh - ch - my);
+        const max_y = Math.max(this.base_pan_px_y + my, 0 + my);
+
+        const clamped_x = Math.max(min_x, Math.min(max_x, desired_x));
+        const clamped_y = Math.max(min_y, Math.min(max_y, desired_y));
+
+        // Convert clamped px back to tile offsets (keeps tile-locked).
+        this.pan_tiles_x = Math.round((clamped_x - this.base_pan_px_x) / tile_w);
+        this.pan_tiles_y = Math.round((clamped_y - this.base_pan_px_y) / tile_h);
+
+        const final_x = this.base_pan_px_x + this.pan_tiles_x * tile_w;
+        const final_y = this.base_pan_px_y + this.pan_tiles_y * tile_h;
+
+        this.canvas_el.style.transform = `translate(${final_x}px, ${final_y}px)`;
+
+        // Best-effort notification so the app shell can keep background patterns aligned.
+        try {
+            window.dispatchEvent(
+                new CustomEvent('thaumworld_ui_pan', {
+                    detail: {
+                        pan_x_px: final_x,
+                        pan_y_px: final_y,
+                        tile_w_px: tile_w,
+                        tile_h_px: tile_h,
+                        scale: this.scale,
+                    },
+                }),
+            );
+        } catch {
+            // ignore
+        }
     }
 
     private draw_canvas(c: Canvas): void {
@@ -292,6 +408,46 @@ export class CanvasRuntime {
     }
 
     private dispatch_global_keydown(ev: KeyboardEvent): boolean {
+        // Global UI scale (1% steps).
+        // Avoid eating '-' / '+' while typing in the input, but allow Ctrl-based override.
+        const typing = this.focused_owner?.id === 'input';
+        const allow_while_typing = ev.ctrlKey;
+
+        if (!typing || allow_while_typing) {
+            if (ev.key === '+' || ev.key === '=') {
+                const next = this.clamp_scale(Number((this.scale * 1.01).toFixed(4)));
+                this.set_scale(next);
+                this.persist_scale_best_effort(next);
+                ev.preventDefault();
+                return true;
+            }
+            if (ev.key === '-' || ev.key === '_') {
+                const next = this.clamp_scale(Number((this.scale / 1.01).toFixed(4)));
+                this.set_scale(next);
+                this.persist_scale_best_effort(next);
+                ev.preventDefault();
+                return true;
+            }
+        }
+
+        if (ev.key === '\\') {
+            const enabled = toggle_ui_debug();
+            // Keep existing debug systems in sync.
+            set_vision_debug_enabled(enabled);
+            return true;
+        }
+        // Renderer snapshot: dumps the current composed ASCII grid to disk.
+        // This is used for debugging visual state in a way LLMs can ingest.
+        //
+        // Hotkeys:
+        // - Ctrl + .
+        // - Ctrl + /
+        // - . or / when nothing is focused
+        const is_snapshot_key = ev.key === '.' || ev.key === '/';
+        if (is_snapshot_key && (ev.ctrlKey || this.focused_owner === null)) {
+            void this.write_ascii_snapshot();
+            return true;
+        }
         if (ev.key === 'Escape') {
             this.focused_owner?.OnBlur?.();
             this.focused_owner = null;
@@ -300,9 +456,80 @@ export class CanvasRuntime {
         return false;
     }
 
+    private grid_to_ascii(): string {
+        // NOTE: y=0 is bottom in our grid space, so we print from top -> bottom.
+        const lines: string[] = [];
+        for (let y = this.grid_height - 1; y >= 0; y--) {
+            let row = '';
+            for (let x = 0; x < this.grid_width; x++) {
+                const cell = this.engine_canvas.get(x, y);
+                row += cell?.char ?? ' ';
+            }
+            lines.push(row);
+        }
+        return lines.join('\n');
+    }
+
+    private async read_session_id_best_effort(): Promise<string> {
+        const api = (window as any).electronAPI;
+        if (!api?.readFile) return 'no_session';
+
+        try {
+            const res = await api.readFile('.session_id');
+            if (!res?.success || typeof res.content !== 'string') return 'no_session';
+            const parsed = JSON.parse(res.content);
+            const sid = parsed?.session_id;
+            if (typeof sid === 'string' && sid.length > 0) return sid;
+            return 'no_session';
+        } catch {
+            return 'no_session';
+        }
+    }
+
+    private async write_ascii_snapshot(): Promise<void> {
+        const api = (window as any).electronAPI;
+        if (!api?.writeFile || !api?.getDataSlotDir) {
+            console.warn('[ui_snapshot] electronAPI missing; cannot write snapshot');
+            return;
+        }
+
+        const session_id = await this.read_session_id_best_effort();
+        const now = new Date();
+        const iso = now.toISOString();
+        const stamp = iso.replace(/[:.]/g, '-');
+
+        // Current workflow uses slot 1 for testing.
+        const dataSlotDir = await api.getDataSlotDir(1);
+        const filename = `ui_snapshot_${session_id}_${stamp}.txt`;
+        const filePath = `${dataSlotDir}/logs/${filename}`;
+
+        const header = [
+            '# UI ASCII Snapshot',
+            `timestamp: ${iso}`,
+            `session_id: ${session_id}`,
+            `grid: ${this.grid_width}x${this.grid_height}`,
+            'hotkey: Ctrl+. / Ctrl+/',
+            '',
+        ].join('\n');
+
+        const payload = `${header}${this.grid_to_ascii()}\n`;
+        const result = await api.writeFile(filePath, payload);
+        if (!result?.success) {
+            console.warn('[ui_snapshot] write failed', { filePath, error: result?.error });
+            return;
+        }
+
+        console.log('[ui_snapshot] saved', { filePath });
+    }
+
     private attach_events(): void {
         this.canvas_el.addEventListener('contextmenu', (ev) => {
             ev.preventDefault();
+        });
+
+        // Unlock WebAudio on first user gesture.
+        this.canvas_el.addEventListener('mousedown', () => {
+            unlock_sfx();
         });
 
         this.canvas_el.addEventListener('mousemove', (ev) => {
@@ -336,6 +563,36 @@ export class CanvasRuntime {
             );
 
             if (this.capture_owner) {
+                // If the drag started on background, pan the entire canvas instead of routing to a module.
+                if (this.global_pan_active && (ev.buttons & 1)) {
+                    const dx = ev.clientX - this.last_pan_client_x;
+                    const dy = ev.clientY - this.last_pan_client_y;
+                    this.last_pan_client_x = ev.clientX;
+                    this.last_pan_client_y = ev.clientY;
+
+                    const { tile_w, tile_h } = this.get_metrics();
+                    this.pan_accum_px_x += dx;
+                    this.pan_accum_px_y += dy;
+
+                    const step_x = tile_w > 0 ? Math.trunc(this.pan_accum_px_x / tile_w) : 0;
+                    const step_y = tile_h > 0 ? Math.trunc(this.pan_accum_px_y / tile_h) : 0;
+
+                    if (step_x !== 0) {
+                        this.pan_tiles_x += step_x;
+                        this.pan_accum_px_x -= step_x * tile_w;
+                    }
+                    if (step_y !== 0) {
+                        this.pan_tiles_y += step_y;
+                        this.pan_accum_px_y -= step_y * tile_h;
+                    }
+
+                    this.pan_dirty = true;
+                    this.recenter_or_clamp_pan();
+
+                    this.last_tile = t;
+                    return;
+                }
+
                 this.capture_owner.OnPointerMove?.(base);
 
                 if (this.down_tile) {
@@ -395,6 +652,17 @@ export class CanvasRuntime {
             if (!t) return;
 
             const top = this.route_to_top_module(t.x, t.y) ?? null;
+
+            // Global UI pan gesture:
+            // - Hold Space + drag anywhere (except while actively typing in input)
+            // - Or drag on background/free space
+            const typing = this.focused_owner?.id === 'input';
+            this.global_pan_active = (!typing && this.space_down) || (top?.id === 'bg');
+            if (this.global_pan_active) {
+                this.last_pan_client_x = ev.clientX;
+                this.last_pan_client_y = ev.clientY;
+            }
+
             this.down_owner = top;
             this.down_tile = t;
             this.dragging = false;
@@ -446,6 +714,7 @@ export class CanvasRuntime {
                 this.down_owner = null;
                 this.down_tile = null;
                 this.dragging = false;
+                this.global_pan_active = false;
                 return;
             }
 
@@ -455,6 +724,8 @@ export class CanvasRuntime {
             target?.OnPointerUp?.(
                 this.make_pointer_event('up', t.x, t.y, ev, this.engine_canvas.get(t.x, t.y)),
             );
+
+            this.global_pan_active = false;
 
             if (this.dragging && target) {
                 target.OnDragEnd?.(
@@ -502,6 +773,15 @@ export class CanvasRuntime {
         });
 
         this.key_sink.addEventListener('keydown', (ev) => {
+            unlock_sfx();
+            if (ev.code === 'Space') {
+                // Space is reserved for global UI pan gesture when not typing into input.
+                const typing = this.focused_owner?.id === 'input';
+                if (!typing) {
+                    this.space_down = true;
+                    ev.preventDefault();
+                }
+            }
             for (let i = this.modules.length - 1; i >= 0; i--) {
                 const m = this.modules[i];
                 if (!m) continue;
@@ -516,6 +796,9 @@ export class CanvasRuntime {
         });
 
         this.key_sink.addEventListener('keyup', (ev) => {
+            if (ev.code === 'Space') {
+                this.space_down = false;
+            }
             this.focused_owner?.OnKeyUp?.(ev);
         });
 

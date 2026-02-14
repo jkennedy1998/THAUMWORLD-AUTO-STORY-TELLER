@@ -13,14 +13,20 @@ import { start_movement_command_handler, set_command_handler_place } from '../mo
 import { get_color_by_name } from '../mono_ui/colors.js';
 import { infer_action_verb_hint } from '../shared/intent_hint.js';
 import { load_actor, save_actor } from '../actor_storage/store.js';
-import { parse_inspect_command } from '../inspection/text_parser.js';
-import { inspect_target, format_inspection_result, type InspectionTarget, type InspectorData } from '../inspection/data_service.js';
+import { DEBUG_VISION, spawn_sense_broadcast_particles } from '../mono_ui/vision_debugger.js';
+import { get_senses_for_action } from '../action_system/sense_broadcast.js';
+import { UI_DEBUG } from '../mono_ui/runtime/ui_debug.js';
+import { play_sfx } from '../mono_ui/sfx/sfx_player.js';
 
 export const APP_CONFIG = {
     font_family: 'Martian Mono',
-    base_font_size_px: 10,
-    base_line_height_mult: 1.5,
-    base_letter_spacing_mult: 0.08,
+    // Typography tuned to match the design reference:
+    // - size: 32.23px
+    // - line height: 29.8px (29.8 / 32.23 ≈ 0.925)
+    // - letter spacing: -18% (of font size)
+    base_font_size_px: 32.23,
+    base_line_height_mult: 29.8 / 32.23,
+    base_letter_spacing_mult: -0.18,
     weight_index_to_css: [100, 200, 300, 400, 500, 600, 700, 800] as const,
 
     grid_width: 160,
@@ -58,6 +64,9 @@ export function create_app_state(): AppState {
             override_intent: null as string | null,
             override_cost: null as string | null,
             selected_target: null as string | null,
+            volume: 'NORMAL' as 'WHISPER' | 'NORMAL' | 'SHOUT',
+            move_mode: 'WALK' as 'WALK' | 'SNEAK' | 'SPRINT',
+            last_sent_input_id: null as string | null,
             draft: "",
             suggested_intent: null as string | null,
             suggested_matched: null as string | null,
@@ -80,6 +89,12 @@ export function create_app_state(): AppState {
         },
     };
 
+    // SFX should correlate with UI updates.
+    const sfx_played_log_ids = new Set<string>();
+    let pending_speech_sfx: { id: string; loudness: 'NORMAL' | 'SHOUT'; expires_at_ms: number } | null = null;
+    let last_sfx_at_ms = 0;
+    let last_sfx_label: string | null = null;
+
     function set_text_window_messages(id: string, messages: (string | TextWindowMessage)[]) {
         const cur = ui_state.text_windows.get(id);
         const npcCount = messages.filter(m => typeof m === 'object' && m.sender === 'npc').length;
@@ -91,6 +106,43 @@ export function create_app_state(): AppState {
         } else {
             cur.messages = [...messages];
             cur.rev++;
+        }
+
+        // Speech SFX: fire when lines actually show up in the transcript.
+        if (id === 'transcript' && pending_speech_sfx) {
+            if (Date.now() > pending_speech_sfx.expires_at_ms) {
+                pending_speech_sfx = null;
+            } else {
+                const hit = messages.some((m) => typeof m === 'object' && (m as any).sender === 'user' && String((m as any).id ?? '') === pending_speech_sfx!.id);
+                if (hit) {
+                    play_sfx('speech_blip', { loudness: pending_speech_sfx.loudness, cooldown_ms: 0 });
+                    last_sfx_at_ms = Date.now();
+                    last_sfx_label = `speech_blip.${pending_speech_sfx.loudness}`;
+                    sfx_played_log_ids.add(pending_speech_sfx.id);
+                    pending_speech_sfx = null;
+                }
+            }
+        }
+
+        if (id === 'transcript') {
+            // NPC talk: play the same speech blip when new NPC lines appear.
+            for (const m of messages) {
+                if (typeof m !== 'object') continue;
+                if (m.sender !== 'npc') continue;
+                const mid = String((m as any).id ?? '');
+                if (!mid || sfx_played_log_ids.has(mid)) continue;
+                sfx_played_log_ids.add(mid);
+                play_sfx('speech_blip', { loudness: 'NORMAL', cooldown_ms: 60 });
+                last_sfx_at_ms = Date.now();
+                last_sfx_label = 'speech_blip.NORMAL';
+            }
+
+            // Cap to avoid unbounded growth.
+            if (sfx_played_log_ids.size > 500) {
+                const keep = new Set(Array.from(sfx_played_log_ids).slice(-250));
+                sfx_played_log_ids.clear();
+                for (const k of keep) sfx_played_log_ids.add(k);
+            }
         }
     }
 
@@ -132,12 +184,16 @@ export function create_app_state(): AppState {
                 // This prevents snap-back when place data is refreshed during movement
                 const current_place = ui_state.place.current_place;
                 if (current_place && current_place.id === data.place.id) {
-                    // Sync NPC positions from current place to new place data
+                    // Sync NPC positions and status from current place to new place data
                     for (const npc of data.place.contents.npcs_present) {
                         const current_npc = current_place.contents.npcs_present.find(n => n.npc_ref === npc.npc_ref);
-                        if (current_npc && is_npc_moving(npc.npc_ref)) {
+                        if (current_npc) {
+                            // Preserve renderer-updated status between place refreshes
+                            npc.status = current_npc.status;
                             // NPC is moving, preserve current position
-                            npc.tile_position = { ...current_npc.tile_position };
+                            if (is_npc_moving(npc.npc_ref)) {
+                                npc.tile_position = { ...current_npc.tile_position };
+                            }
                         }
                     }
                     // Sync actor positions
@@ -255,7 +311,7 @@ export function create_app_state(): AppState {
                     }
                 }
 
-                // Update targets window text
+                // Debug reader text (always visible)
                 const targets_lines: string[] = [];
                 const placeName = data.place ?? 'Wilderness';
                 const worldX = data.world_coords?.x ?? 0;
@@ -298,7 +354,26 @@ export function create_app_state(): AppState {
                         targets_lines.push(`- ${t.label} (${t.ref})`);
                     }
                 }
-                set_text_window_messages('targets', targets_lines);
+                const dbg: string[] = [];
+                dbg.push(`[debug] ${UI_DEBUG.enabled ? 'ON' : 'off'} | H:${DEBUG_VISION.show_hearing_ranges ? 'on' : 'off'} B:${DEBUG_VISION.show_sense_broadcasts ? 'on' : 'off'} V:${DEBUG_VISION.show_blocked_vision ? 'on' : 'off'}`);
+                dbg.push(`[volume] ${ui_state.controls.volume}`);
+                dbg.push(`[move] ${ui_state.controls.move_mode}`);
+                if (last_sfx_label) {
+                    const age_ms = Math.max(0, Date.now() - last_sfx_at_ms);
+                    dbg.push(`[sfx] ${last_sfx_label} (${Math.round(age_ms)}ms ago)`);
+                }
+                if (pending_speech_sfx) {
+                    const left_ms = Math.max(0, pending_speech_sfx.expires_at_ms - Date.now());
+                    dbg.push(`[sfx_pending] speech_blip.${pending_speech_sfx.loudness} ${Math.round(left_ms)}ms id=${pending_speech_sfx.id}`);
+                }
+                if (ui_state.controls.last_sent_input_id) dbg.push(`[last_input] ${ui_state.controls.last_sent_input_id}`);
+                // Keep target line near the top for quick trust checks.
+                const target_line_index = targets_lines.findIndex(l => l.startsWith('[target] '));
+                const target_line = target_line_index >= 0 ? targets_lines.splice(target_line_index, 1)[0] : null;
+                if (target_line) dbg.push(target_line);
+                dbg.push('');
+
+                set_text_window_messages('debug', [...dbg, ...targets_lines]);
             } catch {
                 // ignore
             }
@@ -403,156 +478,29 @@ export function create_app_state(): AppState {
                 }
             }
 
-            // Check if this is an inspection command
-            const inspect_parse = parse_inspect_command(outgoing);
-            
-            if (inspect_parse.is_inspect) {
-                // Handle inspection locally
+            // INSPECT is handled by backend now (so findings are canonical + renderer-safe).
+
+            // Local debug visualization: show outgoing COMMUNICATE broadcast at the actor.
+            // (ActionPipeline runs in the backend, so renderer-only particles must be spawned here.)
+            if (DEBUG_VISION.enabled && DEBUG_VISION.show_sense_broadcasts) {
                 const place = get_current_place();
-                if (!place) {
-                    flash_status(['Cannot inspect - no place loaded'], 1200);
-                    return;
-                }
-                
-                // Get target ref from parsed command or selected target
-                let inspect_target_ref = target_ref;
-                let inspect_target_type: 'npc' | 'actor' | 'item' | 'tile' = 'tile';
-                
-                if (inspect_parse.target_name && !inspect_target_ref) {
-                    // Check if it's a tile-related word
-                    const tile_words = ['floor', 'ground', 'wall', 'terrain', 'tile', 'surface'];
-                    const is_tile_inspection = tile_words.some(word => 
-                        inspect_parse.target_name?.toLowerCase().includes(word)
-                    );
-                    
-                    if (is_tile_inspection) {
-                        // For tile inspections, use the place's terrain type as the tile reference
-                        const terrain = place.environment?.terrain;
-                        if (terrain) {
-                            inspect_target_ref = terrain;
-                            inspect_target_type = 'tile';
-                        }
-                    } else {
-                        // Try to resolve target name from available targets (NPCs/Actors)
-                        const target = ui_state.controls.targets.find(t => 
-                            t.label.toLowerCase().includes(inspect_parse.target_name!.toLowerCase()) ||
-                            t.ref.toLowerCase().includes(inspect_parse.target_name!.toLowerCase())
-                        );
-                        if (target) {
-                            inspect_target_ref = target.ref;
-                            inspect_target_type = target.type === 'npc' ? 'npc' : 'actor';
+                const actor_ref = `actor.${APP_CONFIG.input_actor_id}`;
+                const actor = place?.contents?.actors_present?.find(a => a.actor_ref === actor_ref);
+                const pos = actor?.tile_position;
+
+                if (pos) {
+                    const trimmed_out = outgoing.trim();
+                    const is_local_cmd = trimmed_out.startsWith('/');
+                    if (!is_local_cmd) {
+                        const hint = infer_action_verb_hint(trimmed_out);
+                        const verb = hint.verb ?? 'COMMUNICATE';
+                        const subtype = verb === 'COMMUNICATE' ? 'NORMAL' : (verb === 'MOVE' ? 'WALK' : undefined);
+                        const broadcasts = get_senses_for_action(verb, subtype);
+                        for (const b of broadcasts) {
+                            spawn_sense_broadcast_particles(pos, b.sense, b.range_tiles);
                         }
                     }
                 }
-                
-                // Validate we have a target to inspect
-                if (!inspect_target_ref) {
-                    flash_status(['Cannot inspect - no matching target found'], 1200);
-                    return;
-                }
-                
-                // Load actor data for inspector info
-                const actor_result = load_actor(APP_CONFIG.selected_data_slot, APP_CONFIG.input_actor_id);
-                if (!actor_result.ok || !actor_result.actor) {
-                    flash_status(['Cannot inspect - actor data not found'], 1200);
-                    return;
-                }
-                
-                const actor = actor_result.actor as Record<string, any>;
-                const actor_location = actor.location as Record<string, any>;
-                
-                // Build inspector data
-                const inspector: InspectorData = {
-                    ref: `actor.${APP_CONFIG.input_actor_id}`,
-                    location: {
-                        world_x: actor_location?.world_tile?.x ?? 0,
-                        world_y: actor_location?.world_tile?.y ?? 0,
-                        region_x: actor_location?.region_tile?.x ?? 0,
-                        region_y: actor_location?.region_tile?.y ?? 0,
-                        x: actor_location?.x ?? 0,
-                        y: actor_location?.y ?? 0
-                    },
-                    senses: {
-                        light: (actor.senses?.light as number) ?? 0,
-                        pressure: (actor.senses?.pressure as number) ?? 0,
-                        aroma: (actor.senses?.aroma as number) ?? 0,
-                        thaumic: (actor.senses?.thaumic as number) ?? 0
-                    },
-                    stats: (actor.stats as Record<string, number>) ?? {},
-                    profs: (actor.profs as Record<string, number>) ?? {}
-                };
-                
-                // Build inspection target
-                let target_type: InspectionTarget['type'];
-                if (inspect_target_type === 'npc') {
-                    target_type = 'npc';
-                } else if (inspect_target_type === 'actor') {
-                    target_type = 'character';
-                } else if (inspect_target_type === ('item' as string)) {
-                    target_type = 'item';
-                } else {
-                    target_type = 'tile';
-                }
-                
-                const inspection_target: InspectionTarget = {
-                    type: target_type,
-                    ref: inspect_target_ref || '',
-                    place_id: place.id,
-                    tile_position: { x: inspector.location.x ?? 0, y: inspector.location.y ?? 0 }
-                };
-                
-                // Get target location
-                let target_location = inspector.location;
-                
-                // Show status that we're inspecting
-                const target_desc = inspect_target_ref ? inspect_target_ref.split('.').pop() :
-                                   inspect_target_type === 'tile' ? 'tile' : 'area';
-                flash_status([`Inspecting ${target_desc}...`], 1200);
-                
-                try {
-                    // Perform inspection
-                    const inspection_result = await inspect_target(
-                        inspector,
-                        inspection_target,
-                        {
-                            requested_keywords: inspect_parse.feature_keywords,
-                            max_features: 5,
-                            target_location,
-                            target_size_mag: 0
-                        }
-                    );
-                    
-                    // Format and display result
-                    const formatted_result = format_inspection_result(inspection_result);
-                    
-                    // Add to text window - split by lines and add each as separate message
-                    const result_lines = formatted_result.split('\n').filter(line => line.trim().length > 0);
-                    const current_messages = ui_state.text_windows.get('log')?.messages ?? [];
-                    
-                    // Add header
-                    const new_messages: (string | TextWindowMessage)[] = [
-                        ...current_messages,
-                        `[Inspection Result - ${target_desc}]`
-                    ];
-                    
-                    // Add each line of the result
-                    for (const line of result_lines) {
-                        new_messages.push(line);
-                    }
-                    
-                    // Add separator
-                    new_messages.push('---');
-                    
-                    set_text_window_messages('log', new_messages);
-                    
-                    // Update status
-                    flash_status([`Inspected ${target_desc}: ${inspection_result.clarity} clarity`], 2000);
-                } catch (err) {
-                    debug_warn('[app_state]', 'Inspection failed:', err);
-                    flash_status(['Inspection failed - check console'], 2000);
-                }
-                
-                return;
             }
 
             // Warn once if there is no intent hint and no override.
@@ -563,13 +511,23 @@ export function create_app_state(): AppState {
                 await new Promise((r) => setTimeout(r, 900));
             }
 
+            const verb_effective = ui_state.controls.override_intent ?? hint.verb;
+            const intent_subtype = (
+                verb_effective === 'COMMUNICATE' ||
+                (!verb_effective && !!target_ref)
+            ) ? ui_state.controls.volume : undefined;
+
+            // arm pending speech SFX once we have an input id from backend
+
             const res = await fetch(APP_CONFIG.interpreter_endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     text: outgoing,
                     sender: APP_CONFIG.input_actor_id,
-                    intent_verb: ui_state.controls.override_intent ?? undefined,
+                    // Send inferred verb when available (not just explicit override).
+                    intent_verb: verb_effective ?? undefined,
+                    intent_subtype,
                     action_cost: ui_state.controls.override_cost ?? undefined,
                     target_ref: target_ref ?? undefined,
                 }),
@@ -581,6 +539,17 @@ export function create_app_state(): AppState {
 
             const data = (await res.json()) as { ok: boolean; id?: string };
             if (data.ok) {
+                if (typeof data.id === 'string') {
+                    ui_state.controls.last_sent_input_id = data.id;
+
+                    const verb_for_sfx = (ui_state.controls.override_intent ?? hint.verb ?? 'COMMUNICATE').toUpperCase();
+                    const v = String(ui_state.controls.volume ?? '').toUpperCase();
+                    if (verb_for_sfx === 'COMMUNICATE' && (v === 'NORMAL' || v === 'SHOUT')) {
+                        pending_speech_sfx = { id: data.id, loudness: v, expires_at_ms: Date.now() + 8000 };
+                    } else {
+                        pending_speech_sfx = null;
+                    }
+                }
                 void poll_window_feeds();
             }
 
@@ -588,7 +557,7 @@ export function create_app_state(): AppState {
             flash_status(['waiting for actor response'], 900);
         } catch (err) {
             debug_warn('[mono_ui] failed to send to interpreter', err);
-            append_text_window_message('log', '[system] failed to reach interpreter');
+            append_text_window_message('transcript', '[system] failed to reach interpreter');
         }
     }
 
@@ -615,12 +584,12 @@ export function create_app_state(): AppState {
     };
     if (!data.ok || !Array.isArray(data.messages)) return [];
 
-    // Limit message count to prevent old session data from cluttering the UI
-    // Take only the most recent 50 messages (approximately 1-2 conversations)
-    const MAX_MESSAGES = 50;
-    const recentMessages = data.messages.length > MAX_MESSAGES 
-        ? data.messages.slice(0, MAX_MESSAGES) 
-        : data.messages;
+     // Limit message count to keep UI readable.
+     // Note: log.jsonc is newest-first; we keep the most recent window and then sort chronologically.
+     const MAX_MESSAGES = 80;
+     const recentMessages = data.messages.length > MAX_MESSAGES
+         ? data.messages.slice(0, MAX_MESSAGES)
+         : data.messages;
 
     // Sort by timestamp extracted from id (format: "ISO : index : random") for chronological order
     const sorted = [...recentMessages].sort((a, b) => {
@@ -633,12 +602,13 @@ export function create_app_state(): AppState {
     });
     
     const seen_ids = new Set<string>();
-    const last_renderer_text_by_correlation = new Map<string, string>();
+     const last_renderer_text_by_correlation = new Map<string, string>();
+     const latest_renderer_by_reply_to = new Map<string, any>();
 
     // Filter out messages older than 30 minutes to prevent old session data from showing
     const CUTOFF_TIME = Date.now() - (30 * 60 * 1000); // 30 minutes ago
     
-    const filtered = sorted.filter((m: { id: string; sender: string; content: string; type?: string; correlation_id?: string; status?: string; stage?: string; meta?: Record<string, unknown> }) => {
+        const filtered = sorted.filter((m: { id: string; sender: string; content: string; type?: string; correlation_id?: string; reply_to?: string; status?: string; stage?: string; meta?: Record<string, unknown> }) => {
         if (!m?.id) return false;
         if (seen_ids.has(m.id)) return false;
         seen_ids.add(m.id);
@@ -656,27 +626,51 @@ export function create_app_state(): AppState {
             if (msgTime < CUTOFF_TIME) return false;
         }
         
-        // Allow NPC messages through (removed aggressive content-based dedup)
-        // ID-based dedup above is sufficient to prevent true duplicates
+        // Allow NPC messages through (ID-based dedup above is sufficient)
         if (sender.startsWith('npc.')) return true;
-        
-        if (sender === 'j') return true;
+
+        // User input sender can be "j" or the configured actor id ("henry_actor").
+        if (sender === 'j' || sender === APP_CONFIG.input_actor_id.toLowerCase()) return true;
         if (sender === 'renderer_ai') {
+            // Prefer dedup by reply_to (one narration per applied message).
+            const replyKey = (m as any).reply_to ?? '';
+            if (replyKey) {
+                latest_renderer_by_reply_to.set(replyKey, m);
+            }
+
+            // Secondary dedup: identical text within a correlation.
             const correlation = m.correlation_id ?? 'none';
             const last = last_renderer_text_by_correlation.get(correlation);
             last_renderer_text_by_correlation.set(correlation, content);
             if (last !== undefined && last === content) return false;
             return true;
         }
+        if (sender === 'inspection' || m.stage === 'inspection_result') return true;
         if (sender === 'hint') return true;
         if (m.type === 'user_input') return true;
-        if (sender === 'state_applier') return true;
+        if (sender === 'state_applier') return UI_DEBUG.enabled;
         return false;
     });
 
-    // Debug logging for message filtering
-    const npcMessages = filtered.filter(m => (m.sender ?? '').toLowerCase().startsWith('npc.'));
-    console.log(`[fetch_log_messages] API returned ${data.messages.length} messages, after filtering: ${filtered.length} total, ${npcMessages.length} NPC`);
+     // Final renderer dedup pass: keep only the latest renderer message for each reply_to.
+     const renderer_reply_to_allow = new Set<string>();
+     for (const m of latest_renderer_by_reply_to.values()) {
+         const k = (m as any).reply_to;
+         if (typeof k === 'string' && k.length > 0) renderer_reply_to_allow.add(k);
+     }
+     const filtered_final = filtered.filter((m: any) => {
+         const sender = (m.sender ?? '').toLowerCase();
+         if (sender !== 'renderer_ai') return true;
+         const replyKey = m.reply_to;
+         if (!replyKey) return true;
+         // If we saw multiple narrations for the same reply_to, only keep the selected latest one.
+         const chosen = latest_renderer_by_reply_to.get(replyKey);
+         return chosen ? chosen.id === m.id : renderer_reply_to_allow.has(replyKey);
+     });
+
+     // Debug logging for message filtering
+      const npcMessages = filtered_final.filter(m => (m.sender ?? '').toLowerCase().startsWith('npc.'));
+      console.log(`[fetch_log_messages] API returned ${data.messages.length} messages, after filtering: ${filtered_final.length} total, ${npcMessages.length} NPC`);
     
     // Log NPC message details for debugging
     npcMessages.forEach(m => {
@@ -684,7 +678,7 @@ export function create_app_state(): AppState {
     });
     
     // Debug: Show which senders were filtered out
-    const filteredOut = sorted.filter(m => {
+     const filteredOut = sorted.filter(m => {
         const sender = (m.sender ?? '').toLowerCase();
         const content = (m.content ?? '').trim();
         if (!content) return true;
@@ -693,44 +687,101 @@ export function create_app_state(): AppState {
         if (sender === 'renderer_ai') return false;
         if (sender === 'hint') return false;
         if (m.type === 'user_input') return false;
-        if (sender === 'state_applier') return false;
+        if (sender === 'state_applier') return !UI_DEBUG.enabled;
         return true;
     });
     if (filteredOut.length > 0) {
         console.log(`[fetch_log_messages] Filtered out ${filteredOut.length} messages from:`, [...new Set(filteredOut.map(m => m.sender))]);
     }
 
-    const from_log = filtered.map((m: { sender: string; content: string }): string | TextWindowMessage => {
-        const sender = (m.sender ?? '').toLowerCase();
-        if (sender === 'hint') {
-            return { content: `💡 ${m.content}`, sender: 'hint' };
-        }
-        if (sender === 'renderer_ai') return { content: `ASSISTANT: ${m.content}`, sender: 'assistant' };
-        if (sender === 'j') return { content: `J: ${m.content}`, sender: 'user' };
-        if (sender.startsWith('npc.')) {
-            const npcName = sender.replace('npc.', '').toUpperCase();
-            return { content: `${npcName}: ${m.content}`, sender: 'npc' };
-        }
-        if (sender === 'state_applier') {
-            return { content: `[STATE] ${m.content}`, sender: 'state' };
-        }
-        return { content: `${m.sender}: ${m.content}`, sender: 'system' };
-    });
-    
-    return from_log;
-}
+     // Group by correlation_id when present, otherwise keep messages as standalone groups.
+     const group_order: string[] = [];
+     const groups = new Map<string, any[]>();
+     for (const m of filtered_final as any[]) {
+         const key = (m.correlation_id ?? '') || m.id;
+         if (!groups.has(key)) {
+             groups.set(key, []);
+             group_order.push(key);
+         }
+         groups.get(key)!.push(m);
+     }
+
+     const out: (string | TextWindowMessage)[] = [];
+      for (const key of group_order) {
+         const msgs = groups.get(key) ?? [];
+         const user = msgs.filter(m => {
+             const s = (m.sender ?? '').toLowerCase();
+             return s === 'j' || s === APP_CONFIG.input_actor_id.toLowerCase();
+         });
+         const narr = msgs.filter(m => (m.sender ?? '').toLowerCase() === 'renderer_ai');
+          const npcs = msgs.filter(m => (m.sender ?? '').toLowerCase().startsWith('npc.'));
+          const inspections = msgs.filter(m => (m.sender ?? '').toLowerCase() === 'inspection' || m.stage === 'inspection_result');
+
+          const push_msg = (sender: string, content: string, kind: string, id?: string) => {
+              const mid = typeof id === 'string' ? id : undefined;
+              if (kind === 'user') out.push({ content, sender: 'user', id: mid });
+              else if (kind === 'assistant') out.push({ content, sender: 'assistant', id: mid });
+              else if (kind === 'npc') {
+                  const npcName = sender.toLowerCase().replace('npc.', '').toUpperCase();
+                  out.push({ content: `${npcName}: ${content}`, sender: 'npc', id: mid });
+              } else if (kind === 'inspection') {
+                  out.push({ content, sender: 'inspection', id: mid });
+              } else if (kind === 'hint') {
+                  out.push({ content: `💡 ${content}`, sender: 'hint', id: mid });
+              } else if (kind === 'state') {
+                  out.push({ content: `[STATE] ${content}`, sender: 'state', id: mid });
+              }
+          };
+
+          if (user.length > 0) {
+              const last = user[user.length - 1];
+              push_msg(last.sender, last.content, 'user', last.id);
+          }
+
+          if (narr.length > 0) {
+              const last = narr[narr.length - 1];
+              push_msg(last.sender, last.content, 'assistant', last.id);
+          }
+
+          for (const n of npcs) {
+              push_msg(n.sender, n.content, 'npc', n.id);
+          }
+
+          for (const ins of inspections) {
+              push_msg(ins.sender, ins.content, 'inspection', ins.id);
+          }
+
+         // Optional system/state/hint visibility (debug-only)
+         if (UI_DEBUG.enabled) {
+             for (const m of msgs) {
+                  const sender = (m.sender ?? '').toLowerCase();
+                  if (sender === 'hint') push_msg(m.sender, m.content, 'hint', m.id);
+                  if (sender === 'state_applier') push_msg(m.sender, m.content, 'state', m.id);
+              }
+          }
+     }
+
+     return out;
+    }
 
     async function fetch_status_line(slot: number): Promise<string[]> {
         // Client-side temporary status override
         if (ui_state.status_override.until_ms > Date.now() && ui_state.status_override.lines.length > 0) {
-            return [...ui_state.status_override.lines];
+            // Status window is 1-line tall; collapse overrides into a single line.
+            return [ui_state.status_override.lines.join(' | ')];
         }
         const res = await fetch(`${APP_CONFIG.interpreter_status_endpoint}?slot=${slot}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-        const data = (await res.json()) as { ok: boolean; status?: { line?: string } };
-        if (!data.ok || !data.status?.line) return [""];
-        return [data.status.line];
+        const data = (await res.json()) as { ok: boolean; status?: { line?: string }; time_short?: string | null; day?: number | null };
+        if (!data.ok) return [""];
+        const status_line = data.status?.line ?? "";
+        const time_short = typeof data.time_short === "string" ? data.time_short : null;
+        const day = typeof data.day === "number" ? data.day : null;
+        const time_prefix = time_short && day ? `Day ${day} ${time_short}` : null;
+        if (time_prefix && status_line) return [`${time_prefix} | ${status_line}`];
+        if (time_prefix) return [time_prefix];
+        return [status_line];
     }
 
     (window as any).THAUM_UI = {
@@ -738,19 +789,41 @@ export function create_app_state(): AppState {
         append_text_window_message,
     };
 
-    set_text_window_messages('log', [
-        'This is a text window. It wraps words onto new lines.',
-        'If a word is tooooooooolongtobefitononeline it will hyphenate-and-continue.',
-        'Scroll with the mouse wheel if there is more text.',
-        'Scroll with the mouse wheel if there is more text.',
-        'Scroll with the mouse wheel if there is more text.',
-        'Scroll with the mouse wheel if there is more text.',
-        'Scroll with the mouse wheel if there is more text.',
-        'Scroll with the mouse wheel if there is more text.',
-        'Scroll with the mouse wheel if there is more text.',
-        'Scroll with the mouse wheel if there is more text.',
-        'hey! :3',
-    ]);
+    // Layout (grid: 0..grid_width-1, 0..grid_height-1). y grows upward.
+    // This roughly matches the UI mock:
+    // - Top: status bar
+    // - Upper left: place
+    // - Upper right: debug reader
+    // - Mid left: incoming log
+    // - Bottom: input + buttons
+    // Layout blocks (see UI mock):
+    // 1 input, 2 transcript, 3 place, 4 system info, 5 free, 6 debug, 7 buttons, 8 roller.
+    const L_X0 = 1;
+    const L_X1 = 96;
+    const R_X0 = 98;
+    const R_X1 = APP_CONFIG.grid_width - 2;
+
+    const Y_INPUT0 = 1;
+    const Y_INPUT1 = 5;
+
+    const Y_TRANSCRIPT0 = 7;
+    const Y_TRANSCRIPT1 = 17;
+
+    const Y_PLACE0 = 19;
+    const Y_PLACE1 = 43;
+
+    // 1-line status window (plus border): 3 tiles tall.
+    const Y_SYS0 = APP_CONFIG.grid_height - 4;
+    const Y_SYS1 = APP_CONFIG.grid_height - 2;
+
+    const BTN_X0 = R_X0;
+    const BTN_X1 = R_X1 - 26;
+    const ROLL_X0 = R_X1 - 24;
+    const ROLL_X1 = R_X1;
+    const BTN_Y0 = Y_INPUT0;
+    const BTN_Y1 = Y_TRANSCRIPT1;
+
+    // Do not seed the log window with placeholder text.
 
     let input_submit: (() => void) | null = null;
 
@@ -765,8 +838,10 @@ export function create_app_state(): AppState {
 
         make_place_module({
             id: 'place',
-            rect: { x0: 120, y0: 1, x1: 158, y1: 48 },
+            rect: { x0: L_X0, y0: Y_PLACE0, x1: L_X1, y1: Y_PLACE1 },
             get_place: get_current_place,
+            get_move_mode: () => ui_state.controls.move_mode,
+            set_move_mode: (mode) => { ui_state.controls.move_mode = mode; },
             on_select_target: (target_ref: string): boolean => {
                 // Check if this target exists in the available targets list
                 const target = ui_state.controls.targets.find(t => 
@@ -824,121 +899,58 @@ export function create_app_state(): AppState {
                 }
             },
             on_inspect: async (target): Promise<void> => {
-                // Handle inspection from place module (right-click)
+                // Inspection from place module (right-click) routes through backend.
                 const place = get_current_place();
-                
                 if (!place) {
                     flash_status(['No place loaded'], 1200);
                     return;
                 }
-                
-                // Load actor data for inspector info
-                const actor_result = load_actor(APP_CONFIG.selected_data_slot, APP_CONFIG.input_actor_id);
-                if (!actor_result.ok || !actor_result.actor) {
-                    flash_status(['Cannot inspect - actor data not found'], 1200);
-                    return;
+
+                let target_ref = String(target.ref ?? '').trim();
+                if (target.type === 'tile') {
+                    // Use terrain id; backend expects target_ref format: tile.<tile_id>
+                    const terrain = String(place.environment?.terrain ?? '').trim();
+                    const tile_id = terrain.startsWith('tile.') ? terrain.slice('tile.'.length) : terrain;
+                    if (tile_id) target_ref = `tile.${tile_id}`;
                 }
-                
-                const actor = actor_result.actor as Record<string, any>;
-                const actor_location = actor.location as Record<string, any>;
-                
-                // Build inspector data
-                const inspector: InspectorData = {
-                    ref: `actor.${APP_CONFIG.input_actor_id}`,
-                    location: {
-                        world_x: actor_location?.world_tile?.x ?? 0,
-                        world_y: actor_location?.world_tile?.y ?? 0,
-                        region_x: actor_location?.region_tile?.x ?? 0,
-                        region_y: actor_location?.region_tile?.y ?? 0,
-                        x: actor_location?.x ?? 0,
-                        y: actor_location?.y ?? 0
-                    },
-                    senses: {
-                        light: (actor.senses?.light as number) ?? 0,
-                        pressure: (actor.senses?.pressure as number) ?? 0,
-                        aroma: (actor.senses?.aroma as number) ?? 0,
-                        thaumic: (actor.senses?.thaumic as number) ?? 0
-                    },
-                    stats: (actor.stats as Record<string, number>) ?? {},
-                    profs: (actor.profs as Record<string, number>) ?? {}
-                };
-                
-                // For tile inspections from right-click, get the terrain type from place
-                let target_ref = target.ref;
-                if (target.type === 'tile' && !target_ref) {
-                    target_ref = place.environment?.terrain || '';
-                }
-                
-                // Validate we have a target ref
+
                 if (!target_ref) {
-                    flash_status(['Cannot inspect - unknown target type'], 1200);
+                    flash_status(['Cannot inspect - no target'], 1200);
                     return;
                 }
-                
-                // Convert to InspectionTarget format
-                const inspection_target: InspectionTarget = {
-                    type: target.type === 'npc' ? 'npc' : 
-                          target.type === 'actor' ? 'character' : 
-                          target.type === 'item' ? 'item' : 'tile',
-                    ref: target_ref,
-                    place_id: place.id,
-                    tile_position: target.tile_position
-                };
-                
-                // Build target location (for tile inspection, use the tile position)
-                let target_location = inspector.location;
-                if (inspection_target.type === 'tile') {
-                    target_location = {
-                        ...inspector.location,
-                        x: target.tile_position.x,
-                        y: target.tile_position.y
-                    };
-                }
-                
-                // Show status that we're inspecting
-                const target_desc = target.ref ? target.ref.split('.').pop() : 'tile';
+
+                const target_desc = target.type === 'tile'
+                    ? (target_ref.split('.').pop() ?? 'tile')
+                    : (target_ref.split('.').pop() ?? 'target');
                 flash_status([`Inspecting ${target_desc}...`], 1200);
-                
+
                 try {
-                    // Perform inspection
-                    const inspection_result = await inspect_target(
-                        inspector,
-                        inspection_target,
-                        {
-                            max_features: 5,
-                            target_location,
-                            target_size_mag: 0
-                        }
-                    );
-                    
-                    // Format and display result
-                    const formatted_result = format_inspection_result(inspection_result);
-                    
-                    // Add to text window - split by lines and add each as separate message
-                    const result_lines = formatted_result.split('\n').filter(line => line.trim().length > 0);
-                    const current_messages = ui_state.text_windows.get('log')?.messages ?? [];
-                    
-                    // Add header
-                    const new_messages: (string | TextWindowMessage)[] = [
-                        ...current_messages,
-                        `[Inspection Result - ${target_desc}]`
-                    ];
-                    
-                    // Add each line of the result
-                    for (const line of result_lines) {
-                        new_messages.push(line);
+                    const res = await fetch(APP_CONFIG.interpreter_endpoint, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            text: 'inspect',
+                            sender: APP_CONFIG.input_actor_id,
+                            intent_verb: 'INSPECT',
+                            target_ref,
+                            ui_target_tile: target.tile_position ? { x: target.tile_position.x, y: target.tile_position.y } : undefined,
+                            action_cost: ui_state.controls.override_cost ?? undefined,
+                        }),
+                    });
+
+                    if (!res.ok) {
+                        flash_status([`Inspect failed (HTTP ${res.status})`], 2000);
+                        return;
                     }
-                    
-                    // Add separator
-                    new_messages.push('---');
-                    
-                    set_text_window_messages('log', new_messages);
-                    
-                    // Show status
-                    flash_status([`Inspected ${target_desc}: ${inspection_result.clarity} clarity`], 2000);
+
+                    const data = (await res.json()) as { ok: boolean; id?: string };
+                    if (data.ok && typeof data.id === 'string') {
+                        ui_state.controls.last_sent_input_id = data.id;
+                        void poll_window_feeds();
+                    }
                 } catch (err) {
-                    debug_warn('[app_state]', 'Inspection failed:', err);
-                    flash_status(['Inspection failed - check console'], 2000);
+                    debug_warn('[app_state]', 'Inspection request failed:', err);
+                    flash_status(['Inspect failed - check console'], 2000);
                 }
             },
             on_place_transition: async (target_place_id: string, direction: string): Promise<boolean> => {
@@ -1021,10 +1033,21 @@ export function create_app_state(): AppState {
             initial_scale: 1,
         }),
 
+        // System status bar (includes time prefix)
         make_text_window_module({
-            id: 'log',
-            rect: { x0: 1, y0: 13, x1: 86, y1: 36 },
-            get_source: () => ui_state.text_windows.get('log') ?? { messages: [], rev: 0 },
+            id: 'status',
+            rect: { x0: L_X0, y0: Y_SYS0, x1: L_X1, y1: Y_SYS1 },
+            get_source: () => ui_state.text_windows.get('status') ?? { messages: [], rev: 0 },
+            border_rgb: get_color_by_name('medium_gray').rgb,
+            text_rgb: get_color_by_name('pale_gray').rgb,
+            bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
+            base_weight_index: 3,
+        }),
+
+        make_text_window_module({
+            id: 'transcript',
+            rect: { x0: L_X0, y0: Y_TRANSCRIPT0, x1: L_X1, y1: Y_TRANSCRIPT1 },
+            get_source: () => ui_state.text_windows.get('transcript') ?? { messages: [], rev: 0 },
             border_rgb: get_color_by_name('light_gray').rgb,
             text_rgb: get_color_by_name('off_white').rgb,
             bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
@@ -1034,20 +1057,10 @@ export function create_app_state(): AppState {
             state_rgb: get_color_by_name('dark_gray').rgb,
         }),
 
-        make_text_window_module({
-            id: 'status',
-            rect: { x0: 1, y0: 38, x1: 86, y1: 42 },
-            get_source: () => ui_state.text_windows.get('status') ?? { messages: [], rev: 0 },
-            border_rgb: get_color_by_name('medium_gray').rgb,
-            text_rgb: get_color_by_name('pale_gray').rgb,
-            bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
-            base_weight_index: 3,
-        }),
-
         make_input_module({
             id: 'input',
-            rect: { x0: 1, y0: 1, x1: 86, y1: 11 },
-            target_id: 'log',
+            rect: { x0: L_X0, y0: Y_INPUT0, x1: L_X1, y1: Y_INPUT1 },
+            target_id: 'transcript',
             on_submit: (target_id, message) => {
                 void send_to_interpreter(message);
             },
@@ -1061,12 +1074,6 @@ export function create_app_state(): AppState {
                     const hint = infer_action_verb_hint(ui_state.controls.draft);
                     ui_state.controls.suggested_intent = hint.verb ? hint.verb : null;
                     ui_state.controls.suggested_matched = hint.matched_keyword ?? null;
-                    const lines: string[] = [];
-                    lines.push(`[suggested] ${ui_state.controls.suggested_intent ?? '(none)'}`);
-                    if (ui_state.controls.suggested_matched) lines.push(`[matched] ${ui_state.controls.suggested_matched}`);
-                    lines.push(`[override intent] ${ui_state.controls.override_intent ?? '(none)'}`);
-                    lines.push(`[override cost] ${ui_state.controls.override_cost ?? '(none)'}`);
-                    set_text_window_messages('controls', lines);
                 }, 1000);
             },
             bind_submit: (submit) => { input_submit = submit; },
@@ -1080,68 +1087,65 @@ export function create_app_state(): AppState {
 
         make_button_module({
             id: 'btn_send',
-            rect: { x0: 88, y0: 1, x1: 100, y1: 3 },
+            rect: { x0: BTN_X0, y0: BTN_Y0, x1: BTN_X0 + 12, y1: BTN_Y0 + 2 },
             label: 'send',
             rgb: get_color_by_name('pale_orange').rgb,
             bg: { char: '-', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
             OnPress() {
                 input_submit?.();
             },
         }),
 
-        // Controls window
+        // Debug reader window (always visible)
         make_text_window_module({
-            id: 'controls',
-            rect: { x0: 88, y0: 4, x1: 118, y1: 11 },
-            get_source: () => ui_state.text_windows.get('controls') ?? { messages: [], rev: 0 },
-            border_rgb: get_color_by_name('medium_gray').rgb,
-            text_rgb: get_color_by_name('pale_gray').rgb,
-            bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
-            base_weight_index: 3,
-        }),
-
-        // Targets window
-        make_text_window_module({
-            id: 'targets',
-            rect: { x0: 88, y0: 20, x1: 118, y1: 36 },
-            get_source: () => ui_state.text_windows.get('targets') ?? { messages: [], rev: 0 },
+            id: 'debug',
+            rect: { x0: R_X0, y0: Y_PLACE0, x1: R_X1, y1: Y_PLACE1 },
+            get_source: () => ui_state.text_windows.get('debug') ?? { messages: [], rev: 0 },
             border_rgb: get_color_by_name('light_gray').rgb,
             text_rgb: get_color_by_name('off_white').rgb,
             bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
             base_weight_index: 3,
+            hint_rgb: get_color_by_name('pale_yellow').rgb,
+            npc_rgb: get_color_by_name('pumpkin').rgb,
+            state_rgb: get_color_by_name('dark_gray').rgb,
         }),
 
         // Action cost buttons
         make_button_module({
             id: 'cost_free',
-            rect: { x0: 102, y0: 1, x1: 106, y1: 3 },
+            rect: { x0: BTN_X0, y0: BTN_Y0 + 12, x1: BTN_X0 + 6, y1: BTN_Y0 + 14 },
             label: 'FREE',
             rgb: get_color_by_name('pale_orange').rgb,
             bg: { char: '.', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
             OnPress() { ui_state.controls.override_cost = 'FREE'; flash_status(['action cost: FREE'], 800); },
         }),
         make_button_module({
             id: 'cost_part',
-            rect: { x0: 107, y0: 1, x1: 112, y1: 3 },
+            rect: { x0: BTN_X0 + 7, y0: BTN_Y0 + 12, x1: BTN_X0 + 13, y1: BTN_Y0 + 14 },
             label: 'PART',
             rgb: get_color_by_name('pale_orange').rgb,
             bg: { char: '.', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
             OnPress() { ui_state.controls.override_cost = 'PARTIAL'; flash_status(['action cost: PARTIAL'], 800); },
         }),
         make_button_module({
             id: 'cost_full',
-            rect: { x0: 113, y0: 1, x1: 118, y1: 3 },
+            rect: { x0: BTN_X0 + 14, y0: BTN_Y0 + 12, x1: BTN_X0 + 20, y1: BTN_Y0 + 14 },
             label: 'FULL',
             rgb: get_color_by_name('pale_orange').rgb,
             bg: { char: '.', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
             OnPress() { ui_state.controls.override_cost = 'FULL'; flash_status(['action cost: FULL'], 800); },
         }),
         make_button_module({
             id: 'cost_ext',
-            rect: { x0: 113, y0: 4, x1: 118, y1: 6 },
+            rect: { x0: BTN_X0 + 21, y0: BTN_Y0 + 12, x1: BTN_X0 + 27, y1: BTN_Y0 + 14 },
             label: 'EXT',
             rgb: get_color_by_name('pale_orange').rgb,
             bg: { char: '.', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
             OnPress() { ui_state.controls.override_cost = 'EXTENDED'; flash_status(['action cost: EXTENDED'], 800); },
         }),
 
@@ -1151,15 +1155,79 @@ export function create_app_state(): AppState {
         // - COMMUNICATE (talking to NPCs)
         // - MOVE (movement)
         // - INSPECT (looking at things)
-        make_button_module({ id: 'verb_use', rect: { x0: 88, y0: 7, x1: 96, y1: 9 }, label: 'USE', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'USE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'USE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'USE'; flash_status(['intent: USE (attack/talk/move with tool)'], 800); } }),
-        make_button_module({ id: 'verb_com', rect: { x0: 97, y0: 7, x1: 105, y1: 9 }, label: 'TALK', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'COMMUNICATE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'COMMUNICATE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'COMMUNICATE'; flash_status(['intent: COMMUNICATE'], 800); } }),
-        make_button_module({ id: 'verb_mov', rect: { x0: 106, y0: 7, x1: 113, y1: 9 }, label: 'MOVE', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'MOVE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'MOVE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'MOVE'; flash_status(['intent: MOVE'], 800); } }),
-        make_button_module({ id: 'verb_ins', rect: { x0: 114, y0: 7, x1: 118, y1: 9 }, label: 'LOOK', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'INSPECT' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'INSPECT' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, OnPress() { ui_state.controls.override_intent = 'INSPECT'; flash_status(['intent: INSPECT'], 800); } }),
-        make_button_module({ id: 'verb_clear', rect: { x0: 88, y0: 10, x1: 99, y1: 12 }, label: 'CLEAR', rgb: get_color_by_name('pale_yellow').rgb, bg: { char: '.', rgb: get_color_by_name('dark_gray').rgb }, OnPress() { ui_state.controls.override_intent = null; ui_state.controls.override_cost = null; flash_status(['overrides cleared'], 800); } }),
+        make_button_module({ id: 'verb_use', rect: { x0: BTN_X0, y0: BTN_Y0 + 9, x1: BTN_X0 + 7, y1: BTN_Y0 + 11 }, label: 'USE', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'USE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'USE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, base_weight_index: 3, OnPress() { ui_state.controls.override_intent = 'USE'; flash_status(['intent: USE'], 800); } }),
+        make_button_module({ id: 'verb_com', rect: { x0: BTN_X0 + 8, y0: BTN_Y0 + 9, x1: BTN_X0 + 15, y1: BTN_Y0 + 11 }, label: 'TALK', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'COMMUNICATE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'COMMUNICATE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, base_weight_index: 3, OnPress() { ui_state.controls.override_intent = 'COMMUNICATE'; flash_status(['intent: COMMUNICATE'], 800); } }),
+        make_button_module({ id: 'verb_mov', rect: { x0: BTN_X0 + 16, y0: BTN_Y0 + 9, x1: BTN_X0 + 23, y1: BTN_Y0 + 11 }, label: 'MOVE', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'MOVE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'MOVE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, base_weight_index: 3, OnPress() { ui_state.controls.override_intent = 'MOVE'; flash_status(['intent: MOVE'], 800); } }),
+        make_button_module({ id: 'verb_ins', rect: { x0: BTN_X0 + 24, y0: BTN_Y0 + 9, x1: BTN_X1, y1: BTN_Y0 + 11 }, label: 'LOOK', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'INSPECT' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'INSPECT' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, base_weight_index: 3, OnPress() { ui_state.controls.override_intent = 'INSPECT'; flash_status(['intent: INSPECT'], 800); } }),
+        make_button_module({ id: 'verb_clear', rect: { x0: BTN_X0 + 28, y0: BTN_Y0 + 12, x1: BTN_X1, y1: BTN_Y0 + 14 }, label: 'CLR', rgb: get_color_by_name('pale_yellow').rgb, bg: { char: '.', rgb: get_color_by_name('dark_gray').rgb }, base_weight_index: 3, OnPress() { ui_state.controls.override_intent = null; ui_state.controls.override_cost = null; flash_status(['overrides cleared'], 800); } }),
+
+        // COMMUNICATE volume buttons (non-debug)
+        make_button_module({
+            id: 'vol_whisper',
+            rect: { x0: BTN_X0, y0: BTN_Y0 + 6, x1: BTN_X0 + 10, y1: BTN_Y0 + 8 },
+            label: 'WSP',
+            rgb: WHITE,
+            get_rgb: () => (ui_state.controls.volume === 'WHISPER' ? get_color_by_name('pale_yellow').rgb : get_color_by_name('dark_gray').rgb),
+            bg: { char: '-', rgb: get_color_by_name('off_black').rgb },
+            base_weight_index: 3,
+            OnPress() { ui_state.controls.volume = 'WHISPER'; flash_status(['volume: WHISPER'], 800); },
+        }),
+        make_button_module({
+            id: 'vol_normal',
+            rect: { x0: BTN_X0 + 11, y0: BTN_Y0 + 6, x1: BTN_X0 + 21, y1: BTN_Y0 + 8 },
+            label: 'NRM',
+            rgb: WHITE,
+            get_rgb: () => (ui_state.controls.volume === 'NORMAL' ? get_color_by_name('pale_yellow').rgb : get_color_by_name('dark_gray').rgb),
+            bg: { char: '-', rgb: get_color_by_name('off_black').rgb },
+            base_weight_index: 3,
+            OnPress() { ui_state.controls.volume = 'NORMAL'; flash_status(['volume: NORMAL'], 800); },
+        }),
+        make_button_module({
+            id: 'vol_shout',
+            rect: { x0: BTN_X0 + 22, y0: BTN_Y0 + 6, x1: BTN_X1, y1: BTN_Y0 + 8 },
+            label: 'SHT',
+            rgb: WHITE,
+            get_rgb: () => (ui_state.controls.volume === 'SHOUT' ? get_color_by_name('pale_yellow').rgb : get_color_by_name('dark_gray').rgb),
+            bg: { char: '-', rgb: get_color_by_name('off_black').rgb },
+            base_weight_index: 3,
+            OnPress() { ui_state.controls.volume = 'SHOUT'; flash_status(['volume: SHOUT'], 800); },
+        }),
+
+        // Movement mode buttons (non-debug)
+        make_button_module({
+            id: 'mv_walk',
+            rect: { x0: BTN_X0, y0: BTN_Y0 + 3, x1: BTN_X0 + 10, y1: BTN_Y0 + 5 },
+            label: 'WLK',
+            rgb: WHITE,
+            get_rgb: () => (ui_state.controls.move_mode === 'WALK' ? get_color_by_name('pale_yellow').rgb : get_color_by_name('dark_gray').rgb),
+            bg: { char: '-', rgb: get_color_by_name('off_black').rgb },
+            base_weight_index: 3,
+            OnPress() { ui_state.controls.move_mode = 'WALK'; flash_status(['move: WALK'], 800); },
+        }),
+        make_button_module({
+            id: 'mv_sneak',
+            rect: { x0: BTN_X0 + 11, y0: BTN_Y0 + 3, x1: BTN_X0 + 21, y1: BTN_Y0 + 5 },
+            label: 'SNK',
+            rgb: WHITE,
+            get_rgb: () => (ui_state.controls.move_mode === 'SNEAK' ? get_color_by_name('pale_yellow').rgb : get_color_by_name('dark_gray').rgb),
+            bg: { char: '-', rgb: get_color_by_name('off_black').rgb },
+            base_weight_index: 3,
+            OnPress() { ui_state.controls.move_mode = 'SNEAK'; flash_status(['move: SNEAK'], 800); },
+        }),
+        make_button_module({
+            id: 'mv_sprint',
+            rect: { x0: BTN_X0 + 22, y0: BTN_Y0 + 3, x1: BTN_X1, y1: BTN_Y0 + 5 },
+            label: 'SPR',
+            rgb: WHITE,
+            get_rgb: () => (ui_state.controls.move_mode === 'SPRINT' ? get_color_by_name('pale_yellow').rgb : get_color_by_name('dark_gray').rgb),
+            bg: { char: '-', rgb: get_color_by_name('off_black').rgb },
+            base_weight_index: 3,
+            OnPress() { ui_state.controls.move_mode = 'SPRINT'; flash_status(['move: SPRINT'], 800); },
+        }),
 
         make_roller_module({
             id: 'roller',
-            rect: { x0: 88, y0: 38, x1: 118, y1: 42 },
+            rect: { x0: ROLL_X0, y0: BTN_Y0, x1: ROLL_X1, y1: BTN_Y1 },
             get_state: () => ui_state.roller,
             on_roll: async (roll_id) => {
                 await fetch(APP_CONFIG.roller_roll_endpoint, {
@@ -1177,7 +1245,7 @@ export function create_app_state(): AppState {
     ];
 
     register_window_feed({
-        window_id: 'log',
+        window_id: 'transcript',
         fetch_messages: () => fetch_log_messages(APP_CONFIG.selected_data_slot),
     });
 
@@ -1186,9 +1254,8 @@ export function create_app_state(): AppState {
         fetch_messages: () => fetch_status_line(APP_CONFIG.selected_data_slot),
     });
 
-    // Seed controls + targets windows
-    set_text_window_messages('controls', ['[suggested] (none)', '[override intent] (none)', '[override cost] (none)']);
-    set_text_window_messages('targets', ['[region] (loading...)', 'Targets will appear here.']);
+    // Seed debug window
+    set_text_window_messages('debug', ['[debug] off | H:off B:on V:off', '[volume] NORMAL', '[move] WALK', '', '[region] (loading...)', 'Targets will appear here.']);
 
     // Initialize NPC movement system
     init_npc_movement((updated_place: Place) => {

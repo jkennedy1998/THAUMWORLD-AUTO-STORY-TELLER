@@ -10,6 +10,13 @@
 
 These test cases verify the complete communication flow from frontend click to NPC response.
 
+Debug keybinds (in-game):
+- `\\` toggle debug
+- `H` toggle hearing ring
+- `B` toggle sense broadcasts
+- `V` toggle LOS occlusion shadow inside cone
+- `M` cycle move mode (WALK/SNEAK/SPRINT)
+
 ---
 
 ## ✅ Test Case 1: Basic Target Selection
@@ -100,7 +107,7 @@ Verify that targeted NPC stops, faces player, and enters conversation state
 - ✅ Console: `[MovementCommandHandler] Executing NPC_FACE for npc.grenda`
 - ✅ NPC status changes to "busy"
 - ✅ Console: `[MovementCommandHandler] npc.grenda status updated to busy`
-- ✅ White "O" indicator appears below NPC (if debug mode enabled)
+- ✅ Debug indicator below NPC: `O` while conversing (if `\\` debug mode enabled)
 
 ### Debug Commands
 ```bash
@@ -119,7 +126,7 @@ Verify that nearby NPCs (not targeted) calculate interest and react accordingly
 ### Prerequisites
 - 2+ NPCs in same place
 - Player targets only one NPC
-- Other NPCs within communication range (10 tiles for NORMAL)
+- Other NPCs within communication range (5 tiles for NORMAL)
 
 ### Steps
 1. Ensure 2+ NPCs are present (e.g., Grenda and Blacksmith)
@@ -156,21 +163,21 @@ Verify that WHISPER, NORMAL, and SHOUT have different ranges
 
 ### Steps
 
-#### Sub-test 5a: Whisper (1 tile range)
-1. Stand 1 tile away from NPC
+#### Sub-test 5a: Whisper (3 tile range)
+1. Stand 3 tiles away from NPC
 2. Set volume to WHISPER
 3. Send message
 4. **Expected:** NPC hears and responds
-5. Move to 2 tiles away
+5. Move to 4 tiles away
 6. Send message
 7. **Expected:** NPC does NOT hear (out of range)
 
-#### Sub-test 5b: Normal (10 tile range)
+#### Sub-test 5b: Normal (5 tile range)
 1. Stand 5 tiles away from NPC
 2. Set volume to NORMAL
 3. Send message
 4. **Expected:** NPC hears and responds
-5. Move to 15 tiles away
+5. Move to 6 tiles away
 6. Send message
 7. **Expected:** NPC does NOT hear (out of range)
 
@@ -213,7 +220,7 @@ Verify that NPC leaves conversation after timeout (30 seconds)
 - ✅ NPC status changes back to "present"
 - ✅ NPC resumes previous action (wandering, etc.)
 - ✅ Console: `[MovementCommandHandler] npc.grenda status updated to present`
-- ✅ White "O" disappears (if visible)
+- ✅ Debug indicator returns to `o` (if `\\` debug mode enabled)
 
 ### Debug Commands
 ```bash
@@ -325,8 +332,9 @@ tail -f local_data/data_slot_1/logs/latest.log | grep -E "WITNESS|ENGAGEMENT|SOC
 
 ## 🐛 Known Issues
 
-1. **White "O" Indicator:** Only shows in DEBUG_VISION mode (press backslash)
-   - Need to make it always visible when status="busy"
+1. **Conversation Indicator:** Debug-only in DEBUG_VISION mode (press backslash)
+   - `o` (dim) = not conversing
+   - `O` (bright) = conversing (`NPC_STATUS: busy`)
    
 2. **Volume Buttons:** Logic ready, UI not built yet
    - Currently defaults to NORMAL volume
@@ -344,6 +352,8 @@ tail -f local_data/data_slot_1/logs/latest.log | grep -E "WITNESS|ENGAGEMENT|SOC
 - ✅ NPC stops moving when communicated to
 - ✅ NPC faces player
 - ✅ Timeout works (30 seconds)
+- ✅ Saying "bye" ends conversation (NPC returns to `present`)
+- ✅ Leaving the place ends conversation (NPC does not remain `busy`)
 
 **Full Feature Set:**
 - ✅ All tests 1-7 pass

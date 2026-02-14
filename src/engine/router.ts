@@ -22,7 +22,6 @@ export function route_message(message: MessageEnvelope): RouteResult {
     }
 
     const is_user = sender === "j" || sender === "user" || type === "user_input";
-    const is_interpreter = sender === "interpreter_ai" || type === "interpreter_ai";
     const is_broker = sender === "data_broker" || type === "data_broker";
     const is_state_applier = sender === "state_applier" || stage.startsWith("applied_");
     const is_renderer = sender === "renderer_ai" || stage.startsWith("rendered_");
@@ -35,38 +34,15 @@ export function route_message(message: MessageEnvelope): RouteResult {
             log: sent,
             outbox: {
                 ...sent,
-                stage: sent.stage ?? "interpreter_ai",
+                // NOTE: `interpreter_ai` is archived in this build.
+                // Keep stage as-is if present; otherwise tag as generic user input.
+                stage: sent.stage ?? "user_input",
             },
         };
-    } else if (is_interpreter) {
-        if (stage.startsWith("interpreted_")) {
-            result = {
-                log: message,
-                outbox: {
-                    ...message,
-                    status: "sent",
-                },
-            };
-        } else {
-            result = { log: message };
-        }
     } else if (is_broker) {
-        if (message.status === "error") {
-            result = {
-                log: message,
-                outbox: {
-                    ...message,
-                    stage: "interpreter_ai",
-                    status: "sent",
-                    meta: {
-                        ...(message.meta ?? {}),
-                        error_iteration: (message.meta as any)?.error_iteration ?? 1,
-                    },
-                },
-            };
-        } else {
-            result = { log: message };
-        }
+        // Legacy note: data_broker used to bounce `error` messages back to interpreter.
+        // That interpreter loop is archived; keep broker messages as log-only.
+        result = { log: message };
     } else if (sender === "rules_lawyer" && stage.startsWith("ruling_") && message.status === "pending_state_apply") {
         // RulesLawyer outputs pending_state_apply - route to outbox for StateApplier
         result = {

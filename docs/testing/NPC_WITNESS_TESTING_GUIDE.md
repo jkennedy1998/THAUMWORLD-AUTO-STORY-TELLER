@@ -197,16 +197,16 @@
 **Objective:** Loud actions (shouting) can be heard from further away
 
 **Setup:**
-- Player is 8-10 tiles away from an NPC
+- Player is ~25 tiles away from an NPC
 - Debug visualization enabled
 
 **Steps:**
-1. Stand 8 tiles away from Grenda
+1. Stand 25 tiles away from Grenda
 2. Shout "HELLO!"
 
 **Expected Results:**
 ```
-[SenseBroadcast] Shout: pressure intensity 9, range 15
+[SenseBroadcast] Shout: pressure intensity 8, range 30
 [ConeOfVision] npc.grenda can hear actor.henry_actor: true
 ```
 
@@ -219,13 +219,22 @@
 
 Press **\\** (backslash) in-game to toggle debug visualization:
 
+Keybinds:
+- `\\` toggle debug
+- `H` toggle hearing ring
+- `B` toggle sense broadcasts
+- `V` toggle LOS occlusion shadow inside the cone (character blockers for now)
+- `M` cycle move mode (WALK/SNEAK/SPRINT) for footstep broadcast intensity
+
 | Symbol | Color | Meaning |
 |--------|-------|---------|
 | ▲ | Yellow | Vision cone (sight/light sense) |
+| ▲ | Red | Occluded tiles inside cone (LOS shadow) |
 | ○ | Cyan | Hearing range (pressure sense) |
 | ✦ | Various | Action broadcast burst |
 | → ← ↑ ↓ | White | Facing direction |
 | ! | White flash | Perception detected |
+| o / O | Gray / White | Conversation debug (`o` idle, `O` conversing) |
 
 ## Troubleshooting
 

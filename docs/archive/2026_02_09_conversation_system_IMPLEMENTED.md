@@ -2,14 +2,17 @@
 ## Unified Implementation Plan
 
 **Date:** 2026-02-09  
-**Status:** 🚧 Phase 1: Foundation  
+**Status:** ✅ Implemented; ready to archive (remaining items moved)  
 **Priority:** High  
 **Approach:** Option B - Archive old system, build new from scratch  
 **Philosophy:** *"Communication is an ACTION, not a system"* (Tabletop RPG Model)
 
 **Task States:** `[ ]` Not Started | `[~]` Implemented | `[x]` Tested
 
-**⚠️ IMPORTANT:** We are NOT debugging the old system. Archive it immediately and build the new click-to-target system from scratch.
+**Last Updated:** 2026-02-13
+
+**⚠️ NOTE:** Multi-party sequential reply scheduling is deferred to `docs/plans/2026_02_13_advanced_npc_interactions_scheduler.md`.
+Edge cases + performance items from this plan are also tracked there now.
 
 ---
 
@@ -17,13 +20,19 @@
 
 Implement a clean, tabletop RPG-style communication system where **COMMUNICATE is a first-class action** flowing through the ActionPipeline. All communication triggers witness reactions, engagement states, and memory formation.
 
+### Non-Negotiable Rule (Single Pipeline)
+There is exactly **one** authority for whether an NPC is "in the conversation" and therefore allowed to respond:
+- **Witness-driven conversation state** (the system built around Grenda) is the default.
+- If an NPC *perceives* a COMMUNICATE and *wants to join*, they are added as a participant (visual `O`, following/face behavior) and are allowed to respond.
+- If an NPC perceives a COMMUNICATE but does *not* join, they do **not** respond.
+
 **End State:**
 - ✅ Left-click to select target, type to communicate
-- ✅ Volume controlled by UI buttons (🔇🗣️📢)
+- ✅ Volume selection supported (frontend-dependent; defaults to NORMAL)
 - ✅ All text = COMMUNICATE action through ActionPipeline
 - ✅ NPCs react with engagement, facing, and responses
 - ✅ Bystanders overhear based on personality
-- ✅ White "O" indicator shows engaged NPCs
+- ✅ Debug indicator shows conversation state (`o/O` when `\\` debug is enabled)
 - ✅ Memories stored with personality filtering
 
 ---
@@ -42,7 +51,7 @@ In tabletop games, talking to an NPC is an **action** like attacking or moving. 
 | Tabletop Concept | Digital Implementation |
 |------------------|------------------------|
 | "DM checks if NPC can hear" | Perception broadcast with sense checks |
-| "Player says 'hello grenda'" | Type text + click [NORMAL] button |
+| "Player says 'hello [npc_name]'" | Type text + click [NORMAL] button |
 | "NPC stops to talk" | Engagement state + stop movement |
 | "Others nearby might overhear" | Bystander social checks |
 | "NPC gets bored after a while" | 30-second timeout |
@@ -89,7 +98,7 @@ Stage 1: Target Resolution
     ↓
 Stage 2: Validation
     • Distance: 4.5 tiles
-    • NORMAL range: 10 tiles ✓
+    • NORMAL (pressure) range: 5 tiles ✓
     • Tool check: Has voice slot ✓
     • Line of sight: Not required for NORMAL
     ↓
@@ -120,15 +129,15 @@ Stage 7: Witness Reactions
         • Enters ENGAGED state
         • Stop current action (send NPC_STOP)
         • Face speaker (send NPC_FACE)
-        • Show white "O" indicator
-        • Set status: "busy"
+        • Emit `NPC_STATUS: busy` (conversation visual sync)
+        • Debug overlay shows `O` (uppercase)
         • Generate response
         
-        BYSTANDERS (e.g., Blacksmith):
-        • Social check: Interest = f(personality, distance, content)
-        • Interest ≥ 70: Join as participant
-        • Interest 40-69: Eavesdrop (store memory)
-        • Interest < 40: Ignore (continue current action)
+         BYSTANDERS (e.g., Blacksmith):
+         • Social check: Interest = f(personality, distance, content)
+         • Interest ≥ 70: Join as participant
+         • Interest 40-69: Eavesdrop (store memory)
+         • Interest < 40: Ignore (continue current action)
         
         NO PERCEPTION (e.g., Guard 50 tiles away):
         • Continue patrol
@@ -149,6 +158,49 @@ Memory Consolidation (on conversation end):
     • Store in npc_storage/memory.ts
     • Update relationship status
 ```
+
+---
+
+## 🔁 Plan Addendum: Single Communication Pipeline (Fix Split Responses)
+
+### Problem (Observed Bug)
+Some NPCs can currently generate replies via `process_communication()` without entering witness-driven conversation state.
+This creates inconsistent behavior (e.g., NPC replies but does not show conversation `O`, does not follow/face like Grenda).
+
+### Desired Contract
+For ActionPipeline-driven COMMUNICATE:
+- **Perceived + Joins** => enters conversation state (`NPC_STATUS: busy`) and may respond.
+- **Perceived + Does Not Join** => may store memory (eavesdrop) but must not respond.
+- **Not Perceived** => no response.
+
+### Implementation Plan (Fits Current Readability Rework)
+
+1) Make witness processing produce a responder eligibility set
+- Key by `actionId` (from `PerceptionEvent.actionId`).
+- Only add an NPC to this set when witness decides they are a **participant**.
+- Expose a small exported accessor from `src/npc_ai/witness_handler.ts` (e.g. `get_response_eligible_npcs(action_id)`), with TTL cleanup.
+
+2) Promote "join" bystanders into full conversation state
+- In `src/npc_ai/witness_handler.ts`, when social checks return `response_type: "join"`, call the same conversation start path used for direct targets:
+  - stop movement (`NPC_STOP`), face (`NPC_FACE`), set goal, set conversation tracking, emit `NPC_STATUS: busy`.
+- Ensure joiners are real participants (not just engagement-only).
+
+3) Thread the eligibility set into the outbox message used for LLM response generation
+- In `src/interface_program/main.ts` where the outbox message is created after ActionPipeline success, add:
+  - `meta.response_eligible_by` (array of `npc.<id>` refs)
+- Keep `meta.observed_by` as the broader perception list (useful for debugging).
+
+4) Gate NPC replies strictly on witness eligibility
+- In `src/npc_ai/main.ts` `process_communication()`:
+  - for `meta.processed_by_action_pipeline === true`, only allow response generation for NPCs listed in `meta.response_eligible_by`.
+  - remove/disable the legacy "direct target always responds" shortcut when pipeline-driven.
+
+### Acceptance Tests
+- Direct target in range => target shows `O` and responds.
+- Bystander hears and joins => bystander shows `O` and responds.
+- Bystander hears but eavesdrops => no response (may store memory).
+- Out of hearing => no response.
+- Door travel ends conversations (no stuck `O`).
 
 ---
 
@@ -271,8 +323,8 @@ interface CommunicationInputState {
 // UI Layout:
 // ┌─────────────────────────────────────────────┐
 // │  Target: [Grenda] ✕                        │
-// │                                              │
-// │  📝 [Text Input]    [🔇] [🗣️] [📢]        │
+// │                                             │
+// │  📝 [Text Input]    [-] [=] [#]             │
 // │                     Whs  Nrm  Sht           │
 // └─────────────────────────────────────────────┘
 
@@ -337,12 +389,12 @@ COMMUNICATE: {
   
   subtypes: {
     WHISPER: {
-      range_tiles: 1,
+      range_tiles: 3,
       senses: ["pressure"],
-      description: "Only audible to adjacent targets"
+      description: "Only audible to nearby targets"
     },
     NORMAL: {
-      range_tiles: 10,
+      range_tiles: 5,
       senses: ["pressure", "light"],
       description: "Normal conversation range"
     },
@@ -559,7 +611,7 @@ export function calculateSocialResponse(
 
 Visual Indicators:
 - Selected target: Highlighted in world + name in UI
-- White "O" below NPC: Currently engaged in conversation
+- Debug `o/O` below NPC (when `\\` enabled): `o` idle, `O` conversing
 - Facing arrows: Direction NPC is looking
 ```
 
@@ -568,10 +620,10 @@ Visual Indicators:
 | State | Visual Cue | Meaning |
 |-------|------------|---------|
 | **Target Selected** | Highlighted name + "Talking to: X" | You will communicate to this target |
-| **NPC Engaged** | White "O" below NPC | NPC is in conversation, won't wander |
+| **NPC Conversing (Debug)** | `O` below NPC | NPC is in conversation (`NPC_STATUS: busy`) |
 | **NPC Facing** | Arrow showing direction | NPC is looking at speaker |
-| **Volume Selected** | Highlighted button | Whisper(1)/Normal(10)/Shout(30) tiles |
-| **Timeout Warning** | Yellow "O" | NPC getting bored, will leave soon |
+| **Volume Selected** | Highlighted button | Whisper(3)/Normal(5)/Shout(30) tiles |
+| **Timeout Warning** | (optional) Yellow `O` | NPC getting bored, will leave soon |
 
 ---
 
@@ -596,7 +648,7 @@ Visual Indicators:
 - [x] **`src/interface_program/target_state.ts`** - Click-to-target system - Tested (63 lines)
 - [x] **`src/npc_ai/engagement_service.ts`** - Engagement state management - Tested (234 lines)
 - [x] **`src/npc_ai/social_checks.ts`** - Bystander interest calculations - Tested (174 lines)
-- [ ] **`src/shared/debug_logger.ts`** - Standardized debug logging - Not Started
+- [~] **`src/shared/debug_logger.ts`** - Outdated (using `src/shared/debug.ts` + structured service logs instead)
 
 ### Files to Modify
 
@@ -604,7 +656,7 @@ Visual Indicators:
 - [~] **`src/interface_program/main.ts`** - Simplify input routing - Implemented
 - [~] **`src/action_system/pipeline.ts`** - Add debug logging at each stage - Implemented
 - [~] **`src/npc_ai/witness_handler.ts`** - Complete integration - Implemented
-- [ ] **`src/mono_ui/modules/input_module.ts`** - Add volume buttons - Not Started
+- [~] **`src/mono_ui/modules/input_module.ts`** - Outdated path (volume state exists; mono_ui needs bindings if desired)
 
 ---
 
@@ -626,22 +678,22 @@ Visual Indicators:
 - [x] Add target validation (distance check) - Tested
 - [x] Visual feedback commands (HIGHLIGHT, TARGET) - Backend Tested
 - [x] Visual feedback sender functions - Backend Tested
-- [ ] Frontend: Handle HIGHLIGHT commands - Not Started
-- [ ] Frontend: Handle TARGET commands - Not Started
-- [ ] Frontend: Render "Talking to: Grenda" display - Not Started
+- [x] Frontend: Handle HIGHLIGHT commands - Implemented (target highlight handled in `src/mono_ui/modules/place_module.ts`)
+- [x] Frontend: Handle TARGET commands - Implemented (target state handled in `src/mono_ui/modules/place_module.ts`)
+- [x] Frontend: Render "Talking to: Grenda" display - Tested (implemented in `src/mono_ui/modules/place_module.ts`)
 
 **Day 4: Communication Input Module** ✅
 - [x] Build new input module (don't fix old one) - Tested
-- [x] Volume buttons (🔇🗣️📢) - Logic Implemented
+- [~] Volume buttons (🔇🗣️📢) - Logic Implemented (UI bindings vary by frontend)
 - [x] Text input field - Logic Implemented
-- [ ] Target display with clear button - Frontend Not Started
-- [ ] Test: UI elements render correctly - Frontend Not Started
+- [~] Target display with clear button - Implemented (display + clear API exist; UI button/keybind may vary)
+- [~] Test: UI elements render correctly - Implemented (minor rendering-order bug tracked in advanced plan)
 
 **Day 5: Integration & First Test** ✅
 - [x] Wire input module → ActionPipeline - Tested
 - [x] Create COMMUNICATE intent with volume + target - Tested
 - [x] Add basic debug logging - Tested
-- [ ] Test: Click Grenda + type + send → ActionPipeline receives intent - Not Started (Needs frontend)
+- [x] Test: Click Grenda + type + send → ActionPipeline receives intent - Tested (slot 1 manual + logs)
 
 **Day 6-7: Debug Buffer**
 - [x] Fix integration issue: NPC messages not displaying - Tested (displayMessageToUser now writes to log with correct sender)
@@ -654,7 +706,7 @@ Visual Indicators:
 - [x] NPC responds to messages - Working (Grenda responds with LLM-generated content)
 - [x] Fix message ordering in window_module - Fixed (messages now sorted by timestamp chronologically)
 - [x] Remove duplicate messages - Fixed (removed direct log write in NPC_AI, added content-based deduplication in frontend)
-- [~] White "O" indicator appears - Implemented (now renders white "O" below busy NPCs in normal gameplay, not just debug mode)
+- [x] Debug `o/O` indicator appears - Implemented + tested
 
 ### Week 2: Engagement System
 
@@ -663,21 +715,21 @@ Visual Indicators:
 - [x] IDLE ↔ ENGAGED transitions - Tested
 - [x] Interrupt/restore actions - Implemented
 - [x] Face speaker on engage - Implemented
-- [ ] Test: NPC stops and faces when communicated to - Not Started (Needs integration)
+- [x] Test: NPC stops and faces when communicated to - Tested (slot 1 manual + logs)
 
 **Day 10-11: Visual Feedback**
 - [x] Stop movement on engagement - Implemented (send_stop_command in witness_handler)
 - [x] Update status to "busy" - Implemented (status commands working)
-- [~] Spawn white "O" indicator - Implemented (renders for all busy NPCs in place_module.ts)
+- [x] Spawn debug `o/O` indicator - Implemented via `src/mono_ui/vision_debugger.ts`
 - [x] Facing updates - Implemented (send_face_command in witness_handler)
-- [ ] Test: Visual indicators work - Not Started (Needs end-to-end testing)
+- [x] Test: Visual indicators work - Tested (slot 1 manual; `O` busy indicator)
 
 **Day 12-14: Timeouts & Polish**
 - [x] 30-second attention span - Implemented
 - [x] Distance breaks engagement - Implemented
-- [ ] Resume interrupted actions - Not Started
-- [ ] Farewell detection - Not Started
-- [ ] Debug and fix edge cases - Not Started
+- [x] Resume interrupted actions - Implemented (restore previous goal on conversation end)
+- [x] Farewell detection - Implemented (witness handler + archive analysis)
+- [~] Debug and fix edge cases - Moved to `docs/plans/2026_02_13_advanced_npc_interactions_scheduler.md`
 - [x] Performance: Only check engaged NPCs (not all) - Implemented
 
 ### Week 3: Social Simulation & Memory
@@ -686,42 +738,34 @@ Visual Indicators:
 - [x] Create `social_checks.ts` - Tested
 - [x] Interest calculation algorithm - Tested
 - [x] Personality integration - Tested
-- [ ] Cache interest scores (performance) - Not Started
+- [~] Cache interest scores (performance) - Moved to `docs/plans/2026_02_13_advanced_npc_interactions_scheduler.md`
 - [x] Debug: Log interest scores - Tested
 
 **Day 17-18: Bystander Reactions**
 - [x] Join vs eavesdrop vs ignore - Implemented
 - [x] Threshold-based decisions - Implemented
-- [ ] Test with multiple NPCs - Not Started
+- [x] Test with multiple NPCs - Tested (Grenda + Mira in same place)
 
 **Day 19-21: Memory System**
-- [ ] Participant memories (full detail) - Not Started
-- [ ] Bystander memories (filtered) - Not Started
+- [x] Participant memories (full detail) - Implemented (conversation_summarizer -> npc_storage/memory)
+- [x] Bystander memories (filtered) - Implemented (witness_handler eavesdrop/join -> npc_storage/memory)
 - [x] Memory importance scoring - Implemented
-- [ ] Store to npc_storage/memory.ts - Not Started
-- [ ] Test: Memories persist and retrieve - Not Started
+- [x] Store to npc_storage/memory.ts - Implemented
+- [~] Test: Memories persist and retrieve - Moved (requires inspection/retrieval UI)
 
 ### Week 4: Polish, Testing & Documentation
 
-**Day 22-23: Edge Cases & Bug Fixes**
-- [ ] NPC dies mid-conversation - Not Started
-- [ ] Player disconnects while engaged - Not Started
-- [ ] Multiple players talk to same NPC - Not Started
-- [ ] NPC moves out of range while typing - Not Started
-- [ ] Fix any bugs discovered - Not Started
-
-**Day 24-25: Performance Testing**
-- [ ] Test with 50 NPCs in one place - Not Started
-- [ ] Multiple simultaneous conversations - Not Started
-- [ ] Memory usage profiling - Not Started
-- [ ] Optimize if needed - Not Started
+**Day 22-25: Edge Cases + Performance**
+- [~] Moved to `docs/plans/2026_02_13_advanced_npc_interactions_scheduler.md`
 
 **Day 26-28: Documentation**
-- [ ] Code comments (JSDoc) - Not Started
-- [ ] Architecture documentation - Not Started
-- [ ] Testing guide - Not Started
-- [ ] Update README - Not Started
-- [ ] Final review - Not Started
+- [x] Architecture documentation - Tested (see this plan + `docs/guides/NPC_WITNESS_SYSTEM.md`)
+- [x] Testing guide - Tested (see `docs/testing/COMMUNICATION_TEST_CASES.md` and logs)
+- [x] Update README - Tested (`docs/plans/README.md` formatting + cross-plan references)
+- [x] Final review - Tested (core flow + multi-NPC test run)
+
+Deferred:
+- Code comments (JSDoc) is hygiene work; not required to archive the plan.
 
 ---
 
@@ -745,6 +789,8 @@ Visual Indicators:
 ## 🔍 Debug Logging Standards
 
 ### Required Log Prefixes
+
+Note: `src/shared/debug_logger.ts` was not created; the codebase uses `src/shared/debug.ts` (and structured service logs). The snippet below is illustrative only.
 
 ```typescript
 // File: src/shared/debug_logger.ts
@@ -800,7 +846,7 @@ Expected:
   - [PIPELINE] Stage 1-7 complete
   - [WITNESS] Grenda can perceive: true
   - [ENGAGE] Grenda entered participant engagement
-  - White "O" appears below Grenda
+  - `O` appears below Grenda (debug mode)
   - Grenda responds
 ```
 
@@ -820,7 +866,7 @@ Expected:
 
 ### Test 3: Whisper Range
 ```
-Setup: Player(0,0), Grenda(2,0)
+Setup: Player(0,0), Grenda(4,0)
 Actions:
   1. LEFT CLICK on Grenda
   2. Click [WHISPER]
@@ -838,7 +884,7 @@ Action: Wait 30 seconds without typing
 Expected:
   - [ENGAGE] Grenda is getting distracted...
   - [ENGAGE] Grenda leaving engagement (timeout)
-  - White "O" disappears
+  - `o` returns (debug mode)
   - Grenda resumes previous action
 ```
 
@@ -911,8 +957,8 @@ interface CommunicateParams {
 
 ## 📊 Current Progress
 
-**Last Updated:** 2026-02-10  
-**Status:** Week 2 Visual Feedback Implemented (75%)
+**Last Updated:** 2026-02-13  
+**Status:** Core flow working; remaining items are UI polish, perf, and edge cases
 
 ### ✅ Completed
 
@@ -930,11 +976,11 @@ interface CommunicateParams {
 
 | Week | Task | Status | Notes |
 |------|------|--------|-------|
-| W1 | Frontend UI | [ ] | Volume buttons, target display - Not Started |
+| W1 | Frontend UI | [~] | Target display implemented; volume UI depends on frontend |
 | W1 | Visual feedback | [~] | Highlight selected NPC - Implemented (backend ready, frontend in place_module) |
 | W2 | Integration testing | [x] | Wire engagement to witness handler - Tested (working) |
-| W2 | White "O" indicator | [x] | Visual busy state - Tested (now renders for all busy NPCs) |
-| W3 | Memory storage | [ ] | Store to npc_storage/memory.ts - Not Started |
+| W2 | Debug `o/O` indicator | [x] | Visual conversation state (debug mode) |
+| W3 | Memory storage | [~] | Stored (participant + bystander); retrieval UI/tests pending |
 | W4 | Edge cases | [ ] | Death, disconnect, etc. - Not Started |
 
 ### 📈 Statistics
@@ -952,36 +998,36 @@ interface CommunicateParams {
 
 **From Tabletop Perspective:**
 
-- [ ] **"It feels like a DM is running NPCs"** - Not Started
-  - [ ] NPCs respond to range and volume - Not Started
-  - [ ] Personality affects who responds - Not Started
-  - [ ] Visual feedback matches narrative - Not Started
+- [~] **"It feels like a DM is running NPCs"** - Implemented (sequencing improvements deferred)
+  - [x] NPCs respond to range and volume - Tested
+  - [x] Personality affects who responds - Tested
+  - [x] Visual feedback matches narrative - Tested
 
-- [ ] **"Communication has tactical considerations"** - Not Started
-  - [ ] Whisper vs shout matters - Not Started
-  - [ ] Distance matters - Not Started
-  - [ ] Who can hear matters - Not Started
+- [x] **"Communication has tactical considerations"** - Tested
+  - [x] Whisper vs shout matters - Tested
+  - [x] Distance matters - Tested
+  - [x] Who can hear matters - Tested
 
-- [ ] **"NPCs feel alive"** - Not Started
-  - [ ] Stop what they're doing to talk - Not Started
-  - [ ] Get bored and leave - Not Started
-  - [ ] Remember past conversations - Not Started
+- [~] **"NPCs feel alive"** - Implemented (content iteration ongoing)
+  - [x] Stop what they're doing to talk - Tested
+  - [x] Get bored and leave - Tested
+  - [~] Remember past conversations - Implemented (storage), retrieval still pending
 
-- [ ] **"The system is debuggable"** - Not Started
-  - [ ] Logs read like a DM's notes - Not Started
-  - [ ] Clear cause-and-effect chains - Not Started
-  - [ ] Easy to see why an NPC did/didn't respond - Not Started
+- [~] **"The system is debuggable"** - Implemented
+  - [~] Logs read like a DM's notes - Implemented (could be cleaned up further)
+  - [x] Clear cause-and-effect chains - Tested (ActionPipeline + witness logs)
+  - [x] Easy to see why an NPC did/didn't respond - Tested (interest + eligibility gating)
 
 **Technical Criteria:**
 
-- [~] All text input flows through ActionPipeline - Implemented
-- [~] Click-to-target works (no text parsing) - Implemented
-- [ ] Volume buttons work (not text parsing) - Not Started
-- [x] White "O" indicator appears reliably - Tested (renders below busy NPCs)
+- [x] All text input flows through ActionPipeline - Tested
+- [x] Click-to-target works (no text parsing) - Tested
+- [~] Volume buttons work (not text parsing) - Implemented (UI bindings vary by frontend)
+- [x] Debug `o/O` indicator appears reliably - Tested (uses renderer-synced `NPC_STATUS`)
 - [x] Engagement system (stop, face, timeout) - Tested
 - [x] Bystanders react based on personality - Tested
 - [x] NPC responses use existing system - Tested (process_communication with build_npc_prompt, decision hierarchy, memory context, location awareness)
-- [ ] Memories stored and retrieved - Not Started
+- [~] Memories stored and retrieved - Stored (participant + bystander); retrieval/testing still pending
 - [~] Comprehensive debug logging - Implemented (debug_log used throughout)
 - [x] Old systems removed/cleaned up - Tested
 
@@ -991,15 +1037,22 @@ interface CommunicateParams {
 
 ### Immediate Next Steps:
 1. [x] Wire `engagement_service.ts` to `witness_handler.ts` - Tested
-2. [x] Add white "O" indicator spawning - Implemented
+2. [x] Add debug `o/O` indicator spawning - Implemented
 3. [x] Fix NPC message display - Tested
 4. [x] Use existing conversation system - Tested (process_communication with build_npc_prompt, decision hierarchy, memory context)
 5. [x] Fix message ordering - Tested (sorted by timestamp chronologically)
 6. [x] Remove duplicate messages - Tested (content-based deduplication)
-7. [ ] Test: Full conversation flow end-to-end
+7. [x] Test: Full conversation flow end-to-end
+
+### Outdated / Moved To Newer Plans
+- Multi-party sequential reply ordering and anti-pile-on: `docs/plans/2026_02_13_advanced_npc_interactions_scheduler.md`
+- Archetype-driven defaults and interaction phases: `docs/plans/2026_02_12_npc_archetypes_and_interaction_phases.md`
 
 ### Blockers:
 - None. All backend systems compile and are ready for integration.
+
+### Deferred Notes:
+- ActionPipeline CR math looks wrong for melee (`USE.IMPACT_SINGLE` showing CR=50 at distance=1 in eval logs). Defer until USE/ATTACK rules are implemented fully.
 
 ---
 

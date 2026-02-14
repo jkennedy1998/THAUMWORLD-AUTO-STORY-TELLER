@@ -27,16 +27,18 @@ import { get_memories_about, remembers_entity, get_relationship_status, add_conv
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { is_timed_event_active, get_timed_event_state, get_region_by_coords } from "../world_storage/store.js";
-import { load_place } from "../place_storage/store.js";
+import { load_place, save_place } from "../place_storage/store.js";
 import { consolidate_npc_memory_journal_if_needed, append_non_timed_conversation_journal } from "./timed_event_journal.js";
 
-// Import witness system for real-time reactions
-import { process_witness_communication } from "./witness_integration.js";
 import { update_conversations } from "./witness_handler.js";
 
+// Import engagement service for conversation management
+import { updateEngagement, initEngagementService } from "./engagement_service.js";
+
 // Import movement command sender for Phase 8: Unified Movement Authority
-import { send_wander_command } from "./movement_command_sender.js";
+import { send_wander_command, send_sense_broadcast_command } from "./movement_command_sender.js";
 import { is_in_conversation } from "./conversation_state.js";
+import { is_in_conversation_presence } from "../shared/conversation_presence_store.js";
 
 const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
 const POLL_MS = SERVICE_CONFIG.POLL_MS.NPC_AI;
@@ -527,6 +529,35 @@ async function process_communication(
     let original_text = meta?.original_text as string || "";
     let machine_text = meta?.machine_text as string || "";
     const events = meta?.events as string[] || [];
+
+    // If the action pipeline produced an observed-by list, prefer that as the set of NPCs
+    // allowed to perceive/respond. This prevents out-of-range "telepathy" responses.
+    const pipeline_driven = meta?.processed_by_action_pipeline === true;
+
+    const observed_by: string[] = Array.isArray(meta?.observed_by)
+        ? meta.observed_by
+        : Array.isArray(meta?.observedBy)
+            ? meta.observedBy
+            : [];
+    const observed_npc_ids = new Set(
+        observed_by
+            .filter((r: unknown) => typeof r === 'string')
+            .map((r: string) => r.startsWith('npc.') ? r.replace('npc.', '') : r)
+            .filter((id: string) => id.length > 0)
+    );
+
+    // Single communication pipeline: only witness-driven conversation participants may respond.
+    const response_eligible_by: string[] = Array.isArray(meta?.response_eligible_by)
+        ? meta.response_eligible_by
+        : Array.isArray(meta?.responseEligibleBy)
+            ? meta.responseEligibleBy
+            : [];
+    const response_eligible_npc_ids = new Set(
+        response_eligible_by
+            .filter((r: unknown) => typeof r === 'string')
+            .map((r: string) => r.startsWith('npc.') ? r.replace('npc.', '') : r)
+            .filter((id: string) => id.length > 0)
+    );
     
     // NEW: Handle direct COMMUNICATE messages from ActionPipeline
     // These have meta.intent_verb === "COMMUNICATE" and content in msg.content
@@ -651,6 +682,11 @@ async function process_communication(
     
     const nearby_npcs = all_npcs.filter(npc_hit => {
         if (npc_hit.id === "default_npc") return false;
+
+        // If ActionPipeline drove this message, only NPCs in observed_by may respond.
+        // (Empty observed_by means nobody perceived it.)
+        if (pipeline_driven && !observed_npc_ids.has(npc_hit.id)) return false;
+
         const npc_result = load_npc(data_slot_number, npc_hit.id);
         if (!npc_result.ok) {
             debug_log("NPC_AI", `Failed to load NPC ${npc_hit.id}`);
@@ -700,6 +736,15 @@ async function process_communication(
         
         return same_region;
     });
+
+    if (pipeline_driven && response_eligible_npc_ids.size === 0) {
+        debug_pipeline("NPC_AI", "No eligible responders (witness-driven conversation state)", {
+            id: msg.id,
+            intent_id: meta?.intent_id ?? meta?.intentId ?? msg.id,
+            observed_by: observed_by.length,
+        });
+        return;
+    }
     
     debug_pipeline("NPC_AI", `Found ${nearby_npcs.length} NPCs nearby`, {
         region: player_location?.region_tile,
@@ -743,16 +788,25 @@ async function process_communication(
             }
         }
         
-        // Check if NPC should respond
-        const should_respond = should_npc_respond(npc, is_direct_target);
-        debug_log("NPC_AI", `should_npc_respond for ${npc_hit.id}: ${should_respond}, is_direct_target: ${is_direct_target}`);
-        if (!should_respond) {
-            continue;
+        // Single pipeline: witness decides which NPCs are allowed to respond.
+        if (pipeline_driven) {
+            if (!response_eligible_npc_ids.has(npc_hit.id)) {
+                continue;
+            }
+        } else {
+            // Legacy (non-pipeline) behavior.
+            const should_respond = should_npc_respond(npc, is_direct_target);
+            debug_log("NPC_AI", `should_npc_respond for ${npc_hit.id}: ${should_respond}, is_direct_target: ${is_direct_target}`);
+            if (!should_respond) {
+                continue;
+            }
         }
         
         // Check perception using AWARENESS tags (per THAUMWORLD rules)
         const player_ref = `actor.${actor_id}`;
-        const perception = can_npc_perceive_player(npc, player_location, player_ref);
+        const perception = pipeline_driven
+            ? { can_perceive: true }
+            : can_npc_perceive_player(npc, player_location, player_ref);
         debug_log("NPC_AI", `can_npc_perceive_player for ${npc_hit.id}: ${perception.can_perceive}, player_place: ${player_location?.place_id}`);
         
         if (!perception.can_perceive && !is_direct_target) {
@@ -764,16 +818,8 @@ async function process_communication(
         // Mark as responded IMMEDIATELY to prevent duplicate processing in rapid ticks
         responded_npcs.add(npc_hit.id);
         
-        // ===== WITNESS SYSTEM INTEGRATION =====
-        // Trigger real-time reaction through witness system
-        // Distance is 0 since they're in the same place
-        process_witness_communication(
-            `npc.${npc_hit.id}`,
-            player_ref,
-            original_text,
-            is_direct_target,
-            0  // Same place = effectively 0 distance
-        );
+        // Witness reactions are handled by ActionPipeline perception broadcast
+        // (witness_handler). Avoid duplicating real-time reactions here.
         
         debug_pipeline("NPC_AI", `Generating response for ${npc.name}`, {
             npc_id: npc_hit.id,
@@ -1060,8 +1106,23 @@ async function process_communication(
         const response_msg = create_message(output);
         append_inbox_message(inbox_path, response_msg);
 
-        // Note: Breath function reads inbox and calls displayMessageToUser() 
-        // which writes to log. Don't write directly to log here to avoid duplicates.
+        // Log the canonical npc_response envelope so the UI can display it.
+        // (Do not rely on interface_program to mirror inbox messages into log.)
+        append_log_envelope(log_path, response_msg);
+
+        // Renderer debug: NPC speech should emit the same sense broadcasts as player speech.
+        // This is purely visual (ASCII rings) and uses the COMMUNICATE sense profile.
+        try {
+            const vol_raw = meta?.intent_subtype ?? meta?.intentSubtype ?? meta?.volume;
+            const vol = typeof vol_raw === "string" ? vol_raw.toUpperCase() : "NORMAL";
+            const subtype = (vol === "WHISPER" || vol === "SHOUT" || vol === "NORMAL") ? vol : "NORMAL";
+            send_sense_broadcast_command(`npc.${npc_hit.id}`, "COMMUNICATE", subtype, "NPC spoke");
+        } catch {
+            // ignore
+        }
+
+        // Note: npc_ai logs its own npc_response envelopes.
+        // Avoid writing extra "display-only" log lines elsewhere.
 
         // Persist conversation context to NPC memory_sheet
         // Stores hierarchical conversation threads (summary + recent turns) for continuity
@@ -1117,6 +1178,9 @@ async function process_communication(
         } catch {
             // ignore
         }
+        
+        // Update engagement to extend conversation timeout when NPC responds
+        updateEngagement(npc_ref);
         
         debug_pipeline("NPC_AI", `Created response from ${npc.name}`, {
             msg_id: response_msg.id,
@@ -1311,8 +1375,10 @@ async function process_npc_movement_decisions(): Promise<void> {
                 continue;
             }
             
-            // Skip if in conversation (check both in-memory state and place data)
-            const in_conv = is_in_conversation(npc_ref);
+            // Skip if in conversation.
+            // Witness-driven conversation state is managed by the ActionPipeline (interface_program)
+            // in a different Node process, so we use a small disk-backed presence store here.
+            const in_conv = is_in_conversation_presence(data_slot_number, npc_ref) || is_in_conversation(npc_ref);
             
             // Also check place data for "busy" status (set by witness handler in Interface Program)
             let npc_status_in_place: string | undefined;
@@ -1323,6 +1389,14 @@ async function process_npc_movement_decisions(): Promise<void> {
                         (n: any) => n.npc_ref === npc_ref
                     );
                     npc_status_in_place = npc_in_place?.status;
+
+                    // Heal stale persisted busy status: busy is an ephemeral conversation visual state.
+                    // If we are not in an active conversation, force it back to present.
+                    if (!in_conv && npc_in_place && npc_in_place.status === "busy") {
+                        npc_in_place.status = "present";
+                        save_place(data_slot_number, place_result.place);
+                        npc_status_in_place = "present";
+                    }
                 }
             }
             
@@ -1436,8 +1510,12 @@ async function process_npc_position_updates(inbox_path: string): Promise<void> {
             }
         }
         
-        // Write updated inbox back
+        // Remove processed position updates to prevent inbox growth.
         if (position_updates.length > 0) {
+            inbox.messages = inbox.messages.filter((m: any) => {
+                if (m?.type !== "npc_position_update") return true;
+                return !m?.meta?.position_processed;
+            });
             write_inbox(inbox_path, inbox);
         }
         
@@ -1556,8 +1634,8 @@ async function tick(outbox_path: string, inbox_path: string, log_path: string): 
         
         // Note: Conversation responses are now handled entirely through process_communication()
         // which is called above for all applied_COMMUNICATE messages.
-        // The witness system triggers real-time reactions via process_witness_communication()
-        // which sets up engagement state, but actual LLM responses come through process_communication().
+        // The witness system triggers real-time reactions via ActionPipeline broadcast (witness_handler).
+        // Actual LLM responses come through process_communication().
         
         // Check for conversation timeouts and clean up ended conversations
         update_conversations();
@@ -1589,6 +1667,10 @@ function initialize(): { outbox_path: string; inbox_path: string; log_path: stri
     if (removed > 0) {
         debug_log("NPC_AI", `Cleaned ${removed} duplicate messages on startup`);
     }
+
+    // Initialize engagement service for conversation management
+    initEngagementService();
+    debug_log("NPC_AI", "Engagement service initialized");
 
     return { outbox_path, inbox_path, log_path };
 }

@@ -5,6 +5,7 @@
 import type { Location } from "../action_system/intent.js";
 import type { TaggedItem } from "../tag_system/index.js";
 import type { ActionContext, ActionResult } from "./core.js";
+import { inspect_target, type InspectorData, type InspectionTarget, type InspectionResult } from "../inspection/data_service.js";
 import {
   calculate_clarity,
   calculate_distance,
@@ -38,60 +39,78 @@ export async function handleInspect(
 ): Promise<ActionResult> {
   const { actorRef, targetRef, actorLocation, targetLocation, parameters } = context;
   
-  if (!targetRef || !targetLocation) {
+  if (!targetRef) {
     return {
       success: false,
       effects: [],
       messages: ["No target to inspect"]
     };
   }
-  
-  // Calculate distance
-  const distance = calculate_distance(actorLocation, targetLocation);
-  
-  // Get inspector's senses from body slots
-  // Convert array format to Record format expected by clarity system
-  const senseArray: Array<{ type: SenseType; mag: number }> = parameters.senses || [
-    { type: "light", mag: 3 },      // Human sight
-    { type: "pressure", mag: 2 },   // Hearing/touch
-    { type: "aroma", mag: 1 }       // Smell
-  ];
-  
-  // Convert to Record format
-  const senses: Record<SenseType, number> = {
-    light: 0,
-    pressure: 0,
-    aroma: 0,
-    thaumic: 0
-  };
-  
-  for (const sense of senseArray) {
-    senses[sense.type] = sense.mag;
-  }
-  
-  // Find the best sense for this distance
-  const bestSense = get_best_inspection_sense(distance, senses);
-  
-  if (!bestSense) {
+
+  const inspector = parameters.inspector_data as InspectorData | undefined;
+  if (!inspector || !inspector.location || !inspector.senses) {
     return {
       success: false,
       effects: [],
-      messages: [`${targetRef} is too far to inspect (distance: ${distance.toFixed(1)} tiles)`]
+      messages: ["Missing inspector data"]
     };
   }
-  
-  // Calculate clarity
-  const targetSizeMag = parameters.targetSizeMag || 0; // Default size
-  const clarity = calculate_clarity(
-    distance,
-    bestSense.sense,
-    senses[bestSense.sense],
-    targetSizeMag
-  );
-  
-  // Build inspection result based on clarity
-  const inspectionDetails = getInspectionDetails(clarity, targetRef, bestSense.sense);
-  
+
+  // Build an InspectionTarget for the inspection data service.
+  const target: InspectionTarget = (() => {
+    if (targetRef.startsWith("npc.")) {
+      return { type: "npc", ref: targetRef, place_id: actorLocation.place_id };
+    }
+    if (targetRef.startsWith("actor.")) {
+      return { type: "character", ref: targetRef, place_id: actorLocation.place_id };
+    }
+    if (targetRef.startsWith("item.")) {
+      return { type: "item", ref: targetRef, place_id: actorLocation.place_id };
+    }
+    if (targetRef.startsWith("tile.")) {
+      const tile_id = targetRef.slice("tile.".length);
+      const tp = targetLocation && typeof targetLocation.x === 'number' && typeof targetLocation.y === 'number'
+        ? { x: targetLocation.x, y: targetLocation.y }
+        : undefined;
+      return { type: "tile", ref: tile_id, place_id: actorLocation.place_id, tile_position: tp };
+    }
+    // Fallback: treat unknown refs as item-like.
+    return { type: "item", ref: targetRef, place_id: actorLocation.place_id };
+  })();
+
+  // Ensure target_location is present for distance/clarity.
+  let resolved_target_location = targetLocation;
+  if (!resolved_target_location && target.type === 'tile' && target.tile_position) {
+    resolved_target_location = {
+      ...inspector.location,
+      x: target.tile_position.x,
+      y: target.tile_position.y,
+    };
+  }
+
+  const requested_keywords = Array.isArray(parameters.requested_keywords)
+    ? (parameters.requested_keywords as any[]).filter((k) => typeof k === 'string')
+    : undefined;
+
+  const max_features = typeof parameters.max_features === 'number' ? parameters.max_features : 5;
+  const target_size_mag = typeof parameters.target_size_mag === 'number' ? parameters.target_size_mag : 0;
+
+  let result: InspectionResult;
+  try {
+    result = await inspect_target(inspector, target, {
+      requested_keywords,
+      max_features,
+      target_location: resolved_target_location,
+      target_size_mag,
+    });
+  } catch {
+    return {
+      success: false,
+      effects: [],
+      messages: ["Inspection failed"]
+    };
+  }
+
   return {
     success: true,
     effects: [{
@@ -99,17 +118,10 @@ export async function handleInspect(
       target: targetRef,
       parameters: {
         inspector: actorRef,
-        distance,
-        sense_type: bestSense.sense,
-        sense_mag: senses[bestSense.sense],
-        clarity,
-        details: inspectionDetails
+        inspection_result: result,
       }
     }],
-    messages: [
-      `${actorRef} inspects ${targetRef} using ${bestSense.sense} sense (${clarity} clarity)`,
-      ...inspectionDetails
-    ]
+    messages: [`INSPECT ${targetRef}: ${result.clarity} (${result.sense_used})`]
   };
 }
 

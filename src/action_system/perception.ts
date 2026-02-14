@@ -5,7 +5,8 @@ import type { ActionVerb } from "../shared/constants.js";
 import type { ActionIntent, ActionResult, Location } from "./intent.js";
 import { ACTION_REGISTRY } from "./registry.js";
 import { calculateDistance } from "./target_resolution.js";
-import { debug_log } from "../shared/debug.js";
+import { DEBUG_LEVEL } from "../shared/debug.js";
+import { debug_event } from "../shared/debug_event.js";
 
 // Perception event types
 export type PerceptionEventType = 
@@ -42,6 +43,8 @@ export interface PerceptionEvent {
   
   // Action details
   verb: ActionVerb;
+  /** Optional action subtype (e.g. COMMUNICATE.NORMAL, USE.PROJECTILE_SINGLE). */
+  subtype?: string;
   verbClarity: PerceptionClarity;
   
   // Target details
@@ -361,6 +364,7 @@ function createPerceptionEvent(
     actorVisibility: perception.clarity,
     actorIdentity: intent.actorRef,  // Would resolve to name
     verb: intent.verb,
+    subtype: typeof intent.parameters?.subtype === "string" ? intent.parameters.subtype : undefined,
     verbClarity: perception.clarity,
     targetRef: intent.targetRef,
     targetVisibility: intent.targetRef ? perception.clarity : undefined,
@@ -393,37 +397,67 @@ export async function broadcastPerception(
 ): Promise<PerceptionEvent[]> {
   const actionDef = ACTION_REGISTRY[intent.verb];
   if (!actionDef) {
-    debug_log("[Perception]", `No action def for ${intent.verb}`);
+    debug_event("PERCEPTION", "broadcast.skipped", {
+      timing,
+      verb: intent.verb,
+      actor_ref: intent.actorRef,
+      reason: "no_action_def",
+    });
     return [];
   }
   
   // Only broadcast observable actions
   if (!actionDef.perceptibility.visual && !actionDef.perceptibility.auditory) {
-    debug_log("[Perception]", `Action ${intent.verb} not observable`);
+    debug_event("PERCEPTION", "broadcast.skipped", {
+      timing,
+      verb: intent.verb,
+      actor_ref: intent.actorRef,
+      reason: "not_observable",
+    });
     return [];
   }
   
   const radius = actionDef.perceptibility.radius;
   const events: PerceptionEvent[] = [];
-  
-  console.log(`[Perception] Broadcasting ${intent.verb} from ${intent.actorRef} with radius ${radius}`);
-  console.log(`[Perception] Actor location:`, intent.actorLocation);
+
+  debug_event("PERCEPTION", "broadcast.start", {
+    timing,
+    verb: intent.verb,
+    actor_ref: intent.actorRef,
+    target_ref: intent.targetRef,
+    radius,
+  });
+  if (DEBUG_LEVEL >= 4) {
+    debug_event("PERCEPTION", "broadcast.actor_location", {
+      actor_ref: intent.actorRef,
+      world_x: intent.actorLocation.world_x,
+      world_y: intent.actorLocation.world_y,
+      region_x: intent.actorLocation.region_x,
+      region_y: intent.actorLocation.region_y,
+      x: intent.actorLocation.x,
+      y: intent.actorLocation.y,
+      place_id: intent.actorLocation.place_id,
+    });
+  }
   
   // Get nearby characters
   const nearbyCharacters: Array<{ ref: string; location: Location }> = [];
   
   if (options.getCharactersInRange) {
-    console.log(`[Perception] Calling getCharactersInRange...`);
     const chars = await options.getCharactersInRange(intent.actorLocation, radius);
-    console.log(`[Perception] getCharactersInRange returned ${chars.length} characters`);
-    for (const char of chars) {
-      console.log(`[Perception]   - ${char.ref} at (${char.location.x}, ${char.location.y})`);
+    if (DEBUG_LEVEL >= 4) {
+      debug_event("PERCEPTION", "broadcast.nearby_characters", {
+        count: chars.length,
+      });
     }
     nearbyCharacters.push(...chars);
-    debug_log("[Perception]", `Found ${chars.length} characters in range`);
   } else {
-    console.log(`[Perception] ERROR: No getCharactersInRange function provided!`);
-    debug_log("[Perception]", "No getCharactersInRange function provided!");
+    debug_event("PERCEPTION", "broadcast.misconfigured", {
+      timing,
+      verb: intent.verb,
+      actor_ref: intent.actorRef,
+      reason: "no_getCharactersInRange",
+    });
   }
   
   for (const observer of nearbyCharacters) {
@@ -448,7 +482,12 @@ export async function broadcastPerception(
     }
   }
   
-  debug_log("[Perception]", `Broadcast complete: ${events.length} observers perceived the action`);
+  debug_event("PERCEPTION", "broadcast.complete", {
+    timing,
+    verb: intent.verb,
+    actor_ref: intent.actorRef,
+    perceived_by: events.length,
+  });
   return events;
 }
 

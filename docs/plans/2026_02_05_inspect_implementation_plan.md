@@ -826,7 +826,7 @@ if (hovered && config.on_inspect) {
 
 #### 4.1 Update Text Parser
 
-**Modify**: `src/interpreter_ai/main.ts` or create `src/inspection/text_parser.ts`
+**Modify**: `src/interface_program/main.ts` (input -> intent) or create `src/inspection/text_parser.ts`
 
 ```typescript
 // Parse inspection commands from text
@@ -1169,7 +1169,7 @@ async function executeInspect(effect: ActionEffect): Promise<boolean> {
 
 - [ ] Player can click any entity to inspect it
 - [ ] Player can type "inspect [target]" with specific keywords
-- [ ] Inspection detail varies by distance and sense type (MAG-based)
+- [~] Inspection detail varies by distance and sense type (MAG-based) (core handler exists; UI + content depth pending)
 - [ ] Random features shown when no specifics requested
 - [ ] Equipment inspection works for body slots
 - [ ] Tile inspection reveals environmental details

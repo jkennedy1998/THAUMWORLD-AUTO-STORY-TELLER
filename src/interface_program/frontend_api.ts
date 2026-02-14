@@ -15,7 +15,7 @@ let current_volume: VolumeLevel = "NORMAL";
 let current_target: { ref: string; type: "npc" | "actor" | "item"; name?: string } | null = null;
 let current_message: string = "";
 
-// Actor reference (TODO: Get from session)
+// NOTE: actor_ref is currently hardcoded for slot-1 local testing.
 const actor_ref = "actor.henry_actor";
 const API_BASE = "http://localhost:8787/api";
 
@@ -141,5 +141,4 @@ export function clearCurrentTarget(): void {
 export function hasValidTarget(): boolean {
     return current_target !== null;
 }
-
 

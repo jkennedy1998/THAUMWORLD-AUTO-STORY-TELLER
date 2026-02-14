@@ -358,15 +358,14 @@ function build_npc_prompt(npc: any, player_text: string, can_perceive: boolean, 
 
 ### Interpreter AI Prompt
 
-Modify prompt in `src/interpreter_ai/main.ts`:
+Note: `interpreter_ai` is archived in this build.
 
-```typescript
-const system_prompt = `You are a command parser for a fantasy RPG.
+Current build: there is no Interpreter-LLM prompt to modify. Player/NPC actions are created and executed via the ActionPipeline in `src/interface_program/`.
 
-NEW INSTRUCTION: Add your custom parsing rules here.
-
-Convert natural language to machine commands...`;
-```
+Practical edit points:
+- `src/interface_program/communication_input.ts` (COMMUNICATE intent creation)
+- `src/interface_program/main.ts` (ActionPipeline integration, message emission)
+- `src/npc_ai/main.ts` (NPC dialogue prompting)
 
 ### Renderer AI Prompt
 
@@ -644,9 +643,10 @@ See full implementation in [examples/custom_service.md](./examples/custom_servic
 
 ## Resources
 
-- [Architecture Overview](./ARCHITECTURE.md)
-- [Service APIs](./SERVICES.md)
+- [Architecture Overview](../design/ARCHITECTURE.md)
+- [Service APIs](../design/SERVICES.md)
 - [AI Prompts](./AI_PROMPTS.md)
+- [Runtime Contracts](../contracts/message_bus.md)
 - [Troubleshooting](./TROUBLESHOOTING.md)
 
 ## Support

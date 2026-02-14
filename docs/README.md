@@ -9,35 +9,32 @@ Complete documentation for the THAUMWORLD automated RPG system.
 If you're an AI agent working on this system, start here:
 
 1. **Read [INDEX.md](./INDEX.md)** - Master documentation index and navigation
-2. **Read [ARCHITECTURE.md](./ARCHITECTURE.md)** - System overview with ASCII diagrams
-3. **Read [SERVICES.md](./SERVICES.md)** - All 8 services documented
-4. **Read [STAGES.md](./STAGES.md)** - Message flow and contracts
-5. **See [CHANGELOG.md](./CHANGELOG.md)** - Recent changes and fixes
-6. **See [examples/](./examples/)** - Working code samples
+2. **Read [design/ARCHITECTURE.md](./design/ARCHITECTURE.md)** - System overview with diagrams
+3. **Read [design/SERVICES.md](./design/SERVICES.md)** - Service contracts (interpreter_ai is archived in this build)
+4. **Read [design/STAGES.md](./design/STAGES.md)** - Message flow and contracts
+5. **Read [guides/PROJECT_SETUP_AND_LLM_CONTEXT.md](./guides/PROJECT_SETUP_AND_LLM_CONTEXT.md)** - Minimal setup + how to feed context to LLMs
+6. **See [CHANGELOG.md](./CHANGELOG.md)** - Historical changes (may be stale)
+7. **See [examples/](./examples/)** - Working code samples
 
 ## Documentation Structure
 
 ```
 docs/
-├── INDEX.md                 # Master documentation index and navigation
-├── CHANGELOG.md             # Recent changes and fixes
-├── README.md                # This file - project overview
-├── ARCHITECTURE.md          # System overview, data flow, ASCII diagrams
-├── SERVICES.md              # All services: purpose, contracts, handoffs
-├── STAGES.md                # Stage definitions, status transitions
-├── DEVELOPER_GUIDE.md       # Complete developer guide
-├── AI_AGENT_GUIDE.md        # Quick reference for AI agents
-├── MACHINE_TEXT_SYNTAX.md   # Command syntax specification
-├── EFFECTS.md               # THAUMWORLD RPG effect system
-├── TIMED_EVENTS.md          # Timed event system
-├── ERROR_HANDLING.md        # Error handling standards
-├── TROUBLESHOOTING.md       # Common issues and solutions
-├── AI_PROMPTS.md            # AI prompt templates
-├── CLEANUP_SUMMARY.md       # Documentation cleanup record
-├── examples/
-│   └── README.md            # Working code examples
-└── archive/
-    └── README.md            # Historical phase summaries
+├── INDEX.md                 # Master documentation index
+├── README.md                # This file
+├── ROADMAP.md               # Current priorities
+├── CHANGELOG.md             # Historical changes (may be stale)
+├── design/                  # Architecture, services, stages
+├── guides/                  # Developer + AI guides
+├── specs/                   # Technical specifications
+├── plans/                   # Active development plans
+├── testing/                 # Test checklists and guides
+├── contracts/               # Data contracts (outbox/inbox)
+├── analysis/                # Post-mortems and bug analyses
+├── todos/                   # Task lists
+├── examples/                # Code examples
+├── archive/build_logs/      # Historical build notes
+└── archive/                 # Completed/superseded docs
 ```
 
 ## System Overview
@@ -52,11 +49,13 @@ docs/
 
 ### Architecture Pattern
 ```
-File-based message pipeline with 8 services:
+File-based message pipeline with service workers.
 
-Player Input → Interpreter → Data Broker → Rules Lawyer → State Applier → Renderer → Display
-                                    ↓
-                              NPC AI (for dialogue)
+Current build note (2026-02-13): `interpreter_ai` is archived. The `interface_program` creates action intents directly (COMMUNICATE, MOVE, etc.) and runs the ActionPipeline for action validation + perception.
+
+High-level flow:
+
+Player Input/UI → interface_program (ActionPipeline) → npc_ai / renderer_ai → Display
 ```
 
 ### Technology Stack
@@ -71,7 +70,7 @@ Player Input → Interpreter → Data Broker → Rules Lawyer → State Applier 
 ### Services
 Independent processes that communicate via file-based messages:
 - **interface_program**: HTTP/CLI bridge
-- **interpreter_ai**: Natural language → Machine commands
+- **interpreter_ai (archived)**: Legacy Natural language → Machine commands
 - **data_broker**: Reference resolution
 - **rules_lawyer**: THAUMWORLD RPG rule application
 - **state_applier**: Game state modification
@@ -79,9 +78,13 @@ Independent processes that communicate via file-based messages:
 - **npc_ai**: NPC dialogue generation
 - **roller**: Dice rolling
 
+Additional:
+- **turn_manager**: Timed events + turn state
+
 ### Stages
 Processing phases in the pipeline:
-- `interpreter_ai` → `interpreted_1` → `brokered_1` → `ruling_1` → `applied_1` → `rendered_1`
+- Legacy stage pipeline (historical): `interpreted_1` → `brokered_1` → `ruling_1` → `applied_1` → `rendered_1`
+- Current build: player/NPC actions are created in `interface_program` and executed via the ActionPipeline (see `docs/design/STAGES.md`)
 - Special: `npc_response`, `awaiting_roll_1`
 
 ### Status State Machine
@@ -96,14 +99,12 @@ queued → sent → processing → done
 ```
 
 ### Handoff Points
-Each service reads from `outbox.jsonc` and writes to `inbox.jsonc` or `outbox.jsonc`:
-- **interface** writes to inbox (user input)
-- **interpreter** reads interpreter_ai, writes interpreted_1
-- **data_broker** reads interpreted_*, writes brokered_1
-- **rules_lawyer** reads brokered_*, writes ruling_1 (pending_state_apply)
-- **state_applier** reads ruling_* (pending_state_apply), writes applied_1
-- **renderer** reads applied_*, writes rendered_1
-- **npc_ai** reads applied_* (COMMUNICATE), writes npc_response
+The message bus still exists, but the primary action path is now in-process:
+- **UI** sends input to `interface_program`
+- **interface_program** creates action intents + runs ActionPipeline (COMMUNICATE/MOVE/USE/INSPECT)
+- **npc_ai** and the renderer receive file-backed messages for movement commands and UI effects
+
+See `docs/contracts/message_bus.md` for message envelopes and `docs/design/ARCHITECTURE.md` for the current flow.
 
 ## THAUMWORLD RPG Integration
 
@@ -135,7 +136,7 @@ npm run dev
 
 # Individual service
 npm run npc_ai_dev
-npm run interpreter_dev
+npm run interpreter_dev  # prints archived note
 # etc.
 ```
 
@@ -158,7 +159,6 @@ set DEBUG_LEVEL=4 && npm run dev
 ```
 src/
 ├── interface_program/     # HTTP bridge, CLI, Breath coordinator
-├── interpreter_ai/        # Natural language → Machine text
 ├── data_broker/          # Reference resolution
 ├── rules_lawyer/         # RPG rule application
 │   └── effects.ts        # Effect implementations

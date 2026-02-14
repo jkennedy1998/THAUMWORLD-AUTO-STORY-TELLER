@@ -2,7 +2,9 @@
 
 ## Overview
 
-This system implements the THAUMWORLD tabletop RPG rules as an automated story teller. It uses a file-based message pipeline where services communicate by reading and writing JSONC files.
+This system implements the THAUMWORLD tabletop RPG rules as an automated story teller. The current build is hybrid: core player/NPC actions run in-process via the ActionPipeline (in `interface_program`), and cross-process coordination uses a file-backed message bus (inbox/outbox JSONC).
+
+Current build note (2026-02-13): `interpreter_ai` is archived. The `interface_program` creates action intents directly (COMMUNICATE/MOVE/USE/INSPECT) and runs the ActionPipeline for validation + perception + witness reactions.
 
 **Reference:** [THAUMWORLD Rules Index](https://www.thaumworld.xyz/rules-index/)
 
@@ -13,130 +15,43 @@ This system implements the THAUMWORLD tabletop RPG rules as an automated story t
 - **AI-powered narration**: LLMs interpret rules and generate narrative responses
 - **Sandbox environment**: Players can attempt any action; system determines outcomes
 
-## System Architecture (ASCII Diagram)
+## System Architecture (Current Build)
+
+Player/NPC actions (COMMUNICATE/MOVE/USE/INSPECT) are created in `interface_program` and executed in-process via the ActionPipeline. The file-backed message bus remains for coordination (renderer commands, NPC movement authority, perception bridging, narration).
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                           THAUMWORLD PIPELINE                                │
+│                         THAUMWORLD (CURRENT BUILD)                            │
 └─────────────────────────────────────────────────────────────────────────────┘
 
-USER INPUT FLOW
-===============
+Player input (UI)
+    │
+    ▼
+┌────────────────────────┐
+│ interface_program       │  HTTP server + Breath loop
+│ - create action intents │  (COMMUNICATE/MOVE/USE/INSPECT)
+│ - run ActionPipeline    │  validate + apply + witness
+└───────────┬────────────┘
+            │ writes/updates
+            ▼
+ local_data/data_slot_1/
+ - outbox.jsonc     (messages to npc_ai, renderer, renderer_ai)
+ - inbox.jsonc      (messages from renderer -> backend bridges)
+ - actors/, npcs/, places/, world/ ... (state files)
 
-  Player types: "attack the goblin"
-           │
-           ▼
-┌─────────────────────┐
-│  interface_program  │  HTTP server + CLI bridge
-│  (main.ts:1-1000)   │  - Accepts user input
-│                     │  - Routes to inbox
-└──────────┬──────────┘
-           │ writes to
-           ▼
-┌─────────────────────┐     ┌─────────────────────┐
-│   inbox.jsonc       │     │   outbox.jsonc      │
-│   (user messages)   │     │   (service outputs) │
-└──────────┬──────────┘     └──────────┬──────────┘
-           │                           ▲
-           │ reads                     │ writes
-           ▼                           │
-┌─────────────────────┐                │
-│      Breath()       │  Polls every 2s│
-│  (main.ts:950-1100) │                │
-│  - Drains inbox     │                │
-│  - Routes messages  │                │
-└──────────┬──────────┘                │
-           │ routes to                 │
-           ▼                           │
-┌─────────────────────┐                │
-│   interpreter_ai    │  LLM: Natural → Machine│
-│   (main.ts:1-900)   │                │
-│  - Parses intent    │                │
-│  - Generates        │                │
-│    machine text     │                │
-│    (e.g., COMMUNICATE)│              │
-└──────────┬──────────┘                │
-           │ writes                    │
-           │ stage: interpreted_1      │
-           ▼                           │
-┌─────────────────────┐                │
-│    data_broker      │  Resolves refs │
-│   (main.ts:1-400)   │                │
-│  - Parses commands  │                │
-│  - Resolves         │                │
-│    actor/npc/tile   │                │
-│    references       │                │
-│  - Creates missing  │                │
-│    entities         │                │
-└──────────┬──────────┘                │
-           │ writes                    │
-           │ stage: brokered_1         │
-           ▼                           │
-┌─────────────────────┐                │
-│    rules_lawyer     │  Applies RPG   │
-│   (main.ts:1-300)   │    rules       │
-│  - Validates        │                │
-│    commands         │                │
-│  - Applies          │                │
-│    THAUMWORLD       │                │
-│    rules            │                │
-│  - Generates        │                │
-│    effects/events   │                │
-│  - Handles dice     │                │
-│    rolls            │                │
-└──────────┬──────────┘                │
-           │ writes                    │
-           │ stage: ruling_1           │
-           │ status: pending_state_apply│
-           ▼                           │
-┌─────────────────────┐                │
-│   state_applier     │  Modifies game │
-│   (main.ts:1-450)   │    state       │
-│  - Applies effects  │                │
-│    to actor/npc     │                │
-│    files            │                │
-│  - Updates health,  │                │
-│    inventory,       │                │
-│    position, etc.   │                │
-└──────────┬──────────┘                │
-           │ writes                    │
-           │ stage: applied_1          │
-           ▼                           │
-┌─────────────────────┐                │
-│    renderer_ai      │  LLM: System → │
-│   (main.ts:1-300)   │    Narrative   │
-│  - Converts         │                │
-│    effects/events   │                │
-│  - Generates        │                │
-│    readable story   │                │
-└──────────┬──────────┘                │
-           │ writes to                 │
-           │ inbox.jsonc               │
-           ▼                           │
-┌─────────────────────┐                │
-│   Canvas Display    │  Electron app  │
-│   (main.ts:1-50)    │  - Shows log   │
-│                     │  - Input box   │
-└─────────────────────┘                │
-                                       │
-NPC RESPONSE FLOW (Optional)           │
-============================           │
-                                       │
-┌─────────────────────┐                │
-│      npc_ai         │  LLM: NPC      │
-│   (main.ts:1-450)   │    Personality │
-│  - Detects player   │                │
-│    communication    │                │
-│  - Loads NPC        │                │
-│    character sheet  │                │
-│  - Generates        │                │
-│    contextual       │                │
-│    response         │                │
-└──────────┬──────────┘                │
-           │ writes to ────────────────┘
-           │ inbox.jsonc
-           ▼
+┌────────────────────────┐         ┌────────────────────────┐
+│ npc_ai                  │         │ UI renderer (Electron) │
+│ - conversation replies   │  cmds   │ - draws place/entities │
+│ - movement authority     ├────────►│ - executes movement    │
+└────────────────────────┘         └───────────┬────────────┘
+                                               │ writes
+                                               ▼
+                                      inbox.jsonc
+                                      - perception_event_batch
+                                        (movement hearing -> witness)
 ```
+
+Legacy note: `interpreter_ai` (Natural -> Machine text) is archived in this build. The older stage pipeline diagrams are historical.
 
 ## Data Storage Architecture
 
@@ -144,27 +59,27 @@ NPC RESPONSE FLOW (Optional)           │
 local_data/
 ├── data_slot_1/                    # Player's game instance
 │   ├── actors/
-│   │   ├── henry_actor.jsonc       # Player character
-│   │   ├── default_actor.jsonc     # Template
-│   │   └── hands.jsonc             # Body part
 │   ├── npcs/
-│   │   ├── shopkeep.jsonc          # NPC with personality
-│   │   └── default_npc.jsonc       # Template
 │   ├── items/                      # Item definitions
-│   ├── world/
-│   │   └── world.jsonc             # World state
+│   ├── places/                     # Place definitions
+│   ├── regions/                    # Region definitions
+│   ├── world/                      # World state
+│   ├── npc_memories/               # NPC memory files
+│   ├── ephemeral/                  # Cross-process scratch state
+│   ├── logs/                       # Per-service logs
 │   ├── inbox.jsonc                 # Service inputs
 │   ├── outbox.jsonc                # Service outputs
+│   ├── outbox_backup.jsonc          # Backup snapshots
 │   ├── log.jsonc                   # Audit trail
 │   ├── status.jsonc                # Current status line
 │   ├── roller_status.jsonc         # Dice roll state
+│   ├── game_time.jsonc             # Time state
+│   ├── working_memory.jsonc        # Context cache
 │   ├── metrics/                    # Performance metrics
 │   │   ├── interpreter_ai.jsonc
 │   │   ├── renderer_ai.jsonc
 │   │   └── npc_ai.jsonc
-│   └── ai_io_logs/                 # AI prompt/response logs
-│       ├── interpreter_io.jsonc
-│       └── renderer_io.jsonc
+│   └── place_entity_index.jsonc    # Place contents index
 └── data_slot_default/              # Templates
     ├── actors/
     ├── npcs/
@@ -174,113 +89,49 @@ local_data/
     └── perk_trees.jsonc            # Perk system
 ```
 
-## Service Handoff Points
+## Current Build Handoff Points
 
-### 1. interface_program → interpreter_ai
-**Location:** `inbox.jsonc` (written by interface, read by Breath)
-**Trigger:** User submits input via HTTP or CLI
-**Message Format:**
-```jsonc
-{
-  "sender": "henry_actor",
-  "content": "attack the goblin",
-  "type": "user_input",
-  "status": "sent"
-}
-```
+### 1. UI → interface_program
+**Trigger:** Player submits input via UI (HTTP/IPC).
+**Notes:** The current build creates action intents in `interface_program` and executes them via the ActionPipeline.
 
-### 2. Breath() → interpreter_ai
-**Location:** `outbox.jsonc` (written by router)
-**Trigger:** Message routed to interpreter stage
-**Message Format:**
-```jsonc
-{
-  "sender": "henry_actor",
-  "content": "attack the goblin",
-  "stage": "interpreter_ai",
-  "status": "sent"
-}
-```
-
-### 3. interpreter_ai → data_broker
-**Location:** `inbox.jsonc` → `outbox.jsonc` (via router)
-**Trigger:** Interpreter generates machine text
-**Message Format:**
-```jsonc
-{
-  "sender": "interpreter_ai",
-  "content": "actor.henry_actor.ATTACK(target=npc.goblin, tool=actor.henry_actor.sword)",
-  "stage": "interpreted_1",
-  "status": "sent",
-  "meta": {
-    "machine_text": "actor.henry_actor.ATTACK(...)",
-    "original_text": "attack the goblin"
-  }
-}
-```
-
-### 4. data_broker → rules_lawyer
+### 2. npc_ai → renderer (movement_command)
+**Trigger:** NPC movement/face/status changes, plus certain UI/debug effects.
 **Location:** `outbox.jsonc`
-**Trigger:** References resolved, commands parsed
-**Message Format:**
+**Message Format (envelope):**
 ```jsonc
 {
-  "sender": "data_broker",
-  "content": "brokered data ready",
-  "stage": "brokered_1",
+  "type": "movement_command",
+  "sender": "npc_ai",
+  "recipient": "renderer",
   "status": "sent",
-  "meta": {
-    "commands": [...],
-    "resolved": {...}
-  }
+  "created_at": "2026-02-13T12:00:00.000Z",
+  "content": "{ ... MovementCommandMessage ... }"
 }
 ```
 
-### 5. rules_lawyer → state_applier
-**Location:** `outbox.jsonc`
-**Trigger:** Rules applied, effects generated
-**Message Format:**
+### 3. renderer → interface_program (perception_event_batch)
+**Trigger:** Renderer emits perception events back into witness processing (ex: hearing footsteps).
+**Location:** `inbox.jsonc`
+**Message Format (envelope):**
 ```jsonc
 {
-  "sender": "rules_lawyer",
-  "content": "rule effects ready",
-  "stage": "ruling_1",
-  "status": "pending_state_apply",
-  "meta": {
-    "events": ["actor.henry_actor.ATTACK(...)"],
-    "effects": ["SYSTEM.APPLY_DAMAGE(target=npc.goblin, amount=5)"]
-  }
-}
-```
-
-### 6. state_applier → renderer_ai
-**Location:** `outbox.jsonc`
-**Trigger:** Effects applied to game state
-**Message Format:**
-```jsonc
-{
-  "sender": "state_applier",
-  "content": "state applied",
-  "stage": "applied_1",
+  "type": "perception_event_batch",
+  "sender": "renderer",
+  "recipient": "interface_program",
   "status": "sent",
-  "meta": {
-    "effects_applied": 2
-  }
+  "created_at": "2026-02-13T12:00:00.000Z",
+  "content": "{ \"type\": \"perception_event_batch\", \"events\": [ ... ] }"
 }
 ```
 
-### 7. renderer_ai → User Display
-**Location:** `inbox.jsonc` (read by canvas app)
-**Trigger:** Narrative generated
-**Message Format:**
-```jsonc
-{
-  "sender": "renderer_ai",
-  "content": "You swing your sword at the goblin, dealing 5 damage!",
-  "stage": "rendered_1",
-  "status": "sent"
-}
-```
+For message envelope details, see `docs/contracts/message_bus.md`.
+
+## Legacy Interpreter Pipeline (Archived)
+
+The older interpreter-driven stage pipeline docs are archived here:
+
+- `docs/archive/2026_02_13_legacy_interpreter_pipeline_reference.md`
 
 ## Key Design Patterns
 
@@ -482,42 +333,44 @@ EVENT_END_CHECK
 
 ### All Services
 
-**Core Pipeline:**
+**Processes (launched by `npm run dev`):**
 1. interface_program
-2. interpreter_ai
-3. data_broker
-4. rules_lawyer
-5. state_applier
-6. renderer_ai
+2. data_broker
+3. rules_lawyer
+4. state_applier
+5. renderer_ai
+6. roller
+7. npc_ai
+8. turn_manager
+9. UI (vite + electron)
 
-**Phase 2-5 Additions:**
-7. context_manager (Working Memory)
-8. turn_manager_enhanced (State Machine)
-9. npc_ai_enhanced (Decision Hierarchy)
-10. conversation_manager (Archive & Summarize)
+**Archived process:**
+- interpreter_ai (archived; not launched)
 
-**Support Services:**
-- roller (Dice rolling)
-- npc_ai (NPC responses)
+**In-process subsystems (selected):**
+- ActionPipeline (`src/action_system/`)
+- Context/working memory (`src/context_manager/`, `working_memory.jsonc`)
+- Conversation/presence helpers (`src/conversation_manager/`, `src/shared/conversation_presence_store.ts`)
 
 ### Complete Data Storage
 
 ```
 local_data/data_slot_1/
-├── actors/                 # Player characters
-├── npcs/                   # NPCs with memories
-├── items/                  # Item definitions
-├── world/                  # World state
-├── conversations/          # Conversation archives
-│   ├── [id].jsonc         # Active conversations
-│   └── conversation_archive.jsonc
-├── conversation_summaries/ # AI summaries
-├── npc_memories/          # Long-term NPC memories
-├── working_memory.jsonc   # Active event context
-├── inbox.jsonc            # Service inputs
-├── outbox.jsonc           # Service outputs
-├── log.jsonc              # Audit trail
-└── metrics/               # Performance data
+├── actors/                  # Player characters
+├── npcs/                    # NPC files
+├── items/                   # Item definitions
+├── places/                  # Places
+├── regions/                 # Regions
+├── world/                   # World state
+├── npc_memories/            # NPC memories
+├── ephemeral/               # Scratch state (ex: conversation presence)
+├── logs/                    # Per-service logs
+├── working_memory.jsonc     # Active event context
+├── inbox.jsonc              # Service inputs
+├── outbox.jsonc             # Service outputs
+├── outbox_backup.jsonc      # Cleanup snapshots
+├── log.jsonc                # Audit trail
+└── metrics/                 # Performance data
 ```
 
 ## Performance Characteristics
@@ -625,9 +478,9 @@ Conversation Manager
 cat local_data/data_slot_1/working_memory.jsonc
 ```
 
-**View Active Conversations:**
+**View Conversation Presence (cross-process):**
 ```bash
-ls local_data/data_slot_1/conversations/*.jsonc
+cat local_data/data_slot_1/ephemeral/conversation_presence.json
 ```
 
 **View NPC Memories:**
@@ -679,7 +532,7 @@ grep "TurnManager" local_data/data_slot_1/log.jsonc
 
 - [SERVICES.md](./SERVICES.md) - Detailed service documentation
 - [STAGES.md](./STAGES.md) - Stage definitions and transitions
-- [EFFECTS.md](./EFFECTS.md) - THAUMWORLD effect system
+- [EFFECTS.md](../specs/EFFECTS.md) - THAUMWORLD effect system
 - [DEVELOPER_GUIDE.md](./DEVELOPER_GUIDE.md) - How to extend
 - [AI_PROMPTS.md](./AI_PROMPTS.md) - AI prompt patterns
 - [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) - Debug guide

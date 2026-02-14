@@ -2,6 +2,8 @@
 
 Complete reference for all message stages, their transitions, and contracts.
 
+Current build note (2026-02-13): `interpreter_ai` service is archived. Action intents (COMMUNICATE/MOVE/USE/INSPECT) are created and validated via the ActionPipeline in `interface_program`. The stage-based pipeline below remains relevant for non-ActionPipeline messages and historical context.
+
 **System Reference:** [THAUMWORLD Rules](https://www.thaumworld.xyz/rules-index/)
 
 ## Stage Overview
@@ -12,200 +14,19 @@ Stages represent processing phases in the pipeline. Each stage has:
 - **Status Flow**: How status transitions through this stage
 - **Contract**: Required and optional fields
 
-## Stage Flow Diagram
+## Stage Flow Diagram (Non-ActionPipeline)
+
+The current build executes core actions via the ActionPipeline. Stage routing is still used for some file-backed flows.
 
 ```
-USER INPUT
-    │
-    ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ STAGE: interpreter_ai                                           │
-│ Creator: interface_program (via Breath)                        │
-│ Consumer: interpreter_ai                                       │
-│ Status: sent → processing → done                               │
-└─────────────────────────────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ STAGE: interpreted_1                                            │
-│ Creator: interpreter_ai                                        │
-│ Consumer: data_broker                                          │
-│ Status: sent → processing → done                               │
-└─────────────────────────────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ STAGE: brokered_1                                               │
-│ Creator: data_broker                                           │
-│ Consumer: rules_lawyer                                         │
-│ Status: sent → processing → done                               │
-└─────────────────────────────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ STAGE: ruling_1                                                 │
-│ Creator: rules_lawyer                                          │
-│ Consumer: state_applier                                        │
-│ Status: pending_state_apply → processing → done                │
-└─────────────────────────────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ STAGE: applied_1                                                │
-│ Creator: state_applier                                         │
-│ Consumer: renderer_ai (or npc_ai)                              │
-│ Status: sent → processing → done                               │
-└─────────────────────────────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ STAGE: rendered_1                                               │
-│ Creator: renderer_ai                                           │
-│ Consumer: User Display (canvas app)                            │
-│ Status: sent                                                   │
-└─────────────────────────────────────────────────────────────────┘
-
-NPC RESPONSE BRANCH
-    │
-    ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ STAGE: npc_response                                             │
-│ Creator: npc_ai                                                │
-│ Consumer: User Display (canvas app)                            │
-│ Status: sent                                                   │
-└─────────────────────────────────────────────────────────────────┘
+brokered_*  -> ruling_* (pending_state_apply) -> applied_* -> rendered_*
+                                    \
+                                     -> npc_response
 ```
 
----
+Legacy interpreter stages (`interpreter_ai`, `interpreted_*`) are archived here:
 
-## Stage: interpreter_ai
-
-**Purpose:** Queue for interpreter_ai service to process user input
-
-### Creator
-- **Service:** interface_program
-- **Method:** Breath() router
-- **Trigger:** User submits input via HTTP/CLI
-
-### Consumer
-- **Service:** interpreter_ai
-- **Poll Location:** outbox.jsonc
-- **Filter:** `stage.startsWith("interpreter_ai") && status === "sent"`
-
-### Status Flow
-```
-sent → processing → done
-```
-
-### Contract
-
-**Required Fields:**
-```typescript
-{
-  sender: string;           // Actor ID (e.g., "henry_actor")
-  content: string;          // User's natural language input
-  stage: "interpreter_ai";
-  status: "sent";
-  type?: "user_input";      // Optional type marker
-}
-```
-
-**Optional Fields:**
-```typescript
-{
-  correlation_id?: string;  // Ties pipeline run together
-  priority?: number;        // Higher = more urgent
-}
-```
-
-### Example
-```jsonc
-{
-  "id": "2026-01-31T12:00:00.000Z : 000001 : ABC123",
-  "sender": "henry_actor",
-  "content": "attack the goblin",
-  "stage": "interpreter_ai",
-  "status": "sent",
-  "type": "user_input",
-  "created_at": "2026-01-31T12:00:00.000Z"
-}
-```
-
-### Handoff
-**To:** interpreted_1 (created by interpreter_ai)
-
----
-
-## Stage: interpreted_1
-
-**Purpose:** Contains machine-readable commands generated by interpreter
-
-### Creator
-- **Service:** interpreter_ai
-- **Trigger:** Successfully parsed user input
-
-### Consumer
-- **Service:** data_broker
-- **Poll Location:** outbox.jsonc (via router from inbox)
-- **Filter:** `stage.startsWith("interpreted_") && status === "sent"`
-
-### Status Flow
-```
-sent → processing → done
-```
-
-### Contract
-
-**Required Fields:**
-```typescript
-{
-  sender: "interpreter_ai";
-  content: string;              // Machine text (system commands)
-  stage: "interpreted_1";       // Or interpreted_2, interpreted_3, etc.
-  status: "sent";
-  meta: {
-    machine_text: string;       // Same as content (redundant but explicit)
-    original_text: string;      // User's original input
-  };
-}
-```
-
-**Optional Fields (Error Cases):**
-```typescript
-{
-  meta: {
-    error_reason?: string;      // Why parsing failed
-    error_iteration?: number;   // Retry count (1-5)
-    errors?: string[];          // Parse errors
-  };
-}
-```
-
-### Iteration Pattern
-If interpreter fails, it creates:
-- `interpreted_1` → error → retry → `interpreted_2` → ... → `interpreted_5`
-
-After 5 failures, uses "band_aid" mode (best effort).
-
-### Example
-```jsonc
-{
-  "id": "2026-01-31T12:00:01.000Z : 000001 : DEF456",
-  "sender": "interpreter_ai",
-  "content": "actor.henry_actor.ATTACK(target=npc.goblin, tool=actor.henry_actor.sword)",
-  "stage": "interpreted_1",
-  "status": "sent",
-  "reply_to": "2026-01-31T12:00:00.000Z : 000001 : ABC123",
-  "correlation_id": "2026-01-31T12:00:00.000Z : 000001 : XYZ789",
-  "meta": {
-    "machine_text": "actor.henry_actor.ATTACK(target=npc.goblin, tool=actor.henry_actor.sword)",
-    "original_text": "attack the goblin"
-  }
-}
-```
-
-### Handoff
-**To:** brokered_1 (created by data_broker)
+- `docs/archive/2026_02_13_legacy_interpreter_pipeline_reference.md`
 
 ---
 
@@ -718,5 +539,5 @@ cat local_data/data_slot_1/outbox.jsonc | grep -A5 "pending_state_apply"
 ## Next Steps
 
 - See [SERVICES.md](./SERVICES.md) for service details
-- See [EFFECTS.md](./EFFECTS.md) for effect system
+- See [EFFECTS.md](../specs/EFFECTS.md) for effect system
 - See [examples/](./examples/) for working code

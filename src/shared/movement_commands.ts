@@ -28,7 +28,9 @@ export type MovementCommandType =
   | "NPC_FLEE"      // Move away from threat
   | "NPC_STATUS"    // Update NPC status (busy/present)
   | "UI_HIGHLIGHT"  // Highlight entity in UI
-  | "UI_TARGET";    // Update target display
+  | "UI_TARGET"     // Update target display
+  | "UI_SENSE_BROADCAST" // Spawn sense broadcast particles (debug)
+  | "UI_SOUND";     // Play a UI sound effect (renderer-local)
 
 /**
  * Base movement command interface
@@ -154,6 +156,29 @@ export interface UITargetCommand extends MovementCommand {
 }
 
 /**
+ * Sense Broadcast Visual Command
+ * Spawns debug particles for a broadcast (e.g. NPC speech, movement).
+ */
+export interface UISenseBroadcastCommand extends MovementCommand {
+  type: "UI_SENSE_BROADCAST";
+  verb: string;
+  subtype?: string;
+}
+
+/**
+ * UI Sound Command
+ * Triggers a short SFX in the renderer (no TTS).
+ */
+export interface UISoundCommand extends MovementCommand {
+  type: "UI_SOUND";
+  sound_id: string;
+  emitter_ref?: string;
+  loudness?: "WHISPER" | "NORMAL" | "SHOUT" | string;
+  channel?: "sfx" | string;
+  cooldown_ms?: number;
+}
+
+/**
  * Union type for all movement commands
  */
 export type AnyMovementCommand =
@@ -165,7 +190,20 @@ export type AnyMovementCommand =
   | NPCFleeCommand
   | NPCStatusCommand
   | UIHighlightCommand
-  | UITargetCommand;
+  | UITargetCommand
+  | UISenseBroadcastCommand
+  | UISoundCommand;
+
+type DistributiveOmit<T, K extends PropertyKey> = T extends any ? Omit<T, K> : never;
+
+/**
+ * Distributive omit for command payloads.
+ *
+ * NOTE: `Omit<Union, K>` is not distributive, so it will erase variant-specific
+ * fields (like `target_entity` on UI_HIGHLIGHT / NPC_FACE). This helper keeps
+ * those fields while removing the shared ones.
+ */
+export type AnyMovementCommandInput = DistributiveOmit<AnyMovementCommand, "npc_ref" | "timestamp">;
 
 /**
  * Message envelope for movement commands
@@ -210,7 +248,7 @@ export interface MovementCommandStorage {
  */
 export function create_movement_command(
   npc_ref: string,
-  command: Omit<AnyMovementCommand, "npc_ref" | "timestamp">,
+  command: AnyMovementCommandInput,
   reason: string,
   place_id?: string
 ): MovementCommandMessage {

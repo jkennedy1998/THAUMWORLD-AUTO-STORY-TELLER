@@ -1,7 +1,7 @@
 # NPC Witness Reaction System - Quick Reference
 
-**Last Updated:** February 8, 2026  
-**Status:** ✅ Partially Working - Core Systems Implemented
+**Last Updated:** February 13, 2026  
+**Status:** ✅ Core Working - Multi-NPC tested; perf/stealth realism deferred
 
 ---
 
@@ -20,7 +20,8 @@ When you talk to an NPC (like Grenda), the system should:
 ### 1. **Communication & Response** ✅
 - Player says "hello grenda" → Grenda responds with AI-generated text
 - Response system working perfectly
-- Place-based filtering works (only NPCs in same place hear you)
+- Place-based filtering works (only NPCs in same place can hear you)
+- Range gating works (no out-of-hearing responses)
 
 ### 2. **Facing System** ✅
 - NPCs face direction of movement automatically
@@ -33,9 +34,11 @@ When you talk to an NPC (like Grenda), the system should:
 - Integration with facing system verified
 
 ### 4. **Sense Broadcasting** ✅
-- COMMUNICATE action broadcasts via `senses=[pressure]`
+- COMMUNICATE action broadcasts via `senses=[light, pressure]` (WHISPER is pressure-only)
 - Different actions have appropriate sense profiles
 - Broadcasting infrastructure in place
+- Movement emits pressure broadcasts (footsteps) and generates MOVE perception events
+- NPC replies also emit COMMUNICATE broadcast particles (same as player)
 
 ---
 
@@ -58,9 +61,11 @@ NPC_Movement Set goal for npc.grenda { type: 'converse', priority: 7 }
 **Fix:** Changed to use `Date.now()` (real-world time) for conversation timeouts  
 **File:** `src/npc_ai/conversation_state.ts` - `get_conversation_time_ms()` function
 
-## ❌ What's Not Working (Known Issues)
+## ⚠️ Known Issues / Watch List
 
-None currently identified - core system is operational!
+- If an NPC is stuck `busy` on load, check for stale persisted `place.contents.npcs_present[].status` in `local_data/` (should be auto-healed to `present`, but old slots may still carry it).
+- Some debug visualization is renderer-side (particles), but key events are bridged into witness via `perception_event_batch` for movement.
+- Renderer bug: entity glyphs may not step tile-to-tile during movement (render order); tracked in `docs/plans/2026_02_13_advanced_npc_interactions_scheduler.md`.
 
 ---
 
@@ -91,6 +96,8 @@ check_success_criteria()       // Checks all success criteria
 | `[Conversation]` | Conversation state changes | ✅ Working |
 | `Facing npc.X` | Facing system | ✅ Working |
 | `NPC_Movement` | Movement system | ✅ Working |
+| `UI_SENSE_BROADCAST` | Speech broadcast particles | ✅ Working |
+| `perception_event_batch` | Renderer -> witness bridge | ✅ Working |
 
 ---
 
@@ -110,16 +117,16 @@ hello grenda
 
 # 4. Current result:
 ✅ Grenda responds verbally
-❌ Grenda keeps wandering (should stop)
+✅ Grenda stops wandering / faces player (conversation mode)
 ```
 
 ### Test 2: Check Log Files
 ```bash
-# View latest session logs
-cat local_data/data_slot_1/logs/$(date +%Y-%m-%d)/latest.log
+# View latest session logs (cross-platform)
+npm run logs:view -- --latest
 
-# Look for:
-grep -i "witness\|perception\|conversation" *.log
+# Optional: view all logs (cleaned)
+npm run logs:clean
 ```
 
 ---
@@ -130,7 +137,10 @@ grep -i "witness\|perception\|conversation" *.log
 - `src/npc_ai/witness_handler.ts` - Processes perception events
 - `src/npc_ai/conversation_state.ts` - Tracks conversation state
 - `src/npc_ai/witness_integration.ts` - Integration layer
-- `src/action_system/perception.ts` - Broadcasts perception events ❌
+- `src/action_system/perception.ts` - Broadcasts perception events ✅
+- `src/action_system/sense_broadcast.ts` - Action -> sense profiles + ranges
+- `src/action_system/pipeline.ts` - Populates `observedBy` for COMMUNICATE gating
+- `src/shared/movement_engine.ts` - Emits MOVE perception batches (actors + NPCs)
 
 ### Debug Files
 - `src/npc_ai/witness_debug.ts` - Debug functions
@@ -138,8 +148,8 @@ grep -i "witness\|perception\|conversation" *.log
 - `scripts/dev_with_logs.js` - Dev mode with logging
 
 ### Documentation
-- `docs/plans/2026_02_07_npc_witness_reaction_system.md` - Full plan
-- `docs/plans/2026_02_08_cmd_log_capture_and_launcher.md` - Log system
+- `docs/archive/2026_02_07_npc_witness_reaction_system_IMPLEMENTED.md` - Full plan (implemented)
+- `docs/archive/2026_02_08_cmd_log_capture_and_launcher.md` - Log system
 - `LAUNCHER_GUIDE.md` - How to run with logs
 
 ---
@@ -148,14 +158,16 @@ grep -i "witness\|perception\|conversation" *.log
 
 | Criteria | Status | Notes |
 |----------|--------|-------|
-| NPCs enter "converse" goal | ❌ | Perception events not created |
+| NPCs enter "converse" goal | ✅ | Perception -> witness -> engagement/goal integration |
 | Movement faces speaker | ✅ | Facing working |
-| Previous goal restored | ⏳ | Pending conversation trigger |
-| 30-second timeout | ⏳ | Pending conversation trigger |
+| Previous goal restored | ✅ | On farewell/timeout |
+| 30-second timeout | ✅ | Conversation expires |
 | Farewell detection | ✅ | Pattern ready |
-| Vision cones | ⏳ | Implemented, needs position integration |
-| Hearing 360° | ⏳ | Implemented, needs testing |
-| Debug particles | ⏳ | UI keybinding pending |
+| Vision cones | ✅ | Implemented + debug overlay |
+| Hearing 360° | ✅ | Pressure sense + debug overlay |
+| Debug particles | ✅ | `\\` toggle; `H` hearing; `B` broadcasts |
+| LOS occlusion overlay | ✅ | `V` shows occlusion shadow inside cone |
+| Move mode | ✅ | `M` cycles WALK/SNEAK/SPRINT (affects footstep broadcast) |
 | 50+ NPCs performance | ⏳ | Not tested |
 
 ---
@@ -255,7 +267,7 @@ When debugging this system:
 ---
 
 **For full implementation details, see:**
-`docs/plans/2026_02_07_npc_witness_reaction_system.md`
+`docs/archive/2026_02_07_npc_witness_reaction_system_IMPLEMENTED.md`
 
 **To run with logging:**
 ```bash

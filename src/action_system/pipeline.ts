@@ -9,12 +9,15 @@ import type { TargetValidationResult, AvailableTarget } from "./target_resolutio
 import { resolveTarget, validateTarget, checkAwareness } from "./target_resolution.js";
 import { broadcastPerception, perceptionMemory, type PerceptionEvent } from "./perception.js";
 import { face_target } from "../npc_ai/facing_system.js";
-import { log_sense_broadcast } from "./sense_broadcast.js";
+import { get_senses_for_action, log_sense_broadcast } from "./sense_broadcast.js";
 import { process_witness_event } from "../npc_ai/witness_handler.js";
 import { validateToolRequirement, getActionTool } from "../tool_system/index.js";
+import { calculateEffectiveRange } from "../action_range/range_calculator.js";
 import { validateRange } from "../action_range/index.js";
 import { handleAction, type ActionContext } from "../action_handlers/index.js";
 import { performResultRoll, performPotencyRoll, calculateCR, createRollContext, type RollContext, type ProficiencyType } from "../roll_system/index.js";
+import { DEBUG_LEVEL } from "../shared/debug.js";
+import { debug_event } from "../shared/debug_event.js";
 
 // Pipeline stage types
 export type PipelineStage = 
@@ -86,12 +89,23 @@ export class ActionPipeline {
   
   // Main processing method
   async process(intent: ActionIntent): Promise<ActionResult> {
-    console.log(`[ActionPipeline] START processing ${intent.verb} by ${intent.actorRef}`);
+    debug_event("ACTION_PIPELINE", "process.start", {
+      intent_id: intent.id,
+      verb: intent.verb,
+      actor_ref: intent.actorRef,
+      target_ref: intent.targetRef,
+      subtype: intent.parameters.subtype,
+    });
     
     const actionDef = getActionDefinition(intent.verb);
     
     if (!actionDef) {
-      console.log(`[ActionPipeline] FAIL: Unknown action verb: ${intent.verb}`);
+      debug_event("ACTION_PIPELINE", "process.failed", {
+        intent_id: intent.id,
+        verb: intent.verb,
+        actor_ref: intent.actorRef,
+        reason: "unknown_action_verb",
+      });
       return this.fail(intent, `Unknown action verb: ${intent.verb}`);
     }
     
@@ -99,70 +113,118 @@ export class ActionPipeline {
     
     try {
       // Stage 1: Target Resolution
-      console.log(`[ActionPipeline] Stage 1: Target Resolution`);
+      debug_event("ACTION_PIPELINE", "stage.start", { intent_id: intent.id, stage: "target_resolution" });
       intent = await this.stageTargetResolution(intent, actionDef);
       if (intent.status === "failed") {
-        console.log(`[ActionPipeline] Stage 1 FAILED: ${intent.failureReason}`);
+        debug_event("ACTION_PIPELINE", "stage.failed", {
+          intent_id: intent.id,
+          stage: "target_resolution",
+          reason: intent.failureReason,
+        });
         return this.fail(intent, intent.failureReason || "Target resolution failed");
       }
-      console.log(`[ActionPipeline] Stage 1 complete`);
+      debug_event("ACTION_PIPELINE", "stage.complete", { intent_id: intent.id, stage: "target_resolution" });
       
       // Stage 2: Validation
       if (this.config.enableValidation) {
-        console.log(`[ActionPipeline] Stage 2: Validation`);
+        debug_event("ACTION_PIPELINE", "stage.start", { intent_id: intent.id, stage: "validation" });
         intent = await this.stageValidation(intent, actionDef);
         if (intent.status === "failed") {
-          console.log(`[ActionPipeline] Stage 2 FAILED: ${intent.failureReason}`);
+          debug_event("ACTION_PIPELINE", "stage.failed", {
+            intent_id: intent.id,
+            stage: "validation",
+            reason: intent.failureReason,
+          });
           return this.fail(intent, intent.failureReason || "Validation failed");
         }
-        console.log(`[ActionPipeline] Stage 2 complete`);
+        debug_event("ACTION_PIPELINE", "stage.complete", { intent_id: intent.id, stage: "validation" });
       }
       
       // Stage 3: Cost Check
       if (this.config.enableCostCheck) {
-        console.log(`[ActionPipeline] Stage 3: Cost Check`);
+        debug_event("ACTION_PIPELINE", "stage.start", { intent_id: intent.id, stage: "cost_check" });
         intent = await this.stageCostCheck(intent, actionDef);
         if (intent.status === "failed") {
-          console.log(`[ActionPipeline] Stage 3 FAILED: ${intent.failureReason}`);
+          debug_event("ACTION_PIPELINE", "stage.failed", {
+            intent_id: intent.id,
+            stage: "cost_check",
+            reason: intent.failureReason,
+          });
           return this.fail(intent, intent.failureReason || "Cannot afford action cost");
         }
-        console.log(`[ActionPipeline] Stage 3 complete`);
+        debug_event("ACTION_PIPELINE", "stage.complete", { intent_id: intent.id, stage: "cost_check" });
       }
       
       // Stage 4: Rules Check
       if (this.config.enableRulesCheck) {
-        console.log(`[ActionPipeline] Stage 4: Rules Check`);
+        debug_event("ACTION_PIPELINE", "stage.start", { intent_id: intent.id, stage: "rules_check" });
         intent = await this.stageRulesCheck(intent, actionDef);
         if (intent.status === "failed") {
-          console.log(`[ActionPipeline] Stage 4 FAILED: ${intent.failureReason}`);
+          debug_event("ACTION_PIPELINE", "stage.failed", {
+            intent_id: intent.id,
+            stage: "rules_check",
+            reason: intent.failureReason,
+          });
           return this.fail(intent, intent.failureReason || "Rules check failed");
         }
-        console.log(`[ActionPipeline] Stage 4 complete`);
+        debug_event("ACTION_PIPELINE", "stage.complete", { intent_id: intent.id, stage: "rules_check" });
       }
       
       // Stage 5: Broadcast Before Execution (perception)
-      console.log(`[ActionPipeline] Stage 5: Broadcast Before`);
+      debug_event("ACTION_PIPELINE", "stage.start", { intent_id: intent.id, stage: "broadcast_before" });
       let perceptionEvents: PerceptionEvent[] = [];
       if (this.config.enablePerception) {
         perceptionEvents = await this.stageBroadcastBefore(intent);
       } else {
-        console.log(`[ActionPipeline] Stage 5: SKIPPED (enablePerception: ${this.config.enablePerception})`);
+        if (DEBUG_LEVEL >= 4) {
+          debug_event("ACTION_PIPELINE", "stage.skipped", {
+            intent_id: intent.id,
+            stage: "broadcast_before",
+            enable_perception: this.config.enablePerception,
+          });
+        }
       }
+      debug_event("ACTION_PIPELINE", "stage.complete", {
+        intent_id: intent.id,
+        stage: "broadcast_before",
+        perceived_by: perceptionEvents.length,
+      });
       
       // Stage 6: Execute
-      console.log(`[ActionPipeline] Stage 6: Execute`);
+      debug_event("ACTION_PIPELINE", "stage.start", { intent_id: intent.id, stage: "execution" });
       const result = await this.stageExecution(intent, actionDef);
-      console.log(`[ActionPipeline] Stage 6: Execution complete, success: ${result.success}`);
+      debug_event("ACTION_PIPELINE", "stage.complete", {
+        intent_id: intent.id,
+        stage: "execution",
+        success: result.success,
+      });
       
       // Stage 7: Broadcast After Execution
-      console.log(`[ActionPipeline] Stage 7: Broadcast After (enablePerception: ${this.config.enablePerception})`);
+      debug_event("ACTION_PIPELINE", "stage.start", { intent_id: intent.id, stage: "broadcast_after" });
       if (this.config.enablePerception) {
-        await this.stageBroadcastAfter(intent, result);
+        const afterEvents = await this.stageBroadcastAfter(intent, result);
+        // Attach observers to the result so downstream systems can respect sensing/range.
+        const unique = new Set<string>();
+        for (const e of afterEvents) unique.add(e.observerRef);
+        result.observedBy = Array.from(unique);
       } else {
-        console.log(`[ActionPipeline] Stage 7: SKIPPED (enablePerception: ${this.config.enablePerception})`);
+        if (DEBUG_LEVEL >= 4) {
+          debug_event("ACTION_PIPELINE", "stage.skipped", {
+            intent_id: intent.id,
+            stage: "broadcast_after",
+            enable_perception: this.config.enablePerception,
+          });
+        }
       }
+      debug_event("ACTION_PIPELINE", "stage.complete", { intent_id: intent.id, stage: "broadcast_after" });
       
       this.log(`Action completed: ${intent.verb} - ${result.success ? "success" : "failed"}`);
+      debug_event("ACTION_PIPELINE", "process.complete", {
+        intent_id: intent.id,
+        verb: intent.verb,
+        actor_ref: intent.actorRef,
+        success: result.success,
+      });
       
       return result;
       
@@ -232,8 +294,10 @@ export class ActionPipeline {
         return markIntentFailed(intent, `Cannot find actor data for ${intent.actorRef}`);
       }
       
-      // Validate tool requirement
-      const toolValidation = validateToolRequirement(actorData, intent.verb);
+      const subtype = typeof intent.parameters.subtype === "string" ? intent.parameters.subtype : undefined;
+
+      // Validate tool requirement (include subtype when present)
+      const toolValidation = validateToolRequirement(actorData, intent.verb, subtype);
       
       if (!toolValidation.valid) {
         return markIntentFailed(intent, toolValidation.error || "Missing required tool");
@@ -248,15 +312,35 @@ export class ActionPipeline {
       }
     }
     
-    // Check range using range validator
-    if (intent.targetRef && intent.targetLocation) {
+    // Check range using range validator.
+    // INSPECT uses its own clarity system; do not hard-fail on range here.
+    if (intent.verb !== "INSPECT" && intent.targetRef && intent.targetLocation) {
       const actorData = await this.deps.getActorData(intent.actorRef);
-      const toolData = actorData ? getActionTool(actorData, intent.verb) : null;
+      const subtype = typeof intent.parameters.subtype === "string" ? intent.parameters.subtype : undefined;
+      const toolData = actorData ? getActionTool(actorData, intent.verb, subtype) : null;
+
+      // If a tool is available and the action has a subtype, compute effective range
+      // from the tag resolver contract (ex: bow -> USE.PROJECTILE_SINGLE).
+      let effectiveRange = actionDef.targetRange;
+
+      // Communication range is subtype-dependent (WHISPER/NORMAL/SHOUT).
+      // Use the pressure broadcast as the actual "can be heard" range for targeted talk.
+      if (intent.verb === "COMMUNICATE" && intent.targetRef) {
+        const broadcasts = get_senses_for_action("COMMUNICATE", subtype);
+        const pressure = broadcasts.filter(b => b.sense === "pressure");
+        if (pressure.length > 0) {
+          effectiveRange = Math.max(...pressure.map(p => p.range_tiles));
+        }
+      } else if (toolData && subtype) {
+        const fullActionType = `${intent.verb}.${subtype}`;
+        const throwerSTR = typeof (actorData as any)?.stats?.STR === "number" ? Number((actorData as any).stats.STR) : undefined;
+        effectiveRange = calculateEffectiveRange(toolData, fullActionType, throwerSTR);
+      }
       
       const rangeValidation = validateRange(
         intent.actorLocation,
         intent.targetLocation,
-        actionDef.targetRange,
+        effectiveRange,
         intent.verb,
         toolData ? {
           mag: toolData.mag || 0,
@@ -390,38 +474,48 @@ export class ActionPipeline {
     
     const capability = validation.valid ? validation.tool?.capability : undefined;
     
-    // Create roll context for this action
-    const rollContext = createRollContext(
-      intent.actorRef,
-      intent.parameters.subtype 
-        ? `${intent.verb}.${intent.parameters.subtype}`
-        : intent.verb,
-      toolData || undefined,
-      capability,
-      {
-        proficiencies: (actorData as any)?.proficiencies as Record<ProficiencyType, number> | undefined,
-        stats: (actorData as any)?.stats as Record<string, number> | undefined
-      }
-    );
-    
-    // Calculate CR for this action
-    const cr = calculateCR(10, {
-      distance: intent.targetLocation ? 
-        Math.sqrt(
-          Math.pow(intent.actorLocation.x || 0 - (intent.targetLocation.x || 0), 2) +
-          Math.pow(intent.actorLocation.y || 0 - (intent.targetLocation.y || 0), 2)
-        ) : undefined,
-      maxRange: capability?.range?.effective,
-      targetDefense: 0, // Would come from target data
-      difficulty: intent.parameters.difficulty
-    });
-    
-    // Perform result roll (D20 + prof + stats + effectors)
-    const resultRoll = performResultRoll(rollContext, cr);
+    // Movement should not require an outcome roll by default.
+    // Future terrain tags can opt-in by setting a difficulty or explicit requires_roll.
+    const requiresOutcomeRoll =
+      intent.verb !== "MOVE" ||
+      intent.parameters.requires_roll === true ||
+      typeof intent.parameters.difficulty === "number";
+
+    // Create roll context only when we need it (rolls and/or potency).
+    const needsRollContext = requiresOutcomeRoll || (intent.verb === "USE" && !!intent.parameters.subtype);
+    const rollContext = needsRollContext
+      ? createRollContext(
+          intent.actorRef,
+          intent.parameters.subtype ? `${intent.verb}.${intent.parameters.subtype}` : intent.verb,
+          toolData || undefined,
+          capability,
+          {
+            proficiencies: (actorData as any)?.proficiencies as Record<ProficiencyType, number> | undefined,
+            stats: (actorData as any)?.stats as Record<string, number> | undefined,
+          }
+        )
+      : null;
+
+    // Calculate CR + roll only when required
+    const cr = requiresOutcomeRoll
+      ? calculateCR(10, {
+          distance: intent.targetLocation
+            ? Math.sqrt(
+                Math.pow(intent.actorLocation.x || 0 - (intent.targetLocation.x || 0), 2) +
+                  Math.pow(intent.actorLocation.y || 0 - (intent.targetLocation.y || 0), 2)
+              )
+            : undefined,
+          maxRange: capability?.range?.effective,
+          targetDefense: 0, // Would come from target data
+          difficulty: intent.parameters.difficulty,
+        })
+      : null;
+
+    const resultRoll = requiresOutcomeRoll && rollContext && cr !== null ? performResultRoll(rollContext, cr) : null;
     
     // Perform potency roll for damage (if applicable)
     let potencyRoll = null;
-    if (intent.verb === "USE" && intent.parameters.subtype) {
+    if (intent.verb === "USE" && intent.parameters.subtype && rollContext) {
       const baseMAG = toolData?.tags?.find(t => 
         capability?.source_tag && t.name === capability.source_tag
       )?.stacks || 1;
@@ -442,13 +536,13 @@ export class ActionPipeline {
         distance: intent.parameters.distance,
         ammo: intent.parameters.ammo,
         // Pass roll results to handlers
-        hit: resultRoll.success,
-        roll: resultRoll.total,
-        nat: resultRoll.nat,
-        cr: resultRoll.cr,
-        margin: resultRoll.margin,
-        prof_bonus: resultRoll.prof_bonus,
-        stat_bonus: resultRoll.stat_bonus,
+        hit: resultRoll ? resultRoll.success : (intent.parameters.hit ?? true),
+        roll: resultRoll ? resultRoll.total : intent.parameters.roll,
+        nat: resultRoll ? resultRoll.nat : intent.parameters.nat,
+        cr: resultRoll ? resultRoll.cr : intent.parameters.cr,
+        margin: resultRoll ? resultRoll.margin : intent.parameters.margin,
+        prof_bonus: resultRoll ? resultRoll.prof_bonus : intent.parameters.prof_bonus,
+        stat_bonus: resultRoll ? resultRoll.stat_bonus : intent.parameters.stat_bonus,
         damageMAG: potencyRoll?.total || intent.parameters.damageMAG,
         potency_roll: potencyRoll?.roll || 0,
         sticks: intent.parameters.sticks
@@ -464,7 +558,11 @@ export class ActionPipeline {
     const handlerResult = await handleAction(fullActionType, context);
     
     // Log roll results
-    this.log(`Result Roll: ${resultRoll.nat} (D20) +${resultRoll.prof_bonus} prof +${resultRoll.stat_bonus} stat = ${resultRoll.total} vs CR ${cr} - ${resultRoll.success ? "SUCCESS" : "FAIL"}`);
+    if (resultRoll && cr !== null) {
+      this.log(
+        `Result Roll: ${resultRoll.nat} (D20) +${resultRoll.prof_bonus} prof +${resultRoll.stat_bonus} stat = ${resultRoll.total} vs CR ${cr} - ${resultRoll.success ? "SUCCESS" : "FAIL"}`
+      );
+    }
     if (potencyRoll) {
       this.log(`Potency Roll: MAG ${potencyRoll.mag} (${potencyRoll.dice}) = ${potencyRoll.roll} damage`);
     }
@@ -574,19 +672,23 @@ export class ActionPipeline {
   }
   
   // Stage 7: Broadcast After Execution
-  private async stageBroadcastAfter(intent: ActionIntent, result: ActionResult): Promise<void> {
-    console.log(`[ActionPipeline] stageBroadcastAfter START for ${intent.verb}`);
+  private async stageBroadcastAfter(intent: ActionIntent, result: ActionResult): Promise<PerceptionEvent[]> {
+    debug_event("ACTION_PIPELINE", "broadcast_after.start", {
+      intent_id: intent.id,
+      verb: intent.verb,
+      actor_ref: intent.actorRef,
+      target_ref: intent.targetRef,
+      success: result.success,
+    });
     intent = setIntentStage(intent, "broadcast_after");
     
     // Update actor facing to face target if action was successful and has a target
     if (result.success && intent.targetRef) {
-      console.log(`[ActionPipeline] Updating actor facing for successful action`);
       this.updateActorFacing(intent);
     }
     
     // Log sense broadcast for debugging
     if (intent.actorLocation) {
-      console.log(`[ActionPipeline] Logging sense broadcast`);
       log_sense_broadcast(
         intent.actorRef,
         intent.verb,
@@ -596,22 +698,34 @@ export class ActionPipeline {
     }
     
     // Broadcast perception and get list of observers who perceived the action
-    console.log(`[ActionPipeline] Broadcasting perception after execution...`);
-    console.log(`[ActionPipeline] enablePerception: ${this.config.enablePerception}`);
-    console.log(`[ActionPipeline] getAvailableTargets exists: ${!!this.deps.getAvailableTargets}`);
     const events = await broadcastPerception(intent, "after", result, {
       getCharactersInRange: this.deps.getAvailableTargets
     });
     
-    console.log(`[ActionPipeline] Perception events: ${events.length} observers`);
+    debug_event("ACTION_PIPELINE", "broadcast_after.perception", {
+      intent_id: intent.id,
+      verb: intent.verb,
+      perceived_by: events.length,
+    });
     
     // Process witness reactions for each observer
     for (const event of events) {
-      console.log(`[ActionPipeline] Processing witness event for: ${event.observerRef}`);
+      if (DEBUG_LEVEL >= 4) {
+        debug_event("ACTION_PIPELINE", "broadcast_after.witness_event", {
+          intent_id: intent.id,
+          observer_ref: event.observerRef,
+          verb: event.verb,
+        });
+      }
       process_witness_event(event.observerRef, event);
     }
     
-    console.log(`[ActionPipeline] stageBroadcastAfter END for ${intent.verb}`);
+    debug_event("ACTION_PIPELINE", "broadcast_after.complete", {
+      intent_id: intent.id,
+      verb: intent.verb,
+    });
+
+    return events;
   }
   
   // Helper: Update actor facing toward target

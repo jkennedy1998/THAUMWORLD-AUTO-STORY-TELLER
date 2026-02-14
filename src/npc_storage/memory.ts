@@ -198,22 +198,18 @@ export function add_memory(
         }
     }
     
-    // Update index
-    for (const entity of full_memory.related_entities) {
-        store.memory_index.set(entity, full_memory.memory_id);
-    }
-    
-    // Update stats
+    // Update stats + index
     store.stats.total_memories++;
     if (full_memory.type === "conversation") {
         store.stats.conversations_remembered++;
     }
+
     for (const entity of full_memory.related_entities) {
-        if (entity.startsWith("actor.") || entity.startsWith("npc.")) {
-            if (!store.stats.people_remembered.includes(entity as any)) {
-                store.stats.people_remembered++;
-            }
+        // Track unique people count using the index as a uniqueness set.
+        if ((entity.startsWith("actor.") || entity.startsWith("npc.")) && !store.memory_index.has(entity)) {
+            store.stats.people_remembered++;
         }
+        store.memory_index.set(entity, full_memory.memory_id);
     }
     
     store.last_updated = new Date().toISOString();

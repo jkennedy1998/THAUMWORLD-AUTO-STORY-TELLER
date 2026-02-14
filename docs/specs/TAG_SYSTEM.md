@@ -3,6 +3,10 @@
 **Documentation Date:** February 6, 2026  
 **Source:** thaumworld.xyz/tags/, thaumworld.xyz/tag-table/, thaumworld.xyz/items-n-inventory/
 
+Notes:
+- Architecture planning snapshots are preserved in `docs/archive/tag_system/2026_02_06_tag_system_architecture_v2_planning.md`.
+- Initial misconceptions + corrections are preserved in `docs/archive/tag_system/2026_02_06_tag_system_initial_vs_corrected_understanding.md`.
+
 ## Overview
 
 TAGS are the core rule-modification system in THAUMWORLD. They are flags attached to **ITEMS**, **CHARACTERS**, **TILES**, or even other **TAGS** that add rules, change existing rules, or attach EFFECTORs.

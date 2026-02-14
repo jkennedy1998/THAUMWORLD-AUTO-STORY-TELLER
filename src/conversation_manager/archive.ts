@@ -214,7 +214,7 @@ export function add_message(
     conversation.stats.last_activity = now;
     
     // Update topics if message contains information
-    if (meta.contains_information) {
+    if (meta?.contains_information) {
         extract_topics(text, conversation.topics_discussed);
     }
     

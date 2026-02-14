@@ -111,7 +111,7 @@ export function roll_initiative(
     
     state.phase = "TURN_START";
     state.current_turn = 1;
-    state.current_actor_ref = state.initiative_order[0];
+    state.current_actor_ref = state.initiative_order[0] ?? null;
     state.turn_start_time = new Date().toISOString();
     
     return state;
@@ -166,7 +166,7 @@ export function transition_phase(
                 state.round_number++;
                 state.completed_actors.clear();
                 state.current_turn = 1;
-                state.current_actor_ref = state.initiative_order[0];
+                state.current_actor_ref = state.initiative_order[0] ?? null;
                 state.phase = "TURN_START";
             } else {
                 // Next actor's turn
@@ -175,7 +175,7 @@ export function transition_phase(
                 );
                 if (next_index >= 0) {
                     state.current_turn++;
-                    state.current_actor_ref = state.initiative_order[next_index];
+                    state.current_actor_ref = state.initiative_order[next_index] ?? null;
                     state.phase = "TURN_START";
                 }
             }

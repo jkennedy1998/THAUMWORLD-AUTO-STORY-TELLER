@@ -4,6 +4,8 @@
 
 The Timed Events system implements THAUMWORLD's turn-based mechanics for combat, conversation, and exploration. It manages initiative order, action costs, and turn advancement automatically.
 
+Current build note (2026-02-13): `interpreter_ai` is archived. Timed events are triggered by completed `ruling_*` messages (file-backed pipeline) that include `.ATTACK(` or `.COMMUNICATE(` in `meta.events`/`meta.machine_text`.
+
 ## Features Implemented
 
 ### 1. Automatic Timed Event Triggers
@@ -110,14 +112,8 @@ type InitiativeEntry = {
 ```
 Player: "attack goblin"
   ↓
-[Interpreter AI] → interpreted_1
-  ↓
-[Data Broker] → brokered_1
-  ↓
-[Rules Lawyer] → ruling_1
-  - Checks action costs
-  - Validates it's player's turn
-  - Consumes action if successful
+[Rules/Effects Pipeline] → ruling_* (done)
+  - Message `meta.events`/`meta.machine_text` includes `.ATTACK(` or `.COMMUNICATE(`
   ↓
 [Turn Manager detects ATTACK]
   - Checks if timed event already active

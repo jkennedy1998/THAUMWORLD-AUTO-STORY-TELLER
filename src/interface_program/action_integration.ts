@@ -32,7 +32,10 @@ function createPipelineDependencies(dataSlot: number) {
             world_x: loc?.world_x ?? 0,
             world_y: loc?.world_y ?? 0,
             region_x: loc?.region_x ?? 0,
-            region_y: loc?.region_y ?? 0
+            region_y: loc?.region_y ?? 0,
+            x: loc?.tile?.x ?? loc?.x,
+            y: loc?.tile?.y ?? loc?.y,
+            place_id: loc?.place_id
           };
         }
       }
@@ -41,19 +44,20 @@ function createPipelineDependencies(dataSlot: number) {
     
     // Check if actor is aware of target
     checkActorAwareness: async (actorRef: string, targetRef: string) => {
-      // TODO: Implement awareness check
+      // Not implemented: awareness gating.
+      // Current behavior assumes awareness is handled elsewhere (or always true).
       return true; // Default to aware for now
     },
     
     // Check if actor can afford action cost
     checkActionCost: async (actorRef: string, cost: any) => {
-      // TODO: Implement action cost check
+      // Not implemented: action point/cost enforcement.
       return true; // Default to affordable for now
     },
     
     // Consume action cost
     consumeActionCost: async (actorRef: string, cost: any) => {
-      // TODO: Implement action cost consumption
+      // Not implemented: action point/cost consumption.
       return true; // Default to success for now
     },
     
@@ -76,7 +80,9 @@ function createPipelineDependencies(dataSlot: number) {
     
     // Execute effect
     executeEffect: async (effect: any) => {
-      // TODO: Implement effect execution
+      // Not implemented: persistent effect execution.
+      // The ActionPipeline currently provides validation + perception/witness hooks;
+      // state mutations are handled by other systems.
       debug_log("ActionPipeline", "Executing effect", effect);
       return true;
     },
@@ -137,14 +143,14 @@ export async function processPlayerAction(
       effectsCount: result.effects.length
     });
     
-    // If this is a COMMUNICATE action with a target, immediately face the target
-    // This provides immediate feedback before the NPC_AI service processes the witness event
-    if (intent.verb === "COMMUNICATE" && intent.targetRef && intent.targetRef.startsWith("npc.")) {
+    // If this is a successful COMMUNICATE action with a target, immediately face the target.
+    // This provides immediate feedback before the NPC_AI service processes the witness event.
+    if (result.success && intent.verb === "COMMUNICATE" && intent.targetRef && intent.targetRef.startsWith("npc.")) {
       const { send_face_command } = await import("../npc_ai/movement_command_sender.js");
       send_face_command(intent.targetRef, intent.actorRef, "Face speaker immediately on communication");
       debug_log("ActionPipeline", "Sent immediate face command", { npc: intent.targetRef, actor: intent.actorRef });
     }
-    
+
     return result;
   } catch (error) {
     debug_warn("ActionPipeline", "Action failed", {

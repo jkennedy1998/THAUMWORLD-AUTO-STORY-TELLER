@@ -16,6 +16,17 @@ import {
 import { find_path } from "../../shared/pathfinding.js";
 import type { Place, TilePosition } from "../../types/place.js";
 import { set_facing, face_target } from "../../npc_ai/facing_system.js";
+import { debug_event } from "../../shared/debug_event.js";
+import { get_sense_profile } from "../../action_system/sense_broadcast.js";
+import { spawn_sense_broadcast_particles } from "../vision_debugger.js";
+import { play_sfx } from "../sfx/sfx_player.js";
+
+function footstep_cooldown_ms(speed_tpm: number): number {
+  // Default speed 300 tpm => 200ms per tile; we allow some overlap.
+  const tpm = Number.isFinite(speed_tpm) && speed_tpm > 0 ? speed_tpm : 300;
+  const ms_per_tile = (60 * 1000) / tpm;
+  return Math.max(55, Math.min(260, Math.round(ms_per_tile * 0.75)));
+}
 
 // Track processed command IDs to avoid duplicates
 const processed_commands = new Set<string>();
@@ -26,6 +37,95 @@ let current_place: Place | null = null;
 // Track NPC actual positions (persisted between movements to prevent snap-back)
 // This is needed because place data gets refreshed from storage which may have stale positions
 const npc_actual_positions = new Map<string, TilePosition>();
+
+// Renderer-authoritative visual status (synced by NPC_STATUS commands)
+const npc_visual_status_by_ref = new Map<string, string>();
+
+export function get_npc_visual_status(npc_ref: string): string | undefined {
+  return npc_visual_status_by_ref.get(npc_ref);
+}
+
+// Conversation-facing support (renderer-side)
+// When an NPC is visually in conversation (status === "busy"), keep them facing their
+// conversation partner as the partner moves.
+const conversation_target_by_npc = new Map<string, string>(); // npc_ref -> entity_ref
+const last_face_target_by_npc = new Map<string, string>(); // npc_ref -> entity_ref
+
+function get_entity_position(entity_ref: string): TilePosition | null {
+  if (!current_place) return null;
+
+  // Prefer renderer-tracked positions (most up-to-date), regardless of entity type.
+  const tracked = npc_actual_positions.get(entity_ref);
+  if (tracked) return tracked;
+
+  if (entity_ref.startsWith("npc.")) {
+    const npc = current_place.contents.npcs_present.find((n: any) => n.npc_ref === entity_ref);
+    return npc?.tile_position ?? null;
+  }
+
+  if (entity_ref.startsWith("actor.")) {
+    const actor = current_place.contents.actors_present.find((a: any) => a.actor_ref === entity_ref);
+    return actor?.tile_position ?? null;
+  }
+
+  return null;
+}
+
+function execute_ui_sense_broadcast_command(cmd: any): void {
+  if (!current_place) return;
+  const origin_ref = cmd?.npc_ref;
+  if (typeof origin_ref !== "string" || origin_ref.length === 0) return;
+  const pos = get_entity_position(origin_ref);
+  if (!pos) return;
+
+  const verb = typeof cmd?.verb === "string" ? cmd.verb : "";
+  const subtype = typeof cmd?.subtype === "string" ? cmd.subtype : undefined;
+  const profile = get_sense_profile(verb, subtype);
+  if (!profile) return;
+
+  for (const b of profile.broadcasts) {
+    spawn_sense_broadcast_particles(pos, b.sense as any, b.range_tiles);
+  }
+}
+
+function execute_ui_sound_command(cmd: any): void {
+  const sound_id = typeof cmd?.sound_id === "string" ? cmd.sound_id : "";
+  if (!sound_id) return;
+
+  const loudness = typeof cmd?.loudness === "string" ? cmd.loudness : undefined;
+  const cooldown_ms = typeof cmd?.cooldown_ms === "number" ? cmd.cooldown_ms : undefined;
+  play_sfx(sound_id, { loudness, cooldown_ms });
+}
+
+function refresh_conversation_facing_for_actor(actor_ref: string): void {
+  if (!current_place) return;
+  const actor_pos = get_entity_position(actor_ref);
+  if (!actor_pos) return;
+
+  for (const npc of current_place.contents.npcs_present) {
+    if (npc.status !== "busy") continue;
+    const target = conversation_target_by_npc.get(npc.npc_ref);
+    if (target !== actor_ref) continue;
+
+    const npc_pos = get_entity_position(npc.npc_ref);
+    if (!npc_pos) continue;
+    face_target(npc.npc_ref, actor_ref, actor_pos, npc_pos);
+  }
+}
+
+function refresh_conversation_facing_for_npc(npc_ref: string): void {
+  if (!current_place) return;
+  const npc = current_place.contents.npcs_present.find((n: any) => n.npc_ref === npc_ref);
+  if (!npc || npc.status !== "busy") return;
+
+  const target = conversation_target_by_npc.get(npc_ref);
+  if (!target) return;
+
+  const target_pos = get_entity_position(target);
+  const npc_pos = get_entity_position(npc_ref);
+  if (!target_pos || !npc_pos) return;
+  face_target(npc_ref, target, target_pos, npc_pos);
+}
 
 // Track when handler started (to ignore old queued messages at startup)
 const handler_start_time = Date.now();
@@ -58,6 +158,21 @@ declare global {
  */
 export function set_command_handler_place(place: Place | null): void {
   current_place = place;
+
+  // IMPORTANT: Do not trust persisted place NPC status as authoritative for conversation visuals.
+  // Status is synced to the renderer via NPC_STATUS commands; place refreshes can be stale.
+  // Keep the renderer-side map stable across refreshes and project it onto the place snapshot.
+  if (place) {
+    for (const npc of place.contents.npcs_present) {
+      const known = npc_visual_status_by_ref.get(npc.npc_ref);
+      if (known) {
+        (npc as any).status = known;
+      } else {
+        npc_visual_status_by_ref.set(npc.npc_ref, "present");
+        (npc as any).status = "present";
+      }
+    }
+  }
   
   // Sync positions from place data to tracker
   // This ensures we have the latest positions when place is refreshed
@@ -89,7 +204,12 @@ export function update_actor_position_in_place(
   
   if (actor) {
     actor.tile_position = { ...new_position };
-    console.log(`[MovementCommandHandler] Updated ${actor_ref} position to (${new_position.x}, ${new_position.y})`);
+    debug_event("RENDERER.MOVEMENT", "actor.position.updated", {
+      actor_ref,
+      x: new_position.x,
+      y: new_position.y,
+    });
+    refresh_conversation_facing_for_actor(actor_ref);
   }
 }
 
@@ -102,7 +222,27 @@ export function set_npc_tracked_position(
   position: TilePosition
 ): void {
   npc_actual_positions.set(entity_ref, { ...position });
-  console.log(`[MovementCommandHandler] Tracked position for ${entity_ref}: (${position.x}, ${position.y})`);
+  debug_event("RENDERER.MOVEMENT", "entity.position.tracked", {
+    entity_ref,
+    x: position.x,
+    y: position.y,
+  });
+
+  // Keep current_place in sync for actors too (used by UI modules).
+  if (current_place && entity_ref.startsWith("actor.")) {
+    const actor = current_place.contents.actors_present.find((a: any) => a.actor_ref === entity_ref);
+    if (actor) actor.tile_position = { ...position };
+  }
+
+  // If an engaged NPC moves, keep their facing updated too.
+  if (entity_ref.startsWith("npc.")) {
+    refresh_conversation_facing_for_npc(entity_ref);
+  }
+
+  // If the conversation partner actor moves, keep engaged NPCs facing them.
+  if (entity_ref.startsWith("actor.")) {
+    refresh_conversation_facing_for_actor(entity_ref);
+  }
 }
 
 /**
@@ -124,18 +264,26 @@ async function mark_existing_commands_processed(): Promise<void> {
     
     let marked_count = 0;
     for (const msg of outbox.messages) {
-      if ((msg.type === "movement_command" || msg.meta?.movement_command) && !processed_commands.has(msg.id)) {
+      if (msg.type !== "movement_command" && !msg.meta?.movement_command) continue;
+      if (processed_commands.has(msg.id)) continue;
+
+      // Only clear backlog: commands created before this handler started.
+      // New commands for the current session must remain eligible for processing.
+      const msg_timestamp = new Date(msg.created_at).getTime();
+      if (!Number.isFinite(msg_timestamp) || msg_timestamp < handler_start_time) {
         processed_commands.add(msg.id);
         marked_count++;
       }
     }
     
     if (marked_count > 0) {
-      console.log(`[MovementCommandHandler] Cleared ${marked_count} queued movement commands from backlog`);
+      debug_event("RENDERER.MOVEMENT", "outbox.backlog.cleared", { marked_count });
     }
   } catch (err) {
     // Silently fail - outbox might not exist yet
-    console.log("[MovementCommandHandler] Could not clear backlog (outbox may not exist yet)");
+    debug_event("RENDERER.MOVEMENT", "outbox.backlog.clear_failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
@@ -144,7 +292,7 @@ async function mark_existing_commands_processed(): Promise<void> {
  * Polls the outbox for movement commands and executes them
  */
 export function start_movement_command_handler(poll_ms: number = 500): () => void {
-  console.log("[MovementCommandHandler] Started");
+  debug_event("RENDERER.MOVEMENT", "handler.started", { poll_ms });
   
   // Mark all existing movement commands as "processed" to clear the backlog
   // This prevents rapid-fire execution of queued commands from previous sessions
@@ -157,7 +305,7 @@ export function start_movement_command_handler(poll_ms: number = 500): () => voi
   // Return cleanup function
   return () => {
     clearInterval(interval_id);
-    console.log("[MovementCommandHandler] Stopped");
+    debug_event("RENDERER.MOVEMENT", "handler.stopped", {});
   };
 }
 
@@ -231,6 +379,10 @@ async function process_movement_commands(): Promise<void> {
         execute_movement_command(movement_msg);
       } catch (err) {
         console.error(`[MovementCommandHandler] Failed to process command ${msg.id}:`, err);
+        debug_event("RENDERER.MOVEMENT", "command.process_failed", {
+          msg_id: msg.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
     
@@ -257,8 +409,19 @@ function execute_movement_command(msg: MovementCommandMessage): void {
   // Only log stop commands (important for conversation flow)
   // Wander/move commands will log when they actually start moving
   if (command.type === "NPC_STOP") {
-    console.log(`[MovementCommandHandler] Executing ${command.type} for ${npc_ref}`, {
+    debug_event("RENDERER.MOVEMENT", "command.execute", {
+      npc_ref,
+      type: command.type,
       reason: command.reason,
+    });
+  }
+  
+  // Log status commands for debugging conversation indicator
+  if (command.type === "NPC_STATUS") {
+    debug_event("RENDERER.MOVEMENT", "command.execute", {
+      npc_ref,
+      type: command.type,
+      status: command.status,
     });
   }
   
@@ -290,9 +453,20 @@ function execute_movement_command(msg: MovementCommandMessage): void {
     case "UI_TARGET":
       execute_ui_target_command(command);
       break;
-      
+
+    case "UI_SENSE_BROADCAST":
+      execute_ui_sense_broadcast_command(command);
+      break;
+
+    case "UI_SOUND":
+      execute_ui_sound_command(command);
+      break;
+       
     default:
-      console.log(`[MovementCommandHandler] Unknown command type: ${(command as any).type}`);
+      debug_event("RENDERER.MOVEMENT", "command.unknown", {
+        npc_ref,
+        type: (command as any).type,
+      });
   }
 }
 
@@ -308,7 +482,10 @@ function execute_stop_command(npc_ref: string): void {
  */
 function execute_move_command(npc_ref: string, cmd: any): void {
   if (!current_place) {
-    console.log(`[MovementCommandHandler] Cannot move ${npc_ref} - no place set`);
+    debug_event("RENDERER.MOVEMENT", "move.rejected", {
+      npc_ref,
+      reason: "no_place_set",
+    });
     return;
   }
   
@@ -317,7 +494,11 @@ function execute_move_command(npc_ref: string, cmd: any): void {
   // Find NPC in place
   const npc = current_place.contents.npcs_present.find((n: any) => n.npc_ref === npc_ref);
   if (!npc) {
-    console.log(`[MovementCommandHandler] Cannot move ${npc_ref} - not in current place`);
+    debug_event("RENDERER.MOVEMENT", "move.rejected", {
+      npc_ref,
+      reason: "npc_not_in_place",
+      place_id: current_place.id,
+    });
     return;
   }
   
@@ -329,7 +510,13 @@ function execute_move_command(npc_ref: string, cmd: any): void {
     });
     
     if (path_result.blocked || path_result.path.length === 0) {
-      console.log(`[MovementCommandHandler] Cannot move ${npc_ref} - path blocked`);
+      debug_event("RENDERER.MOVEMENT", "move.rejected", {
+        npc_ref,
+        reason: "path_blocked",
+        place_id: current_place.id,
+        target_x: target.x,
+        target_y: target.y,
+      });
       return;
     }
     
@@ -338,7 +525,7 @@ function execute_move_command(npc_ref: string, cmd: any): void {
   
   // Start movement
   const speed = cmd.speed || 300; // Default 300 tiles/minute
-  
+
   const started = start_entity_movement(
     npc_ref,
     "npc",
@@ -349,13 +536,32 @@ function execute_move_command(npc_ref: string, cmd: any): void {
       priority: 5,
       reason: cmd.reason,
     },
-    speed
+    speed,
+    undefined,
+    undefined,
+    (_pos: TilePosition) => {
+      play_sfx('footstep_blip', { emitter_ref: npc_ref, channel: 'sfx', cooldown_ms: footstep_cooldown_ms(speed) });
+    }
   );
   
   if (started) {
-    console.log(`[MovementCommandHandler] ${npc_ref} moving to (${target.x}, ${target.y})`);
+    debug_event("RENDERER.MOVEMENT", "move.started", {
+      npc_ref,
+      place_id: current_place.id,
+      target_x: target.x,
+      target_y: target.y,
+      speed,
+      reason: cmd.reason,
+    });
   } else {
-    console.log(`[MovementCommandHandler] ${npc_ref} failed to start movement`);
+    debug_event("RENDERER.MOVEMENT", "move.start_failed", {
+      npc_ref,
+      place_id: current_place.id,
+      target_x: target.x,
+      target_y: target.y,
+      speed,
+      reason: cmd.reason,
+    });
   }
 }
 
@@ -438,7 +644,14 @@ function execute_wander_command(npc_ref: string, cmd: any): void {
   });
   
   if (path_result.blocked || path_result.path.length === 0) {
-    console.log(`[MovementCommandHandler] ${npc_ref} wander blocked`);
+    debug_event("RENDERER.MOVEMENT", "wander.blocked", {
+      npc_ref,
+      place_id: current_place.id,
+      start_x: start_position.x,
+      start_y: start_position.y,
+      target_x: target.x,
+      target_y: target.y,
+    });
     npcs_being_processed.delete(npc_ref);
     return;
   }
@@ -468,7 +681,12 @@ function execute_wander_command(npc_ref: string, cmd: any): void {
       // on_complete - receives final position directly from movement engine
       // This is the ACTUAL position the NPC ended up at, regardless of place object refreshes
       npc_actual_positions.set(npc_ref, { ...final_position });
-      console.log(`[MovementCommandHandler] ${npc_ref} completed movement at (${final_position.x}, ${final_position.y}), tracker updated`);
+      debug_event("RENDERER.MOVEMENT", "wander.completed", {
+        npc_ref,
+        place_id: current_place!.id,
+        x: final_position.x,
+        y: final_position.y,
+      });
       // Save to storage via backend
       save_npc_position_on_complete(npc_ref, final_position, current_place!);
       // Release processing lock
@@ -476,17 +694,36 @@ function execute_wander_command(npc_ref: string, cmd: any): void {
     },
     (path) => {
       // on_start - movement started
-      console.log(`[MovementCommandHandler] ${npc_ref} started wandering from (${start_position.x}, ${start_position.y}) to (${target.x}, ${target.y})`);
+      debug_event("RENDERER.MOVEMENT", "wander.started", {
+        npc_ref,
+        place_id: current_place!.id,
+        start_x: start_position.x,
+        start_y: start_position.y,
+        target_x: target.x,
+        target_y: target.y,
+        path_len: Array.isArray(path) ? path.length : undefined,
+        reason: cmd.reason,
+      });
       // Release processing lock once movement has actually started
       npcs_being_processed.delete(npc_ref);
     }
+    ,
+    (_pos: TilePosition) => {
+      play_sfx('footstep_blip', { emitter_ref: npc_ref, channel: 'sfx', cooldown_ms: footstep_cooldown_ms(tiles_per_minute) });
+    }
   );
   
-  if (started) {
-    console.log(`[MovementCommandHandler] ${npc_ref} wandering to (${target.x}, ${target.y})`);
-  } else {
+  if (!started) {
     // Movement failed to start - release the lock
-    console.log(`[MovementCommandHandler] ${npc_ref} failed to start wandering`);
+    debug_event("RENDERER.MOVEMENT", "wander.start_failed", {
+      npc_ref,
+      place_id: current_place.id,
+      start_x: start_position.x,
+      start_y: start_position.y,
+      target_x: target.x,
+      target_y: target.y,
+      reason: cmd.reason,
+    });
     npcs_being_processed.delete(npc_ref);
   }
 }
@@ -526,7 +763,11 @@ async function save_npc_position_on_complete(npc_ref: string, final_position: Ti
         try {
           inbox = JSON.parse(result.content);
         } catch (e) {
-          console.log("[MovementCommandHandler] Failed to parse inbox, creating new");
+          debug_event("RENDERER.MOVEMENT", "inbox.parse_failed", {
+            npc_ref,
+            inbox_path: inboxPath,
+            error: e instanceof Error ? e.message : String(e),
+          });
         }
       }
       
@@ -544,10 +785,12 @@ async function save_npc_position_on_complete(npc_ref: string, final_position: Ti
       const writeResult = await window.electronAPI.writeFile(inboxPath, JSON.stringify(inbox, null, 2));
       
       if (writeResult.success) {
-        console.log(`[MovementCommandHandler] ${npc_ref} position update sent to backend`, {
+        debug_event("RENDERER.MOVEMENT", "npc_position_update.sent", {
+          npc_ref,
           x: final_position.x,
           y: final_position.y,
-          place_id: place.id
+          place_id: place.id,
+          msg_id: positionMsg.id,
         });
       } else {
         console.error(`[MovementCommandHandler] Failed to write inbox for ${npc_ref}:`, writeResult.error);
@@ -563,14 +806,21 @@ async function save_npc_position_on_complete(npc_ref: string, final_position: Ti
  */
 function execute_face_command(npc_ref: string, cmd: any): void {
   if (!current_place) {
-    console.log(`[MovementCommandHandler] Cannot face ${npc_ref} - no place set`);
+    debug_event("RENDERER.MOVEMENT", "face.rejected", {
+      npc_ref,
+      reason: "no_place_set",
+    });
     return;
   }
   
   // Find NPC in place
   const npc = current_place.contents.npcs_present.find((n: any) => n.npc_ref === npc_ref);
   if (!npc) {
-    console.log(`[MovementCommandHandler] Cannot face ${npc_ref} - not in current place`);
+    debug_event("RENDERER.MOVEMENT", "face.rejected", {
+      npc_ref,
+      reason: "npc_not_in_place",
+      place_id: current_place.id,
+    });
     return;
   }
   
@@ -615,6 +865,15 @@ function execute_face_command(npc_ref: string, cmd: any): void {
   // If we have a target position, calculate and set facing
   if (target_pos) {
     face_target(npc_ref, cmd.target_entity || "unknown", target_pos, npc_pos);
+
+    // Track last face target; if NPC is visually in conversation, treat it as conversation target.
+    if (typeof cmd.target_entity === "string" && cmd.target_entity.length > 0) {
+      last_face_target_by_npc.set(npc_ref, cmd.target_entity);
+      const npc = current_place?.contents.npcs_present.find((n: any) => n.npc_ref === npc_ref);
+      if (npc?.status === "busy") {
+        conversation_target_by_npc.set(npc_ref, cmd.target_entity);
+      }
+    }
   }
 }
 
@@ -622,21 +881,46 @@ function execute_face_command(npc_ref: string, cmd: any): void {
  * Execute NPC_STATUS command - Update NPC status for visual indicator
  */
 function execute_status_command(npc_ref: string, cmd: any): void {
+  if (typeof cmd.status === "string") {
+    npc_visual_status_by_ref.set(npc_ref, cmd.status);
+  }
+
   if (!current_place) {
-    console.log(`[MovementCommandHandler] Cannot update status for ${npc_ref} - no place set`);
+    debug_event("RENDERER.MOVEMENT", "status.rejected", {
+      npc_ref,
+      status: cmd.status,
+      reason: "no_place_set",
+    });
     return;
   }
   
   // Find NPC in place
   const npc = current_place.contents.npcs_present.find((n: any) => n.npc_ref === npc_ref);
   if (!npc) {
-    console.log(`[MovementCommandHandler] Cannot update status for ${npc_ref} - not in current place`);
+    debug_event("RENDERER.MOVEMENT", "status.rejected", {
+      npc_ref,
+      status: cmd.status,
+      reason: "npc_not_in_place",
+      place_id: current_place.id,
+    });
     return;
   }
   
   // Update the NPC's status
   npc.status = cmd.status;
-  console.log(`[MovementCommandHandler] ${npc_ref} status updated to ${cmd.status}`);
+  debug_event("RENDERER.MOVEMENT", "status.updated", {
+    npc_ref,
+    status: cmd.status,
+    place_id: current_place.id,
+  });
+
+  // Keep conversation facing target routing through the same visual state variable.
+  if (npc.status === "busy") {
+    const last = last_face_target_by_npc.get(npc_ref);
+    if (last) conversation_target_by_npc.set(npc_ref, last);
+  } else {
+    conversation_target_by_npc.delete(npc_ref);
+  }
 }
 
 /**

@@ -208,7 +208,7 @@ function matches_trigger(
         case "DEFEND_ALLY":
             // Triggered when ally is attacked
             return event_lower.includes("attacks") && 
-                   (event_lower.includes("ally") || context.target_ref?.includes("ally"));
+                   (event_lower.includes("ally") || (context.target_ref?.includes("ally") ?? false));
             
         case "COUNTER_SPELL":
             // Triggered when spell is cast

@@ -198,7 +198,7 @@ After applying these fixes, test the following scenarios:
 
 - [Phase 6 Complete](./PHASE6_COMPLETE.md) - Original Phase 6 documentation
 - [Troubleshooting Guide](./TROUBLESHOOTING.md) - Debug and recovery procedures
-- [Architecture Overview](./ARCHITECTURE.md) - System architecture details
+- [Architecture Overview](../design/ARCHITECTURE.md) - System architecture details
 
 ---
 

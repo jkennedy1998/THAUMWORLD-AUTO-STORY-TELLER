@@ -25,6 +25,7 @@ import { load_actor, save_actor } from "../actor_storage/store.js";
 import { load_npc, save_npc } from "../npc_storage/store.js";
 import { advance_time } from "../time_system/tracker.js";
 import { move_entity_in_index } from "../place_storage/entity_index.js";
+import { end_conversations_involving_entity } from "../npc_ai/witness_handler.js";
 
 /**
  * Calculate the entry position (door position) based on direction
@@ -298,6 +299,12 @@ export async function travel_between_places(
   
   // Update entity index for fast lookups
   move_entity_in_index(slot, entity_ref, from_place_id, target_place_id);
+
+  // If an actor leaves a place, terminate any conversations/engagements in that place.
+  // This prevents NPCs remaining "busy" and following after the player departs.
+  if (!is_npc) {
+    end_conversations_involving_entity(entity_ref, `left place ${from_place_id} -> ${target_place_id}`);
+  }
   
   return {
     ok: true,

@@ -155,7 +155,8 @@ export function applySway(
     // Remove expired sway first
     const now = Date.now();
     const validSway = npcSway.filter(s => {
-        const age = (now - new Date(s.applied_at).getTime()) / 1000;
+        const applied_at = s.applied_at ?? new Date(0).toISOString();
+        const age = (now - new Date(applied_at).getTime()) / 1000;
         // Assume 30 seconds per turn
         const turnsElapsed = age / 30;
         return turnsElapsed < s.duration_turns;
@@ -175,7 +176,8 @@ export function getActiveSway(npcId: string): SwayFactor[] {
     // Filter out expired sway
     const now = Date.now();
     const validSway = npcSway.filter(s => {
-        const age = (now - new Date(s.applied_at).getTime()) / 1000;
+        const applied_at = s.applied_at ?? new Date(0).toISOString();
+        const age = (now - new Date(applied_at).getTime()) / 1000;
         const turnsElapsed = age / 30;
         return turnsElapsed < s.duration_turns;
     });

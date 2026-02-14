@@ -223,14 +223,14 @@ export function remove_conversation_participant(
  * Update all conversations, ending timed-out ones
  * Call this periodically (e.g., every tick)
  */
-export function update_conversations(): string[] {
-  const ended: string[] = [];
+export function update_conversations(): ActiveConversation[] {
+  const ended: ActiveConversation[] = [];
   const now = get_conversation_time_ms();
   
   for (const [npc_ref, conv] of active_conversations) {
     if (now >= conv.timeout_at_ms) {
-      end_conversation(npc_ref);
-      ended.push(npc_ref);
+      const ended_conv = end_conversation(npc_ref);
+      if (ended_conv) ended.push(ended_conv);
     }
   }
   

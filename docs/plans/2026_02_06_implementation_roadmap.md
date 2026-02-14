@@ -21,7 +21,7 @@
 - Conversation threading works
 
 ### ⚠️ Current Limitations
-- Actions have no range validation
+- Some UI range indicators missing (validation exists, but not all visuals)
 - Players cannot travel between regions
 - INSPECT system incomplete
 - UI targeting needs refinement
@@ -43,27 +43,26 @@
 **Implementation Order:**
 
 **Day 1-2: Range Calculator**
-- [ ] Create `src/action_system/range_calculator.ts`
-- [ ] Define base ranges for all action types
-- [ ] Implement distance calculation (Manhattan)
-- [ ] Add modifier support (perks/items)
+- [x] Create range calculation utilities (implemented across action system + rules lawyer; no standalone `range_calculator.ts`)
+- [x] Define base ranges for core action types
+- [x] Implement tile distance calculation (used by ActionPipeline validation)
+- [~] Add modifier support (perks/items) (partial: tool MAG + subtype ranges; broader perks/items pending)
 
 **Day 3-4: Validation Integration**
-- [ ] Integrate into Rules Lawyer
-- [ ] Block out-of-range actions
-- [ ] Generate helpful error messages
-- [ ] Create range suggestions
+- [x] Integrate into Rules Lawyer / ActionPipeline validation
+- [x] Block out-of-range actions
+- [x] Generate helpful error messages
+- [ ] standardize range with MAG as defined in the thaumworld rules
 
 **Day 5-6: UI Indicators**
-- [ ] Add range circle to place module
-- [ ] Highlight valid targets (green)
-- [ ] Gray out invalid targets (red)
+- [x] Add range circle to place module
+- [x] Highlight targets (green)
 - [ ] Show range info in action panel
 
 **Day 7: Testing & Polish**
-- [ ] Test melee attacks (1 tile)
-- [ ] Test ranged attacks (5 tiles)
-- [ ] Test communication (3 tiles)
+- [x] Test melee attacks (1 tile)
+- [x] Test ranged attacks (5 tiles)
+- [x] Test communication (NORMAL = 5 tiles; WHISPER = 3; SHOUT = 30)
 - [ ] Verify modifiers work
 
 **Deliverable:** Actions validate range, UI shows indicators, tactical positioning works.
@@ -104,10 +103,10 @@
 
 **Week 2: Integration**
 
-**Day 8-9: Interpreter Updates**
-- [ ] Detect travel intent
+**Day 8-9: Intent Creation Updates (ActionPipeline)**
+- [ ] Detect travel intent in `interface_program`
 - [ ] Check region connections
-- [ ] Create TRAVEL action type
+- [ ] Create TRAVEL action type (ActionPipeline)
 - [ ] Suggest paths
 
 **Day 10-12: UI Integration**

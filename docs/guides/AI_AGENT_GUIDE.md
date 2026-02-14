@@ -3,43 +3,36 @@
 Quick reference for AI agents working on the THAUMWORLD Auto Story Teller system.
 
 **For comprehensive docs, see:**
-- [ARCHITECTURE.md](./ARCHITECTURE.md) - System overview
-- [SERVICES.md](./SERVICES.md) - Service details
-- [STAGES.md](./STAGES.md) - Message flow
-- [EFFECTS.md](./EFFECTS.md) - RPG effects
-- [ERROR_HANDLING.md](./ERROR_HANDLING.md) - Error standards
+- [ARCHITECTURE.md](../design/ARCHITECTURE.md) - System overview
+- [SERVICES.md](../design/SERVICES.md) - Service details
+- [STAGES.md](../design/STAGES.md) - Message flow
+- [EFFECTS.md](../specs/EFFECTS.md) - RPG effects
+- [ERROR_HANDLING.md](../specs/ERROR_HANDLING.md) - Error standards
 
 ## Quick Start (5 Minutes)
 
 ### 1. System Pattern (Memorize This)
 ```
-File-based message pipeline:
-- Services read from outbox.jsonc
-- Services write to inbox.jsonc or outbox.jsonc
-- Messages have stage and status fields
-- Router in Breath() coordinates flow
+Hybrid action + message system:
+- Player/NPC actions run in-process via the ActionPipeline (in interface_program)
+- Cross-process coordination uses inbox.jsonc/outbox.jsonc message envelopes
+- Renderer is command-driven (movement_command), and can emit witness bridges (perception_event_batch)
 ```
 
 ### 2. Message Flow (Always Follows This)
 ```
-User Input → interface → inbox
+User Input/UI
   ↓
-Breath() routes to interpreter_ai stage in outbox
+interface_program creates action intent + runs ActionPipeline
   ↓
-interpreter_ai reads outbox → writes interpreted_1 to inbox
+outbox.jsonc messages + state files update
   ↓
-Router moves to outbox as interpreted_1
+npc_ai / renderer / renderer_ai consume as needed
   ↓
-data_broker reads → writes brokered_1
-  ↓
-rules_lawyer reads → writes ruling_1 (pending_state_apply)
-  ↓
-state_applier reads → writes applied_1
-  ↓
-renderer_ai reads → writes rendered_1 to inbox
-  ↓
-Canvas displays rendered_1
+UI renders + (optionally) renderer_ai narrates
 ```
+
+Note: `interpreter_ai` is archived in this build; do not route work there.
 
 ### 3. Key File Locations
 ```
@@ -352,9 +345,11 @@ for (const msg of candidates) {
 
 ### Stages and Their Purposes
 
+These are the legacy file-backed stage labels (still present in some message flows). Player/NPC actions (COMMUNICATE/MOVE/USE/INSPECT) are created and executed in-process via the ActionPipeline in `interface_program`.
+
 | Stage | Creator | Consumer | Purpose |
 |-------|---------|----------|---------|
-| interpreter_ai | interface | interpreter_ai | Queue for interpretation |
+| interpreter_ai | interface | interpreter_ai | Archived in this build (legacy stage label) |
 | interpreted_1 | interpreter | data_broker | Machine text ready |
 | brokered_1 | data_broker | rules_lawyer | References resolved |
 | ruling_1 | rules_lawyer | state_applier | Rules applied, effects ready |
@@ -477,8 +472,8 @@ cat local_data/data_slot_1/outbox.jsonc | jq '.messages | map(select(.stage | co
 
 - **THAUMWORLD Rules:** https://www.thaumworld.xyz/rules-index/
 - **Examples:** See docs/examples/README.md
-- **Architecture:** See docs/ARCHITECTURE.md
-- **Services:** See docs/SERVICES.md
+- **Architecture:** See docs/design/ARCHITECTURE.md
+- **Services:** See docs/design/SERVICES.md
 
 ## Remember
 

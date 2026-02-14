@@ -14,7 +14,7 @@ import type { Place, TilePosition } from "../types/place.js";
 import { find_path, type PathResult } from "./pathfinding.js";
 import { debug_log, DEBUG_LEVEL } from "./debug.js";
 import { update_facing_on_move } from "../npc_ai/facing_system.js";
-import { process_witness_movement, calculate_movement_detectability } from "../npc_ai/witness_integration.js";
+import { process_witness_movement, calculate_movement_detectability, emit_move_perception_batch } from "../npc_ai/movement_perception.js";
 import { init_movement_state as init_npc_movement_state, set_goal as set_npc_goal, type Goal as NPCGoal } from "../npc_ai/movement_state.js";
 
 // Default speed: 300 tiles per minute (5 tiles per second = 200ms per tile)
@@ -339,7 +339,9 @@ async function engine_tick(): Promise<void> {
     
     // Check if it's time for next step
     if (now >= state.next_step_time) {
-      debug_log("MovementEngine", `${entity_ref} executing step ${state.step_count}/${state.total_distance}`);
+      if (DEBUG_LEVEL >= 4) {
+        debug_log("MovementEngine", `${entity_ref} executing step ${state.step_count}/${state.total_distance}`);
+      }
       await execute_step(entity_ref, state, place);
     }
   }
@@ -391,38 +393,54 @@ async function execute_step(
     }
     
     // ===== WITNESS SYSTEM: Movement Detection =====
-    // Check if other entities should detect this movement
-    // Only NPCs detect movement (players don't need to detect NPC movement)
-    if (state.entity_type === "npc") {
-      // Get all other entities in the place
-      const other_npcs = place.contents.npcs_present.filter(n => n.npc_ref !== entity_ref);
-      const actors = place.contents.actors_present;
-      
-      // Calculate detectability based on step count and speed
-      const detectability = calculate_movement_detectability(
-        state.total_distance,
-        state.speed_tpm
-      );
-      
-      // Notify nearby observers every few steps
-      const should_notify = state.step_count % 3 === 0 || 
-                           state.step_count === 0 || 
-                           state.step_count >= state.total_distance - 1;
-      
-      if (should_notify) {
-        // Notify NPCs
-        other_npcs.forEach(npc => {
-          process_witness_movement(
-            npc.npc_ref,
-            entity_ref,
-            next_tile,
-            state.step_count,
-            state.total_distance
-          );
+    // Movement should generate perception events regardless of mover type.
+    // Observers are NPCs; the player doesn't need NPC-perception events.
+    const other_npcs = place.contents.npcs_present.filter(n => n.npc_ref !== entity_ref);
+
+    // Calculate detectability based on step count and speed
+    const detectability = calculate_movement_detectability(
+      state.total_distance,
+      state.speed_tpm
+    );
+
+    // Notify nearby observers every few steps
+    const should_notify = state.step_count % 3 === 0 ||
+                         state.step_count === 0 ||
+                         state.step_count >= state.total_distance - 1;
+
+    if (should_notify) {
+      // Renderer-side trace logging (no-op at normal debug levels)
+      other_npcs.forEach(npc => {
+        process_witness_movement(
+          npc.npc_ref,
+          entity_ref,
+          next_tile,
+          state.step_count,
+          state.total_distance
+        );
+      });
+
+      // Emit movement perception batch to backend witness system.
+      // This is renderer->backend bridging so movement uses the same sensing pipeline.
+      try {
+        void emit_move_perception_batch({
+          place,
+          mover_ref: entity_ref,
+          mover_position: next_tile,
+          step_number: state.step_count,
+          total_steps: state.total_distance,
+          speed_tpm: state.speed_tpm,
         });
-        
-        // Log movement detection level
-        debug_log("MovementEngine", `${entity_ref} movement step ${state.step_count}/${state.total_distance}: ${detectability.description} (intensity: ${detectability.intensity}, range: ${detectability.range})`);
+      } catch {
+        // Ignore; renderer should not crash on perception emission failures.
+      }
+
+      // Log movement detection level
+      if (DEBUG_LEVEL >= 4) {
+        debug_log(
+          "MovementEngine",
+          `${entity_ref} movement step ${state.step_count}/${state.total_distance}: ${detectability.description} (intensity: ${detectability.intensity}, range: ${detectability.range})`
+        );
       }
     }
     

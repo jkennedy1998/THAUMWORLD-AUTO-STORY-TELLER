@@ -174,6 +174,8 @@ async function build_participant_memory(
     const parts = ref.split(".");
     const type = parts[0];
     const id = parts[1];
+
+    if (!type || !id) return null;
     
     if (type === "actor") {
         const result = load_actor(slot, id);
@@ -263,7 +265,7 @@ function extract_notable_features(entity: Record<string, unknown>): string[] {
     }
     
     // Wound status
-    const health = (entity.resources?.health || {}) as Record<string, number>;
+    const health = (((entity as any).resources?.health || {}) as Record<string, number>);
     if (health.current !== undefined && health.max !== undefined) {
         const ratio = health.current / health.max;
         if (ratio < 0.25) features.push("critically wounded");

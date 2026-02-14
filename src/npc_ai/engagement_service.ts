@@ -3,7 +3,6 @@
 // Tabletop concept: "NPC stops what they're doing to talk"
 
 import { debug_log } from "../shared/debug.js";
-import { send_stop_command, send_face_command, send_status_command } from "../npc_ai/movement_command_sender.js";
 
 export type EngagementType = "participant" | "bystander";
 export type EngagementState = "idle" | "engaged" | "distracted" | "leaving";
@@ -88,11 +87,9 @@ export function enterEngagement(
   engagements.set(npc_ref, engagement);
   
   debug_log("[ENGAGEMENT]", `${npc_ref} entered ${type} engagement with ${target_ref}`);
-  
-  // Send commands to frontend
-  send_stop_command(npc_ref, "Entering conversation");
-  send_face_command(npc_ref, target_ref, "Facing conversation partner");
-  send_status_command(npc_ref, "busy", "In conversation");
+
+  // NOTE: Engagement is tracking-only.
+  // Movement/facing/status commands are emitted by the witness system.
 }
 
 /**
@@ -152,7 +149,7 @@ export function endEngagement(npc_ref: string, reason: string): void {
   }
   
   // Clear status
-  send_status_command(npc_ref, "present", "Leaving conversation");
+  // Conversation visual status is emitted by witness_* (single authority)
   
   // Remove engagement
   engagements.delete(npc_ref);
@@ -199,7 +196,7 @@ export function clearAllEngagements(): void {
   debug_log("[ENGAGEMENT]", "Clearing all engagements");
   
   for (const npc_ref of engagements.keys()) {
-    send_status_command(npc_ref, "present", "System clearing engagements");
+    // Conversation visual status is emitted by witness_* (single authority)
   }
   
   engagements.clear();

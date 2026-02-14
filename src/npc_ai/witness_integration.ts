@@ -1,14 +1,17 @@
 /**
- * Witness Integration
- * 
- * Bridges the NPC_AI system with the witness/reaction system.
- * Called when NPCs detect communication or movement to trigger real-time reactions.
+ * Witness Integration (LEGACY)
+ *
+ * This module remains only as a compatibility surface while the project converges on the
+ * canonical witness pipeline.
+ *
+ * Canonical ownership:
+ * - Conversation start/end + reactions: `src/npc_ai/witness_handler.ts`
+ * - Renderer-safe movement perception helpers: `src/npc_ai/movement_perception.ts`
  */
 
 import { debug_log } from "../shared/debug.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
 import type { TilePosition } from "../types/place.js";
-import { load_place } from "../place_storage/store.js";
 import { load_npc } from "../npc_storage/store.js";
 
 // Import witness system components
@@ -47,12 +50,9 @@ import {
 
 import {
     face_target,
-    get_facing
 } from "./facing_system.js";
 
-import {
-    is_action_detectable
-} from "../action_system/sense_broadcast.js";
+// NOTE: movement detection exports are re-exported from movement_perception.
 
 const data_slot = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
 
@@ -112,43 +112,7 @@ export function process_witness_communication(
     }
 }
 
-/**
- * Process movement detection
- * Called per-step when an entity moves
- * 
- * @param observer_ref - The NPC observing the movement
- * @param mover_ref - The entity that moved
- * @param mover_position - Current position of mover
- * @param step_number - Which step in the movement path (0-indexed)
- * @param total_steps - Total number of steps in movement
- */
-export function process_witness_movement(
-    observer_ref: string,
-    mover_ref: string,
-    mover_position: TilePosition,
-    step_number: number = 0,
-    total_steps: number = 1
-): void {
-    // Only react periodically to avoid spam
-    // React every 3 steps or on the first/last step
-    const should_react = step_number === 0 || 
-                        step_number === total_steps - 1 || 
-                        step_number % 3 === 0;
-    
-    if (!should_react) return;
-    
-    debug_log("[Witness]", `${observer_ref} detected movement from ${mover_ref} at step ${step_number}/${total_steps}`);
-    
-    // TODO: Calculate distance and check if observer can hear/see
-    // For now, just log
-    
-    // If in conversation with this mover, face them
-    const conv = get_conversation(observer_ref);
-    if (conv && conv.target_entity === mover_ref) {
-        // Update facing to track them
-        debug_log("[Witness]", `${observer_ref} tracking ${mover_ref} during conversation`);
-    }
-}
+export { process_witness_movement, calculate_movement_detectability } from "./movement_perception.js";
 
 /**
  * Handle farewell message
@@ -297,24 +261,4 @@ function restore_previous_goal(npc_ref: string): void {
  * Check if movement should be detectable based on step count
  * Walking is quieter than running, fewer steps = less sound
  */
-export function calculate_movement_detectability(
-    total_steps: number,
-    speed: number = 300 // tiles per minute
-): { intensity: number; range: number; description: string } {
-    // Fewer steps = slower movement = quieter
-    // Speed: 300 TPM is normal walk, 600 is run
-    
-    if (speed >= 500) {
-        // Running - loud
-        return { intensity: 6, range: 8, description: "running (loud)" };
-    } else if (total_steps <= 2) {
-        // Very short movement - subtle
-        return { intensity: 2, range: 3, description: "subtle movement (quiet)" };
-    } else if (total_steps <= 5) {
-        // Short movement
-        return { intensity: 3, range: 5, description: "walking (normal)" };
-    } else {
-        // Longer movement - more noticeable
-        return { intensity: 4, range: 6, description: "extended movement" };
-    }
-}
+// NOTE: legacy movement detectability function is re-exported above.

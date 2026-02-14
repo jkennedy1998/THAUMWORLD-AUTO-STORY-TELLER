@@ -2,6 +2,7 @@
 // Handles text input, volume selection, and intent creation
 
 import { createIntent } from "../action_system/intent.js";
+import { get_sense_profile } from "../action_system/sense_broadcast.js";
 import { load_actor } from "../actor_storage/store.js";
 import { getActorTarget, hasValidTarget } from "./target_state.js";
 import { debug_log } from "../shared/debug.js";
@@ -20,6 +21,20 @@ export interface CommunicationIntent {
   tool: string;
 }
 
+function get_communicate_pressure_range_tiles(volume: VolumeLevel): number {
+  const profile = get_sense_profile("COMMUNICATE", volume);
+  const pressure = profile?.broadcasts.find(b => b.sense === "pressure");
+  if (pressure?.range_tiles) return pressure.range_tiles;
+
+  // Fallback values should match `src/action_system/sense_broadcast.ts`.
+  switch (volume) {
+    case "WHISPER": return 3;
+    case "NORMAL": return 5;
+    case "SHOUT": return 30;
+    default: return 5;
+  }
+}
+
 // Current state
 let current_volume: VolumeLevel = "NORMAL";
 let current_message: string = "";
@@ -30,9 +45,8 @@ let current_message: string = "";
 export function setVolume(volume: VolumeLevel): void {
   debug_log("[INPUT]", `Volume set to: ${volume}`);
   current_volume = volume;
-  
-  // TODO: Update UI to show selected volume
-  // This will be called by the UI component
+
+  // UI rendering of selected volume is handled by the frontend.
 }
 
 /**
@@ -114,6 +128,7 @@ export function createCommunicationIntent(): CommunicationIntent | null {
   // Return the full intent with actorLocation for the action pipeline
   return {
     ...intent,
+    verb: "COMMUNICATE",
     message: intent.parameters?.message || "",
     volume: current_volume,
     tool: "actor.voice"
@@ -142,22 +157,18 @@ export function handleCommunicationSubmit(
  * Get range for volume level
  */
 export function getVolumeRange(volume: VolumeLevel): number {
-  switch (volume) {
-    case "WHISPER": return 1;
-    case "NORMAL": return 10;
-    case "SHOUT": return 30;
-    default: return 10;
-  }
+  return get_communicate_pressure_range_tiles(volume);
 }
 
 /**
  * Get description for volume level
  */
 export function getVolumeDescription(volume: VolumeLevel): string {
+  const range = getVolumeRange(volume);
   switch (volume) {
-    case "WHISPER": return "Only audible to adjacent targets (1 tile)";
-    case "NORMAL": return "Normal conversation range (10 tiles)";
-    case "SHOUT": return "Loud, attracts attention (30 tiles)";
-    default: return "Normal conversation range";
+    case "WHISPER": return `Quiet; audible within ${range} tiles`;
+    case "NORMAL": return `Normal conversation; audible within ${range} tiles`;
+    case "SHOUT": return `Loud; audible within ${range} tiles`;
+    default: return `Audible within ${range} tiles`;
   }
 }

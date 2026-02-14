@@ -98,6 +98,10 @@ export function append_log_message(log_path: string, sender: string, content: st
 
 export function append_log_envelope(log_path: string, message: MessageEnvelope): MessageEnvelope {
     const log = read_log(log_path);
+
+    // Dedup by id: keep the newest copy of a message envelope.
+    // Many services append updated status versions of the same message id.
+    log.messages = log.messages.filter((m) => m?.id !== message.id);
     log.messages.unshift(message);
     
     // Rotate log if it gets too large (keep last 100 messages for cleaner UI)
@@ -108,4 +112,22 @@ export function append_log_envelope(log_path: string, message: MessageEnvelope):
     
     write_log(log_path, log);
     return message;
+}
+
+export function prune_log_noise(log_path: string, opts?: { max_messages?: number }): void {
+    const max_messages = opts?.max_messages ?? 4000;
+    const log = read_log(log_path);
+
+    // Remove pure-noise messages that are not useful for narrative/UI and can spam the log.
+    // These are coordination messages between renderer and npc_ai.
+    log.messages = log.messages.filter((m: any) => {
+        if (m?.type === "npc_position_update") return false;
+        return true;
+    });
+
+    if (log.messages.length > max_messages) {
+        log.messages = log.messages.slice(0, max_messages);
+    }
+
+    write_log(log_path, log);
 }

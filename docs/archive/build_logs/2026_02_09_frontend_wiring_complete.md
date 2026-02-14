@@ -150,7 +150,7 @@ grep -E "Target selected|Wired target|Set target|COMMUNICATE intent" local_data/
 
 **Remaining (20%):**
 - ⏳ Volume buttons UI (logic ready)
-- ⏳ White "O" indicator (exists in debug mode only)
+- ⏳ Conversation debug indicator `o/O` (exists in debug mode only)
 - ⏳ End-to-end testing
 - ⏳ Memory storage (algorithm ready, not wired)
 

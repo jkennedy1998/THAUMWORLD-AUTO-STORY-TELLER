@@ -45,25 +45,19 @@ function initializeSessionId(): string {
   return newSessionId;
 }
 
-// Current session ID
-let currentSessionId = initializeSessionId();
+// Current session ID (exported as a live binding).
+// This allows long-running services to follow updates to `.session_id`.
+export let SESSION_ID = initializeSessionId();
 
 // Poll session file every 5 seconds to detect late starters or updates
 setInterval(() => {
   const sessionFile = readSessionFile();
-  if (sessionFile && sessionFile.session_id && sessionFile.session_id !== currentSessionId) {
-    console.log(`[Session] Session file updated: ${currentSessionId} -> ${sessionFile.session_id}`);
+  if (sessionFile && sessionFile.session_id && sessionFile.session_id !== SESSION_ID) {
+    console.log(`[Session] Session file updated: ${SESSION_ID} -> ${sessionFile.session_id}`);
     console.log(`[Session] New boot time: ${sessionFile.boot_time}`);
-    currentSessionId = sessionFile.session_id;
+    SESSION_ID = sessionFile.session_id;
   }
 }, 5000);
-
-/**
- * Unique session identifier for the current system boot.
- * Format: session_<timestamp>_<random>
- * Read from shared file for multi-service coordination.
- */
-export const SESSION_ID = currentSessionId;
 
 /**
  * Checks if a message belongs to the current session.

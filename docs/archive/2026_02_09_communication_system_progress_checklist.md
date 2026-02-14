@@ -1,7 +1,7 @@
 # Communication System - Progress Checklist
 
 **Date:** 2026-02-09  
-**Plan:** docs/plans/2026_02_09_conversation_system.md
+**Plan:** docs/archive/2026_02_09_conversation_system_IMPLEMENTED.md
 
 ---
 
@@ -68,14 +68,15 @@
 - [ ] Frontend integration with backend click handlers
 
 ### Integration
-- [ ] Wire engagement_service to witness_handler
-- [ ] Test: NPC stops and faces when communicated to
-- [ ] White "O" indicator appears
-- [ ] Facing updates
+- [x] Wire engagement_service to witness_handler
+- [x] Test: NPC stops and faces when communicated to
+- [x] Debug conversation indicator appears (`o/O` in `\` debug mode)
+- [x] Facing updates while moving (NPC keeps facing conversation target)
 
 ### Missing Features
 - [ ] Resume interrupted actions
-- [ ] Farewell detection
+- [x] Farewell detection ("bye"/"goodbye" ends conversation)
+- [x] Leaving place ends conversation/engagement (prevents stuck-follow)
 - [ ] Cache interest scores (performance)
 - [ ] Test with multiple NPCs
 - [ ] Participant memories (full detail)
@@ -108,7 +109,7 @@
 
 **What's Needed:**
 - Volume buttons UI components (logic ready)
-- White "O" indicator (works in debug mode only)
+- Conversation debug indicator `o/O` (works in debug mode only)
 - Memory persistence (algorithm ready, not storing)
 - Comprehensive testing
 

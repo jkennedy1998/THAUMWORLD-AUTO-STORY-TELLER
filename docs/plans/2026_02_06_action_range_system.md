@@ -190,9 +190,9 @@ Player attacks rushed (PARTIAL action):
 
 | Subtype | Range | Action Cost | Detection |
 |---------|-------|-------------|-----------|
-| **COMMUNICATE.WHISPER** | 1 tile | FREE | Only adjacent hear |
-| **COMMUNICATE** | 3 tiles | FREE | Normal hearing range |
-| **COMMUNICATE.SHOUT** | 10 tiles | FREE | Long range, may attract enemies |
+| **COMMUNICATE.WHISPER** | 3 tiles | FREE | Quiet; nearby only |
+| **COMMUNICATE** | 5 tiles | FREE | Normal conversation range |
+| **COMMUNICATE.SHOUT** | 30 tiles | FREE | Long range; may attract enemies |
 | **COMMUNICATE.TELEPATHY** | ∞ | FREE | No physical detection |
 
 **TODO:** Telepathy system (requires psychic ability)
@@ -407,9 +407,9 @@ Target at 12 tiles (MAG 5):
 
 | Action/Subtype | Base Range | Range Modifier Sources |
 |----------------|------------|----------------------|
-| COMMUNICATE.WHISPER | 1 tile | — |
-| COMMUNICATE | 3 tiles | — |
-| COMMUNICATE.SHOUT | 10 tiles | — |
+| COMMUNICATE.WHISPER | 3 tiles | — |
+| COMMUNICATE | 5 tiles | — |
+| COMMUNICATE.SHOUT | 30 tiles | — |
 | MOVE | ∞ | — |
 | USE.IMPACT_SINGLE | 1 tile | `effect.far_reach` (+1) |
 | USE.PROJECTILE_SINGLE | 5 tiles | Tool MAG, `perk.long_shot` (+2) |
@@ -1137,9 +1137,9 @@ src/action_handlers/
 **Implemented Handlers:**
 
 **1. COMMUNICATE Action**
-- WHISPER: 1 tile range
-- NORMAL: 3 tiles range
-- SHOUT: 10 tiles range
+- WHISPER: 3 tile range
+- NORMAL: 5 tile range
+- SHOUT: 30 tile range
 - TELEPATHY: Unlimited (placeholder)
 
 **2. MOVE Action**
@@ -1176,7 +1176,7 @@ src/action_handlers/inspect.ts
 **Features:**
 - Single INSPECT action (no subtypes needed)
 - Distance MAG determines clarity
-- Best sense auto-selected (sight, hearing, smell, magic)
+- Best sense auto-selected (light, pressure, aroma, thaumic)
 - Clarity levels: clear, vague, obscured, none
 - Detail varies by distance:
   - Clear: Full appearance, equipment, condition

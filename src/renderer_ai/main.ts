@@ -42,6 +42,45 @@ const RENDERER_SYSTEM_PROMPT = [
     "Only describe what the player character experiences in the moment.",
 ].join("\n");
 
+function normalize_action_verb(v: string | null): string | null {
+    if (!v) return null;
+    const s = String(v).trim().toUpperCase();
+    return s.length > 0 ? s : null;
+}
+
+function move_is_travelish(events: string[]): boolean {
+    const joined = events.join(" ");
+    // Heuristics: moving to a named place/region tile is travel; moving within a place tile grid is local.
+    if (/\bregion_tile\./i.test(joined)) return true;
+    if (/\bplace\.[a-z0-9_]+\.[a-z0-9_]+/i.test(joined)) return true;
+    return false;
+}
+
+function move_has_notable_outcome(events: string[], effects: string[]): boolean {
+    if (effects.length > 0) return true;
+    const joined = `${events.join(" ")} ${effects.join(" ")}`.toLowerCase();
+    // If something went wrong / changed state, narrate.
+    if (joined.includes("blocked")) return true;
+    if (joined.includes("fail")) return true;
+    if (joined.includes("stumble")) return true;
+    if (joined.includes("system.set_awareness")) return true;
+    return false;
+}
+
+function should_skip_narration(action_verb: string | null, events: string[], effects: string[]): { skip: boolean; reason?: string } {
+    const v = normalize_action_verb(action_verb);
+    if (!v) return { skip: false };
+
+    // MOVE within a place should not produce narration unless something notable happened.
+    if (v === "MOVE") {
+        if (!move_is_travelish(events) && !move_has_notable_outcome(events, effects)) {
+            return { skip: true, reason: "MOVE.local.no_notable_outcome" };
+        }
+    }
+
+    return { skip: false };
+}
+
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -218,38 +257,61 @@ function generateInspectNarrativePrompt(params: {
     original_text: string;
     events: string[];
     effects: string[];
+    context?: Record<string, unknown>;
 }): string {
+    const ctx = params.context ?? {};
+    const ir = (ctx as any).inspect_result as any;
+    if (ir && typeof ir === "object") {
+        const clarity = String(ir.clarity ?? "unknown");
+        const sense = String(ir.sense_used ?? "unknown");
+        const short_desc = String(ir?.content?.short_description ?? "").trim();
+        const full_desc = String(ir?.content?.full_description ?? "").trim();
+        const features = Array.isArray(ir?.content?.features) ? ir.content.features : [];
+
+        const feature_lines = features
+            .filter((f: any) => !!f && f.discovered === true)
+            .slice(0, 6)
+            .map((f: any) => `- ${String(f.description ?? f.name ?? "").trim()}`)
+            .filter((s: string) => s.length > 2)
+            .join("\n");
+
+        const sensory = ir?.content?.sensory_details;
+        const sensory_lines: string[] = [];
+        if (sensory && typeof sensory === "object") {
+            for (const k of Object.keys(sensory)) {
+                const arr = (sensory as any)[k];
+                if (Array.isArray(arr) && arr.length > 0) {
+                    sensory_lines.push(`${k}: ${arr.slice(0, 6).join(", ")}`);
+                }
+            }
+        }
+
+        return `The player inspects a target. Use ONLY the provided inspection result.
+
+INSPECTION RESULT:
+Clarity: ${clarity}
+Sense: ${sense}
+Short: ${short_desc || "(none)"}
+Full: ${full_desc || "(none)"}
+Sensory: ${sensory_lines.length > 0 ? sensory_lines.join(" | ") : "(none)"}
+Notable features (discovered only):
+${feature_lines || "- (none)"}
+
+Write 1-2 concise sentences in second person.
+Do NOT invent new features, items, identities, or facts.
+If clarity is vague/obscured, keep it restrained and do not add extra detail beyond Short/Sensory/Notable features.`;
+    }
+
+    // Fallback: older, less-structured prompt.
     const rawTarget = params.events[0]?.match(/target=([^,)]+)/)?.[1] || "the area";
     const target = resolveRegionName(rawTarget);
     const hasFindings = params.effects.length > 0;
-    
-    // Extract actor ID from event (e.g., "actor.henry_actor.INSPECT...")
-    const actorMatch = params.events[0]?.match(/actor\.([^.]+)\./);
-    const actorId = actorMatch?.[1];
-    
-    // Get place details for rich descriptions
-    const placeDetails = getPlaceDetails(rawTarget, actorId);
-    
-    let placeContext = "";
-    if (placeDetails) {
-        placeContext = `
-PLACE DETAILS:
-Name: ${placeDetails.name}
-Description: ${placeDetails.description}
-Sensory: ${placeDetails.sensory}
-Features: ${placeDetails.features}`;
-    }
-    
-    return `The player is inspecting ${target}.${placeContext}
-${hasFindings 
-    ? "They discover something noteworthy. Describe what they find in detail, incorporating the place's atmosphere and features."
-    : "They find nothing of particular interest. Describe the place using its sensory details and features."}
 
-Write a descriptive narrative (2-4 sentences) of what they see, hear, or notice.
-Use the sensory details provided above (sights, sounds, smells, textures).
-Mention specific features of the place if appropriate.
-Write in second person ("You see...", "You notice...", "The air smells of...").
-Keep it immersive and atmospheric.`;
+    return `The player is inspecting ${target}.
+${hasFindings ? "They discover something noteworthy." : "They find nothing of particular interest."}
+
+Write a brief narrative (1-2 sentences) in second person.
+Do not invent specific findings unless explicitly provided in the input.`;
 }
 
 function generateAttackNarrativePrompt(params: {
@@ -278,40 +340,71 @@ function generateCommunicateNarrativePrompt(params: {
     original_text: string;
     events: string[];
     effects: string[];
+    context?: Record<string, unknown>;
 }): string {
+    const ctx = params.context ?? {};
+
     const text = params.events[0]?.match(/text="([^"]+)"/)?.[1] || params.original_text || "something";
-    const targets = params.events[0]?.match(/targets=\[([^\]]*)\]/)?.[1];
-    const hasTarget = targets && targets.length > 0 && !targets.includes("[]");
-    
-    // Extract actor ID and get location context
-    const actorMatch = params.events[0]?.match(/actor\.([^.]+)\./);
-    const actorId = actorMatch?.[1];
+    const actor_ref = typeof (ctx as any).actor_ref === "string" ? ((ctx as any).actor_ref as string) : "actor.unknown";
+    const target_ref = typeof (ctx as any).target_ref === "string" ? ((ctx as any).target_ref as string) : null;
+    const volume = typeof (ctx as any).intent_subtype === "string" ? ((ctx as any).intent_subtype as string) : "NORMAL";
+    const conversation_phase = typeof (ctx as any).conversation_phase === "string" ? ((ctx as any).conversation_phase as string) : "mid";
+    const observed_by = Array.isArray((ctx as any).observed_by) ? ((ctx as any).observed_by as unknown[]) : [];
+    const heard_by = observed_by
+        .filter((r) => typeof r === "string")
+        .map((r) => (r as string).split(".").pop() ?? (r as string));
+
+    const actor_id = actor_ref.startsWith("actor.") ? actor_ref.slice("actor.".length) : actor_ref;
+    const target_name = target_ref ? target_ref.split(".").pop() ?? target_ref : null;
+
     let locationContext = "";
-    
-    if (actorId) {
-        const actorResult = load_actor(data_slot_number, actorId);
+    let placeDetailsText = "";
+    try {
+        const actorResult = load_actor(data_slot_number, actor_id);
         if (actorResult.ok) {
             const placeId = (actorResult.actor as any)?.location?.place_id;
             if (placeId) {
                 const placeResult = load_place(data_slot_number, placeId);
                 if (placeResult.ok) {
                     const placeName = placeResult.place.name || placeId;
-                    locationContext = `\nCURRENT LOCATION: The player is in ${placeName}.`;
+                    locationContext = `\nCURRENT LOCATION: ${placeName}`;
+
+                    const desc = ((placeResult.place as any).description ?? "").toString().trim();
+                    const sensory = ((placeResult.place as any).sensory ?? "").toString().trim();
+                    const features = Array.isArray((placeResult.place as any).features)
+                        ? ((placeResult.place as any).features as unknown[]).slice(0, 6).join(", ")
+                        : "";
+
+                    const parts = [
+                        desc ? `Description: ${desc}` : "",
+                        sensory ? `Sensory: ${sensory}` : "",
+                        features ? `Features: ${features}` : "",
+                    ].filter(p => p.length > 0);
+
+                    if (parts.length > 0) {
+                        placeDetailsText = `\nPLACE CONTEXT:\n${parts.join("\n")}`;
+                    }
                 }
             }
         }
+    } catch {
+        // best-effort only
     }
-    
-    return `The player says: "${text}"${locationContext}
-${hasTarget 
-    ? "They are speaking to someone present in this location."
-    : "They speak but there's no one around to hear."}
 
-Write a narrative (1-2 sentences) describing ONLY the act of speaking.
-Describe the tone, volume, and manner of speaking.
-DO NOT describe the surroundings or invent details not in the context.
-DO NOT add meta-commentary about what will happen next.
-${hasTarget ? "Set up that someone heard them." : "Convey the emptiness of the moment."}
+    const addressing = target_name ? `to ${target_name}` : "into the air";
+
+    return `The player speaks ${addressing}.${locationContext}${placeDetailsText}
+Spoken text: "${text}"
+Volume: ${volume}
+Conversation phase: ${conversation_phase}
+Heard by: ${heard_by.length > 0 ? heard_by.join(", ") : "(nobody)"}
+
+Write exactly 2 lines of narration.
+Line 1: describe the act of speaking (tone, volume, intent).
+Line 2: describe the immediate social beat (someone hears/turns/reacts if Heard by is not (nobody), otherwise the emptiness).
+Do NOT invent spoken replies or quotes from NPCs; dialogue will be provided separately by NPC response lines.
+Do NOT mention specific objects or events unless explicitly present in PLACE CONTEXT or the input fields.
+Stay grounded in the provided context; do not invent new world facts.
 Write in second person.`;
 }
 
@@ -341,6 +434,18 @@ Sensory: ${placeDetails.sensory}
 Features: ${placeDetails.features}`;
     }
     
+    const travelish = move_is_travelish(params.events);
+
+    if (!travelish) {
+        return `The player moves locally within the current place.
+Events: ${params.events.join(", ") || "none"}
+Effects: ${params.effects.join(", ") || "none"}
+
+If nothing notable occurs, write exactly 0 lines (output nothing).
+If something notable occurs (blocked path, stumble, bumped into someone, sudden sensation), write 1-2 concise sentences.
+Write in second person.`;
+    }
+
     return `The player ${mode}s toward ${destination}.${placeContext}
 
 Write a travel narrative (2-4 sentences) describing their movement and arrival.
@@ -387,15 +492,26 @@ function build_renderer_prompt(params: {
     events: string[];
     effects: string[];
     action_verb: string | null;
+    context?: Record<string, unknown>;
 }): string {
     // Route to action-specific narrative generator
     switch (params.action_verb) {
         case "INSPECT":
-            return generateInspectNarrativePrompt(params);
+            return generateInspectNarrativePrompt({
+                original_text: params.original_text,
+                events: params.events,
+                effects: params.effects,
+                context: params.context,
+            });
         case "ATTACK":
             return generateAttackNarrativePrompt(params);
         case "COMMUNICATE":
-            return generateCommunicateNarrativePrompt(params);
+            return generateCommunicateNarrativePrompt({
+                original_text: params.original_text,
+                events: params.events,
+                effects: params.effects,
+                context: params.context,
+            });
         case "MOVE":
             return generateMoveNarrativePrompt(params);
         case "USE":
@@ -412,6 +528,7 @@ async function run_renderer_ai(params: {
     events: string[];
     effects: string[];
     action_verb: string | null;
+    context?: Record<string, unknown>;
 }): Promise<string> {
     const session_key = get_session_key(params.msg);
     const history = get_session_history(session_key);
@@ -422,6 +539,7 @@ async function run_renderer_ai(params: {
         events: params.events,
         effects: params.effects,
         action_verb: params.action_verb,
+        context: params.context,
     });
 
     const messages: OllamaMessage[] = [
@@ -453,7 +571,13 @@ async function run_renderer_ai(params: {
             chars: response.content.length,
         });
 
-        const cleaned = strip_code_fences(response.content).trim();
+        let cleaned = strip_code_fences(response.content).trim();
+
+        // Keep COMMUNICATE narration tight (2 lines max).
+        if (params.action_verb === "COMMUNICATE") {
+            const lines = cleaned.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+            cleaned = lines.slice(0, 2).join("\n");
+        }
         
         // AI I/O Logging
         const fullPrompt = messages.map(m => `${m.role}: ${m.content}`).join('\n');
@@ -522,23 +646,69 @@ async function run_renderer_ai(params: {
 async function process_message(outbox_path: string, inbox_path: string, log_path: string, msg: MessageEnvelope): Promise<void> {
     debug_log("Renderer: received", { id: msg.id, status: msg.status, stage: msg.stage });
 
+    // Best-effort lock (prevents double-processing if the same message is seen twice).
+    const now_ms = Date.now();
+    const meta0 = (msg.meta as Record<string, unknown> | undefined) ?? {};
+    const lock_at = typeof meta0.render_lock_at_ms === "number" ? (meta0.render_lock_at_ms as number) : null;
+    if (lock_at !== null && Number.isFinite(lock_at) && now_ms - lock_at < 30_000) {
+        return;
+    }
+
     const processing = try_set_message_status(msg, "processing");
     if (!processing.ok) return;
+
+    processing.message.meta = {
+        ...(processing.message.meta ?? {}),
+        render_lock_at_ms: now_ms,
+    };
     update_outbox_message(outbox_path, processing.message);
     append_log_envelope(log_path, processing.message);
 
-    const meta = (msg.meta as Record<string, unknown> | undefined) ?? {};
+    const meta = (processing.message.meta as Record<string, unknown> | undefined) ?? {};
     const effects = Array.isArray(meta?.effects) ? (meta.effects as string[]) : [];
     const events = Array.isArray(meta?.events) ? (meta.events as string[]) : [];
     const original_text = typeof meta?.original_text === "string" ? (meta.original_text as string) : "";
     const machine_text = typeof meta?.machine_text === "string" ? (meta.machine_text as string) : "";
-    const action_verb = typeof meta?.action_verb === "string" ? (meta.action_verb as string) : null;
+    const action_verb =
+        (typeof meta?.action_verb === "string" ? (meta.action_verb as string) : null) ??
+        (typeof (meta as any)?.intent_verb === "string" ? ((meta as any).intent_verb as string) : null);
+    const action_verb_norm = normalize_action_verb(action_verb);
+
+    const renderer_context = typeof (meta as any)?.renderer_context === "object" && (meta as any).renderer_context !== null
+        ? ((meta as any).renderer_context as Record<string, unknown>)
+        : {
+            actor_ref: (meta as any)?.actor_ref,
+            target_ref: (meta as any)?.target_ref,
+            intent_subtype: (meta as any)?.intent_subtype,
+            observed_by: (meta as any)?.observed_by,
+            response_eligible_by: (meta as any)?.response_eligible_by,
+            conversation_phase: (meta as any)?.conversation_phase,
+        };
 
     if (effects.length > 0) {
         debug_log("Renderer: effects", { id: msg.id, effects });
     }
     
     debug_log("Renderer: action detected", { id: msg.id, action_verb: action_verb || "unknown" });
+
+    // Narration routing by action type: some actions should not emit narration unless notable.
+    const skip = should_skip_narration(action_verb_norm, events, effects);
+    if (skip.skip) {
+        const done = try_set_message_status(processing.message, "done");
+        if (done.ok) {
+            done.message.meta = {
+                ...(done.message.meta ?? {}),
+                rendered: true,
+                rendered_skipped: true,
+                rendered_skip_reason: skip.reason ?? "unknown",
+            };
+            update_outbox_message(outbox_path, done.message);
+            append_log_envelope(log_path, done.message);
+        }
+        debug_log("Renderer: narration skipped", { id: msg.id, action_verb: action_verb_norm, reason: skip.reason });
+        await sleep(0);
+        return;
+    }
 
     // Log the exact input being sent to renderer
     console.log(`\n[RENDERER_AI] =========================================`);
@@ -553,7 +723,8 @@ async function process_message(outbox_path: string, inbox_path: string, log_path
         machine_text,
         events,
         effects,
-        action_verb,
+        action_verb: action_verb_norm,
+        context: renderer_context,
     });
     const content = response_text.length > 0 ? response_text : "Narration unavailable.";
     
@@ -609,8 +780,8 @@ async function tick(outbox_path: string, inbox_path: string, log_path: string): 
         const candidates = outbox.messages.filter((m) => {
             if (!m.stage?.startsWith("applied_")) return false;
             if ((m.meta as any)?.rendered === true) return false;
-            // Include sent, done, OR processing messages that aren't rendered yet
-            if ((m.status === "sent" || m.status === "done" || m.status === "processing") && isCurrentSession(m)) return true;
+            // Only process stable "ready" messages. Never re-process "processing".
+            if ((m.status === "sent" || m.status === "done") && isCurrentSession(m)) return true;
             return false;
         });
 

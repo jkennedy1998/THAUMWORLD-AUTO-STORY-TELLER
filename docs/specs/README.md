@@ -8,6 +8,7 @@ This directory contains detailed technical specifications, standards, and system
 - **EFFECTS.md** - Effect system specification (damage types, conditions, durations, etc.)
 - **TIMED_EVENTS.md** - Timed event system documentation (scheduling, triggers, execution)
 - **ERROR_HANDLING.md** - Error handling standards and conventions
+- **TAG_SYSTEM.md** - Tag rules reference (items/characters/tiles)
 
 ### Language & Syntax
 - **MACHINE_TEXT_SYNTAX.md** - Command syntax specification for the machine text language

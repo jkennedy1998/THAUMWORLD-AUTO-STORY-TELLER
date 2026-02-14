@@ -228,7 +228,7 @@ if (!target_path) {
 }
 ```
 
-**interpreter_ai:**
+**interpreter_ai (archived):**
 ```typescript
 {
     session_id: session_key,
@@ -356,6 +356,6 @@ try {
 
 ## Next Steps
 
-- See [SERVICES.md](./SERVICES.md) for service-specific error handling
+- See [SERVICES.md](../design/SERVICES.md) for service-specific error handling
 - See [examples/](./examples/) for working error handling patterns
 - Use DEBUG_LEVEL=4 for full stack traces during development

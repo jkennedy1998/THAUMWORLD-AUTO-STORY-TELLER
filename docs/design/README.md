@@ -6,7 +6,7 @@ This directory contains architectural design documents, system overviews, and hi
 
 ### Core Architecture
 - **ARCHITECTURE.md** - System overview with diagrams, data flow, and component relationships
-- **SERVICES.md** - Documentation for all 8 services (Rules Lawyer, Interpreter AI, Data Broker, etc.)
+- **SERVICES.md** - Documentation for services (note: interpreter_ai is archived in this build)
 - **STAGES.md** - Pipeline stage definitions and message flow contracts
 
 ### Design Decisions

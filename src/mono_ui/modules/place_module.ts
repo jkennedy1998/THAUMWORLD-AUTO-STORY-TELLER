@@ -2,13 +2,29 @@ import type { Canvas, Module, Rect, Rgb, PointerEvent, WheelEvent } from "../typ
 import { rect_width, rect_height } from "../types.js";
 import { draw_border } from "../padding.js";
 import { get_color_by_name } from "../colors.js";
-import type { Place, PlaceNPC, PlaceActor, TilePosition } from "../../types/place.js";
+import type { Place, PlaceNPC, PlaceActor, PlaceConnection, TilePosition } from "../../types/place.js";
 import { get_entity_path, start_entity_movement, register_place, unregister_place } from "../../shared/movement_engine.js";
 import { load_actor } from "../../actor_storage/store.js";
-import { DEBUG_VISION, register_particle_spawner, update_npc_debug_visuals } from "../vision_debugger.js";
+import {
+  DEBUG_VISION,
+  register_particle_spawner,
+  update_npc_debug_visuals,
+  toggle_hearing_ranges,
+  toggle_sense_broadcasts,
+  toggle_blocked_vision,
+  spawn_sense_broadcast_particles,
+} from "../vision_debugger.js";
+import { get_sense_profile } from "../../action_system/sense_broadcast.js";
 import { get_facing } from "../../npc_ai/facing_system.js";
-import { is_in_conversation } from "../../npc_ai/conversation_state.js";
-import { update_actor_position_in_place, set_npc_tracked_position } from "./movement_command_handler.js";
+import { update_actor_position_in_place, set_npc_tracked_position, get_npc_visual_status } from "./movement_command_handler.js";
+import { play_sfx } from "../sfx/sfx_player.js";
+
+function footstep_cooldown_ms(speed_tpm: number): number {
+  const tpm = Number.isFinite(speed_tpm) && speed_tpm > 0 ? speed_tpm : 300;
+  const ms_per_tile = (60 * 1000) / tpm;
+  return Math.max(55, Math.min(260, Math.round(ms_per_tile * 0.75)));
+}
+import { UI_DEBUG } from "../runtime/ui_debug.js";
 
 // Debug logging helper - re-enabled with balanced output
 function debug_log_place(...args: any[]) {
@@ -57,6 +73,10 @@ export type PlaceModuleConfig = {
 
   // Initial view state
   initial_scale?: number; // tiles per character (1 = 1:1, 2 = 2 tiles per char)
+
+  // Player movement mode (affects speed + movement sound debug broadcast)
+  get_move_mode?: () => "WALK" | "SNEAK" | "SPRINT";
+  set_move_mode?: (mode: "WALK" | "SNEAK" | "SPRINT") => void;
 };
 
 type ViewState = {
@@ -134,7 +154,6 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
   let hovered: HoveredTile = null;
   let targeted: TargetedEntity = null; // Track selected target for communication (follows entity)
-  let is_panning = false;
   let last_pointer_x = 0;
   let last_pointer_y = 0;
 
@@ -148,6 +167,45 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
   // Inspection cycling state - tracks right-click inspect cycles per tile
   const inspect_cycle_state = new Map<string, number>();  // "x,y" -> current index
+
+  function get_door_at_tile(place: Place, tile_x: number, tile_y: number): { conn: PlaceConnection; door_x: number; door_y: number } | null {
+    for (const conn of place.connections) {
+      const dir = conn.direction.toLowerCase();
+      let door_tile_x: number;
+      let door_tile_y: number;
+
+      if (dir.includes("north") || dir.includes("up") || dir.includes("forward")) {
+        door_tile_x = Math.floor(place.tile_grid.width / 2);
+        door_tile_y = place.tile_grid.height - 1;
+      } else if (dir.includes("south") || dir.includes("down") || dir.includes("backward")) {
+        door_tile_x = Math.floor(place.tile_grid.width / 2);
+        door_tile_y = 0;
+      } else if (dir.includes("east") || dir.includes("right")) {
+        door_tile_x = place.tile_grid.width - 1;
+        door_tile_y = Math.floor(place.tile_grid.height / 2);
+      } else if (dir.includes("west") || dir.includes("left")) {
+        door_tile_x = 0;
+        door_tile_y = Math.floor(place.tile_grid.height / 2);
+      } else {
+        door_tile_x = place.tile_grid.default_entry.x;
+        door_tile_y = place.tile_grid.default_entry.y;
+      }
+
+      if (Math.abs(tile_x - door_tile_x) <= 1 && Math.abs(tile_y - door_tile_y) <= 1) {
+        return { conn, door_x: door_tile_x, door_y: door_tile_y };
+      }
+    }
+    return null;
+  }
+
+  function get_door_from_screen(place: Place, sx: number, sy: number): { conn: PlaceConnection; door_x: number; door_y: number } | null {
+    const inner = inner_rect();
+    const rel_x = sx - inner.x0;
+    const rel_y = sy - inner.y0;
+    const tile_x = Math.floor(view.offset_x + rel_x * view.scale);
+    const tile_y = Math.floor(view.offset_y + rel_y * view.scale);
+    return get_door_at_tile(place, tile_x, tile_y);
+  }
 
   // Particle system
   let particles: Particle[] = [];
@@ -165,6 +223,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   const previous_positions = new Map<string, TilePosition>();
   // Track previous movement state to detect when movement starts
   const previous_moving_state = new Map<string, boolean>();
+  // Throttle movement sound/broadcasts per entity
+  const movement_sound_step = new Map<string, number>();
 
   // Derived dimensions (excluding border)
   function inner_rect(): Rect {
@@ -215,6 +275,26 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
   function get_target(): TargetedEntity | null {
     return targeted;
+  }
+
+  // Player movement mode (affects speed + movement sound debug broadcast).
+  type MoveMode = "WALK" | "SNEAK" | "SPRINT";
+  let move_mode_local: MoveMode = "WALK";
+
+  function get_move_mode(): MoveMode {
+    return (config.get_move_mode?.() as MoveMode | undefined) ?? move_mode_local;
+  }
+
+  function set_move_mode(mode: MoveMode): void {
+    move_mode_local = mode;
+    config.set_move_mode?.(mode);
+    console.log(`[PlaceModule] Move mode: ${mode}`);
+  }
+
+  function cycle_move_mode(): void {
+    const cur = get_move_mode();
+    const next: MoveMode = cur === "WALK" ? "SNEAK" : cur === "SNEAK" ? "SPRINT" : "WALK";
+    set_move_mode(next);
   }
 
   // Get current position of targeted entity (follows movement)
@@ -402,8 +482,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       return false;
     }
     
-    // TODO: Check for solid features (walls, furniture)
-    // For now, all empty tiles are walkable
+    // Not implemented: treat solid place features (walls/furniture) as blockers.
+    // For now, all empty tiles are walkable.
     
     return true;
   }
@@ -416,7 +496,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     
     // Try to load actor data to get their walk speed
     try {
-      const result = load_actor(1, actor_id); // TODO: Use actual slot
+      // NOTE: UI runs against slot 1 in the current workflow.
+      const result = load_actor(1, actor_id);
       if (result.ok && result.actor) {
         const actor = result.actor as Record<string, unknown>;
         const movement = actor.movement as Record<string, number> | undefined;
@@ -552,11 +633,25 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       if (prev && (prev.x !== actor.tile_position.x || prev.y !== actor.tile_position.y)) {
         // Actor moved, spawn movement particle
         spawn_movement_particle(actor.tile_position);
+
+        // Movement should create pressure broadcasts (footsteps)
+        const n = (movement_sound_step.get(actor.actor_ref) ?? 0) + 1;
+        movement_sound_step.set(actor.actor_ref, n);
+        if (n % 3 === 1) {
+          const profile = get_sense_profile("MOVE", get_move_mode());
+          const pressure = profile?.broadcasts.find(b => b.sense === "pressure");
+          const range = pressure?.range_tiles ?? 5;
+          spawn_sense_broadcast_particles(actor.tile_position, "pressure", range);
+        }
       }
       
       // Update stored state
       previous_positions.set(actor.actor_ref, { ...actor.tile_position });
       previous_moving_state.set(actor.actor_ref, is_moving);
+
+      if (!is_moving) {
+        movement_sound_step.delete(actor.actor_ref);
+      }
     }
     
     // Check NPCs
@@ -576,11 +671,25 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       if (prev && (prev.x !== npc.tile_position.x || prev.y !== npc.tile_position.y)) {
         // NPC moved, spawn movement particle
         spawn_movement_particle(npc.tile_position);
+
+        // Movement sound for NPCs (assume WALK for now)
+        const n = (movement_sound_step.get(npc.npc_ref) ?? 0) + 1;
+        movement_sound_step.set(npc.npc_ref, n);
+        if (n % 3 === 1) {
+          const profile = get_sense_profile("MOVE", "WALK");
+          const pressure = profile?.broadcasts.find(b => b.sense === "pressure");
+          const range = pressure?.range_tiles ?? 5;
+          spawn_sense_broadcast_particles(npc.tile_position, "pressure", range);
+        }
       }
       
       // Update stored state
       previous_positions.set(npc.npc_ref, { ...npc.tile_position });
       previous_moving_state.set(npc.npc_ref, is_moving);
+
+      if (!is_moving) {
+        movement_sound_step.delete(npc.npc_ref);
+      }
     }
   }
 
@@ -791,31 +900,29 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     check_entity_movement(place);
     
     // Update debug visuals for all NPCs (vision cones, facing, etc.)
+    // For LOS-occlusion debug, treat characters as blockers.
+    // (Eventually this should use solid features/walls, not occupancy.)
+    const character_blockers = new Set<string>();
+    for (const npc of place.contents.npcs_present) {
+      const p = npc.tile_position;
+      character_blockers.add(`${p.x},${p.y}`);
+    }
+    for (const actor of place.contents.actors_present) {
+      const p = actor.tile_position;
+      character_blockers.add(`${p.x},${p.y}`);
+    }
     for (const npc of place.contents.npcs_present) {
       const npc_position = npc.tile_position;
       const npc_facing = get_facing(npc.npc_ref);
-      // Check if NPC is in conversation via status (backend sets this to "busy")
-      const npc_in_conv = npc.status === "busy";
+      // Conversation visual state is synced to renderer via NPC_STATUS commands.
+      // We intentionally do NOT read backend in-memory conversation_state here.
+      const npc_visual_status = get_npc_visual_status(npc.npc_ref) ?? npc.status;
+      const npc_conversation_visual = npc_visual_status === "busy";
       
-      update_npc_debug_visuals(npc.npc_ref, npc_position, npc_facing, npc_in_conv);
+      update_npc_debug_visuals(npc.npc_ref, npc_position, npc_facing, npc_conversation_visual, character_blockers);
       
-      // Draw conversation indicator (white "O") for busy NPCs
-      // This is a standard gameplay feature, not just debug
-      if (npc_in_conv) {
-        const indicator_x = inner.x0 + Math.floor((npc_position.x - view.offset_x) / view.scale);
-        const indicator_y = inner.y0 + Math.floor((npc_position.y + 1 - view.offset_y) / view.scale);
-        
-        if (indicator_x >= inner.x0 && indicator_x <= inner.x1 &&
-            indicator_y >= inner.y0 && indicator_y <= inner.y1) {
-          canvas.set(indicator_x, indicator_y, {
-            char: "O",
-            rgb: { r: 255, g: 255, b: 255 }, // White
-            weight_index: 7, // High weight to render on top
-          });
-        }
-      }
     }
-
+    
     // Draw particles (path visualization and effects)
     update_particles();
     for (const p of particles) {
@@ -989,30 +1096,6 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const place = config.get_place();
       if (!place) return;
 
-      // Handle panning
-      if (is_panning && e.buttons & 1) {
-        const dx = e.x - last_pointer_x;
-        const dy = e.y - last_pointer_y;
-
-        const bounds = get_view_bounds(place);
-
-        // Convert screen delta to tile delta (inverted - dragging moves view opposite)
-        view.offset_x = clamp(
-          view.offset_x - dx * view.scale,
-          bounds.min_x,
-          bounds.max_x
-        );
-        view.offset_y = clamp(
-          view.offset_y - dy * view.scale,
-          bounds.min_y,
-          bounds.max_y
-        );
-
-        last_pointer_x = e.x;
-        last_pointer_y = e.y;
-        return;
-      }
-
       // Update hover
       const tile = screen_to_tile(e.x, e.y);
       if (tile) {
@@ -1026,26 +1109,92 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       last_pointer_y = e.y;
     },
 
-    OnPointerDown(e: PointerEvent): void {
-      if (e.button === 0) {
-        is_panning = true;
-        last_pointer_x = e.x;
-        last_pointer_y = e.y;
-      }
-    },
+    OnDragMove(e): void {
+      const place = config.get_place();
+      if (!place) return;
+      if (!(e.buttons & 1)) return;
 
-    OnPointerUp(e: PointerEvent): void {
-      if (e.button === 0) {
-        is_panning = false;
-      }
+      const dx = e.step_dx;
+      const dy = e.step_dy;
+      const bounds = get_view_bounds(place);
+
+      // Convert screen delta to tile delta (inverted - dragging moves view opposite)
+      view.offset_x = clamp(
+        view.offset_x - dx * view.scale,
+        bounds.min_x,
+        bounds.max_x
+      );
+      view.offset_y = clamp(
+        view.offset_y - dy * view.scale,
+        bounds.min_y,
+        bounds.max_y
+      );
     },
 
     OnClick(e: PointerEvent): void {
+      // Only left click should move/select. Right click is reserved for INSPECT.
+      if (e.button !== 0) return;
+
       const place = config.get_place();
       if (!place) return;
 
       // Convert screen to tile coordinates
       const tile = screen_to_tile(e.x, e.y);
+
+      // Left click: doors do movement/travel.
+      const door_hit = tile
+        ? get_door_at_tile(place, tile.x, tile.y)
+        : get_door_from_screen(place, e.x, e.y);
+
+      if (door_hit) {
+        const player = place.contents.actors_present[0];
+        if (!player) return;
+
+        const dist_to_door = Math.sqrt(
+          Math.pow(player.tile_position.x - door_hit.door_x, 2) +
+          Math.pow(player.tile_position.y - door_hit.door_y, 2)
+        );
+
+        // Must be within 2 tiles of door to travel
+        if (dist_to_door > 2) {
+          debug_log_place("DOOR: Player too far, pathing to door", {
+            player_pos: player.tile_position,
+            door_pos: { x: door_hit.door_x, y: door_hit.door_y },
+            distance: dist_to_door,
+          });
+
+          const started = start_entity_movement(
+            player.actor_ref,
+            "actor",
+            place,
+            {
+              type: "move_to",
+              target_position: { x: door_hit.door_x, y: door_hit.door_y },
+              priority: 10,
+              reason: "Travel to door",
+            },
+            300,
+            undefined,
+            undefined,
+            (_pos) => {
+              play_sfx('footstep_blip', { emitter_ref: player.actor_ref, channel: 'sfx', cooldown_ms: footstep_cooldown_ms(300) });
+            }
+          );
+
+          if (!started) {
+            debug_log_place("DOOR: Path to door blocked");
+          }
+          return;
+        }
+
+        // Player is close enough - trigger place transition
+        if (config.on_place_transition) {
+          const result = config.on_place_transition(door_hit.conn.target_place_id, door_hit.conn.direction);
+          if (result) return;
+        }
+        return;
+      }
+
       if (!tile) return;
 
       // Check if clicked on an entity (NPC or actor)
@@ -1105,6 +1254,12 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       // Use unified movement engine
       // Get actor walk speed from their data
       const tiles_per_minute = get_actor_walk_speed(actor.actor_ref);
+
+      const mode = get_move_mode();
+      const speed_mult = mode === "SPRINT" ? 1.8 : mode === "SNEAK" ? 0.6 : 1.0;
+      const speed_tpm = Math.max(60, Math.round(tiles_per_minute * speed_mult));
+      const move_subtype = mode === "SPRINT" ? "SPRINT" : mode === "SNEAK" ? "SNEAK" : "WALK";
+
       
       const started = start_entity_movement(
         actor.actor_ref,
@@ -1116,7 +1271,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           priority: 10,
           reason: "Player commanded movement"
         },
-        tiles_per_minute,
+        speed_tpm,
         (_final_position) => {
           // On complete callback - receives final position from movement engine
           debug_log_place("Movement complete", { actor_ref: actor.actor_ref, final_position: _final_position });
@@ -1139,12 +1294,14 @@ export function make_place_module(config: PlaceModuleConfig): Module {
             from: { x: start_x, y: start_y },
             to: { x: tile.x, y: tile.y },
             path_length: path.length,
-            speed: tiles_per_minute
+            speed: speed_tpm,
+            move_mode: mode,
           });
         },
         (current_position) => {
           // On step callback - track position for facing calculations during movement
           set_npc_tracked_position(actor.actor_ref, current_position);
+          play_sfx('footstep_blip', { emitter_ref: actor.actor_ref, channel: 'sfx', cooldown_ms: footstep_cooldown_ms(speed_tpm) });
         }
       );
       
@@ -1154,7 +1311,6 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     },
 
     OnPointerLeave(): void {
-      is_panning = false;
       hovered = null;
     },
 
@@ -1165,171 +1321,16 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       // Convert screen to tile coordinates
       const tile = screen_to_tile(e.x, e.y);
       if (!tile) {
-        // Check if clicked on a door (outside normal place bounds)
-        const inner = inner_rect();
-        const rel_x = e.x - inner.x0;
-        const rel_y = e.y - inner.y0;
-        const tile_x = Math.floor(view.offset_x + rel_x * view.scale);
-        const tile_y = Math.floor(view.offset_y + rel_y * view.scale);
-        
-        // Check if this is near a door position
-        for (const conn of place.connections) {
-          const dir = conn.direction.toLowerCase();
-          let door_tile_x: number;
-          let door_tile_y: number;
-          
-          if (dir.includes("north") || dir.includes("up") || dir.includes("forward")) {
-            door_tile_x = Math.floor(place.tile_grid.width / 2);
-            door_tile_y = place.tile_grid.height;
-          } else if (dir.includes("south") || dir.includes("down") || dir.includes("backward")) {
-            door_tile_x = Math.floor(place.tile_grid.width / 2);
-            door_tile_y = -1;
-          } else if (dir.includes("east") || dir.includes("right")) {
-            door_tile_x = place.tile_grid.width;
-            door_tile_y = Math.floor(place.tile_grid.height / 2);
-          } else if (dir.includes("west") || dir.includes("left")) {
-            door_tile_x = -1;
-            door_tile_y = Math.floor(place.tile_grid.height / 2);
-          } else {
-            door_tile_x = place.tile_grid.default_entry.x;
-            door_tile_y = place.tile_grid.default_entry.y;
-          }
-          
-          // Check if clicked near this door (within 1 tile)
-          if (Math.abs(tile_x - door_tile_x) <= 1 && Math.abs(tile_y - door_tile_y) <= 1) {
-            debug_log_place("DOOR CLICKED (outside bounds):", {
-              target_place_id: conn.target_place_id,
-              direction: conn.direction
-            });
-            
-            // Check if player is close enough to the door
-            const player = place.contents.actors_present[0];
-            if (player) {
-              const dist_to_door = Math.sqrt(
-                Math.pow(player.tile_position.x - door_tile_x, 2) + 
-                Math.pow(player.tile_position.y - door_tile_y, 2)
-              );
-              
-              // Must be within 2 tiles of door to travel
-              if (dist_to_door > 2) {
-                debug_log_place("DOOR: Player too far, pathing to door", {
-                  player_pos: player.tile_position,
-                  door_pos: { x: door_tile_x, y: door_tile_y },
-                  distance: dist_to_door
-                });
-                
-                // Path to the door first
-                const started = start_entity_movement(
-                  player.actor_ref,
-                  "actor",
-                  place,
-                  {
-                    type: "move_to",
-                    target_position: { x: door_tile_x, y: door_tile_y },
-                    priority: 10,
-                    reason: "Travel to door"
-                  },
-                  300
-                );
-                
-                if (!started) {
-                  debug_log_place("DOOR: Path to door blocked");
-                }
-                return;
-              }
-              
-              // Player is close enough - trigger place transition
-              if (config.on_place_transition) {
-                const result = config.on_place_transition(conn.target_place_id, conn.direction);
-                if (result) {
-                  return; // Transition handled
-                }
-              }
-            }
-            return;
-          }
-        }
-        
-        debug_log_place("ContextMenu: Clicked outside place bounds", { x: e.x, y: e.y, tile_x, tile_y });
-        return;
-      }
-
-      // Check if clicked on a door within place bounds
-      for (const conn of place.connections) {
-        const dir = conn.direction.toLowerCase();
-        let door_tile_x: number;
-        let door_tile_y: number;
-        
-        if (dir.includes("north") || dir.includes("up") || dir.includes("forward")) {
-          door_tile_x = Math.floor(place.tile_grid.width / 2);
-          door_tile_y = place.tile_grid.height - 1;
-        } else if (dir.includes("south") || dir.includes("down") || dir.includes("backward")) {
-          door_tile_x = Math.floor(place.tile_grid.width / 2);
-          door_tile_y = 0;
-        } else if (dir.includes("east") || dir.includes("right")) {
-          door_tile_x = place.tile_grid.width - 1;
-          door_tile_y = Math.floor(place.tile_grid.height / 2);
-        } else if (dir.includes("west") || dir.includes("left")) {
-          door_tile_x = 0;
-          door_tile_y = Math.floor(place.tile_grid.height / 2);
-        } else {
-          door_tile_x = place.tile_grid.default_entry.x;
-          door_tile_y = place.tile_grid.default_entry.y;
-        }
-        
-        // Check if clicked on or very near this door
-        if (Math.abs(tile.x - door_tile_x) <= 1 && Math.abs(tile.y - door_tile_y) <= 1) {
-          debug_log_place("DOOR CLICKED (inside bounds):", {
-            target_place_id: conn.target_place_id,
-            direction: conn.direction
+        // Right click is INSPECT only. If user clicks near a door (outside bounds), inspect that tile.
+        const door_hit = get_door_from_screen(place, e.x, e.y);
+        if (door_hit && config.on_inspect) {
+          config.on_inspect({
+            type: "tile",
+            place_id: place.id,
+            tile_position: { x: door_hit.door_x, y: door_hit.door_y },
           });
-          
-          // Check if player is close enough to the door
-          const player = place.contents.actors_present[0];
-          if (player) {
-            const dist_to_door = Math.sqrt(
-              Math.pow(player.tile_position.x - door_tile_x, 2) + 
-              Math.pow(player.tile_position.y - door_tile_y, 2)
-            );
-            
-            // Must be within 2 tiles of door to travel
-            if (dist_to_door > 2) {
-              debug_log_place("DOOR: Player too far, pathing to door", {
-                player_pos: player.tile_position,
-                door_pos: { x: door_tile_x, y: door_tile_y },
-                distance: dist_to_door
-              });
-              
-              // Path to the door first
-              const started = start_entity_movement(
-                player.actor_ref,
-                "actor",
-                place,
-                {
-                  type: "move_to",
-                  target_position: { x: door_tile_x, y: door_tile_y },
-                  priority: 10,
-                  reason: "Travel to door"
-                },
-                300
-              );
-              
-              if (!started) {
-                debug_log_place("DOOR: Path to door blocked");
-              }
-              return;
-            }
-            
-            // Player is close enough - trigger place transition
-            if (config.on_place_transition) {
-              const result = config.on_place_transition(conn.target_place_id, conn.direction);
-              if (result) {
-                return; // Transition handled
-              }
-            }
-          }
-          return;
         }
+        return;
       }
 
       // Get what's at this tile (use get_all to show cycling indicator)
@@ -1405,44 +1406,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         }
       }
       
-      // Fall back to target selection if no inspection or inspection didn't trigger
-      if (entity && config.on_select_target) {
-        const is_npc = "npc_ref" in entity;
-        const ref = is_npc 
-          ? (entity as PlaceNPC).npc_ref 
-          : (entity as PlaceActor).actor_ref;
-        
-        // Attempt to select this target
-        const success = config.on_select_target(ref);
-        
-        if (success) {
-          debug_log_place("ContextMenu: Selected target", { 
-            tile: { x: tile.x, y: tile.y }, 
-            type: is_npc ? "NPC" : "Actor", 
-            ref,
-            total_entities_on_tile: all_entities.length
-          });
-        } else {
-          debug_log_place("ContextMenu: Target not in available targets list", { 
-            tile: { x: tile.x, y: tile.y }, 
-            type: is_npc ? "NPC" : "Actor", 
-            ref 
-          });
-        }
-      } else if (entity) {
-        // No callback configured, just log
-        const is_npc = "npc_ref" in entity;
-        const ref = is_npc 
-          ? (entity as PlaceNPC).npc_ref 
-          : (entity as PlaceActor).actor_ref;
-        debug_log_place("ContextMenu: Targeted entity (no selection callback)", { 
-          tile: { x: tile.x, y: tile.y }, 
-          type: is_npc ? "NPC" : "Actor", 
-          ref 
-        });
-      } else {
-        debug_log_place("ContextMenu: Targeted empty tile", { x: tile.x, y: tile.y });
-      }
+      // Right click is INSPECT only (no target selection, no movement).
     },
 
     OnWheel(e: WheelEvent): void {
@@ -1451,37 +1415,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
       const bounds = get_view_bounds(place);
 
-      // Zoom with ctrl, pan with shift, else scroll vertically
-      if (e.ctrl) {
-        // Zoom
-        const old_scale = view.scale;
-        if (e.delta_y > 0) {
-          // Zoom out (increase scale)
-          view.scale = Math.min(view.scale * 2, 8);
-        } else {
-          // Zoom in (decrease scale)
-          view.scale = Math.max(view.scale / 2, 1);
-        }
-
-        // Adjust offset to zoom toward center
-        if (view.scale !== old_scale) {
-          const { width, height } = inner_size();
-          const new_bounds = get_view_bounds(place);
-          const center_tile_x = view.offset_x + (width * old_scale) / 2;
-          const center_tile_y = view.offset_y + (height * old_scale) / 2;
-
-          view.offset_x = clamp(
-            center_tile_x - (width * view.scale) / 2,
-            new_bounds.min_x,
-            new_bounds.max_x
-          );
-          view.offset_y = clamp(
-            center_tile_y - (height * view.scale) / 2,
-            new_bounds.min_y,
-            new_bounds.max_y
-          );
-        }
-      } else if (e.shift) {
+      // Note: zoom is not supported in the current UI.
+      // Pan with shift, else scroll vertically.
+      if (e.shift) {
         // Horizontal scroll
         const scroll_amount = e.delta_y > 0 ? 1 : -1;
         view.offset_x = clamp(
@@ -1552,62 +1488,28 @@ export function make_place_module(config: PlaceModuleConfig): Module {
             place
           );
           break;
-        case "+":
-        case "=":
-          // Zoom in
-          if (view.scale > 1) {
-            const old_scale = view.scale;
-            view.scale = Math.max(view.scale / 2, 1);
-            // Recenter
-            const { width, height } = inner_size();
-            const new_bounds = get_view_bounds(place);
-            const center_tile_x = view.offset_x + (width * old_scale) / 2;
-            const center_tile_y = view.offset_y + (height * old_scale) / 2;
-            view.offset_x = clamp(
-              center_tile_x - (width * view.scale) / 2,
-              new_bounds.min_x,
-              new_bounds.max_x
-            );
-            view.offset_y = clamp(
-              center_tile_y - (height * view.scale) / 2,
-              new_bounds.min_y,
-              new_bounds.max_y
-            );
-          }
+        case "h":
+        case "H":
+          // Toggle hearing radius visualization
+          if (!UI_DEBUG.enabled) break;
+          toggle_hearing_ranges();
           break;
-        case "-":
-        case "_":
-          // Zoom out
-          const old_scale = view.scale;
-          view.scale = Math.min(view.scale * 2, 8);
-          // Recenter
-          const { width, height } = inner_size();
-          const new_bounds = get_view_bounds(place);
-          const center_tile_x = view.offset_x + (width * old_scale) / 2;
-          const center_tile_y = view.offset_y + (height * old_scale) / 2;
-          view.offset_x = clamp(
-            center_tile_x - (width * view.scale) / 2,
-            new_bounds.min_x,
-            new_bounds.max_x
-          );
-          view.offset_y = clamp(
-            center_tile_y - (height * view.scale) / 2,
-            new_bounds.min_y,
-            new_bounds.max_y
-          );
+        case "b":
+        case "B":
+          // Toggle sense broadcast visualization
+          if (!UI_DEBUG.enabled) break;
+          toggle_sense_broadcasts();
           break;
-        case "0":
-          // Reset zoom to 1:1 and center on entry
-          view.scale = 1;
-          center_on_tile(
-            place.tile_grid.default_entry.x,
-            place.tile_grid.default_entry.y,
-            place
-          );
+        case "v":
+        case "V":
+          // Toggle LOS occlusion visualization
+          if (!UI_DEBUG.enabled) break;
+          toggle_blocked_vision();
           break;
-        case "\\":
-          // Toggle vision debug mode (backslash key)
-          DEBUG_VISION.toggle();
+        case "m":
+        case "M":
+          // Cycle movement mode (WALK -> SNEAK -> SPRINT)
+          cycle_move_mode();
           break;
       }
     },

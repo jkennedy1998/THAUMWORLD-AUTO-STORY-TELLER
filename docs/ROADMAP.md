@@ -1,6 +1,6 @@
 # Development Roadmap
 
-**Last Updated:** February 6, 2026  
+**Last Updated:** February 13, 2026  
 **Status:** Active Development  
 **Current Phase:** Core Systems Operational - Feature Development
 
@@ -8,7 +8,7 @@
 
 ## System Status ✅
 
-**The core system is operational and playable!** Recent testing (Feb 6, 2026) confirms:
+**The core system is operational and playable!** Recent testing (Feb 13, 2026) confirms:
 
 ### Working Correctly
 - ✅ **Working Memory** - Events recorded properly (`ContextManager Built working memory`)
@@ -18,6 +18,8 @@
 - ✅ **NPC Autonomy** - Grenda wanders autonomously, makes decisions
 - ✅ **Click-to-Move** - Player movement working with path visualization
 - ✅ **AI Integration** - NPCs generate contextual responses using llama3.2
+- ✅ **COMMUNICATE as Action** - ActionPipeline validates range + perception; witness drives conversation state
+- ✅ **Multi-NPC Witness** - Nearby NPCs can join/eavesdrop/ignore based on personality and perception
 
 ### Minor Issues (Polish, Not Critical)
 - Message cleanup/garbage collection needed (old messages accumulate)
@@ -30,7 +32,22 @@
 
 ### 🟠 HIGH PRIORITY - Active Development
 
-#### 1. Complete Place Module Phase 5 (1-2 weeks)
+#### 1. Advanced NPC Interactions (1-2 weeks)
+**Plan:** `docs/plans/2026_02_13_advanced_npc_interactions_scheduler.md`
+**Status:** Draft (active)
+**Impact:** Sequential multi-NPC replies, witnessed-action follow-ups, perf/edge-case hardening
+
+**Already Done:**
+- ✅ Single pipeline for COMMUNICATE (only participants respond)
+- ✅ Multi-NPC in same place tested (Grenda + assistant)
+
+**Remaining:**
+- Reply sequencing (avoid pile-on)
+- Edge cases + performance checks
+
+---
+
+#### 2. Complete Place Module Phase 5 (1-2 weeks)
 **Plan:** `PLACE_MODULE_PLAN.md`  
 **Status:** Phase 5.2 Complete, 5.3-5.4 In Progress  
 **Impact:** Visual feedback, player movement, NPC autonomy
@@ -53,8 +70,8 @@
 
 ---
 
-#### 2. Region Travel System (3-4 weeks)
-**Plan:** `2026_02_02_phased_implementation_plan.md`  
+#### 3. Region Travel System (3-4 weeks)
+**Plan:** `docs/plans/2026_02_06_region_travel_system.md`  
 **Status:** Phase 0 Complete  
 **Impact:** World exploration, travel between regions
 
@@ -74,8 +91,8 @@
 
 ### 🟡 MEDIUM PRIORITY - Enhancement
 
-#### 3. Tabletop Pacing & Intent System (2-3 weeks)
-**Plan:** `2026_02_02_tabletop_pacing_intent_targeting.md`  
+#### 4. Tabletop Pacing & Intent System (2-3 weeks)
+**Plan:** `docs/plans/2026_02_02_tabletop_pacing_intent_targeting.md`  
 **Status:** Draft (Approved Direction)  
 **Impact:** Core UX improvement - one message = one action
 
@@ -87,8 +104,8 @@
 
 ---
 
-#### 4. INSPECT Action System (4 weeks)
-**Plan:** `inspect_implementation_plan.md`  
+#### 5. INSPECT Action System (4 weeks)
+**Plan:** `docs/plans/2026_02_05_inspect_implementation_plan.md`  
 **Status:** Planning/Ready  
 **Impact:** Core gameplay mechanic - exploration and discovery
 
@@ -98,9 +115,9 @@
 
 ### 🟢 FUTURE - Architecture
 
-#### 5. Unified Action System (6-8 weeks)
-**Plan:** `action_system_plan.md`  
-**Status:** Draft/Planning  
+#### 6. Unified Action System (6-8 weeks)
+**Plan:** `docs/archive/2026_02_05_action_system_plan_IMPLEMENTED.md` (core implemented; extensions ongoing)
+**Status:** Ongoing extensions
 **Impact:** Architecture improvement for maintainability
 
 **Dependencies:** All foundation work complete (✅ Done)

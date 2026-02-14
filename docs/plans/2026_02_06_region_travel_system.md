@@ -384,7 +384,7 @@ async function generate_region(
 
 ### 4. Interpreter Integration
 
-**File:** `src/interpreter_ai/main.ts`
+**File:** `src/interface_program/main.ts` (interpreter_ai is archived in this build)
 
 Update travel intent detection:
 

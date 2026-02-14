@@ -75,10 +75,10 @@ export function parse_inspect_command(text: string): InspectionParseResult {
   const target_name = extract_target_name(lowered);
   
   // Extract feature keywords
-  const feature_keywords = extract_feature_keywords(lowered);
+  const feature_keywords = extract_feature_keywords_for_inspection(lowered);
   
   // Check for body slot specification
-  const body_slot = extract_body_slot(lowered);
+  const body_slot = extract_body_slot_for_inspection(lowered);
   
   return {
     is_inspect,
@@ -120,7 +120,7 @@ function extract_target_name(text: string): string | undefined {
 /**
  * Extract feature keywords from text
  */
-function extract_feature_keywords(text: string): string[] {
+export function extract_feature_keywords_for_inspection(text: string): string[] {
   const found: string[] = [];
   
   for (const [category, keywords] of Object.entries(KEYWORD_MAP)) {
@@ -136,7 +136,7 @@ function extract_feature_keywords(text: string): string[] {
  * Extract body slot from text
  * Example: "inspect his armor" -> "body"
  */
-function extract_body_slot(text: string): string | undefined {
+export function extract_body_slot_for_inspection(text: string): string | undefined {
   for (const [slot, keywords] of Object.entries(BODY_SLOT_KEYWORDS)) {
     if (keywords.some(kw => text.includes(kw))) {
       return slot;

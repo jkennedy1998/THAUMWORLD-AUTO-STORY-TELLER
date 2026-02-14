@@ -185,7 +185,7 @@ For each NPC observer:
 - [ ] Type message + NORMAL → sent to target
 - [ ] NPC stops moving on communication
 - [ ] NPC faces speaker
-- [ ] White "O" appears (TODO)
+- [ ] Conversation debug indicator `o/O` appears (TODO)
 - [ ] Bystander in range → social check runs
 - [ ] 30-second timeout → NPC leaves
 - [ ] Distance > 3 tiles → engagement breaks

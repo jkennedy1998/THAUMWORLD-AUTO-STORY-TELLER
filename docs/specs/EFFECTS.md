@@ -616,7 +616,7 @@ cat local_data/data_slot_1/log.jsonc | jq '.messages | map(select(.sender == "st
 
 ## Next Steps
 
-- See [SERVICES.md](./SERVICES.md) for service details
-- See [STAGES.md](./STAGES.md) for message flow
+- See [SERVICES.md](../design/SERVICES.md) for service details
+- See [STAGES.md](../design/STAGES.md) for message flow
 - See [examples/](./examples/) for implementation examples
 - Reference [THAUMWORLD Rules](https://www.thaumworld.xyz/rules-index/) for game mechanics

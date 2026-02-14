@@ -12,6 +12,11 @@
 
 The fundamental issue: **Conversations are implemented in 4+ different ways across the codebase, with no clear ownership or single source of truth.**
 
+**Update (2026-02-12):** The renderer now treats conversation visuals as an event-synced state:
+- Backend emits `NPC_STATUS busy/present`.
+- Renderer stores this in a stable map and uses it for debug `o/O` and continuous facing.
+- Farewell + leaving place end conversation/engagement to avoid stuck-follow.
+
 ---
 
 ## 🔍 Root Cause Analysis

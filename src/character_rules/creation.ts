@@ -49,7 +49,9 @@ export function shuffle<T>(items: T[]): T[] {
     const out = [...items];
     for (let i = out.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
-        [out[i], out[j]] = [out[j], out[i]];
+        const tmp = out[i]!;
+        out[i] = out[j]!;
+        out[j] = tmp;
     }
     return out;
 }
@@ -59,7 +61,9 @@ export function random_stat_assignment(): StatAssignment {
     const stats = ["con", "str", "dex", "wis", "int", "cha"];
     const out: StatAssignment = {};
     for (let i = 0; i < stats.length; i++) {
-        out[stats[i]] = values[i] ?? 50;
+        const stat = stats[i];
+        if (!stat) continue;
+        out[stat] = values[i] ?? 50;
     }
     return out;
 }

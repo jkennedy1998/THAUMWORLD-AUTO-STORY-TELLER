@@ -424,7 +424,7 @@ export function get_most_recent_conversation(
         new Date(b.started_at).getTime() - new Date(a.started_at).getTime()
     );
     
-    return matching[0];
+    return matching[0] ?? null;
 }
 
 /**

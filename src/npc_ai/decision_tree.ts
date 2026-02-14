@@ -97,14 +97,15 @@ const socialResponses: DecisionNode[] = [
     {
         condition: (ctx) => ctx.is_greeting && !ctx.is_combat && ctx.player_tone !== "hostile",
         response: (ctx) => {
-            const greetings: Record<string, string[]> = {
-                "shopkeeper": ["Welcome! Looking for anything specific?", "Greetings! Come to browse my wares?"],
-                "guard": ["Move along.", "What do you want?"],
-                "villager": ["Hello there!", "Good day to you!"],
-                "noble": ["*nods* Yes?", "Do I know you?"],
-                "default": ["Hello.", "Greetings.", "What do you need?"]
-            };
-            const options = greetings[ctx.npc_role] ?? greetings.default;
+            const greetings = {
+                shopkeeper: ["Welcome! Looking for anything specific?", "Greetings! Come to browse my wares?"],
+                guard: ["Move along.", "What do you want?"],
+                villager: ["Hello there!", "Good day to you!"],
+                noble: ["*nods* Yes?", "Do I know you?"],
+                default: ["Hello.", "Greetings.", "What do you need?"]
+            } as const;
+
+            const options = (greetings as any)[ctx.npc_role] ?? greetings.default;
             const dialogue = options[Math.floor(Math.random() * options.length)] ?? "Hello.";
             return {
                 matched: true,

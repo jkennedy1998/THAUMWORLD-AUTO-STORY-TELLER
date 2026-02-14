@@ -145,7 +145,7 @@ if (conv && conv.target_entity === event.actorRef) {
 **Remaining:**
 - ⏳ Frontend click → Backend target
 - ⏳ Memory persistence (store memories)
-- ⏳ White "O" indicator
+- ⏳ Conversation debug indicator `o/O`
 - ⏳ Volume buttons UI
 - ⏳ End-to-end testing
 

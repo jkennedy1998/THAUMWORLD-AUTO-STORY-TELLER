@@ -1,35 +1,49 @@
-# Development Analysis
+# Analysis Notes (Preserved)
 
-This directory contains analysis documents, bug fix summaries, session analysis, and post-mortems.
+This folder holds short, dated writeups that explain *why* something was changed: root-cause analysis, debugging timelines, and fix retrospectives.
 
-## Contents
+These notes are intentionally preserved even when stale.
 
-### Bug Fixes & Improvements
-- **CONTINUITY_FIXES_SUMMARY.md** - Summary of continuity fixes implemented
-- **NPC_CONSISTENCY_FIX.md** - NPC consistency improvements and fixes
-- **PHASE7_FIXES.md** - Phase 7 critical bug fixes
+## What This Folder Is (and Is Not)
 
-### Session Analysis
-- **SESSION_ANALYSIS_2026-02-01.md** - Analysis of development session from Feb 1, 2026
+- **Is:** post-mortems, “what broke + why”, debugging discoveries, fix summaries.
+- **Is not:** an active roadmap. For active work, use `docs/plans/` and `docs/todos/`.
 
-## Purpose
+## Naming Convention
 
-These documents capture:
-- Root cause analysis of issues
-- Solutions implemented
-- Lessons learned
-- Session findings and insights
+Match the plan docs style so these sort cleanly:
 
-## When to Reference
+- `YYYY_MM_DD_<topic>_<type>.md`
+- Examples: `2026_02_09_conversation_debugging_retrospective.md`, `2026_02_02_continuity_fixes_summary.md`
 
-**Understanding past fixes?** → Check the fix summary documents
+Keep titles specific and problem-shaped (what failed / what was fixed), not generic (“notes”, “misc”).
 
-**Investigating similar issues?** → Review relevant analysis docs
+## Structure (Minimal, Repeatable)
 
-**Learning from past sessions?** → Read session analysis
+Each file should start with:
 
----
+- `# <Title>`
+- `Date:` (ISO or written date)
+- `Status:` `Retrospective` | `Complete` | `Reference`
+- `Scope:` one sentence
 
-**Note:** These documents are preserved for reference. Active work should reference [plans/](../plans/) and [todos/](../todos/).
+Then keep it tight:
 
-**Related:** [archive/](../archive/) for completed work, [CHANGELOG.md](../CHANGELOG.md) for recent changes
+- `Problem` (symptoms)
+- `Root Cause` (actual failure)
+- `Fix` (what changed + where)
+- `Follow-ups` (if any; point to a plan)
+
+## Index (Stale but Useful)
+
+- `docs/analysis/2026_02_01_session_analysis_report.md`
+- `docs/analysis/2026_02_01_phase7_critical_bug_fixes.md`
+- `docs/analysis/2026_02_02_continuity_fixes_summary.md`
+- `docs/analysis/2026_02_02_npc_data_consistency_fix.md`
+- `docs/analysis/2026_02_09_conversation_debugging_retrospective.md`
+- `docs/analysis/2026_02_10_communication_message_display_bugfix_summary.md`
+- `docs/analysis/2026_02_12_npc_movement_dual_authority_bug.md`
+
+Related:
+- `docs/plans/` (active intent)
+- `docs/archive/` (completed/superseded plans)

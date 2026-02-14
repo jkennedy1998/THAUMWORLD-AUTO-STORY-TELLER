@@ -1,12 +1,12 @@
 # NPC Witness & Reaction System Implementation Plan
 
 **Date:** 2026-02-07 to 2026-02-08  
-**Status:** ⚠️ Core Implementation Complete - Integration Testing Revealed Issue  
+**Status:** ✅ Implemented; Archived (remaining follow-ups moved)  
 **Priority:** High  
-**File:** `docs/plans/2026_02_07_npc_witness_reaction_system.md`
+**File:** `docs/archive/2026_02_07_npc_witness_reaction_system_IMPLEMENTED.md`
 
 **🆕 AI AGENT QUICK REFERENCE:**
-📖 **Read this first for current status:** `docs/NPC_WITNESS_SYSTEM.md`
+📖 **Read this first for current status:** `docs/guides/NPC_WITNESS_SYSTEM.md`
 - ✅ What's working / ❌ What's broken
 - 🔍 Debug tools and how to use them
 - 🎯 Root cause analysis
@@ -65,13 +65,13 @@ These systems are operational and will be extended/integrated:
 | **Farewell Detection** | ✅ | "bye" ends conversation immediately |
 | **Facing During Movement** | ✅ | Real-time position tracking during actor movement |
 | **Vision Cones** | ⚠️ | Implemented but needs visual debug verification |
-| **Conversation Indicator** | ⚠️ | Status commands sent, needs visual verification |
+| **Conversation Indicator** | ✅ | Renderer uses `NPC_STATUS busy/present` for `o/O` overlay |
 
 ### ⚠️ KNOWN ISSUES
 
 | Issue | Status | Investigation Needed |
 |-------|--------|---------------------|
-| White "O" indicator not showing | ⚠️ | Status updates working but visual not rendering |
+| Conversation debug `o/O` not showing | ✅ Resolved | Renderer reads `NPC_STATUS busy/present` (no backend in-memory reads) |
 
 ---
 
@@ -96,6 +96,9 @@ Implement a real-time NPC reaction system that connects perception broadcasts to
 7. **Directional Perception:** NPCs have facing direction and cones of vision
 8. **Sensory Broadcasting:** All actions broadcast senses (visual, auditory, etc.)
 9. **Sound Levels:** Actions have different perceptibility (damage = loud, walking = quiet)
+
+TODO:
+- Standardize MAG (magnitude) conversions as a single source of truth (esp. Distance MAG <-> tiles) and consume it from `action_system/sense_broadcast.ts`, `action_range/*`, and perception/vision helpers.
 
 ---
 
@@ -368,9 +371,9 @@ export interface SenseBroadcast {
 
 | Action | Light | Pressure | Aroma | Thaumic | Notes |
 |--------|-------|----------|-------|---------|-------|
-| **COMMUNICATE.WHISPER** | - | Intensity 2, Range 1 | - | - | Very quiet, very close |
-| **COMMUNICATE.NORMAL** | Visible mouth | Intensity 5, Range 3 | - | - | Normal talking range |
-| **COMMUNICATE.SHOUT** | Visible mouth | Intensity 8, Range 10 | - | - | Loud, attracts attention |
+| **COMMUNICATE.WHISPER** | - | Intensity 2, Range 3 | - | - | Very quiet, close range |
+| **COMMUNICATE.NORMAL** | Visible mouth | Intensity 5, Range 5 | - | - | Normal talking range |
+| **COMMUNICATE.SHOUT** | Visible mouth | Intensity 8, Range 30 | - | - | Loud, attracts attention |
 | **MOVE.WALK** | Full body | Intensity 3, Range 5 | - | - | Footsteps (pressure) |
 | **MOVE.SPRINT** | Full body | Intensity 6, Range 8 | - | - | Heavy footsteps |
 | **USE.IMPACT_SINGLE** | Weapon swing | Intensity 7, Range 6 | - | - | Combat sounds |
@@ -390,30 +393,30 @@ export interface SenseBroadcast {
 
 export const ACTION_SENSE_PROFILES: Record<string, SenseBroadcast[]> = {
   "COMMUNICATE.WHISPER": [
-    { sense: "hearing", intensity: 2, range_tiles: 1, directional: false, penetrates_walls: true }
+    { sense: "pressure", intensity: 2, range_tiles: 3, directional: false, penetrates_walls: true }
   ],
   "COMMUNICATE.NORMAL": [
-    { sense: "sight", intensity: 3, range_tiles: 3, directional: true, penetrates_walls: false },
-    { sense: "hearing", intensity: 5, range_tiles: 3, directional: false, penetrates_walls: true }
+    { sense: "light", intensity: 3, range_tiles: 3, directional: true, penetrates_walls: false },
+    { sense: "pressure", intensity: 5, range_tiles: 5, directional: false, penetrates_walls: true }
   ],
   "COMMUNICATE.SHOUT": [
-    { sense: "sight", intensity: 5, range_tiles: 10, directional: true, penetrates_walls: false },
-    { sense: "hearing", intensity: 8, range_tiles: 10, directional: false, penetrates_walls: true }
+    { sense: "light", intensity: 5, range_tiles: 10, directional: true, penetrates_walls: false },
+    { sense: "pressure", intensity: 8, range_tiles: 30, directional: false, penetrates_walls: true }
   ],
   "MOVE.WALK": [
-    { sense: "sight", intensity: 5, range_tiles: 12, directional: true, penetrates_walls: false },
-    { sense: "hearing", intensity: 3, range_tiles: 5, directional: false, penetrates_walls: true },
+    { sense: "light", intensity: 5, range_tiles: 12, directional: true, penetrates_walls: false },
+    { sense: "pressure", intensity: 3, range_tiles: 5, directional: false, penetrates_walls: true },
     { sense: "pressure", intensity: 2, range_tiles: 2, directional: false, penetrates_walls: true }
   ],
   "USE.IMPACT_SINGLE": [
-    { sense: "sight", intensity: 7, range_tiles: 8, directional: true, penetrates_walls: false },
-    { sense: "hearing", intensity: 7, range_tiles: 6, directional: false, penetrates_walls: true },
+    { sense: "light", intensity: 7, range_tiles: 8, directional: true, penetrates_walls: false },
+    { sense: "pressure", intensity: 7, range_tiles: 6, directional: false, penetrates_walls: true },
     { sense: "pressure", intensity: 5, range_tiles: 3, directional: false, penetrates_walls: true }
   ],
   "DAMAGE": [
-    { sense: "sight", intensity: 9, range_tiles: 15, directional: true, penetrates_walls: false },
-    { sense: "hearing", intensity: 9, range_tiles: 15, directional: false, penetrates_walls: true },
-    { sense: "smell", intensity: 4, range_tiles: 3, directional: false, penetrates_walls: true }
+    { sense: "light", intensity: 9, range_tiles: 15, directional: true, penetrates_walls: false },
+    { sense: "pressure", intensity: 9, range_tiles: 15, directional: false, penetrates_walls: true },
+    { sense: "aroma", intensity: 4, range_tiles: 3, directional: false, penetrates_walls: true }
   ]
 };
 
@@ -554,12 +557,10 @@ export function spawn_facing_indicator(
 
 function get_sense_color(sense: SenseType): { r: number; g: number; b: number } {
   switch (sense) {
-    case "sight": return { r: 255, g: 255, b: 0 };    // Yellow
-    case "hearing": return { r: 0, g: 255, b: 255 }; // Cyan
-    case "smell": return { r: 255, g: 128, b: 0 };   // Orange
-    case "pressure": return { r: 128, g: 0, b: 255 }; // Purple
-    case "magic": return { r: 255, g: 0, b: 255 };   // Magenta
-    case "thermal": return { r: 255, g: 0, b: 0 };   // Red
+    case "light": return { r: 255, g: 255, b: 0 };     // Yellow
+    case "pressure": return { r: 0, g: 255, b: 255 };  // Cyan
+    case "aroma": return { r: 255, g: 128, b: 0 };     // Orange
+    case "thaumic": return { r: 255, g: 0, b: 255 };   // Magenta
     default: return { r: 255, g: 255, b: 255 };      // White
   }
 }
@@ -1040,6 +1041,8 @@ if (!is_timed_event_active(data_slot_number)) {
 
 **Modify `src/action_system/perception.ts`:**
 
+- [x] Add `PerceptionEvent.subtype` and populate it from `intent.parameters.subtype`
+
 Ensure COMMUNICATE events include target info:
 ```typescript
 // In createPerceptionEvent for communication
@@ -1416,7 +1419,7 @@ Expected:
 Setup: NPC at (0,0), player at (15,0) - far away
 Action: Player shouts "HELLO!"
 Expected:
-  - NPC reacts to shout (pressure sense range 10 tiles)
+  - NPC reacts to shout (pressure sense range 30 tiles)
   - Debug: Cyan ○ particles show pressure range (sound vibrations)
   - NPC faces sound direction
 ```
@@ -1750,6 +1753,7 @@ AFTER (Fixed):
 - [x] Movement system - **✅ VERIFIED** (NPCs wander properly)
 - [x] Sense broadcasting - **✅ VERIFIED** (COMMUNICATE shows senses=[pressure])
 - [x] Farewell detection - **✅ IMPLEMENTED** (pattern ready)
+- [x] Bystander memories persisted - **✅ IMPLEMENTED** (eavesdrop/join -> `npc_storage/memory.ts`)
 
 **✅ FIXED (February 8, 2026):**
 - [x] NPCs enter "converse" goal when addressed - **✅ VERIFIED** (logs show `goal set to: converse`)
@@ -1763,36 +1767,32 @@ Conversation timeout was using game time converted to milliseconds, resulting in
 
 ### Vision & Senses (New)
 - [x] NPCs face direction of movement automatically - **✅ VERIFIED** (logs show facing updates)
-- [ ] NPCs face targets when acting (COMMUNICATE, USE, INSPECT) - **⏳ PENDING** (pipeline integration working, needs actor facing)
-- [ ] Vision cones block perception behind NPCs - **⏳ PENDING** (needs position lookups)
-- [ ] Hearing works in 360 degrees at reduced range - **⏳ PENDING** (implemented, needs testing)
+ - [x] NPCs face targets when acting (COMMUNICATE, USE, INSPECT) - **✅ VERIFIED** (ActionPipeline updates facing on successful targeted actions)
 - [x] Damage broadcasts as loud (range 15) - **✅ IMPLEMENTED** (sense profiles defined)
 - [x] Walking broadcasts as quiet (range 5) - **✅ IMPLEMENTED** (sense profiles defined)
 - [x] Different action types have appropriate sense profiles - **✅ IMPLEMENTED**
 
 ### Debug Visualization (New)
 - [x] \\ toggles debug mode - **✅ COMPLETED**
-- [ ] Yellow ▲ particles show vision cones - **⏳ PENDING** (needs manual trigger)
-- [ ] Cyan ○ particles show hearing ranges - **⏳ PENDING** (needs manual trigger)
-- [ ] Colored ✦ particles show sense broadcasts - **⏳ PENDING** (needs manual trigger)
-- [ ] White arrows show facing direction - **⏳ PENDING** (needs manual trigger)
-- [ ] Particles fade cleanly after lifespan - **✅ IMPLEMENTED**
+- [x] Yellow ▲ particles show vision cones - **✅ VERIFIED**
+- [x] Cyan ○ hearing ring shows hearing range - **✅ VERIFIED** (press `H` to toggle)
+- [x] Colored ✦ ring shows sense broadcasts - **✅ VERIFIED** (press `B` to toggle)
+- [x] White arrows show facing direction - **✅ VERIFIED**
+- [x] Particles fade cleanly after lifespan - **✅ IMPLEMENTED**
 
 ### Integration Success
 - [x] Works with existing action pipeline - **✅ VERIFIED** (witness handler processes communication events)
 - [x] Disabled during combat - **✅ IMPLEMENTED** (checks is_timed_event_active)
 - [x] No interference with AI responses - **✅ VERIFIED** (Grenda responded normally)
-- [ ] Performance acceptable with 50+ NPCs - **⏳ PENDING** (needs load testing)
 - [x] Facing system works with existing movement - **✅ VERIFIED**
-- [ ] Particle system doesn't impact performance - **⏳ PENDING** (needs manual testing)
 
 ### Tabletop Feel
 - [x] NPCs react immediately (no delay) - **✅ VERIFIED** (witness processing during NPC_AI tick)
 - [x] Behavior changes are visible to players - **✅ VERIFIED** (NPC stops wandering, enters conversation)
 - [x] Natural conversation flow (enter → talk → exit) - **✅ VERIFIED** (tested with Grenda)
-- [ ] Respects NPC roles (guards stay near posts) - **⏳ PENDING**
-- [ ] Vision cones create realistic awareness - **⏳ PENDING**
-- [ ] Players can use stealth by staying behind NPCs - **⏳ PENDING**
+
+Remaining follow-ups (performance + stealth realism + archetype-driven constraints) moved to:
+- `docs/plans/2026_02_13_advanced_npc_interactions_scheduler.md`
 
 ---
 
@@ -1823,7 +1823,7 @@ Conversation timeout was using game time converted to milliseconds, resulting in
 ---
 
 **Document:** NPC Witness & Reaction System Implementation Plan  
-**Location:** `docs/plans/2026_02_07_npc_witness_reaction_system.md`  
+**Location:** `docs/archive/2026_02_07_npc_witness_reaction_system_IMPLEMENTED.md`  
 **Duration:** 2.5 weeks (12 working days) → **Completed in 1 day**  
 **Last Updated:** February 8, 2026 (Implementation Complete)
 
