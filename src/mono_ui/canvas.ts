@@ -7,11 +7,18 @@ const DEFAULT_CHAR = " ";
 
 // 0..7 => 8 weights. default 3 ≈ "regular"
 const DEFAULT_WEIGHT_INDEX = 3;
+const DEFAULT_RENDER_INDEX = 0;
 
 function clamp_weight_index(n: unknown): number {
     const v = typeof n === "number" ? Math.trunc(n) : DEFAULT_WEIGHT_INDEX;
     if (!Number.isFinite(v)) return DEFAULT_WEIGHT_INDEX;
     return Math.max(0, Math.min(7, v));
+}
+
+function clamp_render_index(n: unknown): number {
+    const v = typeof n === "number" ? Math.trunc(n) : DEFAULT_RENDER_INDEX;
+    if (!Number.isFinite(v)) return DEFAULT_RENDER_INDEX;
+    return Math.max(0, Math.min(255, v));  // Allow 0-255 layers
 }
 
 
@@ -31,8 +38,9 @@ function normalize_cell(partial: Partial<Cell> & { char: string }): Cell {
 
     const style = partial.style ?? DEFAULT_STYLE;
     const weight_index = clamp_weight_index((partial as any).weight_index);
+    const render_index = clamp_render_index((partial as any).render_index);
 
-    return { char, rgb, style, weight_index };
+    return { char, rgb, style, weight_index, render_index };
 
 }
 
@@ -51,6 +59,7 @@ export function create_canvas(width: number, height: number, fill?: Partial<Cell
     if (!Number.isInteger(height) || height <= 0) throw new Error("Canvas height must be a positive integer");
 
     const base = normalize_cell(fill ?? { char: DEFAULT_CHAR });
+    // Single array of cells - last write wins (simple, reliable)
     const cells: Cell[] = Array.from({ length: width * height }, () => ({ ...base }));
 
     const api: Canvas = {
@@ -66,8 +75,8 @@ export function create_canvas(width: number, height: number, fill?: Partial<Cell
         set(x: number, y: number, cell: Partial<Cell> & { char: string }): void {
             const idx = to_index(width, height, x, y);
             if (idx === null) return;
-            const next = normalize_cell({ ...cells[idx], ...cell });
-            cells[idx] = next;
+            const next = normalize_cell(cell);
+            cells[idx] = next;  // Last write wins - simple and reliable
         },
 
         clear_rect(rect: Rect): void {

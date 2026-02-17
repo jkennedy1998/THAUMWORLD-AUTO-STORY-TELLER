@@ -109,6 +109,7 @@ type Particle = {
   created_at: number;  // Timestamp (Date.now())
   lifespan_ms: number; // How long to live
   weight?: number;     // Optional weight for rendering priority (higher = on top)
+  render_index?: number; // Render layer (higher = on top), defaults to 3 for particles
 };
 
 // Movement state
@@ -604,13 +605,16 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     const now = Date.now();
     const move_rgb = get_color_by_name("vivid_cyan").rgb;
     
+    // Movement particles at layer 3 (below entities at layer 4)
     particles.push({
       x: pos.x,
       y: pos.y,
       char: "·",
       rgb: move_rgb,
       created_at: now,
-      lifespan_ms: PARTICLE_LIFESPAN_MS
+      lifespan_ms: PARTICLE_LIFESPAN_MS,
+      weight: 4,  // Medium weight
+      render_index: 3,  // Below entities (layer 4)
     });
   }
   
@@ -699,97 +703,23 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     particles = particles.filter(p => (now - p.created_at) < p.lifespan_ms);
   }
 
-  // Render the place
-  function draw_place(canvas: Canvas, place: Place): void {
-    const inner = inner_rect();
-    const { width, height } = inner_size();
+    // Render the place
+    function draw_place(canvas: Canvas, place: Place): void {
+      const inner = inner_rect();
+      const { width, height } = inner_size();
 
-    // Calculate visible tile range
-    const visible_tile_start_x = view.offset_x;
-    const visible_tile_start_y = view.offset_y;
-    const visible_tile_end_x = view.offset_x + width * view.scale;
-    const visible_tile_end_y = view.offset_y + height * view.scale;
+      // Calculate visible tile range
+      const visible_tile_start_x = view.offset_x;
+      const visible_tile_start_y = view.offset_y;
+      const visible_tile_end_x = view.offset_x + width * view.scale;
+      const visible_tile_end_y = view.offset_y + height * view.scale;
 
-    // Clear background
-    canvas.fill_rect(inner, { char: " ", rgb: bg_rgb });
+      // Clear background
+      canvas.fill_rect(inner, { char: " ", rgb: bg_rgb });
 
-    // Track previous positions to detect movement and spawn footsteps
-    const current_positions = new Map<string, TilePosition>();
-    
-    // Record current positions
-    for (const actor of place.contents.actors_present) {
-      current_positions.set(actor.actor_ref, { ...actor.tile_position });
-    }
-    for (const npc of place.contents.npcs_present) {
-      current_positions.set(npc.npc_ref, { ...npc.tile_position });
-    }
-
-    // Draw floor grid and entities
-    for (let screen_y = inner.y0; screen_y <= inner.y1; screen_y++) {
-      for (let screen_x = inner.x0; screen_x <= inner.x1; screen_x++) {
-        const rel_x = screen_x - inner.x0;
-        const rel_y = screen_y - inner.y0;
-
-        // Calculate which tile(s) this screen cell represents
-        const tile_start_x = view.offset_x + rel_x * view.scale;
-        const tile_start_y = view.offset_y + rel_y * view.scale;
-        const tile_end_x = tile_start_x + view.scale;
-        const tile_end_y = tile_start_y + view.scale;
-
-        // Check if this screen cell is within place bounds
-        // Use <= to include tiles at the boundary (e.g., x=19 in a 20-wide place)
-        const in_bounds =
-          tile_start_x < place.tile_grid.width &&
-          tile_start_y < place.tile_grid.height &&
-          tile_end_x > 0 &&
-          tile_end_y > 0;
-
-        if (!in_bounds) {
-          // Outside place bounds - render as void
-          canvas.set(screen_x, screen_y, { char: " ", rgb: bg_rgb });
-          continue;
-        }
-
-        // For scale > 1, show the "most important" entity or floor
-        // Priority: NPC > Actor > Floor
-        let found_entity = false;
-
-        // Check for entities in this tile block
-        let checked_tiles = 0;
-        for (let tx = Math.floor(tile_start_x); tx < tile_end_x && !found_entity; tx++) {
-          for (let ty = Math.floor(tile_start_y); ty < tile_end_y && !found_entity; ty++) {
-            if (tx < 0 || ty < 0 || tx >= place.tile_grid.width || ty >= place.tile_grid.height) {
-              continue;
-            }
-            checked_tiles++;
-
-            const entity = get_entity_at(tx, ty, place);
-            if (entity) {
-              const is_npc = "npc_ref" in entity;
-              const name = is_npc
-                ? (entity as PlaceNPC).npc_ref.split(".").pop() ?? "N"
-                : (entity as PlaceActor).actor_ref.split(".").pop() ?? "A";
-              const rgb = is_npc ? npc_rgb : actor_rgb;
-              canvas.set(screen_x, screen_y, {
-                char: get_initial(name),
-                rgb,
-                weight_index: 6,  // Bold for visibility
-              });
-              found_entity = true;
-              break;
-            }
-          }
-        }
-
-        if (!found_entity) {
-          // Draw floor
-          const tile_char = view.scale > 2 ? "·" : floor_char;
-          canvas.set(screen_x, screen_y, { char: tile_char, rgb: floor_rgb });
-        }
-      }
-    }
-
-    // Draw place boundary indicators on INVALID tiles (outside place bounds)
+      // CRITICAL FIX: Check entity movement FIRST (spawns particles)
+      // Must happen before drawing, so particles draw below entities
+      check_entity_movement(place);
     // This places walls at x=-1, x=width, y=-1, y=height so entities at 0..width-1 render clearly inside
     
     // Left edge: at x = -1 (one tile left of 0)
@@ -825,6 +755,28 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         if (tile_y >= -1 && tile_y <= place.tile_grid.height) {
           canvas.set(right_screen_x, y, { char: "│", rgb: grid_rgb });
         }
+      }
+    }
+
+    // CRITICAL FIX STEP 2: After drawing floor and BEFORE particles/entities,
+    // we need to collect entity positions for the entity rendering pass
+    const entity_positions = new Map<string, {x: number, y: number, entity: PlaceNPC | PlaceActor}>();
+    
+    // Record all entity positions in the view
+    for (const actor of place.contents.actors_present) {
+      const screen_x = inner.x0 + Math.floor((actor.tile_position.x - view.offset_x) / view.scale);
+      const screen_y = inner.y0 + Math.floor((actor.tile_position.y - view.offset_y) / view.scale);
+      if (screen_x >= inner.x0 && screen_x <= inner.x1 && 
+          screen_y >= inner.y0 && screen_y <= inner.y1) {
+        entity_positions.set(actor.actor_ref, {x: screen_x, y: screen_y, entity: actor});
+      }
+    }
+    for (const npc of place.contents.npcs_present) {
+      const screen_x = inner.x0 + Math.floor((npc.tile_position.x - view.offset_x) / view.scale);
+      const screen_y = inner.y0 + Math.floor((npc.tile_position.y - view.offset_y) / view.scale);
+      if (screen_x >= inner.x0 && screen_x <= inner.x1 && 
+          screen_y >= inner.y0 && screen_y <= inner.y1) {
+        entity_positions.set(npc.npc_ref, {x: screen_x, y: screen_y, entity: npc});
       }
     }
 
@@ -896,12 +848,12 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
     }
 
-    // Check for entity movement and spawn footsteps
-    check_entity_movement(place);
+    // CRITICAL FIX STEP 3: Draw particles BEFORE entities
+    // This ensures particles don't overwrite entities (last write wins)
+    check_entity_movement(place);  // Spawns new particles based on movement
     
     // Update debug visuals for all NPCs (vision cones, facing, etc.)
     // For LOS-occlusion debug, treat characters as blockers.
-    // (Eventually this should use solid features/walls, not occupancy.)
     const character_blockers = new Set<string>();
     for (const npc of place.contents.npcs_present) {
       const p = npc.tile_position;
@@ -931,18 +883,38 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       
       if (screen_x >= inner.x0 && screen_x <= inner.x1 &&
           screen_y >= inner.y0 && screen_y <= inner.y1) {
-        // Draw particle with weight (higher weight = on top)
-        // Use particle's weight if specified, otherwise default to 4
+        // Draw particle with render_index (higher = drawn later = on top)
+        // Use particle's render_index if specified, otherwise default to 3 (below entities at 4)
         const weight = p.weight ?? 4;
+        const render_index = p.render_index ?? 3;  // Particles layer (below entities)
         canvas.set(screen_x, screen_y, {
           char: p.char,
           rgb: p.rgb,
-          weight_index: weight
+          weight_index: weight,
+          render_index: render_index
         });
       }
     }
 
-    // Draw target highlight (follows entity movement) - draw BEFORE entities
+    // CRITICAL FIX STEP 4: Draw entities LAST (after particles)
+    // This ensures entities are on top since last write wins
+    for (const [ref, pos] of entity_positions) {
+      const is_npc = "npc_ref" in pos.entity;
+      const name = is_npc 
+        ? (pos.entity as PlaceNPC).npc_ref.split(".").pop() ?? "N"
+        : (pos.entity as PlaceActor).actor_ref.split(".").pop() ?? "A";
+      const rgb = is_npc ? npc_rgb : actor_rgb;
+      
+      canvas.set(pos.x, pos.y, {
+        char: get_initial(name),
+        rgb,
+        weight_index: 6,
+        render_index: 4,  // Not used in single-layer mode but kept for consistency
+      });
+    }
+
+    // Draw target highlight (follows entity movement) - draw AFTER entities
+    // So highlights appear on top of entities
     const target_pos = get_target_current_position(place);
     if (target_pos && targeted) {
       const screen_x = inner.x0 + Math.floor((target_pos.x - view.offset_x) / view.scale);
@@ -963,7 +935,6 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
     } else if (targeted) {
       // Target no longer valid (entity left place or doesn't exist)
-      console.log(`[PlaceModule] Target ${targeted.ref} not found in place, clearing`);
       clear_target();
     }
 
@@ -1042,6 +1013,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     rect: config.rect,
     Focusable: true,
 
+// Draw callback for PlaceModule - renders the place with all entities and effects
     Draw(canvas: Canvas): void {
       const place = config.get_place();
 

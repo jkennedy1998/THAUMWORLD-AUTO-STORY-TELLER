@@ -2,6 +2,7 @@ import type { Canvas, Module } from "./types.js";
 
 export function compose_modules(canvas: Canvas, modules: Module[]): void {
     // Clear whole canvas each frame (lofi, correct baseline)
+    // This ensures a clean slate for all modules every frame
     canvas.fill_rect(
         { x0: 0, y0: 0, x1: canvas.width - 1, y1: canvas.height - 1 },
         { char: " " },

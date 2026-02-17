@@ -17,6 +17,18 @@ export type Cell = {
     // 0=thin ... 3=regular-ish ... 7=black-ish
     weight_index: number;
 
+    // Z-index / render layer
+    // Lower numbers = drawn first (bottom layer)
+    // Higher numbers = drawn last (top layer)
+    // Default: 0 = floor/background
+    //          1 = static features (walls)
+    //          2 = paths / guides
+    //          3 = particles / effects
+    //          4 = entities (NPCs, actors)
+    //          5 = highlights / overlays
+    //          6 = UI elements
+    render_index: number;
+
     style: StyleName;
     rgb: Rgb;
 };
