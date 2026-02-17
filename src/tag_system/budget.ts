@@ -33,7 +33,7 @@ export interface BudgetResult {
   /** Breakdown by tag */
   tag_costs: Array<{
     tag_name: string;
-    stacks: number;
+    mag: number;
     cost: number;
   }>;
   /** Error message if invalid */
@@ -106,19 +106,19 @@ export class MAGBudgetCalculator {
     itemMAG: number,
     tags: TagInstance[]
   ): BudgetResult {
-    const tag_costs: Array<{ tag_name: string; stacks: number; cost: number }> = [];
+    const tag_costs: Array<{ tag_name: string; mag: number; cost: number }> = [];
     let total_spent = 0;
 
     for (const tag of tags) {
       const costInfo = this.getTagCost(tag.name);
-      const stacks = tag.stacks || 1;
+      const mag = tag.mag || 1;
       
-      // Calculate cost: base + (stacks - 1) * per_stack
-      const cost = costInfo.base_cost + ((stacks - 1) * costInfo.per_stack_cost);
+      // Calculate cost: base + (mag - 1) * per_stack
+      const cost = costInfo.base_cost + ((mag - 1) * costInfo.per_stack_cost);
       
       tag_costs.push({
         tag_name: tag.name,
-        stacks: stacks,
+        mag: mag,
         cost: cost
       });
       
@@ -232,8 +232,8 @@ export class MAGBudgetCalculator {
     // Try to add optional tags within remaining budget
     for (const optTag of optionalTags) {
       const costInfo = this.getTagCost(optTag.name);
-      const stacks = optTag.stacks || 1;
-      const cost = costInfo.base_cost + ((stacks - 1) * costInfo.per_stack_cost);
+      const mag = optTag.mag || 1;
+      const cost = costInfo.base_cost + ((mag - 1) * costInfo.per_stack_cost);
 
       if (cost <= remainingMAG) {
         currentTags.push(optTag);
@@ -263,7 +263,7 @@ export class MAGBudgetCalculator {
     lines.push(`Tag Costs:`);
     
     for (const tc of result.tag_costs) {
-      lines.push(`  - ${tc.tag_name} ×${tc.stacks}: ${tc.cost} MAG`);
+      lines.push(`  - ${tc.tag_name} ×${tc.mag}: ${tc.cost} MAG`);
     }
     
     if (result.error) {

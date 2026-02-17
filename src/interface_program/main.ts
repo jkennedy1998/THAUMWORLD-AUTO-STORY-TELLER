@@ -1616,6 +1616,83 @@ function start_http_server(log_path: string): void {
             return;
         }
 
+        // POST /api/tag/add - Add a tag to an entity (for testing)
+        if (url.pathname === "/api/tag/add") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+            if (!Number.isFinite(slot) || slot <= 0) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+            req.on("end", async () => {
+                try {
+                    const data = JSON.parse(body);
+                    const { entity_ref, tag_name, mag, meta } = data;
+
+                    if (!entity_ref || !tag_name) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                        return;
+                    }
+
+                    // Determine if actor or NPC
+                    const is_npc = entity_ref.startsWith("npc.");
+                    const entity_id = entity_ref.replace(/^(npc|actor)\./, "");
+
+                    if (is_npc) {
+                        const result = load_npc(slot, entity_id);
+                        if (!result.ok || !result.npc) {
+                            res.writeHead(404, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: false, error: "npc_not_found" }));
+                            return;
+                        }
+                        const npc = result.npc as Record<string, any>;
+                        if (!npc.tags) npc.tags = [];
+                        (npc.tags as any[]).push({
+                            name: tag_name,
+                            mag: mag || 1,
+                            meta: meta || []
+                        });
+                        save_npc(slot, entity_id, npc);
+                    } else {
+                        const result = load_actor(slot, entity_id);
+                        if (!result.ok || !result.actor) {
+                            res.writeHead(404, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: false, error: "actor_not_found" }));
+                            return;
+                        }
+                        const actor = result.actor as Record<string, any>;
+                        if (!actor.tags) actor.tags = [];
+                        (actor.tags as any[]).push({
+                            name: tag_name,
+                            mag: mag || 1,
+                            meta: meta || []
+                        });
+                        save_actor(slot, entity_id, actor);
+                    }
+
+                    debug_log("API", `/api/tag/add: Added ${tag_name} to ${entity_ref}`);
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, entity_ref, tag_name, mag }));
+                } catch (err: any) {
+                    debug_error("API", `/api/tag/add request error`, err);
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? "tag_add_failed" }));
+                }
+            });
+            return;
+        }
+
         if (url.pathname === "/api/targets") {
             if (req.method !== "GET") {
                 res.writeHead(405, { "Content-Type": "application/json" });

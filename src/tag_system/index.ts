@@ -11,7 +11,8 @@ export {
   type TagInstance,
   type TagRule,
   type TagAction,
-  type TaggedItem
+  type TaggedItem,
+  type TaggedEntity
 } from "./registry.js";
 
 export {

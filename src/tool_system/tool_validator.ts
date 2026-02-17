@@ -51,7 +51,8 @@ function convertToTaggedItem(item: any): TaggedItem | null {
       weight: item.weight || 0,
       tags: (item.tags as string[]).map((tagName: string) => ({
         name: tagName,
-        stacks: 1
+        mag: 1,
+        meta: []
       })),
       mag: item.mag
     };
@@ -190,7 +191,7 @@ function getEquippedTools(actor: Actor): Array<{ slot: string; item: TaggedItem 
         ref: `${actor.ref}.hand`,
         name: "Hand",
         weight: 0,
-        tags: [{ name: "hand", stacks: 1 }]
+        tags: [{ name: "hand", mag: 1, meta: [] }]
       }
     });
   }

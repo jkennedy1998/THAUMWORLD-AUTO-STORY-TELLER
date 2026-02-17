@@ -32,8 +32,8 @@ const longbow: TaggedItem = {
   name: "Longbow",
   weight: 12,
   tags: [
-    { name: "bow", stacks: 3 },  // MAG 3 bow
-    { name: "damage", value: "piercing", stacks: 1 }
+    { name: "bow", mag: 3, meta: [] },  // MAG 3 bow
+    { name: "damage", mag: 1, meta: [], info: ["piercing"] }
   ]
 };
 
@@ -42,7 +42,7 @@ const arrow: TaggedItem = {
   name: "Arrow",
   weight: 1,
   tags: [
-    { name: "projectile", value: "arrow", stacks: 1 }
+    { name: "projectile", mag: 1, meta: [], info: ["arrow"] }
   ]
 };
 
@@ -51,7 +51,7 @@ const sword: TaggedItem = {
   name: "Steel Sword",
   weight: 10,
   tags: [
-    { name: "sword", stacks: 2 }  // MAG 2 sword
+    { name: "sword", mag: 2, meta: [] }  // MAG 2 sword
   ]
 };
 

@@ -78,7 +78,7 @@ export class TagResolver {
           action.base_range,
           action.range_category,
           rule,
-          tagInstance.stacks
+          tagInstance.mag
         );
 
         capabilities.push({
@@ -90,8 +90,8 @@ export class TagResolver {
           },
           damage: {
             formula: action.damage_formula,
-            base_mag: tagInstance.stacks,
-            bonus_mag: this.calculateBonusMAG(rule, tagInstance.stacks)
+            base_mag: tagInstance.mag,
+            bonus_mag: this.calculateBonusMAG(rule, tagInstance.mag)
           },
           proficiencies: action.proficiencies,
           ammo_requirement: action.requirements || null,
@@ -140,7 +140,7 @@ export class TagResolver {
     const req = capability.ammo_requirement;
     const hasTag = ammo.tags.some(tag => {
       if (tag.name !== req.tag) return false;
-      if (req.tag_value && tag.value !== req.tag_value) return false;
+      if (req.tag_value && tag.info && tag.info[0] !== req.tag_value) return false;
       return true;
     });
 
@@ -219,7 +219,7 @@ export class TagResolver {
         return {
           rule,
           action,
-          tagStacks: tagInstance.stacks
+          tagStacks: tagInstance.mag
         };
       }
     }
@@ -270,7 +270,7 @@ export class TagResolver {
       ref: "body.hand",
       name: "Hand",
       weight: 0,
-      tags: [{ name: "hand", stacks: 1 }]
+      tags: [{ name: "hand", mag: 1, meta: [] }]
     };
   }
 }

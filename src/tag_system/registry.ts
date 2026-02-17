@@ -8,14 +8,18 @@
 export interface TagInstance {
   /** Tag identifier (e.g., "bow", "fire!", "sword") */
   name: string;
-  /** Stack count / MAG level (default: 1) */
-  stacks: number;
-  /** Tracked variable/data (optional) */
-  value?: any;
+  /** Magnitude / stack count (default: 1) - renamed from stacks */
+  mag: number;
+  /** Meta tags applied to this tag instance (e.g., ["dispersing"]) */
+  meta: string[];
+  /** Tracked information / variables (optional) */
+  info?: any[];
   /** Source of the tag (optional) */
   source?: string;
-  /** Expiry timestamp (optional) */
+  /** Expiry timestamp in milliseconds (optional) */
   expiry?: number;
+  /** Valid scopes for this tag instance (optional) */
+  scope?: ("CHARACTER" | "ITEM" | "TILE")[];
 }
 
 /**
@@ -71,6 +75,27 @@ export interface TagRule {
     };
     max_stacks?: number;
   };
+  /** Entity-specific effect definitions (optional) */
+  entity_effects?: {
+    character?: any[];
+    item?: any[];
+    tile?: any[];
+  };
+}
+
+/**
+ * Standardized interface for all entities with tags
+ */
+export interface TaggedEntity {
+  id: string;
+  tags: TagInstance[];
+  
+  // Standardized operations
+  getTag?(name: string): TagInstance | undefined;
+  hasTag?(name: string): boolean;
+  addTag?(tag: TagInstance): void;
+  removeTag?(name: string, amount?: number): void;
+  addStacks?(name: string, amount: number): void;
 }
 
 /**
@@ -157,10 +182,10 @@ export function calculateWeightMAG(weight: number): number {
 }
 
 /**
- * Calculate item MAG from tag stacks
+ * Calculate item MAG from tag magnitude
  */
 export function calculateItemMAG(item: TaggedItem): number {
-  return item.tags.reduce((sum, tag) => sum + (tag.stacks || 1), 0);
+  return item.tags.reduce((sum, tag) => sum + (tag.mag || 1), 0);
 }
 
 /**

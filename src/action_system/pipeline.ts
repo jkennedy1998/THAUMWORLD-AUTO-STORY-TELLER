@@ -518,7 +518,7 @@ export class ActionPipeline {
     if (intent.verb === "USE" && intent.parameters.subtype && rollContext) {
       const baseMAG = toolData?.tags?.find(t => 
         capability?.source_tag && t.name === capability.source_tag
-      )?.stacks || 1;
+      )?.mag || 1;
       potencyRoll = performPotencyRoll(baseMAG, rollContext.effectors);
     }
     

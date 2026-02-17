@@ -46,7 +46,11 @@
           "aroma": ["Wood polish", "Dust"]
         }
       },
-      "tags": ["wooden", "indoor", "flammable"]
+      "tags": [
+        { "name": "wooden", "mag": 1, "meta": [] },
+        { "name": "indoor", "mag": 1, "meta": [] },
+        { "name": "flammable", "mag": 1, "meta": [] }
+      ]
     },
     {
       "id": "stone_floor",
@@ -81,7 +85,11 @@
           "aroma": ["Damp stone", "Moss"]
         }
       },
-      "tags": ["stone", "indoor", "outdoor"]
+      "tags": [
+        { "name": "stone", "mag": 1, "meta": [] },
+        { "name": "indoor", "mag": 1, "meta": [] },
+        { "name": "outdoor", "mag": 1, "meta": [] }
+      ]
     },
     {
       "id": "wooden_wall",
@@ -120,7 +128,11 @@
           "aroma": ["Wood", "Dust"]
         }
       },
-      "tags": ["wooden", "wall", "indoor"]
+      "tags": [
+        { "name": "wooden", "mag": 1, "meta": [] },
+        { "name": "wall", "mag": 1, "meta": [] },
+        { "name": "indoor", "mag": 1, "meta": [] }
+      ]
     },
     {
       "id": "stone_wall",
@@ -159,7 +171,12 @@
           "aroma": ["Stone dust", "Age"]
         }
       },
-      "tags": ["stone", "wall", "indoor", "outdoor"]
+      "tags": [
+        { "name": "stone", "mag": 1, "meta": [] },
+        { "name": "wall", "mag": 1, "meta": [] },
+        { "name": "indoor", "mag": 1, "meta": [] },
+        { "name": "outdoor", "mag": 1, "meta": [] }
+      ]
     },
     {
       "id": "wooden_table",
@@ -200,7 +217,11 @@
           "time_seconds": 15
         }
       ],
-      "tags": ["wooden", "furniture", "cover"]
+      "tags": [
+        { "name": "wooden", "mag": 1, "meta": [] },
+        { "name": "furniture", "mag": 1, "meta": [] },
+        { "name": "cover", "mag": 1, "meta": [] }
+      ]
     },
     {
       "id": "wooden_chair",
@@ -224,7 +245,10 @@
           "touch": ["Smooth wood", "Textured seat"]
         }
       },
-      "tags": ["wooden", "furniture"]
+      "tags": [
+        { "name": "wooden", "mag": 1, "meta": [] },
+        { "name": "furniture", "mag": 1, "meta": [] }
+      ]
     },
     {
       "id": "grass_terrain",
@@ -259,7 +283,11 @@
           "aroma": ["Fresh grass", "Earth"]
         }
       },
-      "tags": ["grass", "outdoor", "flammable"]
+      "tags": [
+        { "name": "grass", "mag": 1, "meta": [] },
+        { "name": "outdoor", "mag": 1, "meta": [] },
+        { "name": "flammable", "mag": 1, "meta": [] }
+      ]
     },
     {
       "id": "dirt_terrain",
@@ -294,7 +322,10 @@
           "aroma": ["Dust", "Earth"]
         }
       },
-      "tags": ["dirt", "outdoor"]
+      "tags": [
+        { "name": "dirt", "mag": 1, "meta": [] },
+        { "name": "outdoor", "mag": 1, "meta": [] }
+      ]
     },
     {
       "id": "water_shallow",
@@ -329,7 +360,11 @@
           "aroma": ["Fresh water"]
         }
       },
-      "tags": ["water", "outdoor", "shallow"]
+      "tags": [
+        { "name": "water", "mag": 1, "meta": [] },
+        { "name": "outdoor", "mag": 1, "meta": [] },
+        { "name": "shallow", "mag": 1, "meta": [] }
+      ]
     },
     {
       "id": "water_deep",
@@ -355,7 +390,11 @@
           "aroma": ["Water", "Depth"]
         }
       },
-      "tags": ["water", "outdoor", "deep"]
+      "tags": [
+        { "name": "water", "mag": 1, "meta": [] },
+        { "name": "outdoor", "mag": 1, "meta": [] },
+        { "name": "deep", "mag": 1, "meta": [] }
+      ]
     }
   ]
 }

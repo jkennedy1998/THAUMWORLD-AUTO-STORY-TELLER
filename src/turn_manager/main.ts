@@ -31,6 +31,7 @@ import { initialize_turn_state, roll_initiative as roll_initiative_state_machine
 import { validate_action, can_perform_action, type ActorState } from "./validator.js";
 import { hold_action, check_triggers, process_reaction, clear_event_reactions, create_trigger, type ReactionRequest } from "./reactions.js";
 import { append_timed_event_memory_journal } from "../npc_ai/timed_event_journal.js";
+import { MetaTagProcessor } from "../tag_system/meta_processor.js";
 
 const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
 const POLL_MS = SERVICE_CONFIG.POLL_MS.TURN_MANAGER;
@@ -691,6 +692,9 @@ async function process_turn_phases(
                         });
                     }
                 }
+                
+                // Process dispersing tags at end of turn
+                await MetaTagProcessor.processDispersingTags(slot);
                 
                 // Transition to event end check (which may start next turn)
                 transition_phase(turn_state, "EVENT_END_CHECK");

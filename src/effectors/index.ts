@@ -73,13 +73,13 @@ export class EffectorRegistry {
       const tagEffectors = this.getEffectors(`tag:${tag.name}`);
       allEffectors.push(...tagEffectors);
       
-      // Add stack-based effectors (more stacks = stronger effect)
-      if (tag.stacks > 1) {
+      // Add mag-based effectors (more mag = stronger effect)
+      if (tag.mag > 1) {
         for (const eff of tagEffectors) {
           allEffectors.push({
             ...eff,
-            value: eff.value * (tag.stacks - 1),  // Additional stacks add more
-            source: `${eff.source} (stack ${tag.stacks})`
+            value: eff.value * (tag.mag - 1),  // Additional mag adds more
+            source: `${eff.source} (mag ${tag.mag})`
           });
         }
       }

@@ -141,7 +141,7 @@ export function logToolValidation(
     actor: actorRef,
     hasTool: !!tool,
     toolName: tool?.name,
-    toolTags: tool?.tags?.map(t => `${t.name}:${t.stacks}`),
+    toolTags: tool?.tags?.map(t => `${t.name}:${t.mag}`),
     hasCapability: !!capability,
     actionType: capability?.action_type,
     proficiencies: capability?.proficiencies,
@@ -304,7 +304,7 @@ export function createTestActor(
 export function createTestTool(
   name: string,
   mag: number,
-  tags: Array<{ name: string; stacks?: number; value?: any }>,
+  tags: Array<{ name: string; mag?: number; meta?: string[]; info?: any[] }>,
   options: { weight?: number; ref?: string } = {}
 ): TaggedItem {
   return {
@@ -313,8 +313,9 @@ export function createTestTool(
     weight: options.weight || 5,
     tags: tags.map(t => ({
       name: t.name,
-      stacks: t.stacks || 1,
-      value: t.value
+      mag: t.mag || 1,
+      meta: t.meta || [],
+      info: t.info
     }))
   };
 }

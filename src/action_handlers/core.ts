@@ -165,7 +165,7 @@ export async function handleImpactSingle(
   // Get damage from tool capability
   const toolMAG = tool?.tags?.find(t => 
     capability?.source_tag && t.name === capability.source_tag
-  )?.stacks || 1;
+  )?.mag || 1;
   
   const baseDamageMAG = parameters.damageMAG || toolMAG;
   
@@ -270,9 +270,9 @@ export async function handleProjectileSingle(
   // Calculate damage
   const toolMAG = tool?.tags?.find(t => 
     capability?.source_tag && t.name === capability.source_tag
-  )?.stacks || 1;
+  )?.mag || 1;
   
-  const ammoMAG = ammo?.tags?.find(t => t.name === "projectile")?.stacks || 
+  const ammoMAG = ammo?.tags?.find(t => t.name === "projectile")?.mag || 
                  (isThrown ? 0 : 1);
   
   const baseTotalMAG = toolMAG + ammoMAG;

@@ -1225,6 +1225,37 @@ export function create_app_state(): AppState {
             OnPress() { ui_state.controls.move_mode = 'SPRINT'; flash_status(['move: SPRINT'], 800); },
         }),
 
+        // Debug button: Add FIRE! tag to actor
+        make_button_module({
+            id: 'debug_add_fire',
+            rect: { x0: BTN_X0, y0: BTN_Y0 + 15, x1: BTN_X0 + 15, y1: BTN_Y0 + 17 },
+            label: 'ADD FIRE!',
+            rgb: get_color_by_name('vivid_red').rgb,
+            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
+            async OnPress() {
+                try {
+                    const response = await fetch('http://localhost:8787/api/tag/add', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            entity_ref: 'actor.henry_actor',
+                            tag_name: 'FIRE!',
+                            mag: 5,
+                            meta: ['DISPERSING']
+                        })
+                    });
+                    if (response.ok) {
+                        flash_status(['FIRE! tag added to actor'], 1500);
+                    } else {
+                        flash_status(['Failed to add FIRE! tag'], 1500);
+                    }
+                } catch (err) {
+                    flash_status(['Error: Could not connect to API'], 1500);
+                }
+            },
+        }),
+
         make_roller_module({
             id: 'roller',
             rect: { x0: ROLL_X0, y0: BTN_Y0, x1: ROLL_X1, y1: BTN_Y1 },

@@ -9,6 +9,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { get_data_slot_dir } from "../engine/paths.js";
+import { MetaTagProcessor } from "../tag_system/meta_processor.js";
 
 // Time constants
 export const MINUTES_PER_HOUR = 60;
@@ -115,6 +116,9 @@ export function advance_time(slot: number, minutes: number): GameTime | null {
   const new_time = minutes_to_game_time(total_minutes);
   
   save_time(slot, new_time);
+  
+  // Process dispersing tags when time advances
+  void MetaTagProcessor.processDispersingTags(slot);
   
   return new_time;
 }
