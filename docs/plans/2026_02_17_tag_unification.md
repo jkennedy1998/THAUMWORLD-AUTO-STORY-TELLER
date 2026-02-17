@@ -25,6 +25,70 @@ Unify the tag system across all entity types (items, characters/NPCs, tiles) wit
 - NPCs already have tag arrays (though different format)
 - Items already use `TagInstance` format
 
+## Implementation Clarifications
+
+**Approach: Minimal, viable system - delete old unused code, extend what works**
+
+### 1. MetaTagProcessor Location
+**NEW FILE**: `src/tag_system/meta_processor.ts`
+- Create as standalone class in new file
+- Keep `src/tag_system/registry.ts` and other existing files, extend them as needed
+- Delete any old/unused tag-related systems that are superseded by this implementation
+
+### 2. Migration Strategy
+**Direct file edits only - NO runtime migration, NO backwards compatibility**
+- One save slot exists with test data only
+- Edit tile files directly: `tags: string[]` → `tags: TagInstance[]`
+- Edit NPC/actor files directly: convert tag format to `TagInstance`
+- No migration script needed (test data only)
+- No old format support (clean, minimal codebase)
+- Delete old tag system code that is no longer used
+
+### 3. Visual Effect Trigger
+**Event-driven approach (NOT polling)**
+- When tags change, emit `TagChangeEvent`
+- Renderer listens for tag change events on entities it displays
+- On event: re-read entity tags, update visual state
+- **Rationale**: Efficient, allows tags to affect rendering/movement/senses/actions throughout the system
+- Add event emitter to `TaggedEntity` operations
+
+### 4. Time System Hook
+**Investigate existing time system for single source of truth**
+- Review `src/time_system/tracker.ts` and any `turn_manager` documentation
+- Find where turn/tick boundaries occur
+- Hook meta tag processing at the appropriate boundary
+- Call `MetaTagProcessor.processDispersingTags()` at end of turn/tick
+- Ensure both real-time and turn-based modes trigger processing
+- **Goal**: Time system is the single authority for when tags should disperse
+
+### 5. Dev UI Button Location
+**`interface_program.ts` debug panel with other buttons**
+- Add button: "Add [FIRE! : 5] to Actor"
+- Place alongside existing debug buttons
+- Remove button after testing phase is complete
+- Use existing UI module pattern
+
+### 6. FIRE! Tag Definition
+**Search for existing definition first**
+- Check `local_data/data_slot_default/tag_definitions.jsonc` for FIRE! tag
+- If half-implemented or missing: add complete definition with [DISPERSING] meta tag
+- Definition must include:
+  ```json
+  {
+    "name": "FIRE!",
+    "meta": ["DISPERSING"],
+    "scope": ["CHARACTER", "ITEM", "TILE"]
+  }
+  ```
+
+### 7. Color Values
+**Use existing indexed color system**
+- Do NOT use hex values or Phaser constants directly
+- Investigate current indexed color system in codebase
+- Use system colors: likely indices like `color_red`, `color_yellow`, etc.
+- Get color mapping from existing system
+- Document which indices correspond to "bright red" and "vivid yellow"
+
 Related plans:
 - `docs/plans/2026_02_14_item_system_unification.md`
 - `docs/specs/TAG_SYSTEM.md`
@@ -49,12 +113,14 @@ Related plans:
 
 ### A) TagInstance (Unified Interface)
 
+**IMPORTANT: Rename existing `stacks` field to `mag`**
+
 ```typescript
 export interface TagInstance {
   /** Tag identifier (e.g., "fire!", "awareness", "broken") */
   name: string;
   
-  /** Magnitude / stack count (default: 1) */
+  /** Magnitude / stack count (default: 1) - NOTE: renamed from `stacks` to `mag` */
   mag: number;
   
   /** Meta tags applied to this tag instance (e.g., ["dispersing"]) */
@@ -73,6 +139,8 @@ export interface TagInstance {
   scope?: ("CHARACTER" | "ITEM" | "TILE")[];
 }
 ```
+
+**Migration Note**: All existing code using `tag.stacks` must be updated to `tag.mag`. The field name change reflects that tag magnitude can do different things at different levels (e.g., FIRE! renders differently at mag >3 vs mag ≤3).
 
 ### B) TaggedEntity Interface
 
@@ -122,86 +190,152 @@ export interface TagRule {
 
 ### 1) Core Infrastructure
 
-- [~] **ALREADY EXISTS**: `TagInstance`, `TagRule`, `TagAction`, `TaggedItem` interfaces in `src/tag_system/registry.ts`
+**Note: Delete unused old systems, keep and extend what works**
+
+**IMPORTANT: Rename `stacks` → `mag` throughout codebase**
+- Existing `TagInstance` uses `stacks` field
+- **Rename to `mag`** (magnitude) to reflect that tag levels have different behaviors
+- Example: FIRE! renders bright red at mag >3, vivid yellow at mag ≤3
+
+- [~] **ALREADY EXISTS**: `TagInstance`, `TagRule`, `TagAction`, `TaggedItem` interfaces in `src/tag_system/registry.ts` (uses `stacks`, rename to `mag`)
 - [~] **ALREADY EXISTS**: `TagRegistry` class with `hasMetaTag()` and `getByMetaTag()` methods
 - [~] **ALREADY EXISTS**: `tagRegistry` singleton instance
-- [ ] Review existing registry to ensure unified interface works for all entity types
-- [ ] Add `TaggedEntity` interface specification to existing registry
+- [~] **ALREADY EXISTS**: `[FIRE!]` tag definition in `tag_definitions.jsonc` (lines 175-190)
+- [ ] **Rename `stacks` → `mag`**: Update all tag-related code to use `mag` instead of `stacks`
+- [ ] Review existing registry - delete old/unused tag systems, extend what's viable
+- [ ] Add `TaggedEntity` interface to `src/tag_system/registry.ts` for standardized operations
 - [ ] Update `TagRule` interface with optional `entity_effects` field
 - [ ] Enhance registry to parse and store entity-specific effects from definitions
 
 Acceptance:
 - [ ] All entities (tiles, characters, items) use compatible tag structures
-- [ ] `FIRE!` tag definition exists with entity-specific effects
+- [ ] `FIRE!` tag definition exists with [DISPERSING] meta tag
+- [ ] **Field renamed: `stacks` → `mag` throughout codebase**
 - [ ] **DEBUG mode enabled for all tag operations**
+- [ ] No old/unused tag code remains (minimal, viable system only)
 
 ### 2) Meta Tag System (SIMPLIFIED)
 
+**Location: Create new file `src/tag_system/meta_processor.ts`**
+
+**FIRE! EFFECTS: Implement ONLY visual + dispersing for this phase (per plan)**
+- Do NOT implement the full existing effects (damage, BROKEN, temperature, spreading)
+- Those effects are deferred for future work
+- Focus on barebones testing first
+
 - [~] **ALREADY EXISTS**: Meta tag definitions in `tag_definitions.jsonc`
-- [ ] Create `MetaTagProcessor` class for applying meta-tag mechanics
-- [ ] Implement `[DISPERSING]`: auto-remove 1 MAG per turn (focus on this only)
+- [ ] Create `MetaTagProcessor` class - NEW FILE: `src/tag_system/meta_processor.ts`
+- [ ] Implement `[DISPERSING]`: auto-remove 1 MAG per turn at end of turn/tick
+- [ ] Create `processDispersingTags(entity)` method - called by time system
 - [~] **DEFERRED**: `[DISEASE:CR]` and other complex meta tags for future work
-- [ ] Add debug logging to meta tag processing
+- [ ] **DEFERRED**: FIRE! damage, spreading, BROKEN, temperature effects
+- [ ] Add debug logging throughout meta tag processing
+- [ ] Use existing debug standard in project for all log statements
 
 Acceptance:
-- [ ] `[FIRE!]` with `[DISPERSING]` meta tag auto-decreases over time
-- [ ] Meta tag effects trigger correctly in both time modes
-- [ ] Debug logs visible in `npm run dev:logs` showing dispersing mechanics
+- [ ] `MetaTagProcessor` processes dispersing tags correctly
+- [ ] `[FIRE!]` with `[DISPERSING]` meta auto-decreases over time (visual only)
+- [ ] Meta tag effects trigger in both real-time and turn-based modes
+- [ ] Debug logs visible in `npm run dev:logs` using project debug standard
 
 ### 3) Entity Migration
 
+**Strategy: Direct file edits (no runtime migration, no backwards compatibility)**
+
+**Migration Scope: Tiles, NPCs, and Places**
 - [~] **Items**: Already use `TagInstance` format (verify compatibility)
-- [ ] **Tiles**: Convert `tags: string[]` to `tags: TagInstance[]`
-- [ ] **Characters/NPCs**: Convert tag objects to `TagInstance` format
-- [ ] Create migration script for existing save data
-- [ ] Add debug logging during migration to track tag conversions
+- [ ] **Tiles**: Convert `tags: string[]` to `tags: TagInstance[]` - EDIT TILE FILES DIRECTLY
+- [ ] **Characters/NPCs**: Convert tag objects to `TagInstance` format - EDIT ACTOR/NPC FILES DIRECTLY  
+- [ ] **Places**: Add tag support if not yet implemented (place tags may not exist yet)
+- [ ] **No migration script needed** - only one save slot, data is test data only
+- [ ] **No old format support** - delete old format code, not needed
+- [ ] Add debug logging to verify successful conversions on load
+
+**IMPORTANT**: Search for all places where tags exist:
+- Check tile definitions
+- Check NPC files  
+- Check place files
+- Convert all to unified `TagInstance` format
 
 Acceptance:
-- [ ] All entities load and save tags in unified format
-- [ ] Legacy data migrates without loss
+- [ ] All entities (tiles, NPCs, places, items) load and save tags in unified format
+- [ ] No backwards compatibility code (clean, minimal system)
+- [ ] Test save slot data converted correctly
 - [ ] Debug logs show successful tag conversions per entity type
 
 ### 4) Tag Effect System Integration (SIMPLIFIED)
 
+**Approach: Event-driven visual updates using NEW event emitter**
+
+**Event System Status: Does not exist yet - must be created**
+- No existing EventEmitter pattern found in codebase
+- No action system events that add tags exist yet
+- **Must create new event emitter** for tag changes
+
 - [~] **SIMPLIFIED**: Skip complex effect system for this phase
-- [ ] Create basic `TagEffectApplicator` skeleton (future expansion)
-- [ ] Focus on visual effects only (color changes)
-- [ ] Apply character visual effects from tag definitions
+- [ ] Create basic `EventEmitter` class for tag change events
+- [ ] Tag operations (`addTag`, `removeTag`) emit `TagChangeEvent`
+- [ ] Renderer listens for `TagChangeEvent` on displayed entities
+- [ ] Apply character visual effects from tag definitions (color changes only)
 - [ ] **DEFERRED**: Item damage, tile temperature for future work
-- [ ] Add debug logging for any effect applications
+- [ ] Add debug logging for effect applications using project debug standard
+
+**Rationale**: Event-driven is more efficient than polling, allows tags to affect rendering, movement, senses, actions throughout the system
 
 Acceptance:
+- [ ] New EventEmitter created for tag changes
 - [ ] `FIRE!` on character changes visual color (red/yellow)
-- [ ] Visual updates appear in renderer
+- [ ] Visual updates triggered by tag change events
+- [ ] Renderer reads colors from indexed color system (existing)
 - [ ] Debug logs show effect applications
 
 ### 5) Time System Integration
 
-- [~] **ALREADY EXISTS**: `src/time_system/tracker.ts` manages game time
-- [ ] Review existing time system integration points
-- [ ] Hook meta tag processing to turn transitions
-- [ ] Add `processDispersingTags()` call to turn end
-- [ ] **DEBUG**: Add time tick logging with mode and processing info
-- [ ] Test both real-time and turn-based modes
+**Single source of truth for time: Time advances in multiple ways**
+
+Time advancement modes:
+1. **Real-time when not in timed events** - use this to proc tag timed effects
+2. **Per round/turn during timed events** - proc tag effects per turn
+3. **When moving places** - different per place, proc tag effects then too
+
+- [~] **ALREADY EXISTS**: `src/time_system/tracker.ts` and `src/turn_manager/main.ts`
+- [ ] Review time systems to find optimal hook point
+- [ ] **Hook meta tag processing into action completion AND place movement**
+- [ ] Call `MetaTagProcessor.processDispersingTags()` at appropriate boundaries
+- [ ] Ensure both real-time (5-second intervals) and turn-based modes work
+- [ ] **DEBUG**: Add time tick logging with mode and processing info using project debug standard
+- [ ] Test all three time advancement modes
+
+**Hook Investigation:**
+- Find `advance_time()` or equivalent in time_system
+- Find turn boundaries in turn_manager
+- Hook into action pipeline after actions complete
+- Hook into place movement handlers
+- Call meta tag processor at these points
 
 Acceptance:
-- [ ] `FIRE!` disperses correctly in real-time mode (every 5 sec)
-- [ ] `FIRE!` disperses correctly per turn in paused mode
+- [ ] `FIRE!` disperses correctly in real-time mode (every 5 seconds)
+- [ ] `FIRE!` disperses correctly per turn during timed events
+- [ ] `FIRE!` disperses correctly when moving between places
+- [ ] Meta tag processing happens at correct time boundaries
 - [ ] Debug logs show time mode, tick count, and dispersing operations
 
 ### 6) Testing Infrastructure
 
-- [ ] Create manual test checklist document
-- [ ] Add developer UI button: "Add [FIRE! : 5] to Actor"
+**Dev UI button location: In module with other buttons (interface_program debug panel)**
+
+- [~] Manual test steps already documented below
+- [ ] Add developer UI button: "Add [FIRE! : 5] to Actor" 
+- [ ] **Location**: `interface_program.ts` debug panel with other debug buttons
 - [ ] Add debug console commands for tag manipulation
-- [ ] Create test scenario with expected output sequence
 - [ ] Add visual indicators in renderer for debugging
+- [ ] **Color values**: Use existing indexed color system (investigate current color system)
 - [ ] Document how to run `npm run dev:logs` to see debug output
 
 Acceptance:
 - [ ] Manual test can be performed following documented steps
 - [ ] Debug logs visible in `npm run dev:logs` show all tag operations
-- [ ] Visual feedback matches expected behavior
+- [ ] Visual feedback matches expected behavior (bright red/yellow using indexed colors)
 - [ ] Dispersing mechanics work correctly in both time modes
 
 ## Test Plan: FIRE! Tag End-to-End
@@ -403,3 +537,69 @@ All implementation must be testable via `npm run dev:logs` with visible debug ou
 - Performance optimization for large tag counts
 - Network synchronization of tag state
 - Save state versioning beyond current migration
+
+---
+
+## User Questions - Implementation Clarifications (All Addressed)
+
+### 1. TagInstance field name: `stacks` → `mag`
+**RESOLVED**: Rename existing `stacks` field to `mag` throughout codebase
+- Action: Update `TagInstance` interface, all tag operations, and all references
+- Rationale: Reflects that tag magnitude can have different behaviors at different levels
+- Done in: Core Infrastructure section
+
+### 2. FIRE! effects: Only visual + dispersing, not full effects
+**RESOLVED**: Implement ONLY visual + dispersing for this phase
+- Discovery: FIRE! definition exists in tag_definitions.jsonc (lines 175-190) with full effects
+- Action: IGNORE existing damage/spreading/temperature effects for now
+- Implement: Visual color changes + dispersing meta tag only
+- Deferred: All other effects for future work
+- Done in: Meta Tag System section
+
+### 3. Time system hook: Multiple advancement modes
+**RESOLVED**: Hook into all three time advancement modes
+- Real-time waiting (5-second intervals when not in timed events)
+- Per round/turn during timed events
+- When moving between places
+- Action: Call `MetaTagProcessor.processDispersingTags()` at each boundary
+- Implementation in: Time System Integration section
+
+### 4. Event system: Does not exist, must be created
+**RESOLVED**: Create new EventEmitter for tag changes
+- Discovery: No existing EventEmitter pattern in codebase
+- Action: Create new EventEmitter class, emit events on tag operations
+- Renderer will listen for `TagChangeEvent` to update visuals
+- Done in: Tag Effect System Integration section
+
+### 5. MetaTagProcessor location: NEW FILE
+**RESOLVED**: `src/tag_system/meta_processor.ts`
+- Action: Create new file with `MetaTagProcessor` class
+- Keep existing registry files, extend as needed
+- Delete unused old tag systems after implementation
+- Done in: Meta Tag System section
+
+### 6. Migration strategy: Direct file edits
+**RESOLVED**: Edit files directly, no runtime migration
+- One save slot with test data only
+- Edit tile, NPC, actor, and place files directly
+- No backwards compatibility needed
+- Delete old format code (clean, minimal system)
+- Done in: Entity Migration section
+
+### 7. FIRE! tag definition: Already EXISTS
+**RESOLVED**: Found existing FIRE! definition
+- Location: `tag_definitions.jsonc` lines 175-190
+- Already has `[DISPERSING]` meta tag
+- Has complex effects (ignored for this phase)
+- No need to add, just reference existing definition
+- Done in: Core Infrastructure and Meta Tag System sections
+
+### 8. Color values: Use existing indexed color system
+**RESOLVED**: Use indexed colors, not hex/Phaser constants
+- Action: Investigate current indexed color system in codebase
+- Use system colors like `color_red`, `color_yellow`
+- Map to "bright red" and "vivid yellow" based on MAG threshold
+- Done in: Testing Infrastructure section
+
+### Summary
+All implementation questions have been clarified and documented in the plan. No conflicting ideas - all answers are consistent with the minimal, viable system approach.
