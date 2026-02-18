@@ -109,6 +109,7 @@ export type PlaceNPC = {
   tile_position: TilePosition;
   status: "present" | "moving" | "busy" | "sleeping";
   activity: string;              // "sitting at the bar", "whittling by the fire"
+  tags?: Array<{ name: string; mag: number; meta: string[] }>;  // Optional tags for visual effects
 };
 
 /**
@@ -118,6 +119,7 @@ export type PlaceActor = {
   actor_ref: string;             // "actor.henry_actor"
   tile_position: TilePosition;
   status: "present" | "moving" | "busy";
+  tags?: Array<{ name: string; mag: number; meta: string[] }>;  // Optional tags for visual effects
 };
 
 /**

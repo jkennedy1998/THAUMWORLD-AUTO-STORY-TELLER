@@ -4,7 +4,8 @@ import { draw_border } from "../padding.js";
 import { get_color_by_name } from "../colors.js";
 import type { Place, PlaceNPC, PlaceActor, PlaceConnection, TilePosition } from "../../types/place.js";
 import { get_entity_path, start_entity_movement, register_place, unregister_place } from "../../shared/movement_engine.js";
-import { load_actor } from "../../actor_storage/store.js";
+import { eventEmitter, type TagChangeEvent, parseEntityRef } from "../../shared/event_emitter.js";
+import type { TagInstance } from "../../tag_system/registry.js";
 import {
   DEBUG_VISION,
   register_particle_spawner,
@@ -30,6 +31,84 @@ import { UI_DEBUG } from "../runtime/ui_debug.js";
 function debug_log_place(...args: any[]) {
   // eslint-disable-next-line no-console
   console.log("[PlaceModule]", ...args.map((a: any) => typeof a === 'object' ? JSON.stringify(a) : a));
+}
+
+// Simple entity tag cache - populated from place data, updated via events
+const entityTagCache = new Map<string, TagInstance[]>();
+let last_cached_place_id: string | null = null;
+
+/**
+ * Populate tag cache from place data
+ * Called when place loads or changes
+ */
+function populateTagCacheFromPlace(place: Place): void {
+  // Clear old cache when place changes
+  entityTagCache.clear();
+  debug_log_place('=== CACHE CLEARED for place:', place.id, '===');
+
+  // Populate cache with NPC tags
+  for (const npc of place.contents?.npcs_present || []) {
+    if (npc.npc_ref) {
+      if (npc.tags && npc.tags.length > 0) {
+        entityTagCache.set(npc.npc_ref, npc.tags);
+        debug_log_place('Cached NPC tags:', npc.npc_ref, 'tags:', npc.tags.map(t => `${t.name}:${t.mag}`).join(', '));
+      } else {
+        debug_log_place('Cached NPC (no tags):', npc.npc_ref);
+      }
+    }
+  }
+
+  // Populate cache with actor tags
+  for (const actor of place.contents?.actors_present || []) {
+    if (actor.actor_ref) {
+      if (actor.tags && actor.tags.length > 0) {
+        entityTagCache.set(actor.actor_ref, actor.tags);
+        debug_log_place('Cached Actor tags:', actor.actor_ref, 'tags:', actor.tags.map(t => `${t.name}:${t.mag}`).join(', '));
+      } else {
+        debug_log_place('Cached Actor (no tags):', actor.actor_ref);
+      }
+    }
+  }
+
+  debug_log_place('=== CACHE POPULATED:', entityTagCache.size, 'entities with tags ===');
+  // Log all cached entities
+  for (const [ref, tags] of entityTagCache.entries()) {
+    debug_log_place('  Cached:', ref, '->', tags.map(t => `${t.name}:${t.mag}`).join(', '));
+  }
+}
+
+/**
+ * Get entity color based on tags
+ * Checks for FIRE! tag and applies appropriate color
+ * - Vivid red when FIRE! MAG > 3 (intense fire)
+ * - Pumpkin orange when FIRE! MAG <= 3 (moderate fire)
+ * - Default color when no FIRE! tag
+ * 
+ * Note: Using pumpkin instead of yellow since NPCs are already pale_yellow by default
+ */
+function get_entity_color_with_tags(entityRef: string, defaultRgb: Rgb): Rgb {
+  const parsed = parseEntityRef(entityRef);
+
+  // Read tags from cache
+  const tags = entityTagCache.get(entityRef);
+
+  if (!tags || !Array.isArray(tags)) {
+    return defaultRgb;
+  }
+
+  // Find FIRE! tag
+  const fireTag = tags.find((tag: TagInstance) => tag.name === 'FIRE!');
+  if (!fireTag) {
+    return defaultRgb;
+  }
+
+  // Apply color based on MAG
+  // Using vivid_red and pumpkin for clear distinction from default NPC pale_yellow
+  if (fireTag.mag > 3) {
+    return get_color_by_name('vivid_red').rgb; // Bright red for intense fire (MAG > 3)
+  } else {
+    return get_color_by_name('pumpkin').rgb; // Orange for moderate fire (MAG <= 3)
+  }
 }
 
 export type PlaceModuleConfig = {
@@ -492,27 +571,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   // Get actor walk speed from their data
   // Uses the unified movement engine's default if actor data unavailable
   function get_actor_walk_speed(actor_ref: string): number {
-    // Extract actor_id from actor_ref (e.g., "actor.henry_actor" -> "henry_actor")
-    const actor_id = actor_ref.replace("actor.", "");
-    
-    // Try to load actor data to get their walk speed
-    try {
-      // NOTE: UI runs against slot 1 in the current workflow.
-      const result = load_actor(1, actor_id);
-      if (result.ok && result.actor) {
-        const actor = result.actor as Record<string, unknown>;
-        const movement = actor.movement as Record<string, number> | undefined;
-        if (movement?.walk) {
-          // Convert tiles per turn to tiles per minute
-          // 4 tiles per turn = 40 tiles per minute (10 turns per minute)
-          // But we're using 300 tpm as base speed for faster gameplay
-          const tiles_per_turn = movement.walk;
-          return tiles_per_turn * 75; // 300 / 4 = 75x multiplier for faster speed
-        }
-      }
-    } catch (e) {
-      // Failed to load actor, use default
-    }
+    // NOTE: Actor movement speed is not available in renderer context
+    // This would need to be included in place data from API
+    // For now, return default speed
     
     // Default: 300 tiles per minute (5 tiles per second)
     return 300;
@@ -900,10 +961,23 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     // This ensures entities are on top since last write wins
     for (const [ref, pos] of entity_positions) {
       const is_npc = "npc_ref" in pos.entity;
-      const name = is_npc 
-        ? (pos.entity as PlaceNPC).npc_ref.split(".").pop() ?? "N"
-        : (pos.entity as PlaceActor).actor_ref.split(".").pop() ?? "A";
-      const rgb = is_npc ? npc_rgb : actor_rgb;
+      const entityRef = is_npc 
+        ? (pos.entity as PlaceNPC).npc_ref
+        : (pos.entity as PlaceActor).actor_ref;
+      const name = entityRef.split(".").pop() ?? (is_npc ? "N" : "A");
+      const defaultRgb = is_npc ? npc_rgb : actor_rgb;
+      
+      // Get color based on tags (e.g., FIRE! tag changes color)
+      const rgb = get_entity_color_with_tags(entityRef, defaultRgb);
+      
+      // Debug: ALWAYS log entity rendering with cache state
+      const cachedTags = entityTagCache.get(entityRef);
+      const fireTag = cachedTags?.find(t => t.name === 'FIRE!');
+      if (fireTag && cachedTags) {
+        const colorName = rgb === get_color_by_name('vivid_red').rgb ? 'RED' : 
+                         rgb === get_color_by_name('pumpkin').rgb ? 'ORANGE' : 'UNKNOWN';
+        debug_log_place('RENDER:', entityRef, 'FIRE! mag:', fireTag.mag, '-> color:', colorName, 'cache:', cachedTags.map(t => `${t.name}:${t.mag}`).join(', '));
+      }
       
       canvas.set(pos.x, pos.y, {
         char: get_initial(name),
@@ -1008,6 +1082,47 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     }
   }
 
+  // Subscribe to tag change events for visual updates
+  // Updates cache and logs changes - the next Draw() call will pick up new colors automatically
+  eventEmitter.on('tag:changed', (event: TagChangeEvent) => {
+    debug_log_place('Tag changed:', event.entityRef, 'type:', event.type, 'tag:', event.tagName, 'mag:', event.oldMag, '->', event.newMag);
+    
+    // Update cache with new tag data
+    const currentTags = entityTagCache.get(event.entityRef) || [];
+    debug_log_place('Cache update START:', event.entityRef, 'current tags:', currentTags.map(t => `${t.name}:${t.mag}`).join(', ') || 'none');
+    
+    const tagIndex = currentTags.findIndex(t => t.name === event.tagName);
+    
+    if (event.type === 'TAG_REMOVED' || event.newMag === 0) {
+      // Remove tag from cache
+      if (tagIndex >= 0) {
+        currentTags.splice(tagIndex, 1);
+        debug_log_place('Cache REMOVED tag:', event.tagName, 'from', event.entityRef);
+      }
+    } else if (event.type === 'TAG_UPDATED' && tagIndex >= 0 && currentTags[tagIndex]) {
+      // Update existing tag
+      const oldMag = currentTags[tagIndex].mag;
+      currentTags[tagIndex].mag = event.newMag;
+      currentTags[tagIndex].meta = event.meta;
+      debug_log_place('Cache UPDATED tag:', event.tagName, 'mag:', oldMag, '->', event.newMag);
+    } else if (event.type === 'TAG_ADDED' || tagIndex < 0) {
+      // Add new tag
+      currentTags.push({
+        name: event.tagName,
+        mag: event.newMag,
+        meta: event.meta
+      });
+      debug_log_place('Cache ADDED tag:', event.tagName, 'mag:', event.newMag);
+    } else if (tagIndex >= 0 && currentTags[tagIndex]) {
+      // Fallback: update existing
+      currentTags[tagIndex].mag = event.newMag;
+      debug_log_place('Cache MODIFIED tag:', event.tagName, 'mag:', event.newMag);
+    }
+    
+    entityTagCache.set(event.entityRef, currentTags);
+    debug_log_place('Cache update COMPLETE:', event.entityRef, 'new tags:', currentTags.map(t => `${t.name}:${t.mag}`).join(', ') || 'none');
+  });
+
   return {
     id: config.id,
     rect: config.rect,
@@ -1058,6 +1173,11 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         register_place(place.id, place);
         current_place_id = place.id;
       }
+
+      // Populate tag cache from place data
+      // Always sync to catch tag changes from backend (EventEmitter doesn't work across processes)
+      populateTagCacheFromPlace(place);
+      last_cached_place_id = place.id;
 
       // Unified movement engine handles all position updates
       // Just need to render the current state

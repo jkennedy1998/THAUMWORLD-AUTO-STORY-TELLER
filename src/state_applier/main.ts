@@ -14,6 +14,7 @@ import { find_npcs, load_npc, save_npc } from "../npc_storage/store.js";
 import { load_actor } from "../actor_storage/store.js";
 import { add_event_to_memory, get_working_memory, build_working_memory } from "../context_manager/index.js";
 import { get_timed_event_state } from "../world_storage/store.js";
+import { MetaTagProcessor } from "../tag_system/meta_processor.js";
 import { parse } from "jsonc-parser";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -551,6 +552,14 @@ async function tick(outbox_path: string, log_path: string): Promise<void> {
                 debug_error("StateApplier", `FAILED to process message ${msg.id}`, err);
                 // Continue to next message even if this one failed
             }
+        }
+        
+        // Process dispersing tags after handling all messages
+        // This ensures meta tags like [DISPERSING] decrease over time
+        try {
+            await MetaTagProcessor.processDispersingTags(data_slot_number);
+        } catch (err) {
+            debug_error("StateApplier", "Failed to process dispersing tags", err);
         }
     } catch (err) {
         debug_error("StateApplier", "Tick failed", err);

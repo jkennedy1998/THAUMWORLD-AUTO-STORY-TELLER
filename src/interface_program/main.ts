@@ -24,6 +24,7 @@ import { get_timed_event_state, get_region_by_coords, is_timed_event_active } fr
 import { travel_between_places } from "../travel/movement.js";
 import { load_npc } from "../npc_storage/store.js";
 import { load_place, list_places_in_region, save_place, create_basic_place } from "../place_storage/store.js";
+import { emitTagChange } from "../shared/event_emitter.js";
 import type { PlaceConnection } from "../types/place.js";
 import { get_npc_location } from "../npc_storage/location.js";
 import { get_entities_in_place } from "../place_storage/entity_index.js";
@@ -1479,7 +1480,8 @@ function start_http_server(log_path: string): void {
                         npc_ref,
                         tile_position: clamped_location,
                         status: npc_status,
-                        activity: "standing here"
+                        activity: "standing here",
+                        tags: (npc_res.npc as any).tags || []
                     });
                 }
 
@@ -1515,9 +1517,24 @@ function start_http_server(log_path: string): void {
                     place.contents.actors_present.push({
                         actor_ref,
                         tile_position: clamped_location,
-                        status: "present"
+                        status: "present",
+                        tags: (actor as any).tags || []
                     });
                 }
+
+                // Debug: Log ALL entities with their tags (even empty) to track changes
+                debug_log("API", `/api/place: All entities with tags in ${place_id}`, {
+                    npcs: place.contents.npcs_present.map(n => ({ 
+                        ref: n.npc_ref, 
+                        tagCount: n.tags?.length || 0,
+                        tags: n.tags?.map((t: any) => `${t.name}:${t.mag}`).join(', ') || 'none'
+                    })),
+                    actors: place.contents.actors_present.map(a => ({ 
+                        ref: a.actor_ref, 
+                        tagCount: a.tags?.length || 0,
+                        tags: a.tags?.map((t: any) => `${t.name}:${t.mag}`).join(', ') || 'none'
+                    }))
+                });
 
                 debug_log("API", `/api/place: Populated ${place_id}`, {
                     slot,
@@ -1658,12 +1675,53 @@ function start_http_server(log_path: string): void {
                         }
                         const npc = result.npc as Record<string, any>;
                         if (!npc.tags) npc.tags = [];
-                        (npc.tags as any[]).push({
-                            name: tag_name,
-                            mag: mag || 1,
-                            meta: meta || []
-                        });
+                        
+                        // Check if tag already exists - update it instead of creating duplicate
+                        const existingTagIndex = (npc.tags as any[]).findIndex((t: any) => t.name === tag_name);
+                        let isNewTag = false;
+                        let oldMag = 0;
+                        
+                        if (existingTagIndex >= 0) {
+                            // Update existing tag
+                            oldMag = npc.tags[existingTagIndex].mag;
+                            npc.tags[existingTagIndex].mag = mag || 1;
+                            npc.tags[existingTagIndex].meta = meta || [];
+                        } else {
+                            // Add new tag
+                            isNewTag = true;
+                            const tagData = {
+                                name: tag_name,
+                                mag: mag || 1,
+                                meta: meta || []
+                            };
+                            (npc.tags as any[]).push(tagData);
+                        }
+                        
                         save_npc(slot, entity_id, npc);
+                        
+                        // Emit appropriate event
+                        if (isNewTag) {
+                            emitTagChange({
+                                type: 'TAG_ADDED',
+                                entityRef: entity_ref,
+                                tagName: tag_name,
+                                newMag: mag || 1,
+                                meta: meta || [],
+                                timestamp: Date.now(),
+                                source: 'api'
+                            });
+                        } else {
+                            emitTagChange({
+                                type: 'TAG_UPDATED',
+                                entityRef: entity_ref,
+                                tagName: tag_name,
+                                oldMag,
+                                newMag: mag || 1,
+                                meta: meta || [],
+                                timestamp: Date.now(),
+                                source: 'api'
+                            });
+                        }
                     } else {
                         const result = load_actor(slot, entity_id);
                         if (!result.ok || !result.actor) {
@@ -1673,12 +1731,53 @@ function start_http_server(log_path: string): void {
                         }
                         const actor = result.actor as Record<string, any>;
                         if (!actor.tags) actor.tags = [];
-                        (actor.tags as any[]).push({
-                            name: tag_name,
-                            mag: mag || 1,
-                            meta: meta || []
-                        });
+                        
+                        // Check if tag already exists - update it instead of creating duplicate
+                        const existingTagIndex = (actor.tags as any[]).findIndex((t: any) => t.name === tag_name);
+                        let isNewTag = false;
+                        let oldMag = 0;
+                        
+                        if (existingTagIndex >= 0) {
+                            // Update existing tag
+                            oldMag = actor.tags[existingTagIndex].mag;
+                            actor.tags[existingTagIndex].mag = mag || 1;
+                            actor.tags[existingTagIndex].meta = meta || [];
+                        } else {
+                            // Add new tag
+                            isNewTag = true;
+                            const tagData = {
+                                name: tag_name,
+                                mag: mag || 1,
+                                meta: meta || []
+                            };
+                            (actor.tags as any[]).push(tagData);
+                        }
+                        
                         save_actor(slot, entity_id, actor);
+                        
+                        // Emit appropriate event
+                        if (isNewTag) {
+                            emitTagChange({
+                                type: 'TAG_ADDED',
+                                entityRef: entity_ref,
+                                tagName: tag_name,
+                                newMag: mag || 1,
+                                meta: meta || [],
+                                timestamp: Date.now(),
+                                source: 'api'
+                            });
+                        } else {
+                            emitTagChange({
+                                type: 'TAG_UPDATED',
+                                entityRef: entity_ref,
+                                tagName: tag_name,
+                                oldMag,
+                                newMag: mag || 1,
+                                meta: meta || [],
+                                timestamp: Date.now(),
+                                source: 'api'
+                            });
+                        }
                     }
 
                     debug_log("API", `/api/tag/add: Added ${tag_name} to ${entity_ref}`);
