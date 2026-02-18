@@ -173,6 +173,7 @@ function startDev() {
 
   // Core processes
   const processes = [
+    { name: "event_bridge", cmd: "node", args: ["dist/event_bridge/main.js"] },  // Start first - other services need it for event broadcasting
     { name: "interface", cmd: "tsx", args: ["src/interface_program/main.ts"] },
     // { name: "interpreter", cmd: "tsx", args: ["src/interpreter_ai/main.ts"] },  // ARCHIVED - communication system now in interface_program
     { name: "data_broker", cmd: "tsx", args: ["src/data_broker/main.ts"] },

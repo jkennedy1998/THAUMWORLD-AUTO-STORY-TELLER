@@ -12,6 +12,7 @@
  */
 
 import { debug_event } from "./debug_event.js";
+import { emitToBridge } from "./event_bridge_client.js";
 
 /**
  * Tag change event types
@@ -170,11 +171,15 @@ export const eventEmitter = new EventEmitter();
  * @param event - TagChangeEvent payload
  */
 export function emitTagChange(event: TagChangeEvent): void {
-  // Emit specific event type
+  // Emit specific event type (local process only)
   eventEmitter.emit(`tag:${event.type.toLowerCase()}`, event);
   
-  // Also emit generic tag:changed event
+  // Also emit generic tag:changed event (local process only)
   eventEmitter.emit('tag:changed', event);
+  
+  // NEW: Send to event bridge for cross-process broadcasting to renderer
+  // This allows events from state_applier, turn_manager, etc. to reach the UI
+  void emitToBridge(event);
 }
 
 /**

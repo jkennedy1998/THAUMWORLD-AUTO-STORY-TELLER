@@ -4,7 +4,8 @@ import { draw_border } from "../padding.js";
 import { get_color_by_name } from "../colors.js";
 import type { Place, PlaceNPC, PlaceActor, PlaceConnection, TilePosition } from "../../types/place.js";
 import { get_entity_path, start_entity_movement, register_place, unregister_place } from "../../shared/movement_engine.js";
-import { eventEmitter, type TagChangeEvent, parseEntityRef } from "../../shared/event_emitter.js";
+import { type TagChangeEvent, parseEntityRef } from "../../shared/event_emitter.js";
+import { initWebSocketClient, type WebSocketClient } from "../websocket_client.js";
 import type { TagInstance } from "../../tag_system/registry.js";
 import {
   DEBUG_VISION,
@@ -1082,46 +1083,66 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     }
   }
 
-  // Subscribe to tag change events for visual updates
-  // Updates cache and logs changes - the next Draw() call will pick up new colors automatically
-  eventEmitter.on('tag:changed', (event: TagChangeEvent) => {
-    debug_log_place('Tag changed:', event.entityRef, 'type:', event.type, 'tag:', event.tagName, 'mag:', event.oldMag, '->', event.newMag);
-    
-    // Update cache with new tag data
+  // Subscribe to tag change events via WebSocket (replaces broken EventEmitter)
+  // WebSocket works across Electron process boundaries, EventEmitter doesn't
+  const wsClient = initWebSocketClient();
+  
+  wsClient.on('TAG_CHANGED', (event: TagChangeEvent) => {
+    debug_log_place('WebSocket TAG_CHANGED:', event.entityRef, event.tagName, 'mag:', event.oldMag, '->', event.newMag);
+    updateCacheFromEvent(event);
+  });
+  
+  wsClient.on('TAG_ADDED', (event: TagChangeEvent) => {
+    debug_log_place('WebSocket TAG_ADDED:', event.entityRef, event.tagName, 'mag:', event.newMag);
+    updateCacheFromEvent(event);
+  });
+  
+  wsClient.on('TAG_REMOVED', (event: TagChangeEvent) => {
+    debug_log_place('WebSocket TAG_REMOVED:', event.entityRef, event.tagName);
+    updateCacheFromEvent(event);
+  });
+  
+  wsClient.on('TAG_DISPERSING', (event: TagChangeEvent) => {
+    debug_log_place('WebSocket TAG_DISPERSING:', event.entityRef, event.tagName, 'mag:', event.oldMag, '->', event.newMag);
+    updateCacheFromEvent(event);
+  });
+
+  // Helper function to update cache from WebSocket events
+  function updateCacheFromEvent(event: TagChangeEvent): void {
     const currentTags = entityTagCache.get(event.entityRef) || [];
-    debug_log_place('Cache update START:', event.entityRef, 'current tags:', currentTags.map(t => `${t.name}:${t.mag}`).join(', ') || 'none');
-    
     const tagIndex = currentTags.findIndex(t => t.name === event.tagName);
     
     if (event.type === 'TAG_REMOVED' || event.newMag === 0) {
-      // Remove tag from cache
-      if (tagIndex >= 0) {
-        currentTags.splice(tagIndex, 1);
-        debug_log_place('Cache REMOVED tag:', event.tagName, 'from', event.entityRef);
+      // Remove ALL instances of this tag (in case of duplicates)
+      for (let i = currentTags.length - 1; i >= 0; i--) {
+        const tag = currentTags[i];
+        if (tag && tag.name === event.tagName) {
+          currentTags.splice(i, 1);
+        }
       }
-    } else if (event.type === 'TAG_UPDATED' && tagIndex >= 0 && currentTags[tagIndex]) {
-      // Update existing tag
-      const oldMag = currentTags[tagIndex].mag;
+    } else if ((event.type === 'TAG_UPDATED' || event.type === 'TAG_DISPERSING') && tagIndex >= 0 && currentTags[tagIndex]) {
       currentTags[tagIndex].mag = event.newMag;
       currentTags[tagIndex].meta = event.meta;
-      debug_log_place('Cache UPDATED tag:', event.tagName, 'mag:', oldMag, '->', event.newMag);
     } else if (event.type === 'TAG_ADDED' || tagIndex < 0) {
-      // Add new tag
-      currentTags.push({
-        name: event.tagName,
-        mag: event.newMag,
-        meta: event.meta
-      });
-      debug_log_place('Cache ADDED tag:', event.tagName, 'mag:', event.newMag);
+      // Add new tag (or update existing to prevent duplicates from double events)
+      if (tagIndex >= 0 && currentTags[tagIndex]) {
+        // Tag already exists - update it instead of creating duplicate
+        currentTags[tagIndex].mag = event.newMag;
+        currentTags[tagIndex].meta = event.meta;
+      } else {
+        // Tag doesn't exist - add it
+        currentTags.push({
+          name: event.tagName,
+          mag: event.newMag,
+          meta: event.meta
+        });
+      }
     } else if (tagIndex >= 0 && currentTags[tagIndex]) {
-      // Fallback: update existing
       currentTags[tagIndex].mag = event.newMag;
-      debug_log_place('Cache MODIFIED tag:', event.tagName, 'mag:', event.newMag);
     }
     
     entityTagCache.set(event.entityRef, currentTags);
-    debug_log_place('Cache update COMPLETE:', event.entityRef, 'new tags:', currentTags.map(t => `${t.name}:${t.mag}`).join(', ') || 'none');
-  });
+  }
 
   return {
     id: config.id,
@@ -1174,10 +1195,12 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         current_place_id = place.id;
       }
 
-      // Populate tag cache from place data
-      // Always sync to catch tag changes from backend (EventEmitter doesn't work across processes)
-      populateTagCacheFromPlace(place);
-      last_cached_place_id = place.id;
+      // Populate tag cache from place data ONLY when place changes
+      // WebSocket now provides real-time updates, so we don't need to sync every frame
+      if (place.id !== last_cached_place_id) {
+        populateTagCacheFromPlace(place);
+        last_cached_place_id = place.id;
+      }
 
       // Unified movement engine handles all position updates
       // Just need to render the current state

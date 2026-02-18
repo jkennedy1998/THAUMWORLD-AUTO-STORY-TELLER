@@ -318,15 +318,15 @@ async function testTargetNPCWithProjectile(): Promise<boolean> {
   
   // Create bow
   const bow = createTestTool("Longbow", 3, [
-    { name: "bow", stacks: 3 },
-    { name: "projectile", stacks: 1 },
-    { name: "damage", stacks: 1, value: "piercing" }
+    { name: "bow", mag: 3, meta: [] },
+    { name: "projectile", mag: 1, meta: [] },
+    { name: "damage", mag: 1, meta: [], info: ["piercing"] }
   ], { weight: 12 });
   
   // Create arrow ammo
   const arrow = createTestTool("Arrow", 1, [
-    { name: "projectile", stacks: 1, value: "arrow" },
-    { name: "piercing", stacks: 1 }
+    { name: "projectile", mag: 1, meta: [], info: ["arrow"] },
+    { name: "piercing", mag: 1, meta: [] }
   ], { weight: 1, ref: "item.arrow_1" });
   
   // Create player with bow
@@ -405,9 +405,9 @@ async function testMeleeWithEffectors(): Promise<boolean> {
   
   // Create masterwork sword
   const sword = createTestTool("Masterwork Sword", 2, [
-    { name: "sword", stacks: 2 },
-    { name: "slashing", stacks: 1 },
-    { name: "masterwork", stacks: 1 }  // +1 SHIFT
+    { name: "sword", mag: 2, meta: [] },
+    { name: "slashing", mag: 1, meta: [] },
+    { name: "masterwork", mag: 1, meta: [] }  // +1 SHIFT
   ], { weight: 10 });
   
   // Create player with sword

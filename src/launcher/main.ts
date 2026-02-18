@@ -97,7 +97,8 @@ async function main(): Promise<void> {
  */
 async function launch_services(session: LogSession): Promise<void> {
   const services = [
-    { name: "data_broker", delay: 0 },
+    { name: "event_bridge", delay: 0 },  // Start first - other services need it
+    { name: "data_broker", delay: 500 },
     { name: "interpreter", delay: 500 },
     { name: "renderer", delay: 500 },
     { name: "rules_lawyer", delay: 500 },

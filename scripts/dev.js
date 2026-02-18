@@ -156,6 +156,7 @@ if (fs.existsSync(outboxPath)) {
 }
 
 const commands = [
+  'node dist/event_bridge/main.js',  // Start first - other services need it for event broadcasting
   'tsx src/interface_program/main.ts',
   // 'tsx src/interpreter_ai/main.ts',  // ARCHIVED - communication system now in interface_program
   'tsx src/data_broker/main.ts',

@@ -30,11 +30,16 @@ Keep plans small and executable. If something matters, it belongs as a checkbox 
 
 ---
 
+## Recently Completed ✓
+
+- `docs/plans/archive/2026_02_17_tag_unification.md` - ✅ COMPLETE - Base tag system with real-time updates via Event Bridge
+
 ## Current Active Plans
 
+- `docs/plans/2026_02_14_item_system_unification.md` - **NEXT PRIORITY** - Starting work on items
+- `docs/plans/2026_02_17_advanced_tags.md` - Advanced tag features (fire damage, spreading, diseases, etc.)
 - `docs/plans/2026_02_13_advanced_npc_interactions_scheduler.md`
 - `docs/plans/2026_02_13_ui_improvements_log_time_audio_shaders.md`
-- `docs/plans/2026_02_14_item_system_unification.md`
 - `docs/plans/2026_02_12_npc_archetypes_and_interaction_phases.md`
 - `docs/plans/2026_02_06_action_range_system.md`
 - `docs/plans/2026_02_05_inspect_implementation_plan.md`
