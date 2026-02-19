@@ -29,7 +29,7 @@ export const APP_CONFIG = {
     base_letter_spacing_mult: -0.18,
     weight_index_to_css: [100, 200, 300, 400, 500, 600, 700, 800] as const,
 
-    grid_width: 160,
+    grid_width: 200,  // Expanded: 160 for main UI + 40 for debug button column
     grid_height: 50,
 
     interpreter_endpoint: 'http://localhost:8787/api/input',
@@ -207,6 +207,12 @@ export function create_app_state(): AppState {
                 }
                 
                 ui_state.place.current_place = data.place;
+                
+                // IMPORTANT: Re-register place with movement engine to ensure it uses updated data
+                // This prevents stale cached place data from affecting rendering
+                // (e.g., items that were picked up still appearing due to old cache)
+                const { register_place } = await import("../shared/movement_engine.js");
+                register_place(data.place.id, data.place);
                 
                 // Phase 8: Unified Movement Authority
                 // Frontend NO LONGER initializes place movement
@@ -798,10 +804,11 @@ export function create_app_state(): AppState {
     // - Bottom: input + buttons
     // Layout blocks (see UI mock):
     // 1 input, 2 transcript, 3 place, 4 system info, 5 free, 6 debug, 7 buttons, 8 roller.
+    // Layout: Left panel (1-96) | Gap | Right panel (98-158) | Gap | Debug buttons (185-198)
     const L_X0 = 1;
     const L_X1 = 96;
     const R_X0 = 98;
-    const R_X1 = APP_CONFIG.grid_width - 2;
+    const R_X1 = 158;  // Stop before debug button area (185-198)
 
     const Y_INPUT0 = 1;
     const Y_INPUT1 = 5;
@@ -822,6 +829,13 @@ export function create_app_state(): AppState {
     const ROLL_X1 = R_X1;
     const BTN_Y0 = Y_INPUT0;
     const BTN_Y1 = Y_TRANSCRIPT1;
+    
+    // Debug buttons - positioned on far right side in a compact column
+    // Grid expanded to 200, buttons at columns 185-198 (far right, own column)
+    const DEBUG_X0 = 185;  // Far right side of expanded grid
+    const DEBUG_X1 = 198;  // Near right edge
+    const DEBUG_Y0 = 2;  // Start near top
+    const DEBUG_Y1 = 30;  // Compact vertical stack
 
     // Do not seed the log window with placeholder text.
 
@@ -1228,13 +1242,15 @@ export function create_app_state(): AppState {
         // Debug button: Add FIRE! tag to actor
         make_button_module({
             id: 'debug_add_fire',
-            rect: { x0: BTN_X0, y0: BTN_Y0 + 15, x1: BTN_X0 + 15, y1: BTN_Y0 + 17 },
-            label: 'ADD FIRE!',
+            rect: { x0: DEBUG_X0, y0: DEBUG_Y0, x1: DEBUG_X1, y1: DEBUG_Y0 + 1 },
+            label: 'FIRE',
             rgb: get_color_by_name('vivid_red').rgb,
             bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
             base_weight_index: 3,
             async OnPress() {
+                console.log('[DEBUG BUTTON] FIRE button pressed');
                 try {
+                    console.log('[DEBUG BUTTON] Calling /api/tag/add...');
                     const response = await fetch('http://localhost:8787/api/tag/add', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -1245,14 +1261,694 @@ export function create_app_state(): AppState {
                             meta: ['DISPERSING']
                         })
                     });
+                    console.log('[DEBUG BUTTON] Response status:', response.status);
                     if (response.ok) {
+                        console.log('[DEBUG BUTTON] FIRE! tag added successfully');
                         flash_status(['FIRE! tag added to actor'], 1500);
                     } else {
+                        console.log('[DEBUG BUTTON] Failed to add FIRE! tag');
                         flash_status(['Failed to add FIRE! tag'], 1500);
                     }
                 } catch (err) {
+                    console.error('[DEBUG BUTTON] Error:', err);
                     flash_status(['Error: Could not connect to API'], 1500);
                 }
+            },
+        }),
+
+        // Debug button: Show Inventory
+        make_button_module({
+            id: 'debug_show_inventory',
+            rect: { x0: DEBUG_X0, y0: DEBUG_Y0 + 2, x1: DEBUG_X1, y1: DEBUG_Y0 + 3 },
+            label: 'INV',
+            rgb: get_color_by_name('pale_green').rgb,
+            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
+            async OnPress() {
+                console.log('[DEBUG BUTTON] INV button pressed');
+                try {
+                    const actor_ref = `actor.${APP_CONFIG.input_actor_id}`;
+                    console.log('[DEBUG BUTTON] Fetching containers for:', actor_ref);
+                    
+                    // Get containers
+                    const containers_res = await fetch(`http://localhost:8787/api/containers?owner_ref=${actor_ref}`);
+                    console.log('[DEBUG BUTTON] Containers response status:', containers_res.status);
+                    const containers_data = await containers_res.json();
+                    console.log('[DEBUG BUTTON] Containers data:', containers_data);
+                    
+                    if (!containers_data.ok) {
+                        console.log('[DEBUG BUTTON] Failed to load containers:', containers_data.error);
+                        flash_status(['Failed to load containers'], 1500);
+                        return;
+                    }
+                    
+                    // Get sack contents
+                    const sack = containers_data.containers.find((c: any) => c.id.includes('sack'));
+                    console.log('[DEBUG BUTTON] Found sack:', sack?.id);
+                    if (sack) {
+                        console.log('[DEBUG BUTTON] Fetching sack contents:', sack.id);
+                        const container_res = await fetch(`http://localhost:8787/api/container?id=${sack.id}`);
+                        console.log('[DEBUG BUTTON] Container response status:', container_res.status);
+                        const container_data = await container_res.json();
+                        console.log('[DEBUG BUTTON] Container data:', container_data);
+                        
+                        if (container_data.ok && container_data.contents) {
+                            const items = container_data.contents.map((c: any) => 
+                                `${c.instance.qty}x ${c.definition?.name || c.instance.def_id}`
+                            );
+                            console.log('[DEBUG BUTTON] Inventory items:', items);
+                            flash_status(['Inventory:', ...items.slice(0, 5)], 3000);
+                        } else {
+                            console.log('[DEBUG BUTTON] Sack is empty or error');
+                            flash_status(['Inventory: (empty)'], 1500);
+                        }
+                    } else {
+                        console.log('[DEBUG BUTTON] No sack found in containers');
+                        flash_status(['No sack found'], 1500);
+                    }
+                } catch (err) {
+                    console.error('[DEBUG BUTTON] Error:', err);
+                    flash_status(['Error: Could not load inventory'], 1500);
+                }
+            },
+        }),
+
+        // Debug button: Equip Item (move first item from sack to hand)
+        make_button_module({
+            id: 'debug_equip_item',
+            rect: { x0: DEBUG_X0, y0: DEBUG_Y0 + 4, x1: DEBUG_X1, y1: DEBUG_Y0 + 5 },
+            label: 'EQUIP',
+            rgb: get_color_by_name('pale_yellow').rgb,
+            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
+            async OnPress() {
+                console.log('[DEBUG BUTTON] EQUIP button pressed');
+                try {
+                    // Get containers
+                    console.log('[DEBUG BUTTON] Fetching containers...');
+                    const containers_res = await fetch(`http://localhost:8787/api/containers?owner_ref=actor.${APP_CONFIG.input_actor_id}`);
+                    console.log('[DEBUG BUTTON] Containers response status:', containers_res.status);
+                    const containers_data = await containers_res.json();
+                    console.log('[DEBUG BUTTON] Containers data:', containers_data);
+                    
+                    if (!containers_data.ok) {
+                        console.log('[DEBUG BUTTON] Failed to load containers');
+                        flash_status(['Failed to load containers'], 1500);
+                        return;
+                    }
+                    
+                    const sack = containers_data.containers.find((c: any) => c.id.includes('sack'));
+                    const hand = containers_data.containers.find((c: any) => c.id.includes('hand_right'));
+                    console.log('[DEBUG BUTTON] Found sack:', sack?.id, 'hand:', hand?.id);
+                    
+                    if (!sack || !hand) {
+                        console.log('[DEBUG BUTTON] Missing containers - sack:', !!sack, 'hand:', !!hand);
+                        flash_status(['Missing containers'], 1500);
+                        return;
+                    }
+                    
+                    // Check if hand already has something
+                    console.log('[DEBUG BUTTON] Checking hand contents...');
+                    const hand_res = await fetch(`http://localhost:8787/api/container?id=${hand.id}`);
+                    const hand_data = await hand_res.json();
+                    console.log('[DEBUG BUTTON] Hand contents:', hand_data);
+                    if (hand_data.ok && hand_data.contents && hand_data.contents.length > 0) {
+                        console.log('[DEBUG BUTTON] Hand already full');
+                        flash_status(['Hand already full'], 1500);
+                        return;
+                    }
+                    
+                    // Get sack contents to find first item
+                    console.log('[DEBUG BUTTON] Fetching sack contents...');
+                    const container_res = await fetch(`http://localhost:8787/api/container?id=${sack.id}`);
+                    const container_data = await container_res.json();
+                    console.log('[DEBUG BUTTON] Sack contents:', container_data);
+                    
+                    if (!container_data.ok || !container_data.contents || container_data.contents.length === 0) {
+                        console.log('[DEBUG BUTTON] Sack is empty');
+                        flash_status(['Sack is empty'], 1500);
+                        return;
+                    }
+                    
+                    const first_item = container_data.contents[0].instance;
+                    const item_name = container_data.contents[0].definition?.name || first_item.def_id;
+                    console.log('[DEBUG BUTTON] First item:', first_item.id, item_name);
+                    
+                    // Perform transfer
+                    console.log('[DEBUG BUTTON] Transferring item:', first_item.id, 'from', sack.id, 'to', hand.id);
+                    const transfer_res = await fetch('http://localhost:8787/api/transfer', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            item_instance_id: first_item.id,
+                            from_container: sack.id,
+                            to_container: hand.id
+                        })
+                    });
+                    
+                    const transfer_data = await transfer_res.json();
+                    console.log('[DEBUG BUTTON] Transfer response:', transfer_data);
+                    
+                    if (transfer_data.ok) {
+                        console.log('[DEBUG BUTTON] Equip successful');
+                        flash_status([`${item_name} equipped to hand`], 1500);
+                    } else {
+                        console.log('[DEBUG BUTTON] Equip failed:', transfer_data.error);
+                        flash_status(['Equip failed'], 1500);
+                    }
+                } catch (err) {
+                    console.error('[DEBUG BUTTON] Error:', err);
+                    flash_status(['Error: Could not equip'], 1500);
+                }
+            },
+        }),
+
+        // Debug button: Unequip Item (move item from hand to sack)
+        make_button_module({
+            id: 'debug_unequip_item',
+            rect: { x0: DEBUG_X0, y0: DEBUG_Y0 + 6, x1: DEBUG_X1, y1: DEBUG_Y0 + 7 },
+            label: 'UNEQUIP',
+            rgb: get_color_by_name('light_orange').rgb,
+            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
+            async OnPress() {
+                console.log('[DEBUG BUTTON] UNEQUIP button pressed');
+                try {
+                    // Get containers
+                    console.log('[DEBUG BUTTON] Fetching containers...');
+                    const containers_res = await fetch(`http://localhost:8787/api/containers?owner_ref=actor.${APP_CONFIG.input_actor_id}`);
+                    const containers_data = await containers_res.json();
+                    console.log('[DEBUG BUTTON] Containers data:', containers_data);
+                    
+                    if (!containers_data.ok) {
+                        console.log('[DEBUG BUTTON] Failed to load containers');
+                        flash_status(['Failed to load containers'], 1500);
+                        return;
+                    }
+                    
+                    const sack = containers_data.containers.find((c: any) => c.id.includes('sack'));
+                    const hand = containers_data.containers.find((c: any) => c.id.includes('hand_right'));
+                    console.log('[DEBUG BUTTON] Found sack:', sack?.id, 'hand:', hand?.id);
+                    
+                    if (!sack || !hand) {
+                        console.log('[DEBUG BUTTON] Missing containers');
+                        flash_status(['Missing containers'], 1500);
+                        return;
+                    }
+                    
+                    // Check if hand has something
+                    console.log('[DEBUG BUTTON] Checking hand contents...');
+                    const hand_res = await fetch(`http://localhost:8787/api/container?id=${hand.id}`);
+                    const hand_data = await hand_res.json();
+                    console.log('[DEBUG BUTTON] Hand data:', hand_data);
+                    if (!hand_data.ok || !hand_data.contents || hand_data.contents.length === 0) {
+                        console.log('[DEBUG BUTTON] Hand is empty');
+                        flash_status(['Hand is empty'], 1500);
+                        return;
+                    }
+                    
+                    const item = hand_data.contents[0].instance;
+                    const item_name = hand_data.contents[0].definition?.name || item.def_id;
+                    console.log('[DEBUG BUTTON] Item to unequip:', item.id, item_name);
+                    
+                    // Perform transfer
+                    console.log('[DEBUG BUTTON] Transferring item from hand to sack...');
+                    const transfer_res = await fetch('http://localhost:8787/api/transfer', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            item_instance_id: item.id,
+                            from_container: hand.id,
+                            to_container: sack.id
+                        })
+                    });
+                    
+                    const transfer_data = await transfer_res.json();
+                    console.log('[DEBUG BUTTON] Transfer response:', transfer_data);
+                    
+                    if (transfer_data.ok) {
+                        console.log('[DEBUG BUTTON] Unequip successful');
+                        flash_status([`${item_name} returned to sack`], 1500);
+                    } else {
+                        console.log('[DEBUG BUTTON] Unequip failed:', transfer_data.error);
+                        flash_status(['Unequip failed'], 1500);
+                    }
+                } catch (err) {
+                    console.error('[DEBUG BUTTON] Error:', err);
+                    flash_status(['Error: Could not unequip'], 1500);
+                }
+            },
+        }),
+
+        // Debug button: List Containers
+        make_button_module({
+            id: 'debug_list_containers',
+            rect: { x0: DEBUG_X0, y0: DEBUG_Y0 + 8, x1: DEBUG_X1, y1: DEBUG_Y0 + 9 },
+            label: 'CNTRS',
+            rgb: get_color_by_name('vivid_cyan').rgb,
+            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
+            async OnPress() {
+                console.log('[DEBUG BUTTON] CNTRS button pressed');
+                try {
+                    console.log('[DEBUG BUTTON] Fetching containers...');
+                    const res = await fetch(`http://localhost:8787/api/containers?owner_ref=actor.${APP_CONFIG.input_actor_id}`);
+                    console.log('[DEBUG BUTTON] Response status:', res.status);
+                    const data = await res.json();
+                    console.log('[DEBUG BUTTON] Containers data:', data);
+                    
+                    if (data.ok && data.containers) {
+                        const container_names = data.containers.map((c: any) => {
+                            const name = c.id.split('.').pop();
+                            return `${name}(${c.contents.length})`;
+                        });
+                        console.log('[DEBUG BUTTON] Container list:', container_names);
+                        flash_status(['Containers:', ...container_names], 3000);
+                    } else {
+                        console.log('[DEBUG BUTTON] No containers found or error');
+                        flash_status(['No containers found'], 1500);
+                    }
+                } catch (err) {
+                    console.error('[DEBUG BUTTON] Error:', err);
+                    flash_status(['Error: Could not list containers'], 1500);
+                }
+            },
+        }),
+
+        // Debug button: Show Ground Items
+        make_button_module({
+            id: 'debug_ground_items',
+            rect: { x0: DEBUG_X0, y0: DEBUG_Y0 + 10, x1: DEBUG_X1, y1: DEBUG_Y0 + 11 },
+            label: 'GRND',
+            rgb: get_color_by_name('pale_purple').rgb,
+            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
+            async OnPress() {
+                console.log('[DEBUG BUTTON] GRND button pressed');
+                try {
+                    // Get current place from UI state
+                    const current_place = ui_state.place.current_place;
+                    console.log('[DEBUG BUTTON] Current place:', current_place?.id);
+                    if (!current_place) {
+                        console.log('[DEBUG BUTTON] Not in a place');
+                        flash_status(['Not in a place'], 1500);
+                        return;
+                    }
+                    
+                    const place_id = current_place.id;
+                    console.log('[DEBUG BUTTON] Fetching ground items for:', place_id);
+                    const res = await fetch(`http://localhost:8787/api/place/ground_items?place_id=${place_id}`);
+                    console.log('[DEBUG BUTTON] Response status:', res.status);
+                    const data = await res.json();
+                    console.log('[DEBUG BUTTON] Ground items data:', data);
+                    
+                    if (data.ok && data.items && data.items.length > 0) {
+                        const item_names = data.items.map((item: any) => 
+                            `${item.qty}x ${item.name}`
+                        );
+                        console.log('[DEBUG BUTTON] Ground items found:', item_names);
+                        flash_status(['Ground items:', ...item_names], 3000);
+                    } else {
+                        console.log('[DEBUG BUTTON] No items on ground');
+                        flash_status(['No items on ground'], 1500);
+                    }
+                } catch (err) {
+                    console.error('[DEBUG BUTTON] Error:', err);
+                    flash_status(['Error: Could not check ground'], 1500);
+                }
+            },
+        }),
+
+        // Debug button: Pick Up Ground Item
+        make_button_module({
+            id: 'debug_pickup_item',
+            rect: { x0: DEBUG_X0, y0: DEBUG_Y0 + 12, x1: DEBUG_X1, y1: DEBUG_Y0 + 13 },
+            label: 'PICKUP',
+            rgb: get_color_by_name('vivid_green').rgb,
+            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
+            async OnPress() {
+                console.log('[DEBUG BUTTON] PICKUP button pressed');
+                try {
+                    // Get current place
+                    const current_place = ui_state.place.current_place;
+                    console.log('[DEBUG BUTTON] Current place:', current_place?.id);
+                    if (!current_place) {
+                        console.log('[DEBUG BUTTON] Not in a place');
+                        flash_status(['Not in a place'], 1500);
+                        return;
+                    }
+                    
+                    const place_id = current_place.id;
+                    
+                    // Get ground items first
+                    console.log('[DEBUG BUTTON] Fetching ground items...');
+                    const ground_res = await fetch(`http://localhost:8787/api/place/ground_items?place_id=${place_id}`);
+                    const ground_data = await ground_res.json();
+                    console.log('[DEBUG BUTTON] Ground items:', ground_data);
+                    
+                    if (!ground_data.ok || !ground_data.items || ground_data.items.length === 0) {
+                        console.log('[DEBUG BUTTON] Nothing to pick up');
+                        flash_status(['Nothing to pick up'], 1500);
+                        return;
+                    }
+                    
+                    // Get actor's current position for distance calculation
+                    const current_actor_pickup = current_place?.contents?.actors_present?.find(
+                        (a: any) => a.actor_ref === `actor.${APP_CONFIG.input_actor_id}`
+                    );
+                    const actor_position_pickup = current_actor_pickup?.tile_position;
+                    
+                    // Sort items by distance to actor (closest first)
+                    const items_with_distance = ground_data.items.map((item: any) => {
+                        const dx = item.tile_position.x - (actor_position_pickup?.x ?? 0);
+                        const dy = item.tile_position.y - (actor_position_pickup?.y ?? 0);
+                        const distance = Math.sqrt(dx * dx + dy * dy);
+                        return { item, distance };
+                    });
+                    items_with_distance.sort((a: any, b: any) => a.distance - b.distance);
+                    
+                    // Pick up closest item
+                    const item = items_with_distance[0].item;
+                    const distance = items_with_distance[0].distance;
+                    console.log('[DEBUG BUTTON] Picking up closest item:', item.instance_id, item.name, `distance: ${distance.toFixed(1)} tiles`);
+                    console.log('[DEBUG BUTTON] Actor position for pickup:', actor_position_pickup);
+                    
+                    console.log('[DEBUG BUTTON] Calling pickup API...');
+                    const pickup_res = await fetch('http://localhost:8787/api/place/pickup', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            item_instance_id: item.instance_id,
+                            place_id: place_id,
+                            actor_id: APP_CONFIG.input_actor_id,
+                            actor_position: actor_position_pickup
+                        })
+                    });
+                    
+                    const pickup_data = await pickup_res.json();
+                    console.log('[DEBUG BUTTON] Pickup response:', pickup_data);
+                    
+                    if (pickup_data.ok) {
+                        console.log('[DEBUG BUTTON] Pickup successful, refreshing place...');
+                        flash_status([`✓ Picked up ${item.qty}x ${item.name}`], 1500);
+                        
+                        // Debug: Log items before refresh
+                        const place_before = ui_state.place.current_place;
+                        console.log('[DEBUG BUTTON] Items before refresh:', place_before?.contents?.items_on_ground?.length || 0);
+                        
+                        // Force refresh place data to remove picked up item immediately
+                        await update_current_place(place_id);
+                        
+                        // Debug: Log items after refresh
+                        const place_after = ui_state.place.current_place;
+                        console.log('[DEBUG BUTTON] Items after refresh:', place_after?.contents?.items_on_ground?.length || 0);
+                        console.log('[DEBUG BUTTON] Place refreshed');
+                        
+                        // Force render update by nudging the view slightly
+                        // This triggers the place module to redraw with new data
+                        setTimeout(() => {
+                            const event = new KeyboardEvent('keydown', { key: 'ArrowRight' });
+                            window.dispatchEvent(event);
+                            setTimeout(() => {
+                                const event2 = new KeyboardEvent('keydown', { key: 'ArrowLeft' });
+                                window.dispatchEvent(event2);
+                            }, 50);
+                        }, 100);
+                    } else if (pickup_data.error === 'too_far_away') {
+                        const distance = pickup_data.distance ? pickup_data.distance.toFixed(1) : '?';
+                        const actor_pos = pickup_data.actor_pos ? `(${pickup_data.actor_pos.x},${pickup_data.actor_pos.y})` : 'unknown';
+                        const item_pos = item.tile_position ? `(${item.tile_position.x},${item.tile_position.y})` : 'unknown';
+                        console.log(`[DEBUG BUTTON] Pickup failed: too far away - Actor at ${actor_pos}, Item at ${item_pos}, Distance: ${distance} tiles`);
+                        flash_status([
+                            `✗ Too far away (${distance} tiles)`,
+                            `You: ${actor_pos} → Item: ${item_pos}`
+                        ], 2500);
+                    } else if (pickup_data.error === 'position_mismatch') {
+                        console.log(`[DEBUG BUTTON] Pickup failed: position mismatch - Storage: ${pickup_data.storage_pos}, Place: ${pickup_data.place_pos}`);
+                        flash_status([
+                            '✗ Position sync error',
+                            `Storage: ${pickup_data.storage_pos}`,
+                            `Place: ${pickup_data.place_pos}`
+                        ], 3000);
+                    } else {
+                        console.log('[DEBUG BUTTON] Pickup failed:', pickup_data.error);
+                        flash_status(['✗ Failed: ' + (pickup_data.error || 'unknown')], 2000);
+                    }
+                } catch (err) {
+                    console.error('[DEBUG BUTTON] Error:', err);
+                    flash_status(['Error: Could not pick up item'], 1500);
+                }
+            },
+        }),
+
+        // Debug button: Drop Item (move first sack item to ground)
+        make_button_module({
+            id: 'debug_drop_item',
+            rect: { x0: DEBUG_X0, y0: DEBUG_Y0 + 13, x1: DEBUG_X1, y1: DEBUG_Y0 + 14 },
+            label: 'DROP',
+            rgb: get_color_by_name('light_red').rgb,
+            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
+            async OnPress() {
+                console.log('[DEBUG BUTTON] DROP button pressed');
+                try {
+                    // Get current place
+                    const current_place = ui_state.place.current_place;
+                    console.log('[DEBUG BUTTON] Current place:', current_place?.id);
+                    if (!current_place) {
+                        console.log('[DEBUG BUTTON] Not in a place');
+                        flash_status(['Not in a place'], 1500);
+                        return;
+                    }
+                    
+                    const place_id = current_place.id;
+                    
+                    // Get actor's containers
+                    console.log('[DEBUG BUTTON] Fetching containers...');
+                    const containers_res = await fetch(`http://localhost:8787/api/containers?owner_ref=actor.${APP_CONFIG.input_actor_id}`);
+                    const containers_data = await containers_res.json();
+                    console.log('[DEBUG BUTTON] Containers data:', containers_data);
+                    
+                    if (!containers_data.ok) {
+                        console.log('[DEBUG BUTTON] Failed to load containers');
+                        flash_status(['Failed to load containers'], 1500);
+                        return;
+                    }
+                    
+                    const sack = containers_data.containers.find((c: any) => c.id.includes('sack'));
+                    console.log('[DEBUG BUTTON] Found sack:', sack?.id);
+                    
+                    if (!sack) {
+                        console.log('[DEBUG BUTTON] No sack found');
+                        flash_status(['No sack found'], 1500);
+                        return;
+                    }
+                    
+                    // Get sack contents
+                    console.log('[DEBUG BUTTON] Fetching sack contents...');
+                    const container_res = await fetch(`http://localhost:8787/api/container?id=${sack.id}`);
+                    const container_data = await container_res.json();
+                    console.log('[DEBUG BUTTON] Sack contents:', container_data);
+                    
+                    if (!container_data.ok || !container_data.contents || container_data.contents.length === 0) {
+                        console.log('[DEBUG BUTTON] Sack is empty');
+                        flash_status(['Sack is empty'], 1500);
+                        return;
+                    }
+                    
+                    // Drop first item
+                    const first_item = container_data.contents[0].instance;
+                    const item_name = container_data.contents[0].definition?.name || first_item.def_id;
+                    console.log('[DEBUG BUTTON] Dropping item:', first_item.id, item_name);
+                    
+                    // Get actor's current position for the drop location
+                    const current_actor = current_place?.contents?.actors_present?.find(
+                        (a: any) => a.actor_ref === `actor.${APP_CONFIG.input_actor_id}`
+                    );
+                    const actor_position = current_actor?.tile_position ?? { x: 20, y: 20 };
+                    console.log('[DEBUG BUTTON] Actor position for drop:', actor_position);
+                    
+                    console.log('[DEBUG BUTTON] Calling drop API...');
+                    const drop_res = await fetch('http://localhost:8787/api/place/drop', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            item_instance_id: first_item.id,
+                            place_id: place_id,
+                            actor_id: APP_CONFIG.input_actor_id,
+                            tile_position: actor_position
+                        })
+                    });
+                    
+                    const drop_data = await drop_res.json();
+                    console.log('[DEBUG BUTTON] Drop response:', drop_data);
+                    
+                    if (drop_data.ok) {
+                        console.log('[DEBUG BUTTON] Drop successful, refreshing place...');
+                        flash_status([`Dropped ${first_item.qty}x ${item_name}`], 1500);
+                        
+                        // Debug: Log items before refresh
+                        const place_before = ui_state.place.current_place;
+                        console.log('[DEBUG BUTTON] Items before refresh:', place_before?.contents?.items_on_ground?.length || 0);
+                        
+                        // Force refresh place data to show dropped item immediately
+                        await update_current_place(place_id);
+                        
+                        // Debug: Log items after refresh
+                        const place_after = ui_state.place.current_place;
+                        console.log('[DEBUG BUTTON] Items after refresh:', place_after?.contents?.items_on_ground?.length || 0);
+                        console.log('[DEBUG BUTTON] Place refreshed');
+                        
+                        // Force render update by nudging the view slightly
+                        setTimeout(() => {
+                            const event = new KeyboardEvent('keydown', { key: 'ArrowRight' });
+                            window.dispatchEvent(event);
+                            setTimeout(() => {
+                                const event2 = new KeyboardEvent('keydown', { key: 'ArrowLeft' });
+                                window.dispatchEvent(event2);
+                            }, 50);
+                        }, 100);
+                    } else {
+                        console.log('[DEBUG BUTTON] Drop failed:', drop_data.error);
+                        flash_status(['Failed to drop: ' + (drop_data.error || 'unknown')], 1500);
+                    }
+                } catch (err) {
+                    console.error('[DEBUG BUTTON] Error:', err);
+                    flash_status(['Error: Could not drop item'], 1500);
+                }
+            },
+        }),
+
+        // Debug button: TEST ALL - Automated system verification
+        make_button_module({
+            id: 'debug_test_all',
+            rect: { x0: DEBUG_X0, y0: DEBUG_Y0 + 14, x1: DEBUG_X1, y1: DEBUG_Y0 + 15 },
+            label: 'TEST',
+            rgb: get_color_by_name('off_white').rgb,
+            bg: { char: '*', rgb: get_color_by_name('vivid_red').rgb },
+            base_weight_index: 3,
+            async OnPress() {
+                console.log('[DEBUG BUTTON] TEST button pressed - Starting automated test suite');
+                const results: string[] = ['=== ITEM SYSTEM TEST ==='];
+                let passed = 0;
+                let failed = 0;
+                
+                try {
+                    // Test 1: List containers
+                    results.push('[1/6] Containers...');
+                    console.log('[DEBUG BUTTON TEST] Testing containers API...');
+                    const containers_res = await fetch(`http://localhost:8787/api/containers?owner_ref=actor.${APP_CONFIG.input_actor_id}`);
+                    console.log('[DEBUG BUTTON TEST] Containers response status:', containers_res.status);
+                    const containers_data = await containers_res.json();
+                    console.log('[DEBUG BUTTON TEST] Containers data:', containers_data);
+                    if (containers_data.ok && containers_data.containers?.length > 0) {
+                        results.push(`✓ ${containers_data.containers.length} containers found`);
+                        passed++;
+                    } else {
+                        results.push('✗ No containers');
+                        failed++;
+                    }
+                    
+                    // Test 2: Check inventory
+                    results.push('[2/6] Inventory...');
+                    console.log('[DEBUG BUTTON TEST] Testing inventory...');
+                    const sack = containers_data.containers?.find((c: any) => c.id.includes('sack'));
+                    console.log('[DEBUG BUTTON TEST] Found sack:', sack?.id);
+                    if (sack) {
+                        const container_res = await fetch(`http://localhost:8787/api/container?id=${sack.id}`);
+                        const container_data = await container_res.json();
+                        console.log('[DEBUG BUTTON TEST] Sack contents:', container_data);
+                        if (container_data.ok) {
+                            results.push(`✓ Sack has ${container_data.contents?.length || 0} items`);
+                            passed++;
+                        } else {
+                            results.push('✗ Cannot read sack');
+                            failed++;
+                        }
+                    } else {
+                        results.push('✗ No sack found');
+                        failed++;
+                    }
+                    
+                    // Test 3: Ground items
+                    results.push('[3/6] Ground items...');
+                    console.log('[DEBUG BUTTON TEST] Testing ground items...');
+                    const current_place = ui_state.place.current_place;
+                    console.log('[DEBUG BUTTON TEST] Current place:', current_place?.id);
+                    if (current_place) {
+                        const ground_res = await fetch(`http://localhost:8787/api/place/ground_items?place_id=${current_place.id}`);
+                        const ground_data = await ground_res.json();
+                        console.log('[DEBUG BUTTON TEST] Ground items:', ground_data);
+                        if (ground_data.ok) {
+                            results.push(`✓ ${ground_data.items?.length || 0} items on ground`);
+                            passed++;
+                        } else {
+                            results.push('✗ Cannot read ground');
+                            failed++;
+                        }
+                    } else {
+                        results.push('⚠ Not in a place');
+                    }
+                    
+                    // Test 4: Place rendering
+                    results.push('[4/6] Place data...');
+                    console.log('[DEBUG BUTTON TEST] Testing place data...');
+                    if (current_place?.contents?.items_on_ground) {
+                        const visible_items = current_place.contents.items_on_ground.length;
+                        console.log('[DEBUG BUTTON TEST] Items in place data:', visible_items);
+                        results.push(`✓ ${visible_items} items in place data`);
+                        passed++;
+                    } else {
+                        console.log('[DEBUG BUTTON TEST] No items_on_ground in place');
+                        results.push('✗ No items_on_ground in place');
+                        failed++;
+                    }
+                    
+                    // Test 5: API health
+                    results.push('[5/6] API health...');
+                    console.log('[DEBUG BUTTON TEST] Testing API health...');
+                    const health_res = await fetch('http://localhost:8787/api/health');
+                    console.log('[DEBUG BUTTON TEST] Health check status:', health_res.status);
+                    if (health_res.ok) {
+                        results.push('✓ API responding');
+                        passed++;
+                    } else {
+                        results.push('✗ API error');
+                        failed++;
+                    }
+                    
+                    // Test 6: Transfer capability
+                    results.push('[6/6] Transfer system...');
+                    console.log('[DEBUG BUTTON TEST] Checking transfer capability...');
+                    if (sack && containers_data.containers?.find((c: any) => c.id.includes('hand'))) {
+                        console.log('[DEBUG BUTTON TEST] Transfer possible');
+                        results.push('✓ Transfer possible');
+                        passed++;
+                    } else {
+                        console.log('[DEBUG BUTTON TEST] Missing containers for transfer');
+                        results.push('✗ Missing containers for transfer');
+                        failed++;
+                    }
+                    
+                    // Summary
+                    results.push('');
+                    results.push(`=== RESULTS: ${passed} passed, ${failed} failed ===`);
+                    console.log('[DEBUG BUTTON TEST] Test complete:', passed, 'passed,', failed, 'failed');
+                    if (failed === 0) {
+                        results.push('✓ ALL TESTS PASSED');
+                    } else {
+                        results.push('✗ SOME TESTS FAILED');
+                    }
+                    
+                } catch (err: any) {
+                    console.error('[DEBUG BUTTON TEST] Error:', err);
+                    results.push('');
+                    results.push(`✗ ERROR: ${err.message || 'Unknown error'}`);
+                    results.push('Is the interface_program running on :8787?');
+                }
+                
+                flash_status(results, 8000);
             },
         }),
 

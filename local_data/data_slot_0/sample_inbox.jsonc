@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "messages": [
+    {
+      "id": "2026-01-01T09:07:35 : 000001 : K7M2QF",
+      "sender": "J",
+      "content": "this is the same formatting of the log.jsonc file in the same folder. /n this is from other systems!"
+    }  
+  ]
+}

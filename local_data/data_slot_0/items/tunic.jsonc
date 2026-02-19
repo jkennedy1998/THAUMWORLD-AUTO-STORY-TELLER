@@ -1,0 +1,26 @@
+{
+  "id": "tunic",
+  "name": "Tunic",
+  "description": "A simple cloth tunic that covers the torso.",
+  "weight": 300,
+  "weight_mag": 1,
+  "mag": 1,
+  "size_mag": 2,
+  "hardness_mag": 1,
+  "conductivity_mag": 1,
+  "tags": [
+    {
+      "name": "ARMOR",
+      "mag": 1,
+      "meta": [],
+      "info": ["torso"]
+    },
+    {
+      "name": "CLOTHING",
+      "mag": 1,
+      "meta": []
+    }
+  ],
+  "stackable": false,
+  "notes": "Basic torso clothing"
+}

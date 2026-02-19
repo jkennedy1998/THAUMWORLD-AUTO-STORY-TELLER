@@ -1,0 +1,26 @@
+{
+  "id": "pants",
+  "name": "Pants",
+  "description": "A pair of simple cloth pants.",
+  "weight": 250,
+  "weight_mag": 1,
+  "mag": 1,
+  "size_mag": 2,
+  "hardness_mag": 1,
+  "conductivity_mag": 1,
+  "tags": [
+    {
+      "name": "ARMOR",
+      "mag": 1,
+      "meta": [],
+      "info": ["leg_left", "leg_right"]
+    },
+    {
+      "name": "CLOTHING",
+      "mag": 1,
+      "meta": []
+    }
+  ],
+  "stackable": false,
+  "notes": "Basic leg clothing"
+}

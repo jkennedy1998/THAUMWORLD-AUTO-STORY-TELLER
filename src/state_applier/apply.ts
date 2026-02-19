@@ -91,15 +91,33 @@ function adjust_inventory(effect_id: string, target_path: string, item_ref: stri
     diffs.push({ effect_id, target: data.id ?? target_path, field: `inventory.${item_id}`, delta: mag, reason: "SYSTEM.ADJUST_INVENTORY" });
 }
 
-function apply_awareness(effect_id: string, target_path: string, target_ref: string, clarity: string | null, diffs: AppliedDiff[]): void {
-    const data = read_jsonc(target_path);
+function apply_awareness(effect_id: string, observer_path: string, observer_ref: string, target_ref: string, clarity: string | null, diffs: AppliedDiff[]): void {
+    // Filter out self-awareness (observer becoming aware of themselves)
+    if (observer_ref === target_ref) {
+        return;
+    }
+
+    const data = read_jsonc(observer_path);
     const tags = Array.isArray(data.tags) ? data.tags : [];
+
+    // Check for existing awareness tag (case-insensitive) with same target
+    const hasExistingAwareness = tags.some((tag: Record<string, unknown>) => {
+        if (String(tag.name ?? "").toUpperCase() !== "AWARENESS") return false;
+        const info = Array.isArray(tag.info) ? (tag.info as unknown[]) : [];
+        return info.some((entry) => String(entry) === target_ref);
+    });
+
+    // Skip if duplicate
+    if (hasExistingAwareness) {
+        return;
+    }
+
     const info: string[] = [target_ref];
     if (clarity === "obscured") info.push("obscured");
     tags.push({ name: "AWARENESS", mag: 1, info });
     data.tags = tags;
-    write_jsonc(target_path, data);
-    diffs.push({ effect_id, target: data.id ?? target_path, field: "tags", delta: 1, reason: "SYSTEM.SET_AWARENESS" });
+    write_jsonc(observer_path, data);
+    diffs.push({ effect_id, target: data.id ?? observer_path, field: "tags", delta: 1, reason: "SYSTEM.SET_AWARENESS" });
 }
 
 // Parse tile reference and extract coordinates
@@ -218,7 +236,7 @@ export function apply_effects(commands: CommandNode[], target_paths: Record<stri
                 continue;
             }
             const clarity = get_identifier(cmd.args.clarity) ?? null;
-            apply_awareness(effect_id, observer_path, target_ref, clarity, diffs);
+            apply_awareness(effect_id, observer_path, observer_ref, target_ref, clarity, diffs);
         } else if (cmd.verb === "SET_OCCUPANCY") {
             // Parse tiles list from command args
             const tiles_arg = cmd.args.tiles;

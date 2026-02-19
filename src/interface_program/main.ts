@@ -24,8 +24,12 @@ import { get_timed_event_state, get_region_by_coords, is_timed_event_active } fr
 import { travel_between_places } from "../travel/movement.js";
 import { load_npc } from "../npc_storage/store.js";
 import { load_place, list_places_in_region, save_place, create_basic_place } from "../place_storage/store.js";
+import { load_container, list_containers_for_owner, transfer_item_between_containers, get_ground_items, build_ground_container_id, get_or_create_scattered_container, list_scattered_containers, delete_scattered_container_if_empty } from "../container_storage/store.js";
+import { load_item_instance, update_item_instance_owner } from "../item_instances/store.js";
+import { load_item_def } from "../item_storage/store.js";
 import { emitTagChange } from "../shared/event_emitter.js";
-import type { PlaceConnection } from "../types/place.js";
+import type { PlaceConnection, PlaceItem } from "../types/place.js";
+import { calculate_tile_distance, is_within_range } from "../types/container.js";
 import { get_npc_location } from "../npc_storage/location.js";
 import { get_entities_in_place } from "../place_storage/entity_index.js";
 import { get_creation_state_path } from "../engine/paths.js";
@@ -1522,6 +1526,45 @@ function start_http_server(log_path: string): void {
                     });
                 }
 
+                // Sync items_on_ground from scattered containers (single source of truth)
+                // This ensures the renderer sees the same items as the API
+                place.contents.items_on_ground = [];
+                const scattered_containers = list_scattered_containers(slot, place_id);
+                let synced_count = 0;
+                
+                for (const container of scattered_containers) {
+                    for (const entry of container.contents) {
+                        const item_result = load_item_instance(slot, entry.item_instance_id);
+                        if (item_result.ok) {
+                            const item = item_result.instance;
+                            const position = container.position || 
+                                place.tile_grid?.default_entry || { x: 20, y: 20 };
+                            
+                            const place_item: PlaceItem = {
+                                item_ref: item.id,
+                                quantity: item.qty,
+                                tile_position: position
+                            };
+                            place.contents.items_on_ground.push(place_item);
+                            synced_count++;
+                        }
+                    }
+                }
+                
+                if (synced_count > 0) {
+                    debug_log("API", `/api/place: Synced ${synced_count} ground items from ${scattered_containers.length} scattered containers`, {
+                        place_id
+                    });
+                }
+
+                // Save place with synced actor positions and items
+                // This ensures actor positions persist and don't get out of sync with storage
+                save_place(slot, place);
+                debug_log("API", `/api/place: Saved place ${place_id} with synced data`, {
+                    actors: place.contents.actors_present.length,
+                    items: place.contents.items_on_ground.length
+                });
+
                 // Debug: Log ALL entities with their tags (even empty) to track changes
                 debug_log("API", `/api/place: All entities with tags in ${place_id}`, {
                     npcs: place.contents.npcs_present.map(n => ({ 
@@ -1787,6 +1830,507 @@ function start_http_server(log_path: string): void {
                     debug_error("API", `/api/tag/add request error`, err);
                     res.writeHead(500, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: err?.message ?? "tag_add_failed" }));
+                }
+            });
+            return;
+        }
+
+        // GET /api/containers?owner_ref=xxx - List containers for an owner
+        if (url.pathname === "/api/containers") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const owner_ref = url.searchParams.get("owner_ref");
+            if (!owner_ref) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_owner_ref" }));
+                return;
+            }
+
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+
+            try {
+                const containers = list_containers_for_owner(slot, owner_ref);
+                
+                debug_log("API", `/api/containers: Found ${containers.length} containers for ${owner_ref}`);
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, owner_ref, containers }));
+            } catch (err: any) {
+                debug_error("API", `/api/containers error for ${owner_ref}`, err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: err?.message ?? "containers_list_failed" }));
+            }
+            return;
+        }
+
+        // GET /api/container?id=xxx - Get specific container with contents
+        if (url.pathname === "/api/container") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const container_id = url.searchParams.get("id");
+            if (!container_id) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_container_id" }));
+                return;
+            }
+
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+
+            try {
+                const container_result = load_container(slot, container_id);
+                if (!container_result.ok) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "container_not_found" }));
+                    return;
+                }
+
+                // Load full item details for contents
+                const contents = [];
+                for (const entry of container_result.container.contents) {
+                    const instance_result = load_item_instance(slot, entry.item_instance_id);
+                    if (instance_result.ok) {
+                        const def_result = load_item_def(slot, instance_result.instance.def_id);
+                        contents.push({
+                            instance: instance_result.instance,
+                            definition: def_result.ok ? def_result.item : null
+                        });
+                    }
+                }
+                
+                debug_log("API", `/api/container: Loaded ${container_id} with ${contents.length} items`);
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ 
+                    ok: true, 
+                    container: container_result.container,
+                    contents 
+                }));
+            } catch (err: any) {
+                debug_error("API", `/api/container error for ${container_id}`, err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: err?.message ?? "container_load_failed" }));
+            }
+            return;
+        }
+
+        // POST /api/transfer - Transfer item between containers
+        if (url.pathname === "/api/transfer") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", chunk => body += chunk);
+            req.on("end", async () => {
+                try {
+                    const data = JSON.parse(body);
+                    const { item_instance_id, from_container, to_container, slot = data_slot_number } = data;
+
+                    if (!item_instance_id || !from_container || !to_container) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                        return;
+                    }
+
+                    debug_log("API", `/api/transfer: Transferring ${item_instance_id} from ${from_container} to ${to_container}`);
+
+                    const result = transfer_item_between_containers(slot, item_instance_id, from_container, to_container);
+
+                    if (result.ok) {
+                        debug_log("API", `/api/transfer: ${item_instance_id} ${from_container} -> ${to_container}`);
+                        res.writeHead(200, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: true, item_instance_id, from_container, to_container }));
+                    } else {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: result.error }));
+                    }
+                } catch (err: any) {
+                    debug_error("API", `/api/transfer request error`, err);
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? "transfer_failed" }));
+                }
+            });
+            return;
+        }
+
+        // GET /api/place/ground_items?place_id=xxx - Get ground items in a place
+        if (url.pathname === "/api/place/ground_items") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const place_id = url.searchParams.get("place_id");
+            if (!place_id) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_place_id" }));
+                return;
+            }
+
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+
+            try {
+                // Get scattered containers and their items
+                const scattered_containers = list_scattered_containers(slot, place_id);
+                const items_with_positions: any[] = [];
+                
+                for (const container of scattered_containers) {
+                    for (const entry of container.contents) {
+                        const instance_result = load_item_instance(slot, entry.item_instance_id);
+                        if (instance_result.ok) {
+                            const instance = instance_result.instance;
+                            const def_result = load_item_def(slot, instance.def_id);
+                            items_with_positions.push({
+                                instance_id: instance.id,
+                                def_id: instance.def_id,
+                                name: def_result.ok ? def_result.item.name : instance.def_id,
+                                qty: instance.qty,
+                                condition: instance.condition,
+                                tile_position: container.position || { x: 20, y: 20 },
+                                container_id: container.id
+                            });
+                        }
+                    }
+                }
+                
+                debug_log("API", `/api/place/ground_items: Found ${items_with_positions.length} items in ${place_id}`);
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, place_id, items: items_with_positions }));
+            } catch (err: any) {
+                debug_error("API", `/api/place/ground_items error for ${place_id}`, err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: err?.message ?? "ground_items_failed" }));
+            }
+            return;
+        }
+
+        // POST /api/place/pickup - Pick up an item from scattered loot (with distance validation)
+        if (url.pathname === "/api/place/pickup") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", chunk => body += chunk);
+            req.on("end", async () => {
+                try {
+                    const data = JSON.parse(body);
+                    const { item_instance_id, place_id, actor_id, actor_position, slot = data_slot_number } = data;
+
+                    if (!item_instance_id || !actor_id) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                        return;
+                    }
+
+                    // Load actor directly from storage (authoritative source)
+                    const actor_result = load_actor(slot, actor_id);
+                    if (!actor_result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "actor_not_found" }));
+                        return;
+                    }
+                    const actor = actor_result.actor as any;
+                    const actor_pos = actor.location?.tile;
+                    
+                    if (!actor_pos) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "actor_position_unknown" }));
+                        return;
+                    }
+                    
+                    // Use actor's actual place from storage (authoritative, not stale client data)
+                    const actual_place_id = actor.location?.place_id;
+                    if (!actual_place_id) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "actor_not_in_any_place" }));
+                        return;
+                    }
+                    
+                    // Log if client sent different place (for debugging stale data issues)
+                    if (place_id && place_id !== actual_place_id) {
+                        debug_log("API", `Pickup place mismatch: client sent ${place_id}, actor is actually in ${actual_place_id}`);
+                    }
+                    
+                    // Load place for updates (using actor's actual location)
+                    const place_result = load_place(slot, actual_place_id);
+                    if (!place_result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "place_not_found" }));
+                        return;
+                    }
+                    const place = place_result.place;
+                    
+                    // Consistency check: compare storage position with place data
+                    const actor_entry = place.contents.actors_present.find(
+                        (a: any) => a.actor_ref === `actor.${actor_id}`
+                    );
+                    if (actor_entry) {
+                        const place_pos = actor_entry.tile_position;
+                        const distance_diff = calculate_tile_distance(
+                            { x: actor_pos.x, y: actor_pos.y },
+                            { x: place_pos.x, y: place_pos.y }
+                        );
+                        if (distance_diff > 2) {
+                            debug_warn("API", `Position mismatch for actor.${actor_id}: storage=(${actor_pos.x},${actor_pos.y}), place=(${place_pos.x},${place_pos.y}), diff=${distance_diff.toFixed(1)} tiles`);
+                        }
+                    }
+
+                    // Find which scattered container has this item (using actor's actual place)
+                    const scattered_containers = list_scattered_containers(slot, actual_place_id);
+                    let target_container = null;
+                    let target_position = null;
+                    
+                    for (const container of scattered_containers) {
+                        const has_item = container.contents.some(
+                            (entry: any) => entry.item_instance_id === item_instance_id
+                        );
+                        if (has_item && container.position) {
+                            target_container = container;
+                            target_position = container.position;
+                            break;
+                        }
+                    }
+
+                    if (!target_container || !target_position) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "item_not_found_on_ground" }));
+                        return;
+                    }
+
+                    // Validate distance (touch range = 1 tile)
+                    const distance = calculate_tile_distance(
+                        { x: actor_pos.x, y: actor_pos.y },
+                        target_position
+                    );
+                    
+                    if (distance > 1) {
+                        debug_warn("API", `Pickup failed: too far away. Actor at (${actor_pos.x},${actor_pos.y}), item at (${target_position.x},${target_position.y}), distance=${distance.toFixed(1)} tiles`);
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ 
+                            ok: false, 
+                            error: "too_far_away",
+                            distance: distance,
+                            max_range: 1,
+                            actor_pos: { x: actor_pos.x, y: actor_pos.y },
+                            item_pos: { x: target_position.x, y: target_position.y }
+                        }));
+                        return;
+                    }
+
+                    // Get actor's sack container
+                    const actor_containers = list_containers_for_owner(slot, `actor.${actor_id}`);
+                    const sack = actor_containers.find((c: any) => c.id.includes('sack'));
+                    
+                    if (!sack) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "actor_has_no_sack" }));
+                        return;
+                    }
+
+                    // Transfer item from scattered container to actor's sack
+                    const result = transfer_item_between_containers(
+                        slot, 
+                        item_instance_id, 
+                        target_container.id, 
+                        sack.id
+                    );
+
+                    if (result.ok) {
+                        // Update item ownership
+                        update_item_instance_owner(slot, item_instance_id, `actor.${actor_id}`);
+                        
+                        // Remove item from place.items_on_ground
+                        if (place.contents.items_on_ground) {
+                            place.contents.items_on_ground = place.contents.items_on_ground.filter(
+                                (item: any) => item.item_ref !== item_instance_id
+                            );
+                        }
+                        
+                        // Delete scattered container if now empty
+                        delete_scattered_container_if_empty(slot, target_container.id);
+                        
+                        save_place(slot, place);
+                        
+                        debug_log("API", `/api/place/pickup: ${item_instance_id} picked up by ${actor_id} from ${target_container.id} in ${actual_place_id}`);
+                        res.writeHead(200, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ 
+                            ok: true, 
+                            item_instance_id, 
+                            from: target_container.id, 
+                            to: sack.id,
+                            place_id: actual_place_id,
+                            container_deleted: target_container.contents.length <= 1
+                        }));
+                    } else {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: result.error }));
+                    }
+                } catch (err: any) {
+                    debug_error("API", `/api/place/pickup request error`, err);
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? "pickup_failed" }));
+                }
+            });
+            return;
+        }
+
+        // POST /api/place/drop - Drop item from actor's sack to scattered loot at position
+        if (url.pathname === "/api/place/drop") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", (chunk) => { body += chunk; });
+            req.on("end", () => {
+                try {
+                    const data = JSON.parse(body);
+                    const item_instance_id = data.item_instance_id;
+                    const place_id = data.place_id;
+                    const actor_id = data.actor_id;
+                    // Position where item should be dropped (required)
+                    const tile_position = data.tile_position;
+
+                    if (!item_instance_id || !actor_id) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                        return;
+                    }
+
+                    const slot = data_slot_number;
+                    
+                    // Load actor directly from storage (authoritative source)
+                    const actor_result = load_actor(slot, actor_id);
+                    if (!actor_result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "actor_not_found" }));
+                        return;
+                    }
+                    const actor = actor_result.actor as any;
+                    const actor_pos = actor.location?.tile;
+                    
+                    if (!actor_pos) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "actor_position_unknown" }));
+                        return;
+                    }
+                    
+                    // Use actor's actual place from storage (authoritative, not stale client data)
+                    const actual_place_id = actor.location?.place_id;
+                    if (!actual_place_id) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "actor_not_in_any_place" }));
+                        return;
+                    }
+                    
+                    // Log if client sent different place (for debugging stale data issues)
+                    if (place_id && place_id !== actual_place_id) {
+                        debug_log("API", `Drop place mismatch: client sent ${place_id}, actor is actually in ${actual_place_id}`);
+                    }
+                    
+                    // Use actor's actual position from storage (ignore client-provided position for security)
+                    const drop_x = actor_pos.x;
+                    const drop_y = actor_pos.y;
+
+                    // Get or create scattered container at drop position (using actor's actual place)
+                    const scattered_result = get_or_create_scattered_container(slot, actual_place_id, drop_x, drop_y);
+                    if (!scattered_result.ok) {
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "failed_to_create_container" }));
+                        return;
+                    }
+                    const scattered_container = scattered_result.container;
+
+                    // Get actor's containers
+                    const actor_containers = list_containers_for_owner(slot, `actor.${actor_id}`);
+                    const sack = actor_containers.find((c: any) => c.id.includes('sack'));
+                    
+                    if (!sack) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "actor_has_no_sack" }));
+                        return;
+                    }
+
+                    // Transfer item from sack to scattered container
+                    const result = transfer_item_between_containers(
+                        slot, 
+                        item_instance_id, 
+                        sack.id, 
+                        scattered_container.id
+                    );
+
+                    if (result.ok) {
+                        // Update item ownership to system (unowned on ground)
+                        update_item_instance_owner(slot, item_instance_id, "system");
+                        
+                        // Load place to add/update item in items_on_ground for rendering (using actor's actual place)
+                        const place_result = load_place(slot, actual_place_id);
+                        if (place_result.ok) {
+                            const place = place_result.place;
+                            if (!place.contents) {
+                                place.contents = { npcs_present: [], actors_present: [], items_on_ground: [], features: [] };
+                            }
+                            
+                            // Get item details
+                            const item_result = load_item_instance(slot, item_instance_id);
+                            const qty = item_result.ok ? item_result.instance.qty : 1;
+                            
+                            // Add/update item in items_on_ground
+                            const items_on_ground = place.contents.items_on_ground ?? [];
+                            const existing_idx = items_on_ground.findIndex(
+                                (i: any) => i.item_ref === item_instance_id
+                            );
+                            if (existing_idx >= 0 && items_on_ground[existing_idx]) {
+                                items_on_ground[existing_idx].tile_position = { x: drop_x, y: drop_y };
+                                items_on_ground[existing_idx].quantity = qty;
+                            } else {
+                                items_on_ground.push({
+                                    item_ref: item_instance_id,
+                                    quantity: qty,
+                                    tile_position: { x: drop_x, y: drop_y }
+                                });
+                            }
+                            place.contents.items_on_ground = items_on_ground;
+                            
+                            save_place(slot, place);
+                            debug_log("API", `/api/place/drop: ${item_instance_id} dropped at (${drop_x},${drop_y}) into ${scattered_container.id} in ${actual_place_id}`);
+                        }
+                        
+                        res.writeHead(200, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ 
+                            ok: true, 
+                            item_instance_id, 
+                            from: sack.id, 
+                            to: scattered_container.id,
+                            place_id: actual_place_id,
+                            container_id: scattered_container.id,
+                            position: { x: drop_x, y: drop_y }
+                        }));
+                    } else {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: result.error }));
+                    }
+                } catch (err: any) {
+                    debug_error("API", `/api/place/drop request error`, err);
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? "drop_failed" }));
                 }
             });
             return;

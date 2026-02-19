@@ -95,23 +95,40 @@ Log Directory: ${session.log_dir}
 }
 
 /**
- * Update latest.log pointer (symlink on Unix, file copy on Windows)
+ * Update latest.log pointer (symlink on Unix, reference file on Windows)
+ * Includes validation metadata to prevent stale references
  */
 function update_latest_pointer(log_dir: string, target_log: string): void {
   const latest_path = path.join(log_dir, "latest.log");
+  const timestamp = new Date().toISOString();
+  const session_id = path.basename(target_log, ".log");
 
   try {
-    // Try to create symlink first
+    // Remove old latest.log if it exists
     try {
       fs.unlinkSync(latest_path);
     } catch {
       // File might not exist
     }
-    fs.symlinkSync(target_log, latest_path);
-  } catch {
-    // Windows might not support symlinks, so write a reference file instead
-    const reference = `CURRENT_LOG=${target_log}\nSESSION_ID=${path.basename(target_log, ".log")}\n`;
+    
+    // Try to create symlink first (Unix/Linux/Mac)
+    try {
+      fs.symlinkSync(target_log, latest_path);
+      return;
+    } catch {
+      // Windows might not support symlinks, fall through to reference file
+    }
+    
+    // Write reference file with validation metadata
+    const reference = `CURRENT_LOG=${target_log}
+SESSION_ID=${session_id}
+CREATED_AT=${timestamp}
+VALID=true
+`;
     fs.writeFileSync(latest_path, reference);
+  } catch (err) {
+    // Log error but don't crash - logging should be best-effort
+    console.error(`[LAUNCHER] Warning: Could not update latest.log: ${err}`);
   }
 }
 
@@ -242,6 +259,7 @@ export function terminate_all_processes(session: LogSession): void {
 
 /**
  * Get the path to the latest log file
+ * Validates that the referenced file actually exists
  */
 export function get_latest_log_path(data_slot: number): string | null {
   const today = new Date();
@@ -254,23 +272,71 @@ export function get_latest_log_path(data_slot: number): string | null {
   const latest_path = path.join(log_dir, "latest.log");
 
   try {
+    let target_log: string | null = null;
+    
     // Check if it's a symlink
     const stats = fs.lstatSync(latest_path);
     if (stats.isSymbolicLink()) {
-      return fs.readlinkSync(latest_path);
+      target_log = fs.readlinkSync(latest_path);
+    } else {
+      // It's a reference file, read the path from it
+      const content = fs.readFileSync(latest_path, "utf-8");
+      const match = content.match(/CURRENT_LOG=(.+)/);
+      if (match && match[1]) {
+        target_log = match[1].trim();
+      }
     }
-
-    // It's a reference file, read the path from it
-    const content = fs.readFileSync(latest_path, "utf-8");
-    const match = content.match(/CURRENT_LOG=(.+)/);
-    if (match && match[1]) {
-      return match[1].trim();
+    
+    // Validate that the target file actually exists
+    if (target_log && fs.existsSync(target_log)) {
+      return target_log;
     }
+    
+    // Target file doesn't exist - latest.log is stale
+    console.warn(`[LAUNCHER] Warning: latest.log points to non-existent file: ${target_log}`);
+    
+    // Try to find the most recent session file as fallback
+    const fallback = find_most_recent_session_file(log_dir);
+    if (fallback) {
+      console.warn(`[LAUNCHER] Using most recent session instead: ${fallback}`);
+      return fallback;
+    }
+    
+    return null;
   } catch {
-    // File doesn't exist
+    // File doesn't exist or error reading - try fallback
+    const fallback = find_most_recent_session_file(log_dir);
+    return fallback;
   }
+}
 
-  return null;
+/**
+ * Find the most recent session log file in a directory
+ * Used as fallback when latest.log is missing or stale
+ */
+function find_most_recent_session_file(log_dir: string): string | null {
+  try {
+    if (!fs.existsSync(log_dir)) {
+      return null;
+    }
+    
+    const files = fs.readdirSync(log_dir)
+      .filter(f => f.startsWith("session_") && f.endsWith(".log"))
+      .map(f => ({
+        name: f,
+        path: path.join(log_dir, f),
+        mtime: fs.statSync(path.join(log_dir, f)).mtime
+      }))
+      .sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
+    
+    if (files.length > 0 && files[0]) {
+      return files[0].path;
+    }
+    
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /**

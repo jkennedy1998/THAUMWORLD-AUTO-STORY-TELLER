@@ -1,0 +1,25 @@
+{
+  "id": "container.default_actor.sack_default",
+  "kind": "actor",
+  "owner_ref": "actor.default_actor",
+  "controller_ref": "actor.default_actor",
+  "capacity": {
+    "max_slots": 10,
+    "max_weight": 5000
+  },
+  "contents": [
+    {
+      "item_instance_id": "inst_DCNDBKNQ"
+    },
+    {
+      "item_instance_id": "inst_4GOXQDNH"
+    },
+    {
+      "item_instance_id": "inst_YRZH4MHO"
+    },
+    {
+      "item_instance_id": "inst_LOOEJQRV"
+    }
+  ],
+  "tags": []
+}

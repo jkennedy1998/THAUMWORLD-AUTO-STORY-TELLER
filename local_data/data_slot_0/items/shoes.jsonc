@@ -1,0 +1,26 @@
+{
+  "id": "shoes",
+  "name": "Shoes",
+  "description": "A pair of simple leather shoes.",
+  "weight": 150,
+  "weight_mag": 1,
+  "mag": 1,
+  "size_mag": 1,
+  "hardness_mag": 2,
+  "conductivity_mag": 1,
+  "tags": [
+    {
+      "name": "ARMOR",
+      "mag": 1,
+      "meta": [],
+      "info": ["foot_left", "foot_right"]
+    },
+    {
+      "name": "CLOTHING",
+      "mag": 1,
+      "meta": []
+    }
+  ],
+  "stackable": false,
+  "notes": "Basic foot clothing"
+}

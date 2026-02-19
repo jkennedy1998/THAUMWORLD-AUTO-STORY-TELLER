@@ -60,12 +60,28 @@ Log Directory: ${logDir}
 `;
 fs.writeFileSync(mainLog, header);
 
-// Update latest.log pointer
+// Update latest.log pointer with validation
 const latestPath = path.join(logDir, "latest.log");
+const nowISO = new Date().toISOString();
+
 try {
-  fs.unlinkSync(latestPath);
-} catch {}
-fs.writeFileSync(latestPath, `CURRENT_LOG=${mainLog}\nSESSION_ID=${sessionId}\n`);
+  // Remove old latest.log if it exists
+  try {
+    fs.unlinkSync(latestPath);
+  } catch {}
+  
+  // Write new reference with metadata
+  const referenceContent = `CURRENT_LOG=${mainLog}
+SESSION_ID=${sessionId}
+CREATED_AT=${nowISO}
+VALID=true
+`;
+  fs.writeFileSync(latestPath, referenceContent);
+  
+  console.log(`✅ Updated latest.log → ${sessionId}`);
+} catch (err) {
+  console.error("⚠️  Warning: Could not update latest.log:", err.message);
+}
 
 console.log(`📝 Logging to: ${logDir}`);
 console.log(`📄 Main log: ${mainLog}`);
@@ -192,9 +208,10 @@ function startDev() {
   }
 
   // Wait for Vite to be ready, then start Electron
+  // Using timeout instead of wait-on for simplicity and reliability
   setTimeout(() => {
-    spawnWithLogging("electron", "npx", ["wait-on", "http://localhost:5173", "&&", "npx", "electron", "."]);
-  }, 3000);
+    spawnWithLogging("electron", "npx", ["electron", "."]);
+  }, 8000);
 
   console.log("✅ All processes started!");
   console.log("🌐 Game will open in Electron window...");

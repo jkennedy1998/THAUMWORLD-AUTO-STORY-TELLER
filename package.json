@@ -35,6 +35,8 @@
     "dev:logs:slot1": "node scripts/dev_with_logs.js --slot=1",
     "logs:view": "node scripts/view_logs.js",
     "logs:clean": "node scripts/view_logs.js --clean",
+    "logs:validate": "node scripts/validate_logs.js",
+    "logs:fix": "node scripts/validate_logs.js --fix",
     "build:exe": "node scripts/build_exe.js"
   },
   "repository": {

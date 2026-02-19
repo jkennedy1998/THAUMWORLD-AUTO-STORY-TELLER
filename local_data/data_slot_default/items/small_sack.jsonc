@@ -1,0 +1,24 @@
+{
+  "id": "small_sack",
+  "name": "Small Sack",
+  "description": "A simple cloth sack for carrying items. Can hold about 10 items or 5kg of weight.",
+  "weight": 100,
+  "weight_mag": 1,
+  "mag": 1,
+  "size_mag": 1,
+  "hardness_mag": 1,
+  "conductivity_mag": 1,
+  "tags": [
+    {
+      "name": "CONTAINER",
+      "mag": 1,
+      "meta": []
+    }
+  ],
+  "stackable": false,
+  "container": {
+    "capacity_slots": 10,
+    "capacity_weight": 5000
+  },
+  "notes": "Default starting container for all characters"
+}

@@ -356,10 +356,91 @@ async function inspect_item(
   options: {
     requested_keywords?: string[];
     max_features?: number;
-  }
+  },
+  data_slot: number = 1
 ): Promise<InspectionResult> {
-  // TODO: Load item data and inspect
-  // For now, return placeholder
+  // Import item storage functions
+  const { load_item_instance } = await import("../item_instances/store.js");
+  const { load_item_def } = await import("../item_storage/store.js");
+  
+  // Extract item instance ID from target ref
+  // Target ref format: "item.<instance_id>" or just "<instance_id>"
+  const item_ref = target.ref;
+  const instance_id = item_ref.startsWith("item.") ? item_ref.slice(5) : item_ref;
+  
+  // Load item instance
+  const instance_result = load_item_instance(data_slot, instance_id);
+  if (!instance_result.ok) {
+    return {
+      target,
+      success: false,
+      clarity,
+      sense_used,
+      distance,
+      requested_features: options.requested_keywords ?? [],
+      random_features: [],
+      content: {
+        short_description: "You cannot make out what this item is.",
+        full_description: "",
+        features: [],
+        sensory_details: {}
+      }
+    };
+  }
+  
+  const instance = instance_result.instance;
+  
+  // Load item definition
+  const def_result = load_item_def(data_slot, instance.def_id);
+  const item_def = def_result.ok ? def_result.item : null;
+  
+  // Build description based on clarity
+  let short_description: string;
+  let full_description: string;
+  
+  if (clarity === "obscured") {
+    // Can barely see it
+    short_description = "Something lies on the ground, but you cannot make out what it is.";
+    full_description = "";
+  } else if (clarity === "vague") {
+    // Can see general shape/type
+    const item_name = item_def?.name ?? "unknown item";
+    const vague_shape = item_def?.size_mag && item_def.size_mag > 2 ? "large" : 
+                       item_def?.size_mag && item_def.size_mag < 1 ? "small" : "medium-sized";
+    short_description = `You can make out a ${vague_shape} ${item_name.toLowerCase()} here.`;
+    full_description = "";
+  } else {
+    // Clear - full details
+    const item_name = item_def?.name ?? instance.def_id;
+    const qty_text = instance.qty > 1 ? `${instance.qty}x ` : "";
+    const condition_text = instance.condition && instance.condition !== "good" ? 
+                          ` (${instance.condition})` : "";
+    
+    short_description = `${qty_text}${item_name}${condition_text}`;
+    
+    // Build full description with definition details
+    let full_desc = item_def?.description ?? "A mundane item.";
+    
+    // Add weight info
+    if (item_def?.weight) {
+      const weight_kg = (item_def.weight / 1000).toFixed(2);
+      full_desc += `\n\nWeight: ${weight_kg}kg`;
+    }
+    
+    // Add tags if any
+    if (instance.tags && instance.tags.length > 0) {
+      const tag_names = instance.tags.map(t => t.name).join(", ");
+      full_desc += `\n\nProperties: ${tag_names}`;
+    }
+    
+    // Add quantity
+    if (instance.qty > 1) {
+      full_desc += `\n\nQuantity: ${instance.qty}`;
+    }
+    
+    full_description = full_desc;
+  }
+  
   return {
     target,
     success: true,
@@ -369,10 +450,13 @@ async function inspect_item(
     requested_features: options.requested_keywords ?? [],
     random_features: [],
     content: {
-      short_description: `An item at ${distance.toFixed(1)} tiles distance.`,
-      full_description: clarity === "clear" ? "You can see it clearly now." : "",
+      short_description,
+      full_description,
       features: [],
-      sensory_details: {}
+      sensory_details: clarity === "clear" && item_def ? {
+        // Add sensory details from item definition if available
+        [sense_used]: [item_def.description]
+      } : {}
     }
   };
 }

@@ -1,0 +1,23 @@
+{
+  // Default world template
+  "schema_version": 1,
+  "world_tiles": {
+    "0,0": {
+      "id": "wt_0_0",
+      "coords": { "x": 0, "y": 0 },
+      "temperature": { "mag": 0 },
+      "regions": [
+        [null, null, null, null, null, null, null, null, null, null],
+        [null, null, null, null, null, null, null, null, null, null],
+        [null, null, null, null, null, null, null, null, null, null],
+        [null, null, null, null, null, null, null, null, null, null],
+        [null, null, null, null, null, null, null, null, null, null],
+        [null, null, null, null, null, null, null, null, null, null],
+        [null, null, null, null, null, null, null, null, null, null],
+        [null, null, null, null, null, null, null, null, null, null],
+        [null, null, null, null, null, null, null, null, null, null],
+        [null, null, null, null, null, null, null, null, null, null]
+      ]
+    }
+  }
+}

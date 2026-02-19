@@ -988,6 +988,38 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       });
     }
 
+    // CRITICAL FIX STEP 5: Draw items on ground (after entities, before highlights)
+    // Items appear as small objects that can be inspected and picked up
+    for (const item of place.contents.items_on_ground) {
+      const screen_x = inner.x0 + Math.floor((item.tile_position.x - view.offset_x) / view.scale);
+      const screen_y = inner.y0 + Math.floor((item.tile_position.y - view.offset_y) / view.scale);
+      
+      if (screen_x >= inner.x0 && screen_x <= inner.x1 &&
+          screen_y >= inner.y0 && screen_y <= inner.y1) {
+        // Don't draw if an entity is on the same tile (entity takes precedence)
+        let entity_present = false;
+        for (const [, pos] of entity_positions) {
+          if (pos.x === screen_x && pos.y === screen_y) {
+            entity_present = true;
+            break;
+          }
+        }
+        
+        if (!entity_present) {
+          // Choose character based on quantity
+          const item_char = item.quantity > 10 ? '$' : 
+                           item.quantity > 1 ? '*' : '·';
+          
+          canvas.set(screen_x, screen_y, {
+            char: item_char,
+            rgb: get_color_by_name("vivid_yellow").rgb, // Gold/yellow for treasure
+            weight_index: 5, // Below entities (6) but above floor
+            render_index: 3, // Below entities
+          });
+        }
+      }
+    }
+
     // Draw target highlight (follows entity movement) - draw AFTER entities
     // So highlights appear on top of entities
     const target_pos = get_target_current_position(place);

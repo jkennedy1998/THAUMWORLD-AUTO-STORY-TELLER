@@ -130,10 +130,10 @@ function apply_awareness_tags(events: string[] | undefined): number {
             const npc = npcResult.npc as Record<string, unknown>;
             const tags = (npc.tags || []) as Array<Record<string, unknown>>;
             
-            // Check if already has awareness of this actor
+            // Check if already has awareness of this actor (case-insensitive)
             const actorRef = `actor.${actorId}`;
-            const hasAwareness = tags.some(tag => 
-                tag.name === "AWARENESS" &&
+            const hasAwareness = tags.some(tag =>
+                String(tag.name ?? "").toUpperCase() === "AWARENESS" &&
                 Array.isArray(tag.info) &&
                 tag.info.includes(actorRef)
             );
@@ -168,7 +168,7 @@ function apply_awareness_tags(events: string[] | undefined): number {
         for (const npcHit of nearbyNpcs) {
             const npcRef = `npc.${npcHit.id}`;
             const hasNpcAwareness = actorTags.some(tag =>
-                tag.name === "AWARENESS" &&
+                String(tag.name ?? "").toUpperCase() === "AWARENESS" &&
                 Array.isArray(tag.info) &&
                 tag.info.includes(npcRef)
             );

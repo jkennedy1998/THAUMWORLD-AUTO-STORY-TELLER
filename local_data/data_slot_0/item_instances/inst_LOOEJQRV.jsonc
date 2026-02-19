@@ -1,0 +1,9 @@
+{
+  "id": "inst_LOOEJQRV",
+  "def_id": "tunic",
+  "qty": 1,
+  "condition": "good",
+  "tags": [],
+  "container_id": "container.default_actor.sack_default",
+  "owner_ref": "actor.default_actor"
+}

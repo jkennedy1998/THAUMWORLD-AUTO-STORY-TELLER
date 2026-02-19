@@ -145,3 +145,21 @@ export function get_perk_trees_path(): string {
 export function get_creation_state_path(slot: number): string {
     return path.join(process.cwd(), "local_data", `data_slot_${slot}`, "creation.jsonc");
 }
+
+// Item instance paths
+export function get_item_instances_dir(slot: number): string {
+    return path.join(get_data_slot_dir(slot), "item_instances");
+}
+
+export function get_item_instance_path(slot: number, instance_id: string): string {
+    return path.join(get_item_instances_dir(slot), `${instance_id}.jsonc`);
+}
+
+// Container paths
+export function get_container_dir(slot: number): string {
+    return path.join(get_data_slot_dir(slot), "containers");
+}
+
+export function get_container_path(slot: number, container_id: string): string {
+    return path.join(get_container_dir(slot), `${container_id}.jsonc`);
+}
