@@ -1835,6 +1835,46 @@ function start_http_server(log_path: string): void {
             return;
         }
 
+        // GET /api/actor?id=xxx - Get actor data
+        if (url.pathname === "/api/actor") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const actor_id = url.searchParams.get("id");
+            if (!actor_id) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_actor_id" }));
+                return;
+            }
+
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+
+            try {
+                const actor_result = load_actor(slot, actor_id);
+                if (!actor_result.ok) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "actor_not_found" }));
+                    return;
+                }
+
+                debug_log("API", `/api/actor: Loaded ${actor_id}`);
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ 
+                    ok: true, 
+                    actor: actor_result.actor 
+                }));
+            } catch (err: any) {
+                debug_error("API", `/api/actor error for ${actor_id}`, err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: err?.message ?? "actor_load_failed" }));
+            }
+            return;
+        }
+
         // GET /api/containers?owner_ref=xxx - List containers for an owner
         if (url.pathname === "/api/containers") {
             if (req.method !== "GET") {

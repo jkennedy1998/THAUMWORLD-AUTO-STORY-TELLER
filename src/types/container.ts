@@ -80,6 +80,28 @@ export interface Container {
      * Examples: [LOCKED], [TRAPPED], etc.
      */
     tags: TagInstance[];
+    
+    /**
+     * UI state - is container currently open for interaction
+     * Default: true (containers start open)
+     */
+    is_open: boolean;
+    
+    /**
+     * Lock state - container requires unlocking before opening
+     * Default: false (all containers unlocked for v1)
+     * Architecture for future lock picking mechanics
+     */
+    is_locked: boolean;
+    
+    /**
+     * Grid dimensions for UI rendering
+     * Computed from capacity.max_slots or slot count
+     */
+    grid_dimensions: {
+        cols: number;
+        rows: number;
+    };
 }
 
 /**
@@ -132,4 +154,98 @@ export function calculate_tile_distance(a: ContainerPosition, b: ContainerPositi
 export function is_within_range(actor_pos: ContainerPosition, target_pos: ContainerPosition, range: number = 1): boolean {
     const distance = calculate_tile_distance(actor_pos, target_pos);
     return distance <= range;
+}
+
+/**
+ * Calculate optimal grid dimensions for container UI
+ * Finds rectangle that fits total_slots with minimal perimeter
+ * Prefers landscape orientation (more columns than rows)
+ * 
+ * Examples:
+ * - 5 slots -> 3x2 (last slot empty)
+ * - 7 slots -> 3x3 (2 slots empty)
+ * - 10 slots -> 5x2
+ * - 12 slots -> 4x3
+ * 
+ * @param total_slots - Total number of slots to display
+ * @returns Grid dimensions { cols, rows }
+ */
+export function calculate_grid_dimensions(total_slots: number): { cols: number; rows: number } {
+    if (total_slots <= 0) return { cols: 1, rows: 1 };
+    if (total_slots === 1) return { cols: 1, rows: 1 };
+    if (total_slots === 2) return { cols: 2, rows: 1 };
+    
+    // Find the factor pair closest to square, preferring landscape
+    let best_cols = total_slots;
+    let best_rows = 1;
+    let best_diff = total_slots - 1;
+    
+    for (let cols = Math.ceil(Math.sqrt(total_slots)); cols <= total_slots; cols++) {
+        const rows = Math.ceil(total_slots / cols);
+        const diff = Math.abs(cols - rows);
+        
+        // Prefer this layout if:
+        // 1. It's more square (smaller diff), OR
+        // 2. Same diff but more landscape-oriented
+        if (diff < best_diff || (diff === best_diff && cols > best_cols)) {
+            best_diff = diff;
+            best_cols = cols;
+            best_rows = rows;
+        }
+    }
+    
+    return { cols: best_cols, rows: best_rows };
+}
+
+/**
+ * Get total slot count for a container
+ * Uses capacity.max_slots if available, otherwise calculates from tags
+ * Formula: slots = 5 * CONTAINER_MAG tag value
+ * 
+ * @param container - The container to get slot count for
+ * @returns Total number of slots
+ */
+export function get_container_slot_count(container: Container): number {
+    // If capacity.max_slots is set, use it
+    if (container.capacity?.max_slots !== undefined) {
+        return container.capacity.max_slots;
+    }
+    
+    // Otherwise calculate from CONTAINER_MAG tag
+    const container_mag_tag = container.tags.find(tag => tag.name === "CONTAINER_MAG");
+    if (container_mag_tag) {
+        return 5 * container_mag_tag.mag;
+    }
+    
+    // Default: 5 slots (MAG 1)
+    return 5;
+}
+
+/**
+ * Apply defaults to container object
+ * Ensures all required fields exist with sensible defaults
+ * 
+ * @param container - Partial container data (from JSON)
+ * @returns Container with all required fields populated
+ */
+export function apply_container_defaults(container: Partial<Container>): Container {
+    const slot_count = get_container_slot_count(container as Container);
+    const grid_dims = calculate_grid_dimensions(slot_count);
+    
+    return {
+        id: container.id ?? "unknown",
+        kind: container.kind ?? "actor",
+        owner_ref: container.owner_ref ?? "system",
+        interaction_range: container.interaction_range ?? 1,
+        contents: container.contents ?? [],
+        tags: container.tags ?? [],
+        is_open: container.is_open ?? true,
+        is_locked: container.is_locked ?? false,
+        grid_dimensions: container.grid_dimensions ?? grid_dims,
+        // Optional fields
+        subtype: container.subtype,
+        position: container.position,
+        place_id: container.place_id,
+        capacity: container.capacity,
+    } as Container;
 }

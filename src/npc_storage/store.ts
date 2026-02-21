@@ -136,7 +136,10 @@ function apply_body_slots(npc: Record<string, unknown>, parts: Array<{ slot: str
     if (!parts || parts.length === 0) return;
     const slots: Record<string, unknown> = {};
     for (const part of parts) {
-        const name = String(part.slot ?? "").toUpperCase();
+        // Normalize to lowercase_snake_case to match actor storage
+        const name = String(part.slot ?? "")
+            .toLowerCase()
+            .replace(/\s+/g, '_');
         if (!name) continue;
         slots[name] = { name, critical: Boolean(part.critical) };
     }

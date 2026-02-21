@@ -5,6 +5,7 @@ import { get_container_dir, get_container_path } from "../engine/paths.js";
 import type { TagInstance } from "../tag_system/registry.js";
 import { load_item_instance, update_item_instance_container, type ItemInstance } from "../item_instances/store.js";
 import type { ContainerPosition } from "../types/container.js";
+import { calculate_grid_dimensions, get_container_slot_count } from "../types/container.js";
 
 export type ContainerLookupResult =
     | { ok: true; container: Container; path: string }
@@ -13,37 +14,59 @@ export type ContainerLookupResult =
 export interface Container {
     id: string;
     kind: "actor" | "npc" | "place";
-    
+
     /**
      * Subtype for place containers
      * - "scattered": Loose loot, auto-deletes when empty
      * - undefined: Furniture (chests, shelves), persists
      */
     subtype?: "scattered";
-    
+
     /**
      * Position for scattered loot containers
      */
     position?: ContainerPosition;
-    
+
     /**
      * Place ID for scattered loot containers
      */
     place_id?: string;
-    
+
     owner_ref: string;
-    
+
     /**
      * Interaction range in tiles (default: 1 for touch)
      */
     interaction_range: number;
-    
+
     capacity?: {
         max_weight?: number;
         max_slots?: number;
     };
     contents: ContainerEntry[];
     tags: TagInstance[];
+
+    /**
+     * UI state - is container currently open for interaction
+     * Default: true (containers start open)
+     */
+    is_open: boolean;
+
+    /**
+     * Lock state - container requires unlocking before opening
+     * Default: false (all containers unlocked for v1)
+     * Architecture for future lock picking mechanics
+     */
+    is_locked: boolean;
+
+    /**
+     * Grid dimensions for UI rendering
+     * Computed from capacity.max_slots or slot count
+     */
+    grid_dimensions: {
+        cols: number;
+        rows: number;
+    };
 }
 
 export interface ContainerEntry {
@@ -116,7 +139,10 @@ export function create_container(
 ): ContainerLookupResult {
     const owner_id = owner_ref.replace(/^(actor|npc|place)\./, "");
     const container_id = build_container_id(kind, owner_id, name);
-    
+
+    const slot_count = capacity?.max_slots ?? 5;
+    const grid_dims = calculate_grid_dimensions(slot_count);
+
     const container: Container = {
         id: container_id,
         kind,
@@ -124,9 +150,12 @@ export function create_container(
         interaction_range: 1,
         capacity,
         contents: [],
-        tags: []
+        tags: [],
+        is_open: true,
+        is_locked: false,
+        grid_dimensions: grid_dims,
     };
-    
+
     const path = save_container(slot, container);
     return { ok: true, container, path };
 }
@@ -138,7 +167,33 @@ export function load_container(slot: number, container_id: string): ContainerLoo
         return { ok: false, error: "container_not_found", todo };
     }
 
-    const container = read_jsonc(container_path) as unknown as Container;
+    const raw = read_jsonc(container_path);
+
+    // Calculate slot count and grid dimensions
+    const slot_count = (raw.capacity as Container["capacity"])?.max_slots ??
+                       ((raw.tags as TagInstance[])?.find(t => t.name === "CONTAINER_MAG")?.mag ?? 1) * 5;
+    const grid_dims = calculate_grid_dimensions(slot_count);
+
+    // Apply defaults for new fields
+    const container: Container = {
+        ...raw,
+        id: String(raw.id ?? container_id),
+        kind: (raw.kind as Container["kind"]) ?? "actor",
+        owner_ref: String(raw.owner_ref ?? "system"),
+        interaction_range: Number(raw.interaction_range ?? 1),
+        contents: (raw.contents as ContainerEntry[]) ?? [],
+        tags: (raw.tags as TagInstance[]) ?? [],
+        // New fields with defaults
+        is_open: (raw.is_open as boolean) ?? true,
+        is_locked: (raw.is_locked as boolean) ?? false,
+        grid_dimensions: (raw.grid_dimensions as Container["grid_dimensions"]) ?? grid_dims,
+        // Optional fields
+        subtype: raw.subtype as "scattered" | undefined,
+        position: raw.position as ContainerPosition | undefined,
+        place_id: raw.place_id as string | undefined,
+        capacity: raw.capacity as Container["capacity"] | undefined,
+    };
+
     return { ok: true, container, path: container_path };
 }
 
@@ -153,6 +208,9 @@ export function ensure_container(
     // Parse owner from container ID
     const parsed = parse_container_id(container_id);
     
+    const slot_count = defaults.capacity?.max_slots ?? 5;
+    const grid_dims = calculate_grid_dimensions(slot_count);
+
     const container: Container = {
         id: container_id,
         kind: defaults.kind ?? "actor",
@@ -160,7 +218,10 @@ export function ensure_container(
         interaction_range: defaults.interaction_range ?? 1,
         capacity: defaults.capacity,
         contents: [],
-        tags: defaults.tags ?? []
+        tags: defaults.tags ?? [],
+        is_open: defaults.is_open ?? true,
+        is_locked: defaults.is_locked ?? false,
+        grid_dimensions: grid_dims,
     };
     
     const path = save_container(slot, container);
@@ -326,15 +387,21 @@ export function get_or_create_ground_container(
     if (existing.ok) return existing;
     
     // Create new ground container
+    const ground_capacity = capacity ?? { max_slots: 100, max_weight: 100000 };
+    const ground_grid = calculate_grid_dimensions(ground_capacity.max_slots ?? 100);
+
     const container: Container = {
         id: container_id,
         kind: "place",
         owner_ref: "system",
         place_id: place_id,
         interaction_range: 1,
-        capacity: capacity ?? { max_slots: 100, max_weight: 100000 },
+        capacity: ground_capacity,
         contents: [],
-        tags: []
+        tags: [],
+        is_open: true,
+        is_locked: false,
+        grid_dimensions: ground_grid,
     };
     
     const path = save_container(slot, container);
@@ -387,6 +454,8 @@ export function get_or_create_scattered_container(
     if (existing.ok) return existing;
     
     // Create new scattered container
+    const scattered_grid = calculate_grid_dimensions(100);
+
     const container: Container = {
         id: container_id,
         kind: "place",
@@ -397,7 +466,10 @@ export function get_or_create_scattered_container(
         interaction_range: 1,
         capacity: { max_slots: 100, max_weight: 100000 },
         contents: [],
-        tags: []
+        tags: [],
+        is_open: true,
+        is_locked: false,
+        grid_dimensions: scattered_grid,
     };
     
     const path = save_container(slot, container);

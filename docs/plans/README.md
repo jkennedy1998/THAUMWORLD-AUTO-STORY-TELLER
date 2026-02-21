@@ -36,7 +36,20 @@ Keep plans small and executable. If something matters, it belongs as a checkbox 
 
 ## Current Active Plans
 
-- `docs/plans/2026_02_14_item_system_unification.md` - **NEXT PRIORITY** - Starting work on items
+### Item System (Active Development)
+These two plans work together. The Inventory Movement Plan is the **primary implementation guide**, while the Unification Plan provides architectural context.
+
+- **`docs/plans/2026_02_19_inventory_movement_plan.md`** - **PRIMARY IMPLEMENTATION GUIDE**
+  - Phase 1-7: Core drag-and-drop system ✅ COMPLETE
+  - Phase 8: Module Gizmos Standard (close X, move #) - **NEXT UP**
+  - Phase 9: NPC Character Module with trading - **IN PLANNING**
+  
+- `docs/plans/2026_02_14_item_system_unification.md` - **ARCHITECTURAL REFERENCE**
+  - Container/item storage architecture ✅ IMPLEMENTED
+  - API endpoints ✅ IMPLEMENTED  
+  - **DEPRECATED:** Phase 6/7 UI modules (replaced by Phase 8-9 above)
+
+### Other Active Plans
 - `docs/plans/2026_02_17_advanced_tags.md` - Advanced tag features (fire damage, spreading, diseases, etc.)
 - `docs/plans/2026_02_13_advanced_npc_interactions_scheduler.md`
 - `docs/plans/2026_02_13_ui_improvements_log_time_audio_shaders.md`

@@ -7,6 +7,7 @@ import { find_kind } from "../kind_storage/store.js";
 import { find_language } from "../language_storage/store.js";
 import { apply_level1_derived } from "../character_rules/derived.js";
 import { apply_prof_picks, make_empty_profs } from "../character_rules/creation.js";
+import { initialize_body_slots, type BodySlots } from "../types/body_slots.js";
 
 export type ActorLookupResult =
     | { ok: true; actor: Record<string, unknown>; path: string }
@@ -235,16 +236,11 @@ export function find_actors(slot: number, query: ActorSearchQuery): ActorSearchH
     return hits;
 }
 
-// TODO: implement character creation flow to populate actor sheets from rules
+// Apply body slots from kind.parts to actor
+// Initializes with empty slots (item_instance_id: null)
 function apply_body_slots(actor: Record<string, unknown>, parts: Array<{ slot: string; critical?: boolean }> | undefined): void {
-    if (!parts || parts.length === 0) return;
-    const slots: Record<string, unknown> = {};
-    for (const part of parts) {
-        const name = String(part.slot ?? "").toUpperCase();
-        if (!name) continue;
-        slots[name] = { name, critical: Boolean(part.critical) };
-    }
-    actor.body_slots = slots;
+    const slots = initialize_body_slots(parts);
+    actor.body_slots = slots as Record<string, unknown>;
 }
 
 function apply_background(actor: Record<string, unknown>, background: string | undefined): void {

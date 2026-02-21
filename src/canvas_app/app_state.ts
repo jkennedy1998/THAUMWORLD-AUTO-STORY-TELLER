@@ -4,6 +4,8 @@ import { make_text_window_module, type TextWindowMessage } from '../mono_ui/modu
 import { make_input_module } from '../mono_ui/modules/input_module.js';
 import { make_roller_module } from '../mono_ui/modules/roller_module.js';
 import { make_place_module } from '../mono_ui/modules/place_module.js';
+import { make_container_module, type SlotItem } from '../mono_ui/modules/container_module.js';
+import { make_character_module } from '../mono_ui/modules/character_module.js';
 import type { Module, Rgb } from '../mono_ui/types.js';
 import { handleEntityClick } from '../interface_program/frontend_api.js';
 import type { Place } from '../types/place.js';
@@ -12,7 +14,12 @@ import { init_npc_movement, stop_place_movement, is_npc_moving } from '../npc_ai
 import { start_movement_command_handler, set_command_handler_place } from '../mono_ui/modules/movement_command_handler.js';
 import { get_color_by_name } from '../mono_ui/colors.js';
 import { infer_action_verb_hint } from '../shared/intent_hint.js';
-import { load_actor, save_actor } from '../actor_storage/store.js';
+// NOTE: Do NOT import Node.js modules (load_actor, find_kind, etc.) here
+// This code runs in browser context and must use HTTP APIs instead
+import { load_container, type Container } from '../container_storage/store.js';
+import { list_item_instances_in_container, type ItemInstance } from '../item_instances/store.js';
+import { type ItemDefinition } from '../item_storage/store.js';
+import { type BodySlots } from '../types/body_slots.js';
 import { DEBUG_VISION, spawn_sense_broadcast_particles } from '../mono_ui/vision_debugger.js';
 import { get_senses_for_action } from '../action_system/sense_broadcast.js';
 import { UI_DEBUG } from '../mono_ui/runtime/ui_debug.js';
@@ -87,7 +94,281 @@ export function create_app_state(): AppState {
             current_place: null as Place | null,
             npc_movement_active: false,
         },
+        container: {
+            is_visible: false,  // Toggle with 'i' key
+            current_container: null as Container | null,
+            slot_items: [] as SlotItem[],
+            is_open: true,
+        },
+        character: {
+            is_visible: true,  // Always visible for now
+            body_slots: {} as BodySlots,
+            equipped_items: new Map() as Map<string, { instance: ItemInstance; definition: ItemDefinition }>,
+            weight: { current: 0, max: 100 },
+            highlighted_slots: [] as string[],  // Slots highlighted when hovering compatible items
+            hovered_item: null as { name: string; source: string } | null,  // Currently hovered item for debug display
+        },
     };
+
+    // Shared drag state for cross-module drag-and-drop
+    const drag_state = {
+        is_dragging: false,
+        source_module: null as string | null,
+        item_instance_id: null as string | null,
+        source_container_id: null as string | null,
+        item_definition: null as ItemDefinition | null,
+
+        start_drag(source: string, item_id: string, container_id: string, def: ItemDefinition) {
+            this.is_dragging = true;
+            this.source_module = source;
+            this.item_instance_id = item_id;
+            this.source_container_id = container_id;
+            this.item_definition = def;
+            debug_log(`[DragState] Started drag: ${def.name} from ${source}`);
+        },
+
+        end_drag() {
+            this.is_dragging = false;
+            this.source_module = null;
+            this.item_instance_id = null;
+            this.source_container_id = null;
+            this.item_definition = null;
+            debug_log(`[DragState] Ended drag`);
+        }
+    };
+
+
+
+    // Helper function to determine compatible body slots for an item
+    // Now uses lowercase_snake_case consistently throughout the system
+    function get_compatible_slots(item_def: ItemDefinition): string[] {
+        if (!item_def.valid_body_slots || item_def.valid_body_slots.length === 0) {
+            return [];
+        }
+
+        // Return slot names directly - they're already in lowercase_snake_case
+        return item_def.valid_body_slots.filter(slot => 
+            ['head', 'torso', 'hand_left', 'hand_right', 'leg_left', 'leg_right'].includes(slot)
+        );
+    }
+
+    // Load character data (body slots, equipped items, weight)
+    async function refresh_character_data(): Promise<void> {
+        try {
+            const actor_id = APP_CONFIG.input_actor_id;
+            const slot = APP_CONFIG.selected_data_slot;
+            
+            console.log(`[Character] Refreshing data for actor: ${actor_id}`);
+            
+            // Load actor via API (NOT via load_actor which requires Node.js fs)
+            const actor_res = await fetch(`http://localhost:8787/api/actor?id=${actor_id}&slot=${slot}`);
+            if (!actor_res.ok) {
+                console.log('[Character] Failed to load actor:', actor_id, 'status:', actor_res.status);
+                return;
+            }
+            
+            const actor_data = await actor_res.json();
+            if (!actor_data.ok || !actor_data.actor) {
+                console.log('[Character] API returned error:', actor_data.error);
+                return;
+            }
+            
+            const actor = actor_data.actor;
+            console.log(`[Character] Loaded actor: ${actor.id}, kind: ${actor.kind}`);
+            
+            // Get body slots from actor
+            const body_slots = (actor.body_slots as BodySlots) || {};
+            console.log(`[Character] Actor has ${Object.keys(body_slots).length} body slots:`, Object.keys(body_slots));
+            
+            if (Object.keys(body_slots).length === 0) {
+                console.log(`[Character] WARNING: Actor has no body slots!`);
+            }
+            
+            ui_state.character.body_slots = body_slots;
+            
+            // Calculate weight from all actor's items
+            console.log(`[Character] Calculating weight from containers...`);
+            const containers_res = await fetch(`http://localhost:8787/api/containers?owner_ref=actor.${actor_id}&slot=${slot}`);
+            if (containers_res.ok) {
+                const containers_data = await containers_res.json();
+                console.log(`[Character] Found ${containers_data.containers?.length || 0} containers`);
+                
+                if (containers_data.ok && containers_data.containers) {
+                    let total_weight = 0;
+                    let item_count = 0;
+                    
+                    for (const container of containers_data.containers) {
+                        console.log(`[Character] Checking container: ${container.id}`);
+                        const container_res = await fetch(`http://localhost:8787/api/container?id=${container.id}&slot=${slot}`);
+                        if (container_res.ok) {
+                            const container_data = await container_res.json();
+                            if (container_data.ok && container_data.contents) {
+                                console.log(`[Character] Container has ${container_data.contents.length} items`);
+                                for (const content of container_data.contents) {
+                                    if (content.instance && content.definition) {
+                                        const item_weight = (content.definition.weight || 0);
+                                        const qty = (content.instance.qty || 1);
+                                        const item_total = item_weight * qty;
+                                        console.log(`[Character] Item: ${content.definition.name}, weight: ${item_weight}, qty: ${qty}, total: ${item_total}`);
+                                        total_weight += item_total;
+                                        item_count++;
+                                    } else {
+                                        console.log(`[Character] Skipping item - missing instance or definition`);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    ui_state.character.weight.current = total_weight;
+                    // Calculate max weight from actor stats (or default)
+                    const strength = (actor.stats as Record<string, number>)?.str || 50;
+                    ui_state.character.weight.max = strength * 2.5;
+                    
+                    console.log(`[Character] Weight calculation complete: ${item_count} items, total: ${total_weight}g`);
+                }
+            } else {
+                console.log(`[Character] Failed to fetch containers:`, containers_res.status);
+            }
+            
+            // Load equipped items from body slot containers
+            console.log(`[Character] Loading equipped items from body slot containers...`);
+            const equipped_items = new Map<string, { instance: ItemInstance; definition: ItemDefinition }>();
+            
+            // Define body slot container IDs
+            const body_slot_containers = [
+                'head', 'torso', 'hand_left', 'hand_right', 'leg_left', 'leg_right'
+            ];
+            
+            for (const slot_name of body_slot_containers) {
+                const container_id = `container.${actor_id}.${slot_name}`;
+                console.log(`[Character] Checking body slot container: ${container_id}`);
+                
+                const container_res = await fetch(`http://localhost:8787/api/container?id=${container_id}&slot=${slot}`);
+                if (container_res.ok) {
+                    const container_data = await container_res.json();
+                    if (container_data.ok && container_data.contents && container_data.contents.length > 0) {
+                        // Body slot containers only hold 1 item
+                        const content = container_data.contents[0];
+                        if (content.instance && content.definition) {
+                            equipped_items.set(slot_name, {
+                                instance: content.instance,
+                                definition: content.definition
+                            });
+                            console.log(`[Character] Equipped in ${slot_name}: ${content.definition.name}`);
+                        }
+                    } else {
+                        console.log(`[Character] Body slot ${slot_name} is empty`);
+                    }
+                } else {
+                    console.log(`[Character] Failed to load body slot container: ${container_id}`);
+                }
+            }
+            
+            ui_state.character.equipped_items = equipped_items;
+            console.log(`[Character] Loaded ${equipped_items.size} equipped items`);
+            
+            console.log(`[Character] Final state: ${Object.keys(body_slots).length} slots, weight: ${ui_state.character.weight.current}/${ui_state.character.weight.max}`);
+            
+        } catch (err) {
+            console.error('[Character] Error refreshing character data:', err);
+        }
+    }
+
+    // Load container data for the player's sack
+    async function refresh_container_data(): Promise<void> {
+        try {
+            const actor_id = APP_CONFIG.input_actor_id;
+            const slot = APP_CONFIG.selected_data_slot;
+            
+            // Fetch containers for this actor
+            const containers_res = await fetch(`http://localhost:8787/api/containers?owner_ref=actor.${actor_id}&slot=${slot}`);
+            if (!containers_res.ok) {
+                console.log('[Container] Failed to fetch containers');
+                return;
+            }
+            
+            const containers_data = await containers_res.json();
+            if (!containers_data.ok) {
+                console.log('[Container] API returned error:', containers_data.error);
+                return;
+            }
+            
+            // Find the sack container
+            const sack = containers_data.containers?.find((c: any) => c.id.includes('sack'));
+            if (!sack) {
+                console.log('[Container] No sack container found');
+                return;
+            }
+            
+            // Fetch full container details with items
+            const container_res = await fetch(`http://localhost:8787/api/container?id=${sack.id}&slot=${slot}`);
+            if (!container_res.ok) {
+                console.log('[Container] Failed to fetch container details');
+                return;
+            }
+            
+            const container_data = await container_res.json();
+            if (!container_data.ok) {
+                console.log('[Container] API returned error for container:', container_data.error);
+                return;
+            }
+            
+            // Update container state
+            // Ensure grid_dimensions exists (for legacy containers without the new field)
+            if (!container_data.container.grid_dimensions) {
+                const slot_count = container_data.container.capacity?.max_slots || 10;
+                const cols = Math.ceil(Math.sqrt(slot_count));
+                const rows = Math.ceil(slot_count / cols);
+                container_data.container.grid_dimensions = { cols, rows };
+                console.log(`[Container] Calculated grid: ${cols}x${rows} for ${slot_count} slots`);
+            }
+            ui_state.container.current_container = container_data.container;
+            
+            // Build slot items array
+            const slot_items: SlotItem[] = [];
+            const contents = container_data.contents || [];
+            const total_slots = (container_data.container.grid_dimensions?.cols || 3) * (container_data.container.grid_dimensions?.rows || 2);
+            
+            console.log(`[Container] Container has ${total_slots} total slots`);
+            console.log(`[Container] API returned ${contents.length} items`);
+            
+            // Map contents to slots (items fill slots in order)
+            for (let i = 0; i < total_slots; i++) {
+                const content = contents[i];
+                if (content && content.instance) {
+                    // API returns item definition in 'definition' field (not 'item')
+                    let item_def = content.definition;
+                    
+                    // Log what we received
+                    if (item_def) {
+                        console.log(`[Container] Slot ${i}: Received def for ${item_def.name}, display_char: ${item_def.display_char || 'MISSING'}`);
+                    } else {
+                        console.log(`[Container] Slot ${i}: No definition received for ${content.instance.def_id}`);
+                    }
+                    
+                    slot_items.push({
+                        slot_index: i,
+                        instance: content.instance,
+                        definition: item_def || null,
+                    });
+                    console.log(`[Container] Slot ${i}: ${item_def?.name || 'unnamed'} (${content.instance.qty}x) char: ${item_def?.display_char || '?'}`);
+                } else {
+                    slot_items.push({
+                        slot_index: i,
+                        instance: null,
+                        definition: null,
+                    });
+                }
+            }
+            
+            ui_state.container.slot_items = slot_items;
+            console.log(`[Container] Updated UI with ${slot_items.filter(s => s.instance).length} items`);
+            
+        } catch (err) {
+            console.error('[Container] Error refreshing container data:', err);
+        }
+    }
 
     // SFX should correlate with UI updates.
     const sfx_played_log_ids = new Set<string>();
@@ -364,6 +645,11 @@ export function create_app_state(): AppState {
                 dbg.push(`[debug] ${UI_DEBUG.enabled ? 'ON' : 'off'} | H:${DEBUG_VISION.show_hearing_ranges ? 'on' : 'off'} B:${DEBUG_VISION.show_sense_broadcasts ? 'on' : 'off'} V:${DEBUG_VISION.show_blocked_vision ? 'on' : 'off'}`);
                 dbg.push(`[volume] ${ui_state.controls.volume}`);
                 dbg.push(`[move] ${ui_state.controls.move_mode}`);
+                if (ui_state.character.hovered_item) {
+                    dbg.push(`[hover] ${ui_state.character.hovered_item.name} (${ui_state.character.hovered_item.source})`);
+                } else {
+                    dbg.push(`[hover] (none)`);
+                }
                 if (last_sfx_label) {
                     const age_ms = Math.max(0, Date.now() - last_sfx_at_ms);
                     dbg.push(`[sfx] ${last_sfx_label} (${Math.round(age_ms)}ms ago)`);
@@ -830,12 +1116,13 @@ export function create_app_state(): AppState {
     const BTN_Y0 = Y_INPUT0;
     const BTN_Y1 = Y_TRANSCRIPT1;
     
-    // Debug buttons - positioned on far right side in a compact column
-    // Grid expanded to 200, buttons at columns 185-198 (far right, own column)
-    const DEBUG_X0 = 185;  // Far right side of expanded grid
-    const DEBUG_X1 = 198;  // Near right edge
-    const DEBUG_Y0 = 2;  // Start near top
-    const DEBUG_Y1 = 30;  // Compact vertical stack
+    // Debug buttons - positioned at TOP RIGHT of screen, horizontally
+    // Y coordinates: 0 is bottom, 50 is top (grid_height - 1)
+    // Place buttons at very top right, away from status bar
+    const DEBUG_Y_TOP = 48;      // Near top (just below screen edge)
+    const DEBUG_Y_BOTTOM = 49;   // Single row height
+    const DEBUG_X0 = 98;         // Start from right side (after status text area)
+    const DEBUG_X1 = 108;        // Button width
 
     // Do not seed the log window with placeholder text.
 
@@ -1242,7 +1529,7 @@ export function create_app_state(): AppState {
         // Debug button: Add FIRE! tag to actor
         make_button_module({
             id: 'debug_add_fire',
-            rect: { x0: DEBUG_X0, y0: DEBUG_Y0, x1: DEBUG_X1, y1: DEBUG_Y0 + 1 },
+            rect: { x0: DEBUG_X0, y0: DEBUG_Y_TOP, x1: DEBUG_X1, y1: DEBUG_Y_TOP + 1 },
             label: 'FIRE',
             rgb: get_color_by_name('vivid_red').rgb,
             bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
@@ -1279,7 +1566,7 @@ export function create_app_state(): AppState {
         // Debug button: Show Inventory
         make_button_module({
             id: 'debug_show_inventory',
-            rect: { x0: DEBUG_X0, y0: DEBUG_Y0 + 2, x1: DEBUG_X1, y1: DEBUG_Y0 + 3 },
+            rect: { x0: DEBUG_X0 + 12, y0: DEBUG_Y_TOP, x1: DEBUG_X1 + 12, y1: DEBUG_Y_TOP + 1 },
             label: 'INV',
             rgb: get_color_by_name('pale_green').rgb,
             bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
@@ -1333,177 +1620,14 @@ export function create_app_state(): AppState {
             },
         }),
 
-        // Debug button: Equip Item (move first item from sack to hand)
-        make_button_module({
-            id: 'debug_equip_item',
-            rect: { x0: DEBUG_X0, y0: DEBUG_Y0 + 4, x1: DEBUG_X1, y1: DEBUG_Y0 + 5 },
-            label: 'EQUIP',
-            rgb: get_color_by_name('pale_yellow').rgb,
-            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            async OnPress() {
-                console.log('[DEBUG BUTTON] EQUIP button pressed');
-                try {
-                    // Get containers
-                    console.log('[DEBUG BUTTON] Fetching containers...');
-                    const containers_res = await fetch(`http://localhost:8787/api/containers?owner_ref=actor.${APP_CONFIG.input_actor_id}`);
-                    console.log('[DEBUG BUTTON] Containers response status:', containers_res.status);
-                    const containers_data = await containers_res.json();
-                    console.log('[DEBUG BUTTON] Containers data:', containers_data);
-                    
-                    if (!containers_data.ok) {
-                        console.log('[DEBUG BUTTON] Failed to load containers');
-                        flash_status(['Failed to load containers'], 1500);
-                        return;
-                    }
-                    
-                    const sack = containers_data.containers.find((c: any) => c.id.includes('sack'));
-                    const hand = containers_data.containers.find((c: any) => c.id.includes('hand_right'));
-                    console.log('[DEBUG BUTTON] Found sack:', sack?.id, 'hand:', hand?.id);
-                    
-                    if (!sack || !hand) {
-                        console.log('[DEBUG BUTTON] Missing containers - sack:', !!sack, 'hand:', !!hand);
-                        flash_status(['Missing containers'], 1500);
-                        return;
-                    }
-                    
-                    // Check if hand already has something
-                    console.log('[DEBUG BUTTON] Checking hand contents...');
-                    const hand_res = await fetch(`http://localhost:8787/api/container?id=${hand.id}`);
-                    const hand_data = await hand_res.json();
-                    console.log('[DEBUG BUTTON] Hand contents:', hand_data);
-                    if (hand_data.ok && hand_data.contents && hand_data.contents.length > 0) {
-                        console.log('[DEBUG BUTTON] Hand already full');
-                        flash_status(['Hand already full'], 1500);
-                        return;
-                    }
-                    
-                    // Get sack contents to find first item
-                    console.log('[DEBUG BUTTON] Fetching sack contents...');
-                    const container_res = await fetch(`http://localhost:8787/api/container?id=${sack.id}`);
-                    const container_data = await container_res.json();
-                    console.log('[DEBUG BUTTON] Sack contents:', container_data);
-                    
-                    if (!container_data.ok || !container_data.contents || container_data.contents.length === 0) {
-                        console.log('[DEBUG BUTTON] Sack is empty');
-                        flash_status(['Sack is empty'], 1500);
-                        return;
-                    }
-                    
-                    const first_item = container_data.contents[0].instance;
-                    const item_name = container_data.contents[0].definition?.name || first_item.def_id;
-                    console.log('[DEBUG BUTTON] First item:', first_item.id, item_name);
-                    
-                    // Perform transfer
-                    console.log('[DEBUG BUTTON] Transferring item:', first_item.id, 'from', sack.id, 'to', hand.id);
-                    const transfer_res = await fetch('http://localhost:8787/api/transfer', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            item_instance_id: first_item.id,
-                            from_container: sack.id,
-                            to_container: hand.id
-                        })
-                    });
-                    
-                    const transfer_data = await transfer_res.json();
-                    console.log('[DEBUG BUTTON] Transfer response:', transfer_data);
-                    
-                    if (transfer_data.ok) {
-                        console.log('[DEBUG BUTTON] Equip successful');
-                        flash_status([`${item_name} equipped to hand`], 1500);
-                    } else {
-                        console.log('[DEBUG BUTTON] Equip failed:', transfer_data.error);
-                        flash_status(['Equip failed'], 1500);
-                    }
-                } catch (err) {
-                    console.error('[DEBUG BUTTON] Error:', err);
-                    flash_status(['Error: Could not equip'], 1500);
-                }
-            },
-        }),
-
-        // Debug button: Unequip Item (move item from hand to sack)
-        make_button_module({
-            id: 'debug_unequip_item',
-            rect: { x0: DEBUG_X0, y0: DEBUG_Y0 + 6, x1: DEBUG_X1, y1: DEBUG_Y0 + 7 },
-            label: 'UNEQUIP',
-            rgb: get_color_by_name('light_orange').rgb,
-            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            async OnPress() {
-                console.log('[DEBUG BUTTON] UNEQUIP button pressed');
-                try {
-                    // Get containers
-                    console.log('[DEBUG BUTTON] Fetching containers...');
-                    const containers_res = await fetch(`http://localhost:8787/api/containers?owner_ref=actor.${APP_CONFIG.input_actor_id}`);
-                    const containers_data = await containers_res.json();
-                    console.log('[DEBUG BUTTON] Containers data:', containers_data);
-                    
-                    if (!containers_data.ok) {
-                        console.log('[DEBUG BUTTON] Failed to load containers');
-                        flash_status(['Failed to load containers'], 1500);
-                        return;
-                    }
-                    
-                    const sack = containers_data.containers.find((c: any) => c.id.includes('sack'));
-                    const hand = containers_data.containers.find((c: any) => c.id.includes('hand_right'));
-                    console.log('[DEBUG BUTTON] Found sack:', sack?.id, 'hand:', hand?.id);
-                    
-                    if (!sack || !hand) {
-                        console.log('[DEBUG BUTTON] Missing containers');
-                        flash_status(['Missing containers'], 1500);
-                        return;
-                    }
-                    
-                    // Check if hand has something
-                    console.log('[DEBUG BUTTON] Checking hand contents...');
-                    const hand_res = await fetch(`http://localhost:8787/api/container?id=${hand.id}`);
-                    const hand_data = await hand_res.json();
-                    console.log('[DEBUG BUTTON] Hand data:', hand_data);
-                    if (!hand_data.ok || !hand_data.contents || hand_data.contents.length === 0) {
-                        console.log('[DEBUG BUTTON] Hand is empty');
-                        flash_status(['Hand is empty'], 1500);
-                        return;
-                    }
-                    
-                    const item = hand_data.contents[0].instance;
-                    const item_name = hand_data.contents[0].definition?.name || item.def_id;
-                    console.log('[DEBUG BUTTON] Item to unequip:', item.id, item_name);
-                    
-                    // Perform transfer
-                    console.log('[DEBUG BUTTON] Transferring item from hand to sack...');
-                    const transfer_res = await fetch('http://localhost:8787/api/transfer', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            item_instance_id: item.id,
-                            from_container: hand.id,
-                            to_container: sack.id
-                        })
-                    });
-                    
-                    const transfer_data = await transfer_res.json();
-                    console.log('[DEBUG BUTTON] Transfer response:', transfer_data);
-                    
-                    if (transfer_data.ok) {
-                        console.log('[DEBUG BUTTON] Unequip successful');
-                        flash_status([`${item_name} returned to sack`], 1500);
-                    } else {
-                        console.log('[DEBUG BUTTON] Unequip failed:', transfer_data.error);
-                        flash_status(['Unequip failed'], 1500);
-                    }
-                } catch (err) {
-                    console.error('[DEBUG BUTTON] Error:', err);
-                    flash_status(['Error: Could not unequip'], 1500);
-                }
-            },
-        }),
+        // Drag-and-drop equipping is now implemented:
+        // - Drag item from inventory container to character body slot
+        // - This replaces the EQUIP/UNEQUIP debug buttons
 
         // Debug button: List Containers
         make_button_module({
             id: 'debug_list_containers',
-            rect: { x0: DEBUG_X0, y0: DEBUG_Y0 + 8, x1: DEBUG_X1, y1: DEBUG_Y0 + 9 },
+            rect: { x0: DEBUG_X0 + 48, y0: DEBUG_Y_TOP, x1: DEBUG_X1 + 48, y1: DEBUG_Y_TOP + 1 },
             label: 'CNTRS',
             rgb: get_color_by_name('vivid_cyan').rgb,
             bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
@@ -1538,7 +1662,7 @@ export function create_app_state(): AppState {
         // Debug button: Show Ground Items
         make_button_module({
             id: 'debug_ground_items',
-            rect: { x0: DEBUG_X0, y0: DEBUG_Y0 + 10, x1: DEBUG_X1, y1: DEBUG_Y0 + 11 },
+            rect: { x0: DEBUG_X0 + 60, y0: DEBUG_Y_TOP, x1: DEBUG_X1 + 60, y1: DEBUG_Y_TOP + 1 },
             label: 'GRND',
             rgb: get_color_by_name('pale_purple').rgb,
             bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
@@ -1582,7 +1706,7 @@ export function create_app_state(): AppState {
         // Debug button: Pick Up Ground Item
         make_button_module({
             id: 'debug_pickup_item',
-            rect: { x0: DEBUG_X0, y0: DEBUG_Y0 + 12, x1: DEBUG_X1, y1: DEBUG_Y0 + 13 },
+            rect: { x0: DEBUG_X0 + 72, y0: DEBUG_Y_TOP, x1: DEBUG_X1 + 72, y1: DEBUG_Y_TOP + 1 },
             label: 'PICKUP',
             rgb: get_color_by_name('vivid_green').rgb,
             bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
@@ -1705,7 +1829,7 @@ export function create_app_state(): AppState {
         // Debug button: Drop Item (move first sack item to ground)
         make_button_module({
             id: 'debug_drop_item',
-            rect: { x0: DEBUG_X0, y0: DEBUG_Y0 + 13, x1: DEBUG_X1, y1: DEBUG_Y0 + 14 },
+            rect: { x0: DEBUG_X0 + 84, y0: DEBUG_Y_TOP, x1: DEBUG_X1 + 84, y1: DEBUG_Y_TOP + 1 },
             label: 'DROP',
             rgb: get_color_by_name('light_red').rgb,
             bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
@@ -1823,7 +1947,7 @@ export function create_app_state(): AppState {
         // Debug button: TEST ALL - Automated system verification
         make_button_module({
             id: 'debug_test_all',
-            rect: { x0: DEBUG_X0, y0: DEBUG_Y0 + 14, x1: DEBUG_X1, y1: DEBUG_Y0 + 15 },
+            rect: { x0: DEBUG_X0 + 96, y0: DEBUG_Y_TOP, x1: DEBUG_X1 + 96, y1: DEBUG_Y_TOP + 1 },
             label: 'TEST',
             rgb: get_color_by_name('off_white').rgb,
             bg: { char: '*', rgb: get_color_by_name('vivid_red').rgb },
@@ -1969,6 +2093,426 @@ export function create_app_state(): AppState {
             bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
             base_weight_index: 3,
         }),
+
+        // Character Module (body slots) - TOP
+        // Shows equipped items and weight
+        make_character_module({
+            id: 'character_module',
+            rect: { x0: 160, y0: 2, x1: 198, y1: 17 },
+            get_actor_name: () => APP_CONFIG.input_actor_id.split('_')[0] || 'Actor',
+            get_actor_id: () => APP_CONFIG.input_actor_id,
+            get_body_slots: () => ui_state.character.body_slots,
+            get_equipped_items: () => ui_state.character.equipped_items,
+            get_weight_data: () => ui_state.character.weight,
+            get_is_visible: () => ui_state.character.is_visible,
+            on_slot_click: (slot_name: string) => {
+                console.log(`[Character] Clicked body slot: ${slot_name}`);
+            },
+            on_slot_hover: (slot_name: string | null, equipped_item: { instance: ItemInstance; definition: ItemDefinition } | null) => {
+                if (equipped_item) {
+                    ui_state.character.hovered_item = { name: equipped_item.definition.name, source: slot_name || 'character' };
+                } else if (slot_name) {
+                    ui_state.character.hovered_item = { name: '(empty slot)', source: slot_name };
+                } else {
+                    ui_state.character.hovered_item = null;
+                }
+            },
+            on_drag_start: (slot_name: string, item: ItemInstance, definition: ItemDefinition, container_id: string) => {
+                console.log(`[Character] Drag started on slot ${slot_name}: ${definition.name}`);
+                // Store in shared drag state
+                drag_state.start_drag('character', item.id, container_id, definition);
+            },
+            on_drop: async (slot_name: string): Promise<boolean> => {
+                console.log(`[Character] on_drop callback called for slot: ${slot_name}`);
+                console.log(`[Character] Drag state: is_dragging=${drag_state.is_dragging}, source_module=${drag_state.source_module}`);
+                console.log(`[Character] Dragged item: ${drag_state.item_definition?.name} (${drag_state.item_instance_id})`);
+                console.log(`[Character] Source container: ${drag_state.source_container_id}`);
+
+                // Check if there's an active drag from container
+                if (!drag_state.is_dragging) {
+                    console.log(`[Character] No active drag - rejecting`);
+                    return false;
+                }
+                if (drag_state.source_module !== 'container') {
+                    console.log(`[Character] Drag source is not container (${drag_state.source_module}) - rejecting`);
+                    return false;
+                }
+
+                // Determine target container based on slot name
+                const actor_id = APP_CONFIG.input_actor_id;
+                console.log(`[Character] Actor ID: ${actor_id}`);
+
+                // Map slot names to container IDs (all lowercase_snake_case)
+                // Format: container.{actor_id}.{slot} (NOT container.actor.{actor_id}.{slot})
+                const slot_to_container: Record<string, string> = {
+                    'hand_left': `container.${actor_id}.hand_left`,
+                    'hand_right': `container.${actor_id}.hand_right`,
+                    'head': `container.${actor_id}.head`,
+                    'torso': `container.${actor_id}.torso`,
+                    'leg_left': `container.${actor_id}.leg_left`,
+                    'leg_right': `container.${actor_id}.leg_right`,
+                };
+
+                const target_container_id = slot_to_container[slot_name];
+                console.log(`[Character] Slot ${slot_name} maps to container: ${target_container_id}`);
+                
+                if (!target_container_id) {
+                    console.log(`[Character] Slot ${slot_name} not recognized - rejecting`);
+                    drag_state.end_drag();
+                    return false;
+                }
+
+                console.log(`[Character] Transferring ${drag_state.item_definition?.name} to ${target_container_id}`);
+
+                try {
+                    // Call /api/transfer to move the item
+                    const transfer_res = await fetch('http://localhost:8787/api/transfer', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            item_instance_id: drag_state.item_instance_id,
+                            from_container: drag_state.source_container_id,
+                            to_container: target_container_id,
+                        }),
+                    });
+
+                    const transfer_data = await transfer_res.json();
+
+                    if (transfer_data.ok) {
+                        console.log(`[Character] Equip successful: ${drag_state.item_definition?.name} -> ${slot_name}`);
+                        flash_status([`${drag_state.item_definition?.name} equipped to ${slot_name}`], 1500);
+
+                        // Refresh container data to show item moved
+                        void refresh_container_data();
+                        void refresh_character_data();
+
+                        drag_state.end_drag();
+                        return true;
+                    } else {
+                        console.log(`[Character] Equip failed:`, transfer_data.error);
+                        flash_status([`Failed to equip: ${transfer_data.error || 'unknown error'}`], 1500);
+                        drag_state.end_drag();
+                        return false;
+                    }
+                } catch (err) {
+                    console.error(`[Character] Error during equip:`, err);
+                    flash_status([`Error equipping item`], 1500);
+                    drag_state.end_drag();
+                    return false;
+                }
+            },
+            get_highlighted_slots: () => ui_state.character.highlighted_slots,
+            on_cross_module_drop: async (x: number, y: number): Promise<boolean> => {
+                console.log(`[Character] Cross-module drop callback called at (${x}, ${y})`);
+                console.log(`[Character] Drag state: is_dragging=${drag_state.is_dragging}, source_module=${drag_state.source_module}`);
+                console.log(`[Character] Dragged item: ${drag_state.item_definition?.name} (${drag_state.item_instance_id})`);
+                console.log(`[Character] Source container: ${drag_state.source_container_id}`);
+
+                // Check if there's an active drag from this character module
+                if (!drag_state.is_dragging) {
+                    console.log(`[Character] No active drag - rejecting`);
+                    return false;
+                }
+                if (drag_state.source_module !== 'character') {
+                    console.log(`[Character] Drag source is not character (${drag_state.source_module}) - rejecting`);
+                    return false;
+                }
+
+                // Check if drop is on container module (inventory)
+                // Container module rect: { x0: 160, y0: 18, x1: 198, y1: 35 }
+                if (x >= 160 && x <= 198 && y >= 18 && y <= 35) {
+                    console.log(`[Character] Drop is on container module - unequipping`);
+                    
+                    // Get target container (the sack)
+                    const container = ui_state.container.current_container;
+                    if (!container) {
+                        console.log(`[Character] No container loaded - rejecting`);
+                        drag_state.end_drag();
+                        return false;
+                    }
+
+                    console.log(`[Character] Transferring ${drag_state.item_definition?.name} from ${drag_state.source_container_id} to ${container.id}`);
+
+                    try {
+                        const transfer_res = await fetch('http://localhost:8787/api/transfer', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                item_instance_id: drag_state.item_instance_id,
+                                from_container: drag_state.source_container_id,
+                                to_container: container.id,
+                            }),
+                        });
+
+                        const transfer_data = await transfer_res.json();
+
+                        if (transfer_data.ok) {
+                            console.log(`[Character] Unequip successful: ${drag_state.item_definition?.name} -> ${container.id}`);
+                            flash_status([`${drag_state.item_definition?.name} unequipped`], 1500);
+
+                            // Refresh data
+                            void refresh_container_data();
+                            void refresh_character_data();
+
+                            drag_state.end_drag();
+                            return true;
+                        } else {
+                            console.log(`[Character] Unequip failed:`, transfer_data.error);
+                            flash_status([`Failed to unequip: ${transfer_data.error || 'unknown error'}`], 1500);
+                            drag_state.end_drag();
+                            return false;
+                        }
+                    } catch (err) {
+                        console.error(`[Character] Error during unequip:`, err);
+                        flash_status([`Error unequipping item`], 1500);
+                        drag_state.end_drag();
+                        return false;
+                    }
+                }
+
+                console.log(`[Character] Drop not on container module - rejecting`);
+                drag_state.end_drag();
+                return false;
+            },
+            border_rgb: get_color_by_name('light_gray').rgb,
+        }),
+
+        // Inventory Container Module - BOTTOM
+        // Shows sack contents
+        make_container_module({
+            id: 'inventory_container',
+            rect: { x0: 160, y0: 18, x1: 198, y1: 35 },
+            get_container: () => ui_state.container.current_container,
+            get_slot_items: () => ui_state.container.slot_items,
+
+            get_is_visible: () => ui_state.container.is_visible,
+            set_is_visible: (visible: boolean) => { 
+                ui_state.container.is_visible = visible;
+                if (visible) {
+                    // Refresh container data when opening
+                    void refresh_container_data();
+                    flash_status(['Inventory opened (press i to close)'], 1000);
+                    
+                    // Auto-refresh every 2 seconds while inventory is open
+                    const refresh_interval = window.setInterval(() => {
+                        if (ui_state.container.is_visible) {
+                            void refresh_container_data();
+                        } else {
+                            window.clearInterval(refresh_interval);
+                        }
+                    }, 2000);
+                } else {
+                    flash_status(['Inventory closed'], 800);
+                }
+            },
+            on_slot_click: (slot_index: number) => {
+                console.log(`[Inventory] Clicked slot ${slot_index}`);
+            },
+            on_drag_start: (slot_index: number, item: ItemInstance, definition: ItemDefinition, container_id: string) => {
+                console.log(`[Inventory] Drag started on slot ${slot_index}: ${definition.name}`);
+                // Store in shared drag state
+                drag_state.start_drag('container', item.id, container_id, definition);
+            },
+            on_slot_hover: (slot_index: number, item: ItemInstance, definition: ItemDefinition | null) => {
+                if (definition) {
+                    // Find compatible slots and highlight them
+                    const compatible = get_compatible_slots(definition);
+                    ui_state.character.highlighted_slots = compatible;
+                    ui_state.character.hovered_item = { name: definition.name, source: 'inventory' };
+                    console.log(`[Inventory] Hovering ${definition.name} - compatible slots:`, compatible);
+                } else {
+                    // Clear highlights and hover
+                    ui_state.character.highlighted_slots = [];
+                    ui_state.character.hovered_item = null;
+                }
+            },
+            on_drop: async (slot_index: number): Promise<boolean> => {
+                console.log(`[Inventory] on_drop callback called for slot: ${slot_index}`);
+                console.log(`[Inventory] Drag state: is_dragging=${drag_state.is_dragging}, source_module=${drag_state.source_module}`);
+                console.log(`[Inventory] Dragged item: ${drag_state.item_definition?.name} (${drag_state.item_instance_id})`);
+                console.log(`[Inventory] Source container: ${drag_state.source_container_id}`);
+
+                // Check if there's an active drag
+                if (!drag_state.is_dragging) {
+                    console.log(`[Inventory] No active drag - rejecting`);
+                    return false;
+                }
+
+                // Get target container (the sack)
+                const container = ui_state.container.current_container;
+                if (!container) {
+                    console.log(`[Inventory] No container loaded - rejecting`);
+                    drag_state.end_drag();
+                    return false;
+                }
+
+                console.log(`[Inventory] Transferring ${drag_state.item_definition?.name} to ${container.id}`);
+
+                try {
+                    const transfer_res = await fetch('http://localhost:8787/api/transfer', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            item_instance_id: drag_state.item_instance_id,
+                            from_container: drag_state.source_container_id,
+                            to_container: container.id,
+                        }),
+                    });
+
+                    const transfer_data = await transfer_res.json();
+
+                    if (transfer_data.ok) {
+                        console.log(`[Inventory] Unequip successful: ${drag_state.item_definition?.name} -> ${container.id}`);
+                        flash_status([`${drag_state.item_definition?.name} unequipped`], 1500);
+
+                        // Refresh data
+                        void refresh_container_data();
+                        void refresh_character_data();
+
+                        drag_state.end_drag();
+                        return true;
+                    } else {
+                        console.log(`[Inventory] Unequip failed:`, transfer_data.error);
+                        flash_status([`Failed to unequip: ${transfer_data.error || 'unknown error'}`], 1500);
+                        drag_state.end_drag();
+                        return false;
+                    }
+                } catch (err) {
+                    console.error(`[Inventory] Error during unequip:`, err);
+                    flash_status([`Error unequipping item`], 1500);
+                    drag_state.end_drag();
+                    return false;
+                }
+            },
+            on_cross_module_drop: async (x: number, y: number): Promise<boolean> => {
+                console.log(`[Inventory] Cross-module drop callback called at (${x}, ${y})`);
+                console.log(`[Inventory] Drag state: is_dragging=${drag_state.is_dragging}, source_module=${drag_state.source_module}`);
+                console.log(`[Inventory] Dragged item: ${drag_state.item_definition?.name}, container=${drag_state.source_container_id}`);
+
+                // Check if we have an active drag
+                if (!drag_state.is_dragging) {
+                    console.log(`[Inventory] No active drag - rejecting drop`);
+                    return false;
+                }
+
+                // Character module rect: { x0: 160, y0: 2, x1: 198, y1: 17 }
+                console.log(`[Inventory] Checking if drop is on character module: x=${x} (160-198), y=${y} (2-17)`);
+                if (x >= 160 && x <= 198 && y >= 2 && y <= 17) {
+                    console.log(`[Inventory] Drop is on character module`);
+                    // Drop is on character module - determine which slot
+                    // Calculate slot from y position
+                    // CharacterModule draws slots at: start_y = rect.y1 - 4 = 13
+                    // Row 0 (head): y = 13, Row 1 (hands): y = 11, Row 2 (torso): y = 9, Row 3 (legs): y = 7
+                    // Formula: row_from_top = floor((start_y - y) / 2) where start_y = 13
+                    const start_y = 13; // rect.y1 - 4, must match CharacterModule
+                    const row_from_top = Math.floor((start_y - y) / 2);
+                    console.log(`[Inventory] Calculated row_from_top: ${row_from_top} (y=${y}, start_y=${start_y})`);
+
+                    let target_slot_name: string | null = null;
+                    if (row_from_top === 0) {
+                        target_slot_name = 'head';
+                    } else if (row_from_top === 1) {
+                        // Hands - check x position
+                        if (x < 179) {
+                            target_slot_name = 'hand_left';
+                        } else {
+                            target_slot_name = 'hand_right';
+                        }
+                    } else if (row_from_top === 2) {
+                        target_slot_name = 'torso';
+                    } else if (row_from_top === 3) {
+                        // Legs - check x position
+                        if (x < 179) {
+                            target_slot_name = 'leg_left';
+                        } else {
+                            target_slot_name = 'leg_right';
+                        }
+                    }
+
+                    console.log(`[Inventory] Target slot determined: ${target_slot_name}`);
+
+                    if (!target_slot_name) {
+                        console.log(`[Inventory] Could not determine target slot - rejecting`);
+                        return false;
+                    }
+
+                    console.log(`[Inventory] Target slot: ${target_slot_name}`);
+
+                    // Check if this slot is compatible with the item
+                    const compatible_slots = get_compatible_slots(drag_state.item_definition!);
+                    if (!compatible_slots.includes(target_slot_name)) {
+                        console.log(`[Inventory] ${target_slot_name} is not compatible with ${drag_state.item_definition?.name}`);
+                        flash_status([`${drag_state.item_definition?.name} cannot be equipped to ${target_slot_name}`], 1500);
+                        drag_state.end_drag();
+                        return false;
+                    }
+
+                    // Determine target container based on slot
+                    const actor_id = APP_CONFIG.input_actor_id;
+                    
+                    // Map slot names to container IDs (all lowercase_snake_case)
+                    // Format: container.{actor_id}.{slot} (NOT container.actor.{actor_id}.{slot})
+                    const slot_to_container: Record<string, string> = {
+                        'hand_left': `container.${actor_id}.hand_left`,
+                        'hand_right': `container.${actor_id}.hand_right`,
+                        'head': `container.${actor_id}.head`,
+                        'torso': `container.${actor_id}.torso`,
+                        'leg_left': `container.${actor_id}.leg_left`,
+                        'leg_right': `container.${actor_id}.leg_right`,
+                    };
+
+                    const target_container_id = slot_to_container[target_slot_name];
+                    if (!target_container_id) {
+                        console.log(`[Inventory] Slot ${target_slot_name} not recognized`);
+                        drag_state.end_drag();
+                        return false;
+                    }
+
+                    console.log(`[Inventory] Transferring ${drag_state.item_definition?.name} to ${target_container_id}`);
+
+                    try {
+                        const transfer_res = await fetch('http://localhost:8787/api/transfer', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                item_instance_id: drag_state.item_instance_id,
+                                from_container: drag_state.source_container_id,
+                                to_container: target_container_id,
+                            }),
+                        });
+
+                        const transfer_data = await transfer_res.json();
+
+                        if (transfer_data.ok) {
+                            console.log(`[Inventory] Equip successful: ${drag_state.item_definition?.name} -> ${target_slot_name}`);
+                            flash_status([`${drag_state.item_definition?.name} equipped to ${target_slot_name}`], 1500);
+
+                            // Refresh data
+                            void refresh_container_data();
+                            void refresh_character_data();
+
+                            drag_state.end_drag();
+                            return true;
+                        } else {
+                            console.log(`[Inventory] Equip failed:`, transfer_data.error);
+                            flash_status([`Failed to equip: ${transfer_data.error || 'unknown error'}`], 1500);
+                            drag_state.end_drag();
+                            return false;
+                        }
+                    } catch (err) {
+                        console.error(`[Inventory] Error during equip:`, err);
+                        flash_status([`Error equipping item`], 1500);
+                        drag_state.end_drag();
+                        return false;
+                    }
+                }
+
+                return false;
+            },
+            border_rgb: get_color_by_name('light_gray').rgb,
+            bg_rgb: get_color_by_name('off_black').rgb,
+            text_rgb: get_color_by_name('off_white').rgb,
+        }),
     ];
 
     register_window_feed({
@@ -1997,6 +2541,14 @@ export function create_app_state(): AppState {
     // Phase 8: Unified Movement Authority
     // Start listening for movement commands from NPC_AI backend
     const stop_command_handler = start_movement_command_handler(100);
+
+    // Initial load of character data
+    void refresh_character_data();
+    
+    // Refresh character data periodically (every 5 seconds)
+    window.setInterval(() => {
+        void refresh_character_data();
+    }, 5000);
 
     return {
         modules,

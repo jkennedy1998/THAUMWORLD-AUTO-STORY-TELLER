@@ -19,6 +19,14 @@ export interface ItemDefinition {
     hardness_mag: number;
     conductivity_mag: number;
     tags: TagInstance[];
+    // New fields for inventory system
+    max_stack_size: number;           // Max quantity per stack (default: 1)
+    display_char: string;             // Single char for UI representation (default: "·")
+    valid_body_slots: string[];       // ["hand_left", "chest", ...] (default: [])
+    occupies_slots: string[];         // ["leg_left", "leg_right"] for multi-slot items
+    slot_shape: number[][];           // [[1]] for 1x1, future tetris shapes
+    fits_actor_kind: string[];        // ["naked_ape"] for race restrictions (default: ["*"])
+    // Existing optional fields
     stackable?: boolean;
     container?: {
         capacity_weight?: number;
@@ -73,7 +81,34 @@ export function load_item_def(slot: number, def_id: string): ItemDefLookupResult
         return { ok: false, error: "item_not_found", todo };
     }
 
-    const item = read_jsonc(item_path) as unknown as ItemDefinition;
+    const raw = read_jsonc(item_path);
+    
+    // Apply defaults for new inventory system fields
+    const item: ItemDefinition = {
+        ...raw,
+        id: String(raw.id ?? def_id),
+        name: String(raw.name ?? def_id),
+        description: String(raw.description ?? ""),
+        weight: Number(raw.weight ?? 0),
+        weight_mag: Number(raw.weight_mag ?? 0),
+        mag: Number(raw.mag ?? 1),
+        size_mag: Number(raw.size_mag ?? 0),
+        hardness_mag: Number(raw.hardness_mag ?? 0),
+        conductivity_mag: Number(raw.conductivity_mag ?? 0),
+        tags: (raw.tags as TagInstance[]) ?? [],
+        // New fields with defaults
+        max_stack_size: Number(raw.max_stack_size ?? 1),
+        display_char: String(raw.display_char ?? "·"),
+        valid_body_slots: (raw.valid_body_slots as string[]) ?? [],
+        occupies_slots: (raw.occupies_slots as string[]) ?? [],
+        slot_shape: (raw.slot_shape as number[][]) ?? [[1]],
+        fits_actor_kind: (raw.fits_actor_kind as string[]) ?? ["*"],
+        // Optional fields
+        stackable: raw.stackable as boolean | undefined,
+        container: raw.container as { capacity_weight?: number; capacity_slots?: number } | undefined,
+        notes: raw.notes as string | undefined,
+    };
+    
     return { ok: true, item, path: item_path };
 }
 

@@ -10,17 +10,18 @@
   "conductivity_mag": 1,
   "tags": [
     {
-      "name": "ARMOR",
-      "mag": 1,
-      "meta": [],
-      "info": ["torso"]
-    },
-    {
       "name": "CLOTHING",
       "mag": 1,
       "meta": []
     }
   ],
   "stackable": false,
-  "notes": "Basic torso clothing"
+  // Inventory system fields
+  "max_stack_size": 1,
+  "display_char": "t",
+  "valid_body_slots": ["torso"],
+  "occupies_slots": ["torso"],
+  "slot_shape": [[1]],
+  "fits_actor_kind": ["naked_ape"],
+  "notes": "Basic torso clothing - armor system not yet implemented (damage system needed first)"
 }

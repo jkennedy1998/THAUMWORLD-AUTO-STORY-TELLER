@@ -56,12 +56,12 @@
       "name": "Naked Ape",
       "greater_kind": "APE",
       "parts": [
-        { "slot": "HEAD", "critical": true },
-        { "slot": "TORSO", "critical": true },
-        { "slot": "LEFT ARM" },
-        { "slot": "RIGHT ARM" },
-        { "slot": "LEFT LEG" },
-        { "slot": "RIGHT LEG" }
+        { "slot": "head", "critical": true },
+        { "slot": "torso", "critical": true },
+        { "slot": "hand_left" },
+        { "slot": "hand_right" },
+        { "slot": "leg_left" },
+        { "slot": "leg_right" }
       ],
       "sleep_type": "SLEEP",
       "sleep_required_per_day": 4,
@@ -123,12 +123,12 @@
       "name": "Maned Ape",
       "greater_kind": "APE",
       "parts": [
-        { "slot": "HEAD", "critical": true },
-        { "slot": "TORSO", "critical": true },
-        { "slot": "LEFT ARM" },
-        { "slot": "RIGHT ARM" },
-        { "slot": "LEFT LEG" },
-        { "slot": "RIGHT LEG" }
+        { "slot": "head", "critical": true },
+        { "slot": "torso", "critical": true },
+        { "slot": "hand_left" },
+        { "slot": "hand_right" },
+        { "slot": "leg_left" },
+        { "slot": "leg_right" }
       ],
       "sleep_type": "SLEEP",
       "sleep_required_per_day": 4,
@@ -183,13 +183,13 @@
       "name": "Wooly Ape",
       "greater_kind": "APE",
       "parts": [
-        { "slot": "HEAD", "critical": true },
-        { "slot": "TORSO", "critical": true },
-        { "slot": "LEFT ARM" },
-        { "slot": "RIGHT ARM" },
-        { "slot": "LEFT LEG" },
-        { "slot": "RIGHT LEG" },
-        { "slot": "TAIL" }
+        { "slot": "head", "critical": true },
+        { "slot": "torso", "critical": true },
+        { "slot": "hand_left" },
+        { "slot": "hand_right" },
+        { "slot": "leg_left" },
+        { "slot": "leg_right" },
+        { "slot": "tail" }
       ],
       "sleep_type": "SLEEP",
       "sleep_required_per_day": 4,
@@ -251,13 +251,13 @@
       "name": "Snow Snoutling",
       "greater_kind": "RODENT",
       "parts": [
-        { "slot": "HEAD", "critical": true },
-        { "slot": "TORSO", "critical": true },
-        { "slot": "LEFT ARM" },
-        { "slot": "RIGHT ARM" },
-        { "slot": "LEFT LEG" },
-        { "slot": "RIGHT LEG" },
-        { "slot": "TAIL" }
+        { "slot": "head", "critical": true },
+        { "slot": "torso", "critical": true },
+        { "slot": "hand_left" },
+        { "slot": "hand_right" },
+        { "slot": "leg_left" },
+        { "slot": "leg_right" },
+        { "slot": "tail" }
       ],
       "sleep_type": "SLEEP",
       "sleep_required_per_day": 4,

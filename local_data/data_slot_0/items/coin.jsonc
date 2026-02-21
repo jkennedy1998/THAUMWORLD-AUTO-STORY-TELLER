@@ -16,5 +16,12 @@
     }
   ],
   "stackable": true,
+  // Inventory system fields
+  "max_stack_size": 99,
+  "display_char": "$",
+  "valid_body_slots": [],
+  "occupies_slots": [],
+  "slot_shape": [[1]],
+  "fits_actor_kind": ["*"],
   "notes": "Standard currency unit"
 }
