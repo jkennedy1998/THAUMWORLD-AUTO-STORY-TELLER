@@ -5,6 +5,8 @@
  * regions into smaller interactive areas with tile-level positioning.
  */
 
+import type { BodySlots } from "./body_slots.js";
+
 /**
  * A place represents a bounded area within a region where interactions are local.
  * Examples: Tavern common room, shop interior, town square, church nave
@@ -110,6 +112,7 @@ export type PlaceNPC = {
   status: "present" | "moving" | "busy" | "sleeping";
   activity: string;              // "sitting at the bar", "whittling by the fire"
   tags?: Array<{ name: string; mag: number; meta: string[] }>;  // Optional tags for visual effects
+  body_slots?: BodySlots;        // Equipment slots for inventory interactions
 };
 
 /**

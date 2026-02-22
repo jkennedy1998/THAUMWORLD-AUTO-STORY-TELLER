@@ -232,11 +232,15 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       const equipped = opts.get_equipped_items();
       const weight = opts.get_weight_data();
       
-      // Debug logging
+      // Debug logging - only log when character changes (module opened/updated)
       if (actor_name !== last_logged_actor) {
         debug_log(`[CharacterModule] Drawing character: ${actor_name}`);
         debug_log(`[CharacterModule] Body slots: ${Object.keys(body_slots).length}`);
         debug_log(`[CharacterModule] Equipped items: ${equipped.size}`);
+        const available_slots = Object.keys(body_slots);
+        if (available_slots.length > 0) {
+          debug_log(`[CharacterModule] Drawing ${available_slots.length} body slots:`, available_slots.join(", "));
+        }
         last_logged_actor = actor_name;
       }
       
@@ -337,12 +341,6 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
         { name: "leg_right", col: 1, row: 3, type: "normal" as const },
       ];
 
-      // Debug: log what body slots we have
-      const available_slots = Object.keys(body_slots);
-      if (available_slots.length > 0) {
-        debug_log(`[CharacterModule] Drawing ${available_slots.length} body slots:`, available_slots.join(", "));
-      }
-
       let drawn_count = 0;
 
       // Draw normal slots
@@ -429,7 +427,8 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       }
       
       if (drawn_count === 0) {
-        debug_log(`[CharacterModule] WARNING: No body slots drawn! Available:`, available_slots);
+        const available = Object.keys(body_slots);
+        debug_log(`[CharacterModule] WARNING: No body slots drawn! Available:`, available);
       }
     },
 

@@ -6,7 +6,8 @@ import { make_roller_module } from '../mono_ui/modules/roller_module.js';
 import { make_place_module } from '../mono_ui/modules/place_module.js';
 import { make_container_module, type SlotItem } from '../mono_ui/modules/container_module.js';
 import { make_character_module } from '../mono_ui/modules/character_module.js';
-import type { Module, Rgb } from '../mono_ui/types.js';
+import type { Module, Rgb, Rect } from '../mono_ui/types.js';
+import { create_module_registry, type ModuleRegistry } from '../mono_ui/module_registry.js';
 import { handleEntityClick } from '../interface_program/frontend_api.js';
 import type { Place } from '../types/place.js';
 import { debug_warn, debug_log } from '../shared/debug.js';
@@ -51,8 +52,9 @@ export const APP_CONFIG = {
 } as const;
 
 export type AppState = {
-    modules: Module[];
+    modules: readonly Module[];
     start_window_feed_polling: (interval_ms: number) => void;
+    module_registry: ModuleRegistry;
 };
 
 type WindowFeed = {
@@ -107,6 +109,13 @@ export function create_app_state(): AppState {
             weight: { current: 0, max: 100 },
             highlighted_slots: [] as string[],  // Slots highlighted when hovering compatible items
             hovered_item: null as { name: string; source: string } | null,  // Currently hovered item for debug display
+        },
+        // Module management (Phase 7.5)
+        modules: {
+            registry: null as ModuleRegistry | null,
+            positions: new Map<string, Rect>(),
+            visibility: new Map<string, boolean>(),
+            open_npc_modules: new Set<string>(),
         },
     };
 
@@ -1128,6 +1137,10 @@ export function create_app_state(): AppState {
 
     let input_submit: (() => void) | null = null;
 
+    // Create module registry for dynamic module management (Phase 7.5)
+    const module_registry = create_module_registry();
+    ui_state.modules.registry = module_registry;
+
     const modules: Module[] = [
         make_fill_module({
             id: 'bg',
@@ -1624,10 +1637,10 @@ export function create_app_state(): AppState {
         // - Drag item from inventory container to character body slot
         // - This replaces the EQUIP/UNEQUIP debug buttons
 
-        // Debug button: List Containers
+        // Debug button: List Containers (moved from +48 to +24)
         make_button_module({
             id: 'debug_list_containers',
-            rect: { x0: DEBUG_X0 + 48, y0: DEBUG_Y_TOP, x1: DEBUG_X1 + 48, y1: DEBUG_Y_TOP + 1 },
+            rect: { x0: DEBUG_X0 + 24, y0: DEBUG_Y_TOP, x1: DEBUG_X1 + 24, y1: DEBUG_Y_TOP + 1 },
             label: 'CNTRS',
             rgb: get_color_by_name('vivid_cyan').rgb,
             bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
@@ -1659,10 +1672,10 @@ export function create_app_state(): AppState {
             },
         }),
 
-        // Debug button: Show Ground Items
+        // Debug button: Show Ground Items (moved from +60 to +36)
         make_button_module({
             id: 'debug_ground_items',
-            rect: { x0: DEBUG_X0 + 60, y0: DEBUG_Y_TOP, x1: DEBUG_X1 + 60, y1: DEBUG_Y_TOP + 1 },
+            rect: { x0: DEBUG_X0 + 36, y0: DEBUG_Y_TOP, x1: DEBUG_X1 + 36, y1: DEBUG_Y_TOP + 1 },
             label: 'GRND',
             rgb: get_color_by_name('pale_purple').rgb,
             bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
@@ -1703,376 +1716,87 @@ export function create_app_state(): AppState {
             },
         }),
 
-        // Debug button: Pick Up Ground Item
+        // Debug button: Open nearest NPC inventory (clean single row layout)
         make_button_module({
-            id: 'debug_pickup_item',
-            rect: { x0: DEBUG_X0 + 72, y0: DEBUG_Y_TOP, x1: DEBUG_X1 + 72, y1: DEBUG_Y_TOP + 1 },
-            label: 'PICKUP',
-            rgb: get_color_by_name('vivid_green').rgb,
+            id: 'debug_open_nearest_npc',
+            rect: { x0: DEBUG_X0 + 48, y0: DEBUG_Y_TOP, x1: DEBUG_X1 + 48, y1: DEBUG_Y_TOP + 1 },
+            label: 'NPCINV',
+            rgb: get_color_by_name('vivid_cyan').rgb,
             bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
             base_weight_index: 3,
             async OnPress() {
-                console.log('[DEBUG BUTTON] PICKUP button pressed');
-                try {
-                    // Get current place
-                    const current_place = ui_state.place.current_place;
-                    console.log('[DEBUG BUTTON] Current place:', current_place?.id);
-                    if (!current_place) {
-                        console.log('[DEBUG BUTTON] Not in a place');
-                        flash_status(['Not in a place'], 1500);
-                        return;
-                    }
-                    
-                    const place_id = current_place.id;
-                    
-                    // Get ground items first
-                    console.log('[DEBUG BUTTON] Fetching ground items...');
-                    const ground_res = await fetch(`http://localhost:8787/api/place/ground_items?place_id=${place_id}`);
-                    const ground_data = await ground_res.json();
-                    console.log('[DEBUG BUTTON] Ground items:', ground_data);
-                    
-                    if (!ground_data.ok || !ground_data.items || ground_data.items.length === 0) {
-                        console.log('[DEBUG BUTTON] Nothing to pick up');
-                        flash_status(['Nothing to pick up'], 1500);
-                        return;
-                    }
-                    
-                    // Get actor's current position for distance calculation
-                    const current_actor_pickup = current_place?.contents?.actors_present?.find(
-                        (a: any) => a.actor_ref === `actor.${APP_CONFIG.input_actor_id}`
-                    );
-                    const actor_position_pickup = current_actor_pickup?.tile_position;
-                    
-                    // Sort items by distance to actor (closest first)
-                    const items_with_distance = ground_data.items.map((item: any) => {
-                        const dx = item.tile_position.x - (actor_position_pickup?.x ?? 0);
-                        const dy = item.tile_position.y - (actor_position_pickup?.y ?? 0);
-                        const distance = Math.sqrt(dx * dx + dy * dy);
-                        return { item, distance };
-                    });
-                    items_with_distance.sort((a: any, b: any) => a.distance - b.distance);
-                    
-                    // Pick up closest item
-                    const item = items_with_distance[0].item;
-                    const distance = items_with_distance[0].distance;
-                    console.log('[DEBUG BUTTON] Picking up closest item:', item.instance_id, item.name, `distance: ${distance.toFixed(1)} tiles`);
-                    console.log('[DEBUG BUTTON] Actor position for pickup:', actor_position_pickup);
-                    
-                    console.log('[DEBUG BUTTON] Calling pickup API...');
-                    const pickup_res = await fetch('http://localhost:8787/api/place/pickup', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            item_instance_id: item.instance_id,
-                            place_id: place_id,
-                            actor_id: APP_CONFIG.input_actor_id,
-                            actor_position: actor_position_pickup
-                        })
-                    });
-                    
-                    const pickup_data = await pickup_res.json();
-                    console.log('[DEBUG BUTTON] Pickup response:', pickup_data);
-                    
-                    if (pickup_data.ok) {
-                        console.log('[DEBUG BUTTON] Pickup successful, refreshing place...');
-                        flash_status([`✓ Picked up ${item.qty}x ${item.name}`], 1500);
-                        
-                        // Debug: Log items before refresh
-                        const place_before = ui_state.place.current_place;
-                        console.log('[DEBUG BUTTON] Items before refresh:', place_before?.contents?.items_on_ground?.length || 0);
-                        
-                        // Force refresh place data to remove picked up item immediately
-                        await update_current_place(place_id);
-                        
-                        // Debug: Log items after refresh
-                        const place_after = ui_state.place.current_place;
-                        console.log('[DEBUG BUTTON] Items after refresh:', place_after?.contents?.items_on_ground?.length || 0);
-                        console.log('[DEBUG BUTTON] Place refreshed');
-                        
-                        // Force render update by nudging the view slightly
-                        // This triggers the place module to redraw with new data
-                        setTimeout(() => {
-                            const event = new KeyboardEvent('keydown', { key: 'ArrowRight' });
-                            window.dispatchEvent(event);
-                            setTimeout(() => {
-                                const event2 = new KeyboardEvent('keydown', { key: 'ArrowLeft' });
-                                window.dispatchEvent(event2);
-                            }, 50);
-                        }, 100);
-                    } else if (pickup_data.error === 'too_far_away') {
-                        const distance = pickup_data.distance ? pickup_data.distance.toFixed(1) : '?';
-                        const actor_pos = pickup_data.actor_pos ? `(${pickup_data.actor_pos.x},${pickup_data.actor_pos.y})` : 'unknown';
-                        const item_pos = item.tile_position ? `(${item.tile_position.x},${item.tile_position.y})` : 'unknown';
-                        console.log(`[DEBUG BUTTON] Pickup failed: too far away - Actor at ${actor_pos}, Item at ${item_pos}, Distance: ${distance} tiles`);
-                        flash_status([
-                            `✗ Too far away (${distance} tiles)`,
-                            `You: ${actor_pos} → Item: ${item_pos}`
-                        ], 2500);
-                    } else if (pickup_data.error === 'position_mismatch') {
-                        console.log(`[DEBUG BUTTON] Pickup failed: position mismatch - Storage: ${pickup_data.storage_pos}, Place: ${pickup_data.place_pos}`);
-                        flash_status([
-                            '✗ Position sync error',
-                            `Storage: ${pickup_data.storage_pos}`,
-                            `Place: ${pickup_data.place_pos}`
-                        ], 3000);
-                    } else {
-                        console.log('[DEBUG BUTTON] Pickup failed:', pickup_data.error);
-                        flash_status(['✗ Failed: ' + (pickup_data.error || 'unknown')], 2000);
-                    }
-                } catch (err) {
-                    console.error('[DEBUG BUTTON] Error:', err);
-                    flash_status(['Error: Could not pick up item'], 1500);
-                }
-            },
-        }),
-
-        // Debug button: Drop Item (move first sack item to ground)
-        make_button_module({
-            id: 'debug_drop_item',
-            rect: { x0: DEBUG_X0 + 84, y0: DEBUG_Y_TOP, x1: DEBUG_X1 + 84, y1: DEBUG_Y_TOP + 1 },
-            label: 'DROP',
-            rgb: get_color_by_name('light_red').rgb,
-            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            async OnPress() {
-                console.log('[DEBUG BUTTON] DROP button pressed');
-                try {
-                    // Get current place
-                    const current_place = ui_state.place.current_place;
-                    console.log('[DEBUG BUTTON] Current place:', current_place?.id);
-                    if (!current_place) {
-                        console.log('[DEBUG BUTTON] Not in a place');
-                        flash_status(['Not in a place'], 1500);
-                        return;
-                    }
-                    
-                    const place_id = current_place.id;
-                    
-                    // Get actor's containers
-                    console.log('[DEBUG BUTTON] Fetching containers...');
-                    const containers_res = await fetch(`http://localhost:8787/api/containers?owner_ref=actor.${APP_CONFIG.input_actor_id}`);
-                    const containers_data = await containers_res.json();
-                    console.log('[DEBUG BUTTON] Containers data:', containers_data);
-                    
-                    if (!containers_data.ok) {
-                        console.log('[DEBUG BUTTON] Failed to load containers');
-                        flash_status(['Failed to load containers'], 1500);
-                        return;
-                    }
-                    
-                    const sack = containers_data.containers.find((c: any) => c.id.includes('sack'));
-                    console.log('[DEBUG BUTTON] Found sack:', sack?.id);
-                    
-                    if (!sack) {
-                        console.log('[DEBUG BUTTON] No sack found');
-                        flash_status(['No sack found'], 1500);
-                        return;
-                    }
-                    
-                    // Get sack contents
-                    console.log('[DEBUG BUTTON] Fetching sack contents...');
-                    const container_res = await fetch(`http://localhost:8787/api/container?id=${sack.id}`);
-                    const container_data = await container_res.json();
-                    console.log('[DEBUG BUTTON] Sack contents:', container_data);
-                    
-                    if (!container_data.ok || !container_data.contents || container_data.contents.length === 0) {
-                        console.log('[DEBUG BUTTON] Sack is empty');
-                        flash_status(['Sack is empty'], 1500);
-                        return;
-                    }
-                    
-                    // Drop first item
-                    const first_item = container_data.contents[0].instance;
-                    const item_name = container_data.contents[0].definition?.name || first_item.def_id;
-                    console.log('[DEBUG BUTTON] Dropping item:', first_item.id, item_name);
-                    
-                    // Get actor's current position for the drop location
-                    const current_actor = current_place?.contents?.actors_present?.find(
-                        (a: any) => a.actor_ref === `actor.${APP_CONFIG.input_actor_id}`
-                    );
-                    const actor_position = current_actor?.tile_position ?? { x: 20, y: 20 };
-                    console.log('[DEBUG BUTTON] Actor position for drop:', actor_position);
-                    
-                    console.log('[DEBUG BUTTON] Calling drop API...');
-                    const drop_res = await fetch('http://localhost:8787/api/place/drop', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            item_instance_id: first_item.id,
-                            place_id: place_id,
-                            actor_id: APP_CONFIG.input_actor_id,
-                            tile_position: actor_position
-                        })
-                    });
-                    
-                    const drop_data = await drop_res.json();
-                    console.log('[DEBUG BUTTON] Drop response:', drop_data);
-                    
-                    if (drop_data.ok) {
-                        console.log('[DEBUG BUTTON] Drop successful, refreshing place...');
-                        flash_status([`Dropped ${first_item.qty}x ${item_name}`], 1500);
-                        
-                        // Debug: Log items before refresh
-                        const place_before = ui_state.place.current_place;
-                        console.log('[DEBUG BUTTON] Items before refresh:', place_before?.contents?.items_on_ground?.length || 0);
-                        
-                        // Force refresh place data to show dropped item immediately
-                        await update_current_place(place_id);
-                        
-                        // Debug: Log items after refresh
-                        const place_after = ui_state.place.current_place;
-                        console.log('[DEBUG BUTTON] Items after refresh:', place_after?.contents?.items_on_ground?.length || 0);
-                        console.log('[DEBUG BUTTON] Place refreshed');
-                        
-                        // Force render update by nudging the view slightly
-                        setTimeout(() => {
-                            const event = new KeyboardEvent('keydown', { key: 'ArrowRight' });
-                            window.dispatchEvent(event);
-                            setTimeout(() => {
-                                const event2 = new KeyboardEvent('keydown', { key: 'ArrowLeft' });
-                                window.dispatchEvent(event2);
-                            }, 50);
-                        }, 100);
-                    } else {
-                        console.log('[DEBUG BUTTON] Drop failed:', drop_data.error);
-                        flash_status(['Failed to drop: ' + (drop_data.error || 'unknown')], 1500);
-                    }
-                } catch (err) {
-                    console.error('[DEBUG BUTTON] Error:', err);
-                    flash_status(['Error: Could not drop item'], 1500);
-                }
-            },
-        }),
-
-        // Debug button: TEST ALL - Automated system verification
-        make_button_module({
-            id: 'debug_test_all',
-            rect: { x0: DEBUG_X0 + 96, y0: DEBUG_Y_TOP, x1: DEBUG_X1 + 96, y1: DEBUG_Y_TOP + 1 },
-            label: 'TEST',
-            rgb: get_color_by_name('off_white').rgb,
-            bg: { char: '*', rgb: get_color_by_name('vivid_red').rgb },
-            base_weight_index: 3,
-            async OnPress() {
-                console.log('[DEBUG BUTTON] TEST button pressed - Starting automated test suite');
-                const results: string[] = ['=== ITEM SYSTEM TEST ==='];
-                let passed = 0;
-                let failed = 0;
+                console.log('[DEBUG BUTTON] NPCINV button pressed - Opening nearest NPC inventory');
+                debug_log('[DEBUG BUTTON] NPCINV button pressed');
                 
-                try {
-                    // Test 1: List containers
-                    results.push('[1/6] Containers...');
-                    console.log('[DEBUG BUTTON TEST] Testing containers API...');
-                    const containers_res = await fetch(`http://localhost:8787/api/containers?owner_ref=actor.${APP_CONFIG.input_actor_id}`);
-                    console.log('[DEBUG BUTTON TEST] Containers response status:', containers_res.status);
-                    const containers_data = await containers_res.json();
-                    console.log('[DEBUG BUTTON TEST] Containers data:', containers_data);
-                    if (containers_data.ok && containers_data.containers?.length > 0) {
-                        results.push(`✓ ${containers_data.containers.length} containers found`);
-                        passed++;
-                    } else {
-                        results.push('✗ No containers');
-                        failed++;
-                    }
-                    
-                    // Test 2: Check inventory
-                    results.push('[2/6] Inventory...');
-                    console.log('[DEBUG BUTTON TEST] Testing inventory...');
-                    const sack = containers_data.containers?.find((c: any) => c.id.includes('sack'));
-                    console.log('[DEBUG BUTTON TEST] Found sack:', sack?.id);
-                    if (sack) {
-                        const container_res = await fetch(`http://localhost:8787/api/container?id=${sack.id}`);
-                        const container_data = await container_res.json();
-                        console.log('[DEBUG BUTTON TEST] Sack contents:', container_data);
-                        if (container_data.ok) {
-                            results.push(`✓ Sack has ${container_data.contents?.length || 0} items`);
-                            passed++;
-                        } else {
-                            results.push('✗ Cannot read sack');
-                            failed++;
-                        }
-                    } else {
-                        results.push('✗ No sack found');
-                        failed++;
-                    }
-                    
-                    // Test 3: Ground items
-                    results.push('[3/6] Ground items...');
-                    console.log('[DEBUG BUTTON TEST] Testing ground items...');
-                    const current_place = ui_state.place.current_place;
-                    console.log('[DEBUG BUTTON TEST] Current place:', current_place?.id);
-                    if (current_place) {
-                        const ground_res = await fetch(`http://localhost:8787/api/place/ground_items?place_id=${current_place.id}`);
-                        const ground_data = await ground_res.json();
-                        console.log('[DEBUG BUTTON TEST] Ground items:', ground_data);
-                        if (ground_data.ok) {
-                            results.push(`✓ ${ground_data.items?.length || 0} items on ground`);
-                            passed++;
-                        } else {
-                            results.push('✗ Cannot read ground');
-                            failed++;
-                        }
-                    } else {
-                        results.push('⚠ Not in a place');
-                    }
-                    
-                    // Test 4: Place rendering
-                    results.push('[4/6] Place data...');
-                    console.log('[DEBUG BUTTON TEST] Testing place data...');
-                    if (current_place?.contents?.items_on_ground) {
-                        const visible_items = current_place.contents.items_on_ground.length;
-                        console.log('[DEBUG BUTTON TEST] Items in place data:', visible_items);
-                        results.push(`✓ ${visible_items} items in place data`);
-                        passed++;
-                    } else {
-                        console.log('[DEBUG BUTTON TEST] No items_on_ground in place');
-                        results.push('✗ No items_on_ground in place');
-                        failed++;
-                    }
-                    
-                    // Test 5: API health
-                    results.push('[5/6] API health...');
-                    console.log('[DEBUG BUTTON TEST] Testing API health...');
-                    const health_res = await fetch('http://localhost:8787/api/health');
-                    console.log('[DEBUG BUTTON TEST] Health check status:', health_res.status);
-                    if (health_res.ok) {
-                        results.push('✓ API responding');
-                        passed++;
-                    } else {
-                        results.push('✗ API error');
-                        failed++;
-                    }
-                    
-                    // Test 6: Transfer capability
-                    results.push('[6/6] Transfer system...');
-                    console.log('[DEBUG BUTTON TEST] Checking transfer capability...');
-                    if (sack && containers_data.containers?.find((c: any) => c.id.includes('hand'))) {
-                        console.log('[DEBUG BUTTON TEST] Transfer possible');
-                        results.push('✓ Transfer possible');
-                        passed++;
-                    } else {
-                        console.log('[DEBUG BUTTON TEST] Missing containers for transfer');
-                        results.push('✗ Missing containers for transfer');
-                        failed++;
-                    }
-                    
-                    // Summary
-                    results.push('');
-                    results.push(`=== RESULTS: ${passed} passed, ${failed} failed ===`);
-                    console.log('[DEBUG BUTTON TEST] Test complete:', passed, 'passed,', failed, 'failed');
-                    if (failed === 0) {
-                        results.push('✓ ALL TESTS PASSED');
-                    } else {
-                        results.push('✗ SOME TESTS FAILED');
-                    }
-                    
-                } catch (err: any) {
-                    console.error('[DEBUG BUTTON TEST] Error:', err);
-                    results.push('');
-                    results.push(`✗ ERROR: ${err.message || 'Unknown error'}`);
-                    results.push('Is the interface_program running on :8787?');
+                const place = get_current_place();
+                if (!place) {
+                    debug_log('[DEBUG BUTTON] No place loaded');
+                    flash_status(['No place loaded'], 1500);
+                    return;
                 }
                 
-                flash_status(results, 8000);
+                debug_log(`[DEBUG BUTTON] Current place: ${place.id}`);
+                debug_log(`[DEBUG BUTTON] Actors present: ${place.contents.actors_present?.length || 0}`);
+                debug_log(`[DEBUG BUTTON] NPCs present: ${place.contents.npcs_present?.length || 0}`);
+                
+                // Get actor position
+                const actor_ref = `actor.${APP_CONFIG.input_actor_id}`;
+                const actor = place.contents.actors_present.find((a: any) => a.actor_ref === actor_ref);
+                if (!actor) {
+                    debug_log(`[DEBUG BUTTON] Actor ${actor_ref} not found in place`);
+                    flash_status(['Actor not found in place'], 1500);
+                    return;
+                }
+                
+                const actor_pos = actor.tile_position;
+                debug_log(`[DEBUG BUTTON] Actor ${actor_ref} at position (${actor_pos.x},${actor_pos.y})`);
+                
+                // Get all NPCs in place
+                const npcs = place.contents.npcs_present;
+                if (!npcs || npcs.length === 0) {
+                    debug_log('[DEBUG BUTTON] No NPCs in place');
+                    flash_status(['No NPCs in this place'], 1500);
+                    return;
+                }
+                
+                // Find nearest NPC
+                let nearest_npc = null;
+                let min_distance = Infinity;
+                
+                for (const npc of npcs) {
+                    const dx = npc.tile_position.x - actor_pos.x;
+                    const dy = npc.tile_position.y - actor_pos.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    debug_log(`[DEBUG BUTTON] NPC ${npc.npc_ref} at (${npc.tile_position.x},${npc.tile_position.y}), distance: ${distance.toFixed(1)}`);
+                    
+                    if (distance < min_distance) {
+                        min_distance = distance;
+                        nearest_npc = npc;
+                    }
+                }
+                
+                if (!nearest_npc) {
+                    debug_log('[DEBUG BUTTON] Could not determine nearest NPC');
+                    flash_status(['Could not find nearest NPC'], 1500);
+                    return;
+                }
+                
+                // Extract NPC name from npc_ref (e.g., "npc.grenda" -> "Grenda")
+                const npc_id = nearest_npc.npc_ref.replace('npc.', '');
+                const npc_name = npc_id.split('_').map((word: string) => 
+                    word.charAt(0).toUpperCase() + word.slice(1)
+                ).join(' ');
+                
+                debug_log(`[DEBUG BUTTON] Selected nearest NPC: ${npc_name} (${nearest_npc.npc_ref}) at distance ${min_distance.toFixed(1)}`);
+                flash_status([`Opening ${npc_name}'s inventory (${min_distance.toFixed(0)} tiles)`], 1500);
+                
+                // Open NPC inventory
+                try {
+                    await open_npc_character_module(npc_id, npc_name);
+                } catch (err) {
+                    debug_log(`[DEBUG BUTTON] Error opening NPC module:`, err);
+                    flash_status([`Error opening ${npc_name}'s inventory`], 1500);
+                }
             },
         }),
 
@@ -2512,8 +2236,41 @@ export function create_app_state(): AppState {
             border_rgb: get_color_by_name('light_gray').rgb,
             bg_rgb: get_color_by_name('off_black').rgb,
             text_rgb: get_color_by_name('off_white').rgb,
+            // Phase 8: Enable gizmos (close X, move #)
+            gizmos: {
+                enabled: ['close', 'move'],
+                can_close: true,
+                can_move: true,
+                can_save_position: false,
+                on_close: () => {
+                    debug_log('[ContainerModule] Close gizmo clicked - hiding container');
+                    ui_state.container.is_visible = false;
+                    flash_status(['Inventory closed (X clicked)'], 800);
+                },
+                on_move_start: () => {
+                    debug_log('[ContainerModule] Move mode started');
+                },
+                on_move: (new_rect) => {
+                    // Update position tracking
+                    ui_state.modules.positions.set('inventory_container', new_rect);
+                    debug_log(`[ContainerModule] Moving to (${new_rect.x0},${new_rect.y0})`);
+                },
+                on_move_end: (final_rect) => {
+                    ui_state.modules.positions.set('inventory_container', final_rect);
+                    flash_status([`Container moved to (${final_rect.x0},${final_rect.y0})`], 1000);
+                },
+            },
         }),
     ];
+
+    // Register all static modules to the registry (Phase 7.5)
+    for (const module of modules) {
+        module_registry.register(module);
+    }
+    
+    // Set initial positions for static modules (needed for NPC module positioning)
+    ui_state.modules.positions.set('character_module', { x0: 160, y0: 2, x1: 198, y1: 17 });
+    ui_state.modules.positions.set('inventory_container', { x0: 160, y0: 18, x1: 198, y1: 35 });
 
     register_window_feed({
         window_id: 'transcript',
@@ -2550,8 +2307,335 @@ export function create_app_state(): AppState {
         void refresh_character_data();
     }, 5000);
 
+    // ============================================================
+    // Phase 7.5: Dynamic Module Management - NPC Module Functions
+    // ============================================================
+    
+    /**
+     * Helper function to flash a module's border (visual feedback)
+     */
+    function flash_module_border(module_id: string, color: 'yellow' | 'red' | 'green', duration_ms: number): void {
+        // TODO: Implement visual flash effect
+        debug_log(`[ModuleFlash] Flashing ${module_id} with ${color} for ${duration_ms}ms`);
+    }
+
+    /**
+     * Get NPC body slots for a given NPC ID
+     * Uses place data instead of API call (workaround for missing /api/npc endpoint)
+     */
+    function get_npc_body_slots(npc_id: string): BodySlots {
+        const place = get_current_place();
+        if (!place) {
+            debug_log(`[NPC Module] Error: No place loaded when getting body slots for ${npc_id}`);
+            return {};
+        }
+        
+        const npc_ref = `npc.${npc_id}`;
+        const place_npc = place.contents.npcs_present.find((npc: any) => npc.npc_ref === npc_ref);
+        
+        if (!place_npc) {
+            debug_log(`[NPC Module] Error: NPC ${npc_ref} not found in place ${place.id}`);
+            return {};
+        }
+        
+        if (!place_npc.body_slots || Object.keys(place_npc.body_slots).length === 0) {
+            debug_log(`[NPC Module] Warning: NPC ${npc_ref} has no body_slots in place data`);
+            return {};
+        }
+        
+        debug_log(`[NPC Module] Found body_slots for ${npc_ref}: ${Object.keys(place_npc.body_slots).length} slots`);
+        return place_npc.body_slots;
+    }
+
+    /**
+     * Get NPC equipped items with definitions
+     */
+    async function get_npc_equipped_items(npc_id: string): Promise<Map<string, { instance: ItemInstance; definition: ItemDefinition }>> {
+        const equipped = new Map<string, { instance: ItemInstance; definition: ItemDefinition }>();
+        
+        try {
+            const slot = APP_CONFIG.selected_data_slot;
+            const containers_res = await fetch(`http://localhost:8787/api/containers?owner_ref=npc.${npc_id}&slot=${slot}`);
+            if (!containers_res.ok) return equipped;
+            
+            const containers_data = await containers_res.json();
+            if (!containers_data.ok || !containers_data.containers) return equipped;
+            
+            // Load equipped items from body slot containers
+            for (const container of containers_data.containers) {
+                const slot_name = container.id.split('.').pop();
+                if (!slot_name) continue;
+                
+                const container_res = await fetch(`http://localhost:8787/api/container?id=${container.id}`);
+                if (!container_res.ok) continue;
+                
+                const container_data = await container_res.json();
+                if (container_data.ok && container_data.contents && container_data.contents.length > 0) {
+                    const item = container_data.contents[0];
+                    if (item.instance && item.definition) {
+                        equipped.set(slot_name, { instance: item.instance, definition: item.definition });
+                    }
+                }
+            }
+        } catch (err) {
+            debug_log(`[NPC Module] Error loading equipped items for ${npc_id}:`, err);
+        }
+        
+        return equipped;
+    }
+
+    /**
+     * Get NPC weight data
+     */
+    async function get_npc_weight_data(npc_id: string): Promise<{ current: number; max: number }> {
+        try {
+            const slot = APP_CONFIG.selected_data_slot;
+            const containers_res = await fetch(`http://localhost:8787/api/containers?owner_ref=npc.${npc_id}&slot=${slot}`);
+            if (!containers_res.ok) return { current: 0, max: 100 };
+            
+            const containers_data = await containers_res.json();
+            if (!containers_data.ok || !containers_data.containers) return { current: 0, max: 100 };
+            
+            let total_weight = 0;
+            for (const container of containers_data.containers) {
+                const container_res = await fetch(`http://localhost:8787/api/container?id=${container.id}`);
+                if (!container_res.ok) continue;
+                
+                const container_data = await container_res.json();
+                if (container_data.ok && container_data.contents) {
+                    for (const item of container_data.contents) {
+                        if (item.instance && item.definition) {
+                            total_weight += (item.definition.weight || 0) * (item.instance.qty || 1);
+                        }
+                    }
+                }
+            }
+            
+            return { current: total_weight, max: 100 };
+        } catch (err) {
+            debug_log(`[NPC Module] Error calculating weight for ${npc_id}:`, err);
+            return { current: 0, max: 100 };
+        }
+    }
+
+    /**
+     * Open an NPC character module
+     */
+    async function open_npc_character_module(npc_id: string, npc_name: string): Promise<void> {
+        debug_log(`[NPC Module] Starting to open ${npc_name} (${npc_id})`);
+        
+        if (!module_registry) {
+            debug_log('[NPC Module] Error: Module registry not initialized');
+            flash_status(['Error: Module system not ready'], 1500);
+            return;
+        }
+        
+        const module_id = `npc_character_${npc_id}`;
+        
+        // Check if already open
+        if (ui_state.modules.open_npc_modules.has(npc_id)) {
+            debug_log(`[NPC Module] ${npc_name} already open, flashing existing module`);
+            flash_module_border(module_id, 'yellow', 500);
+            flash_status([`${npc_name}'s inventory already open`], 1500);
+            return;
+        }
+        
+        // Calculate position (cascade from player module)
+        const player_rect = ui_state.modules.positions.get('character_module');
+        if (!player_rect) {
+            debug_log('[NPC Module] Error: Player character module position not found');
+            flash_status(['Error: Player position unknown'], 1500);
+            return;
+        }
+        
+        const open_count = ui_state.modules.open_npc_modules.size;
+        const npc_rect = {
+            x0: player_rect.x0 - 28 - (open_count * 3),
+            y0: player_rect.y0 + (open_count * 2),
+            x1: player_rect.x0 - 3 - (open_count * 3),
+            y1: player_rect.y1 + (open_count * 2)
+        };
+        
+        debug_log(`[NPC Module] Calculated position for ${npc_name}: x0=${npc_rect.x0}, y0=${npc_rect.y0} (player at x0=${player_rect.x0})`);
+        
+        // Load NPC data
+        debug_log(`[NPC Module] Loading data for ${npc_name}...`);
+        let body_slots, equipped_items, weight_data;
+        try {
+            // Get body_slots synchronously from place data
+            body_slots = get_npc_body_slots(npc_id);
+            
+            // Get equipped items and weight via API
+            [equipped_items, weight_data] = await Promise.all([
+                get_npc_equipped_items(npc_id),
+                get_npc_weight_data(npc_id)
+            ]);
+            debug_log(`[NPC Module] Loaded data for ${npc_name}: ${Object.keys(body_slots).length} body slots, ${equipped_items.size} equipped items`);
+        } catch (err) {
+            debug_log(`[NPC Module] Error loading data for ${npc_name}:`, err);
+            flash_status([`Error loading ${npc_name}'s data`], 1500);
+            return;
+        }
+        
+        // Create NPC character module
+        const npc_module = make_character_module({
+            id: module_id,
+            rect: npc_rect,
+            get_actor_name: () => npc_name,
+            get_actor_id: () => npc_id,
+            get_body_slots: () => body_slots,
+            get_equipped_items: () => equipped_items,
+            get_weight_data: () => weight_data,
+            get_is_visible: () => true,
+            on_slot_click: (slot_name: string) => {
+                debug_log(`[NPC Module] Clicked body slot: ${slot_name}`);
+            },
+            on_drag_start: (slot_name: string, item: ItemInstance, definition: ItemDefinition, container_id: string) => {
+                drag_state.start_drag('npc_character', item.id, container_id, definition);
+            },
+            on_drop: async (slot_name: string): Promise<boolean> => {
+                // Handle equipping from player to NPC
+                if (!drag_state.is_dragging || drag_state.source_module !== 'container') return false;
+                
+                const target_container_id = `container.${npc_id}.${slot_name}`;
+                
+                try {
+                    const transfer_res = await fetch('http://localhost:8787/api/transfer', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            item_instance_id: drag_state.item_instance_id,
+                            from_container: drag_state.source_container_id,
+                            to_container: target_container_id,
+                        }),
+                    });
+                    
+                    const transfer_data = await transfer_res.json();
+                    
+                    if (transfer_data.ok) {
+                        flash_status([`${drag_state.item_definition?.name} given to ${npc_name}`], 1500);
+                        drag_state.end_drag();
+                        return true;
+                    } else {
+                        flash_status([`Failed to give item: ${transfer_data.error}`], 1500);
+                        drag_state.end_drag();
+                        return false;
+                    }
+                } catch (err) {
+                    flash_status([`Error transferring item`], 1500);
+                    drag_state.end_drag();
+                    return false;
+                }
+            },
+            on_cross_module_drop: async (x: number, y: number): Promise<boolean> => {
+                // Handle unequipping from NPC to player/container
+                if (!drag_state.is_dragging || drag_state.source_module !== 'npc_character') return false;
+                
+                // Check if drop is on container module
+                const container_module = module_registry.get('inventory_container');
+                if (container_module && 
+                    x >= container_module.rect.x0 && x <= container_module.rect.x1 &&
+                    y >= container_module.rect.y0 && y <= container_module.rect.y1) {
+                    
+                    const container = ui_state.container.current_container;
+                    if (!container) {
+                        drag_state.end_drag();
+                        return false;
+                    }
+                    
+                    try {
+                        const transfer_res = await fetch('http://localhost:8787/api/transfer', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                item_instance_id: drag_state.item_instance_id,
+                                from_container: drag_state.source_container_id,
+                                to_container: container.id,
+                            }),
+                        });
+                        
+                        const transfer_data = await transfer_res.json();
+                        
+                        if (transfer_data.ok) {
+                            flash_status([`${drag_state.item_definition?.name} taken from ${npc_name}`], 1500);
+                            drag_state.end_drag();
+                            return true;
+                        } else {
+                            flash_status([`Failed to take item: ${transfer_data.error}`], 1500);
+                            drag_state.end_drag();
+                            return false;
+                        }
+                    } catch (err) {
+                        flash_status([`Error transferring item`], 1500);
+                        drag_state.end_drag();
+                        return false;
+                    }
+                }
+                
+                drag_state.end_drag();
+                return false;
+            }
+        });
+        
+        // Register the module
+        module_registry.register(npc_module);
+        ui_state.modules.positions.set(module_id, npc_rect);
+        ui_state.modules.open_npc_modules.add(npc_id);
+        
+        const total_modules = module_registry.get_all().length;
+        debug_log(`[NPC Module] Successfully opened ${npc_name} (${module_id}) at position (${npc_rect.x0},${npc_rect.y0})`);
+        debug_log(`[NPC Module] Total modules in registry: ${total_modules}`);
+        flash_status([`Opened ${npc_name}'s inventory`], 1500);
+    }
+
+    /**
+     * Close an NPC character module
+     */
+    function close_npc_module(npc_id: string): void {
+        if (!module_registry) return;
+        
+        const module_id = `npc_character_${npc_id}`;
+        
+        module_registry.unregister(module_id);
+        ui_state.modules.open_npc_modules.delete(npc_id);
+        ui_state.modules.positions.delete(module_id);
+        
+        debug_log(`[NPC Module] Closed ${module_id}`);
+    }
+
+    /**
+     * Test function for dynamic module system
+     */
+    function test_dynamic_modules(): void {
+        debug_log('[ModuleRegistry] Testing dynamic module system...');
+        
+        // Test 1: Register a temporary module
+        const test_module = make_fill_module({
+            id: 'test_dynamic_module',
+            rect: { x0: 50, y0: 25, x1: 60, y1: 30 },
+            char: 'T',
+            rgb: { r: 255, g: 255, b: 0 },
+            style: 'regular'
+        });
+        
+        module_registry.register(test_module);
+        debug_log(`[ModuleRegistry] Registered test module, total: ${module_registry.get_all().length}`);
+        
+        // Test 2: Unregister after 3 seconds
+        window.setTimeout(() => {
+            module_registry.unregister('test_dynamic_module');
+            debug_log(`[ModuleRegistry] Unregistered test module, total: ${module_registry.get_all().length}`);
+        }, 3000);
+    }
+
+    // Expose NPC module functions for testing
+    (window as any).open_npc_module = open_npc_character_module;
+    (window as any).close_npc_module = close_npc_module;
+    (window as any).test_dynamic_modules = test_dynamic_modules;
+
     return {
-        modules,
+        modules: module_registry.get_all(),
         start_window_feed_polling,
+        module_registry,  // Expose for subscription
     };
 }

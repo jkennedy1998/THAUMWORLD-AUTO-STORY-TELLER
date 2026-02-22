@@ -20,7 +20,7 @@ export type CanvasRuntimeOptions = {
     base_letter_spacing_mult: number;
     weight_index_to_css?: readonly number[];
 
-    modules: Module[];
+    modules: readonly Module[];
 };
 
 const DEFAULT_WEIGHT_INDEX_TO_CSS: readonly number[] = [100, 200, 300, 400, 500, 600, 700, 800] as const;
@@ -36,7 +36,7 @@ export class CanvasRuntime {
     private ctx: CanvasRenderingContext2D;
     private key_sink: HTMLTextAreaElement;
     private engine_canvas: Canvas;
-    private modules: Module[];
+    private modules: readonly Module[];
 
     private grid_width: number;
     private grid_height: number;
@@ -147,8 +147,8 @@ export class CanvasRuntime {
         }
     }
 
-    set_modules(modules: Module[]): void {
-        this.modules = modules;
+    set_modules(modules: readonly Module[]): void {
+        this.modules = modules as Module[];
     }
 
     start(): void {

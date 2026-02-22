@@ -4,7 +4,7 @@ import { APP_CONFIG, create_app_state } from './app_state.js';
 const el = document.getElementById('mono_canvas') as HTMLCanvasElement | null;
 if (!el) throw new Error('mono_canvas element not found');
 
-const { modules, start_window_feed_polling } = create_app_state();
+const { modules, start_window_feed_polling, module_registry } = create_app_state();
 
 const runtime = new CanvasRuntime({
     canvas: el,
@@ -16,6 +16,11 @@ const runtime = new CanvasRuntime({
     base_letter_spacing_mult: APP_CONFIG.base_letter_spacing_mult,
     weight_index_to_css: APP_CONFIG.weight_index_to_css,
     modules,
+});
+
+// Subscribe to module registry changes to update runtime when modules are added/removed
+module_registry.subscribe(() => {
+    runtime.set_modules(module_registry.get_all());
 });
 
 type TextureFilterEls = {

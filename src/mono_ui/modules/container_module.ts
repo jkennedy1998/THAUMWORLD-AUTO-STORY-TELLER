@@ -3,6 +3,8 @@ import type { Container } from "../../types/container.js";
 import type { ItemInstance } from "../../item_instances/store.js";
 import type { ItemDefinition } from "../../item_storage/store.js";
 import { debug_log, debug_warn } from "../../shared/debug.js";
+import type { ModuleGizmosConfig, GizmoState } from "../module_gizmos.js";
+import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area } from "../module_gizmos.js";
 
 // Simple slot item type
 export type SlotItem = {
@@ -38,12 +40,18 @@ export type ContainerModuleConfig = {
   border_rgb?: Rgb;
   bg_rgb?: Rgb;
   text_rgb?: Rgb;
+  // Phase 8: Module Gizmos (close X, move #)
+  gizmos?: ModuleGizmosConfig;
 };
 
 export function make_container_module(opts: ContainerModuleConfig): Module {
-  const rect = opts.rect;
+  // Phase 8: Use mutable rect for moving
+  let rect = opts.rect;
   let hover_slot_index = -1;
   let last_logged_container_id: string | null = null;
+  
+  // Phase 8: Gizmo state
+  const gizmo_state: GizmoState = create_gizmo_state();
 
   debug_log("[ContainerModule] Created module:", opts.id);
 
@@ -142,7 +150,7 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
 
   return {
     id: opts.id,
-    rect,
+    get rect() { return rect; },  // Phase 8: Use getter for mutable rect
     Focusable: true,
 
     Draw(c: Canvas): void {
@@ -188,11 +196,18 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
       c.set(rect.x0, rect.y0, { char: "+", rgb: border, style: "regular", weight_index: 3 });
       c.set(rect.x1, rect.y0, { char: "+", rgb: border, style: "regular", weight_index: 3 });
       
+      // Phase 8: Draw gizmos (close X, move #)
+      if (opts.gizmos) {
+        draw_module_gizmos(c, rect, opts.gizmos, gizmo_state);
+      }
+      
       // Draw title if we have container
       if (container) {
         const title = container.id.split(".").pop() || "container";
         const title_y = rect.y1 - 1;
-        let title_x = rect.x0 + 2;
+        // Phase 8: Start title after gizmos if they're enabled
+        const gizmo_count = opts.gizmos?.enabled?.length || 0;
+        let title_x = rect.x0 + 2 + (gizmo_count * 2);
         for (const char of title.slice(0, 10)) {
           if (title_x <= rect.x1 - 2) {
             c.set(title_x, title_y, { char, rgb: opts.text_rgb ?? { r: 200, g: 200, b: 200 }, style: "regular", weight_index: 4 });
@@ -296,6 +311,15 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
     OnPointerDown(e: PointerEvent): void {
       if (!opts.get_is_visible()) return;
       
+      // Phase 8: Check for gizmo clicks first
+      if (opts.gizmos && is_in_gizmo_area(e.x, e.y, rect)) {
+        const clicked_gizmo = handle_gizmo_click(e.x, e.y, rect, opts.gizmos, gizmo_state);
+        if (clicked_gizmo) {
+          debug_log(`[ContainerModule] Gizmo clicked: ${clicked_gizmo}`);
+          return;  // Don't process slot clicks if gizmo was clicked
+        }
+      }
+      
       const slot_index = get_slot_at_position(e.x, e.y);
       if (slot_index >= 0) {
         const slots = opts.get_slot_items();
@@ -314,6 +338,17 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
       
       if (!opts.get_is_visible()) {
         debug_log(`[ContainerModule] Drag rejected - container not visible`);
+        return;
+      }
+
+      // Phase 8: Handle move mode drag start
+      if (gizmo_state.is_move_mode) {
+        debug_log(`[ContainerModule] Move mode drag started at (${e.start_x}, ${e.start_y})`);
+        gizmo_state.move_start_x = e.start_x;
+        gizmo_state.move_start_y = e.start_y;
+        if (opts.gizmos?.on_move_start) {
+          opts.gizmos.on_move_start();
+        }
         return;
       }
 
@@ -351,6 +386,31 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
     OnDragEnd(e: DragEvent): void {
       debug_log(`[ContainerModule] OnDragEnd called at (${e.x}, ${e.y})`);
       debug_log(`[ContainerModule] Container rect: (${rect.x0},${rect.y0}) to (${rect.x1},${rect.y1})`);
+      
+      // Phase 8: Handle move mode drag end
+      if (gizmo_state.is_move_mode && gizmo_state.original_rect) {
+        const dx = e.x - gizmo_state.move_start_x;
+        const dy = e.y - gizmo_state.move_start_y;
+        
+        const final_rect: Rect = {
+          x0: gizmo_state.original_rect.x0 + dx,
+          y0: gizmo_state.original_rect.y0 + dy,
+          x1: gizmo_state.original_rect.x1 + dx,
+          y1: gizmo_state.original_rect.y1 + dy,
+        };
+        
+        // Update the module's rect to the final position
+        rect = final_rect;
+        
+        debug_log(`[ContainerModule] Move mode ended: final rect at (${rect.x0},${rect.y0})`);
+        
+        if (opts.gizmos?.on_move_end) {
+          opts.gizmos.on_move_end(final_rect);
+        }
+        
+        // Stay in move mode until user clicks # again
+        return;
+      }
       
       // Check if drop is within our rect
       const within_rect = e.x >= rect.x0 && e.x <= rect.x1 && e.y >= rect.y0 && e.y <= rect.y1;
@@ -393,6 +453,29 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
     },
 
     OnDragMove(e: DragEvent): void {
+      // Phase 8: Handle move mode dragging
+      if (gizmo_state.is_move_mode && gizmo_state.original_rect) {
+        const dx = e.x - gizmo_state.move_start_x;
+        const dy = e.y - gizmo_state.move_start_y;
+        
+        const new_rect: Rect = {
+          x0: gizmo_state.original_rect.x0 + dx,
+          y0: gizmo_state.original_rect.y0 + dy,
+          x1: gizmo_state.original_rect.x1 + dx,
+          y1: gizmo_state.original_rect.y1 + dy,
+        };
+        
+        // Actually update the module's rect so it moves
+        rect = new_rect;
+        
+        debug_log(`[ContainerModule] Move mode: delta (${dx}, ${dy}), new rect at (${rect.x0},${rect.y0})`);
+        
+        if (opts.gizmos?.on_move) {
+          opts.gizmos.on_move(new_rect);
+        }
+        return;
+      }
+      
       // Track drag position for highlighting compatible slots in other modules
       // This is handled by the parent app_state which has access to both modules
       // We just ensure the drag state stays active

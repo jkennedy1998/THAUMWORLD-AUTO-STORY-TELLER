@@ -1485,7 +1485,8 @@ function start_http_server(log_path: string): void {
                         tile_position: clamped_location,
                         status: npc_status,
                         activity: "standing here",
-                        tags: (npc_res.npc as any).tags || []
+                        tags: (npc_res.npc as any).tags || [],
+                        body_slots: (npc_res.npc as any).body_slots || {}
                     });
                 }
 

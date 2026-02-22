@@ -1,6 +1,6 @@
 import type { Canvas, Module } from "./types.js";
 
-export function compose_modules(canvas: Canvas, modules: Module[]): void {
+export function compose_modules(canvas: Canvas, modules: readonly Module[]): void {
     // Clear whole canvas each frame (lofi, correct baseline)
     // This ensures a clean slate for all modules every frame
     canvas.fill_rect(
