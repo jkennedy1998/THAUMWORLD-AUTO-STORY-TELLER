@@ -727,8 +727,10 @@ export class CanvasRuntime {
 
             this.global_pan_active = false;
 
-            if (this.dragging && target) {
-                target.OnDragEnd?.(
+            // Phase 8: Route OnDragEnd to module under cursor (target), not source module
+            // This enables drag-and-drop between modules (e.g., CharacterModule to ContainerModule)
+            if (this.dragging && top) {
+                top.OnDragEnd?.(
                     this.make_drag_event('drag_end', t.x, t.y, ev.buttons, this.engine_canvas.get(t.x, t.y)),
                 );
             }

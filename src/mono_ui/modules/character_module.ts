@@ -4,6 +4,9 @@ import type { ItemInstance } from "../../item_instances/store.js";
 import type { ItemDefinition } from "../../item_storage/store.js";
 import type { BodySlots, BodySlot } from "../../types/body_slots.js";
 import { debug_log } from "../../shared/debug.js";
+import { draw_module_border, BORDER_STYLES, draw_horizontal_divider, draw_container_box } from "../module_borders.js";
+import type { ModuleGizmosConfig, GizmoState } from "../module_gizmos.js";
+import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area } from "../module_gizmos.js";
 
 // Character module configuration
 export type CharacterModuleConfig = {
@@ -35,12 +38,38 @@ export type CharacterModuleConfig = {
   border_rgb?: Rgb;
   bg_rgb?: Rgb;
   text_rgb?: Rgb;
+  
+  // Phase 8: Module Gizmos (close X, move #)
+  gizmos?: ModuleGizmosConfig;
+  
+  // Container sidebar: Equipped containers only (items in body slots that are container types)
+  get_equipped_containers?: () => Array<{
+    slot_name: string;
+    item_instance: ItemInstance;
+    item_definition: ItemDefinition;
+    container_id: string;
+  }>;
+  on_container_click?: (container_id: string) => void;
+  
+  // Phase 7: Right-click container opening
+  on_open_container?: (container_id: string, slot_name: string) => Promise<void>;
+  get_open_containers?: () => Set<string>; // Returns set of open container IDs
 };
 
 export function make_character_module(opts: CharacterModuleConfig): Module {
-  const rect = opts.rect;
+  // Phase 8: Use mutable rect for moving
+  let rect = opts.rect;
   let hover_slot_name: string | null = null;
   let last_logged_actor: string | null = null;
+  
+  // Phase 8: Gizmo state
+  const gizmo_state: GizmoState = create_gizmo_state();
+  
+  // Layout constants
+  const SIDEBAR_WIDTH = 5;  // Width of container sidebar (divider at col 5)
+  
+  // Phase 7: Track sidebar container boxes for click detection
+  let sidebar_boxes: Array<{ x0: number; y0: number; x1: number; y1: number; container_id: string }> = [];
 
   debug_log("[CharacterModule] Created module:", opts.id);
 
@@ -56,12 +85,15 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
     // Row 2: TORSO (centered)
     // Row 3: LEFT LEG | RIGHT LEG
     
-    const col_width = Math.floor((rect.x1 - rect.x0) / 2);
+    // Available width excludes sidebar
+    const available_width = rect.x1 - rect.x0 - SIDEBAR_WIDTH;
+    const col_width = Math.floor(available_width / 2);
     const start_y = rect.y1 - 4;
+    const content_start_x = rect.x0 + SIDEBAR_WIDTH;
     
     // Check each slot position - MUST MATCH draw loop
     const check_slot = (slot_name: string, col: number, row: number, x_offset: number = 0) => {
-      const slot_x = rect.x0 + Math.floor(col * col_width) + Math.floor(col_width / 2) + x_offset;
+      const slot_x = content_start_x + Math.floor(col * col_width) + Math.floor(col_width / 2) + x_offset;
       const slot_y = start_y - Math.floor(row * 2);
       // Item is drawn at (slot_x, slot_y) in draw_body_slot
       if (x === slot_x && y === slot_y) {
@@ -180,14 +212,29 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       }
     }
 
-    // Determine display character color
+    // Phase 7: Determine display character color with container state
     let char_rgb: { r: number; g: number; b: number };
+    
+    // Check if equipped item is a container
+    const is_container = equipped_item?.definition.tags?.some(tag => 
+      ['CONTAINER', 'BAG', 'SACK', 'POUCH', 'BACKPACK', 'WALLET', 'CHEST', 'BOX'].includes(tag.name.toUpperCase())
+    );
+    
+    // Check if this container is currently open
+    const container_id = equipped_item ? `container.${opts.get_actor_id()}.${slot_name}` : null;
+    const is_open = container_id && opts.get_open_containers ? opts.get_open_containers().has(container_id) : false;
+    
+    // Apply color priority: Hovered > Open (purple) > Container (orange) > Normal
     if (is_hovered) {
-      char_rgb = { r: 255, g: 255, b: 100 };
+      char_rgb = { r: 255, g: 255, b: 100 }; // Yellow hover
+    } else if (is_open) {
+      char_rgb = { r: 180, g: 100, b: 220 }; // Purple - container is open
+    } else if (is_container) {
+      char_rgb = { r: 255, g: 165, b: 0 }; // Orange - is a container
     } else if (is_highlighted) {
-      char_rgb = { r: 0, g: 255, b: 100 };
+      char_rgb = { r: 0, g: 255, b: 100 }; // Green highlight
     } else {
-      char_rgb = text;
+      char_rgb = text; // Normal text color
     }
 
     // Draw item or empty indicator at the slot position (this is what gets hovered)
@@ -219,7 +266,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
 
   return {
     id: opts.id,
-    rect,
+    get rect() { return rect; },  // Phase 8: Use getter for mutable rect
     Focusable: true,
 
     Draw(c: Canvas): void {
@@ -244,52 +291,77 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
         last_logged_actor = actor_name;
       }
       
-      const bg = opts.bg_rgb ?? { r: 20, g: 20, b: 20 };
-      const border = opts.border_rgb ?? { r: 100, g: 100, b: 100 };
-      
-      // Fill background
-      for (let x = rect.x0; x <= rect.x1; x++) {
-        for (let y = rect.y0; y <= rect.y1; y++) {
-          c.set(x, y, { char: " ", rgb: bg, style: "regular", weight_index: 3 });
+      // Phase 1 & 2: Draw border with header
+      draw_module_border(c, {
+        rect,
+        style: BORDER_STYLES.double,
+        border_rgb: opts.border_rgb ?? { r: 150, g: 150, b: 150 },
+        bg_rgb: opts.bg_rgb ?? { r: 20, g: 20, b: 20 },
+        weight_index: 3,
+        header: {
+          text: actor_name,
+          text_rgb: opts.text_rgb ?? { r: 220, g: 220, b: 220 },
+          divider_at_col: 5, // Divider after gizmo area (X # + padding)
         }
+      });
+      
+      // Phase 8: Draw gizmos (close X, move #)
+      if (opts.gizmos) {
+        draw_module_gizmos(c, rect, opts.gizmos, gizmo_state);
       }
       
-      // Draw border (simple box)
-      for (let x = rect.x0; x <= rect.x1; x++) {
-        c.set(x, rect.y1, { char: "-", rgb: border, style: "regular", weight_index: 3 });
-        c.set(x, rect.y0, { char: "-", rgb: border, style: "regular", weight_index: 3 });
-      }
-      for (let y = rect.y0; y <= rect.y1; y++) {
-        c.set(rect.x0, y, { char: "|", rgb: border, style: "regular", weight_index: 3 });
-        c.set(rect.x1, y, { char: "|", rgb: border, style: "regular", weight_index: 3 });
-      }
-      
-      // Corners
-      c.set(rect.x0, rect.y1, { char: "+", rgb: border, style: "regular", weight_index: 3 });
-      c.set(rect.x1, rect.y1, { char: "+", rgb: border, style: "regular", weight_index: 3 });
-      c.set(rect.x0, rect.y0, { char: "+", rgb: border, style: "regular", weight_index: 3 });
-      c.set(rect.x1, rect.y0, { char: "+", rgb: border, style: "regular", weight_index: 3 });
-      
-      // Draw title
-      const title = actor_name.slice(0, 10);
-      const title_y = rect.y1 - 1;
-      let title_x = rect.x0 + 2;
-      for (const char of title) {
-        if (title_x <= rect.x1 - 2) {
-          c.set(title_x, title_y, { 
-            char, 
-            rgb: opts.text_rgb ?? { r: 200, g: 200, b: 200 }, 
-            style: "regular", 
-            weight_index: 4 
-          });
-          title_x++;
+      // Draw container sidebar (equipped containers only)
+      sidebar_boxes = []; // Reset tracked boxes
+      if (opts.get_equipped_containers) {
+        const equipped_containers = opts.get_equipped_containers();
+        const box_width = 3;
+        const box_height = 3;
+        const gap = 1;
+        const sidebar_x = rect.x0 + 1;
+        let sidebar_y = rect.y1 - 3 - box_height; // Start from bottom and work up
+        
+        for (let i = 0; i < equipped_containers.length && sidebar_y >= rect.y0 + 2; i++) {
+          const container_info = equipped_containers[i];
+          if (container_info && container_info.container_id) {
+            // Get display char from item definition, fallback to 'C'
+            const display_char = container_info.item_definition.display_char || "C";
+            
+            // Phase 7: Check if container is open for purple color
+            const is_open = opts.get_open_containers?.().has(container_info.container_id) || false;
+            // Orange for containers, Purple if open
+            const container_color: Rgb = is_open 
+              ? { r: 180, g: 100, b: 220 } // Purple - open
+              : { r: 255, g: 165, b: 0 };   // Orange - container
+            
+            // Draw 3x3 box for this equipped container
+            draw_container_box(
+              c,
+              { x0: sidebar_x, y0: sidebar_y, x1: sidebar_x + box_width - 1, y1: sidebar_y + box_height - 1 },
+              display_char,
+              container_color,
+              { r: 100, g: 100, b: 100 }, // Gray border
+              3
+            );
+            
+            // Track this box for click detection
+            sidebar_boxes.push({
+              x0: sidebar_x,
+              y0: sidebar_y,
+              x1: sidebar_x + box_width - 1,
+              y1: sidebar_y + box_height - 1,
+              container_id: container_info.container_id
+            });
+            
+            sidebar_y -= (box_height + gap);
+          }
         }
       }
       
       // Draw weight bar at bottom
       const weight_y = rect.y0 + 1;
       const weight_pct = weight.max > 0 ? weight.current / weight.max : 0;
-      const bar_width = rect.x1 - rect.x0 - 4;
+      // Account for sidebar in bar width
+      const bar_width = rect.x1 - rect.x0 - SIDEBAR_WIDTH - 4;
       const filled_width = Math.floor(bar_width * Math.min(weight_pct, 1));
       
       // Weight bar color based on load
@@ -298,7 +370,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       else if (weight_pct < 0.75) weight_color = { r: 200, g: 200, b: 100 }; // Yellow
       else weight_color = { r: 200, g: 100, b: 100 }; // Red
       
-      const bar_x = rect.x0 + 2;
+      const bar_x = rect.x0 + SIDEBAR_WIDTH + 2;
       for (let i = 0; i < bar_width; i++) {
         const char = i < filled_width ? "=" : "-";
         c.set(bar_x + i, weight_y, { 
@@ -309,9 +381,10 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
         });
       }
       
-      // Draw weight text
+      // Draw weight text (centered in content area)
       const weight_text = `${Math.floor(weight.current)}/${Math.floor(weight.max)}`;
-      const text_x = rect.x0 + Math.floor((rect.x1 - rect.x0 + 1 - weight_text.length) / 2);
+      const content_center = rect.x0 + SIDEBAR_WIDTH + Math.floor((rect.x1 - rect.x0 - SIDEBAR_WIDTH + 1) / 2);
+      const text_x = content_center - Math.floor(weight_text.length / 2);
       for (let i = 0; i < weight_text.length; i++) {
         const char = weight_text.charAt(i);
         c.set(text_x + i, weight_y - 1, { 
@@ -323,8 +396,11 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       }
       
       // Draw body slots
-      const col_width = Math.floor((rect.x1 - rect.x0) / 2);
+      // Available width excludes sidebar
+      const available_width = rect.x1 - rect.x0 - SIDEBAR_WIDTH;
+      const col_width = Math.floor(available_width / 2);
       const start_y = rect.y1 - 4;
+      const content_start_x = rect.x0 + SIDEBAR_WIDTH;
       
       // Track hover state for hand slots (both sub-slots share one label)
       const left_hand_hovered = hover_slot_name === "hand_left";
@@ -347,7 +423,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       for (const layout of normal_slots) {
         const slot = body_slots[layout.name];
         if (slot) {
-          const slot_x = rect.x0 + Math.floor(layout.col * col_width) + Math.floor(col_width / 2);
+          const slot_x = content_start_x + Math.floor(layout.col * col_width) + Math.floor(col_width / 2);
           const slot_y = start_y - Math.floor(layout.row * 2);
           const equipped_item = equipped.get(layout.name);
           const is_hovered = layout.name === hover_slot_name;
@@ -361,7 +437,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       // Draw LEFT HAND with two sub-slots side by side
       const left_hand_slot = body_slots["hand_left"];
       if (left_hand_slot) {
-        const hand_center_x = rect.x0 + Math.floor(0 * col_width) + Math.floor(col_width / 2);
+        const hand_center_x = content_start_x + Math.floor(0 * col_width) + Math.floor(col_width / 2);
         const hand_y = start_y - Math.floor(1 * 2); // Row 1
         const equipped_item = equipped.get("hand_left");
         const is_highlighted = highlighted_slots.includes("hand_left");
@@ -395,7 +471,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       // Draw RIGHT HAND with two sub-slots side by side
       const right_hand_slot = body_slots["hand_right"];
       if (right_hand_slot) {
-        const hand_center_x = rect.x0 + Math.floor(1 * col_width) + Math.floor(col_width / 2);
+        const hand_center_x = content_start_x + Math.floor(1 * col_width) + Math.floor(col_width / 2);
         const hand_y = start_y - Math.floor(1 * 2); // Row 1
         const equipped_item = equipped.get("hand_right");
         const is_highlighted = highlighted_slots.includes("hand_right");
@@ -456,11 +532,58 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
     OnPointerDown(e: PointerEvent): void {
       if (!opts.get_is_visible()) return;
       
-      const slot_name = get_slot_at_position(e.x, e.y);
-      if (slot_name) {
-        debug_log(`[CharacterModule] Clicked: ${slot_name}`);
-        opts.on_slot_click?.(slot_name);
+      // Phase 8: Check for gizmo clicks first
+      if (opts.gizmos && is_in_gizmo_area(e.x, e.y, rect)) {
+        const clicked_gizmo = handle_gizmo_click(e.x, e.y, rect, opts.gizmos, gizmo_state);
+        if (clicked_gizmo) {
+          debug_log(`[CharacterModule] Gizmo clicked: ${clicked_gizmo}`);
+          return;  // Don't process slot clicks if gizmo was clicked
+        }
       }
+      
+      // Phase 7: Check for sidebar container box clicks (right or left)
+      for (const box of sidebar_boxes) {
+        if (e.x >= box.x0 && e.x <= box.x1 && e.y >= box.y0 && e.y <= box.y1) {
+          if (e.button === 2) {
+            // Right-click opens container
+            debug_log(`[CharacterModule] Right-clicked sidebar container: ${box.container_id}`);
+            void opts.on_open_container?.(box.container_id, 'sidebar');
+          } else {
+            // Left-click also opens container (for convenience)
+            debug_log(`[CharacterModule] Clicked sidebar container: ${box.container_id}`);
+            void opts.on_container_click?.(box.container_id);
+          }
+          return;
+        }
+      }
+      
+      const slot_name = get_slot_at_position(e.x, e.y);
+      if (!slot_name) return;
+      
+      // Phase 7: Right-click (button 2) opens container
+      if (e.button === 2) {
+        const equipped = opts.get_equipped_items().get(slot_name);
+        if (equipped) {
+          // Check if equipped item is a container type
+          const is_container = equipped.definition.tags?.some(tag => 
+            ['CONTAINER', 'BAG', 'SACK', 'POUCH', 'BACKPACK', 'WALLET', 'CHEST', 'BOX'].includes(tag.name.toUpperCase())
+          );
+          
+          if (is_container) {
+            const container_id = `container.${opts.get_actor_id()}.${slot_name}`;
+            debug_log(`[CharacterModule] Right-clicked container: ${container_id}`);
+            void opts.on_open_container?.(container_id, slot_name);
+          } else {
+            debug_log(`[CharacterModule] Right-clicked non-container item: ${equipped.definition.name}`);
+            // Future: Show context menu for non-container items
+          }
+        }
+        return;
+      }
+      
+      // Left-click (button 0)
+      debug_log(`[CharacterModule] Clicked: ${slot_name}`);
+      opts.on_slot_click?.(slot_name);
     },
 
     OnPointerLeave(): void {
@@ -473,6 +596,17 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       
       if (!opts.get_is_visible()) {
         debug_log(`[CharacterModule] Drag rejected - module not visible`);
+        return;
+      }
+
+      // Phase 8: Handle move mode drag start
+      if (gizmo_state.is_move_mode) {
+        debug_log(`[CharacterModule] Move mode drag started at (${e.start_x}, ${e.start_y})`);
+        gizmo_state.move_start_x = e.start_x;
+        gizmo_state.move_start_y = e.start_y;
+        if (opts.gizmos?.on_move_start) {
+          opts.gizmos.on_move_start();
+        }
         return;
       }
 
@@ -504,11 +638,64 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       debug_log(`[CharacterModule] Drag start callback executed`);
     },
 
+    OnDragMove(e: DragEvent): void {
+      // Phase 8: Handle move mode dragging
+      if (gizmo_state.is_move_mode && gizmo_state.original_rect) {
+        const dx = e.x - gizmo_state.move_start_x;
+        const dy = e.y - gizmo_state.move_start_y;
+        
+        const new_rect: Rect = {
+          x0: gizmo_state.original_rect.x0 + dx,
+          y0: gizmo_state.original_rect.y0 + dy,
+          x1: gizmo_state.original_rect.x1 + dx,
+          y1: gizmo_state.original_rect.y1 + dy,
+        };
+        
+        // Actually update the module's rect so it moves
+        rect = new_rect;
+        
+        debug_log(`[CharacterModule] Move mode: delta (${dx}, ${dy}), new rect at (${rect.x0},${rect.y0})`);
+        
+        if (opts.gizmos?.on_move) {
+          opts.gizmos.on_move(new_rect);
+        }
+        return;
+      }
+      
+      // Normal drag move - can be used for panning body slot area in future
+      debug_log(`[CharacterModule] OnDragMove at (${e.x}, ${e.y})`);
+    },
+
     OnDragEnd(e: DragEvent): void {
       debug_log(`[CharacterModule] OnDragEnd called at (${e.x}, ${e.y}), visible=${opts.get_is_visible()}`);
       
       if (!opts.get_is_visible()) {
         debug_log(`[CharacterModule] DragEnd rejected - module not visible`);
+        return;
+      }
+
+      // Phase 8: Handle move mode drag end
+      if (gizmo_state.is_move_mode && gizmo_state.original_rect) {
+        const dx = e.x - gizmo_state.move_start_x;
+        const dy = e.y - gizmo_state.move_start_y;
+        
+        const final_rect: Rect = {
+          x0: gizmo_state.original_rect.x0 + dx,
+          y0: gizmo_state.original_rect.y0 + dy,
+          x1: gizmo_state.original_rect.x1 + dx,
+          y1: gizmo_state.original_rect.y1 + dy,
+        };
+        
+        // Update the module's rect to the final position
+        rect = final_rect;
+        
+        debug_log(`[CharacterModule] Move mode ended: final rect at (${rect.x0},${rect.y0})`);
+        
+        if (opts.gizmos?.on_move_end) {
+          opts.gizmos.on_move_end(final_rect);
+        }
+        
+        // Stay in move mode until user clicks # again
         return;
       }
 

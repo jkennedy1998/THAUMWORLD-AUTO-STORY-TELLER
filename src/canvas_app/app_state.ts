@@ -62,6 +62,24 @@ type WindowFeed = {
     fetch_messages: () => Promise<(string | TextWindowMessage)[]>;
 };
 
+/**
+ * Check if an item definition represents a container type
+ * Used for determining which equipped items appear in the container sidebar
+ */
+function is_container_item(definition: ItemDefinition): boolean {
+    if (!definition.tags) return false;
+    
+    const container_tags = ['CONTAINER', 'BAG', 'SACK', 'POUCH', 'BACKPACK', 'WALLET', 'CHEST', 'BOX'];
+    
+    for (const tag of definition.tags) {
+        if (container_tags.includes(tag.name.toUpperCase())) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
 export function create_app_state(): AppState {
     const WHITE: Rgb = get_color_by_name('off_white').rgb;
     const DEEP_RED: Rgb = get_color_by_name('deep_red').rgb;
@@ -101,6 +119,12 @@ export function create_app_state(): AppState {
             current_container: null as Container | null,
             slot_items: [] as SlotItem[],
             is_open: true,
+            // Phase 7: Track open container modules for visual state
+            open_containers: new Set<string>(), // Set of container_ids that are currently open
+            // Phase 7: Track containers currently being opened (prevents double-clicks)
+            opening_containers: new Set<string>(),
+            // Phase 7: Track container_id -> module_id mapping for closing
+            container_module_map: new Map<string, string>(), // container_id -> module_id
         },
         character: {
             is_visible: true,  // Always visible for now
@@ -1999,6 +2023,61 @@ export function create_app_state(): AppState {
                 return false;
             },
             border_rgb: get_color_by_name('light_gray').rgb,
+            // Player character module: can move but cannot close
+            gizmos: {
+                enabled: ['move'],
+                can_close: false,
+                can_move: true,
+                can_save_position: false,
+                on_move_start: () => {
+                    debug_log('[CharacterModule] Move mode started');
+                },
+                on_move: (new_rect) => {
+                    ui_state.modules.positions.set('character_module', new_rect);
+                    debug_log(`[CharacterModule] Moving to (${new_rect.x0},${new_rect.y0})`);
+                },
+                on_move_end: (final_rect) => {
+                    ui_state.modules.positions.set('character_module', final_rect);
+                    flash_status([`Character panel moved`], 1000);
+                },
+            },
+            // Container sidebar: Show equipped containers only
+            get_equipped_containers: () => {
+                const actor_id = APP_CONFIG.input_actor_id;
+                const equipped = ui_state.character.equipped_items;
+                const containers: Array<{
+                    slot_name: string;
+                    item_instance: ItemInstance;
+                    item_definition: ItemDefinition;
+                    container_id: string;
+                }> = [];
+                
+                // Filter equipped items to only container types
+                for (const [slot_name, item_data] of equipped.entries()) {
+                    if (is_container_item(item_data.definition)) {
+                        const container_id = `container.${actor_id}.${slot_name}`;
+                        containers.push({
+                            slot_name,
+                            item_instance: item_data.instance,
+                            item_definition: item_data.definition,
+                            container_id,
+                        });
+                    }
+                }
+                
+                return containers;
+            },
+            on_container_click: (container_id: string) => {
+                debug_log(`[Character] Container clicked: ${container_id}`);
+                // Phase 7: Open container in new ContainerModule
+                void open_container_module(container_id, 'your container');
+            },
+            // Phase 7: Right-click container opening
+            on_open_container: async (container_id: string, slot_name: string) => {
+                debug_log(`[Character] Opening container via right-click: ${container_id}`);
+                await open_container_module(container_id, slot_name);
+            },
+            get_open_containers: () => ui_state.container.open_containers,
         }),
 
         // Inventory Container Module - BOTTOM
@@ -2419,6 +2498,176 @@ export function create_app_state(): AppState {
     }
 
     /**
+     * Phase 7: Open a container in a new ContainerModule instance
+     */
+    async function open_container_module(container_id: string, source_name?: string): Promise<void> {
+        debug_log(`[ContainerOpener] Opening container: ${container_id}`);
+        
+        // Check if already open
+        if (ui_state.container.open_containers.has(container_id)) {
+            flash_status([`Container already open`], 800);
+            return;
+        }
+        
+        // Check if currently being opened (prevents double-clicks)
+        if (ui_state.container.opening_containers.has(container_id)) {
+            debug_log(`[ContainerOpener] Container ${container_id} is already being opened, ignoring click`);
+            return;
+        }
+        
+        // Mark as opening (acquire lock)
+        ui_state.container.opening_containers.add(container_id);
+        
+        try {
+            // Fetch container data
+            const res = await fetch(`http://localhost:8787/api/container?id=${container_id}`);
+            const data = await res.json();
+            
+            if (!data.ok) {
+                flash_status([`Failed to load container`], 1500);
+                return;
+            }
+            
+            // Generate unique module ID
+            const instance_id = `container_module_${Date.now()}`;
+            
+            // Calculate center-screen position with offset based on open count
+            const open_count = ui_state.container.open_containers.size;
+            const offset_x = open_count * 3;
+            const offset_y = open_count * 2;
+            
+            const grid_w = APP_CONFIG.grid_width;
+            const grid_h = APP_CONFIG.grid_height;
+            const module_w = 39;
+            const module_h = 18;
+            
+            const container_rect = {
+                x0: Math.floor((grid_w - module_w) / 2) + offset_x,
+                y0: Math.floor((grid_h - module_h) / 2) + offset_y,
+                x1: Math.floor((grid_w + module_w) / 2) + offset_x,
+                y1: Math.floor((grid_h + module_h) / 2) + offset_y
+            };
+            
+            // Create container module
+            const container_module = make_container_module({
+                id: instance_id,
+                rect: container_rect,
+                get_container: () => data.container,
+                get_slot_items: () => {
+                    // Transform contents to slot items
+                    return (data.container?.contents || []).map((item: any, idx: number) => ({
+                        slot_index: idx,
+                        item_instance: item.instance,
+                        item_definition: item.definition
+                    }));
+                },
+                get_is_visible: () => true,
+                set_is_visible: (visible: boolean) => {
+                    if (!visible) {
+                        // Close this container module
+                        close_container_module(container_id);
+                    }
+                },
+                on_slot_click: (slot_index: number) => {
+                    debug_log(`[Container ${instance_id}] Clicked slot ${slot_index}`);
+                },
+                on_drag_start: (slot_index: number, item: ItemInstance, definition: ItemDefinition, cont_id: string) => {
+                    drag_state.start_drag('container', item.id, cont_id, definition);
+                },
+                on_slot_hover: (slot_index: number, item: ItemInstance, definition: ItemDefinition | null) => {
+                    // TODO: Show item tooltip
+                },
+                on_drop: async (slot_index: number): Promise<boolean> => {
+                    // Handle dropping items into this container
+                    if (!drag_state.is_dragging) return false;
+                    
+                    try {
+                        const transfer_res = await fetch('http://localhost:8787/api/transfer', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                item_instance_id: drag_state.item_instance_id,
+                                from_container: drag_state.source_container_id,
+                                to_container: container_id,
+                            }),
+                        });
+                        
+                        const transfer_data = await transfer_res.json();
+                        
+                        if (transfer_data.ok) {
+                            flash_status([`${drag_state.item_definition?.name} moved to container`], 1500);
+                            drag_state.end_drag();
+                            // Refresh container data
+                            void refresh_container_data();
+                            return true;
+                        } else {
+                            flash_status([`Transfer failed: ${transfer_data.error}`], 1500);
+                            drag_state.end_drag();
+                            return false;
+                        }
+                    } catch (err) {
+                        flash_status([`Error transferring item`], 1500);
+                        drag_state.end_drag();
+                        return false;
+                    }
+                },
+                gizmos: {
+                    enabled: ['close', 'move'],
+                    can_close: true,
+                    can_move: true,
+                    can_save_position: false,
+                    on_close: () => {
+                        close_container_module(container_id);
+                    },
+                    on_move: (new_rect) => {
+                        // Position updated via gizmo system
+                    }
+                },
+            });
+            
+            // Register module
+            module_registry.register(container_module);
+            ui_state.container.open_containers.add(container_id);
+            ui_state.container.container_module_map.set(container_id, instance_id);
+            
+            const display_name = source_name || container_id.split('.').pop() || 'container';
+            flash_status([`Opened ${display_name}`], 1000);
+            debug_log(`[ContainerOpener] Opened ${container_id} as ${instance_id}`);
+            
+        } catch (err) {
+            debug_log(`[ContainerOpener] Error opening container:`, err);
+            flash_status([`Failed to open container`], 1500);
+        } finally {
+            // Release the opening lock
+            ui_state.container.opening_containers.delete(container_id);
+        }
+    }
+    
+    /**
+     * Phase 7: Close a container module
+     */
+    function close_container_module(container_id: string): void {
+        debug_log(`[ContainerOpener] Closing container: ${container_id}`);
+        
+        // Get the module_id from our tracking map
+        const module_id = ui_state.container.container_module_map.get(container_id);
+        
+        if (module_id) {
+            // Unregister the module from the registry
+            module_registry.unregister(module_id);
+            debug_log(`[ContainerOpener] Unregistered module: ${module_id}`);
+        } else {
+            debug_log(`[ContainerOpener] Warning: No module found for ${container_id}`);
+        }
+        
+        // Clean up tracking
+        ui_state.container.open_containers.delete(container_id);
+        ui_state.container.container_module_map.delete(container_id);
+        
+        flash_status([`Container closed`], 800);
+    }
+
+    /**
      * Open an NPC character module
      */
     async function open_npc_character_module(npc_id: string, npc_name: string): Promise<void> {
@@ -2574,7 +2823,65 @@ export function create_app_state(): AppState {
                 
                 drag_state.end_drag();
                 return false;
-            }
+            },
+            // NPC character module: can close and move
+            gizmos: {
+                enabled: ['close', 'move'],
+                can_close: true,
+                can_move: true,
+                can_save_position: false,
+                on_close: () => {
+                    debug_log(`[NPC Module] Close gizmo clicked - closing ${npc_name}`);
+                    close_npc_module(npc_id);
+                    flash_status([`${npc_name}'s inventory closed`], 1000);
+                },
+                on_move_start: () => {
+                    debug_log(`[NPC Module] Move mode started for ${npc_name}`);
+                },
+                on_move: (new_rect) => {
+                    ui_state.modules.positions.set(module_id, new_rect);
+                    debug_log(`[NPC Module] Moving ${npc_name} to (${new_rect.x0},${new_rect.y0})`);
+                },
+                on_move_end: (final_rect) => {
+                    ui_state.modules.positions.set(module_id, final_rect);
+                    flash_status([`${npc_name}'s panel moved`], 1000);
+                },
+            },
+            // Container sidebar: Show equipped containers only
+            get_equipped_containers: () => {
+                const containers: Array<{
+                    slot_name: string;
+                    item_instance: ItemInstance;
+                    item_definition: ItemDefinition;
+                    container_id: string;
+                }> = [];
+                
+                // Filter equipped items to only container types
+                for (const [slot_name, item_data] of equipped_items.entries()) {
+                    if (is_container_item(item_data.definition)) {
+                        const container_id = `container.${npc_id}.${slot_name}`;
+                        containers.push({
+                            slot_name,
+                            item_instance: item_data.instance,
+                            item_definition: item_data.definition,
+                            container_id,
+                        });
+                    }
+                }
+                
+                return containers;
+            },
+            on_container_click: (container_id: string) => {
+                debug_log(`[NPC Module] Container clicked: ${container_id}`);
+                // Phase 7: Open container in new ContainerModule
+                void open_container_module(container_id, `${npc_name}'s container`);
+            },
+            // Phase 7: Right-click container opening
+            on_open_container: async (container_id: string, slot_name: string) => {
+                debug_log(`[NPC Module] Opening container via right-click: ${container_id}`);
+                await open_container_module(container_id, `${npc_name}'s ${slot_name}`);
+            },
+            get_open_containers: () => ui_state.container.open_containers,
         });
         
         // Register the module

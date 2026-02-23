@@ -4,6 +4,7 @@ import { ensure_dir_exists } from "../engine/log_store.js";
 import { get_container_dir, get_container_path } from "../engine/paths.js";
 import type { TagInstance } from "../tag_system/registry.js";
 import { load_item_instance, update_item_instance_container, type ItemInstance } from "../item_instances/store.js";
+import { debug_error } from "../shared/debug.js";
 import type { ContainerPosition } from "../types/container.js";
 import { calculate_grid_dimensions, get_container_slot_count } from "../types/container.js";
 
@@ -293,18 +294,60 @@ export function add_item_to_container(
 ): ContainerLookupResult {
     const result = load_container(slot, container_id);
     if (!result.ok) return result;
-    
+
     // Check if already in container
     const exists = result.container.contents.some(
         entry => entry.item_instance_id === item_instance_id
     );
-    
-    if (!exists) {
-        result.container.contents.push({ item_instance_id });
-        save_container(slot, result.container);
+
+    if (exists) {
+        return { ok: true, container: result.container, path: result.path };
     }
-    
-    return { ok: true, container: result.container, path: result.path };
+
+    // Load item instance to get weight for validation
+    const item_result = load_item_instance(slot, item_instance_id);
+    if (!item_result.ok) {
+        return { ok: false, error: `Failed to load item instance ${item_instance_id}: ${item_result.error}`, todo: "Check item instance exists" };
+    }
+    const item = item_result.instance;
+
+    // Check capacity constraints
+    const container = result.container;
+    const current_slots = container.contents.length;
+    const capacity = container.capacity;
+
+    if (capacity) {
+        // Check max slots
+        if (capacity.max_slots !== undefined) {
+            if (current_slots >= capacity.max_slots) {
+                debug_error("Container", `Container ${container_id} is overfull: ${current_slots}/${capacity.max_slots} slots, attempting to add ${item_instance_id}`);
+                return { ok: false, error: `Container ${container_id} is full (${current_slots}/${capacity.max_slots} slots)`, todo: "Transfer to container with more capacity" };
+            }
+        }
+
+        // Check max weight (simplified - assumes item.qty represents weight)
+        if (capacity.max_weight !== undefined) {
+            const current_weight = container.contents.reduce((total, entry) => {
+                const entry_result = load_item_instance(slot, entry.item_instance_id);
+                if (entry_result.ok) {
+                    return total + (entry_result.instance.qty || 1);
+                }
+                return total;
+            }, 0);
+
+            const item_weight = item.qty || 1;
+            if (current_weight + item_weight > capacity.max_weight) {
+                debug_error("Container", `Container ${container_id} would exceed weight limit: ${current_weight}/${capacity.max_weight}, adding ${item_weight}`);
+                return { ok: false, error: `Container ${container_id} would exceed weight limit (${current_weight + item_weight}/${capacity.max_weight})`, todo: "Transfer to container with more weight capacity" };
+            }
+        }
+    }
+
+    // Add item to container
+    container.contents.push({ item_instance_id });
+    save_container(slot, container);
+
+    return { ok: true, container: container, path: result.path };
 }
 
 export function remove_item_from_container(
