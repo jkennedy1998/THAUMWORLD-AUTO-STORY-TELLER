@@ -1,10 +1,47 @@
 import type { TagInstance } from "../tag_system/registry.js";
+import type { ItemInstance } from "../item_instances/store.js";
 
 /**
  * Container entry - reference to an item instance inside a container
+ * @deprecated Use ItemInstance directly in Container.contents (inline storage)
  */
 export interface ContainerEntry {
     item_instance_id: string;
+}
+
+/**
+ * Container content entry - wrapped item with instance and definition
+ * This is the standardized format for all container contents
+ */
+export interface ContainerContentEntry {
+    instance: ItemInstance;
+    definition: {
+        id: string;
+        name: string;
+        description?: string;
+        weight?: number;
+        weight_mag?: number;
+        mag?: number;
+        size_mag?: number;
+        hardness_mag?: number;
+        conductivity_mag?: number;
+        tags?: TagInstance[];
+        stackable?: boolean;
+        max_stack_size?: number;
+        display_char?: string;
+        valid_body_slots?: string[];
+        occupies_slots?: string[];
+        slot_shape?: number[][];
+        fits_actor_kind?: string[];
+    };
+    /**
+     * Grid position within the container (REQUIRED - unified grid system)
+     * x: column (0 to cols-1)
+     * y: row (0 to rows-1)
+     * All items MUST have grid coordinates - no packed fallback
+     */
+    grid_x: number;
+    grid_y: number;
 }
 
 /**
@@ -71,9 +108,11 @@ export interface Container {
     };
     
     /**
-     * Contents - array of item instance references
+     * Contents - array of wrapped item entries (stored inline)
+     * Each entry contains both the item instance and its definition
+     * Format: { instance: ItemInstance, definition: ItemDefinition }
      */
-    contents: ContainerEntry[];
+    contents: ContainerContentEntry[];
     
     /**
      * Tags for container properties
@@ -93,15 +132,6 @@ export interface Container {
      * Architecture for future lock picking mechanics
      */
     is_locked: boolean;
-    
-    /**
-     * Grid dimensions for UI rendering
-     * Computed from capacity.max_slots or slot count
-     */
-    grid_dimensions: {
-        cols: number;
-        rows: number;
-    };
 }
 
 /**
@@ -229,9 +259,6 @@ export function get_container_slot_count(container: Container): number {
  * @returns Container with all required fields populated
  */
 export function apply_container_defaults(container: Partial<Container>): Container {
-    const slot_count = get_container_slot_count(container as Container);
-    const grid_dims = calculate_grid_dimensions(slot_count);
-    
     return {
         id: container.id ?? "unknown",
         kind: container.kind ?? "actor",
@@ -241,7 +268,6 @@ export function apply_container_defaults(container: Partial<Container>): Contain
         tags: container.tags ?? [],
         is_open: container.is_open ?? true,
         is_locked: container.is_locked ?? false,
-        grid_dimensions: container.grid_dimensions ?? grid_dims,
         // Optional fields
         subtype: container.subtype,
         position: container.position,

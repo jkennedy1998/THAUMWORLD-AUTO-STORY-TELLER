@@ -359,18 +359,18 @@ async function inspect_item(
   },
   data_slot: number = 1
 ): Promise<InspectionResult> {
-  // Import item storage functions
-  const { load_item_instance } = await import("../item_instances/store.js");
+  // Import storage functions
   const { load_item_def } = await import("../item_storage/store.js");
-  
+  const { find_item_in_entity_containers } = await import("../container_storage/store.js");
+
   // Extract item instance ID from target ref
   // Target ref format: "item.<instance_id>" or just "<instance_id>"
   const item_ref = target.ref;
   const instance_id = item_ref.startsWith("item.") ? item_ref.slice(5) : item_ref;
-  
-  // Load item instance
-  const instance_result = load_item_instance(data_slot, instance_id);
-  if (!instance_result.ok) {
+
+  // Find item in entity containers (entity-centric storage)
+  const found_item = find_item_in_entity_containers(data_slot, instance_id);
+  if (!found_item) {
     return {
       target,
       success: false,
@@ -387,12 +387,10 @@ async function inspect_item(
       }
     };
   }
-  
-  const instance = instance_result.instance;
-  
-  // Load item definition
-  const def_result = load_item_def(data_slot, instance.def_id);
-  const item_def = def_result.ok ? def_result.item : null;
+
+  const item_entry = found_item.item;
+  const instance = item_entry.instance;
+  const definition = item_entry.definition;
   
   // Build description based on clarity
   let short_description: string;
@@ -404,14 +402,14 @@ async function inspect_item(
     full_description = "";
   } else if (clarity === "vague") {
     // Can see general shape/type
-    const item_name = item_def?.name ?? "unknown item";
-    const vague_shape = item_def?.size_mag && item_def.size_mag > 2 ? "large" : 
-                       item_def?.size_mag && item_def.size_mag < 1 ? "small" : "medium-sized";
+    const item_name = definition?.name ?? "unknown item";
+    const vague_shape = definition?.size_mag && definition.size_mag > 2 ? "large" : 
+                       definition?.size_mag && definition.size_mag < 1 ? "small" : "medium-sized";
     short_description = `You can make out a ${vague_shape} ${item_name.toLowerCase()} here.`;
     full_description = "";
   } else {
     // Clear - full details
-    const item_name = item_def?.name ?? instance.def_id;
+    const item_name = definition?.name ?? instance.def_id;
     const qty_text = instance.qty > 1 ? `${instance.qty}x ` : "";
     const condition_text = instance.condition && instance.condition !== "good" ? 
                           ` (${instance.condition})` : "";
@@ -419,17 +417,17 @@ async function inspect_item(
     short_description = `${qty_text}${item_name}${condition_text}`;
     
     // Build full description with definition details
-    let full_desc = item_def?.description ?? "A mundane item.";
+    let full_desc = definition?.description ?? "A mundane item.";
     
     // Add weight info
-    if (item_def?.weight) {
-      const weight_kg = (item_def.weight / 1000).toFixed(2);
+    if (definition?.weight) {
+      const weight_kg = (definition.weight / 1000).toFixed(2);
       full_desc += `\n\nWeight: ${weight_kg}kg`;
     }
     
     // Add tags if any
     if (instance.tags && instance.tags.length > 0) {
-      const tag_names = instance.tags.map(t => t.name).join(", ");
+      const tag_names = instance.tags.map((t: any) => t.name).join(", ");
       full_desc += `\n\nProperties: ${tag_names}`;
     }
     
@@ -453,9 +451,9 @@ async function inspect_item(
       short_description,
       full_description,
       features: [],
-      sensory_details: clarity === "clear" && item_def ? {
+      sensory_details: clarity === "clear" && definition ? {
         // Add sensory details from item definition if available
-        [sense_used]: [item_def.description]
+        [sense_used]: [definition.description]
       } : {}
     }
   };

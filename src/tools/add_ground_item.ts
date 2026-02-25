@@ -6,14 +6,44 @@
  * Usage: node dist/tools/add_ground_item.js <place_id> <item_def_id> [qty] [x] [y] [slot]
  */
 
-import { create_item_instance } from "../item_instances/store.js";
 import { 
     get_or_create_scattered_container, 
     add_item_to_container
 } from "../container_storage/store.js";
 import { load_place, save_place } from "../place_storage/store.js";
+import { load_item_def } from "../item_storage/store.js";
+import { rand_base32_rfc } from "../engine/log_store.js";
+import type { ItemInstance } from "../item_instances/store.js";
+import { find_empty_grid_position } from "../shared/migration.js";
+import { calculate_grid_dimensions } from "../types/container.js";
 
 const DEFAULT_SLOT = 1;
+
+/**
+ * Create an inline item instance (not saved to separate file)
+ * Items are created directly in container.contents arrays
+ */
+function make_instance_id(): string {
+    return `inst_${rand_base32_rfc(8)}`;
+}
+
+function create_inline_item(
+    def_id: string,
+    qty: number = 1,
+    owner_ref: string = "system",
+    container_id: string = "",
+    condition: ItemInstance["condition"] = "good"
+): ItemInstance {
+    return {
+        id: make_instance_id(),
+        def_id,
+        qty: Math.max(1, qty),
+        condition,
+        tags: [],
+        container_id,
+        owner_ref
+    };
+}
 
 async function add_ground_item(
     slot: number,
@@ -45,9 +75,8 @@ async function add_ground_item(
 
     console.log(`✓ Scattered container: ${scattered_result.container.id}`);
 
-    // Create the item instance
-    const item = create_item_instance(
-        slot,
+    // Create the item instance (inline)
+    const item = create_inline_item(
         item_def_id,
         qty,
         "system",  // Ground items are unowned
@@ -56,8 +85,34 @@ async function add_ground_item(
 
     console.log(`✓ Created item instance: ${item.id}`);
 
-    // Add item to scattered container
-    const add_result = add_item_to_container(slot, scattered_result.container.id, item.id);
+    // Load item definition for wrapped format
+    const def_result = load_item_def(slot, item_def_id);
+    if (!def_result.ok) {
+        console.error(`❌ Failed to load item definition: ${def_result.error}`);
+        return false;
+    }
+
+    // Find empty grid position in container
+    const max_slots = scattered_result.container.capacity?.max_slots || scattered_result.container.contents.length + 1;
+    const { cols } = calculate_grid_dimensions(max_slots);
+    const empty_pos = find_empty_grid_position(
+        scattered_result.container.contents,
+        cols,
+        max_slots
+    );
+    
+    if (!empty_pos) {
+        console.error(`❌ Container is full`);
+        return false;
+    }
+
+    // Add item to scattered container (wrapped format with grid coordinates)
+    const add_result = add_item_to_container(slot, scattered_result.container.id, {
+        instance: item,
+        definition: def_result.item,
+        grid_x: empty_pos.x,
+        grid_y: empty_pos.y
+    });
     if (!add_result.ok) {
         console.error(`❌ Failed to add item to scattered container: ${add_result.error}`);
         return false;

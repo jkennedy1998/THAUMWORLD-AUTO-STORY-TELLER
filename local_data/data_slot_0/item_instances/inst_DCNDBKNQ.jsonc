@@ -1,9 +1,0 @@
-{
-  "id": "inst_DCNDBKNQ",
-  "def_id": "pants",
-  "qty": 1,
-  "condition": "good",
-  "tags": [],
-  "container_id": "container.default_actor.sack_default",
-  "owner_ref": "actor.default_actor"
-}

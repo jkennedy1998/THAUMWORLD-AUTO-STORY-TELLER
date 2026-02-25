@@ -731,6 +731,145 @@ These can be added later once basic equip/unequip via drag is working.
 
 ---
 
+## ⚠️ IMPORTANT: Container Data Format Dependency
+
+**Status:** BLOCKED - See `container_format_standardization.md`
+
+The inventory drag-and-drop system depends on the standardized container content format. Currently, there's a format mismatch causing crashes:
+
+**Issue:** Some code expects raw `ItemInstance[]` but data is now wrapped `{instance, definition}`
+**Impact:** Services crash on startup (white screen)
+**Fix Required:** Complete the format standardization before testing drag-and-drop
+
+**Related Plan:** See `docs/plans/container_format_standardization.md` for:
+- Critical bug fixes needed (Phase 1)
+- Implementation roadmap
+- Testing checklist
+
+**Do not test inventory dragging until format standardization is complete!**
+
+---
+
+## Phase 4.5: Nested Container System (NEW)
+
+**Status:** ACTIVE - Implementing
+**Goal:** Enable items with CONTAINER tag to hold other items
+**Use Case:** Drag Henry's torso armor into the pouch on his leg
+
+### Design Principle
+
+Items with the `CONTAINER` tag automatically have `container_data` - the container is PART of the item, not separate. When the item moves, its contents move with it.
+
+### Data Model
+
+**ItemInstance with Container:**
+```typescript
+interface ItemInstance {
+  id: string;
+  def_id: string;
+  qty: number;
+  condition?: "pristine" | "good" | "worn" | "damaged" | "broken";
+  tags: TagInstance[];
+  container_id: string;  // Parent container this item is in
+  owner_ref: string;     // Who owns this item
+  
+  // NEW: Container data for items with CONTAINER tag
+  container_data?: {
+    capacity: {
+      max_slots: number;   // From item definition CONTAINER_SLOTS tag
+      max_weight: number;  // From item definition CONTAINER_WEIGHT tag
+    };
+    contents: ItemInstance[];  // Items inside this container
+    is_open: boolean;
+    is_locked: boolean;
+  };
+}
+```
+
+**Example - Small Sack:**
+```jsonc
+{
+  "id": "inst_henry_sack_001",
+  "def_id": "small_sack",
+  "qty": 1,
+  "container_id": "container.henry_actor.leg_left",
+  "owner_ref": "actor.henry_actor",
+  "container_data": {
+    "capacity": { "max_slots": 10, "max_weight": 5000 },
+    "contents": [
+      { "id": "inst_xxx", "def_id": "iron_dagger", ... }
+    ],
+    "is_open": true,
+    "is_locked": false
+  }
+}
+```
+
+### Implementation Tasks
+
+**4.5.1 Update ItemInstance Interface**
+- File: `src/item_instances/store.ts`
+- Add `container_data?: ContainerData` to ItemInstance
+- ContainerData type includes capacity, contents, is_open, is_locked
+
+**4.5.2 Auto-Create Container Data**
+- File: `src/item_instances/store.ts` - `create_inline_item()`
+- When creating item, check if definition has CONTAINER tag
+- If yes, auto-create container_data with capacity from tags
+- Default: max_slots = 10, max_weight = 5000 (override via tags)
+
+**4.5.3 Update Transfer Logic**
+- File: `src/container_storage/store.ts`
+- Update `transfer_item_between_containers()`
+- Handle case where item has container_data (contents move with item)
+- Validate capacity when adding item with container_data (count item weight + contents weight)
+
+**4.5.4 Open Nested Containers**
+- File: `src/canvas_app/app_state.ts` - `open_container_module()`
+- Modify right-click handler to detect container items
+- If item has container_data, open it in ContainerModule
+- Container ID format: `item.{instance_id}`
+
+**4.5.5 Drag Into Nested Containers**
+- File: `src/mono_ui/modules/container_module.ts`
+- Handle drop on item slot
+- If dropped item is container, route into its container_data
+- Visual feedback: Container items show different border/color
+
+**4.5.6 Container Item Definition Updates**
+- File: `local_data/data_slot_1/items/small_sack.jsonc`
+- Add tags: `["CONTAINER", "CONTAINER_SLOTS:10", "CONTAINER_WEIGHT:5000"]`
+
+### Testing Checklist
+
+**Test 4.5.1: Item Creation**
+- [ ] Create small_sack item → has container_data field
+- [ ] Container capacity matches definition tags
+- [ ] container_data.contents starts empty
+
+**Test 4.5.2: Nested Container Opening**
+- [ ] Right-click equipped pouch → opens pouch container
+- [ ] ContainerModule shows pouch contents (not body slot contents)
+- [ ] Can add items to pouch
+
+**Test 4.5.3: Drag to Nested Container**
+- [ ] Open pouch (shows empty)
+- [ ] Drag torso armor from CharacterModule
+- [ ] Drop onto pouch slot → armor goes INTO pouch
+- [ ] Verify armor appears in pouch container_data.contents
+
+**Test 4.5.4: Nested Container Persistence**
+- [ ] Add items to pouch
+- [ ] Unequip pouch (drag to ground)
+- [ ] Equip pouch again
+- [ ] Items still in pouch
+
+**Test 4.5.5: Weight Calculation**
+- [ ] Pouch weight = pouch item weight + sum of contents weights
+- [ ] Transfer validates total weight, not just item weight
+
+---
+
 ## Phase 5: Visual Feedback & Particles
 
 ### 5.1 Extend Particle System for Global Use

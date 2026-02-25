@@ -6,6 +6,7 @@
  */
 
 import type { BodySlots } from "./body_slots.js";
+import type { Container } from "./container.js";
 
 /**
  * A place represents a bounded area within a region where interactions are local.
@@ -31,7 +32,10 @@ export type Place = {
   
   // Contents tracking (denormalized for quick access)
   contents: PlaceContents;
-  
+
+  // Container storage - inline containers for ground loot, furniture, etc.
+  containers?: Record<string, Container>;
+
   // Metadata
   is_public: boolean;            // Can random travelers enter?
   is_default: boolean;           // Is this the region's default entry place?

@@ -8,7 +8,7 @@ import type { SlotItem } from "../mono_ui/modules/container_module.js";
 
 console.log("=== CONTAINER MODULE TEST ===\n");
 
-// Create mock container with 4x3 grid (like the real one)
+// Create mock container with 12 slots (will calculate to 4x3 grid)
 const mock_container: Container = {
   id: "container.actor.test.sack",
   kind: "actor",
@@ -18,7 +18,6 @@ const mock_container: Container = {
   tags: [],
   is_open: true,
   is_locked: false,
-  grid_dimensions: { cols: 4, rows: 3 },
   capacity: { max_slots: 12, max_weight: 5000 },
 };
 

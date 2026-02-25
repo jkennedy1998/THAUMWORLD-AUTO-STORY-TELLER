@@ -23,11 +23,8 @@ import {
     save_item_def,
     type ItemDefinition 
 } from "../item_storage/store.js";
-import { 
-    create_item_instance, 
-    save_item_instance,
-    type ItemInstance 
-} from "../item_instances/store.js";
+import type { ItemInstance } from "../item_instances/store.js";
+import { rand_base32_rfc } from "../engine/log_store.js";
 import { 
     create_container,
     add_item_to_container,
@@ -37,8 +34,37 @@ import {
 import { load_actor, ensure_actor_dir } from "../actor_storage/store.js";
 import { load_npc, ensure_npc_dir } from "../npc_storage/store.js";
 import { ensure_dir_exists } from "../engine/log_store.js";
+import { find_empty_grid_position } from "../shared/migration.js";
+import { calculate_grid_dimensions } from "../types/container.js";
+import { debug_log } from "../shared/debug.js";
 
 const DEFAULT_SLOT = 0;
+
+/**
+ * Create an inline item instance (not saved to separate file)
+ * Items are created directly in container.contents arrays
+ */
+function make_instance_id(): string {
+    return `inst_${rand_base32_rfc(8)}`;
+}
+
+function create_inline_item(
+    def_id: string,
+    qty: number = 1,
+    owner_ref: string = "system",
+    container_id: string = "",
+    condition: ItemInstance["condition"] = "good"
+): ItemInstance {
+    return {
+        id: make_instance_id(),
+        def_id,
+        qty: Math.max(1, qty),
+        condition,
+        tags: [],
+        container_id,
+        owner_ref
+    };
+}
 
 interface GenerationResult {
     actors_processed: number;
@@ -91,22 +117,40 @@ async function generate_for_actor(slot: number, actor_id: string): Promise<{ con
     result.containers++;
     
     // Create starter items in the sack
+    // Track item index for grid coordinate assignment
+    let item_index = 0;
+    const sack_max_slots = sack_result.container.capacity?.max_slots || 10;
+    const { cols: sack_cols } = calculate_grid_dimensions(sack_max_slots);
+
     // Small amount of coin
-    const coin_instance = create_item_instance(slot, "coin", 10, owner_ref, sack_result.container.id);
-    add_item_to_container(slot, sack_result.container.id, coin_instance.id);
+    const coin_instance = create_inline_item("coin", 10, owner_ref, sack_result.container.id);
+    const coin_def = load_item_def(slot, "coin");
+    add_item_to_container(slot, sack_result.container.id, {
+        instance: coin_instance,
+        definition: coin_def.ok ? coin_def.item : { id: "coin", name: "Coin" },
+        grid_x: item_index % sack_cols,
+        grid_y: Math.floor(item_index / sack_cols)
+    });
+    item_index++;
     result.items++;
-    
+
     // Basic clothing
     const clothing_items = ["tunic", "pants", "shoes"];
     for (const clothing_id of clothing_items) {
-        const clothing_instance = create_item_instance(
-            slot, 
-            clothing_id, 
-            1, 
-            owner_ref, 
+        const clothing_instance = create_inline_item(
+            clothing_id,
+            1,
+            owner_ref,
             sack_result.container.id
         );
-        add_item_to_container(slot, sack_result.container.id, clothing_instance.id);
+        const clothing_def = load_item_def(slot, clothing_id);
+        add_item_to_container(slot, sack_result.container.id, {
+            instance: clothing_instance,
+            definition: clothing_def.ok ? clothing_def.item : { id: clothing_id, name: clothing_id },
+            grid_x: item_index % sack_cols,
+            grid_y: Math.floor(item_index / sack_cols)
+        });
+        item_index++;
         result.items++;
     }
     
@@ -176,8 +220,16 @@ async function generate_for_npc(slot: number, npc_id: string): Promise<{ contain
     
     // Add some coin to wallet (random amount 5-50)
     const coin_amount = Math.floor(Math.random() * 45) + 5;
-    const coin_instance = create_item_instance(slot, "coin", coin_amount, owner_ref, wallet_result.container.id);
-    add_item_to_container(slot, wallet_result.container.id, coin_instance.id);
+    const coin_instance = create_inline_item("coin", coin_amount, owner_ref, wallet_result.container.id);
+    const coin_def2 = load_item_def(slot, "coin");
+    const wallet_max_slots = wallet_result.container.capacity?.max_slots || 5;
+    const { cols: wallet_cols } = calculate_grid_dimensions(wallet_max_slots);
+    add_item_to_container(slot, wallet_result.container.id, {
+        instance: coin_instance,
+        definition: coin_def2.ok ? coin_def2.item : { id: "coin", name: "Coin" },
+        grid_x: 0 % wallet_cols,
+        grid_y: Math.floor(0 / wallet_cols)
+    });
     result.items++;
     
     // If NPC is a shopkeeper, create shop inventory container

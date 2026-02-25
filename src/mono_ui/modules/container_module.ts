@@ -5,6 +5,8 @@ import type { ItemDefinition } from "../../item_storage/store.js";
 import { debug_log, debug_warn } from "../../shared/debug.js";
 import type { ModuleGizmosConfig, GizmoState } from "../module_gizmos.js";
 import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area } from "../module_gizmos.js";
+import { get_container_grid } from "../../container_storage/grid_calculator.js";
+import { get_color_by_name } from "../colors.js";
 
 // Simple slot item type
 export type SlotItem = {
@@ -34,9 +36,15 @@ export type ContainerModuleConfig = {
   on_slot_click?: (slot_index: number) => void;
   on_drag_start?: (slot_index: number, item: ItemInstance, definition: ItemDefinition, container_id: string) => void;
   on_cross_module_drop?: (x: number, y: number) => Promise<boolean>;
-  on_drop?: (slot_index: number) => Promise<boolean>; // Returns true if drop was successful
+  on_drop?: (slot_index: number, grid_x?: number, grid_y?: number) => Promise<boolean>; // Returns true if drop was successful
   get_compatible_slots?: (item_def: ItemDefinition) => string[];
   on_slot_hover?: (slot_index: number, item: ItemInstance, definition: ItemDefinition | null) => void;
+  // Bidirectional highlighting: items highlighted when hovering body slots
+  get_highlighted_items?: () => Array<{ container_id: string; slot_index: number }>;
+  // Drag visualization
+  on_drag_move?: (x: number, y: number) => void;
+  render_drag_ghost?: (c: Canvas) => void;
+  on_drag_rejected?: () => void;
   border_rgb?: Rgb;
   bg_rgb?: Rgb;
   text_rgb?: Rgb;
@@ -59,8 +67,7 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
     const container = opts.get_container();
     if (!container) return -1;
 
-    const cols = container.grid_dimensions?.cols || 5;
-    const rows = container.grid_dimensions?.rows || 2;
+    const { cols, rows } = get_container_grid(container);
     
     // MUST MATCH the drawing logic exactly!
     // Drawing uses: slot_spacing_x = 2, slot_spacing_y = 1
@@ -89,8 +96,15 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
     return slot_index < cols * rows ? slot_index : -1;
   }
 
-  function draw_slot(c: Canvas, slot_x: number, slot_y: number, slot_item: SlotItem | undefined, is_hovered: boolean): void {
+  function draw_slot(c: Canvas, slot_x: number, slot_y: number, slot_item: SlotItem | undefined, is_hovered: boolean, slot_index: number): void {
     const text = opts.text_rgb ?? { r: 200, g: 200, b: 200 };
+    
+    // Check if this slot should be highlighted (bidirectional highlighting)
+    const highlighted_items = opts.get_highlighted_items?.() ?? [];
+    const container = opts.get_container();
+    const is_highlighted = container && highlighted_items.some(
+      h => h.container_id === container.id && h.slot_index === slot_index
+    );
     
     // Debug: log what we have
     if (slot_item?.instance && is_hovered) {
@@ -98,6 +112,16 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
       if (slot_item.definition) {
         debug_log(`[ContainerModule] Definition - name: ${slot_item.definition.name}, display_char: ${slot_item.definition.display_char}`);
       }
+    }
+    
+    // Determine color based on state: highlighted (green) > hovered (yellow) > normal
+    let item_rgb: Rgb;
+    if (is_highlighted) {
+      item_rgb = { r: 0, g: 255, b: 100 };  // Bright green for highlighted
+    } else if (is_hovered) {
+      item_rgb = { r: 255, g: 255, b: 100 };  // Yellow for hover
+    } else {
+      item_rgb = text;  // Normal text color
     }
     
     // Simple slot background - just the character position
@@ -120,9 +144,9 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
       
       c.set(slot_x, slot_y, { 
         char: display_char, 
-        rgb: is_hovered ? { r: 255, g: 255, b: 100 } : text, 
+        rgb: item_rgb, 
         style: "regular", 
-        weight_index: is_hovered ? 6 : 4 
+        weight_index: is_hovered || is_highlighted ? 6 : 4 
       });
       
       if (is_hovered) {
@@ -133,17 +157,17 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
       // Has instance but no definition - show "?"
       c.set(slot_x, slot_y, { 
         char: "?", 
-        rgb: { r: 255, g: 100, b: 100 }, 
+        rgb: is_highlighted ? { r: 0, g: 255, b: 100 } : { r: 255, g: 100, b: 100 }, 
         style: "regular", 
         weight_index: 4 
       });
     } else {
-      // Empty slot
+      // Empty slot - use medium gray from indexed color system for better visibility
       c.set(slot_x, slot_y, { 
         char: ".", 
-        rgb: { r: 40, g: 40, b: 40 }, 
+        rgb: is_highlighted ? { r: 0, g: 200, b: 0 } : get_color_by_name("medium_gray").rgb, 
         style: "regular", 
-        weight_index: 1 
+        weight_index: 2 
       });
     }
   }
@@ -163,8 +187,9 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
       
       // Debug logging - only when container changes
       if (container && container.id !== last_logged_container_id) {
+        const { cols, rows } = get_container_grid(container);
         debug_log(`[ContainerModule] Drawing container: ${container.id}`);
-        debug_log(`[ContainerModule] Grid: ${container.grid_dimensions?.cols}x${container.grid_dimensions?.rows}`);
+        debug_log(`[ContainerModule] Grid: ${cols}x${rows} (from ${container.capacity?.max_slots} slots)`);
         debug_log(`[ContainerModule] Slot items count: ${slots.length}`);
         debug_log(`[ContainerModule] Filled slots: ${slots.filter(s => s.instance).length}`);
         last_logged_container_id = container.id;
@@ -218,8 +243,7 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
       
       // Draw grid of slots
       if (container) {
-        const cols = container.grid_dimensions?.cols || 5;
-        const rows = container.grid_dimensions?.rows || 2;
+        const { cols, rows } = get_container_grid(container);
         
         // Use smaller spacing to fit more slots
         const slot_spacing_x = 2;  // Horizontal spacing between slots
@@ -235,7 +259,7 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
         
         // Debug grid size
         if (container.id !== last_logged_container_id) {
-          debug_log(`[ContainerModule] Drawing ${cols}x${rows} grid in area ${available_width}x${available_height}`);
+          debug_log(`[ContainerModule] Drawing ${cols}x${rows} grid (${container.capacity?.max_slots} slots) in area ${available_width}x${available_height}`);
           debug_log(`[ContainerModule] Start position: (${start_x}, ${start_y})`);
         }
         
@@ -252,7 +276,7 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
               const slot_item = slots.find(s => s.slot_index === slot_index);
               const is_hovered = slot_index === hover_slot_index;
               
-              draw_slot(c, slot_x, slot_y, slot_item, is_hovered);
+              draw_slot(c, slot_x, slot_y, slot_item, is_hovered, slot_index);
             }
           }
         }
@@ -267,6 +291,9 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
           c.set(msg_x + i, msg_y, { char, rgb: { r: 150, g: 0, b: 0 }, style: "regular", weight_index: 5 });
         }
       }
+      
+      // Render drag ghost if active
+      opts.render_drag_ghost?.(c);
     },
 
     OnGlobalKeyDown(e: KeyboardEvent): void {
@@ -423,10 +450,22 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
           debug_log(`[ContainerModule] Internal drop on slot ${slot_index}`);
           debug_log(`[ContainerModule] on_drop callback exists: ${!!opts.on_drop}`);
           
+          // Calculate grid coordinates from slot_index
+          const container = opts.get_container();
+          let grid_x: number | undefined;
+          let grid_y: number | undefined;
+          
+          if (container && container.capacity?.max_slots) {
+            const { cols } = get_container_grid(container);
+            grid_x = slot_index % cols;
+            grid_y = Math.floor(slot_index / cols);
+            debug_log(`[ContainerModule] Calculated grid coordinates: (${grid_x}, ${grid_y}) from slot ${slot_index}`);
+          }
+          
           // Notify parent via callback - it will handle the transfer
           if (opts.on_drop) {
-            debug_log(`[ContainerModule] Calling on_drop for slot: ${slot_index}`);
-            void opts.on_drop(slot_index).then((success: boolean) => {
+            debug_log(`[ContainerModule] Calling on_drop for slot: ${slot_index} at grid(${grid_x},${grid_y})`);
+            void opts.on_drop(slot_index, grid_x, grid_y).then((success: boolean) => {
               debug_log(`[ContainerModule] Drop ${success ? 'successful' : 'failed'} on slot ${slot_index}`);
             });
           } else {
@@ -434,6 +473,10 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
           }
         } else {
           debug_log(`[ContainerModule] Drop within container but not on a slot`);
+          // Drop inside module but not on valid slot - reject the drag
+          if (opts.on_drag_rejected) {
+            opts.on_drag_rejected();
+          }
         }
         return;
       }
@@ -479,6 +522,9 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
       // Track drag position for highlighting compatible slots in other modules
       // This is handled by the parent app_state which has access to both modules
       // We just ensure the drag state stays active
+      if (opts.on_drag_move) {
+        opts.on_drag_move(e.x, e.y);
+      }
       debug_log(`[ContainerModule] OnDragMove at (${e.x}, ${e.y})`);
     },
   };

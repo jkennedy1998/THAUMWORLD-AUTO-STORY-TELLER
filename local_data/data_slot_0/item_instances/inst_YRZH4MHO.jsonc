@@ -1,9 +1,0 @@
-{
-  "id": "inst_YRZH4MHO",
-  "def_id": "coin",
-  "qty": 10,
-  "condition": "good",
-  "tags": [],
-  "container_id": "container.default_actor.sack_default",
-  "owner_ref": "actor.default_actor"
-}

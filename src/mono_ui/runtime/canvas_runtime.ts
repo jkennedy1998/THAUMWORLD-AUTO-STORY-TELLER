@@ -21,6 +21,9 @@ export type CanvasRuntimeOptions = {
     weight_index_to_css?: readonly number[];
 
     modules: readonly Module[];
+    
+    // Called when a drag ends outside any module (for rejection feedback)
+    on_drag_end_outside?: (x: number, y: number) => void;
 };
 
 const DEFAULT_WEIGHT_INDEX_TO_CSS: readonly number[] = [100, 200, 300, 400, 500, 600, 700, 800] as const;
@@ -70,6 +73,8 @@ export class CanvasRuntime {
     private down_owner: Module | null = null;
     private down_tile: { x: number; y: number } | null = null;
     private dragging = false;
+    
+    private on_drag_end_outside: ((x: number, y: number) => void) | null = null;
 
     private readonly DBLCLICK_MS = 180;
     private readonly DBLCLICK_TILE_RADIUS = 1;
@@ -110,6 +115,7 @@ export class CanvasRuntime {
         this.base_letter_spacing_mult = opts.base_letter_spacing_mult;
         this.weight_index_to_css = opts.weight_index_to_css ?? DEFAULT_WEIGHT_INDEX_TO_CSS;
         this.modules = opts.modules;
+        this.on_drag_end_outside = opts.on_drag_end_outside ?? null;
 
         this.engine_canvas = create_canvas(this.grid_width, this.grid_height);
         this.key_sink = opts.key_sink ?? this.ensure_key_sink();
@@ -710,6 +716,10 @@ export class CanvasRuntime {
         this.canvas_el.addEventListener('mouseup', (ev) => {
             const t = this.mouse_to_tile(ev);
             if (!t) {
+                // Drag ended outside canvas - notify for rejection feedback
+                if (this.dragging && this.on_drag_end_outside) {
+                    this.on_drag_end_outside(-1, -1);
+                }
                 this.capture_owner = null;
                 this.down_owner = null;
                 this.down_tile = null;
@@ -733,6 +743,9 @@ export class CanvasRuntime {
                 top.OnDragEnd?.(
                     this.make_drag_event('drag_end', t.x, t.y, ev.buttons, this.engine_canvas.get(t.x, t.y)),
                 );
+            } else if (this.dragging && !top && this.on_drag_end_outside) {
+                // Drag ended outside any module - notify for rejection feedback
+                this.on_drag_end_outside(t.x, t.y);
             }
 
             if (!this.dragging && this.down_owner && target && this.down_owner === target) {

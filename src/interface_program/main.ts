@@ -25,7 +25,8 @@ import { travel_between_places } from "../travel/movement.js";
 import { load_npc } from "../npc_storage/store.js";
 import { load_place, list_places_in_region, save_place, create_basic_place } from "../place_storage/store.js";
 import { load_container, list_containers_for_owner, transfer_item_between_containers, get_ground_items, build_ground_container_id, get_or_create_scattered_container, list_scattered_containers, delete_scattered_container_if_empty } from "../container_storage/store.js";
-import { load_item_instance, update_item_instance_owner } from "../item_instances/store.js";
+import { find_empty_grid_position } from "../shared/migration.js";
+import { calculate_grid_dimensions } from "../types/container.js";
 import { load_item_def } from "../item_storage/store.js";
 import { emitTagChange } from "../shared/event_emitter.js";
 import type { PlaceConnection, PlaceItem } from "../types/place.js";
@@ -1535,20 +1536,16 @@ function start_http_server(log_path: string): void {
                 
                 for (const container of scattered_containers) {
                     for (const entry of container.contents) {
-                        const item_result = load_item_instance(slot, entry.item_instance_id);
-                        if (item_result.ok) {
-                            const item = item_result.instance;
-                            const position = container.position || 
-                                place.tile_grid?.default_entry || { x: 20, y: 20 };
-                            
-                            const place_item: PlaceItem = {
-                                item_ref: item.id,
-                                quantity: item.qty,
-                                tile_position: position
-                            };
-                            place.contents.items_on_ground.push(place_item);
-                            synced_count++;
-                        }
+                        const position = container.position || 
+                            place.tile_grid?.default_entry || { x: 20, y: 20 };
+                        
+                        const place_item: PlaceItem = {
+                            item_ref: entry.instance.id,
+                            quantity: entry.instance.qty,
+                            tile_position: position
+                        };
+                        place.contents.items_on_ground.push(place_item);
+                        synced_count++;
                     }
                 }
                 
@@ -1934,18 +1931,8 @@ function start_http_server(log_path: string): void {
                     return;
                 }
 
-                // Load full item details for contents
-                const contents = [];
-                for (const entry of container_result.container.contents) {
-                    const instance_result = load_item_instance(slot, entry.item_instance_id);
-                    if (instance_result.ok) {
-                        const def_result = load_item_def(slot, instance_result.instance.def_id);
-                        contents.push({
-                            instance: instance_result.instance,
-                            definition: def_result.ok ? def_result.item : null
-                        });
-                    }
-                }
+                // Contents are already in wrapped format {instance, definition}
+                const contents = container_result.container.contents;
                 
                 debug_log("API", `/api/container: Loaded ${container_id} with ${contents.length} items`);
                 res.writeHead(200, { "Content-Type": "application/json" });
@@ -1975,7 +1962,10 @@ function start_http_server(log_path: string): void {
             req.on("end", async () => {
                 try {
                     const data = JSON.parse(body);
-                    const { item_instance_id, from_container, to_container, slot = data_slot_number } = data;
+                    debug_log("DEBUG-GRID", `/api/transfer: Received request body:`, JSON.stringify(data, null, 2));
+                    const { item_instance_id, from_container, to_container, from_slot_index, to_slot_index, target_grid_x, target_grid_y, slot = data_slot_number } = data;
+
+                    debug_log("DEBUG-GRID", `/api/transfer: Parsed - target_grid_x=${target_grid_x}, target_grid_y=${target_grid_y}, typeof x=${typeof target_grid_x}, typeof y=${typeof target_grid_y}`);
 
                     if (!item_instance_id || !from_container || !to_container) {
                         res.writeHead(400, { "Content-Type": "application/json" });
@@ -1983,15 +1973,36 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    debug_log("API", `/api/transfer: Transferring ${item_instance_id} from ${from_container} to ${to_container}`);
+                    debug_log("API", `/api/transfer: Transferring ${item_instance_id} from ${from_container} to ${to_container}${target_grid_x !== undefined ? ` at (${target_grid_x},${target_grid_y})` : ''}`);
 
-                    const result = transfer_item_between_containers(slot, item_instance_id, from_container, to_container);
+                    debug_log("API", `=== TRANSFER START ===`);
+                    debug_log("API", `Item: ${item_instance_id}`);
+                    debug_log("API", `From: ${from_container} -> To: ${to_container}`);
+                    debug_log("API", `Target grid: (${target_grid_x}, ${target_grid_y})`);
+                    
+                    // FIXED: Arguments now in correct order - grid coordinates come before slot indices
+                    const result = transfer_item_between_containers(slot, item_instance_id, from_container, to_container, target_grid_x, target_grid_y, from_slot_index, to_slot_index);
 
                     if (result.ok) {
-                        debug_log("API", `/api/transfer: ${item_instance_id} ${from_container} -> ${to_container}`);
+                        debug_log("API", `=== TRANSFER SUCCESS ===`);
+                        debug_log("API", `${item_instance_id} moved ${from_container} -> ${to_container} at grid(${target_grid_x},${target_grid_y})`);
+                        
+                        // Verify the container was saved with new coordinates
+                        const verify_load = load_container(slot, to_container);
+                        if (verify_load.ok) {
+                            const moved_item = verify_load.container.contents.find((c: any) => c.instance.id === item_instance_id);
+                            if (moved_item) {
+                                debug_log("API", `✅ Verification: Item now at grid(${moved_item.grid_x},${moved_item.grid_y})`);
+                            } else {
+                                debug_log("API", `⚠️ Verification: Could not find item in destination container`);
+                            }
+                        }
+                        
                         res.writeHead(200, { "Content-Type": "application/json" });
-                        res.end(JSON.stringify({ ok: true, item_instance_id, from_container, to_container }));
+                        res.end(JSON.stringify({ ok: true, item_instance_id, from_container, to_container, grid_x: target_grid_x, grid_y: target_grid_y }));
                     } else {
+                        debug_log("API", `=== TRANSFER FAILED ===`);
+                        debug_log("API", `Error: ${result.error}`);
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: result.error }));
                     }
@@ -2029,20 +2040,15 @@ function start_http_server(log_path: string): void {
                 
                 for (const container of scattered_containers) {
                     for (const entry of container.contents) {
-                        const instance_result = load_item_instance(slot, entry.item_instance_id);
-                        if (instance_result.ok) {
-                            const instance = instance_result.instance;
-                            const def_result = load_item_def(slot, instance.def_id);
-                            items_with_positions.push({
-                                instance_id: instance.id,
-                                def_id: instance.def_id,
-                                name: def_result.ok ? def_result.item.name : instance.def_id,
-                                qty: instance.qty,
-                                condition: instance.condition,
-                                tile_position: container.position || { x: 20, y: 20 },
-                                container_id: container.id
-                            });
-                        }
+                        items_with_positions.push({
+                            instance_id: entry.instance.id,
+                            def_id: entry.instance.def_id,
+                            name: entry.definition.name || entry.instance.def_id,
+                            qty: entry.instance.qty,
+                            condition: entry.instance.condition,
+                            tile_position: container.position || { x: 20, y: 20 },
+                            container_id: container.id
+                        });
                     }
                 }
                 
@@ -2138,7 +2144,7 @@ function start_http_server(log_path: string): void {
                     
                     for (const container of scattered_containers) {
                         const has_item = container.contents.some(
-                            (entry: any) => entry.item_instance_id === item_instance_id
+                            (entry: any) => entry.instance.id === item_instance_id
                         );
                         if (has_item && container.position) {
                             target_container = container;
@@ -2183,17 +2189,28 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
+                    // Find empty position in sack
+                    const sack_max_slots = sack.capacity?.max_slots || sack.contents.length + 1;
+                    const { cols: sack_cols } = calculate_grid_dimensions(sack_max_slots);
+                    const sack_empty_pos = find_empty_grid_position(
+                        sack.contents,
+                        sack_cols,
+                        sack_max_slots
+                    ) || { x: 0, y: 0 }; // Default to (0,0) if full
+
                     // Transfer item from scattered container to actor's sack
                     const result = transfer_item_between_containers(
                         slot, 
                         item_instance_id, 
                         target_container.id, 
-                        sack.id
+                        sack.id,
+                        sack_empty_pos.x,
+                        sack_empty_pos.y
                     );
 
                     if (result.ok) {
-                        // Update item ownership
-                        update_item_instance_owner(slot, item_instance_id, `actor.${actor_id}`);
+                        // Item ownership is now implicit in entity.containers structure
+                        // No need to update separate item_instance files (inline storage)
                         
                         // Remove item from place.items_on_ground
                         if (place.contents.items_on_ground) {
@@ -2309,17 +2326,28 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
+                    // Find empty position in scattered container
+                    const ground_max_slots = scattered_container.capacity?.max_slots || scattered_container.contents.length + 1;
+                    const { cols: ground_cols } = calculate_grid_dimensions(ground_max_slots);
+                    const ground_empty_pos = find_empty_grid_position(
+                        scattered_container.contents,
+                        ground_cols,
+                        ground_max_slots
+                    ) || { x: 0, y: 0 }; // Default to (0,0) if full
+
                     // Transfer item from sack to scattered container
                     const result = transfer_item_between_containers(
                         slot, 
                         item_instance_id, 
                         sack.id, 
-                        scattered_container.id
+                        scattered_container.id,
+                        ground_empty_pos.x,
+                        ground_empty_pos.y
                     );
 
                     if (result.ok) {
-                        // Update item ownership to system (unowned on ground)
-                        update_item_instance_owner(slot, item_instance_id, "system");
+                        // Item ownership is implicit in container structure (inline storage)
+                        // No need to update separate item_instance files
                         
                         // Load place to add/update item in items_on_ground for rendering (using actor's actual place)
                         const place_result = load_place(slot, actual_place_id);
@@ -2329,9 +2357,9 @@ function start_http_server(log_path: string): void {
                                 place.contents = { npcs_present: [], actors_present: [], items_on_ground: [], features: [] };
                             }
                             
-                            // Get item details
-                            const item_result = load_item_instance(slot, item_instance_id);
-                            const qty = item_result.ok ? item_result.instance.qty : 1;
+                            // Get item details from the scattered container (wrapped format)
+                            const item_entry = scattered_container.contents.find((c: any) => c.instance.id === item_instance_id);
+                            const qty = item_entry ? item_entry.instance.qty : 1;
                             
                             // Add/update item in items_on_ground
                             const items_on_ground = place.contents.items_on_ground ?? [];

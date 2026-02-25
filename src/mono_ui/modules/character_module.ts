@@ -33,6 +33,10 @@ export type CharacterModuleConfig = {
   on_cross_module_drop?: (x: number, y: number) => Promise<boolean>; // Handle drops outside the module (unequip)
   on_slot_hover?: (slot_name: string | null, equipped_item: { instance: ItemInstance; definition: ItemDefinition } | null) => void; // Report hover state for debug display
   get_highlighted_slots?: () => string[]; // Slots to highlight as compatible targets
+  // Drag visualization
+  on_drag_move?: (x: number, y: number) => void;
+  render_drag_ghost?: (c: Canvas) => void;
+  on_drag_rejected?: () => void;
 
   // Styling
   border_rgb?: Rgb;
@@ -506,6 +510,9 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
         const available = Object.keys(body_slots);
         debug_log(`[CharacterModule] WARNING: No body slots drawn! Available:`, available);
       }
+      
+      // Render drag ghost if active
+      opts.render_drag_ghost?.(c);
     },
 
     OnPointerMove(e: PointerEvent): void {
@@ -564,12 +571,16 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       if (e.button === 2) {
         const equipped = opts.get_equipped_items().get(slot_name);
         if (equipped) {
-          // Check if equipped item is a container type
-          const is_container = equipped.definition.tags?.some(tag => 
+          // Check if equipped item has container_data (nested container)
+          if (equipped.instance.container_data) {
+            // Item has container_data - open the item's internal container
+            const nested_container_id = `item.${equipped.instance.id}`;
+            debug_log(`[CharacterModule] Right-clicked nested container item: ${equipped.definition.name} (ID: ${nested_container_id})`);
+            void opts.on_open_container?.(nested_container_id, slot_name);
+          } else if (equipped.definition.tags?.some(tag => 
             ['CONTAINER', 'BAG', 'SACK', 'POUCH', 'BACKPACK', 'WALLET', 'CHEST', 'BOX'].includes(tag.name.toUpperCase())
-          );
-          
-          if (is_container) {
+          )) {
+            // Legacy: Item is tagged as container but doesn't have container_data yet
             const container_id = `container.${opts.get_actor_id()}.${slot_name}`;
             debug_log(`[CharacterModule] Right-clicked container: ${container_id}`);
             void opts.on_open_container?.(container_id, slot_name);
@@ -663,6 +674,9 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       }
       
       // Normal drag move - can be used for panning body slot area in future
+      if (opts.on_drag_move) {
+        opts.on_drag_move(e.x, e.y);
+      }
       debug_log(`[CharacterModule] OnDragMove at (${e.x}, ${e.y})`);
     },
 
@@ -710,6 +724,10 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
         
         if (!slot_name) {
           debug_log(`[CharacterModule] Drop occurred outside any slot at (${e.x}, ${e.y})`);
+          // Drop inside module but not on valid slot - reject the drag
+          if (opts.on_drag_rejected) {
+            opts.on_drag_rejected();
+          }
           return;
         }
 

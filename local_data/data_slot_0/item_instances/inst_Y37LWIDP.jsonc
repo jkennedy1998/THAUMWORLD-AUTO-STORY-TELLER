@@ -1,9 +1,0 @@
-{
-  "id": "inst_Y37LWIDP",
-  "def_id": "coin",
-  "qty": 28,
-  "condition": "good",
-  "tags": [],
-  "container_id": "container.default_npc.wallet",
-  "owner_ref": "npc.default_npc"
-}
