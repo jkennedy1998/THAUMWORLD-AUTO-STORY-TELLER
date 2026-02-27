@@ -44,6 +44,7 @@
   },
   "exclude": [
     "vite.config.ts",
+    "vite.painter.config.ts",
     "dist",
     "node_modules",
     "scripts",

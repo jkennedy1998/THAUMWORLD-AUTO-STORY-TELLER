@@ -1,14 +1,25 @@
 /**
  * Log Viewer Utility
  *
- * View and manage game logs.
- * Usage: node scripts/view_logs.js [--latest] [--list] [--clean] [--slot=1]
+ * View and manage game and painter logs.
+ * Usage: node scripts/view_logs.js [--latest] [--list] [--clean] [--slot=1] [--mode=game|painter]
  */
 
 import fs from "fs";
 import path from "path";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
+import {
+  getDataSlotDir,
+  getLogDir,
+  formatDateLocal,
+  getLatestLogPath,
+  listLogDates,
+  listSessionFiles,
+  formatFileSize,
+  parseLatestLog,
+  findMostRecentSession,
+} from "../dist/launcher/log_utils.js";
 
 // Get __dirname in ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -19,101 +30,64 @@ const args = process.argv.slice(2);
 const show_latest = args.includes("--latest");
 const show_list = args.includes("--list") || args.length === 0;
 const do_clean = args.includes("--clean");
-const slot_arg = args.find(arg => arg.startsWith("--slot="));
+const slot_arg = args.find((arg) => arg.startsWith("--slot="));
+const mode_arg = args.find((arg) => arg.startsWith("--mode="));
 const data_slot = slot_arg ? parseInt(slot_arg.split("=")[1]) : 1;
+const mode = mode_arg ? mode_arg.split("=")[1] : "game";
+
+if (mode !== "game" && mode !== "painter") {
+  console.error(`❌ Invalid mode: ${mode}. Use 'game' or 'painter'.`);
+  process.exit(1);
+}
 
 // Get paths
 const data_slot_dir = path.join(__dirname, "..", "local_data", `data_slot_${data_slot}`);
-const logs_base = path.join(data_slot_dir, "logs");
+const logs_base = path.join(
+  data_slot_dir,
+  mode === "game" ? "logs" : "logs_ascii_painter"
+);
 
-function format_date(date_str) {
+function formatDateForDisplay(date_str) {
   const date = new Date(date_str);
   return date.toLocaleDateString("en-US", {
     weekday: "short",
     year: "numeric",
     month: "short",
-    day: "numeric"
+    day: "numeric",
   });
 }
 
-function format_file_size(bytes) {
-  if (bytes < 1024) return `${bytes}B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
-}
-
-function get_log_files() {
-  if (!fs.existsSync(logs_base)) {
-    return [];
-  }
-
+function getLogFiles() {
+  const dates = listLogDates(data_slot, mode);
   const result = [];
-  const dates = fs.readdirSync(logs_base);
 
   for (const date of dates) {
-    const date_dir = path.join(logs_base, date);
-    const stats = fs.statSync(date_dir);
+    const logDir = path.join(logs_base, date);
+    const files = listSessionFiles(logDir);
 
-    if (stats.isDirectory()) {
-      const files = fs.readdirSync(date_dir)
-        .filter(f => f.endsWith(".log") && !f.startsWith("latest"))
-        .map(f => {
-          const file_path = path.join(date_dir, f);
-          const file_stats = fs.statSync(file_path);
-          return {
-            name: f,
-            path: file_path,
-            date: date,
-            size: file_stats.size,
-            modified: file_stats.mtime
-          };
-        })
-        .sort((a, b) => b.modified - a.modified);
-
-      if (files.length > 0) {
-        result.push({ date, files });
-      }
+    if (files.length > 0) {
+      result.push({
+        date,
+        files: files.map((f) => ({
+          name: f.name,
+          path: f.path,
+          date: date,
+          size: f.size,
+          modified: f.mtime,
+        })),
+      });
     }
   }
 
-  return result.sort((a, b) => b.date.localeCompare(a.date));
+  return result;
 }
 
-function get_latest_log() {
-  const today = new Date().toISOString().split("T")[0];
-  const today_dir = path.join(logs_base, today);
-
-  if (!fs.existsSync(today_dir)) {
-    return null;
-  }
-
-  const latest_path = path.join(today_dir, "latest.log");
-
-  if (!fs.existsSync(latest_path)) {
-    return null;
-  }
-
-  try {
-    // Check if it's a symlink
-    const stats = fs.lstatSync(latest_path);
-    if (stats.isSymbolicLink()) {
-      return fs.readlinkSync(latest_path);
-    }
-
-    // It's a reference file
-    const content = fs.readFileSync(latest_path, "utf-8");
-    const match = content.match(/CURRENT_LOG=(.+)/);
-    if (match && match[1]) {
-      return match[1].trim();
-    }
-  } catch (err) {
-    console.error("Error reading latest log:", err.message);
-  }
-
-  return null;
+function getLatestLog() {
+  // Use shared utility with fallback logic
+  return getLatestLogPath(data_slot, mode);
 }
 
-function clean_old_logs(keep_days = 30) {
+function cleanOldLogs(keep_days = 30) {
   if (!fs.existsSync(logs_base)) {
     console.log("No logs directory found.");
     return 0;
@@ -121,7 +95,7 @@ function clean_old_logs(keep_days = 30) {
 
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - keep_days);
-  const cutoff_str = cutoff.toISOString().split("T")[0];
+  const cutoff_str = formatDateLocal(cutoff);
 
   let removed = 0;
   let total_size = 0;
@@ -149,7 +123,9 @@ function clean_old_logs(keep_days = 30) {
   }
 
   if (removed > 0) {
-    console.log(`\n✅ Cleaned ${removed} old log directories (${format_file_size(total_size)})`);
+    console.log(
+      `\n✅ Cleaned ${removed} old log directories (${formatFileSize(total_size)})`
+    );
   } else {
     console.log("✅ No old logs to clean.");
   }
@@ -157,7 +133,7 @@ function clean_old_logs(keep_days = 30) {
   return removed;
 }
 
-function open_log_file(file_path) {
+function openLogFile(file_path) {
   const platform = process.platform;
   let command;
 
@@ -173,22 +149,48 @@ function open_log_file(file_path) {
   spawn(command, [file_path], { detached: true, stdio: "ignore" });
 }
 
+function showUsage() {
+  console.log("📊 THAUMWORLD Log Viewer");
+  console.log("");
+  console.log("Usage: node scripts/view_logs.js [options]");
+  console.log("");
+  console.log("Options:");
+  console.log("  --latest          Open the most recent log file");
+  console.log("  --list            List all log files (default)");
+  console.log("  --clean           Remove logs older than 30 days");
+  console.log("  --slot=N          Use data slot N (default: 1)");
+  console.log("  --mode=game       View game logs (default)");
+  console.log("  --mode=painter    View painter logs");
+  console.log("");
+  console.log("Examples:");
+  console.log("  node scripts/view_logs.js --latest");
+  console.log("  node scripts/view_logs.js --slot=2 --mode=painter");
+  console.log("  node scripts/view_logs.js --clean");
+}
+
+// Check for help
+if (args.includes("--help") || args.includes("-h")) {
+  showUsage();
+  process.exit(0);
+}
+
 // Main logic
 console.log("📊 THAUMWORLD Log Viewer");
 console.log(`💾 Data slot: ${data_slot}`);
+console.log(`🎨 Mode: ${mode}`);
 console.log("");
 
 if (do_clean) {
   console.log("🧹 Cleaning old logs (keeping last 30 days)...\n");
-  clean_old_logs(30);
+  cleanOldLogs(30);
   process.exit(0);
 }
 
 if (show_latest) {
-  const latest = get_latest_log();
+  const latest = getLatestLog();
   if (latest) {
     console.log(`Latest log: ${latest}`);
-    open_log_file(latest);
+    openLogFile(latest);
   } else {
     console.log("❌ No latest log found. Is the game running?");
   }
@@ -196,11 +198,15 @@ if (show_latest) {
 }
 
 if (show_list) {
-  const logs = get_log_files();
+  const logs = getLogFiles();
 
   if (logs.length === 0) {
     console.log("📭 No logs found.");
-    console.log("   Run the game first with: npm run launch");
+    console.log(
+      mode === "game"
+        ? "   Run the game first with: npm run launch"
+        : "   Run the painter first with: npm run dev:ascii"
+    );
     process.exit(0);
   }
 
@@ -214,10 +220,12 @@ if (show_list) {
     }
   }
 
-  console.log(`📁 Found ${total_files} log files (${format_file_size(total_size)})\n`);
+  console.log(
+    `📁 Found ${total_files} log files (${formatFileSize(total_size)})\n`
+  );
 
   // Show latest
-  const latest = get_latest_log();
+  const latest = getLatestLog();
   if (latest) {
     console.log(`📝 Latest log: ${path.basename(latest)}`);
     console.log(`   Path: ${latest}\n`);
@@ -227,14 +235,22 @@ if (show_list) {
   console.log("📅 Recent logs:");
   const recent = logs.slice(0, 3);
   for (const day of recent) {
-    console.log(`\n  ${format_date(day.date)} (${day.files.length} files):`);
+    console.log(`\n  ${formatDateForDisplay(day.date)} (${day.files.length} files):`);
 
     // Show main session logs only
-    const sessions = day.files.filter(f => f.name.match(/session_\d+_\d+\.log$/));
+    // FIXED: Updated regex to accept alphanumeric suffixes
+    const sessions = day.files.filter((f) =>
+      f.name.match(/^session_\d+_[a-z0-9]+\.log$/)
+    );
     for (const file of sessions.slice(0, 3)) {
-      const time = file.name.match(/_(\d{6})\.log$/);
-      const time_str = time ? `${time[1].substring(0, 2)}:${time[1].substring(2, 4)}:${time[1].substring(4, 6)}` : "";
-      console.log(`    📄 ${time_str} - ${format_file_size(file.size)}`);
+      const time = file.name.match(/session_(\d{13})/);
+      let time_str = "";
+      if (time) {
+        const timestamp = parseInt(time[1]);
+        const date = new Date(timestamp);
+        time_str = date.toTimeString().split(" ")[0];
+      }
+      console.log(`    📄 ${time_str} - ${formatFileSize(file.size)}`);
     }
 
     if (day.files.length > 3) {
@@ -243,6 +259,7 @@ if (show_list) {
   }
 
   console.log("\n💡 Tips:");
-  console.log("   npm run logs:view -- --latest    Open latest log");
-  console.log("   npm run logs:clean               Remove old logs");
+  console.log("   npm run logs:view -- --latest       Open latest log");
+  console.log("   npm run logs:view -- --mode=painter View painter logs");
+  console.log("   npm run logs:clean                  Remove old logs");
 }

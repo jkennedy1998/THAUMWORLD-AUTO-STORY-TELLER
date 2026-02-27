@@ -1,28 +1,70 @@
 import { CanvasRuntime } from '../mono_ui/runtime/canvas_runtime.js';
+import type { Module } from '../mono_ui/types.js';
 import { APP_CONFIG, create_app_state } from './app_state.js';
+import { PAINTER_CONFIG, create_painter_app_state } from './painter_app_state.js';
+
+// Detect if we're in painter mode (set by preload script before page loads)
+const IS_PAINTER_MODE = (window as any).electronAPI?.appMode === 'ascii_painter';
 
 const el = document.getElementById('mono_canvas') as HTMLCanvasElement | null;
 if (!el) throw new Error('mono_canvas element not found');
 
-const { modules, start_window_feed_polling, module_registry, on_drag_end_outside } = create_app_state();
+let modules: readonly Module[];
+let start_window_feed_polling: (interval_ms: number) => void;
+let module_registry: any;
+let on_drag_end_outside: ((x: number, y: number) => void) | undefined;
+
+if (IS_PAINTER_MODE) {
+    // PAINTER MODE
+    console.log('🎨 Initializing ASCII Painter...');
+    const painter_state = create_painter_app_state();
+    modules = painter_state.modules;
+    module_registry = painter_state.module_registry;
+    start_window_feed_polling = () => {}; // No polling needed for painter
+    on_drag_end_outside = undefined;
+    
+    // Expose painter API globally
+    (window as any).painter = {
+        export: painter_state.export_grid,
+        import: painter_state.import_grid,
+        clear: painter_state.clear_canvas,
+        save: painter_state.save_to_file,
+        load: painter_state.load_from_file,
+        new_canvas: painter_state.new_canvas,
+        export_text: painter_state.export_as_text,
+        filename: () => painter_state.current_filename
+    };
+} else {
+    // GAME MODE
+    console.log('🎮 Initializing Game...');
+    const game_state = create_app_state();
+    modules = game_state.modules;
+    start_window_feed_polling = game_state.start_window_feed_polling;
+    module_registry = game_state.module_registry;
+    on_drag_end_outside = game_state.on_drag_end_outside;
+}
+
+const config = IS_PAINTER_MODE ? PAINTER_CONFIG : APP_CONFIG;
 
 const runtime = new CanvasRuntime({
     canvas: el,
-    grid_width: APP_CONFIG.grid_width,
-    grid_height: APP_CONFIG.grid_height,
-    font_family: APP_CONFIG.font_family,
-    base_font_size_px: APP_CONFIG.base_font_size_px,
-    base_line_height_mult: APP_CONFIG.base_line_height_mult,
-    base_letter_spacing_mult: APP_CONFIG.base_letter_spacing_mult,
-    weight_index_to_css: APP_CONFIG.weight_index_to_css,
+    grid_width: config.grid_width,
+    grid_height: config.grid_height,
+    font_family: config.font_family,
+    base_font_size_px: config.base_font_size_px,
+    base_line_height_mult: config.base_line_height_mult,
+    base_letter_spacing_mult: config.base_letter_spacing_mult,
+    weight_index_to_css: config.weight_index_to_css,
     modules,
     on_drag_end_outside,
 });
 
-// Subscribe to module registry changes to update runtime when modules are added/removed
-module_registry.subscribe(() => {
-    runtime.set_modules(module_registry.get_all());
-});
+// Subscribe to module registry changes
+if (module_registry) {
+    module_registry.subscribe(() => {
+        runtime.set_modules(module_registry.get_all());
+    });
+}
 
 type TextureFilterEls = {
     disp_wobble: HTMLElement;
@@ -47,8 +89,6 @@ function update_texture_filter_for_scale(scale: number): void {
     const s = Number.isFinite(scale) ? Math.max(0.25, Math.min(6.0, scale)) : 1.0;
     const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
-    // Keep deformation readable at larger UI scales by scaling amplitude up
-    // while scaling frequencies down (larger kernels).
     const wobble_scale = clamp(7.5 * s, 5.0, 24.0);
     const texture_scale = clamp(4.0 * s, 2.5, 18.0);
     const wobble_freq = clamp(0.0065 / s, 0.002, 0.02);
@@ -99,12 +139,10 @@ function load_saved_ui_scale(): number {
 }
 
 async function boot() {
-    // Ensure the font is loaded before the first `resize_to_grid()`.
-    // Otherwise we measure fallback glyph widths and the grid geometry is wrong.
     const saved_scale = load_saved_ui_scale();
     if ((document as any).fonts?.load) {
         try {
-            await (document as any).fonts.load(`${APP_CONFIG.base_font_size_px * saved_scale}px "${APP_CONFIG.font_family}"`);
+            await (document as any).fonts.load(`${config.base_font_size_px * saved_scale}px "${config.font_family}"`);
             await (document as any).fonts.ready;
         } catch {
             // best-effort
@@ -115,7 +153,6 @@ async function boot() {
     update_texture_filter_for_scale(saved_scale);
     update_background_for_scale(saved_scale);
 
-    // When UI scale changes (hotkeys), keep the SVG deformation tuned.
     try {
         window.addEventListener('thaumworld_ui_scale', (ev: any) => {
             const next = Number(ev?.detail?.scale);
@@ -127,7 +164,6 @@ async function boot() {
         // ignore
     }
 
-    // Keep the background dot grid locked to the canvas.
     try {
         window.addEventListener('thaumworld_ui_pan', (ev: any) => {
             const pan_x_px = Number(ev?.detail?.pan_x_px);
@@ -140,12 +176,13 @@ async function boot() {
         // ignore
     }
 
-    start_window_feed_polling(1000);
+    if (!IS_PAINTER_MODE) {
+        start_window_feed_polling(1000);
+    }
+    
     runtime.start();
 
-    // Texture deformation animation (12fps feel).
-    // NOTE: do NOT change turbulence seeds per-frame (reads like static).
-    // Instead, keep seeds stable and animate the noise field via offset.
+    // Texture deformation animation
     const wobble = document.getElementById('uiOffsetWobble');
     const texture = document.getElementById('uiOffsetTexture');
     if (wobble && texture) {
@@ -155,7 +192,6 @@ async function boot() {
         let tx = 0;
         let ty = 0;
 
-        // Bounded random-walk -> "paper breathing" rather than drifting forever.
         const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
         const step = (max_step: number) => (Math.random() * 2 - 1) * max_step;
 
@@ -173,11 +209,8 @@ async function boot() {
             const wobble_bound = 9 * s;
             const texture_bound = 20 * s;
 
-            // Wobble: gentle, mostly vertical.
             wx = clamp(wx + step(0.6 * s), -wobble_bound, wobble_bound);
             wy = clamp(wy + step(1.2 * s), -wobble_bound, wobble_bound);
-
-            // Texture: slightly more active.
             tx = clamp(tx + step(1.4 * s), -texture_bound, texture_bound);
             ty = clamp(ty + step(1.4 * s), -texture_bound, texture_bound);
 

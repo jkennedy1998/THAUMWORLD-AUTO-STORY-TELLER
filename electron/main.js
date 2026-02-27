@@ -2,14 +2,22 @@ import { app, BrowserWindow, ipcMain } from 'electron';
 import { readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
-const DEV_URL = 'http://localhost:5173';
+// Determine which mode we're in
+const IS_PAINTER_MODE = process.env.THAUM_APP_MODE === 'ascii_painter';
+
+// Use different ports for game vs painter so they can run simultaneously
+const DEV_URL = IS_PAINTER_MODE 
+    ? 'http://localhost:5174'  // Painter port
+    : 'http://localhost:5173'; // Game port
 
 function create_window() {
     console.log('[Electron] Creating window...');
+    console.log(`[Electron] Mode: ${IS_PAINTER_MODE ? 'ASCII Painter' : 'Game'}`);
+    console.log(`[Electron] Loading URL: ${DEV_URL}`);
     
     const win = new BrowserWindow({
-        width: 1200,
-        height: 800,
+        width: 1400,
+        height: 900,
         autoHideMenuBar: true,
         webPreferences: {
             contextIsolation: true,
@@ -17,6 +25,9 @@ function create_window() {
             preload: join(process.cwd(), 'electron', 'preload.js'),
         },
     });
+
+    // Mode is set via preload script before page loads
+    // Preload reads process.env.THAUM_APP_MODE and exposes it as window.electronAPI.appMode
 
     // Add error handlers
     win.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
@@ -32,7 +43,6 @@ function create_window() {
         console.log(`[Renderer ${levelName}] ${message}`);
     });
 
-    console.log('[Electron] Loading URL:', DEV_URL);
     win.loadURL(DEV_URL).catch(err => {
         console.error('[Electron] Failed to load URL:', err);
     });

@@ -34,9 +34,14 @@
     "dev:logs": "node scripts/dev_with_logs.js",
     "dev:logs:slot1": "node scripts/dev_with_logs.js --slot=1",
     "logs:view": "node scripts/view_logs.js",
+    "logs:view:painter": "node scripts/view_logs.js --mode=painter",
     "logs:clean": "node scripts/view_logs.js --clean",
     "logs:validate": "node scripts/validate_logs.js",
+    "logs:validate:painter": "node scripts/validate_logs.js --mode=painter",
     "logs:fix": "node scripts/validate_logs.js --fix",
+    "logs:fix:painter": "node scripts/validate_logs.js --fix --mode=painter",
+    "dev:ascii": "node scripts/dev_ascii.js",
+    "dev:ascii:logs": "node scripts/dev_ascii.js",
     "build:exe": "node scripts/build_exe.js"
   },
   "repository": {

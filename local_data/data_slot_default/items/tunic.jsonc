@@ -13,6 +13,12 @@
       "name": "CLOTHING",
       "mag": 1,
       "meta": []
+    },
+    {
+      "name": "GARB",
+      "mag": 1,
+      "meta": ["torso"],
+      "info": [5]
     }
   ],
   "stackable": false,

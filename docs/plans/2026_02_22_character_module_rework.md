@@ -3,9 +3,11 @@
 **Status:** Planning  
 **Priority:** High  
 **Created:** 2026-02-22  
+**Updated:** 2026-02-27  
 **Related Plans:** 
 - 2026_02_19_inventory_movement_plan.md (Phases 7.5, 8, 9)
 - 2026_02_14_item_system_unification.md
+- 2026_02_26_pickup_and_drop.md
 
 ---
 
@@ -13,7 +15,20 @@
 
 Refactor the CharacterModule to provide a comprehensive character inspection interface with three distinct areas: a container sidebar, a pannable body slot view, and a scrollable status bar section. This rework unifies character data display and provides access to all stored items through equipped containers.
 
-**Critical Design Principle:** Characters and NPCs do NOT have a "main inventory." All items must be stored in equipped containers (bags, sacks, pouches) that are worn on body slots. The sidebar displays these equipped containers only.
+**Critical Design Principle:** Characters and NPCs do NOT have a "main inventory." All items must be stored in equipped containers (bags, sacks, pouches) that are worn on body slots, held in hands, or equipped as armor/garb. The sidebar displays these equipped containers only.
+
+**Architecture Status (2026-02-27):**
+
+**CURRENT (Working Now):** `valid_body_slots` array on ItemDefinition
+- Items specify compatible slots: `valid_body_slots: ["hand_left", "hand_right"]`
+- One item per body slot (simple structure)
+- Working system with drag-drop, stacking, swapping
+
+**FUTURE (Phase 9 - Planned):** Tag-Based Slot System  
+- ARMOR/GARB/TOOL tags with body slot metadata
+- Each body part has 3 slot types: ARMOR (1 max), GARB (∞), TOOL (1 per hand)
+- Enables: multiple rings per hand, layered clothing, distinct tool vs equipment slots
+- **⚠️ NOT YET IMPLEMENTED** - requires major refactoring
 
 ---
 
@@ -21,20 +36,37 @@ Refactor the CharacterModule to provide a comprehensive character inspection int
 
 ### What's Working
 - ✅ Basic CharacterModule structure exists
-- ✅ Body slots render with slot names and equipped items
 - ✅ Weight bar visualization at bottom
 - ✅ Gizmos (X/#) implemented for close/move
-- ✅ Drag-and-drop equip/unequip functional
+- ✅ Drag-and-drop equip/unequip functional (OLD system)
 - ✅ Module positioning and registry system
+- ✅ Right-click container opening system (Phase 7)
+- ✅ Multi-instance ContainerModule support
+- ✅ Drag-and-drop routing to target modules (Phase 8)
 
-### What's Missing
+### What's Missing / Needs Update for Tag-Based System
+- ❌ Tag-based slot system (ARMOR/GARB/TOOL) instead of `valid_body_slots`
+- ❌ Separate slot types per body part (armor/garb/tool)
+- ❌ Hand slot bug: Items mirror to both visual slots (need 3 separate slots)
 - ❌ Container sidebar showing EQUIPPED containers only (not all body slots)
-- ❌ Logic to filter equipped items by container type
+- ❌ Logic to filter equipped items by container type (using CONTAINER tag)
 - ❌ Health bar display
 - ❌ Pan support for body slot area (for large creatures)
 - ❌ Scrollable status section for extensibility
 - ❌ Consistent border styling across modules
 - ❌ Name truncation for long character names
+- ❌ "Main container" selection for pickup routing
+
+### Known Issues (To Fix)
+- **Hand Slot Mirroring Bug:** Equipping to hand_left shows item in both visual hand slots
+  - Root cause: Both red (tool) and blue (equipment) visuals map to same body_slot
+  - Fix: Implement separate armor/garb/tool slot arrays per hand
+  - See Phase 9: Tag-Based Equipment Slot System
+
+- **Sack Detection in Pickup/Drop:** APIs assume actors have sacks
+  - Current: `find_actor_sack()` searches body_slots for items with container_data
+  - Better: Use "main container" selection + fallback to dominant hand tool slot
+  - See pickup_and_drop.md for implementation notes
 
 ---
 
@@ -353,12 +385,403 @@ Uses box-drawing characters:
 
 ---
 
+## Phase 9: Tag-Based Equipment Slot System (NEW - PLANNED)
+
+**Status:** Design Phase  
+**⚠️ NOT YET IMPLEMENTED**  
+**Goal:** Replace `valid_body_slots` array with ARMOR/GARB/TOOL tags that specify body slot compatibility
+
+**Current Working System:** `valid_body_slots` array on ItemDefinition
+- Simple but functional
+- One item per body slot
+- Compatibility: `item_def.valid_body_slots.includes(target_slot)`
+
+**Future System:** Tag-based with ARMOR/GARB/TOOL
+- More flexible
+- Multiple items per slot (garb)
+- Better categorization for actions
+- Requires significant refactoring
+
+---
+
+### Current System (Working Now)
+
+**Body Slot Structure:**
+```typescript
+body_slots: {
+  hand_left: { item_instance_id: "inst_sword_001" },  // Max 1 item
+  hand_right: { item_instance_id: "inst_torch_001" }, // Max 1 item
+  head: { item_instance_id: "inst_helmet_001" },      // Max 1 item
+  torso: { item_instance_id: "inst_tunic_001" },      // Max 1 item
+  leg_left: { item_instance_id: "inst_pants_001" },   // Max 1 item
+  leg_right: { item_instance_id: "inst_sack_001" }    // Max 1 item (container)
+}
+```
+
+**Compatibility Check:**
+```typescript
+// ItemDefinition.valid_body_slots: string[]
+const can_equip = item_def.valid_body_slots?.includes(target_slot_name);
+// Example: sword.valid_body_slots = ["hand_left", "hand_right"]
+```
+
+**Known Bug:** Hand slot visual mirroring
+- CharacterModule shows 2 positions per hand (red + blue)
+- Both positions display the same equipped item
+- Visual only - actual data only has 1 item per hand
+
+---
+
+### Proposed Future System: Tag-Based Slot Types
+
+Each **body part** would have **3 functional slot types**:
+
+```
+Body Part (e.g., Left Hand)
+├─ [ARMOR]  Max 1  ← Requires ARMOR tag + body_slot match
+├─ [GARB]   Max ∞  ← Requires GARB tag + body_slot match
+└─ [TOOL]   Max 1  ← Requires TOOL tag (any body part)
+```
+
+#### Slot Type Definitions
+
+| Slot Type | Tag | Max Items | Body Slot Match | Purpose |
+|-----------|-----|-----------|-----------------|---------|
+| **ARMOR** | `ARMOR` | 1 | Yes | Protection (helmet, chest plate, gauntlet) |
+| **GARB** | `GARB` | ∞ | Yes | Clothing, jewelry, accessories (rings, tunics, cloaks) |
+| **TOOL** | `TOOL` | 1 | No | Weapons, tools, held items (sword, torch, potion) |
+
+**Key Insight:** TOOL slots don't require body slot matching because tools are "held", not "worn". Armor and garb must match the body part (can't wear a helmet on your hand).
+
+#### Body Part Slot Type Mapping
+
+Each body part has a specific set of available slot types:
+
+| Body Part | Armor | Garb | Tool | Notes |
+|-----------|-------|------|------|-------|
+| **Head** | ✓ | ✓ | | Helmets, hats, masks, headbands |
+| **Torso** | ✓ | ✓ | | Chest armor, tunics, shirts, cloaks |
+| **Hand Left** | ✓ | ✓ | ✓ | Gauntlets/bracers, rings/bracelets, weapons/tools |
+| **Hand Right** | ✓ | ✓ | ✓ | Gauntlets/bracers, rings/bracelets, weapons/tools |
+| **Leg Left** | ✓ | ✓ | | Greaves/leggings, pants, boots, accessories |
+| **Leg Right** | ✓ | ✓ | | Greaves/leggings, pants, boots, accessories |
+
+**Design Rationale:**
+- **Head/Torso/Legs**: No tool slots - these are "worn" body parts. Items here are passive (armor/clothing).
+- **Hands**: Have tool slots - hands are "active" and used to hold/wield items (weapons, torches, potions).
+- **Garb slots**: Hold clothing, accessories, and containers (sacks, pouches, bags worn on legs/hands).
+- **Initial Testing**: Use 1 item per garb slot for simplicity (support for multiple items can be added later).
+
+#### Tag Data Structure
+
+Tags already support metadata storage. Extend ARMOR and GARB tags:
+
+```jsonc
+// Armor tag with body slot specification
+{
+  "name": "ARMOR",
+  "mag": 1,
+  "meta": [
+    { "key": "body_slot", "value": "hand_left" },  // Which slot this armor fits
+    { "key": "armor_value", "value": 5 },           // Protection amount
+    { "key": "layer", "value": "outer" }            // For layering system (future)
+  ]
+}
+
+// Garb tag with body slot specification
+{
+  "name": "GARB", 
+  "mag": 1,
+  "meta": [
+    { "key": "body_slot", "value": "hand_left" },   // Which slot this clothing fits
+    { "key": "style", "value": "ornate" },          // Visual/style property
+    { "key": "layer", "value": "base" }             // For layering system (future)
+  ]
+}
+
+// Tool tag (no body slot needed - tools are held)
+{
+  "name": "TOOL",
+  "mag": 1,
+  "meta": [
+    { "key": "tool_type", "value": "weapon" },      // Classification
+    { "key": "damage_dice", "value": "1d6" }        // Mechanical property
+  ]
+}
+```
+
+#### Data Structure Changes
+
+**OLD:**
+```typescript
+body_slots: {
+  hand_left: { item_instance_id: "inst_sword_001" }
+}
+```
+
+**NEW:**
+```typescript
+body_slots: {
+  hand_left: {
+    armor: null,                          // Max 1
+    garb: ["inst_ring_001", "inst_bracelet_001"],  // Array, max ∞
+    tool: "inst_sword_001"               // Max 1
+  }
+}
+```
+
+#### Visual Rendering by Slot Type
+
+| Slot Type | Color | Display | Example |
+|-----------|-------|---------|---------|
+| **ARMOR** | Blue | Single item char | `H` for helmet |
+| **GARB** | Green | Multiple items, stacked vertically | `r` `b` for ring+bracelet |
+| **TOOL** | Red | Single item char | `/` for sword |
+
+**Hand Slot Rendering (Fixed Bug):**
+```
+Left Hand (hand_left):
+┌──────────┐
+│ [Blue A] │ ← ARMOR slot: gauntlet/bracer
+│ [Green G]│ ← GARB slot: ring(s)
+│ [Green G]│ ← GARB slot: bracelet
+│ [Red T]  │ ← TOOL slot: sword/torch/empty
+└──────────┘
+```
+
+#### Equip Logic Flow
+
+1. **Check Item Tags:** Does item have ARMOR, GARB, or TOOL tag?
+2. **Check Body Slot Match:** (Skip for TOOL tags)
+   - ARMOR/GARB: Does tag's `body_slot` meta match target slot?
+3. **Check Slot Capacity:**
+   - ARMOR: Is slot empty? (Max 1)
+   - GARB: Always accepts (Max ∞)
+   - TOOL: Is slot empty? (Max 1)
+4. **Execute Equip:** Add item to appropriate slot array
+
+#### Implementation Requirements
+
+**⚠️ MAJOR REFACTORING REQUIRED**
+
+To implement this system, the following changes are needed:
+
+**1. Tag Definitions** (`local_data/data_slot_default/tag_definitions.jsonc`)
+```jsonc
+// ADD THESE TAGS:
+{
+  "name": "ARMOR",
+  "description": "Protection equipment",
+  "scope": ["ITEM"],
+  "effects": [],
+  "meta_schema": {
+    "body_slot": "string",      // e.g., "head", "torso", "hand"
+    "armor_value": "number",    // Protection amount
+    "layer": "string"           // "inner", "outer", etc.
+  }
+}
+{
+  "name": "GARB",
+  "description": "Clothing and jewelry",
+  "scope": ["ITEM"],
+  "effects": [],
+  "meta_schema": {
+    "body_slot": "string",      // e.g., "hand", "torso"
+    "style": "string",          // Visual style
+    "layer": "string"
+  }
+}
+{
+  "name": "TOOL",
+  "description": "Usable items and weapons",
+  "scope": ["ITEM"],
+  "effects": [],
+  "meta_schema": {
+    "tool_type": "string",      // "weapon", "implement", etc.
+    "damage_dice": "string"     // e.g., "1d6"
+  }
+}
+```
+
+**2. Data Structure Changes**
+```typescript
+// CURRENT (src/types/body_slots.ts)
+interface BodySlot {
+  name: string;
+  critical: boolean;
+  item_instance_id: string | null;
+}
+
+// FUTURE
+interface BodySlot {
+  name: string;
+  critical: boolean;
+  armor: string | null;           // Max 1
+  garb: string[];                 // Unlimited
+  tool: string | null;            // Max 1
+}
+```
+
+**3. Container ID Pattern Changes**
+```typescript
+// CURRENT
+container.henry_actor.hand_left
+
+// FUTURE
+container.henry_actor.hand_left.armor    // Gauntlet
+container.henry_actor.hand_left.garb     // Rings (array)
+container.henry_actor.hand_left.tool     // Sword
+```
+
+**4. Implementation Approach (No Migration Scripts)**
+
+**Strategy: Direct Implementation with Git Version Control**
+
+Since we use git for version control and want to avoid leaving migration scripts behind:
+
+**Step 1: Add Tag Definitions**
+- Add ARMOR and GARB to `tag_definitions.jsonc`
+- Extend existing TOOL tag for equipment use
+- Test: Load game, verify tags register
+
+**Step 2: Update Types (Non-Breaking)**
+- Change `BodySlot` interface to support armor/garb/tool
+- Keep backward compatibility during transition
+- Test: TypeScript compiles, existing actors still load
+
+**Step 3: Inline Data Migration (Manual)**
+Since we have minimal test data:
+- Manually update 1-2 test actors in data_slot_1
+- Add tags to a few test items
+- Test the new system with limited data
+- Iterate quickly
+
+**Step 4: Code Updates with Dual Support**
+- Validation checks tags first, falls back to valid_body_slots
+- UI renders new slot structure when present
+- Old format still works (backward compatible)
+- Test: Both old and new actor formats work
+
+**Step 5: Full Data Update**
+- Once code is stable, update all items with tags
+- Update all actors to new format
+- Remove dual-support code paths
+- Test: Everything works with new format only
+
+**Benefits:**
+- No leftover migration scripts
+- Changes tracked in git
+- Can rollback via git checkout
+- Incremental testing
+
+**5. Files to Modify**
+- `local_data/data_slot_default/tag_definitions.jsonc` - Add ARMOR, GARB tags
+- `src/types/body_slots.ts` - New slot structure with backward compat
+- `src/equipment/tag_validation.ts` - NEW validation helpers
+- `src/container_storage/store.ts` - Dual validation (tags + legacy)
+- `src/canvas_app/app_state.ts` - Tag-based equip logic
+- `src/mono_ui/modules/character_module.ts` - 3-position slot rendering
+- `local_data/data_slot_1/items/*.jsonc` - Add equipment tags
+- `local_data/data_slot_1/actors/*.jsonc` - Update body slot structure
+
+#### Integration with Pickup/Drop
+
+**Pickup Routing (where does picked up item go?):**
+1. Check if actor has "main container" set (top of sidebar containers)
+2. If no main container, check hands:
+   - Dominant hand (hand_right) TOOL slot empty? → Place in hand
+   - Otherwise → Try non-dominant hand
+3. If hands full → Reject with "no space"
+
+**Drop Logic (drag from character to ground):**
+- Can drag from ANY equipped slot: armor, garb, or tool
+- Source tracked via `drag_state.source_container_id`:
+  - Format: `container.{actor_id}.{body_slot}.{slot_type}`
+  - Examples:
+    - `container.henry_actor.hand_left.tool` (sword in hand)
+    - `container.henry_actor.hand_left.garb` (rings)
+    - `container.henry_actor.torso.armor` (chest plate)
+
+#### Legality System Integration
+
+Tags define what's legal to equip where:
+- **Legality check:** Does item's tag allow equipping to this body slot?
+- **Example:** Ring with `GARB` tag + `body_slot: hand` → Can equip to any hand
+- **Example:** Helmet with `ARMOR` tag + `body_slot: head` → Can ONLY equip to head
+
+### Tasks
+
+**Phase 1: Foundation (Tags & Types)** ✅ COMPLETE
+- [x] Add ARMOR tag definition to tag_definitions.jsonc
+- [x] Add GARB tag definition to tag_definitions.jsonc
+- [x] Update TOOL tag for equipment use (already exists)
+- [x] Update BodySlot interface (armor/garb/tool structure)
+- [x] Create `src/equipment/tag_validation.ts` with validation helpers
+- [x] Test: Tags load, TypeScript compiles ✅
+
+**Phase 2: Validation (Dual Support)** ✅ COMPLETE
+- [x] Implement `check_tag_compatibility()` function
+- [x] Update `is_item_compatible_with_slot()` for dual validation
+- [x] Add slot type constants (SLOT_TYPE_CATEGORIES)
+- [x] Test: Items with tags validate correctly ✅
+- [x] Test: Items with valid_body_slots still work (backward compat) ✅
+
+**Phase 3: Data (Manual Updates)** ✅ COMPLETE
+- [x] Add equipment tags to test items (hat - ARMOR, pants - GARB, tunic - GARB)
+- [x] Manually update 1 test actor's body_slots structure (henry_actor)
+- [x] Test: New format loads and validates ✅
+- [x] Iterate: Fix issues, test again ✅
+  - Added backward compatibility helpers in body_slots.ts
+  - TypeScript compiles without errors
+  - Both old and new formats supported
+
+**Phase 4: UI (Rendering)**
+- [ ] Update CharacterModule to render 3 slot positions per hand
+- [ ] Add slot type colors (blue/green/red)
+- [ ] Update drag-and-drop for slot types
+- [ ] Test: Visual rendering correct, drag-drop works
+
+**Phase 5: Integration (Pickup/Drop)**
+- [ ] Update pickup routing to check slot types
+- [ ] Update drop handling for armor/garb/tool sources
+- [ ] Update "I" key to use main container preference
+- [ ] Test: Pickup routes correctly, drop works from all slot types
+
+**Phase 6: Complete Data Update**
+- [ ] Add tags to all item definitions
+- [ ] Update all actor body_slots to new format
+- [ ] Remove dual-support code (clean up)
+- [ ] Final integration test
+
+### Acceptance Criteria
+
+**Functional:**
+- [ ] Items with ARMOR tag equip only to armor slots (1 max)
+- [ ] Items with GARB tag equip to garb slots (∞ items)
+- [ ] Items with TOOL tag equip to tool slots (1 max)
+- [ ] Hand slots show 3 positions: armor (blue), garb (green), tool (red)
+- [ ] No visual mirroring bug (each position distinct)
+
+**Integration:**
+- [ ] Pickup routes to main container or dominant hand tool slot
+- [ ] Drop works from any equipped slot (armor/garb/tool/container)
+- [ ] "I" key opens main container or shows hand if none
+- [ ] Drag-and-drop respects slot type compatibility
+
+**Compatibility:**
+- [ ] Backward compatible during transition (dual validation)
+- [ ] Can rollback via git if issues arise
+- [ ] No data loss during format update
+
+---
+
 ## Future Enhancements
 
 - **Nested Containers:** Open containers-within-containers via ContainerModule
 - **Additional Stats:** Thaum, stamina, action points in status section
 - **Equipment Comparison:** Show stat changes when hovering equipped items
 - **Quick Actions:** Right-click menu on body slots (examine, unequip, etc.)
+- **Layering System:** Visual ordering of armor/garb layers (outer over inner)
 
 ---
 
@@ -367,28 +790,52 @@ Uses box-drawing characters:
 ### Critical Design Principles
 
 **1. No "Main Inventory":**
-Characters and NPCs do NOT have a default inventory or "pocket" storage. All items must be stored in equipped containers. This replaces traditional RPG inventory systems.
+Characters and NPCs do NOT have a default inventory or "pocket" storage. All items must be stored in equipped containers (sacks, bags) or equipped to body slots. This replaces traditional RPG inventory systems.
 
-**2. Equipped Containers Only:**
-The sidebar only shows containers that are actively equipped as items in body slots. Empty slots or non-container items do not appear in the sidebar.
+**2. Equipped Containers vs Equipment:**
+**Current System:**
+- **Containers** (sacks, bags): Have `container_data`, provide storage capacity
+- **Equipment** (armor, weapons, clothing): Equipped to body slots via `valid_body_slots`
+- Sidebar shows equipped **containers** only
+- Body slots show equipped items
 
-**3. First-Layer Only:**
-The sidebar shows only containers equipped directly on body slots. Nested containers (containers within equipped containers) are accessed via the ContainerModule, not the sidebar.
+**Future System (Phase 9):**
+- Separate into: Armor (protection), Garb (clothing/jewelry), Tools (weapons/items)
+- Tags: ARMOR, GARB, TOOL with body_slot metadata
+- Each hand gets 3 slots: armor (1), garb (∞), tool (1)
 
-**4. Container Identification:**
-An item is considered a "container" if its definition has specific tags:
-- "CONTAINER" (generic)
-- "BAG" 
-- "SACK"
-- "POUCH"
-- "BACKPACK"
-- "WALLET"
-- Any other container-type tag
+**3. Equipment Compatibility:**
+**Current:** `valid_body_slots` array on ItemDefinition
+```typescript
+sword.valid_body_slots = ["hand_left", "hand_right"]
+helmet.valid_body_slots = ["head"]
+```
 
-**5. State Management:**
+**Future (Phase 9):** Tag-based validation
+- `ARMOR` tag + `body_slot: "torso"` → Torso armor slot
+- `GARB` tag + `body_slot: "hand"` → Any hand garb slot  
+- `TOOL` tag → Any hand tool slot
+
+**4. Slot Capacity:**
+**Current:** One item per body slot (simple)
+**Future:** Capacity by slot type
+- ARMOR: Max 1
+- GARB: Unlimited  
+- TOOL: Max 1 per hand
+- Container: Max 1 per body slot
+
+**5. Hand Slot Rendering:**
+**Current Bug:** Visual hand slots show 2 positions but both map to same body_slot
+- Equipping to hand fills both visual slots (mirroring bug)
+
+**Future Fix:** 3 separate slot positions per hand
+- Blue (armor), Green (garb stack), Red (tool)
+
+**6. State Management:**
 - Pan and scroll offsets should reset when module opens
 - Consider minimum module dimensions to ensure usability
 - Sidebar scrolls independently of body slot panning
+- "Main container" preference determines default inventory for pickup operations
 
 ---
 
@@ -1092,9 +1539,9 @@ As features are implemented, update the following documentation:
 
 ---
 
-**Status:** Phase 7 Complete ✓ | Phase 8 Core Complete ✓ | Phase 8 Extended In Progress
+**Status:** Phase 7 Complete ✓ | Phase 8 Core Complete ✓ | Phase 9 Design Phase
 
-**Last Updated:** 2026-02-23
+**Last Updated:** 2026-02-27
 
 **Completed:**
 - ✅ Phase 7: Right-click container opening with multi-instance support
@@ -1106,6 +1553,7 @@ As features are implemented, update the following documentation:
 - ✅ Phase 8: Container refresh system working
 - ✅ Phase 8: **CRITICAL BUG FIX** - Intra-container duplication prevented
 - ✅ Phase 8: **Stacking implemented** - Compatible items merge automatically
+- ✅ Phase 8: Pickup/Drop APIs working (inline scattered containers)
 
 **Current State:**
 - ✅ Core inventory management working (move between containers)
@@ -1115,17 +1563,96 @@ As features are implemented, update the following documentation:
 - ✅ Slot highlighting working (shows compatible targets)
 - ✅ **Bidirectional highlighting** (item↔slot cross-module highlighting)
 - ✅ **Drag ghost visual** (wiggling item at cursor during drag)
-- 📋 Ground/NPC drops pending
+- ✅ Pickup/Drop working with inline scattered containers
+- 📋 Phase 9: Tag-based slot system (ARMOR/GARB/TOOL) - Design Phase
 
 **Next Steps:**
-1. 📋 **Implement ground drop handling** (drag to background)
-2. 📋 **Implement range checking** for ground/NPC drops
-3. 📝 **Documentation updates** (see Section 9)
-4. 🔧 **Future enhancement**: REORDER operation for within-container moves (requires slot index API)
+1. 🔧 **Phase 9: Implement tag-based slot system**
+   - Add ARMOR/GARB/TOOL tag schemas
+   - Update body_slots data structure
+   - Fix hand slot mirroring bug
+   - Update legality system for tags
+2. 📋 **Implement ground drop handling** (drag to background)
+3. 📋 **Implement range checking** for ground/NPC drops
+4. 📝 **Documentation updates** (see Section 9)
 
 ---
 
-## 10. Grid-Based Sparse Inventory System (Minecraft-Style) - ATTEMPTED 2026-02-24
+## 11. Architecture Decision Records
+
+### ADR-001: Tag-Based Equipment Slots (2026-02-27)
+
+**Decision:** Replace `valid_body_slots` array with ARMOR/GARB/TOOL tags that include body slot specifications in tag metadata.
+
+**Context:**
+- Current system uses `valid_body_slots: string[]` on ItemDefinitions
+- Hand slots show 2 visual positions but both map to same body_slot (mirroring bug)
+- No way to equip multiple rings on one hand (no garb slot concept)
+- No distinction between worn armor and held tools
+
+**Decision:**
+Implement 3 slot types per body part using tags:
+- **ARMOR** (tag): Max 1, requires body_slot match (e.g., helmet → head)
+- **GARB** (tag): Max ∞, requires body_slot match (e.g., rings → hand)
+- **TOOL** (tag): Max 1, NO body_slot match (tools are held, not worn)
+
+**Consequences:**
+- ✅ Supports multiple jewelry on one hand (garb slots)
+- ✅ Clear visual separation of armor/garb/tool per body part
+- ✅ Fixes hand slot mirroring bug
+- ✅ Tags already support metadata (no schema changes needed)
+- ⚠️ Requires migration of existing equipped items
+- ⚠️ Updates needed to CharacterModule rendering logic
+
+### ADR-002: No Default Inventory (2026-02-22)
+
+**Decision:** Characters have no "pockets" or default storage. All items must be in equipped containers, worn as armor/garb, or held as tools.
+
+**Context:**
+- Traditional RPGs give characters magic inventory space
+- Realistic tabletop RPGs require physical containers
+- Simplifies "where is this item?" questions
+
+**Decision:**
+- Items must be stored in equipped containers (sacks, bags with container_data)
+- OR worn as armor/garb (equipped to body slots)
+- OR held in hands (tool slots)
+- Pickup operations route to "main container" (configurable) or dominant hand
+
+**Consequences:**
+- ✅ More realistic inventory management
+- ✅ Encourages strategic container selection
+- ✅ Clear item location tracking
+- ⚠️ New characters start with no storage (need to find/acquire containers)
+- ⚠️ Hand slots become critical (can't hold tool if hands full)
+
+### ADR-003: Hand Slot Tool vs Armor/Garb (2026-02-27)
+
+**Decision:** Each hand has 3 distinct slot types: armor (worn), garb (worn), tool (held).
+
+**Context:**
+- Current bug: Equipping to hand fills both visual slots with same item
+- Want to wear gauntlets (armor) + rings (garb) + hold sword (tool)
+- Need clear distinction between "worn on hand" vs "held in hand"
+
+**Decision:**
+```
+hand_left:
+  armor: gauntlet (1 max)  - Worn on hand
+  garb: [ring, bracelet]   - Worn on hand, unlimited
+  tool: sword (1 max)      - Held in hand
+```
+
+**Consequences:**
+- ✅ Can wear protective gear while holding items
+- ✅ Supports blinged-out characters (multiple rings)
+- ✅ Clear visual: blue (armor), green (garb), red (tool)
+- ⚠️ Complex rendering logic (3 positions per hand)
+- ⚠️ More complex equip validation
+
+---
+
+## 12. Grid-Based Sparse Inventory System (Minecraft-Style) - ATTEMPTED 2026-02-24
 
 **Status:** Partially Implemented - Requires Completion
 

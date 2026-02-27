@@ -257,6 +257,32 @@
       "effects": [
         {"verb": "SYSTEM.ADJUST_TAG_BALANCE", "trigger": "on_apply", "args": {"target": "ref:holder", "mag": "ref:info[0]"}}
       ]
+    },
+    {
+      "name": "ARMOR",
+      "proficiency": "BRAWN",
+      "meta": ["equipment", "armor", "protection"],
+      "stacking": "sum",
+      "scope": ["ITEM"],
+      "requires_info": true,
+      "info_schema": ["ref:armor_value", "ref:coverage_slots"],
+      "triggers": ["on_hit", "on_equip", "on_unequip"],
+      "effects": [
+        {"verb": "SYSTEM.REDUCE_DAMAGE", "trigger": "on_hit", "args": {"target": "ref:holder", "reduction": "ref:info[0]"}}
+      ]
+    },
+    {
+      "name": "GARB",
+      "proficiency": null,
+      "meta": ["equipment", "clothing", "apparel"],
+      "stacking": "sum",
+      "scope": ["ITEM"],
+      "requires_info": true,
+      "info_schema": ["ref:style_value"],
+      "triggers": ["on_equip", "on_social_check"],
+      "effects": [
+        {"verb": "SYSTEM.ADJUST_SOCIAL", "trigger": "on_social_check", "args": {"bonus": "ref:info[0]"}}
+      ]
     }
   ]
 }

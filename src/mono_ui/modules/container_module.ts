@@ -297,12 +297,8 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
     },
 
     OnGlobalKeyDown(e: KeyboardEvent): void {
-      if (e.key === 'i' || e.key === 'I') {
-        const new_visible = !opts.get_is_visible();
-        opts.set_is_visible(new_visible);
-        debug_log(`[ContainerModule] Toggled visibility: ${new_visible}`);
-        e.preventDefault();
-      }
+      // Note: 'I' key is now handled globally in app_state.ts
+      // This handler can be used for other global shortcuts if needed
     },
 
     OnPointerMove(e: PointerEvent): void {

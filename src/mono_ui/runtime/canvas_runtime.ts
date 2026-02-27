@@ -279,7 +279,7 @@ export class CanvasRuntime {
         const line_height_px = font_size_px * this.base_line_height_mult;
         const letter_spacing_px = font_size_px * this.base_letter_spacing_mult;
 
-        this.ctx.font = `400 ${font_size_px}px "${this.font_family}"`;
+        this.ctx.font = `400 ${font_size_px}px ${this.font_family}`;
         const glyph_w = this.ctx.measureText('M').width;
 
         const tile_w = glyph_w + letter_spacing_px;
@@ -386,7 +386,7 @@ export class CanvasRuntime {
 
                 const wi = clamp_weight_index((cell as any).weight_index);
                 const css_w = this.weight_index_to_css[wi] ?? 400;
-                this.ctx.font = `${css_w} ${font_size_px}px "${this.font_family}"`;
+                this.ctx.font = `${css_w} ${font_size_px}px ${this.font_family}`;
 
                 this.ctx.fillStyle = `rgb(${cell.rgb.r},${cell.rgb.g},${cell.rgb.b})`;
 

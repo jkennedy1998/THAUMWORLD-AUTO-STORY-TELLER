@@ -68,6 +68,64 @@ import { load_time, format_short_time, type GameTime } from "../time_system/trac
 const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
 const visual_log_limit = 12;
 const HTTP_PORT = 8787;
+
+/**
+ * Find actor's equipped sack (container item in body slots)
+ * Returns null if no sack found, otherwise returns sack info with container_id and empty position
+ */
+function find_actor_sack(slot: number, actor_id: string, actor: any): { 
+    container_id: string; 
+    slot_name: string; 
+    empty_pos: { x: number; y: number };
+    sack_item: any;
+} | null {
+    // Check body slots for equipped container items (sacks)
+    const body_slots = actor.body_slots || {};
+    
+    for (const [slot_name, slot_data] of Object.entries(body_slots)) {
+        const slot_info = slot_data as any;
+        if (!slot_info?.item_instance_id) continue;
+        
+        // Check if this slot has a container (leg slots typically have sacks)
+        const slot_container_id = `container.${actor_id}.${slot_name}`;
+        const slot_container_result = load_container(slot, slot_container_id);
+        
+        if (!slot_container_result.ok) continue;
+        
+        // Look for the equipped item in this slot's container
+        const equipped_item = slot_container_result.container.contents.find(
+            (entry: any) => entry.instance?.id === slot_info.item_instance_id
+        );
+        
+        if (!equipped_item) continue;
+        
+        // Check if item has container_data (is a sack/bag)
+        if (equipped_item.instance?.container_data) {
+            const container_id = `item.${equipped_item.instance.id}`;
+            const container_data = equipped_item.instance.container_data;
+            
+            // Find empty position in the sack
+            const max_slots = container_data.capacity?.max_slots || container_data.contents?.length + 1 || 10;
+            const { cols } = calculate_grid_dimensions(max_slots);
+            const empty_pos = find_empty_grid_position(
+                container_data.contents || [],
+                cols,
+                max_slots
+            ) || { x: 0, y: 0 };
+            
+            debug_log("API", `Found sack ${container_id} in ${slot_name} slot`);
+            return {
+                container_id,
+                slot_name,
+                empty_pos,
+                sack_item: equipped_item
+            };
+        }
+    }
+    
+    debug_log("API", `No sack found for actor ${actor_id}`);
+    return null;
+}
 // const ENABLE_CLI_LOG = false;
 const OLLAMA_HOST = process.env.OLLAMA_HOST ?? "http://localhost:11434";
 const INTERPRETER_MODEL = process.env.INTERPRETER_MODEL ?? "llama3.2:latest";
@@ -2179,33 +2237,25 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    // Get actor's sack container
-                    const actor_containers = list_containers_for_owner(slot, `actor.${actor_id}`);
-                    const sack = actor_containers.find((c: any) => c.id.includes('sack'));
-                    
-                    if (!sack) {
+                    // Get actor's equipped sack from body slots
+                    // Sack is an equipped item with container_data, not a direct actor container
+                    const sack_info = find_actor_sack(slot, actor_id, actor as any);
+                    if (!sack_info) {
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: "actor_has_no_sack" }));
                         return;
                     }
-
-                    // Find empty position in sack
-                    const sack_max_slots = sack.capacity?.max_slots || sack.contents.length + 1;
-                    const { cols: sack_cols } = calculate_grid_dimensions(sack_max_slots);
-                    const sack_empty_pos = find_empty_grid_position(
-                        sack.contents,
-                        sack_cols,
-                        sack_max_slots
-                    ) || { x: 0, y: 0 }; // Default to (0,0) if full
+                    
+                    debug_log("API", `Pickup: Found sack ${sack_info.container_id} in ${sack_info.slot_name} slot`);
 
                     // Transfer item from scattered container to actor's sack
                     const result = transfer_item_between_containers(
                         slot, 
                         item_instance_id, 
                         target_container.id, 
-                        sack.id,
-                        sack_empty_pos.x,
-                        sack_empty_pos.y
+                        sack_info.container_id,
+                        sack_info.empty_pos.x,
+                        sack_info.empty_pos.y
                     );
 
                     if (result.ok) {
@@ -2230,7 +2280,7 @@ function start_http_server(log_path: string): void {
                             ok: true, 
                             item_instance_id, 
                             from: target_container.id, 
-                            to: sack.id,
+                            to: sack_info.container_id,
                             place_id: actual_place_id,
                             container_deleted: target_container.contents.length <= 1
                         }));
@@ -2316,15 +2366,15 @@ function start_http_server(log_path: string): void {
                     }
                     const scattered_container = scattered_result.container;
 
-                    // Get actor's containers
-                    const actor_containers = list_containers_for_owner(slot, `actor.${actor_id}`);
-                    const sack = actor_containers.find((c: any) => c.id.includes('sack'));
-                    
-                    if (!sack) {
+                    // Get actor's equipped sack from body slots
+                    const sack_info = find_actor_sack(slot, actor_id, actor);
+                    if (!sack_info) {
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: "actor_has_no_sack" }));
                         return;
                     }
+                    
+                    debug_log("API", `Drop: Found sack ${sack_info.container_id} in ${sack_info.slot_name} slot`);
 
                     // Find empty position in scattered container
                     const ground_max_slots = scattered_container.capacity?.max_slots || scattered_container.contents.length + 1;
@@ -2339,7 +2389,7 @@ function start_http_server(log_path: string): void {
                     const result = transfer_item_between_containers(
                         slot, 
                         item_instance_id, 
-                        sack.id, 
+                        sack_info.container_id, 
                         scattered_container.id,
                         ground_empty_pos.x,
                         ground_empty_pos.y
@@ -2386,7 +2436,7 @@ function start_http_server(log_path: string): void {
                         res.end(JSON.stringify({ 
                             ok: true, 
                             item_instance_id, 
-                            from: sack.id, 
+                            from: sack_info.container_id, 
                             to: scattered_container.id,
                             place_id: actual_place_id,
                             container_id: scattered_container.id,

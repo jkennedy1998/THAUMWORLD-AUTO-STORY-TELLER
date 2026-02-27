@@ -1,9 +1,28 @@
 # Pickup and Drop System Implementation Plan
 
 **Date:** 2026-02-25  
-**Status:** Planning Phase  
+**Updated:** 2026-02-27  
+**Status:** Implementation Phase  
 **Priority:** High  
-**Related Plans:** 2026_02_14_item_system_unification.md, 2026_02_25_item_system_bug_fixes.md
+**Related Plans:** 
+- 2026_02_14_item_system_unification.md (Item system foundation)
+- 2026_02_25_item_system_bug_fixes.md (Bug fixes)
+- 2026_02_22_character_module_rework.md (Phase 9: Tag-based equipment - **CRITICAL DEPENDENCY**)
+
+---
+
+## Quick Status
+
+**🟢 WORKING:** Pickup and Drop APIs functional with inline scattered containers  
+**🟡 BUGS:** Sack detection needs fixing (assumes all actors have sacks)  
+**🔵 PLANNED:** Tag-based equipment system (Phase 9 - future enhancement)
+
+**Current System:** Uses `valid_body_slots` array - simple but functional  
+**Future System:** ARMOR/GARB/TOOL tags - more flexible but requires major refactoring
+
+**Decision:** Fix current system bugs first, defer tag-based migration until core gameplay stable.
+
+---
 
 ---
 
@@ -12,14 +31,89 @@
 This plan connects the existing item/container system with the world interaction layer, allowing players to pick up items from the world and drop items into the world. It integrates the scattered loot containers (already implemented) with the character inventory system.
 
 ### Current State
-- ✅ Scattered loot containers exist (drop/pickup APIs)
-- ✅ Container modules open with right-click
-- ✅ Character has sacks equipped on legs
-- ✅ Drag and drop works between containers
-- ✅ "I" key opens inventory UI (currently not hooked up to actual container)
-- ❌ No way to pick up items from world into inventory
-- ❌ No way to drop items from inventory to world
-- ❌ Distance checks not enforced for external containers
+
+**✅ WORKING NOW:**
+- Scattered loot containers exist (drop/pickup APIs) - **NOW INLINE in place.containers**
+- Container modules open with right-click
+- Drag and drop works between containers
+- Pickup/Drop APIs functional (with bugs noted below)
+- Distance checks enforced (1 tile for pickup, 1.5 tiles for drop)
+
+**🔧 WORKING WITH ISSUES:**
+- **Sack Detection:** Currently searches for any equipped container item
+  - Works if actor has sack equipped
+  - Fails if actor has no containers (needs fallback to hand slots)
+- **"I" Key:** Opens inventory but hardcoded to find first sack
+  - Should use "main container" selection (Phase 9 feature)
+
+**❌ PLANNED (Phase 9):**
+- Tag-based equipment slots (ARMOR/GARB/TOOL)
+- "Main container" selection (rearrangeable sidebar)
+- Drop from any equipped slot (armor, garb, tool, container)
+- Hand slot separation (fix mirroring bug)
+
+**ARCHITECTURE NOTE:**
+Current system uses `valid_body_slots` array on ItemDefinition.
+Future system (Phase 9) will use ARMOR/GARB/TOOL tags.
+See [Character Module Rework Phase 9](./2026_02_22_character_module_rework.md#phase-9-tag-based-equipment-slot-system-new) for details.
+
+### Implementation Update (2026-02-26)
+**Migrated scattered containers to inline storage:**
+- Scattered containers now stored in `place.containers["scattered_<x>_<y>"]` instead of separate files
+- Modified `container_storage/store.ts`:
+  - `find_scattered_container()` - reads from place.containers inline
+  - `get_or_create_scattered_container()` - creates containers inline in place.containers
+  - `list_scattered_containers()` - reads from place.containers instead of directory
+  - `delete_scattered_container_if_empty()` - deletes from place.containers inline
+- Benefits: Single source of truth, faster access, easier cleanup, no orphaned container files
+
+**Added drag and drop to place_module.ts:**
+- Added `OnDragEnd` handler to detect drops onto place tiles
+- Added config options: `on_drop`, `is_dragging`, `get_drag_source`
+- Validates drop is within 1.5 tiles of actor position
+- **Fixed coordinate calculation** - uses `screen_to_tile()` like OnClick for consistency
+- **Added extensive debug logging** to trace every step of the drag-drop flow
+
+**Bug Fix (Coordinate Issue):**
+- Original code used manual inner rect calculation with wrong padding (x0+2, y0+3)
+- Fixed to use `screen_to_tile()` function (same as OnClick, OnRightClick)
+- This ensures consistent coordinate calculation across all place module interactions
+
+**Bug Fix (API Parameters):**
+- Request body was sending `actor_ref`, `tile_x`, `tile_y` 
+- API expects `actor_id` (without "actor." prefix) and `tile_position: {x, y}`
+- Fixed parameter names to match API expectations
+
+**Bug Fix (Actor Sack Detection):**
+- Both pickup and drop APIs were looking for a container with "sack" in the ID
+- Sack is actually an equipped item in body slots (leg_left/leg_right) with `container_data`
+- Created `find_actor_sack()` helper function to:
+  - Check all body slots for equipped items
+  - Find items that have `container_data` (are containers)
+  - Return the container ID as `item.${instance_id}`
+  - Find empty position in the sack for transfers
+- Updated both `/api/place/pickup` and `/api/place/drop` to use the new helper
+
+**Architecture Note: No Default Inventory**
+- Actors may not have any equipped containers (no sack, no bag)
+- Fallback: Use dominant hand (hand_right) TOOL slot as implicit "container" for 1 item
+- Better: Player sets "main container" in CharacterModule sidebar
+  - Rearrange containers vertically, top one = main
+  - Opens with "I" key
+  - Receives items from pickup operations
+  - See Character Module Rework Phase 9 for details
+- If no containers and hands full, pickup is rejected
+
+**Created migration script:**
+- `src/tools/migrate_scattered_to_inline.ts` - migrates existing scattered containers
+- Usage: `npx tsx src/tools/migrate_scattered_to_inline.ts 1 [--dry-run]`
+- Moves container files to inline storage and deletes old files
+
+**Added debugging to app_state.ts:**
+- Configured `is_dragging` callback - returns drag_state.is_dragging
+- Configured `get_drag_source` callback - returns item and container IDs
+- Configured `on_drop` callback - calls `/api/place/drop` with full logging
+- Logs every step: drag start, drop detection, tile calculation, API call, response
 
 ### Goal
 Enable seamless interaction between:
@@ -91,49 +185,154 @@ interface ContainerAccessRules {
 - "I" key opens inventory UI via `ui_state.container.is_visible`
 - Currently shows placeholder or empty state
 - Not connected to any actual container
+- **Issue:** Assumes actor always has a sack (not always true)
 
-### Implementation
+### Implementation (Updated for Tag-Based System)
 
-**Step 1:** Identify main inventory container
+**Step 1:** Define "Main Container" Selection
 ```typescript
-// In app_state.ts, when creating app state
-function get_main_inventory_container(actor_data: Actor): Container | null {
-    // Priority: First equipped sack found
-    const body_slots = ['leg_left', 'leg_right', 'torso', 'head'];
-    for (const slot_name of body_slots) {
-        const slot = actor_data.body_slots[slot_name];
-        if (slot?.item_instance_id) {
-            // Check if item is a container
-            const item = get_item_instance(slot.item_instance_id);
-            if (item?.container_data) {
-                return item.container_data;
-            }
+// CharacterModule sidebar shows equipped containers
+// Player can rearrange containers vertically
+// Top container = "main inventory"
+// If only 1 container equipped, that one is main
+// If 0 containers equipped, use dominant hand TOOL slot
+
+interface MainInventoryResult {
+    type: 'container' | 'hand_tool' | 'none';
+    container_id?: string;      // For type='container'
+    hand_slot?: string;         // For type='hand_tool'
+}
+
+function get_main_inventory(actor_data: Actor): MainInventoryResult {
+    // Check if player has set a preferred main container
+    const preferred = actor_data.preferences?.main_container_id;
+    if (preferred && container_exists(preferred)) {
+        return { type: 'container', container_id: preferred };
+    }
+    
+    // Find first equipped container (sack, bag, etc.)
+    for (const [slot_name, slot_data] of Object.entries(actor_data.body_slots)) {
+        // Check if slot has a container item (has container_data)
+        const equipped = get_equipped_item(slot_name);
+        if (equipped?.instance.container_data) {
+            const container_id = `item.${equipped.instance.id}`;
+            return { type: 'container', container_id };
         }
     }
-    return null;
+    
+    // No containers - check dominant hand
+    const dominant_hand = actor_data.body_slots.hand_right;
+    if (dominant_hand && !dominant_hand.tool) {
+        return { type: 'hand_tool', hand_slot: 'hand_right' };
+    }
+    
+    return { type: 'none' };
 }
 ```
 
-**Step 2:** Connect "I" key to equipped sack
+**Step 2:** Connect "I" key to main inventory
 ```typescript
 // When 'i' is pressed:
-const main_inventory = get_main_inventory_container(current_actor);
-if (main_inventory) {
-    open_container_module(`item.${main_inventory.instance.id}`);
+const main = get_main_inventory(current_actor);
+
+if (main.type === 'container') {
+    open_container_module(main.container_id!);
+} else if (main.type === 'hand_tool') {
+    // Open "hand" view or show tool slot
+    flash_status(['Using hand - no container equipped'], 1500);
 } else {
-    flash_status(['No equipped container found'], 1500);
+    flash_status(['No inventory - equip a container or use your hands'], 2000);
 }
 ```
 
-**Step 3:** Set as default for pickup operations
-- When picking up items, default destination = main inventory container
-- If main inventory full, show error: "Inventory full"
+**Step 3:** Pickup Routing with Tag-Based Slots
+```typescript
+// When picking up items:
+const main = get_main_inventory(actor_data);
+
+if (main.type === 'container') {
+    // Try to put in container
+    transfer_to_container(item, main.container_id!);
+} else if (main.type === 'hand_tool') {
+    // Put in dominant hand TOOL slot
+    equip_to_slot(item, 'hand_right', 'tool');
+} else {
+    // No space - reject
+    flash_status(['No space - hands full, no containers'], 2000);
+    return false;
+}
+```
+
+**Integration with Tag-Based System:**
+- **Armor items:** Can only pickup if armor slot empty (max 1)
+- **Garb items:** Can always pickup (unlimited per slot)
+- **Tool items:** Can pickup if hand TOOL slot empty (max 1 per hand)
+- **Container items:** Pickup puts them in main container (or hand if no container)
+
+See [Character Module Rework Phase 9](./2026_02_22_character_module_rework.md#phase-9-tag-based-equipment-slot-system-new) for full slot system details.
 
 ---
 
-## 4. Pickup Items from World
+## 4. Drop Items with Tag-Based System
 
-### 4.1 World Container Access
+### Drop from Any Equipped Slot
+
+With the tag-based slot system, players can drop items from:
+- **Armor slots:** Drop equipped armor (helmet, chest plate, etc.)
+- **Garb slots:** Drop clothing/jewelry (rings, tunics, bracelets)
+- **Tool slots:** Drop held items (sword, torch, tools)
+- **Container slots:** Drop items from equipped containers (sacks, bags)
+
+### Source Container ID Format
+
+When dragging an item for drop, `drag_state.source_container_id` uses format:
+```typescript
+// Format: container.{actor_id}.{body_slot}.{slot_type}
+// Examples:
+"container.henry_actor.hand_left.tool"      // Sword in left hand
+"container.henry_actor.hand_left.garb"      // Rings on left hand
+"container.henry_actor.hand_left.armor"     // Gauntlet on left hand
+"container.henry_actor.torso.armor"         // Chest plate
+"item.inst_henry_sack_001"                  // Nested container (sack)
+```
+
+### Drop Validation
+
+1. **Check drag source:** Get source container ID from `drag_state`
+2. **Verify ownership:** Ensure actor owns the source container
+3. **Get item:** Locate item in source container/slot
+4. **Create destination:** Get/create scattered container at drop tile
+5. **Transfer:** Move item from source to scattered container
+6. **Cleanup:** 
+   - Remove from source slot (armor/tool) or container
+   - Delete scattered container if empty
+
+### Slot Type Handling
+
+```typescript
+// Armor/Garb/Tool slots (body_slots)
+if (source_id.includes('.armor') || source_id.includes('.garb') || source_id.includes('.tool')) {
+    // Unequip from body slot
+    unequip_from_body_slot(actor_id, slot_name, slot_type);
+}
+// Nested containers (items with container_data)
+else if (source_id.startsWith('item.')) {
+    // Transfer from nested container
+    transfer_from_nested_container(source_id, item_id);
+}
+```
+
+**Visual Feedback:**
+- Drag ghost shows item being carried
+- Drop on valid ground tile → item drops
+- Drop too far from actor → red flash, returns to source
+- Drop on occupied slot → swap or reject
+
+---
+
+## 5. Pickup Items from World
+
+### 5.1 World Container Access
 
 **Double-Click Detection:**
 ```typescript
@@ -236,7 +435,7 @@ buttons: [
 
 ---
 
-## 5. Drop Items to World
+## 6. Drop Items to World
 
 ### 5.1 Drop Flow
 
@@ -321,142 +520,15 @@ on_item_removed: (container_id: string) => {
 
 ---
 
-## 6. UI Changes
+## 7. UI Changes
 
-### 6.1 Replace Debug Button with Double-Click
+## 8. Files to Modify
 
-**Remove from place_module.ts:**
-- Remove "CNTRS", "GRND", "PICKUP", "DROP" debug buttons
-- Keep essential debug buttons (TEST, etc.) if needed
+## 9. Implementation Phases
 
-**Add double-click handler:**
-```typescript
-// In place_module.ts click handling
-let last_click_time = 0;
-let last_click_target: string | null = null;
+## 10. Success Criteria
 
-on_click: (x, y, target) => {
-    const now = Date.now();
-    const target_id = target.id || `${x},${y}`;
-    
-    // Check for double-click (within 300ms, same target)
-    if (now - last_click_time < 300 && last_click_target === target_id) {
-        handle_double_click(target);
-    }
-    
-    last_click_time = now;
-    last_click_target = target_id;
-}
-
-function handle_double_click(target: ClickTarget) {
-    if (target.type === 'npc') {
-        // Open NPC character module
-        open_npc_character_module(target.npc_id);
-    } else if (target.type === 'scattered_container' || target.type === 'ground_items') {
-        // Open world container
-        const distance = get_distance_to(target.position);
-        if (distance <= 1) {
-            open_container_module(target.container_id);
-            track_container_distance(target.container_id, 5);
-        } else {
-            flash_status(['Too far away'], 1500);
-        }
-    }
-}
-```
-
-### 6.2 Highlight Accessible Containers
-
-```typescript
-// In place_module.ts render function
-render: (c: CanvasRenderingContext2D) => {
-    // Draw accessible container indicators
-    for (const container of get_nearby_containers()) {
-        const distance = get_distance_to(container.position);
-        
-        if (distance <= 1) {
-            // Highlight in green (accessible)
-            c.fillStyle = 'rgba(0, 255, 0, 0.3)';
-            c.fillRect(container.x, container.y, 1, 1);
-        } else if (distance <= 5) {
-            // Highlight in yellow (within range but not adjacent)
-            c.fillStyle = 'rgba(255, 255, 0, 0.2)';
-            c.fillRect(container.x, container.y, 1, 1);
-        }
-    }
-}
-```
-
----
-
-## 7. Files to Modify
-
-### Core Files
-- `src/canvas_app/app_state.ts` - Main inventory hookup, world drop handler
-- `src/mono_ui/modules/place_module.ts` - Double-click, distance tracking
-- `src/mono_ui/modules/container_module.ts` - Distance checks for external containers
-- `src/container_storage/store.ts` - Auto-delete empty scattered containers
-- `src/interface_program/main.ts` - Pickup API endpoint (may already exist)
-
-### Supporting Files
-- `src/types/container.ts` - Add distance tracking types if needed
-- `AGENTS.md` - Document pickup/drop mechanics
-
----
-
-## 8. Implementation Phases
-
-### Phase 1: Hook Up "I" Key (1 hour)
-- [ ] Identify main inventory (first equipped sack)
-- [ ] Connect "I" key to open equipped sack
-- [ ] Test opening/closing with "I" key
-
-### Phase 2: Double-Click to Open (2 hours)
-- [ ] Implement double-click detection in place_module
-- [ ] Add double-click handler for scattered containers
-- [ ] Add double-click handler for NPCs (open character module)
-- [ ] Remove debug buttons (CNTRS, GRND, PICKUP, DROP)
-
-### Phase 3: Distance Tracking (2 hours)
-- [ ] Track open external containers
-- [ ] Check distance on movement
-- [ ] Auto-close at 5 tiles
-- [ ] Visual indicator for accessible containers
-
-### Phase 4: Pickup from World (2 hours)
-- [ ] Drag from world container to inventory
-- [ ] "Take All" button for world containers
-- [ ] Validate distance on pickup
-- [ ] Transfer items to main inventory
-
-### Phase 5: Drop to World (2 hours)
-- [ ] Drag from inventory to place module
-- [ ] Create scattered container if needed
-- [ ] Auto-delete empty containers
-- [ ] Visual feedback (item appears on ground)
-
-### Phase 6: Testing & Polish (2 hours)
-- [ ] Test full pickup → inventory → drop cycle
-- [ ] Test distance limits
-- [ ] Test auto-close
-- [ ] Verify empty containers delete
-
----
-
-## 9. Success Criteria
-
-- [ ] Pressing "I" opens equipped sack
-- [ ] Double-clicking ground items opens container
-- [ ] Can drag items from world container to inventory
-- [ ] Can drag items from inventory to ground
-- [ ] Moving 5+ tiles away auto-closes external containers
-- [ ] Empty scattered containers auto-delete
-- [ ] NPCs can be double-clicked to view equipment
-- [ ] Debug buttons replaced with double-click
-
----
-
-## 10. Dependencies
+## 11. Dependencies
 
 ### Already Implemented
 - ✅ Scattered loot container system
@@ -470,8 +542,63 @@ render: (c: CanvasRenderingContext2D) => {
 
 ---
 
-**Next Step:** Begin Phase 1 - Hook up "I" key to equipped sack
+## 12. Implementation Sequence
+
+**Integrated with Character Module Rework Phase 9**
+
+The pickup/drop system implementation is coordinated with the tag-based equipment system migration. See [Character Module Rework - Phase 9](./2026_02_22_character_module_rework.md#phase-9-tag-based-equipment-slot-system-new) for full details.
+
+**Phase 1: Foundation (Character Module Rework)**
+- Add ARMOR/GARB/TOOL tag definitions
+- Update BodySlot type structure
+- Create validation helpers
+- Test: Tags load, types compile
+
+**Phase 2: Pickup/Drop Integration (This Plan)**
+- Update pickup routing to use slot types
+  - Check for main container first
+  - Route to dominant hand tool slot if no containers
+  - Handle armor/garb/tool appropriately
+- Update drop handling
+  - Parse source container ID for slot type
+  - Unequip from specific slot (armor/garb/tool)
+- Update "I" key inventory
+  - Open main container or show hand status
+
+**Phase 3: Testing**
+- Test pickup with containers (routes to container)
+- Test pickup without containers (routes to hand)
+- Test drop from each slot type
+- Test "I" key with various configurations
+
+**Implementation Notes:**
+- No separate migration scripts (use git for version control)
+- Manual data updates for test actors
+- Dual validation during transition (tags + valid_body_slots)
+- Coordinate with Character Module UI changes
+
+**Dependencies:**
+- Character Module Phase 9 must be complete before Phase 2
+- Body slot structure must support armor/garb/tool
+- Validation system must check tags
+- ⚠️ Migration of all item data
+- ⚠️ Weeks of work
+- **Action:** Plan as Phase 9, implement after core features stable
+
+**Recommended Path:**
+1. Fix current system bugs (Phase A)
+2. Integrate with Action Pipeline (using current `valid_body_slots`)
+3. Defer tag-based migration until core gameplay loop is solid
+4. Document tag-based as "Future Enhancement" not "Required"
+
+**See Also:**
+- [Character Module Rework - Phase 9](./2026_02_22_character_module_rework.md#phase-9-tag-based-equipment-slot-system-new) - Tag-based slot system (planned)
+- [Item System Overview](./ITEM_SYSTEM_OVERVIEW.md) - Architecture comparison
 
 ---
 
-*This plan was created following user requirements for pickup/drop integration with the existing container system.*
+**Next Step:** Fix pickup/drop bugs using current `valid_body_slots` system
+
+---
+
+*This plan documents both the working pickup/drop system and the planned future tag-based equipment system.*

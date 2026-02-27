@@ -1,4 +1,4 @@
-import type { Canvas, Module, Rect, Rgb, PointerEvent, WheelEvent } from "../types.js";
+import type { Canvas, Module, Rect, Rgb, PointerEvent, WheelEvent, DragEvent } from "../types.js";
 import { rect_width, rect_height } from "../types.js";
 import { draw_border } from "../padding.js";
 import { get_color_by_name } from "../colors.js";
@@ -157,6 +157,16 @@ export type PlaceModuleConfig = {
   // Player movement mode (affects speed + movement sound debug broadcast)
   get_move_mode?: () => "WALK" | "SNEAK" | "SPRINT";
   set_move_mode?: (mode: "WALK" | "SNEAK" | "SPRINT") => void;
+
+  // Phase 2: Double-click callbacks for opening containers
+  on_double_click_npc?: (npc_ref: string) => void;  // Open NPC character module
+  on_double_click_ground?: (tile_x: number, tile_y: number) => void;  // Open scattered container
+  get_actor_position?: () => { x: number; y: number } | null;  // For distance checking
+
+  // Drag and drop callbacks
+  on_drop?: (tile_x: number, tile_y: number) => Promise<boolean>;  // Drop item onto ground tile
+  is_dragging?: () => boolean;  // Check if an item is being dragged
+  get_drag_source?: () => { item_instance_id: string; source_container_id: string } | null;  // Get drag source info
 };
 
 type ViewState = {
@@ -990,9 +1000,13 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
     // CRITICAL FIX STEP 5: Draw items on ground (after entities, before highlights)
     // Items appear as small objects that can be inspected and picked up
+    debug_log_place(`[GroundItems] Rendering ${place.contents.items_on_ground.length} ground items`);
     for (const item of place.contents.items_on_ground) {
+      debug_log_place(`[GroundItems] Processing item: ${item.item_ref} at (${item.tile_position.x},${item.tile_position.y}), qty: ${item.quantity}`);
       const screen_x = inner.x0 + Math.floor((item.tile_position.x - view.offset_x) / view.scale);
       const screen_y = inner.y0 + Math.floor((item.tile_position.y - view.offset_y) / view.scale);
+      
+      debug_log_place(`[GroundItems] Screen position: (${screen_x},${screen_y}), bounds: [${inner.x0},${inner.y0}]-[${inner.x1},${inner.y1}]`);
       
       if (screen_x >= inner.x0 && screen_x <= inner.x1 &&
           screen_y >= inner.y0 && screen_y <= inner.y1) {
@@ -1005,10 +1019,14 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           }
         }
         
+        debug_log_place(`[GroundItems] Entity present: ${entity_present}`);
+        
         if (!entity_present) {
           // Choose character based on quantity
           const item_char = item.quantity > 10 ? '$' : 
                            item.quantity > 1 ? '*' : '·';
+          
+          debug_log_place(`[GroundItems] Drawing item at (${screen_x},${screen_y}) with char: ${item_char}`);
           
           canvas.set(screen_x, screen_y, {
             char: item_char,
@@ -1017,6 +1035,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
             render_index: 3, // Below entities
           });
         }
+      } else {
+        debug_log_place(`[GroundItems] Item out of bounds, skipping`);
       }
     }
 
@@ -1278,6 +1298,90 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       );
     },
 
+    OnDragEnd(e: DragEvent): void {
+      debug_log_place(`[OnDragEnd] ========== DRAG END ==========`);
+      debug_log_place(`[OnDragEnd] Called at screen position (${e.x}, ${e.y})`);
+      debug_log_place(`[OnDragEnd] config.is_dragging exists: ${!!config.is_dragging}`);
+      debug_log_place(`[OnDragEnd] config.on_drop exists: ${!!config.on_drop}`);
+      debug_log_place(`[OnDragEnd] config.get_drag_source exists: ${!!config.get_drag_source}`);
+      
+      // Only handle drops if we're dragging an item
+      if (!config.is_dragging) {
+        debug_log_place(`[OnDragEnd] is_dragging callback not configured!`);
+        return;
+      }
+      
+      const is_dragging = config.is_dragging();
+      debug_log_place(`[OnDragEnd] is_dragging() returned: ${is_dragging}`);
+      
+      if (!is_dragging) {
+        debug_log_place(`[OnDragEnd] Not dragging - ignoring`);
+        return;
+      }
+
+      const place = config.get_place();
+      if (!place) {
+        debug_log_place(`[OnDragEnd] No place loaded - ignoring`);
+        return;
+      }
+      debug_log_place(`[OnDragEnd] Place: ${place.id}`);
+
+      // Use screen_to_tile like OnClick does for consistent coordinate calculation
+      const tile = screen_to_tile(e.x, e.y);
+      debug_log_place(`[OnDragEnd] screen_to_tile(${e.x}, ${e.y}) returned: ${tile ? `(${tile.x}, ${tile.y})` : 'null'}`);
+      
+      if (!tile) {
+        debug_log_place(`[OnDragEnd] Drop outside visible area - ignoring`);
+        return;
+      }
+
+      const tile_x = tile.x;
+      const tile_y = tile.y;
+
+      // Check if tile is within place bounds
+      if (tile_x < 0 || tile_x >= place.tile_grid.width || tile_y < 0 || tile_y >= place.tile_grid.height) {
+        debug_log_place(`[OnDragEnd] Drop outside place bounds: (${tile_x}, ${tile_y}) vs grid (${place.tile_grid.width}x${place.tile_grid.height})`);
+        return;
+      }
+
+      // Check distance from actor (must be within 1 tile for dropping)
+      const actor_pos = config.get_actor_position?.();
+      debug_log_place(`[OnDragEnd] Actor position: ${actor_pos ? `(${actor_pos.x}, ${actor_pos.y})` : 'null'}`);
+      
+      if (actor_pos) {
+        const distance = Math.sqrt(
+          Math.pow(tile_x - actor_pos.x, 2) + Math.pow(tile_y - actor_pos.y, 2)
+        );
+        debug_log_place(`[OnDragEnd] Distance from actor: ${distance.toFixed(2)} tiles`);
+        
+        if (distance > 1.5) {
+          debug_log_place(`[OnDragEnd] Drop too far from actor: ${distance.toFixed(2)} tiles (max 1.5)`);
+          // Reject the drag
+          if (config.get_drag_source) {
+            debug_log_place(`[OnDragEnd] Calling get_drag_source for rejection`);
+            const drag_source = config.get_drag_source();
+            debug_log_place(`[OnDragEnd] Drag source: ${JSON.stringify(drag_source)}`);
+          }
+          return;
+        }
+      }
+
+      debug_log_place(`[OnDragEnd] ========== CALLING on_drop ==========`);
+      debug_log_place(`[OnDragEnd] Tile: (${tile_x}, ${tile_y})`);
+
+      // Call the on_drop callback
+      if (config.on_drop) {
+        debug_log_place(`[OnDragEnd] Calling config.on_drop callback...`);
+        void config.on_drop(tile_x, tile_y).then((success: boolean) => {
+          debug_log_place(`[OnDragEnd] Drop ${success ? 'successful' : 'failed'} at (${tile_x}, ${tile_y})`);
+        }).catch((err: any) => {
+          debug_log_place(`[OnDragEnd] Drop error: ${err}`);
+        });
+      } else {
+        debug_log_place(`[OnDragEnd] ERROR: config.on_drop callback not configured!`);
+      }
+    },
+
     OnClick(e: PointerEvent): void {
       // Only left click should move/select. Right click is reserved for INSPECT.
       if (e.button !== 0) return;
@@ -1347,13 +1451,31 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       // Check if clicked on an entity (NPC or actor)
       const entity = get_entity_at(tile.x, tile.y, place);
       if (entity) {
-        // Entity clicked - set as target for communication
         const is_npc = "npc_ref" in entity;
         const ref = is_npc
           ? (entity as PlaceNPC).npc_ref
           : (entity as PlaceActor).actor_ref;
+
+        // Phase 2: Handle double-click on NPC (e.click_count is set by runtime)
+        if (e.click_count === 2 && is_npc && config.on_double_click_npc) {
+          // Check distance (must be within 1 tile)
+          const actor_pos = config.get_actor_position?.();
+          if (actor_pos) {
+            const distance = Math.sqrt(
+              Math.pow(actor_pos.x - tile.x, 2) +
+              Math.pow(actor_pos.y - tile.y, 2)
+            );
+            if (distance <= 1) {
+              debug_log_place(`Double-click on NPC: ${ref} (distance: ${distance.toFixed(1)})`);
+              config.on_double_click_npc(ref);
+            } else {
+              debug_log_place(`Double-click on NPC too far: ${ref} (distance: ${distance.toFixed(1)})`);
+            }
+          }
+          return;
+        }
         
-        // Set internal target
+        // Single click: Set internal target
         set_target({ x: tile.x, y: tile.y, entity });
         
         // Call external target selection callback if provided
@@ -1363,6 +1485,31 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         
         console.log(`[PlaceModule] Target selected: ${ref}`);
         return;
+      }
+
+      // Phase 2: Handle double-click on ground (items on ground)
+      if (e.click_count === 2 && config.on_double_click_ground) {
+        const items_on_ground = place.contents.items_on_ground.filter(
+          item => item.tile_position.x === tile.x && item.tile_position.y === tile.y
+        );
+        
+        if (items_on_ground.length > 0) {
+          // Check distance (must be within 1 tile)
+          const actor_pos = config.get_actor_position?.();
+          if (actor_pos) {
+            const distance = Math.sqrt(
+              Math.pow(actor_pos.x - tile.x, 2) +
+              Math.pow(actor_pos.y - tile.y, 2)
+            );
+            if (distance <= 1) {
+              debug_log_place(`Double-click on ground items at (${tile.x},${tile.y}), count: ${items_on_ground.length}`);
+              config.on_double_click_ground(tile.x, tile.y);
+            } else {
+              debug_log_place(`Double-click on ground items too far: (${tile.x},${tile.y}), distance: ${distance.toFixed(1)})`);
+            }
+          }
+          return;
+        }
       }
 
       // Check if tile is walkable

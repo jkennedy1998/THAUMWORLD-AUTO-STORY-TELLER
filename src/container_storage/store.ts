@@ -9,6 +9,14 @@ import { debug_error, debug_log, debug_warn } from "../shared/debug.js";
 import { calculate_grid_dimensions } from "../types/container.js";
 import type { ContainerPosition, Container, ContainerContentEntry } from "../types/container.js";
 import { ensure_grid_coordinates_recursive } from "../shared/migration.js";
+import { load_place, save_place } from "../place_storage/store.js";
+import { load_actor, save_actor } from "../actor_storage/store.js";
+import { 
+    check_tag_compatibility, 
+    has_equipment_tags,
+    get_primary_slot_type,
+    get_compatible_slot_types
+} from "../equipment/tag_validation.js";
 
 // Re-export Container for backward compatibility
 export type { Container };
@@ -82,6 +90,258 @@ export function ensure_container_dir(slot: number): string {
     return dir;
 }
 
+/**
+ * Load body slot container from inline body_slots storage
+ * Returns container object or null if not found
+ */
+function load_body_slot_container_inline(
+    entity: any,
+    container_id: string,
+    slot_name: string
+): any | null {
+    // Check if this is a body slot container
+    const body_slot = entity.body_slots?.[slot_name];
+    if (!body_slot) return null;
+
+    // Check all slot types for equipped items with container_data
+    const equipped_items: any[] = [];
+
+    // Check tool slot
+    if (body_slot.tool) {
+        const item = find_item_in_entity(entity, body_slot.tool);
+        if (item) {
+            equipped_items.push({
+                instance: {
+                    id: item.id,
+                    def_id: item.def_id,
+                    qty: 1,
+                    condition: "good",
+                    tags: item.tags || [],
+                    container_id: container_id,
+                    owner_ref: entity.id
+                },
+                definition: item,
+                grid_x: 0,
+                grid_y: 0
+            });
+        }
+    }
+
+    // Check armor slot
+    if (body_slot.armor) {
+        const item = find_item_in_entity(entity, body_slot.armor);
+        if (item) {
+            equipped_items.push({
+                instance: {
+                    id: item.id,
+                    def_id: item.def_id,
+                    qty: 1,
+                    condition: "good",
+                    tags: item.tags || [],
+                    container_id: container_id,
+                    owner_ref: entity.id
+                },
+                definition: item,
+                grid_x: equipped_items.length,
+                grid_y: 0
+            });
+        }
+    }
+
+    // Check garb slots (can have multiple)
+    if (body_slot.garb && Array.isArray(body_slot.garb)) {
+        for (const garb_id of body_slot.garb) {
+            const item = find_item_in_entity(entity, garb_id);
+            if (item) {
+                equipped_items.push({
+                    instance: {
+                        id: item.id,
+                        def_id: item.def_id,
+                        qty: 1,
+                        condition: "good",
+                        tags: item.tags || [],
+                        container_id: container_id,
+                        owner_ref: entity.id
+                    },
+                    definition: item,
+                    grid_x: equipped_items.length,
+                    grid_y: 0
+                });
+            }
+        }
+    }
+
+    if (equipped_items.length === 0) return null;
+
+    // Return container structure
+    return {
+        id: container_id,
+        kind: "actor",
+        owner_ref: `actor.${entity.id}`,
+        name: slot_name,
+        capacity: {
+            max_slots: 2,
+            max_weight: 2000
+        },
+        contents: equipped_items,
+        tags: [],
+        is_open: true,
+        is_locked: false
+    };
+}
+
+/**
+ * Find item definition in entity's containers or body_slots
+ * Returns full item definition with tags for equipment validation
+ */
+function find_item_in_entity(entity: any, item_id: string): any {
+    // Check entity.containers first
+    if (entity.containers) {
+        for (const container_name of Object.keys(entity.containers)) {
+            const container = entity.containers[container_name];
+            if (container?.contents) {
+                for (const entry of container.contents) {
+                    if (entry.instance?.id === item_id) {
+                        return entry.definition;
+                    }
+                }
+            }
+        }
+    }
+
+    // Check inline body slot containers (items with container_data equipped to body slots)
+    if (entity.body_slots) {
+        for (const slot_name of Object.keys(entity.body_slots)) {
+            const slot = entity.body_slots[slot_name];
+            
+            // Check tool slot - look for item with container_data
+            if (slot.tool === item_id) {
+                // Search in entity's equipped containers for this item
+                const equipped_container = find_equipped_container_with_item(entity, item_id);
+                if (equipped_container) return equipped_container;
+                
+                // Fallback: return minimal with TOOL tag
+                return { 
+                    id: item_id, 
+                    def_id: item_id.replace("inst_", "").replace(/_\d+$/, ""),
+                    tags: [{ name: "TOOL", mag: 1 }]
+                };
+            }
+            
+            // Check armor slot
+            if (slot.armor === item_id) {
+                const equipped_container = find_equipped_container_with_item(entity, item_id);
+                if (equipped_container) return equipped_container;
+                
+                return { 
+                    id: item_id, 
+                    def_id: item_id.replace("inst_", "").replace(/_\d+$/, ""),
+                    tags: [{ name: "ARMOR", mag: 1, meta: [slot_name] }]
+                };
+            }
+            
+            // Check garb slots
+            if (slot.garb && slot.garb.includes(item_id)) {
+                const equipped_container = find_equipped_container_with_item(entity, item_id);
+                if (equipped_container) return equipped_container;
+                
+                return { 
+                    id: item_id, 
+                    def_id: item_id.replace("inst_", "").replace(/_\d+$/, ""),
+                    tags: [{ name: "GARB", mag: 1, meta: [slot_name] }]
+                };
+            }
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Helper to find item definition in equipped containers (body slots with container_data)
+ */
+function find_equipped_container_with_item(entity: any, item_id: string): any {
+    if (!entity.body_slots) return null;
+    
+    for (const slot_name of Object.keys(entity.body_slots)) {
+        const slot = entity.body_slots[slot_name];
+        
+        // Check if this slot has an equipped item with container_data
+        const equipped_ids = [
+            slot.tool,
+            slot.armor,
+            ...(slot.garb || [])
+        ].filter(Boolean);
+        
+        for (const equipped_id of equipped_ids) {
+            // This is a container item - check its container_data.contents
+            const equipped_item = find_item_in_entity_recursive(entity, equipped_id);
+            if (equipped_item?.container_data?.contents) {
+                for (const entry of equipped_item.container_data.contents) {
+                    if (entry.instance?.id === item_id) {
+                        return entry.definition;
+                    }
+                }
+            }
+        }
+    }
+    
+    return null;
+}
+
+/**
+ * Recursively find item in entity (for nested containers)
+ */
+function find_item_in_entity_recursive(entity: any, item_id: string): any {
+    // Check containers
+    if (entity.containers) {
+        for (const container_name of Object.keys(entity.containers)) {
+            const container = entity.containers[container_name];
+            if (container?.contents) {
+                for (const entry of container.contents) {
+                    if (entry.instance?.id === item_id) {
+                        return entry;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Check inline sack in body_slots
+    if (entity.body_slots) {
+        for (const slot_name of Object.keys(entity.body_slots)) {
+            const slot = entity.body_slots[slot_name];
+            const equipped_ids = [slot.tool, slot.armor, ...(slot.garb || [])].filter(Boolean);
+            
+            for (const equipped_id of equipped_ids) {
+                // Get the equipped item entry
+                if (entity.containers) {
+                    for (const container_name of Object.keys(entity.containers)) {
+                        const container = entity.containers[container_name];
+                        if (container?.contents) {
+                            for (const entry of container.contents) {
+                                if (entry.instance?.id === equipped_id) {
+                                    // Check if this item has the target in its container_data
+                                    if (entry.instance?.container_data?.contents) {
+                                        for (const nested_entry of entry.instance.container_data.contents) {
+                                            if (nested_entry.instance?.id === item_id) {
+                                                return entry; // Return the container item
+                                            }
+                                        }
+                                    }
+                                    return entry;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    return null;
+}
+
 export function create_container(
     slot: number,
     owner_ref: string,
@@ -125,7 +385,7 @@ export function load_container(slot: number, container_id: string): ContainerLoo
 }
 
 /**
- * Load container from entity.containers (entity-centric storage)
+ * Load container from entity - checks both entity.containers and inline body_slots
  */
 function load_container_from_entity(slot: number, container_id: string): ContainerLookupResult {
     const parsed = parse_container_id(container_id);
@@ -153,12 +413,26 @@ function load_container_from_entity(slot: number, container_id: string): Contain
     }
 
     entity = read_jsonc(entity_path);
-    if (!entity || !entity.containers) {
-        return { ok: false, error: "no_containers_field", todo: "Entity has no containers field" };
+    const container_name = get_container_name_from_id(container_id);
+    let container: any;
+
+    // Check 1: entity.containers (legacy/standard location)
+    if (entity.containers && entity.containers[container_name]) {
+        container = entity.containers[container_name];
+        debug_log("container", `Loaded ${container_id} from entity.containers`);
+    }
+    // Check 2: inline body_slots for body slot containers
+    else if (parsed.owner_type === "actor" || parsed.owner_type === "npc") {
+        const slot_container = load_body_slot_container_inline(entity, container_id, container_name);
+        if (slot_container) {
+            container = slot_container;
+            debug_log("container", `Loaded ${container_id} from inline body_slots`);
+        }
     }
 
-    const container_name = get_container_name_from_id(container_id);
-    const container = entity.containers[container_name];
+    if (!container) {
+        return { ok: false, error: "container_not_found", todo: `Container ${container_name} not found in entity ${parsed.owner_id}` };
+    }
 
     if (!container) {
         return { ok: false, error: "container_not_in_entity", todo: `Container ${container_name} not found in entity` };
@@ -249,15 +523,59 @@ function save_container_to_entity(slot: number, container: Container): { ok: boo
     try {
         // Read current entity
         const entity = read_jsonc(entity_path) as Record<string, any>;
-        
-        // Initialize containers field if not exists
-        if (!entity.containers) {
-            entity.containers = {};
-        }
-
-        // Update the specific container
         const container_name = get_container_name_from_id(container.id);
-        entity.containers[container_name] = container;
+        
+        // Check if this is a body slot container (hand_left, hand_right, head, torso, leg_left, leg_right)
+        const body_slot_names = ["hand_left", "hand_right", "head", "torso", "leg_left", "leg_right"];
+        const is_body_slot = body_slot_names.includes(container_name);
+        
+        if (is_body_slot && (parsed.owner_type === "actor" || parsed.owner_type === "npc")) {
+            // Body slot containers are stored inline in body_slots
+            if (!entity.body_slots) {
+                entity.body_slots = {};
+            }
+            if (!entity.body_slots[container_name]) {
+                entity.body_slots[container_name] = {
+                    name: container_name,
+                    critical: ["head", "torso"].includes(container_name),
+                    armor: null,
+                    garb: [],
+                    tool: null
+                };
+            }
+            
+            // Update body_slots based on container contents
+            // Each item in the container should be reflected in the appropriate slot type
+            const slot_data = entity.body_slots[container_name];
+            
+            // Clear existing
+            slot_data.tool = null;
+            slot_data.armor = null;
+            slot_data.garb = [];
+            
+            // Re-populate from container contents
+            for (const entry of container.contents) {
+                const slot_type = get_primary_slot_type(entry.definition as any);
+                if (slot_type === "tool") {
+                    slot_data.tool = entry.instance.id;
+                } else if (slot_type === "armor") {
+                    slot_data.armor = entry.instance.id;
+                } else if (slot_type === "garb") {
+                    if (!slot_data.garb.includes(entry.instance.id)) {
+                        slot_data.garb.push(entry.instance.id);
+                    }
+                }
+            }
+            
+            debug_log("container", `Saved ${container.id} to inline body_slots`);
+        } else {
+            // Non-body-slot containers go to entity.containers
+            if (!entity.containers) {
+                entity.containers = {};
+            }
+            entity.containers[container_name] = container;
+            debug_log("container", `Saved ${container.id} to entity.containers`);
+        }
 
         // Write back to file
         fs.writeFileSync(entity_path, JSON.stringify(entity, null, 2), "utf-8");
@@ -502,13 +820,77 @@ function can_swap_items(
 
 /**
  * Check if an item is compatible with a body slot
+ * 
+ * DUAL VALIDATION: Checks both equipment tags and legacy valid_body_slots
+ * during the transition period.
+ * 
+ * @param item_entry - The item to check
+ * @param slot_name - The body slot name (e.g., "hand_left", "torso")
+ * @param slot_type - Optional: The slot type ("armor", "garb", "tool") for tag-based validation
+ * @returns True if item can equip to the slot
  */
+/**
+ * Body part slot type mapping from the plan:
+ * Head: armor, garb (no tool)
+ * Torso: armor, garb (no tool)
+ * Hand Left/Right: armor, garb, tool
+ * Leg Left/Right: armor, garb (no tool)
+ */
+const BODY_SLOT_TYPE_MAPPING: Record<string, string[]> = {
+    "head": ["armor", "garb"],
+    "torso": ["armor", "garb"],
+    "hand_left": ["armor", "garb", "tool"],
+    "hand_right": ["armor", "garb", "tool"],
+    "leg_left": ["armor", "garb"],
+    "leg_right": ["armor", "garb"]
+};
+
 function is_item_compatible_with_slot(
     item_entry: { instance: ItemInstance; definition: any },
-    slot_name: string
+    slot_name: string,
+    slot_type?: string
 ): boolean {
     const def = item_entry.definition;
-    return def.valid_body_slots?.includes(slot_name) ?? false;
+    
+    // Get available slot types for this body part
+    const available_slot_types = BODY_SLOT_TYPE_MAPPING[slot_name];
+    if (!available_slot_types) {
+        debug_log("transfer", `[COMPATIBILITY] Unknown body slot: ${slot_name}`);
+        return false;
+    }
+    
+    // If item has equipment tags, use tag-based validation
+    if (has_equipment_tags(def)) {
+        // Get all compatible slot types for this item
+        const item_slot_types = get_compatible_slot_types(def);
+        
+        // Check if item can go to ANY available slot on this body part
+        const compatible_types = item_slot_types.filter(type => available_slot_types.includes(type));
+        
+        if (compatible_types.length === 0) {
+            debug_log("transfer", `[COMPATIBILITY] REJECTED: ${def.name || def.id} has tags [${item_slot_types.join(', ')}] but ${slot_name} only supports [${available_slot_types.join(', ')}]`);
+            return false;
+        }
+        
+        // If specific slot_type requested, validate it
+        if (slot_type) {
+            // Check if the requested slot_type is available on this body part
+            if (!available_slot_types.includes(slot_type)) {
+                debug_log("transfer", `[COMPATIBILITY] REJECTED: ${slot_name} doesn't have ${slot_type} slot (available: [${available_slot_types.join(', ')}])`);
+                return false;
+            }
+            
+            // Check if item is compatible with this specific slot_type
+            const tag_result = check_tag_compatibility(def, slot_name, slot_type);
+            return tag_result.compatible;
+        }
+        
+        // No specific slot_type requested - item is compatible if it can go to any slot
+        return true;
+    }
+    
+    // If item has no equipment tags, reject (all items must have tags)
+    return false;
 }
 
 export function add_item_to_container(
@@ -577,6 +959,147 @@ export function remove_item_from_container(
 
     save_container(slot, result.container);
     return { ok: true, container: result.container, path: result.path };
+}
+
+/**
+ * Sync actor's body_slots with container contents after transfer
+ * This ensures body_slots accurately reflect what's actually equipped
+ */
+function sync_body_slots_with_containers(
+    slot: number,
+    from_container_id: string,
+    to_container_id: string,
+    item_instance_id: string
+): void {
+    debug_log("transfer", `[SYNC] === START SYNC ===`);
+    debug_log("transfer", `[SYNC] Item: ${item_instance_id}`);
+    debug_log("transfer", `[SYNC] From: ${from_container_id} -> To: ${to_container_id}`);
+    
+    // Parse container IDs to get actor info
+    const from_match = from_container_id.match(/^container\.(actor\.[^.]+)\.(.+)$/);
+    const to_match = to_container_id.match(/^container\.(actor\.[^.]+)\.(.+)$/);
+    
+    debug_log("transfer", `[SYNC] from_match: ${from_match ? `${from_match[1]}.${from_match[2]}` : 'null'}`);
+    debug_log("transfer", `[SYNC] to_match: ${to_match ? `${to_match[1]}.${to_match[2]}` : 'null'}`);
+    
+    // Handle item moved FROM a body slot (remove from body_slots)
+    if (from_match && from_match[1] && from_match[2]) {
+        const actor_id = from_match[1];
+        const slot_name = from_match[2];
+        debug_log("transfer", `[SYNC] Processing removal from ${slot_name} for actor ${actor_id}`);
+        
+        const actor_result = load_actor(slot, actor_id);
+        if (actor_result.ok) {
+            const actor = actor_result.actor as any;
+            debug_log("transfer", `[SYNC] Loaded actor, body_slots exists: ${!!actor.body_slots}`);
+            
+            if (actor.body_slots && actor.body_slots[slot_name]) {
+                const body_slot = actor.body_slots[slot_name];
+                debug_log("transfer", `[SYNC] BEFORE removal - ${slot_name}: tool=${body_slot.tool}, armor=${body_slot.armor}, garb=[${body_slot.garb?.join(', ') || 'empty'}]`);
+                
+                // Check all slot types and remove the item
+                let removed = false;
+                if (body_slot.tool === item_instance_id) {
+                    body_slot.tool = null;
+                    removed = true;
+                    debug_log("transfer", `[SYNC] REMOVED from ${slot_name}.tool`);
+                }
+                if (body_slot.armor === item_instance_id) {
+                    body_slot.armor = null;
+                    removed = true;
+                    debug_log("transfer", `[SYNC] REMOVED from ${slot_name}.armor`);
+                }
+                if (body_slot.garb && Array.isArray(body_slot.garb)) {
+                    const idx = body_slot.garb.indexOf(item_instance_id);
+                    if (idx >= 0) {
+                        body_slot.garb.splice(idx, 1);
+                        removed = true;
+                        debug_log("transfer", `[SYNC] REMOVED from ${slot_name}.garb at index ${idx}`);
+                    }
+                }
+                
+                if (!removed) {
+                    debug_log("transfer", `[SYNC] WARNING: Item ${item_instance_id} not found in ${slot_name} for removal`);
+                }
+                
+                debug_log("transfer", `[SYNC] AFTER removal - ${slot_name}: tool=${body_slot.tool}, armor=${body_slot.armor}, garb=[${body_slot.garb?.join(', ') || 'empty'}]`);
+                
+                // Save the updated actor
+                save_actor(slot, actor_id!, actor);
+                debug_log("transfer", `[SYNC] Saved actor after removal`);
+            } else {
+                debug_log("transfer", `[SYNC] WARNING: body_slots or ${slot_name} not found`);
+            }
+        } else {
+            debug_log("transfer", `[SYNC] ERROR: Failed to load actor ${actor_id}`);
+        }
+    }
+    
+    // Handle item moved TO a body slot (add to body_slots)
+    if (to_match && to_match[1] && to_match[2]) {
+        const actor_id = to_match[1];
+        const slot_name = to_match[2];
+        debug_log("transfer", `[SYNC] Processing addition to ${slot_name} for actor ${actor_id}`);
+        
+        const actor_result = load_actor(slot, actor_id);
+        if (actor_result.ok) {
+            const actor = actor_result.actor as any;
+            debug_log("transfer", `[SYNC] Loaded actor, body_slots exists: ${!!actor.body_slots}`);
+            
+            if (actor.body_slots && actor.body_slots[slot_name]) {
+                const body_slot = actor.body_slots[slot_name];
+                debug_log("transfer", `[SYNC] BEFORE addition - ${slot_name}: tool=${body_slot.tool}, armor=${body_slot.armor}, garb=[${body_slot.garb?.join(', ') || 'empty'}]`);
+                
+                // Load the item to check its slot type
+                const container_result = load_container(slot, to_container_id);
+                if (container_result.ok) {
+                    const item_entry = container_result.container.contents.find(
+                        entry => entry.instance.id === item_instance_id
+                    );
+                    
+                    if (item_entry) {
+                        const slot_type = get_primary_slot_type(item_entry.definition as any);
+                        debug_log("transfer", `[SYNC] Item ${item_instance_id} has slot_type: ${slot_type}`);
+                        
+                        // Add to appropriate slot type
+                        if (slot_type === "tool") {
+                            body_slot.tool = item_instance_id;
+                            debug_log("transfer", `[SYNC] ADDED to ${slot_name}.tool`);
+                        } else if (slot_type === "armor") {
+                            body_slot.armor = item_instance_id;
+                            debug_log("transfer", `[SYNC] ADDED to ${slot_name}.armor`);
+                        } else if (slot_type === "garb") {
+                            if (!body_slot.garb) body_slot.garb = [];
+                            if (!body_slot.garb.includes(item_instance_id)) {
+                                body_slot.garb.push(item_instance_id);
+                                debug_log("transfer", `[SYNC] ADDED to ${slot_name}.garb, now has ${body_slot.garb.length} items`);
+                            } else {
+                                debug_log("transfer", `[SYNC] Item already in ${slot_name}.garb, skipping`);
+                            }
+                        } else {
+                            debug_log("transfer", `[SYNC] WARNING: Unknown slot_type ${slot_type}, not adding to body_slots`);
+                        }
+                        
+                        debug_log("transfer", `[SYNC] AFTER addition - ${slot_name}: tool=${body_slot.tool}, armor=${body_slot.armor}, garb=[${body_slot.garb?.join(', ') || 'empty'}]`);
+                        
+                        // Save the updated actor
+                        save_actor(slot, actor_id!, actor);
+                        debug_log("transfer", `[SYNC] Saved actor after addition`);
+                    } else {
+                        debug_log("transfer", `[SYNC] ERROR: Item ${item_instance_id} not found in container ${to_container_id}`);
+                    }
+                } else {
+                    debug_log("transfer", `[SYNC] ERROR: Failed to load container ${to_container_id}`);
+                }
+            } else {
+                debug_log("transfer", `[SYNC] WARNING: body_slots or ${slot_name} not found`);
+            }
+        } else {
+            debug_log("transfer", `[SYNC] ERROR: Failed to load actor ${actor_id}`);
+        }
+    }
+    
+    debug_log("transfer", `[SYNC] === END SYNC ===`);
 }
 
 export function calculate_container_weight(
@@ -684,7 +1207,44 @@ export function transfer_item_between_containers(
     }
 
     // Find the item in source
-    const item_index = source_contents.findIndex(entry => entry.instance.id === item_instance_id);
+    let item_index = source_contents.findIndex(entry => entry.instance.id === item_instance_id);
+    
+    // If not found in expected container, try to locate it anywhere (inline storage)
+    if (item_index === -1) {
+        debug_log("transfer", `Item ${item_instance_id} not found in ${from_container_id}, searching inline storage...`);
+        const location = find_item_location(slot, item_instance_id);
+        
+        if (location) {
+            debug_log("transfer", `Found item in inline storage: ${location.container_id} (nested: ${location.is_nested})`);
+            
+            // Update source to the actual location
+            if (location.container_id.startsWith("item.")) {
+                // Item is in a nested container
+                const nested_item_id = location.container_id.slice(5);
+                const found = find_item_and_parent_container(slot, nested_item_id);
+                if (found && found.item.instance.container_data) {
+                    from_item_entry = found.item;
+                    from_parent_container = found.parent_container;
+                    from_parent_container_id = found.container_id;
+                    source_contents = found.item.instance.container_data.contents;
+                    source_container_to_save = null; // Will save parent instead
+                    debug_log("transfer", `Switched to nested container: ${location.container_id}`);
+                }
+            } else {
+                // Item is in a regular container
+                const actual_result = load_container(slot, location.container_id);
+                if (actual_result.ok) {
+                    source_contents = actual_result.container.contents;
+                    source_container_to_save = actual_result.container;
+                    debug_log("transfer", `Switched to regular container: ${location.container_id}`);
+                }
+            }
+            
+            // Try to find the item again in the correct location
+            item_index = source_contents.findIndex(entry => entry.instance.id === item_instance_id);
+        }
+    }
+    
     if (item_index === -1) {
         debug_error("transfer", `Item ${item_instance_id} not found in source container`);
         return { ok: false, error: `Item ${item_instance_id} not found in source container` };
@@ -969,8 +1529,10 @@ export function transfer_item_between_containers(
         const is_to_body_slot = is_body_slot_container(to_container_id);
         if (is_to_body_slot) {
             const target_slot_name = get_slot_name(to_container_id);
-            const is_compatible = is_item_compatible_with_slot(removed_entry, target_slot_name);
-            debug_log("transfer", `[UNIFIED-TRANSFER] Body slot compatibility check: ${removed_entry.instance.def_id} -> ${target_slot_name}: ${is_compatible}`);
+            // Get slot_type from item's equipment tags for tag-based validation
+            const slot_type = get_primary_slot_type(removed_entry.definition);
+            const is_compatible = is_item_compatible_with_slot(removed_entry, target_slot_name, slot_type || undefined);
+            debug_log("transfer", `[UNIFIED-TRANSFER] Body slot compatibility check: ${removed_entry.instance.def_id} -> ${target_slot_name} (type: ${slot_type}): ${is_compatible}`);
             if (!is_compatible) {
                 debug_log("transfer", `[UNIFIED-TRANSFER] REJECTING: ${removed_entry.instance.def_id} cannot be equipped to ${target_slot_name}`);
                 return { ok: false, error: `${removed_entry.definition.name || removed_entry.instance.def_id} cannot be equipped to ${target_slot_name}` };
@@ -1220,6 +1782,9 @@ export function transfer_item_between_containers(
     
     debug_log("transfer", "[UNIFIED-TRANSFER] SAVE PHASE COMPLETE");
 
+    // SYNC BODY SLOTS: Update actor's body_slots to match container state
+    sync_body_slots_with_containers(slot, from_container_id, to_container_id, item_instance_id);
+
     debug_log("transfer", `Transfer complete: ${item_instance_id} moved from ${from_container_id} to ${to_container_id}`);
     return { ok: true };
 }
@@ -1270,7 +1835,7 @@ export function get_ground_items(
 }
 
 /**
- * Find scattered container at specific coordinates
+ * Find scattered container at specific coordinates (inline storage in place.containers)
  * Returns null if not found
  */
 export function find_scattered_container(
@@ -1279,17 +1844,24 @@ export function find_scattered_container(
     x: number,
     y: number
 ): Container | null {
-    const container_id = `container.place.${place_id}.scattered_${x}_${y}`;
-    const result = load_container(slot, container_id);
-    if (result.ok && result.container.subtype === "scattered") {
-        return result.container;
+    const place_result = load_place(slot, place_id);
+    if (!place_result.ok) return null;
+    
+    const place = place_result.place;
+    if (!place.containers) return null;
+    
+    const container_name = `scattered_${x}_${y}`;
+    const container = place.containers[container_name];
+    
+    if (container && container.subtype === "scattered") {
+        return container;
     }
     return null;
 }
 
 /**
- * Get or create scattered container at specific coordinates
- * Auto-creates container if it doesn't exist
+ * Get or create scattered container at specific coordinates (inline storage in place.containers)
+ * Auto-creates container inline if it doesn't exist
  */
 export function get_or_create_scattered_container(
     slot: number,
@@ -1297,13 +1869,25 @@ export function get_or_create_scattered_container(
     x: number,
     y: number
 ): ContainerLookupResult {
-    const container_id = `container.place.${place_id}.scattered_${x}_${y}`;
+    const place_result = load_place(slot, place_id);
+    if (!place_result.ok) {
+        return { ok: false, error: "place_not_found", todo: `Place ${place_id} not found` };
+    }
     
-    // Try to load existing
-    const existing = load_container(slot, container_id);
-    if (existing.ok) return existing;
+    const place = place_result.place;
+    if (!place.containers) {
+        place.containers = {};
+    }
     
-    // Create new scattered container
+    const container_name = `scattered_${x}_${y}`;
+    const container_id = `container.place.${place_id}.${container_name}`;
+    
+    // Check if already exists
+    if (place.containers[container_name]) {
+        return { ok: true, container: place.containers[container_name], path: `place:${place_id}` };
+    }
+    
+    // Create new scattered container inline
     const container: Container = {
         id: container_id,
         kind: "place",
@@ -1319,33 +1903,33 @@ export function get_or_create_scattered_container(
         is_locked: false,
     };
     
-    const path = save_container(slot, container);
-    return { ok: true, container, path };
+    // Store inline in place.containers
+    place.containers[container_name] = container;
+    save_place(slot, place);
+    
+    return { ok: true, container, path: `place:${place_id}` };
 }
 
 /**
- * List all scattered containers in a place
+ * List all scattered containers in a place (inline storage in place.containers)
  * Returns array of containers with their contents
  */
 export function list_scattered_containers(
     slot: number,
     place_id: string
 ): Container[] {
-    const dir = ensure_container_dir(slot);
-    if (!fs.existsSync(dir)) return [];
+    const place_result = load_place(slot, place_id);
+    if (!place_result.ok) return [];
     
-    const prefix = `container.place.${place_id}.scattered_`;
+    const place = place_result.place;
+    if (!place.containers) return [];
+    
     const containers: Container[] = [];
     
-    const files = fs.readdirSync(dir).filter(f => f.endsWith(".jsonc"));
-    
-    for (const file of files) {
-        const container_id = file.replace(".jsonc", "");
-        if (container_id.startsWith(prefix)) {
-            const result = load_container(slot, container_id);
-            if (result.ok && result.container.subtype === "scattered") {
-                containers.push(result.container);
-            }
+    // Find all scattered containers in place.containers
+    for (const [container_name, container] of Object.entries(place.containers)) {
+        if (container_name.startsWith("scattered_") && container.subtype === "scattered") {
+            containers.push(container);
         }
     }
     
@@ -1353,21 +1937,35 @@ export function list_scattered_containers(
 }
 
 /**
- * Delete scattered container if empty
+ * Delete scattered container if empty (inline storage in place.containers)
  * Returns true if deleted, false if not empty or not found
  */
 export function delete_scattered_container_if_empty(
     slot: number,
     container_id: string
 ): boolean {
-    const result = load_container(slot, container_id);
-    if (!result.ok) return false;
+    // Parse container_id to get place_id and coordinates
+    const match = container_id.match(/^container\.place\.(.+)\.scattered_(\d+)_(\d+)$/);
+    if (!match) return false;
     
-    const container = result.container;
+    const place_id = match[1]!;
+    const container_name = `scattered_${match[2]}_${match[3]}`;
+    
+    const place_result = load_place(slot, place_id);
+    if (!place_result.ok) return false;
+    
+    const place = place_result.place;
+    if (!place.containers) return false;
+    
+    const container = place.containers[container_name];
+    if (!container) return false;
     if (container.subtype !== "scattered") return false;
     if (container.contents.length > 0) return false;
     
-    return delete_container(slot, container_id);
+    // Delete from inline storage
+    delete place.containers[container_name];
+    save_place(slot, place);
+    return true;
 }
 
 /**
@@ -1562,5 +2160,143 @@ export function find_item_and_parent_container(
     }
 
     debug_log("find_item_and_parent", `Item ${instance_id} not found in any entity`);
+    return null;
+}
+
+/**
+ * Find an item anywhere, including in nested containers (sacks, bags)
+ * This handles the new inline storage architecture where items can be inside
+ * container_data.contents of equipped items
+ * 
+ * @returns Full path information for where the item is located
+ */
+export function find_item_location(
+    slot: number,
+    instance_id: string
+): {
+    item: { instance: ItemInstance; definition: any };
+    container_id: string;
+    is_nested: boolean;
+    parent_item_id?: string;
+    entity_type: string;
+    entity_id: string;
+} | null {
+    debug_log("find_item_location", `Searching for item ${instance_id} in slot ${slot}`);
+    
+    const base_dir = `local_data/data_slot_${slot}`;
+
+    // Helper to search contents recursively including nested containers
+    function search_contents_recursive(
+        contents: ContainerContentEntry[], 
+        container_id: string,
+        entity_type: string,
+        entity_id: string,
+        parent_item_id?: string
+): {
+    item: { instance: ItemInstance; definition: any };
+    container_id: string;
+    is_nested: boolean;
+    parent_item_id?: string;
+    entity_type: string;
+    entity_id: string;
+} | null {
+        for (const entry of contents) {
+            // Check if this is the item we're looking for
+            if (entry.instance.id === instance_id) {
+                return {
+                    item: entry,
+                    container_id: container_id,
+                    is_nested: !!parent_item_id,
+                    parent_item_id,
+                    entity_type,
+                    entity_id
+                };
+            }
+            
+            // Check nested container
+            if (entry.instance.container_data?.contents) {
+                const nested = search_contents_recursive(
+                    entry.instance.container_data.contents,
+                    `item.${entry.instance.id}`,
+                    entity_type,
+                    entity_id,
+                    entry.instance.id
+                );
+                if (nested) return nested;
+            }
+        }
+        return null;
+    }
+
+    // Helper to search an entity's containers
+    function search_entity_containers(entity_path: string, entity_type: string, entity_id: string) {
+        if (!fs.existsSync(entity_path)) return null;
+
+        try {
+            const entity = read_jsonc(entity_path) as Record<string, any>;
+            if (!entity.containers) return null;
+
+            for (const [container_name, container] of Object.entries(entity.containers)) {
+                const container_data = container as Container;
+                const found = search_contents_recursive(
+                    container_data.contents, 
+                    container_data.id,
+                    entity_type,
+                    entity_id
+                );
+                if (found) return found;
+            }
+        } catch (err) {
+            debug_error("find_item_location", `Error reading entity ${entity_id}`, err);
+        }
+        return null;
+    }
+
+    // Search Actors first (most common case for equipment)
+    const actors_dir = path.join(base_dir, "actors");
+    if (fs.existsSync(actors_dir)) {
+        const actor_files = fs.readdirSync(actors_dir).filter(f => f.endsWith(".jsonc"));
+        for (const file of actor_files) {
+            const actor_id = file.replace(".jsonc", "");
+            const result = search_entity_containers(
+                path.join(actors_dir, file),
+                "actor",
+                actor_id
+            );
+            if (result) return result;
+        }
+    }
+
+    // Search NPCs
+    const npcs_dir = path.join(base_dir, "npcs");
+    if (fs.existsSync(npcs_dir)) {
+        const npc_files = fs.readdirSync(npcs_dir).filter(f => f.endsWith(".jsonc"));
+        for (const file of npc_files) {
+            const npc_id = file.replace(".jsonc", "");
+            const result = search_entity_containers(
+                path.join(npcs_dir, file),
+                "npc",
+                npc_id
+            );
+            if (result) return result;
+        }
+    }
+
+    // Search Places
+    const places_dir = path.join(base_dir, "places");
+    if (fs.existsSync(places_dir)) {
+        const place_files = fs.readdirSync(places_dir).filter(f => f.endsWith(".jsonc"));
+        for (const file of place_files) {
+            const place_id = file.replace(".jsonc", "");
+            const result = search_entity_containers(
+                path.join(places_dir, file),
+                "place",
+                place_id
+            );
+            if (result) return result;
+        }
+    }
+
+    debug_log("find_item_location", `Item ${instance_id} not found anywhere`);
     return null;
 }

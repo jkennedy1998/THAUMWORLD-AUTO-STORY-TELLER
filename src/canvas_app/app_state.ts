@@ -21,7 +21,7 @@ import { load_container, type Container } from '../container_storage/store.js';
 import { calculate_grid_dimensions, get_container_grid } from '../container_storage/grid_calculator.js';
 import { type ItemInstance } from '../item_instances/store.js';
 import { type ItemDefinition } from '../item_storage/store.js';
-import { type BodySlots } from '../types/body_slots.js';
+import { type BodySlots, get_slot_item_id } from '../types/body_slots.js';
 import { DEBUG_VISION, spawn_sense_broadcast_particles } from '../mono_ui/vision_debugger.js';
 import { get_senses_for_action } from '../action_system/sense_broadcast.js';
 import { UI_DEBUG } from '../mono_ui/runtime/ui_debug.js';
@@ -355,24 +355,31 @@ export function create_app_state(): AppState {
             const body_slots = (actor.body_slots as BodySlots) || {};
             ui_state.character.body_slots = body_slots;
             
-            // Calculate weight from all actor's items
+            // Fetch all containers for this actor (reused for weight calc and equipped items)
             const containers_res = await fetch(`http://localhost:8787/api/containers?owner_ref=actor.${actor_id}&slot=${slot}`);
+            const full_containers: any[] = [];
+            let total_weight = 0;
+            
             if (containers_res.ok) {
                 const containers_data = await containers_res.json();
                 
                 if (containers_data.ok && containers_data.containers) {
-                    let total_weight = 0;
-                    
+                    // Load full container data for all containers
                     for (const container of containers_data.containers) {
                         const container_res = await fetch(`http://localhost:8787/api/container?id=${container.id}&slot=${slot}`);
                         if (container_res.ok) {
                             const container_data = await container_res.json();
-                            if (container_data.ok && container_data.contents) {
-                                for (const content of container_data.contents) {
-                                    if (content.instance && content.definition) {
-                                        const item_weight = (content.definition.weight || 0);
-                                        const qty = (content.instance.qty || 1);
-                                        total_weight += item_weight * qty;
+                            if (container_data.ok && container_data.container) {
+                                full_containers.push(container_data.container);
+                                
+                                // Calculate weight from this container's contents
+                                if (container_data.container.contents) {
+                                    for (const content of container_data.container.contents) {
+                                        if (content.instance && content.definition) {
+                                            const item_weight = (content.definition.weight || 0);
+                                            const qty = (content.instance.qty || 1);
+                                            total_weight += item_weight * qty;
+                                        }
                                     }
                                 }
                             }
@@ -385,31 +392,184 @@ export function create_app_state(): AppState {
                 }
             }
             
-            // Load equipped items from body slot containers
-            const equipped_items = new Map<string, { instance: ItemInstance; definition: ItemDefinition }>();
-            const body_slot_containers = ['head', 'torso', 'hand_left', 'hand_right', 'leg_left', 'leg_right'];
+            // Load equipped items from body_slots (new armor/garb/tool format)
+            // Clear existing Map instead of replacing it to maintain reference
+            debug_log(`[LOAD_EQUIPPED] === START LOADING EQUIPPED ITEMS ===`);
+            debug_log(`[LOAD_EQUIPPED] body_slots: ${JSON.stringify(body_slots, null, 2)}`);
+            ui_state.character.equipped_items.clear();
+            const body_slot_names = ['head', 'torso', 'hand_left', 'hand_right', 'leg_left', 'leg_right'];
             
-            for (const slot_name of body_slot_containers) {
-                const container_id = `container.${actor_id}.${slot_name}`;
-                const container_res = await fetch(`http://localhost:8787/api/container?id=${container_id}&slot=${slot}`);
-                if (container_res.ok) {
-                    const container_data = await container_res.json();
-                    if (container_data.ok && container_data.contents && container_data.contents.length > 0) {
-                        const content = container_data.contents[0];
-                        if (content.instance && content.definition) {
-                            equipped_items.set(slot_name, {
-                                instance: content.instance,
-                                definition: content.definition
-                            });
+            debug_log(`[LOAD_EQUIPPED] Have ${full_containers.length} containers to search`);
+            full_containers.forEach((c, i) => {
+                debug_log(`[LOAD_EQUIPPED] Container ${i}: ${c.id}, contents: ${c.contents?.length || 0}`);
+                c.contents?.forEach((content: any, j: number) => {
+                    debug_log(`[LOAD_EQUIPPED]   Content ${j}: ${content.instance?.id} (${content.definition?.name})`);
+                    if (content.instance?.container_data?.contents) {
+                        content.instance.container_data.contents.forEach((nested: any, k: number) => {
+                            debug_log(`[LOAD_EQUIPPED]     Nested ${k}: ${nested.instance?.id} (${nested.definition?.name})`);
+                        });
+                    }
+                });
+            });
+            
+            // Helper to find item by ID across all containers (including nested)
+            function find_item_in_containers(containers: any[], item_id: string): { instance: ItemInstance; definition: ItemDefinition } | null {
+                debug_log(`[LOAD_EQUIPPED] Searching for item ${item_id}...`);
+                for (const container of containers) {
+                    // Check direct contents
+                    for (const content of container.contents || []) {
+                        if (content.instance?.id === item_id) {
+                            debug_log(`[LOAD_EQUIPPED] FOUND ${item_id} in container ${container.id}`);
+                            return { instance: content.instance, definition: content.definition };
+                        }
+                        // Check nested containers (sacks, bags)
+                        if (content.instance?.container_data?.contents) {
+                            for (const nested of content.instance.container_data.contents) {
+                                if (nested.instance?.id === item_id) {
+                                    debug_log(`[LOAD_EQUIPPED] FOUND ${item_id} in nested container ${content.instance.id}`);
+                                    return { instance: nested.instance, definition: nested.definition };
+                                }
+                            }
+                        }
+                    }
+                }
+                debug_log(`[LOAD_EQUIPPED] Item ${item_id} NOT FOUND in any container`);
+                return null;
+            }
+            
+            // Reuse containers data from weight calculation above
+            // For each body slot, get the equipped item ID from body_slots and find it in containers
+            for (const slot_name of body_slot_names) {
+                const item_id = get_slot_item_id(body_slots, slot_name);
+                debug_log(`[LOAD_EQUIPPED] Slot ${slot_name}: item_id=${item_id}`);
+                if (item_id) {
+                    const item_data = find_item_in_containers(full_containers, item_id);
+                    if (item_data) {
+                        ui_state.character.equipped_items.set(slot_name, item_data);
+                        debug_log(`[Character] Found equipped item in ${slot_name}: ${item_data.definition.name} (${item_id})`);
+                    } else {
+                        debug_log(`[Character] WARNING: Could not find item ${item_id} for slot ${slot_name}`);
+                    }
+                }
+            }
+            
+            debug_log(`[Character] Total equipped items loaded: ${ui_state.character.equipped_items.size}`);
+            debug_log(`[LOAD_EQUIPPED] === END LOADING EQUIPPED ITEMS ===`);
+            
+        } catch (err) {
+            console.error('[Character] Error refreshing character data:', err);
+        }
+    }
+
+    // Phase 1: Get main inventory container (equipped sack)
+    async function get_main_inventory_container(): Promise<{ container_id: string; container_data: any } | null> {
+        const actor_id = APP_CONFIG.input_actor_id;
+        const slot = APP_CONFIG.selected_data_slot;
+        
+        debug_log(`[MainInventory] Looking for main inventory. Actor: ${actor_id}, Slot: ${slot}`);
+        
+        if (!actor_id) {
+            flash_status(['No actor selected'], 1500);
+            debug_log('[MainInventory] ERROR: No actor_id in APP_CONFIG');
+            return null;
+        }
+        
+        try {
+            // Load actor to check body slots
+            const actor_res = await fetch(`http://localhost:8787/api/actor?id=${actor_id}&slot=${slot}`);
+            debug_log(`[MainInventory] Actor API response: ${actor_res.status}`);
+            if (!actor_res.ok) {
+                debug_log(`[MainInventory] ERROR: Actor API returned ${actor_res.status}`);
+                return null;
+            }
+            
+            const actor_data = await actor_res.json();
+            if (!actor_data.ok || !actor_data.actor) {
+                debug_log(`[MainInventory] ERROR: Actor data invalid - ok: ${actor_data.ok}, has actor: ${!!actor_data.actor}`);
+                return null;
+            }
+            
+            const actor = actor_data.actor;
+            const body_slots = actor.body_slots || {};
+            debug_log(`[MainInventory] Actor loaded. Body slots: ${Object.keys(body_slots).join(', ')}`);
+            
+            // Priority order: leg_left, leg_right, torso, head
+            const slot_priority = ['leg_left', 'leg_right', 'torso', 'head'];
+            
+            for (const slot_name of slot_priority) {
+                const body_slot = body_slots[slot_name];
+                debug_log(`[MainInventory] Checking ${slot_name}: has item: ${!!body_slot?.item_instance_id}`);
+                
+                if (body_slot?.item_instance_id) {
+                    // Check if this is a container item
+                    const containers_res = await fetch(`http://localhost:8787/api/containers?owner_ref=actor.${actor_id}&slot=${slot}`);
+                    if (!containers_res.ok) {
+                        debug_log(`[MainInventory] ERROR: Containers API returned ${containers_res.status}`);
+                        continue;
+                    }
+                    
+                    const containers_data = await containers_res.json();
+                    if (!containers_data.ok || !containers_data.containers) {
+                        debug_log(`[MainInventory] ERROR: Containers data invalid`);
+                        continue;
+                    }
+                    
+                    debug_log(`[MainInventory] Found ${containers_data.containers.length} containers`);
+                    
+                    // Find the container for this body slot
+                    for (const container_info of containers_data.containers) {
+                        const expected_id = `container.${actor_id}.${slot_name}`;
+                        debug_log(`[MainInventory] Checking container ${container_info.id} against ${expected_id}`);
+                        
+                        if (container_info.id === expected_id) {
+                            const container_res = await fetch(`http://localhost:8787/api/container?id=${container_info.id}&slot=${slot}`);
+                            if (!container_res.ok) {
+                                debug_log(`[MainInventory] ERROR: Container API returned ${container_res.status}`);
+                                continue;
+                            }
+                            
+                            const container_details = await container_res.json();
+                            if (!container_details.ok) {
+                                debug_log(`[MainInventory] ERROR: Container details invalid`);
+                                continue;
+                            }
+                            
+                            debug_log(`[MainInventory] Container ${slot_name} has ${container_details.contents?.length || 0} items`);
+                            
+                            // Check if the equipped item has container_data (is a sack/bag)
+                            const equipped_item = container_details.contents?.find(
+                                (item: any) => item.instance?.id === body_slot.item_instance_id
+                            );
+                            
+                            debug_log(`[MainInventory] Equipped item ${body_slot.item_instance_id}: found=${!!equipped_item}, has container_data: ${!!equipped_item?.instance?.container_data}`);
+                            
+                            if (equipped_item?.instance?.container_data) {
+                                // This is a container item - return its nested container
+                                const nested_container_id = `item.${equipped_item.instance.id}`;
+                                debug_log(`[MainInventory] SUCCESS: Found main inventory at ${nested_container_id}`);
+                                return {
+                                    container_id: nested_container_id,
+                                    container_data: {
+                                        id: nested_container_id,
+                                        kind: 'item',
+                                        owner_ref: `actor.${actor_id}`,
+                                        ...equipped_item.instance.container_data,
+                                        contents: equipped_item.instance.container_data.contents || []
+                                    }
+                                };
+                            }
                         }
                     }
                 }
             }
             
-            ui_state.character.equipped_items = equipped_items;
-            
+            debug_log('[MainInventory] WARNING: No equipped container found in any body slot');
+            flash_status(['No equipped container found'], 1500);
+            return null;
         } catch (err) {
-            console.error('[Character] Error refreshing character data:', err);
+            console.error('[MainInventory] Error getting main inventory:', err);
+            debug_log(`[MainInventory] EXCEPTION: ${err instanceof Error ? err.message : String(err)}`);
+            return null;
         }
     }
 
@@ -1476,6 +1636,155 @@ export function create_app_state(): AppState {
             actor_rgb: get_color_by_name('vivid_green').rgb,
             grid_rgb: get_color_by_name('medium_gray').rgb,
             initial_scale: 1,
+            
+            // Phase 2: Double-click callbacks
+            get_actor_position: () => {
+                const place = get_current_place();
+                if (!place) return null;
+                const player = place.contents.actors_present[0];
+                return player ? { x: player.tile_position.x, y: player.tile_position.y } : null;
+            },
+            on_double_click_npc: (npc_ref: string) => {
+                debug_log(`[PlaceModule] Double-click on NPC: ${npc_ref}`);
+                // Look up NPC to get name
+                const place = get_current_place();
+                if (!place) return;
+                const npc = place.contents.npcs_present.find((n: any) => n.npc_ref === npc_ref);
+                if (!npc) return;
+                const npc_name = npc_ref.replace('npc.', '').replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                // Open NPC character module
+                void open_npc_character_module(npc_ref.replace('npc.', ''), npc_name);
+            },
+            on_double_click_ground: (tile_x: number, tile_y: number) => {
+                debug_log(`[PlaceModule] Double-click on ground at (${tile_x}, ${tile_y})`);
+                // Open scattered container at this position
+                const place = get_current_place();
+                if (!place) return;
+                const container_id = `container.place.${place.id}.scattered_${tile_x}_${tile_y}`;
+                void open_container_module(container_id, 'ground items');
+            },
+
+            // Drag and drop callbacks for dropping items onto ground
+            is_dragging: () => {
+                const dragging = drag_state.is_dragging;
+                debug_log(`[PlaceModule] is_dragging() called: ${dragging}`);
+                return dragging;
+            },
+
+            get_drag_source: () => {
+                debug_log(`[PlaceModule] get_drag_source() called`);
+                if (!drag_state.is_dragging) {
+                    debug_log(`[PlaceModule] get_drag_source: not dragging, returning null`);
+                    return null;
+                }
+                if (!drag_state.item_instance_id || !drag_state.source_container_id) {
+                    debug_log(`[PlaceModule] get_drag_source: missing item or container id, returning null`);
+                    return null;
+                }
+                const source = {
+                    item_instance_id: drag_state.item_instance_id,
+                    source_container_id: drag_state.source_container_id
+                };
+                debug_log(`[PlaceModule] get_drag_source: ${JSON.stringify(source)}`);
+                return source;
+            },
+
+            on_drop: async (tile_x: number, tile_y: number): Promise<boolean> => {
+                debug_log(`[PlaceModule] ========== on_drop called ==========`);
+                debug_log(`[PlaceModule] Target tile: (${tile_x}, ${tile_y})`);
+                debug_log(`[PlaceModule] Drag state: is_dragging=${drag_state.is_dragging}, source_module=${drag_state.source_module}`);
+                debug_log(`[PlaceModule] Item: ${drag_state.item_instance_id} from ${drag_state.source_container_id}`);
+
+                if (!drag_state.is_dragging) {
+                    debug_log(`[PlaceModule] on_drop: Not dragging - rejecting`);
+                    return false;
+                }
+
+                const place = get_current_place();
+                if (!place) {
+                    debug_log(`[PlaceModule] on_drop: No place loaded - rejecting`);
+                    return false;
+                }
+                debug_log(`[PlaceModule] on_drop: Place is ${place.id}`);
+
+                // Get actor position for distance check
+                const actor = place.contents.actors_present[0];
+                if (!actor) {
+                    debug_log(`[PlaceModule] on_drop: No actor present - rejecting`);
+                    return false;
+                }
+
+                const distance = Math.sqrt(
+                    Math.pow(tile_x - actor.tile_position.x, 2) +
+                    Math.pow(tile_y - actor.tile_position.y, 2)
+                );
+                debug_log(`[PlaceModule] on_drop: Distance from actor: ${distance.toFixed(2)} tiles`);
+
+                if (distance > 1.5) {
+                    debug_log(`[PlaceModule] on_drop: Too far (${distance.toFixed(2)} > 1.5) - rejecting`);
+                    drag_state.reject_drag();
+                    return false;
+                }
+
+                // Call the drop API
+                const slot = APP_CONFIG.selected_data_slot;
+                const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+                const url = `${base_url}/api/place/drop?slot=${slot}`;
+                
+                // API expects: actor_id (not actor_ref), tile_position object (not tile_x/tile_y)
+                const actor_id = APP_CONFIG.input_actor_id;
+                const request_body = {
+                    actor_id: actor_id,
+                    item_instance_id: drag_state.item_instance_id,
+                    tile_position: { x: tile_x, y: tile_y }
+                };
+                
+                debug_log(`[PlaceModule] on_drop: Calling API ${url}`);
+                debug_log(`[PlaceModule] on_drop: Request body: ${JSON.stringify(request_body)}`);
+
+                try {
+                    const response = await fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(request_body)
+                    });
+
+                    debug_log(`[PlaceModule] on_drop: Response status: ${response.status}`);
+
+                    if (!response.ok) {
+                        const error_text = await response.text();
+                        debug_log(`[PlaceModule] on_drop: HTTP error: ${response.status} - ${error_text}`);
+                        drag_state.reject_drag();
+                        flash_status([`Cannot drop: ${error_text}`], 2000);
+                        return false;
+                    }
+
+                    const data = await response.json();
+                    debug_log(`[PlaceModule] on_drop: Response data: ${JSON.stringify(data)}`);
+
+                    if (data.ok) {
+                        debug_log(`[PlaceModule] on_drop: SUCCESS!`);
+                        flash_status([`Dropped item at (${tile_x}, ${tile_y})`], 1500);
+                        // Clear drag state
+                        drag_state.is_dragging = false;
+                        drag_state.item_instance_id = null;
+                        drag_state.source_container_id = null;
+                        drag_state.item_definition = null;
+                        drag_state.source_module = null;
+                        return true;
+                    } else {
+                        debug_log(`[PlaceModule] on_drop: API returned error: ${data.error}`);
+                        drag_state.reject_drag();
+                        flash_status([`Cannot drop: ${data.error}`], 2000);
+                        return false;
+                    }
+                } catch (err) {
+                    debug_log(`[PlaceModule] on_drop: Exception: ${err}`);
+                    drag_state.reject_drag();
+                    flash_status([`Drop failed: ${err}`], 2000);
+                    return false;
+                }
+            },
         }),
 
         // System status bar (includes time prefix)
@@ -1768,86 +2077,12 @@ export function create_app_state(): AppState {
         // - Drag item from inventory container to character body slot
         // - This replaces the EQUIP/UNEQUIP debug buttons
 
-        // Debug button: List Containers (moved from +48 to +24)
-        make_button_module({
-            id: 'debug_list_containers',
-            rect: { x0: DEBUG_X0 + 24, y0: DEBUG_Y_TOP, x1: DEBUG_X1 + 24, y1: DEBUG_Y_TOP + 1 },
-            label: 'CNTRS',
-            rgb: get_color_by_name('vivid_cyan').rgb,
-            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            async OnPress() {
-                console.log('[DEBUG BUTTON] CNTRS button pressed');
-                try {
-                    console.log('[DEBUG BUTTON] Fetching containers...');
-                    const res = await fetch(`http://localhost:8787/api/containers?owner_ref=actor.${APP_CONFIG.input_actor_id}`);
-                    console.log('[DEBUG BUTTON] Response status:', res.status);
-                    const data = await res.json();
-                    console.log('[DEBUG BUTTON] Containers data:', data);
-                    
-                    if (data.ok && data.containers) {
-                        const container_names = data.containers.map((c: any) => {
-                            const name = c.id.split('.').pop();
-                            return `${name}(${c.contents.length})`;
-                        });
-                        console.log('[DEBUG BUTTON] Container list:', container_names);
-                        flash_status(['Containers:', ...container_names], 3000);
-                    } else {
-                        console.log('[DEBUG BUTTON] No containers found or error');
-                        flash_status(['No containers found'], 1500);
-                    }
-                } catch (err) {
-                    console.error('[DEBUG BUTTON] Error:', err);
-                    flash_status(['Error: Could not list containers'], 1500);
-                }
-            },
-        }),
+        // Phase 2: Double-click replaces these debug buttons:
+        // - CNTRS (list containers) -> Press 'I' to open inventory
+        // - GRND (ground items) -> Double-click ground to open scattered container
+        // - NPCINV (NPC inventory) -> Double-click NPC to open character module
 
-        // Debug button: Show Ground Items (moved from +60 to +36)
-        make_button_module({
-            id: 'debug_ground_items',
-            rect: { x0: DEBUG_X0 + 36, y0: DEBUG_Y_TOP, x1: DEBUG_X1 + 36, y1: DEBUG_Y_TOP + 1 },
-            label: 'GRND',
-            rgb: get_color_by_name('pale_purple').rgb,
-            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            async OnPress() {
-                console.log('[DEBUG BUTTON] GRND button pressed');
-                try {
-                    // Get current place from UI state
-                    const current_place = ui_state.place.current_place;
-                    console.log('[DEBUG BUTTON] Current place:', current_place?.id);
-                    if (!current_place) {
-                        console.log('[DEBUG BUTTON] Not in a place');
-                        flash_status(['Not in a place'], 1500);
-                        return;
-                    }
-                    
-                    const place_id = current_place.id;
-                    console.log('[DEBUG BUTTON] Fetching ground items for:', place_id);
-                    const res = await fetch(`http://localhost:8787/api/place/ground_items?place_id=${place_id}`);
-                    console.log('[DEBUG BUTTON] Response status:', res.status);
-                    const data = await res.json();
-                    console.log('[DEBUG BUTTON] Ground items data:', data);
-                    
-                    if (data.ok && data.items && data.items.length > 0) {
-                        const item_names = data.items.map((item: any) => 
-                            `${item.qty}x ${item.name}`
-                        );
-                        console.log('[DEBUG BUTTON] Ground items found:', item_names);
-                        flash_status(['Ground items:', ...item_names], 3000);
-                    } else {
-                        console.log('[DEBUG BUTTON] No items on ground');
-                        flash_status(['No items on ground'], 1500);
-                    }
-                } catch (err) {
-                    console.error('[DEBUG BUTTON] Error:', err);
-                    flash_status(['Error: Could not check ground'], 1500);
-                }
-            },
-        }),
-
-        // Debug button: Open nearest NPC inventory (clean single row layout)
+        // Debug button: Open nearest NPC (for quick access during development)
         make_button_module({
             id: 'debug_open_nearest_npc',
             rect: { x0: DEBUG_X0 + 48, y0: DEBUG_Y_TOP, x1: DEBUG_X1 + 48, y1: DEBUG_Y_TOP + 1 },
@@ -1927,6 +2162,63 @@ export function create_app_state(): AppState {
                 } catch (err) {
                     debug_log(`[DEBUG BUTTON] Error opening NPC module:`, err);
                     flash_status([`Error opening ${npc_name}'s inventory`], 1500);
+                }
+            },
+        }),
+
+        // Debug button: Dump body_slots state
+        make_button_module({
+            id: 'debug_dump_body_slots',
+            rect: { x0: DEBUG_X0 + 60, y0: DEBUG_Y_TOP, x1: DEBUG_X1 + 60, y1: DEBUG_Y_TOP + 1 },
+            label: 'SLOTS',
+            rgb: get_color_by_name('vivid_yellow').rgb,
+            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
+            async OnPress() {
+                console.log('[DEBUG BUTTON] SLOTS button pressed');
+                debug_log('[DEBUG BUTTON] === DUMPING BODY SLOTS STATE ===');
+                
+                try {
+                    const actor_id = APP_CONFIG.input_actor_id;
+                    debug_log(`[DEBUG BUTTON] Actor ID: ${actor_id}`);
+                    
+                    // Fetch actor data directly
+                    const actor_res = await fetch(`http://localhost:8787/api/actor?id=${actor_id}`);
+                    if (!actor_res.ok) {
+                        debug_log('[DEBUG BUTTON] ERROR: Failed to fetch actor');
+                        flash_status(['Failed to fetch actor'], 1500);
+                        return;
+                    }
+                    
+                    const actor_data = await actor_res.json();
+                    if (!actor_data.ok) {
+                        debug_log('[DEBUG BUTTON] ERROR: Actor data not ok');
+                        flash_status(['Actor data error'], 1500);
+                        return;
+                    }
+                    
+                    const body_slots = actor_data.body_slots || {};
+                    debug_log('[DEBUG BUTTON] Raw body_slots from API:');
+                    
+                    // Log each slot
+                    for (const [slot_name, slot_data] of Object.entries(body_slots)) {
+                        const slot = slot_data as any;
+                        debug_log(`[DEBUG BUTTON] ${slot_name}:`);
+                        debug_log(`[DEBUG BUTTON]   tool: ${slot.tool || 'null'}`);
+                        debug_log(`[DEBUG BUTTON]   armor: ${slot.armor || 'null'}`);
+                        debug_log(`[DEBUG BUTTON]   garb: [${slot.garb?.join(', ') || 'empty'}]`);
+                    }
+                    
+                    // Also log what's in ui_state
+                    debug_log('[DEBUG BUTTON] ui_state.character.equipped_items:');
+                    ui_state.character.equipped_items.forEach((item, slot) => {
+                        debug_log(`[DEBUG BUTTON]   ${slot}: ${item.definition.name} (${item.instance.id})`);
+                    });
+                    
+                    flash_status(['Body slots dumped to console'], 2000);
+                } catch (err) {
+                    console.error('[DEBUG BUTTON] Error:', err);
+                    flash_status(['Error dumping body slots'], 1500);
                 }
             },
         }),
@@ -2264,12 +2556,56 @@ export function create_app_state(): AppState {
             id: 'inventory_container',
             rect: { x0: 160, y0: 18, x1: 198, y1: 35 },
             get_container: () => ui_state.container.current_container,
-            get_slot_items: () => ui_state.container.slot_items,
+            get_slot_items: () => {
+                const container = ui_state.container.current_container;
+                const contents = ui_state.container.slot_items || [];
+                const max_slots = container?.capacity?.max_slots || contents.length || 10;
+                
+                // Map items to SlotItem format with proper slot_index
+                const slots = [];
+                for (let i = 0; i < max_slots; i++) {
+                    slots.push({ slot_index: i, instance: null, definition: null });
+                }
+                
+                contents.forEach((item: any, idx: number) => {
+                    let slot_index = idx;
+                    
+                    // If item has grid coordinates, use them
+                    if (item.grid_x !== undefined && item.grid_y !== undefined && container) {
+                        const { cols } = get_container_grid(container);
+                        slot_index = item.grid_y * cols + item.grid_x;
+                    }
+                    
+                    if (slot_index >= 0 && slot_index < max_slots) {
+                        slots[slot_index] = {
+                            slot_index,
+                            instance: item.instance,
+                            definition: item.definition
+                        };
+                    }
+                });
+                
+                return slots;
+            },
 
             get_is_visible: () => ui_state.container.is_visible,
-            set_is_visible: (visible: boolean) => { 
+            set_is_visible: async (visible: boolean) => { 
+                debug_log(`[Inventory] set_is_visible called with: ${visible}`);
                 ui_state.container.is_visible = visible;
                 if (visible) {
+                    // Phase 1: Load main inventory (equipped sack) when opening
+                    debug_log('[Inventory] Opening inventory - fetching main inventory container...');
+                    const main_inventory = await get_main_inventory_container();
+                    debug_log(`[Inventory] get_main_inventory_container returned: ${main_inventory ? 'SUCCESS' : 'NULL'}`);
+                    
+                    if (main_inventory) {
+                        ui_state.container.current_container = main_inventory.container_data;
+                        ui_state.container.slot_items = main_inventory.container_data.contents || [];
+                        debug_log(`[Inventory] Loaded main inventory: ${main_inventory.container_id} with ${main_inventory.container_data.contents?.length || 0} items`);
+                    } else {
+                        debug_log('[Inventory] No main inventory found - will show empty');
+                    }
+                    
                     // Refresh container data when opening
                     void refresh_container_data();
                     flash_status(['Inventory opened (press i to close)'], 1000);
@@ -2558,6 +2894,52 @@ export function create_app_state(): AppState {
                 },
             },
         }),
+        
+        // Phase 1.5: Global 'I' key handler - opens main inventory via open_container_module
+        // This ensures the inventory works the same as clicking a sack
+        {
+            id: 'global_key_handler',
+            rect: { x0: 0, y0: 0, x1: 0, y1: 0 }, // Invisible module
+            Focusable: false,
+            Draw() {}, // No rendering
+            OnGlobalKeyDown(e: KeyboardEvent) {
+                debug_log(`[GlobalKeyHandler] Key pressed: ${e.key}`);
+                if (e.key === 'i' || e.key === 'I') {
+                    debug_log('[GlobalKeyHandler] I key detected, handling...');
+                    e.preventDefault();
+                    e.stopPropagation();
+                    
+                    // Find and open main inventory
+                    void (async () => {
+                        debug_log('[GlobalKeyHandler] Looking for main inventory...');
+                        const main_inventory = await get_main_inventory_container();
+                        debug_log(`[GlobalKeyHandler] Main inventory result: ${main_inventory ? 'FOUND' : 'NOT FOUND'}`);
+                        
+                        if (main_inventory) {
+                            debug_log(`[GlobalKeyHandler] Container ID: ${main_inventory.container_id}`);
+                            // Check if already open
+                            if (ui_state.container.open_containers.has(main_inventory.container_id)) {
+                                debug_log('[GlobalKeyHandler] Container already open, closing...');
+                                // Close it
+                                close_container_module(main_inventory.container_id);
+                                flash_status(['Inventory closed'], 800);
+                            } else {
+                                debug_log('[GlobalKeyHandler] Opening container...');
+                                // Open it
+                                await open_container_module(main_inventory.container_id, 'inventory');
+                                debug_log('[GlobalKeyHandler] Container opened successfully');
+                            }
+                        } else {
+                            debug_log('[GlobalKeyHandler] No main inventory found!');
+                            flash_status(['No inventory equipped'], 1500);
+                        }
+                    })();
+                    
+                    return true; // Stop propagation to other handlers
+                }
+                return false;
+            },
+        },
     ];
 
     // Register all static modules to the registry (Phase 7.5)

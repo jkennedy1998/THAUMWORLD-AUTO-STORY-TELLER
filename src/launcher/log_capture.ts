@@ -8,7 +8,16 @@
 import { spawn, type ChildProcess } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
-import { get_data_slot_dir } from "../engine/paths.js";
+import {
+  initLogSession,
+  getLogDir,
+  formatDateLocal,
+  updateLatestPointer,
+  getLatestLogPath,
+  listSessionFiles,
+  listLogDates,
+  parseLatestLog,
+} from "./log_utils.js";
 
 export interface LogSession {
   session_id: string;
@@ -20,116 +29,33 @@ export interface LogSession {
 }
 
 /**
- * Generate unique session ID
- */
-function generate_session_id(): string {
-  const timestamp = Date.now();
-  const random = Math.random().toString(36).substring(2, 8);
-  return `session_${timestamp}_${random}`;
-}
-
-/**
- * Format date as YYYY-MM-DD
- */
-function format_date(date: Date): string {
-  const parts = date.toISOString().split("T");
-  return parts[0] ?? date.toISOString().substring(0, 10);
-}
-
-/**
- * Format time as HHMMSS
- */
-function format_time(date: Date): string {
-  const parts = date.toTimeString().split(" ");
-  const time = parts[0] ?? "000000";
-  return time.replace(/:/g, "");
-}
-
-/**
  * Initialize a new log capture session
+ * Uses shared utilities for consistency
  */
 export function init_log_capture(data_slot: number): LogSession {
-  const session_id = generate_session_id();
-  const now = new Date();
-  const log_dir = path.join(
-    get_data_slot_dir(data_slot),
-    "logs",
-    format_date(now)
-  );
-
-  // Ensure log directory exists
-  fs.mkdirSync(log_dir, { recursive: true });
-
+  const start_time = new Date();
+  
+  // Use shared utility for session initialization
+  const session_info = initLogSession(data_slot, "game");
+  
   const session: LogSession = {
-    session_id,
-    log_dir,
-    main_log: path.join(log_dir, `${session_id}_${format_time(now)}.log`),
+    session_id: session_info.sessionId,
+    log_dir: session_info.logDir,
+    main_log: session_info.mainLog,
     process_logs: new Map(),
-    start_time: now,
-    child_processes: []
+    start_time,
+    child_processes: [],
   };
 
-  // Write session header
-  write_log_header(session);
-
-  // Create/update latest.log symlink (or copy on Windows)
-  update_latest_pointer(log_dir, session.main_log);
+  // Write additional launcher-specific info
+  const launcher_info = `
+Launcher Type: log_capture
+Mode: game
+Data Slot: ${data_slot}
+`;
+  fs.appendFileSync(session.main_log, launcher_info);
 
   return session;
-}
-
-/**
- * Write session header to log file
- */
-function write_log_header(session: LogSession): void {
-  const header = `
-================================================================================
-THAUMWORLD Log Session
-Session ID: ${session.session_id}
-Start Time: ${session.start_time.toISOString()}
-Log Directory: ${session.log_dir}
-================================================================================
-
-`;
-  fs.writeFileSync(session.main_log, header);
-}
-
-/**
- * Update latest.log pointer (symlink on Unix, reference file on Windows)
- * Includes validation metadata to prevent stale references
- */
-function update_latest_pointer(log_dir: string, target_log: string): void {
-  const latest_path = path.join(log_dir, "latest.log");
-  const timestamp = new Date().toISOString();
-  const session_id = path.basename(target_log, ".log");
-
-  try {
-    // Remove old latest.log if it exists
-    try {
-      fs.unlinkSync(latest_path);
-    } catch {
-      // File might not exist
-    }
-    
-    // Try to create symlink first (Unix/Linux/Mac)
-    try {
-      fs.symlinkSync(target_log, latest_path);
-      return;
-    } catch {
-      // Windows might not support symlinks, fall through to reference file
-    }
-    
-    // Write reference file with validation metadata
-    const reference = `CURRENT_LOG=${target_log}
-SESSION_ID=${session_id}
-CREATED_AT=${timestamp}
-VALID=true
-`;
-    fs.writeFileSync(latest_path, reference);
-  } catch (err) {
-    // Log error but don't crash - logging should be best-effort
-    console.error(`[LAUNCHER] Warning: Could not update latest.log: ${err}`);
-  }
 }
 
 /**
@@ -161,6 +87,7 @@ export function spawn_with_logging(
   args: string[],
   options?: any
 ): ChildProcess {
+  // FIXED: Use consistent naming without time suffix
   const process_log_file = path.join(
     session.log_dir,
     `${session.session_id}_${name}.log`
@@ -180,7 +107,7 @@ Started: ${new Date().toISOString()}
 
   const child = spawn(command, args, {
     ...options,
-    stdio: ["pipe", "pipe", "pipe"]
+    stdio: ["pipe", "pipe", "pipe"],
   });
 
   session.child_processes.push(child);
@@ -213,7 +140,11 @@ Started: ${new Date().toISOString()}
 
   // Handle process exit
   child.on("close", (code: number | null) => {
-    const entry = format_log_entry(name, "EXIT", `Process exited with code ${code}`);
+    const entry = format_log_entry(
+      name,
+      "EXIT",
+      `Process exited with code ${code}`
+    );
     append_to_log(session.main_log, entry);
     append_to_log(process_log_file, entry);
 
@@ -226,7 +157,11 @@ Started: ${new Date().toISOString()}
 
   // Handle errors
   child.on("error", (err: Error) => {
-    const entry = format_log_entry(name, "ERROR", `Process error: ${err.message}`);
+    const entry = format_log_entry(
+      name,
+      "ERROR",
+      `Process error: ${err.message}`
+    );
     append_to_log(session.main_log, entry);
     append_to_log(process_log_file, entry);
     console.error(entry);
@@ -242,7 +177,11 @@ export function terminate_all_processes(session: LogSession): void {
   console.log("\n🛑 Terminating all processes...");
 
   // Write termination notice to log
-  const entry = format_log_entry("LAUNCHER", "INFO", "Initiating graceful shutdown...");
+  const entry = format_log_entry(
+    "LAUNCHER",
+    "INFO",
+    "Initiating graceful shutdown..."
+  );
   append_to_log(session.main_log, entry);
 
   // Kill all child processes
@@ -253,146 +192,61 @@ export function terminate_all_processes(session: LogSession): void {
   }
 
   // Write final log entry
-  const final_entry = format_log_entry("LAUNCHER", "INFO", "All processes terminated");
+  const final_entry = format_log_entry(
+    "LAUNCHER",
+    "INFO",
+    "All processes terminated"
+  );
   append_to_log(session.main_log, final_entry);
 }
 
 /**
  * Get the path to the latest log file
- * Validates that the referenced file actually exists
+ * Uses shared utility with fallback logic
  */
-export function get_latest_log_path(data_slot: number): string | null {
-  const today = new Date();
-  const log_dir = path.join(
-    get_data_slot_dir(data_slot),
-    "logs",
-    format_date(today)
-  );
-
-  const latest_path = path.join(log_dir, "latest.log");
-
-  try {
-    let target_log: string | null = null;
-    
-    // Check if it's a symlink
-    const stats = fs.lstatSync(latest_path);
-    if (stats.isSymbolicLink()) {
-      target_log = fs.readlinkSync(latest_path);
-    } else {
-      // It's a reference file, read the path from it
-      const content = fs.readFileSync(latest_path, "utf-8");
-      const match = content.match(/CURRENT_LOG=(.+)/);
-      if (match && match[1]) {
-        target_log = match[1].trim();
-      }
-    }
-    
-    // Validate that the target file actually exists
-    if (target_log && fs.existsSync(target_log)) {
-      return target_log;
-    }
-    
-    // Target file doesn't exist - latest.log is stale
-    console.warn(`[LAUNCHER] Warning: latest.log points to non-existent file: ${target_log}`);
-    
-    // Try to find the most recent session file as fallback
-    const fallback = find_most_recent_session_file(log_dir);
-    if (fallback) {
-      console.warn(`[LAUNCHER] Using most recent session instead: ${fallback}`);
-      return fallback;
-    }
-    
-    return null;
-  } catch {
-    // File doesn't exist or error reading - try fallback
-    const fallback = find_most_recent_session_file(log_dir);
-    return fallback;
-  }
-}
-
-/**
- * Find the most recent session log file in a directory
- * Used as fallback when latest.log is missing or stale
- */
-function find_most_recent_session_file(log_dir: string): string | null {
-  try {
-    if (!fs.existsSync(log_dir)) {
-      return null;
-    }
-    
-    const files = fs.readdirSync(log_dir)
-      .filter(f => f.startsWith("session_") && f.endsWith(".log"))
-      .map(f => ({
-        name: f,
-        path: path.join(log_dir, f),
-        mtime: fs.statSync(path.join(log_dir, f)).mtime
-      }))
-      .sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
-    
-    if (files.length > 0 && files[0]) {
-      return files[0].path;
-    }
-    
-    return null;
-  } catch {
-    return null;
-  }
+export function get_latest_log_path(
+  data_slot: number,
+  mode: "game" | "painter" = "game"
+): string | null {
+  return getLatestLogPath(data_slot, mode);
 }
 
 /**
  * List all log files for a data slot
+ * Uses shared utility
  */
-export function list_logs(data_slot: number): { date: string; files: string[] }[] {
-  const logs_base = path.join(get_data_slot_dir(data_slot), "logs");
+export function list_logs(
+  data_slot: number,
+  mode: "game" | "painter" = "game"
+): { date: string; files: string[] }[] {
+  const dates = listLogDates(data_slot, mode);
+  const result = [];
 
-  if (!fs.existsSync(logs_base)) {
-    return [];
-  }
-
-  const result: { date: string; files: string[] }[] = [];
-
-  const dates = fs.readdirSync(logs_base);
   for (const date of dates) {
-    const date_dir = path.join(logs_base, date);
-    const stats = fs.statSync(date_dir);
+    const logDir = getLogDir(data_slot, mode, new Date(date));
+    const files = listSessionFiles(logDir);
 
-    if (stats.isDirectory()) {
-      const files = fs.readdirSync(date_dir)
-        .filter(f => f.endsWith(".log"))
-        .sort();
-
-      result.push({ date, files });
+    if (files.length > 0) {
+      result.push({
+        date,
+        files: files.map((f) => f.name),
+      });
     }
   }
 
-  // Sort by date (newest first)
-  return result.sort((a, b) => b.date.localeCompare(a.date));
+  return result;
 }
 
 /**
- * Clean old log files (keep last N days)
+ * Re-export shared utilities for convenience
  */
-export function clean_old_logs(data_slot: number, keep_days: number = 30): number {
-  const logs_base = path.join(get_data_slot_dir(data_slot), "logs");
-
-  if (!fs.existsSync(logs_base)) {
-    return 0;
-  }
-
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - keep_days);
-  const cutoff_str = format_date(cutoff);
-
-  let removed = 0;
-
-  const dates = fs.readdirSync(logs_base);
-  for (const date of dates) {
-    if (date < cutoff_str) {
-      const date_dir = path.join(logs_base, date);
-      fs.rmSync(date_dir, { recursive: true, force: true });
-      removed++;
-    }
-  }
-
-  return removed;
-}
+export {
+  initLogSession,
+  getLogDir,
+  formatDateLocal,
+  updateLatestPointer,
+  getLatestLogPath,
+  listLogDates,
+  listSessionFiles,
+  parseLatestLog,
+} from "./log_utils.js";
