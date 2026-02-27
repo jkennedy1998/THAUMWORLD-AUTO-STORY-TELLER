@@ -63,7 +63,7 @@ function hex_to_rgb(hex: string): Rgb {
     return { r, g, b };
 }
 
-const INDEXED_COLORS: IndexedColor[] = [
+export const INDEXED_COLORS: IndexedColor[] = [
     { index: 0, name: "off_black", hex: "#120a1a", rgb: hex_to_rgb("#120a1a") },
     { index: 1, name: "off_white", hex: "#feffe5", rgb: hex_to_rgb("#feffe5") },
     { index: 2, name: "pumpkin", hex: "#e36325", rgb: hex_to_rgb("#e36325") },

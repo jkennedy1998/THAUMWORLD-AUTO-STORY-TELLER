@@ -8,7 +8,6 @@ import type { ItemInstance } from "../item_instances/store.js";
 import { debug_error, debug_log, debug_warn } from "../shared/debug.js";
 import { calculate_grid_dimensions } from "../types/container.js";
 import type { ContainerPosition, Container, ContainerContentEntry } from "../types/container.js";
-import { ensure_grid_coordinates_recursive } from "../shared/migration.js";
 import { load_place, save_place } from "../place_storage/store.js";
 import { load_actor, save_actor } from "../actor_storage/store.js";
 import { 
@@ -438,47 +437,11 @@ function load_container_from_entity(slot: number, container_id: string): Contain
         return { ok: false, error: "container_not_in_entity", todo: `Container ${container_name} not found in entity` };
     }
 
-    // MIGRATION: Ensure all items have grid coordinates
-    const max_slots = container.capacity?.max_slots || container.contents.length || 10;
-    debug_log("MIGRATION", `=== Starting migration for container: ${container_id} ===`);
-    debug_log("MIGRATION", `Container has ${container.contents.length} items, max_slots: ${max_slots}`);
-    
-    // Log first few items BEFORE migration
-    container.contents.slice(0, 3).forEach((entry: ContainerContentEntry, idx: number) => {
-        debug_log("MIGRATION", `BEFORE MIGRATION - Item ${idx}: ${entry.instance.def_id}, grid_x: ${entry.grid_x}, grid_y: ${entry.grid_y}`);
+    // DEBUG: Log container load for troubleshooting
+    debug_log("container", `[LOAD] Container ${container_id} loaded with ${container.contents.length} items`);
+    container.contents.forEach((entry: ContainerContentEntry, idx: number) => {
+        debug_log("container", `  [${idx}] ${entry.instance.def_id} (${entry.instance.id}) tags: [${entry.instance.tags?.map((t: any) => t.name).join(', ') || 'none'}]`);
     });
-    
-    const migrated_count = ensure_grid_coordinates_recursive(container.contents, container_id, max_slots);
-    
-    // Log first few items AFTER migration
-    container.contents.slice(0, 3).forEach((entry: ContainerContentEntry, idx: number) => {
-        debug_log("MIGRATION", `AFTER MIGRATION - Item ${idx}: ${entry.instance.def_id}, grid_x: ${entry.grid_x}, grid_y: ${entry.grid_y}`);
-    });
-    
-    // CRITICAL FIX: Save container if migration made changes
-    if (migrated_count > 0) {
-        debug_log("MIGRATION", `Migration assigned coordinates to ${migrated_count} items. SAVING container...`);
-        const save_result = save_container(slot, container);
-        if (save_result) {
-            debug_log("MIGRATION", `✅ Successfully saved container ${container_id} with ${migrated_count} migrated coordinates`);
-            
-            // VERIFICATION: Reload and check if coordinates persisted
-            const verify_result = load_container_from_entity(slot, container_id);
-            if (verify_result.ok) {
-                const all_have_coords = verify_result.container.contents.every(e => e.grid_x !== undefined && e.grid_y !== undefined);
-                debug_log("MIGRATION", `✅ VERIFICATION: All items have coordinates after save: ${all_have_coords}`);
-                if (!all_have_coords) {
-                    debug_error("MIGRATION", `❌ VERIFICATION FAILED: Some items missing coordinates after save!`);
-                }
-            }
-        } else {
-            debug_error("MIGRATION", `❌ FAILED to save container ${container_id} after migration!`);
-        }
-    } else {
-        debug_log("MIGRATION", `No items needed migration (all already have coordinates)`);
-    }
-    
-    debug_log("MIGRATION", `=== Migration complete for container: ${container_id} ===`);
 
     return { ok: true, container, path: entity_path };
 }
@@ -554,28 +517,44 @@ function save_container_to_entity(slot: number, container: Container): { ok: boo
             slot_data.garb = [];
             
             // Re-populate from container contents
+            debug_log("container", `[SAVE_BODY_SLOT] Processing ${container.contents.length} items in ${container.id}`);
             for (const entry of container.contents) {
+                const item_id = entry.instance?.id || 'unknown';
+                const item_name = entry.definition?.name || entry.instance?.def_id || 'unknown';
+                const has_tags = entry.definition?.tags ? `tags: [${entry.definition.tags.map((t: any) => t.name).join(', ')}]` : 'no tags';
+                debug_log("container", `[SAVE_BODY_SLOT] Item: ${item_name} (${item_id}), ${has_tags}`);
+                
                 const slot_type = get_primary_slot_type(entry.definition as any);
+                debug_log("container", `[SAVE_BODY_SLOT]   -> slot_type: ${slot_type}`);
+                
                 if (slot_type === "tool") {
                     slot_data.tool = entry.instance.id;
+                    debug_log("container", `[SAVE_BODY_SLOT]   -> ADDED to tool`);
                 } else if (slot_type === "armor") {
                     slot_data.armor = entry.instance.id;
+                    debug_log("container", `[SAVE_BODY_SLOT]   -> ADDED to armor`);
                 } else if (slot_type === "garb") {
                     if (!slot_data.garb.includes(entry.instance.id)) {
                         slot_data.garb.push(entry.instance.id);
+                        debug_log("container", `[SAVE_BODY_SLOT]   -> ADDED to garb, now: [${slot_data.garb.join(', ')}]`);
+                    } else {
+                        debug_log("container", `[SAVE_BODY_SLOT]   -> already in garb`);
                     }
+                } else {
+                    debug_log("container", `[SAVE_BODY_SLOT]   -> NOT ADDED (no matching slot_type)`);
                 }
             }
             
-            debug_log("container", `Saved ${container.id} to inline body_slots`);
-        } else {
-            // Non-body-slot containers go to entity.containers
-            if (!entity.containers) {
-                entity.containers = {};
-            }
-            entity.containers[container_name] = container;
-            debug_log("container", `Saved ${container.id} to entity.containers`);
+            debug_log("container", `[SAVE_BODY_SLOT] Final state for ${container_name}: tool=${slot_data.tool}, armor=${slot_data.armor}, garb=[${slot_data.garb.join(', ') || 'empty'}]`);
+            debug_log("container", `Saved ${container.id} references to inline body_slots`);
         }
+        
+        // ALWAYS save container data to entity.containers (this is the actual storage)
+        if (!entity.containers) {
+            entity.containers = {};
+        }
+        entity.containers[container_name] = container;
+        debug_log("container", `Saved ${container.id} data to entity.containers`);
 
         // Write back to file
         fs.writeFileSync(entity_path, JSON.stringify(entity, null, 2), "utf-8");
@@ -666,12 +645,53 @@ export function list_containers_for_owner(slot: number, owner_ref: string): Cont
     
     try {
         const entity = read_jsonc(entity_path) as Record<string, any>;
-        if (!entity.containers) {
-            return [];
+        const containers: Container[] = [];
+        
+        // Add regular containers from entity.containers
+        if (entity.containers) {
+            containers.push(...Object.values(entity.containers) as Container[]);
         }
         
-        // Return all containers from entity.containers
-        return Object.values(entity.containers) as Container[];
+        // For actors and NPCs, also add body slot containers
+        // Body slot containers are stored inline and need to be converted to Container format
+        if ((entity_type === "actor" || entity_type === "npc") && entity.body_slots) {
+            const body_slot_names = ["head", "torso", "hand_left", "hand_right", "leg_left", "leg_right"];
+            
+            for (const slot_name of body_slot_names) {
+                const body_slot = entity.body_slots[slot_name];
+                if (!body_slot) continue;
+                
+                // Get all equipped item IDs from this body slot
+                const equipped_items: string[] = [];
+                if (body_slot.tool) equipped_items.push(body_slot.tool);
+                if (body_slot.armor) equipped_items.push(body_slot.armor);
+                if (body_slot.garb && Array.isArray(body_slot.garb)) {
+                    equipped_items.push(...body_slot.garb);
+                }
+                
+                // If no items equipped, skip
+                if (equipped_items.length === 0) continue;
+                
+                // Build container from body slot data
+                // First check if we already have this container from entity.containers
+                const existing_container = containers.find(c => c.id === `container.${owner_ref}.${slot_name}`);
+                if (existing_container) {
+                    // Already have it, skip
+                    continue;
+                }
+                
+                // Need to construct the container from equipped items
+                // We need to load the full item data
+                const container_id = `container.${owner_ref}.${slot_name}`;
+                const container_result = load_container(slot, container_id);
+                
+                if (container_result.ok && container_result.container) {
+                    containers.push(container_result.container);
+                }
+            }
+        }
+        
+        return containers;
     } catch (err) {
         debug_error("Container", `Failed to list containers for ${owner_ref}: ${err}`);
         return [];
@@ -1738,6 +1758,7 @@ export function transfer_item_between_containers(
 
     // Save changes
     debug_log("transfer", "[UNIFIED-TRANSFER] BEGINNING SAVE PHASE");
+    debug_log("transfer", `[UNIFIED-TRANSFER] SAVE CHECK: source_container_to_save=${!!source_container_to_save}, from_parent_container=${!!from_parent_container}, to_parent_container=${!!to_parent_container}, is_same_container=${is_same_container}`);
     
     if (source_container_to_save) {
         // Regular container - save it

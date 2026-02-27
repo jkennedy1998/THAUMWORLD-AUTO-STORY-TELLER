@@ -36,7 +36,11 @@ export type ToolType =
   | 'rect_stroke' 
   | 'rect_fill' 
   | 'bucket' 
-  | 'eyedropper';
+  | 'eyedropper'
+  | 'text'
+  | 'select_rect'
+  | 'copy'
+  | 'paste';
 
 /**
  * Brush configuration

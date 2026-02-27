@@ -17,6 +17,13 @@ export type FileMenuOptions = {
   on_new: () => void;
   on_export_text: () => void;
   on_clear: () => void;
+  on_reset_positions?: () => void;
+  on_toggle_toolbox?: () => void;
+  on_toggle_char_selector?: () => void;
+  on_toggle_color_selector?: () => void;
+  on_toggle_weight_selector?: () => void;
+  on_toggle_brush_preview?: () => void;
+  on_toggle_tool_properties?: () => void;
 };
 
 type MenuButton = {
@@ -38,6 +45,51 @@ export function make_file_menu_module(opts: FileMenuOptions): Module {
     { label: 'EXPORT', shortcut: 'E', action: opts.on_export_text, x: 22, y: 0, width: 8 },
     { label: 'CLEAR', shortcut: 'C', action: opts.on_clear, x: 31, y: 0, width: 7 },
   ];
+  
+  // Add module toggle buttons
+  let module_button_x = 50;
+  
+  if (opts.on_toggle_toolbox) {
+    buttons.push({ label: 'TOOLS', shortcut: '', action: opts.on_toggle_toolbox, x: module_button_x, y: 0, width: 7 });
+    module_button_x += 8;
+  }
+  
+  if (opts.on_toggle_char_selector) {
+    buttons.push({ label: 'CHAR', shortcut: '', action: opts.on_toggle_char_selector, x: module_button_x, y: 0, width: 6 });
+    module_button_x += 7;
+  }
+  
+  if (opts.on_toggle_color_selector) {
+    buttons.push({ label: 'COLOR', shortcut: '', action: opts.on_toggle_color_selector, x: module_button_x, y: 0, width: 7 });
+    module_button_x += 8;
+  }
+  
+  if (opts.on_toggle_weight_selector) {
+    buttons.push({ label: 'WEIGHT', shortcut: '', action: opts.on_toggle_weight_selector, x: module_button_x, y: 0, width: 8 });
+    module_button_x += 9;
+  }
+  
+  if (opts.on_toggle_brush_preview) {
+    buttons.push({ label: 'SWATCH', shortcut: '', action: opts.on_toggle_brush_preview, x: module_button_x, y: 0, width: 8 });
+    module_button_x += 9;
+  }
+  
+  if (opts.on_toggle_tool_properties) {
+    buttons.push({ label: 'PROPS', shortcut: '', action: opts.on_toggle_tool_properties, x: module_button_x, y: 0, width: 7 });
+    module_button_x += 8;
+  }
+  
+  // Add reset positions button if callback provided
+  if (opts.on_reset_positions) {
+    buttons.push({ 
+      label: 'RESET', 
+      shortcut: '', 
+      action: opts.on_reset_positions, 
+      x: module_button_x, 
+      y: 0, 
+      width: 7 
+    });
+  }
 
   function get_button_at(x: number, y: number): MenuButton | null {
     for (const btn of buttons) {

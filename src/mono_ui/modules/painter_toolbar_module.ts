@@ -13,7 +13,7 @@ export type PainterToolbarOptions = {
   rect: Rect;
   
   // Current tool
-  current_tool: ToolType;
+  get_current_tool: () => ToolType;
   
   // Callback when tool is selected
   on_tool_select: (tool: ToolType) => void;
@@ -32,6 +32,7 @@ export function make_painter_toolbar_module(opts: PainterToolbarOptions): Module
   const rect = opts.rect;
   
   // Define tool buttons layout
+  // y=1 places buttons in the middle row (between borders)
   const buttons: ToolButton[] = [
     { tool: 'pencil', label: 'PENCIL', shortcut: 'P', x: 1, y: 1, width: 8 },
     { tool: 'eraser', label: 'ERASER', shortcut: 'E', x: 10, y: 1, width: 8 },
@@ -40,6 +41,7 @@ export function make_painter_toolbar_module(opts: PainterToolbarOptions): Module
     { tool: 'line', label: 'LINE', shortcut: 'L', x: 38, y: 1, width: 6 },
     { tool: 'rect_stroke', label: 'RECT', shortcut: 'R', x: 45, y: 1, width: 6 },
     { tool: 'rect_fill', label: 'FILL', shortcut: 'S', x: 52, y: 1, width: 6 },
+    { tool: 'text', label: 'TEXT', shortcut: 'T', x: 59, y: 1, width: 6 },
   ];
   
   function get_button_at(x: number, y: number): ToolButton | null {
@@ -82,7 +84,7 @@ export function make_painter_toolbar_module(opts: PainterToolbarOptions): Module
       
       // Draw buttons
       for (const btn of buttons) {
-        const is_selected = opts.current_tool === btn.tool;
+        const is_selected = opts.get_current_tool() === btn.tool;
         const btn_color = is_selected ? selected_bg : bg_color;
         const txt_color = is_selected ? selected_text : text_color;
         const weight = is_selected ? 6 : 3;

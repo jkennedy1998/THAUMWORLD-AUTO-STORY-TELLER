@@ -16,6 +16,11 @@ import { make_painter_toolbar_module } from '../mono_ui/modules/painter_toolbar_
 import { make_file_menu_module } from '../mono_ui/modules/painter_file_menu_module.js';
 import { make_character_selector_module } from '../mono_ui/modules/character_selector_module.js';
 import { make_brush_preview_module } from '../mono_ui/modules/brush_preview_module.js';
+import { make_color_selector_module } from '../mono_ui/modules/color_selector_module.js';
+import { make_weight_selector_module } from '../mono_ui/modules/weight_selector_module.js';
+import { make_toolbox_module } from '../mono_ui/modules/toolbox_module.js';
+import { make_tool_properties_module } from '../mono_ui/modules/tool_properties_module.js';
+import { saveModulePosition, getModulePosition, clearModulePositions } from '../ascii_painter/module_position_storage.js';
 import {
   exportToJSON,
   exportToText,
@@ -82,12 +87,22 @@ export function create_painter_app_state(): PainterAppState {
   // Current tool state
   let current_tool: ToolType = 'pencil';
   
+  // Tool mapping for left/right click
+  let left_click_tool: ToolType = 'pencil';
+  let right_click_tool: ToolType = 'eraser';
+  
   // Brush state
   const brush: Brush = {
     char: '█',
     rgb: get_color_by_name('off_white').rgb,
     weight_index: 4
   };
+  
+  // Brush tip size (1-5, for 1x1 to 5x5)
+  let brush_size = 1;
+  
+  // Text tool: space replaces character or preserves it
+  let space_replace = true;
   
   // Preview points for line/rect tools
   let preview_points: { x: number; y: number }[] = [];
@@ -149,7 +164,7 @@ export function create_painter_app_state(): PainterAppState {
   const toolbar_module = make_painter_toolbar_module({
     id: 'painter_toolbar',
     rect: toolbar_rect,
-    current_tool,
+    get_current_tool: () => current_tool,
     on_tool_select: (tool) => {
       current_tool = tool;
       // Update the toolbar module's tool reference
@@ -162,9 +177,13 @@ export function create_painter_app_state(): PainterAppState {
     id: 'painter_canvas',
     rect: canvas_rect,
     grid,
-    current_tool,
+    get_current_tool: () => current_tool,
     brush,
+    get_brush_size: () => brush_size,
+    get_space_replace: () => space_replace,
     preview_points,
+    get_left_click_tool: () => left_click_tool,
+    get_right_click_tool: () => right_click_tool,
     on_push_snapshot: () => {
       pushSnapshot(history, grid);
       schedule_auto_save();
@@ -176,6 +195,252 @@ export function create_painter_app_state(): PainterAppState {
     }
   });
   
+  // Track module visibility state - MUST be declared before file menu
+  let char_selector_open = true;
+  let brush_preview_open = true;
+  let color_selector_open = true;
+  let weight_selector_open = true;
+  let toolbox_open = true;
+  let tool_properties_open = true;
+  
+  // Helper function to toggle any module
+  function toggleModule(
+    isOpen: boolean,
+    setOpen: (v: boolean) => void,
+    moduleId: string,
+    createModule: () => Module,
+    moduleVar: Module | null
+  ): void {
+    if (isOpen) {
+      setOpen(false);
+      registry.unregister(moduleId);
+    } else {
+      if (!registry.get_all().find(m => m.id === moduleId)) {
+        setOpen(true);
+        const mod = createModule();
+        registry.register(mod);
+      }
+    }
+  }
+  
+  // Create module instances (but don't register yet)
+  let char_selector_module: Module | null = null;
+  let brush_preview_module: Module | null = null;
+  let color_selector_module: Module | null = null;
+  let weight_selector_module: Module | null = null;
+  let toolbox_module: Module | null = null;
+  let tool_properties_module: Module | null = null;
+  
+  // Define rects for floating modules (with saved position fallback)
+  function getModuleRectWithSave(id: string, defaultRect: Rect): Rect {
+    const saved = getModulePosition(id);
+    return saved || defaultRect;
+  }
+  
+  const char_selector_rect: Rect = getModuleRectWithSave('char_selector', {
+    x0: 150,
+    y0: 10,
+    x1: 161,  // Wider to accommodate 4 chars across
+    y1: 35
+  });
+  
+  const brush_preview_rect: Rect = getModuleRectWithSave('brush_preview', {
+    x0: 130,
+    y0: 10,
+    x1: 136,
+    y1: 15
+  });
+  
+  const color_selector_rect: Rect = getModuleRectWithSave('color_selector', {
+    x0: 110,
+    y0: 10,
+    x1: 121,
+    y1: 35
+  });
+  
+  const weight_selector_rect: Rect = getModuleRectWithSave('weight_selector', {
+    x0: 90,
+    y0: 10,
+    x1: 103,
+    y1: 18
+  });
+  
+  const toolbox_rect: Rect = getModuleRectWithSave('toolbox', {
+    x0: 10,
+    y0: 10,
+    x1: 26,
+    y1: 30
+  });
+  
+  const tool_properties_rect: Rect = getModuleRectWithSave('tool_properties', {
+    x0: 30,
+    y0: 10,
+    x1: 50,
+    y1: 18
+  });
+  
+  // Factory functions for creating modules
+  function create_char_selector_module(): Module {
+    console.log('Creating char selector module at rect:', char_selector_rect);
+    return make_character_selector_module({
+      id: 'char_selector',
+      rect: char_selector_rect,
+      selected_char: brush.char,
+      on_char_select: (char) => {
+        brush.char = char;
+        console.log('Selected character:', char);
+      },
+      on_move: (new_rect) => {
+        if (char_selector_module) {
+          char_selector_module.rect = new_rect;
+          saveModulePosition('char_selector', new_rect);
+        }
+      },
+      on_close: () => {
+        char_selector_open = false;
+        registry.unregister('char_selector');
+        char_selector_module = null;
+      }
+    });
+  }
+  
+  function create_brush_preview_module(): Module {
+    return make_brush_preview_module({
+      id: 'brush_preview',
+      rect: brush_preview_rect,
+      get_brush: () => brush,
+      on_move: (new_rect) => {
+        if (brush_preview_module) {
+          brush_preview_module.rect = new_rect;
+          saveModulePosition('brush_preview', new_rect);
+        }
+      },
+      on_close: () => {
+        brush_preview_open = false;
+        registry.unregister('brush_preview');
+        brush_preview_module = null;
+      }
+    });
+  }
+  
+  function create_color_selector_module(): Module {
+    return make_color_selector_module({
+      id: 'color_selector',
+      rect: color_selector_rect,
+      get_brush: () => brush,
+      on_color_select: (rgb) => {
+        brush.rgb = rgb;
+        console.log('Selected color:', rgb);
+      },
+      on_move: (new_rect) => {
+        if (color_selector_module) {
+          color_selector_module.rect = new_rect;
+          saveModulePosition('color_selector', new_rect);
+        }
+      },
+      on_close: () => {
+        color_selector_open = false;
+        registry.unregister('color_selector');
+        color_selector_module = null;
+      }
+    });
+  }
+  
+  function create_weight_selector_module(): Module {
+    return make_weight_selector_module({
+      id: 'weight_selector',
+      rect: weight_selector_rect,
+      get_weight_index: () => brush.weight_index,
+      on_weight_change: (weight_index) => {
+        brush.weight_index = weight_index;
+        console.log('Selected weight:', weight_index);
+      },
+      on_move: (new_rect) => {
+        if (weight_selector_module) {
+          weight_selector_module.rect = new_rect;
+          saveModulePosition('weight_selector', new_rect);
+        }
+      },
+      on_close: () => {
+        weight_selector_open = false;
+        registry.unregister('weight_selector');
+        weight_selector_module = null;
+      }
+    });
+  }
+  
+  function create_toolbox_module(): Module {
+    return make_toolbox_module({
+      id: 'toolbox',
+      rect: toolbox_rect,
+      get_current_tool: () => current_tool,
+      get_left_click_tool: () => left_click_tool,
+      get_right_click_tool: () => right_click_tool,
+      on_tool_select: (tool) => {
+        current_tool = tool;
+        console.log('Selected tool:', tool);
+      },
+      on_left_click_tool_change: (tool) => {
+        left_click_tool = tool;
+        console.log('Left-click tool:', tool);
+      },
+      on_right_click_tool_change: (tool) => {
+        right_click_tool = tool;
+        console.log('Right-click tool:', tool);
+      },
+      on_move: (new_rect) => {
+        if (toolbox_module) {
+          toolbox_module.rect = new_rect;
+          saveModulePosition('toolbox', new_rect);
+        }
+      },
+      on_resize: (new_rect) => {
+        if (toolbox_module) {
+          toolbox_module.rect = new_rect;
+        }
+      },
+      on_close: () => {
+        toolbox_open = false;
+        registry.unregister('toolbox');
+        toolbox_module = null;
+      }
+    });
+  }
+  
+  function create_tool_properties_module(): Module {
+    return make_tool_properties_module({
+      id: 'tool_properties',
+      rect: tool_properties_rect,
+      get_current_tool: () => current_tool,
+      get_brush_size: () => brush_size,
+      on_brush_size_change: (size) => {
+        brush_size = size;
+        console.log('Selected brush size:', size);
+      },
+      get_space_replace: () => space_replace,
+      on_space_replace_change: (replace) => {
+        space_replace = replace;
+        console.log('Space replace:', replace);
+      },
+      on_move: (new_rect) => {
+        if (tool_properties_module) {
+          tool_properties_module.rect = new_rect;
+          saveModulePosition('tool_properties', new_rect);
+        }
+      },
+      on_resize: (new_rect) => {
+        if (tool_properties_module) {
+          tool_properties_module.rect = new_rect;
+        }
+      },
+      on_close: () => {
+        tool_properties_open = false;
+        registry.unregister('tool_properties');
+        tool_properties_module = null;
+      }
+    });
+  }
+
   // Create file menu module
   const file_menu = make_file_menu_module({
     id: 'painter_file_menu',
@@ -247,61 +512,89 @@ export function create_painter_app_state(): PainterAppState {
         }
         schedule_auto_save();
       }
-    }
-  });
-
-  // Create character selector module (floating on right side)
-  const char_selector_rect: Rect = {
-    x0: 170,
-    y0: 10,
-    x1: 175,
-    y1: 35
-  };
-  
-  const char_selector_module = make_character_selector_module({
-    id: 'char_selector',
-    rect: char_selector_rect,
-    selected_char: brush.char,
-    on_char_select: (char) => {
-      brush.char = char;
-      console.log('Selected character:', char);
     },
-    on_move: (new_rect) => {
-      // Update the module's rect when moved
-      char_selector_module.rect = new_rect;
+    on_reset_positions: () => {
+      if (confirm('Reset all panel positions?')) {
+        clearModulePositions();
+        // Reload the page to apply default positions
+        window.location.reload();
+      }
     },
-    on_close: () => {
-      registry.unregister('char_selector');
-    }
-  });
-  
-  // Create brush preview module (floating, shows current brush)
-  const brush_preview_rect: Rect = {
-    x0: 150,
-    y0: 10,
-    x1: 155,
-    y1: 15
-  };
-  
-  const brush_preview_module = make_brush_preview_module({
-    id: 'brush_preview',
-    rect: brush_preview_rect,
-    get_brush: () => brush,
-    on_move: (new_rect) => {
-      // Update the module's rect when moved
-      brush_preview_module.rect = new_rect;
+    on_toggle_toolbox: () => {
+      toggleModule(
+        toolbox_open,
+        (v) => { toolbox_open = v; },
+        'toolbox',
+        create_toolbox_module,
+        toolbox_module
+      );
     },
-    on_close: () => {
-      registry.unregister('brush_preview');
+    on_toggle_char_selector: () => {
+      toggleModule(
+        char_selector_open,
+        (v) => { char_selector_open = v; },
+        'char_selector',
+        create_char_selector_module,
+        char_selector_module
+      );
+    },
+    on_toggle_color_selector: () => {
+      toggleModule(
+        color_selector_open,
+        (v) => { color_selector_open = v; },
+        'color_selector',
+        create_color_selector_module,
+        color_selector_module
+      );
+    },
+    on_toggle_weight_selector: () => {
+      toggleModule(
+        weight_selector_open,
+        (v) => { weight_selector_open = v; },
+        'weight_selector',
+        create_weight_selector_module,
+        weight_selector_module
+      );
+    },
+    on_toggle_brush_preview: () => {
+      toggleModule(
+        brush_preview_open,
+        (v) => { brush_preview_open = v; },
+        'brush_preview',
+        create_brush_preview_module,
+        brush_preview_module
+      );
+    },
+    on_toggle_tool_properties: () => {
+      toggleModule(
+        tool_properties_open,
+        (v) => { tool_properties_open = v; },
+        'tool_properties',
+        create_tool_properties_module,
+        tool_properties_module
+      );
     }
   });
   
   // Register initial modules
   registry.register(file_menu);
-  registry.register(toolbar_module);
   registry.register(canvas_module);
+  
+  // Register floating modules (open by default)
+  char_selector_module = create_char_selector_module();
+  brush_preview_module = create_brush_preview_module();
+  color_selector_module = create_color_selector_module();
+  weight_selector_module = create_weight_selector_module();
+  toolbox_module = create_toolbox_module();
+  tool_properties_module = create_tool_properties_module();
   registry.register(char_selector_module);
   registry.register(brush_preview_module);
+  registry.register(color_selector_module);
+  registry.register(weight_selector_module);
+  registry.register(toolbox_module);
+  registry.register(tool_properties_module);
+  
+  console.log('Registered modules:', registry.get_all().map(m => ({ id: m.id, rect: m.rect })));
   
   return {
     modules: registry.get_all(),
