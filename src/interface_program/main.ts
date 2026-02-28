@@ -2297,7 +2297,7 @@ function start_http_server(log_path: string): void {
             return;
         }
 
-        // POST /api/place/drop - Drop item from actor's sack to scattered loot at position
+        // POST /api/place/drop - Drop item from any equipped slot to scattered loot at position
         if (url.pathname === "/api/place/drop") {
             if (req.method !== "POST") {
                 res.writeHead(405, { "Content-Type": "application/json" });
@@ -2313,10 +2313,11 @@ function start_http_server(log_path: string): void {
                     const item_instance_id = data.item_instance_id;
                     const place_id = data.place_id;
                     const actor_id = data.actor_id;
-                    // Position where item should be dropped (required)
+                    const from_container_id = data.from_container_id; // Source container (any equipped slot)
+                    // Position where item should be dropped (from client cursor)
                     const tile_position = data.tile_position;
 
-                    if (!item_instance_id || !actor_id) {
+                    if (!item_instance_id || !actor_id || !from_container_id) {
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
                         return;
@@ -2353,9 +2354,28 @@ function start_http_server(log_path: string): void {
                         debug_log("API", `Drop place mismatch: client sent ${place_id}, actor is actually in ${actual_place_id}`);
                     }
                     
-                    // Use actor's actual position from storage (ignore client-provided position for security)
-                    const drop_x = actor_pos.x;
-                    const drop_y = actor_pos.y;
+                    // Validate drop position (must be cardinal direction from actor)
+                    const drop_x = tile_position?.x;
+                    const drop_y = tile_position?.y;
+                    
+                    if (drop_x === undefined || drop_y === undefined) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_tile_position" }));
+                        return;
+                    }
+                    
+                    // Check cardinal adjacency (N/E/S/W only, no diagonals)
+                    const dx = Math.abs(drop_x - actor_pos.x);
+                    const dy = Math.abs(drop_y - actor_pos.y);
+                    const is_cardinal_adjacent = (dx === 1 && dy === 0) || (dx === 0 && dy === 1);
+                    
+                    if (!is_cardinal_adjacent) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "can_only_drop_to_cardinal_adjacent_tiles" }));
+                        return;
+                    }
+                    
+                    debug_log("API", `Drop: ${item_instance_id} from ${from_container_id} to (${drop_x},${drop_y})`);
 
                     // Get or create scattered container at drop position (using actor's actual place)
                     const scattered_result = get_or_create_scattered_container(slot, actual_place_id, drop_x, drop_y);
@@ -2366,16 +2386,6 @@ function start_http_server(log_path: string): void {
                     }
                     const scattered_container = scattered_result.container;
 
-                    // Get actor's equipped sack from body slots
-                    const sack_info = find_actor_sack(slot, actor_id, actor);
-                    if (!sack_info) {
-                        res.writeHead(400, { "Content-Type": "application/json" });
-                        res.end(JSON.stringify({ ok: false, error: "actor_has_no_sack" }));
-                        return;
-                    }
-                    
-                    debug_log("API", `Drop: Found sack ${sack_info.container_id} in ${sack_info.slot_name} slot`);
-
                     // Find empty position in scattered container
                     const ground_max_slots = scattered_container.capacity?.max_slots || scattered_container.contents.length + 1;
                     const { cols: ground_cols } = calculate_grid_dimensions(ground_max_slots);
@@ -2385,11 +2395,11 @@ function start_http_server(log_path: string): void {
                         ground_max_slots
                     ) || { x: 0, y: 0 }; // Default to (0,0) if full
 
-                    // Transfer item from sack to scattered container
+                    // Transfer item from source container to scattered container
                     const result = transfer_item_between_containers(
                         slot, 
                         item_instance_id, 
-                        sack_info.container_id, 
+                        from_container_id, 
                         scattered_container.id,
                         ground_empty_pos.x,
                         ground_empty_pos.y
@@ -2436,7 +2446,7 @@ function start_http_server(log_path: string): void {
                         res.end(JSON.stringify({ 
                             ok: true, 
                             item_instance_id, 
-                            from: sack_info.container_id, 
+                            from: from_container_id, 
                             to: scattered_container.id,
                             place_id: actual_place_id,
                             container_id: scattered_container.id,

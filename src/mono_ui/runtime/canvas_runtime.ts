@@ -274,6 +274,11 @@ export class CanvasRuntime {
         return undefined;
     }
 
+    private get_canvas_module(): Module | undefined {
+        // Find the painter_canvas module to use as fallback for events
+        return this.modules.find(m => m?.id === 'painter_canvas');
+    }
+
     private get_metrics() {
         const font_size_px = this.base_font_size_px * this.scale;
         const line_height_px = font_size_px * this.base_line_height_mult;
@@ -657,12 +662,17 @@ export class CanvasRuntime {
             const t = this.mouse_to_tile(ev);
             if (!t) return;
 
-            const top = this.route_to_top_module(t.x, t.y) ?? null;
+            let top = this.route_to_top_module(t.x, t.y) ?? null;
+            
+            // If no module under cursor and space is held, use canvas as fallback
+            const typing = this.focused_owner?.id === 'input';
+            if (!top && !typing && this.space_down) {
+                top = this.get_canvas_module() ?? null;
+            }
 
             // Global UI pan gesture:
             // - Hold Space + drag anywhere (except while actively typing in input)
             // - Or drag on background/free space
-            const typing = this.focused_owner?.id === 'input';
             this.global_pan_active = (!typing && this.space_down) || (top?.id === 'bg');
             if (this.global_pan_active) {
                 this.last_pan_client_x = ev.clientX;

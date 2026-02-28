@@ -1391,11 +1391,35 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
       // Convert screen to tile coordinates
       const tile = screen_to_tile(e.x, e.y);
+      if (!tile) return;
 
-      // Left click: doors do movement/travel.
-      const door_hit = tile
-        ? get_door_at_tile(place, tile.x, tile.y)
-        : get_door_from_screen(place, e.x, e.y);
+      // PRIORITY 1: Handle double-click on ground items (takes precedence over doors)
+      if (e.click_count === 2 && config.on_double_click_ground) {
+        const items_on_ground = place.contents.items_on_ground.filter(
+          item => item.tile_position.x === tile.x && item.tile_position.y === tile.y
+        );
+        
+        if (items_on_ground.length > 0) {
+          // Check distance (must be within 1 tile)
+          const actor_pos = config.get_actor_position?.();
+          if (actor_pos) {
+            const distance = Math.sqrt(
+              Math.pow(actor_pos.x - tile.x, 2) +
+              Math.pow(actor_pos.y - tile.y, 2)
+            );
+            if (distance <= 1) {
+              debug_log_place(`Double-click on ground items at (${tile.x},${tile.y}), count: ${items_on_ground.length}`);
+              config.on_double_click_ground(tile.x, tile.y);
+            } else {
+              debug_log_place(`Double-click on ground items too far: (${tile.x},${tile.y}), distance: ${distance.toFixed(1)})`);
+            }
+          }
+          return;
+        }
+      }
+
+      // PRIORITY 2: Check for door/travel (only if no items on ground)
+      const door_hit = get_door_at_tile(place, tile.x, tile.y);
 
       if (door_hit) {
         const player = place.contents.actors_present[0];
@@ -1446,8 +1470,6 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         return;
       }
 
-      if (!tile) return;
-
       // Check if clicked on an entity (NPC or actor)
       const entity = get_entity_at(tile.x, tile.y, place);
       if (entity) {
@@ -1485,31 +1507,6 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         
         console.log(`[PlaceModule] Target selected: ${ref}`);
         return;
-      }
-
-      // Phase 2: Handle double-click on ground (items on ground)
-      if (e.click_count === 2 && config.on_double_click_ground) {
-        const items_on_ground = place.contents.items_on_ground.filter(
-          item => item.tile_position.x === tile.x && item.tile_position.y === tile.y
-        );
-        
-        if (items_on_ground.length > 0) {
-          // Check distance (must be within 1 tile)
-          const actor_pos = config.get_actor_position?.();
-          if (actor_pos) {
-            const distance = Math.sqrt(
-              Math.pow(actor_pos.x - tile.x, 2) +
-              Math.pow(actor_pos.y - tile.y, 2)
-            );
-            if (distance <= 1) {
-              debug_log_place(`Double-click on ground items at (${tile.x},${tile.y}), count: ${items_on_ground.length}`);
-              config.on_double_click_ground(tile.x, tile.y);
-            } else {
-              debug_log_place(`Double-click on ground items too far: (${tile.x},${tile.y}), distance: ${distance.toFixed(1)})`);
-            }
-          }
-          return;
-        }
       }
 
       // Check if tile is walkable

@@ -13,9 +13,13 @@
 
 ## Quick Status
 
-**🟢 WORKING:** Pickup and Drop APIs functional with inline scattered containers  
-**🟡 BUGS:** Sack detection needs fixing (assumes all actors have sacks)  
-**🔵 PLANNED:** Tag-based equipment system (Phase 9 - future enhancement)
+**✅ COMPLETE:** Pickup and Drop fully functional
+- Pickup from ground scattered containers to equipped containers
+- Drop from any equipped slot to cardinal adjacent tiles
+- Drop at cursor position with immediate visual feedback
+- Works with tag-based equipment system (ARMOR/GARB/TOOL)
+
+**🔵 PLANNED:** Tag-based equipment system UI enhancements (Phase 4-5)
 
 **Current System:** Uses `valid_body_slots` array - simple but functional  
 **Future System:** ARMOR/GARB/TOOL tags - more flexible but requires major refactoring
@@ -554,22 +558,26 @@ The pickup/drop system implementation is coordinated with the tag-based equipmen
 - Create validation helpers
 - Test: Tags load, types compile
 
-**Phase 2: Pickup/Drop Integration (This Plan)**
-- Update pickup routing to use slot types
-  - Check for main container first
-  - Route to dominant hand tool slot if no containers
-  - Handle armor/garb/tool appropriately
-- Update drop handling
-  - Parse source container ID for slot type
-  - Unequip from specific slot (armor/garb/tool)
-- Update "I" key inventory
-  - Open main container or show hand status
+**Phase 2: Pickup/Drop Integration** ✅ COMPLETE
+- ✅ Update pickup routing to use slot types
+  - ✅ Check for main container first
+  - ✅ Route to dominant hand tool slot if no containers
+  - ✅ Handle armor/garb/tool appropriately
+- ✅ Update drop handling
+  - ✅ Parse source container ID for slot type
+  - ✅ Unequip from specific slot (armor/garb/tool)
+  - ✅ Drop at cursor position (cardinal directions only)
+  - ✅ Place view auto-refreshes after drop
+- ✅ Update "I" key inventory
+  - ✅ Open main container or show hand status
 
-**Phase 3: Testing**
-- Test pickup with containers (routes to container)
-- Test pickup without containers (routes to hand)
-- Test drop from each slot type
-- Test "I" key with various configurations
+**Phase 3: Testing** ✅ COMPLETE
+- ✅ Test pickup with containers (routes to container)
+- ✅ Test pickup without containers (routes to hand)
+- ✅ Test drop from each slot type
+- ✅ Test drop at cardinal positions
+- ✅ Test "I" key with various configurations
+- ✅ Ground items render immediately after drop
 
 **Implementation Notes:**
 - No separate migration scripts (use git for version control)
@@ -597,8 +605,20 @@ The pickup/drop system implementation is coordinated with the tag-based equipmen
 
 ---
 
-**Next Step:** Fix pickup/drop bugs using current `valid_body_slots` system
+**Status: COMPLETE** ✅
+
+All pickup and drop functionality is working:
+- ✅ Pickup from scattered ground containers to equipped containers
+- ✅ Drop from any equipped slot to cardinal adjacent tiles
+- ✅ Drop at cursor position with validation
+- ✅ Immediate visual feedback after drop
+- ✅ Works with tag-based equipment system
+
+**Next Step:** Character Module UI Enhancements (Phase 6)
+- Render 3 slot positions per body part (armor/garb/tool)
+- Add slot type colors (blue/green/red)
+- Fix hand slot mirroring bug
 
 ---
 
-*This plan documents both the working pickup/drop system and the planned future tag-based equipment system.*
+*This plan documents the completed pickup/drop system.*

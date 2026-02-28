@@ -449,9 +449,18 @@ function load_container_from_entity(slot: number, container_id: string): Contain
 /**
  * Get container name from container ID
  * e.g., "container.gunther.leg_left" -> "leg_left"
+ * New format: "container.gunther.hand_left.tool" -> "hand_left"
+ * New format: "container.gunther.hand_left.garb.0" -> "hand_left"
  */
 function get_container_name_from_id(container_id: string): string {
     const parts = container_id.split(".");
+    // Old format: container.actor_id.slot_name
+    // New format: container.actor_id.slot_name.slot_type[.garb_index]
+    if (parts.length >= 3) {
+        // For body slots, the slot_name is at index 2
+        // Everything after is slot_type and optional garb_index
+        return parts[2] || "unknown";
+    }
     return parts[parts.length - 1] || "unknown";
 }
 
@@ -996,11 +1005,13 @@ function sync_body_slots_with_containers(
     debug_log("transfer", `[SYNC] From: ${from_container_id} -> To: ${to_container_id}`);
     
     // Parse container IDs to get actor info
-    const from_match = from_container_id.match(/^container\.(actor\.[^.]+)\.(.+)$/);
-    const to_match = to_container_id.match(/^container\.(actor\.[^.]+)\.(.+)$/);
+    // New format: container.{actor_id}.{slot_name}.{slot_type}[.{garb_index}]
+    // Examples: container.henry_actor.hand_left.tool, container.henry_actor.hand_left.garb.0
+    const from_match = from_container_id.match(/^container\.(actor\.[^.]+)\.(\w+)\.(tool|armor|garb)(?:\.(\d+))?$/);
+    const to_match = to_container_id.match(/^container\.(actor\.[^.]+)\.(\w+)\.(tool|armor|garb)(?:\.(\d+))?$/);
     
-    debug_log("transfer", `[SYNC] from_match: ${from_match ? `${from_match[1]}.${from_match[2]}` : 'null'}`);
-    debug_log("transfer", `[SYNC] to_match: ${to_match ? `${to_match[1]}.${to_match[2]}` : 'null'}`);
+    debug_log("transfer", `[SYNC] from_match: ${from_match ? `${from_match[1]}.${from_match[2]}.${from_match[3]}${from_match[4] ? '.' + from_match[4] : ''}` : 'null'}`);
+    debug_log("transfer", `[SYNC] to_match: ${to_match ? `${to_match[1]}.${to_match[2]}.${to_match[3]}${to_match[4] ? '.' + to_match[4] : ''}` : 'null'}`);
     
     // Handle item moved FROM a body slot (remove from body_slots)
     if (from_match && from_match[1] && from_match[2]) {
@@ -1056,10 +1067,12 @@ function sync_body_slots_with_containers(
     }
     
     // Handle item moved TO a body slot (add to body_slots)
-    if (to_match && to_match[1] && to_match[2]) {
+    if (to_match && to_match[1] && to_match[2] && to_match[3]) {
         const actor_id = to_match[1];
         const slot_name = to_match[2];
-        debug_log("transfer", `[SYNC] Processing addition to ${slot_name} for actor ${actor_id}`);
+        const target_slot_type = to_match[3]; // tool, armor, or garb
+        const target_garb_index = to_match[4] ? parseInt(to_match[4], 10) : null;
+        debug_log("transfer", `[SYNC] Processing addition to ${slot_name}.${target_slot_type}${target_garb_index !== null ? '.' + target_garb_index : ''} for actor ${actor_id}`);
         
         const actor_result = load_actor(slot, actor_id);
         if (actor_result.ok) {
@@ -1070,7 +1083,7 @@ function sync_body_slots_with_containers(
                 const body_slot = actor.body_slots[slot_name];
                 debug_log("transfer", `[SYNC] BEFORE addition - ${slot_name}: tool=${body_slot.tool}, armor=${body_slot.armor}, garb=[${body_slot.garb?.join(', ') || 'empty'}]`);
                 
-                // Load the item to check its slot type
+                // Load the item to check its slot type (for validation)
                 const container_result = load_container(slot, to_container_id);
                 if (container_result.ok) {
                     const item_entry = container_result.container.contents.find(
@@ -1078,26 +1091,41 @@ function sync_body_slots_with_containers(
                     );
                     
                     if (item_entry) {
-                        const slot_type = get_primary_slot_type(item_entry.definition as any);
-                        debug_log("transfer", `[SYNC] Item ${item_instance_id} has slot_type: ${slot_type}`);
+                        const item_slot_type = get_primary_slot_type(item_entry.definition as any);
+                        debug_log("transfer", `[SYNC] Item ${item_instance_id} has slot_type: ${item_slot_type}, target: ${target_slot_type}`);
                         
-                        // Add to appropriate slot type
-                        if (slot_type === "tool") {
+                        // Validate that item's slot type matches the target slot type
+                        if (item_slot_type !== target_slot_type) {
+                            debug_log("transfer", `[SYNC] WARNING: Item slot type ${item_slot_type} doesn't match target ${target_slot_type}`);
+                        }
+                        
+                        // Add to appropriate slot type based on target
+                        if (target_slot_type === "tool") {
                             body_slot.tool = item_instance_id;
                             debug_log("transfer", `[SYNC] ADDED to ${slot_name}.tool`);
-                        } else if (slot_type === "armor") {
+                        } else if (target_slot_type === "armor") {
                             body_slot.armor = item_instance_id;
                             debug_log("transfer", `[SYNC] ADDED to ${slot_name}.armor`);
-                        } else if (slot_type === "garb") {
+                        } else if (target_slot_type === "garb") {
                             if (!body_slot.garb) body_slot.garb = [];
-                            if (!body_slot.garb.includes(item_instance_id)) {
-                                body_slot.garb.push(item_instance_id);
-                                debug_log("transfer", `[SYNC] ADDED to ${slot_name}.garb, now has ${body_slot.garb.length} items`);
+                            // For garb, insert at specific index if provided, otherwise append
+                            if (target_garb_index !== null && target_garb_index < body_slot.garb.length) {
+                                // Insert at specific position (for reordering)
+                                if (!body_slot.garb.includes(item_instance_id)) {
+                                    body_slot.garb.splice(target_garb_index, 0, item_instance_id);
+                                    debug_log("transfer", `[SYNC] INSERTED to ${slot_name}.garb at index ${target_garb_index}`);
+                                }
                             } else {
-                                debug_log("transfer", `[SYNC] Item already in ${slot_name}.garb, skipping`);
+                                // Append to end
+                                if (!body_slot.garb.includes(item_instance_id)) {
+                                    body_slot.garb.push(item_instance_id);
+                                    debug_log("transfer", `[SYNC] ADDED to ${slot_name}.garb at end, now has ${body_slot.garb.length} items`);
+                                } else {
+                                    debug_log("transfer", `[SYNC] Item already in ${slot_name}.garb, skipping`);
+                                }
                             }
                         } else {
-                            debug_log("transfer", `[SYNC] WARNING: Unknown slot_type ${slot_type}, not adding to body_slots`);
+                            debug_log("transfer", `[SYNC] WARNING: Unknown slot_type ${target_slot_type}, not adding to body_slots`);
                         }
                         
                         debug_log("transfer", `[SYNC] AFTER addition - ${slot_name}: tool=${body_slot.tool}, armor=${body_slot.armor}, garb=[${body_slot.garb?.join(', ') || 'empty'}]`);

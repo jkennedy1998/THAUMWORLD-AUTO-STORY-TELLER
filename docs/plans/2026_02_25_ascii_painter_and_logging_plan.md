@@ -400,14 +400,10 @@ font_family: '"Martian Mono", "Noto Sans Mono", monospace',
 **File:** `src/canvas_app/app_state.ts:38`
 
 **Test values:**
-- Current: `-0.18`
-- Try: `-0.10`, `-0.05`, `0.0`
+- Original: `-0.18`
+- Selected: `-0.10`
 
-**Process:**
-- [ ] Test each value in painter mode first
-- [ ] Verify readability at different scales
-- [ ] Choose optimal value
-- [ ] Apply to both app states
+**Status:** ✅ COMPLETE - Both game and painter modes set to `-0.10`
 
 ### 3.4 Add Glyph Coverage Test Panel
 

@@ -20,4 +20,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // App mode (game or ascii_painter) - set before page loads
   appMode: appMode,
+
+  // Clipboard operations
+  clipboardReadText: () => ipcRenderer.invoke('clipboard-read-text'),
+  clipboardWriteText: (text) => ipcRenderer.invoke('clipboard-write-text', text),
+  clipboardReadImage: () => ipcRenderer.invoke('clipboard-read-image'),
+  clipboardHasImage: () => ipcRenderer.invoke('clipboard-has-image'),
 });

@@ -208,19 +208,6 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
       c.set(rect.x0, rect.y0, { char: '└', rgb: border_color, style: 'regular', weight_index: 3 });
       c.set(rect.x1, rect.y0, { char: '┘', rgb: border_color, style: 'regular', weight_index: 3 });
       
-      // Draw title
-      const title = 'CHARS';
-      const title_y = rect.y1 - 1;
-      for (let i = 0; i < title.length && i < rect.x1 - rect.x0 - 2; i++) {
-        const char = title[i]!;
-        c.set(rect.x0 + 3 + i, title_y, { 
-          char: char, 
-          rgb: text_color, 
-          style: 'regular',
-          weight_index: 4 
-        });
-      }
-      
       // Draw characters in a grid (responsive to width)
       const visible_rows = get_visible_rows();
       const chars_per_row = get_chars_per_row(rect.x1 - rect.x0);
@@ -259,7 +246,7 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
       }
       
       // Draw gizmos
-      draw_module_gizmos(c, rect, gizmo_config, gizmo_state);
+      draw_module_gizmos(c, rect, gizmo_config, gizmo_state, 'CHARS');
       
       // Draw scroll indicator if needed
       const total_rows = Math.ceil(CHARACTER_SET.length / chars_per_row);

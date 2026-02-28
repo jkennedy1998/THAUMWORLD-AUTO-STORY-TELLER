@@ -91,6 +91,54 @@ export function deselectRect(bitmap: SelectionBitmap, x0: number, y0: number, x1
   }
 }
 
+// Select a polygon region (for lasso tool) using scanline fill
+export function selectPolygon(bitmap: SelectionBitmap, points: { x: number; y: number }[]): void {
+  if (points.length < 3) return;
+  
+  // Find bounding box
+  let minX = points[0]!.x, maxX = points[0]!.x;
+  let minY = points[0]!.y, maxY = points[0]!.y;
+  for (const p of points) {
+    minX = Math.min(minX, p.x);
+    maxX = Math.max(maxX, p.x);
+    minY = Math.min(minY, p.y);
+    maxY = Math.max(maxY, p.y);
+  }
+  
+  // Scanline fill algorithm
+  for (let y = minY; y <= maxY; y++) {
+    const intersections: number[] = [];
+    
+    // Find intersections with polygon edges
+    for (let i = 0; i < points.length; i++) {
+      const p1 = points[i]!;
+      const p2 = points[(i + 1) % points.length]!;
+      
+      // Check if edge crosses this scanline
+      if ((p1.y <= y && p2.y > y) || (p2.y <= y && p1.y > y)) {
+        // Calculate intersection x
+        const t = (y - p1.y) / (p2.y - p1.y);
+        const x = p1.x + t * (p2.x - p1.x);
+        intersections.push(Math.round(x));
+      }
+    }
+    
+    // Sort intersections
+    intersections.sort((a, b) => a - b);
+    
+    // Fill between pairs of intersections
+    for (let i = 0; i < intersections.length; i += 2) {
+      if (i + 1 < intersections.length) {
+        const x1 = intersections[i]!;
+        const x2 = intersections[i + 1]!;
+        for (let x = x1; x <= x2; x++) {
+          setSelected(bitmap, x, y, true);
+        }
+      }
+    }
+  }
+}
+
 export function hasSelection(bitmap: SelectionBitmap): boolean {
   for (let y = 0; y < bitmap.height; y++) {
     const row = bitmap.cells[y];

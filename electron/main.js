@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, clipboard, nativeImage } from 'electron';
 import { readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
@@ -71,6 +71,48 @@ ipcMain.handle('write-file', async (event, filePath, content) => {
 
 ipcMain.handle('get-data-slot-dir', async (event, slot) => {
     return join(process.cwd(), 'local_data', `data_slot_${slot}`);
+});
+
+// Clipboard IPC handlers
+ipcMain.handle('clipboard-read-text', async () => {
+    try {
+        const text = clipboard.readText();
+        return { success: true, text };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('clipboard-write-text', async (event, text) => {
+    try {
+        clipboard.writeText(text);
+        return { success: true };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('clipboard-read-image', async () => {
+    try {
+        const image = clipboard.readImage();
+        if (image.isEmpty()) {
+            return { success: false, error: 'No image in clipboard' };
+        }
+        // Convert to data URL for transfer to renderer
+        const dataUrl = image.toDataURL();
+        return { success: true, dataUrl, width: image.getSize().width, height: image.getSize().height };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('clipboard-has-image', async () => {
+    try {
+        const hasImage = clipboard.hasImage && clipboard.hasImage();
+        return { success: true, hasImage };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
 });
 
 app.whenReady().then(() => {

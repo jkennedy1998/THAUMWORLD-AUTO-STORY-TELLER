@@ -64,19 +64,6 @@ export function make_brush_preview_module(opts: BrushPreviewOptions): Module {
       c.set(rect.x0, rect.y0, { char: '└', rgb: border_color, style: 'regular', weight_index: 3 });
       c.set(rect.x1, rect.y0, { char: '┘', rgb: border_color, style: 'regular', weight_index: 3 });
       
-      // Draw title
-      const title = 'BRUSH';
-      const title_y = rect.y1 - 1;
-      for (let i = 0; i < title.length && i < rect.x1 - rect.x0 - 2; i++) {
-        const char = title[i]!;
-        c.set(rect.x0 + 2 + i, title_y, { 
-          char: char, 
-          rgb: border_color, 
-          style: 'regular',
-          weight_index: 4 
-        });
-      }
-      
       // Draw the brush character in the center
       const center_x = Math.floor((rect.x0 + rect.x1) / 2);
       const center_y = Math.floor((rect.y0 + rect.y1) / 2);
@@ -89,7 +76,7 @@ export function make_brush_preview_module(opts: BrushPreviewOptions): Module {
       });
       
       // Draw gizmos
-      draw_module_gizmos(c, rect, gizmo_config, gizmo_state);
+      draw_module_gizmos(c, rect, gizmo_config, gizmo_state, 'PREVIEW');
     },
 
     OnPointerDown(e: PointerEvent): void {

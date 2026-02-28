@@ -38,7 +38,10 @@ export type ToolType =
   | 'bucket' 
   | 'eyedropper'
   | 'text'
-  | 'select_rect'
+  | 'weighter'
+  | 'colorer'
+  | 'selectangle'
+  | 'lassoselect'
   | 'copy'
   | 'paste';
 

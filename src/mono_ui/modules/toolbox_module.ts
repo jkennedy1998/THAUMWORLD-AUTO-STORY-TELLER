@@ -35,6 +35,12 @@ const TOOLS: { tool: ToolType; label: string; icon: string; shortcut: string }[]
   { tool: 'rect_stroke', label: 'Rect', icon: '□', shortcut: 'R' },
   { tool: 'rect_fill', label: 'Fill', icon: '■', shortcut: 'S' },
   { tool: 'text', label: 'Text', icon: 'T', shortcut: 'T' },
+  { tool: 'weighter', label: 'Weight', icon: '▪', shortcut: 'W' },
+  { tool: 'colorer', label: 'Color', icon: '◐', shortcut: 'O' },
+  { tool: 'selectangle', label: 'RectSel', icon: '▣', shortcut: 'M' },
+  { tool: 'lassoselect', label: 'Lasso', icon: '◎', shortcut: 'N' },
+  { tool: 'copy', label: 'Copy', icon: '⎘', shortcut: 'C' },
+  { tool: 'paste', label: 'Paste', icon: '⎗', shortcut: 'V' },
 ];
 
 // Size constraints
@@ -109,19 +115,6 @@ export function make_toolbox_module(opts: ToolboxOptions): Module {
       c.set(rect.x0, rect.y0, { char: '└', rgb: border_color, style: 'regular', weight_index: 3 });
       c.set(rect.x1, rect.y0, { char: '┘', rgb: border_color, style: 'regular', weight_index: 3 });
       
-      // Draw title
-      const title = 'TOOLS';
-      const title_y = rect.y1 - 1;
-      for (let i = 0; i < title.length && i < rect.x1 - rect.x0 - 2; i++) {
-        const char = title[i]!;
-        c.set(rect.x0 + 2 + i, title_y, { 
-          char: char, 
-          rgb: text_color, 
-          style: 'regular',
-          weight_index: 4 
-        });
-      }
-      
       // Draw assignment legend
       const left_tool = opts.get_left_click_tool();
       const right_tool = opts.get_right_click_tool();
@@ -187,7 +180,7 @@ export function make_toolbox_module(opts: ToolboxOptions): Module {
       }
       
       // Draw gizmos
-      draw_module_gizmos(c, rect, gizmo_config, gizmo_state);
+      draw_module_gizmos(c, rect, gizmo_config, gizmo_state, 'TOOLS');
     },
 
     OnPointerDown(e: PointerEvent): void {

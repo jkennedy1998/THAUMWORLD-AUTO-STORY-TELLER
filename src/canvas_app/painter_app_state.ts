@@ -11,6 +11,8 @@ import type { Grid, Brush, ToolType } from '../ascii_painter/types.js';
 import { createGrid, exportGrid, importGrid } from '../ascii_painter/types.js';
 import { createHistoryManager, pushSnapshot, undo, redo } from '../ascii_painter/history.js';
 import { get_color_by_name } from '../mono_ui/colors.js';
+import type { SelectionMode } from '../ascii_painter/selection.js';
+import { clearSelection, selectAll, invertSelection } from '../ascii_painter/selection.js';
 import { make_painter_canvas_module } from '../mono_ui/modules/painter_canvas_module.js';
 import { make_painter_toolbar_module } from '../mono_ui/modules/painter_toolbar_module.js';
 import { make_file_menu_module } from '../mono_ui/modules/painter_file_menu_module.js';
@@ -21,6 +23,8 @@ import { make_weight_selector_module } from '../mono_ui/modules/weight_selector_
 import { make_toolbox_module } from '../mono_ui/modules/toolbox_module.js';
 import { make_tool_properties_module } from '../mono_ui/modules/tool_properties_module.js';
 import { saveModulePosition, getModulePosition, clearModulePositions } from '../ascii_painter/module_position_storage.js';
+import { createGradiatorState, type GradiatorState, type GradiatorSlot, setActiveGradiatorSlot, selectGradiatorChar, addGradiatorChar, removeGradiatorChar, setGradiatorChar } from '../ascii_painter/gradiator.js';
+import { saveGradiatorState, loadGradiatorState } from '../ascii_painter/gradiator_storage.js';
 import {
   exportToJSON,
   exportToText,
@@ -39,7 +43,7 @@ export const PAINTER_CONFIG = {
   font_family: '"Martian Mono", "Noto Sans Mono", monospace',
   base_font_size_px: 32,
   base_line_height_mult: 29.8 / 32,
-  base_letter_spacing_mult: -0.10, // Relaxed from -0.18
+  base_letter_spacing_mult: -0.10,
   weight_index_to_css: [100, 200, 300, 400, 500, 600, 700, 800] as const,
   grid_width: 200,
   grid_height: 50,
@@ -104,6 +108,33 @@ export function create_painter_app_state(): PainterAppState {
   // Text tool: space replaces character or preserves it
   let space_replace = true;
   
+  // Text tool: spacing (horizontal movement per character, -16 to 16)
+  let text_spacing = 1;
+  
+  // Text tool: charlead (vertical movement per character, -16 to 16)
+  let text_charlead = 0;
+  
+  // Text tool: enterlead (vertical movement on Enter key, -16 to 16)
+  let text_enterlead = 1;
+  
+  // Text tool: enterspace (horizontal offset on Enter key, -16 to 16)
+  let text_enterspace = 0;
+  
+  // Paste tool: space replaces character or preserves it
+  let paste_space_replace = true;
+  
+  // Paste tool: scale (0.1 to 3.0, representing 10% to 300%)
+  let paste_scale = 1.0;
+  
+  // Gradiator state for image/text conversion - load from storage or create default
+  const gradiator_state = loadGradiatorState();
+  
+  // Selection mode
+  let selection_mode: SelectionMode = 'replace';
+  
+  // Clipboard for copy/paste
+  let clipboard_data: string | null = null;
+  
   // Preview points for line/rect tools
   let preview_points: { x: number; y: number }[] = [];
 
@@ -153,7 +184,7 @@ export function create_painter_app_state(): PainterAppState {
     y1: GRID_HEIGHT - 1
   };
 
-  const canvas_rect: Rect = {
+  let canvas_rect: Rect = {
     x0: canvas_start_x + PADDING_X,
     y0: canvas_start_y,
     x1: canvas_start_x + PADDING_X + CANVAS_DISPLAY_WIDTH - 1,
@@ -181,9 +212,18 @@ export function create_painter_app_state(): PainterAppState {
     brush,
     get_brush_size: () => brush_size,
     get_space_replace: () => space_replace,
+    get_paste_space_replace: () => paste_space_replace,
+    get_paste_scale: () => paste_scale,
+    get_gradiator_state: () => gradiator_state,
+    get_selection_mode: () => selection_mode,
+    get_text_spacing: () => text_spacing,
+    get_text_charlead: () => text_charlead,
+    get_text_enterlead: () => text_enterlead,
+    get_text_enterspace: () => text_enterspace,
     preview_points,
     get_left_click_tool: () => left_click_tool,
     get_right_click_tool: () => right_click_tool,
+    history,
     on_push_snapshot: () => {
       pushSnapshot(history, grid);
       schedule_auto_save();
@@ -192,6 +232,55 @@ export function create_painter_app_state(): PainterAppState {
       brush.char = cell.char;
       brush.rgb = { ...cell.rgb };
       brush.weight_index = cell.weight_index;
+    },
+    on_selection_change: () => {
+      // Force redraw when selection changes
+    },
+    on_copy_data: async (data) => {
+      clipboard_data = data;
+      // Also write to Windows clipboard via Electron
+      try {
+        if (window.electronAPI?.clipboardWriteText) {
+          await window.electronAPI.clipboardWriteText(data);
+        }
+      } catch (e) {
+        console.warn('Failed to write to system clipboard:', e);
+      }
+    },
+    get_clipboard_data: async () => {
+      // First try to get from system clipboard
+      try {
+        if (window.electronAPI?.clipboardReadText) {
+          const result = await window.electronAPI.clipboardReadText();
+          if (result.success && result.text) {
+            return result.text;
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to read from system clipboard:', e);
+      }
+      // Fall back to internal clipboard
+      return clipboard_data;
+    },
+    on_move: (new_rect) => {
+      // Update canvas_rect when moved
+      canvas_rect = new_rect;
+      console.log('Canvas moved:', new_rect);
+    },
+    on_resize: (new_rect) => {
+      // Update canvas_rect
+      canvas_rect = new_rect;
+      console.log('Canvas resized:', new_rect);
+    },
+    on_close: () => {
+      // Reset canvas to default position
+      canvas_rect = {
+        x0: canvas_start_x + PADDING_X,
+        y0: canvas_start_y,
+        x1: canvas_start_x + PADDING_X + CANVAS_DISPLAY_WIDTH - 1,
+        y1: canvas_start_y + CANVAS_DISPLAY_HEIGHT - 1
+      };
+      console.log('Canvas reset to default position');
     }
   });
   
@@ -287,8 +376,16 @@ export function create_painter_app_state(): PainterAppState {
       rect: char_selector_rect,
       selected_char: brush.char,
       on_char_select: (char) => {
-        brush.char = char;
-        console.log('Selected character:', char);
+        // Check if we're editing a gradiator
+        if (gradiator_state.isEditing && gradiator_state.editSlot !== null) {
+          // Set the character in the gradiator at the selected position
+          setGradiatorChar(gradiator_state, gradiator_state.editSlot, gradiator_state.editCursorX, char);
+          console.log('Set gradiator character:', char, 'at position', gradiator_state.editCursorX);
+        } else {
+          // Normal brush character selection
+          brush.char = char;
+          console.log('Selected character:', char);
+        }
       },
       on_move: (new_rect) => {
         if (char_selector_module) {
@@ -421,6 +518,79 @@ export function create_painter_app_state(): PainterAppState {
       on_space_replace_change: (replace) => {
         space_replace = replace;
         console.log('Space replace:', replace);
+      },
+      get_text_spacing: () => text_spacing,
+      on_text_spacing_change: (spacing) => {
+        text_spacing = spacing;
+        console.log('Text spacing:', spacing);
+      },
+      get_text_charlead: () => text_charlead,
+      on_text_charlead_change: (charlead) => {
+        text_charlead = charlead;
+        console.log('Text charlead:', charlead);
+      },
+      get_text_enterlead: () => text_enterlead,
+      on_text_enterlead_change: (enterlead) => {
+        text_enterlead = enterlead;
+        console.log('Text enterlead:', enterlead);
+      },
+      get_text_enterspace: () => text_enterspace,
+      on_text_enterspace_change: (enterspace) => {
+        text_enterspace = enterspace;
+        console.log('Text enterspace:', enterspace);
+      },
+      get_selection_mode: () => selection_mode,
+      on_selection_mode_change: (mode) => {
+        selection_mode = mode;
+        console.log('Selection mode:', mode);
+      },
+      get_paste_space_replace: () => paste_space_replace,
+      on_paste_space_replace_change: (replace) => {
+        paste_space_replace = replace;
+        console.log('Paste space replace:', replace);
+      },
+      get_paste_scale: () => paste_scale,
+      on_paste_scale_change: (scale) => {
+        paste_scale = Math.max(0.1, Math.min(3.0, scale));
+        console.log('Paste scale:', paste_scale);
+      },
+      get_gradiator_state: () => gradiator_state,
+      on_gradiator_slot_select: (slot) => {
+        setActiveGradiatorSlot(gradiator_state, slot);
+        saveGradiatorState(gradiator_state);
+        console.log('Selected gradiator slot:', slot);
+      },
+      on_gradiator_char_select: (slot, x) => {
+        selectGradiatorChar(gradiator_state, slot, x);
+        // Don't save on selection, only on actual changes
+        console.log('Selected gradiator char position:', slot, x);
+      },
+      on_gradiator_add_char: (slot) => {
+        addGradiatorChar(gradiator_state, slot);
+        saveGradiatorState(gradiator_state);
+        console.log('Added char to gradiator:', slot);
+      },
+      on_gradiator_remove_char: (slot) => {
+        removeGradiatorChar(gradiator_state, slot);
+        saveGradiatorState(gradiator_state);
+        console.log('Removed char from gradiator:', slot);
+      },
+      on_gradiator_char_set: (slot, x, char) => {
+        setGradiatorChar(gradiator_state, slot, x, char);
+        saveGradiatorState(gradiator_state);
+        console.log('Set gradiator char:', slot, x, char);
+      },
+      on_selection_clear: () => {
+        (canvas_module as any).clearSelection?.();
+        console.log('Selection cleared');
+      },
+      on_selection_invert: () => {
+        (canvas_module as any).invertSelection?.();
+        console.log('Selection inverted');
+      },
+      on_selection_all: () => {
+        (canvas_module as any).selectAll?.();
+        console.log('Select all');
       },
       on_move: (new_rect) => {
         if (tool_properties_module) {

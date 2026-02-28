@@ -263,6 +263,12 @@ export function pasteToGrid(
   startY: number,
   spaceReplace: boolean
 ): void {
+  console.log('pasteToGrid called with spaceReplace:', spaceReplace);
+  let placed = 0;
+  let preserved = 0;
+  let cleared = 0;
+  let skipped = 0;
+  
   for (let y = 0; y < data.height; y++) {
     for (let x = 0; x < data.width; x++) {
       const cell = data.cells[y]?.[x];
@@ -274,18 +280,30 @@ export function pasteToGrid(
         continue;
       }
       
-      if (cell) {
-        // Place the cell
+      // Check if this is a space/empty cell
+      const isSpace = !cell || cell.char === ' ';
+      
+      if (cell && !isSpace) {
+        // Non-space cell: always place it
         grid.cells[targetY]![targetX] = { ...cell };
-      } else if (spaceReplace) {
-        // Space replacement mode: clear the cell
-        grid.cells[targetY]![targetX] = {
-          char: ' ',
-          rgb: { r: 0, g: 0, b: 0 },
-          weight_index: 0
-        };
+        placed++;
+      } else if (isSpace) {
+        // Space cell: handle based on spaceReplace setting
+        if (spaceReplace) {
+          // Replace mode: clear the cell with a space
+          grid.cells[targetY]![targetX] = {
+            char: ' ',
+            rgb: { r: 0, g: 0, b: 0 },
+            weight_index: 0
+          };
+          cleared++;
+        } else {
+          // Preserve mode: skip this cell entirely, leave existing content
+          skipped++;
+        }
       }
-      // If spaceReplace is false and cell is null, preserve existing content
     }
   }
+  
+  console.log(`Paste complete: ${placed} placed, ${skipped} skipped (preserved), ${cleared} cleared`);
 }

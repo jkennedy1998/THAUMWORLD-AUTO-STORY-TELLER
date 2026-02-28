@@ -148,6 +148,11 @@ declare global {
       readFile: (filePath: string) => Promise<{ success: boolean; content?: string; error?: string }>;
       writeFile: (filePath: string, content: string) => Promise<{ success: boolean; error?: string }>;
       getDataSlotDir: (slot: number) => Promise<string>;
+      // Clipboard operations
+      clipboardReadText: () => Promise<{ success: boolean; text?: string; error?: string }>;
+      clipboardWriteText: (text: string) => Promise<{ success: boolean; error?: string }>;
+      clipboardReadImage: () => Promise<{ success: boolean; dataUrl?: string; width?: number; height?: number; error?: string }>;
+      clipboardHasImage: () => Promise<{ success: boolean; hasImage?: boolean; error?: string }>;
     };
   }
 }

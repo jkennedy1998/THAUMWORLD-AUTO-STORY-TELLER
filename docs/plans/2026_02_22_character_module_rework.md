@@ -19,16 +19,25 @@ Refactor the CharacterModule to provide a comprehensive character inspection int
 
 **Architecture Status (2026-02-27):**
 
-**CURRENT (Working Now):** `valid_body_slots` array on ItemDefinition
-- Items specify compatible slots: `valid_body_slots: ["hand_left", "hand_right"]`
-- One item per body slot (simple structure)
-- Working system with drag-drop, stacking, swapping
-
-**FUTURE (Phase 9 - Planned):** Tag-Based Slot System  
-- ARMOR/GARB/TOOL tags with body slot metadata
+**✅ COMPLETED:** Tag-Based Slot System (Phase 9)
+- ARMOR/GARB/TOOL tags with body slot metadata implemented
 - Each body part has 3 slot types: ARMOR (1 max), GARB (∞), TOOL (1 per hand)
-- Enables: multiple rings per hand, layered clothing, distinct tool vs equipment slots
-- **⚠️ NOT YET IMPLEMENTED** - requires major refactoring
+- Backend fully functional: equip, unequip, and drag-drop working
+- Items properly route to correct slot types based on tags
+- Validation enforces slot type mapping (e.g., TOOL items can't go to head/torso/legs)
+
+**CURRENT:** Backend Complete, Pickup/Drop Complete, UI Pending
+- Backend: Tag-based storage and validation ✅
+- Backend: Transfer system supports tag-based routing ✅
+- Backend: All container save/load operations working ✅
+- Backend: Pickup/Drop integration complete ✅
+  - ✅ Pickup from ground to equipped containers
+  - ✅ Drop from any slot to cardinal adjacent tiles
+  - ✅ Drop at cursor with immediate refresh
+- UI: CharacterModule still uses single-slot display (needs 3-position update)
+- UI: No slot type colors yet (blue/green/red)
+
+**NEXT:** Phase 4 - UI Enhancements
 
 ---
 
@@ -45,28 +54,24 @@ Refactor the CharacterModule to provide a comprehensive character inspection int
 - ✅ Drag-and-drop routing to target modules (Phase 8)
 
 ### What's Missing / Needs Update for Tag-Based System
-- ❌ Tag-based slot system (ARMOR/GARB/TOOL) instead of `valid_body_slots`
-- ❌ Separate slot types per body part (armor/garb/tool)
-- ❌ Hand slot bug: Items mirror to both visual slots (need 3 separate slots)
-- ❌ Container sidebar showing EQUIPPED containers only (not all body slots)
-- ❌ Logic to filter equipped items by container type (using CONTAINER tag)
-- ❌ Health bar display
-- ❌ Pan support for body slot area (for large creatures)
-- ❌ Scrollable status section for extensibility
-- ❌ Consistent border styling across modules
-- ❌ Name truncation for long character names
-- ❌ "Main container" selection for pickup routing
+- ❌ UI: 3-position slot display per body part (armor/garb/tool)
+- ❌ UI: Slot type colors (blue=armor, green=garb, red=tool)
+- ❌ UI: Hand slot bug - items mirror to both visual slots (need 3 separate slots)
+- ❌ UI: Container sidebar showing EQUIPPED containers only
+- ❌ UI: Health bar display
+- ❌ UI: Pan support for body slot area (for large creatures)
+- ❌ UI: Scrollable status section for extensibility
+- ❌ UI: Consistent border styling across modules
+- ❌ UI: Name truncation for long character names
+- ✅ Backend: Tag-based slot system complete
+- ✅ Backend: Container sidebar logic complete
+- ✅ Backend: Pickup/Drop integration complete
 
 ### Known Issues (To Fix)
 - **Hand Slot Mirroring Bug:** Equipping to hand_left shows item in both visual hand slots
   - Root cause: Both red (tool) and blue (equipment) visuals map to same body_slot
   - Fix: Implement separate armor/garb/tool slot arrays per hand
   - See Phase 9: Tag-Based Equipment Slot System
-
-- **Sack Detection in Pickup/Drop:** APIs assume actors have sacks
-  - Current: `find_actor_sack()` searches body_slots for items with container_data
-  - Better: Use "main container" selection + fallback to dominant hand tool slot
-  - See pickup_and_drop.md for implementation notes
 
 ---
 
@@ -735,17 +740,32 @@ Tags define what's legal to equip where:
   - TypeScript compiles without errors
   - Both old and new formats supported
 
-**Phase 4: UI (Rendering)**
+**Phase 4: Backend Integration** ✅ COMPLETE
+- [x] Update transfer system to work with tag-based slots
+- [x] Fix save_container_to_entity to save body slot containers
+- [x] Add list_containers_for_owner to include body slot containers
+- [x] Remove migration code that was corrupting data
+- [x] Fix body_slots sync during transfers
+- [x] Test: Drag-drop equip/unequip works correctly ✅
+  - Tunic can be equipped to torso and unequipped back to sack
+  - Sword can be equipped to hand_right
+  - All operations persist correctly
+
+**Phase 5: Pickup/Drop Integration** ✅ COMPLETE
+- [x] Update pickup routing to check slot types
+- [x] Update drop handling for armor/garb/tool sources
+- [x] Update drop to use cursor position (cardinal directions)
+- [x] Add place refresh after drop
+- [x] Update "I" key to use main container preference
+- [x] Test: Pickup routes correctly, drop works from all slot types
+- [x] Test: Drop at cardinal positions works
+- [x] Test: Ground items render immediately after drop
+
+**Phase 6: UI (Rendering)**
 - [ ] Update CharacterModule to render 3 slot positions per hand
 - [ ] Add slot type colors (blue/green/red)
 - [ ] Update drag-and-drop for slot types
 - [ ] Test: Visual rendering correct, drag-drop works
-
-**Phase 5: Integration (Pickup/Drop)**
-- [ ] Update pickup routing to check slot types
-- [ ] Update drop handling for armor/garb/tool sources
-- [ ] Update "I" key to use main container preference
-- [ ] Test: Pickup routes correctly, drop works from all slot types
 
 **Phase 6: Complete Data Update**
 - [ ] Add tags to all item definitions

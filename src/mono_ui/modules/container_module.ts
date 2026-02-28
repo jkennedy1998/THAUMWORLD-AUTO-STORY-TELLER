@@ -221,24 +221,10 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
       c.set(rect.x0, rect.y0, { char: "+", rgb: border, style: "regular", weight_index: 3 });
       c.set(rect.x1, rect.y0, { char: "+", rgb: border, style: "regular", weight_index: 3 });
       
-      // Phase 8: Draw gizmos (close X, move #)
+      // Phase 8: Draw gizmos (close X, move #) with title
       if (opts.gizmos) {
-        draw_module_gizmos(c, rect, opts.gizmos, gizmo_state);
-      }
-      
-      // Draw title if we have container
-      if (container) {
-        const title = container.id.split(".").pop() || "container";
-        const title_y = rect.y1 - 1;
-        // Phase 8: Start title after gizmos if they're enabled
-        const gizmo_count = opts.gizmos?.enabled?.length || 0;
-        let title_x = rect.x0 + 2 + (gizmo_count * 2);
-        for (const char of title.slice(0, 10)) {
-          if (title_x <= rect.x1 - 2) {
-            c.set(title_x, title_y, { char, rgb: opts.text_rgb ?? { r: 200, g: 200, b: 200 }, style: "regular", weight_index: 4 });
-            title_x++;
-          }
-        }
+        const title = container ? (container.id.split(".").pop() || "container").toUpperCase().slice(0, 10) : undefined;
+        draw_module_gizmos(c, rect, opts.gizmos, gizmo_state, title);
       }
       
       // Draw grid of slots

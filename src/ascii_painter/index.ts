@@ -66,3 +66,30 @@ export {
   downloadFile,
   readFileAsText
 } from './export.js';
+
+// Image Import (PNG to ASCII)
+export {
+  imageToAscii,
+  dataUrlToAscii,
+  clipboardHasImage,
+  pasteImageFromClipboard
+} from './image_import.js';
+
+// Gradiator System
+export type { 
+  GradiatorState, 
+  GradiatorSlot 
+} from './gradiator.js';
+export {
+  createGradiatorState,
+  getActiveGradiator,
+  setActiveGradiatorSlot,
+  selectGradiatorChar,
+  addGradiatorChar,
+  removeGradiatorChar,
+  setGradiatorChar,
+  scaleCopyData,
+  scaleTextToCopyData,
+  parseScalePercent,
+  formatScalePercent
+} from './gradiator.js';

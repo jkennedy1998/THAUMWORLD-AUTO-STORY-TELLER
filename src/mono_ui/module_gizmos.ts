@@ -56,12 +56,14 @@ function get_gizmo_rect(rect: Rect, index: number): { x: number; y: number } {
 
 /**
  * Draw module gizmos (close X, move #, save $)
+ * Optionally draws module name to the right of gizmos
  */
 export function draw_module_gizmos(
   c: Canvas,
   rect: Rect,
   config: ModuleGizmosConfig,
-  gizmo_state: GizmoState
+  gizmo_state: GizmoState,
+  module_name?: string
 ): void {
   if (!config.enabled || config.enabled.length === 0) {
     return;
@@ -117,6 +119,22 @@ export function draw_module_gizmos(
       style: 'regular',
       weight_index: gizmo_state.is_resize_mode ? 5 : 4,
     });
+  }
+
+  // Draw module name to the right of gizmos
+  if (module_name && module_name.length > 0) {
+    const name_x = rect.x0 + 1 + (gizmo_index * 2);
+    const name_y = rect.y1 - 1;
+    const name_color: Rgb = { r: 200, g: 200, b: 200 }; // Light gray
+    
+    for (let i = 0; i < module_name.length && name_x + i < rect.x1; i++) {
+      c.set(name_x + i, name_y, {
+        char: module_name[i]!,
+        rgb: name_color,
+        style: 'regular',
+        weight_index: 4,
+      });
+    }
   }
 
   // If in move mode, draw yellow border

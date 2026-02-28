@@ -6,6 +6,7 @@ import { make_roller_module } from '../mono_ui/modules/roller_module.js';
 import { make_place_module } from '../mono_ui/modules/place_module.js';
 import { make_container_module, type SlotItem } from '../mono_ui/modules/container_module.js';
 import { make_character_module } from '../mono_ui/modules/character_module.js';
+import type { SlotType } from '../equipment/body_slot_resolver.js';
 import type { Module, Rgb, Rect } from '../mono_ui/types.js';
 import { create_module_registry, type ModuleRegistry } from '../mono_ui/module_registry.js';
 import { handleEntityClick } from '../interface_program/frontend_api.js';
@@ -35,7 +36,7 @@ export const APP_CONFIG = {
     // - letter spacing: -18% (of font size)
     base_font_size_px: 32.23,
     base_line_height_mult: 29.8 / 32.23,
-    base_letter_spacing_mult: -0.18,
+    base_letter_spacing_mult: -0.10,
     weight_index_to_css: [100, 200, 300, 400, 500, 600, 700, 800] as const,
 
     grid_width: 200,  // Expanded: 160 for main UI + 40 for debug button column
@@ -372,13 +373,26 @@ export function create_app_state(): AppState {
                             if (container_data.ok && container_data.container) {
                                 full_containers.push(container_data.container);
                                 
-                                // Calculate weight from this container's contents
+                                // Calculate weight from this container's contents (including nested containers)
                                 if (container_data.container.contents) {
                                     for (const content of container_data.container.contents) {
                                         if (content.instance && content.definition) {
                                             const item_weight = (content.definition.weight || 0);
                                             const qty = (content.instance.qty || 1);
-                                            total_weight += item_weight * qty;
+                                            let content_total = item_weight * qty;
+                                            
+                                            // Add weight of items inside this item (if it's a container like a sack)
+                                            if (content.instance.container_data?.contents) {
+                                                for (const nested of content.instance.container_data.contents) {
+                                                    if (nested.instance && nested.definition) {
+                                                        const nested_weight = (nested.definition.weight || 0);
+                                                        const nested_qty = (nested.instance.qty || 1);
+                                                        content_total += nested_weight * nested_qty;
+                                                    }
+                                                }
+                                            }
+                                            
+                                            total_weight += content_total;
                                         }
                                     }
                                 }
@@ -444,11 +458,11 @@ export function create_app_state(): AppState {
                 debug_log(`[LOAD_EQUIPPED] Slot ${slot_name}: item_id=${item_id}`);
                 if (item_id) {
                     const item_data = find_item_in_containers(full_containers, item_id);
-                    if (item_data) {
+                    if (item_data && item_data.definition) {
                         ui_state.character.equipped_items.set(slot_name, item_data);
                         debug_log(`[Character] Found equipped item in ${slot_name}: ${item_data.definition.name} (${item_id})`);
                     } else {
-                        debug_log(`[Character] WARNING: Could not find item ${item_id} for slot ${slot_name}`);
+                        debug_log(`[Character] WARNING: Could not find item ${item_id} for slot ${slot_name} (data=${!!item_data}, def=${!!item_data?.definition})`);
                     }
                 }
             }
@@ -1714,27 +1728,19 @@ export function create_app_state(): AppState {
                     return false;
                 }
 
-                const distance = Math.sqrt(
-                    Math.pow(tile_x - actor.tile_position.x, 2) +
-                    Math.pow(tile_y - actor.tile_position.y, 2)
-                );
-                debug_log(`[PlaceModule] on_drop: Distance from actor: ${distance.toFixed(2)} tiles`);
-
-                if (distance > 1.5) {
-                    debug_log(`[PlaceModule] on_drop: Too far (${distance.toFixed(2)} > 1.5) - rejecting`);
-                    drag_state.reject_drag();
-                    return false;
-                }
+                // Distance validation is now handled by backend (cardinal adjacency check)
+                // Frontend accepts drops anywhere and lets backend validate
 
                 // Call the drop API
                 const slot = APP_CONFIG.selected_data_slot;
                 const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
                 const url = `${base_url}/api/place/drop?slot=${slot}`;
                 
-                // API expects: actor_id (not actor_ref), tile_position object (not tile_x/tile_y)
+                // API expects: actor_id, from_container_id, item_instance_id, tile_position
                 const actor_id = APP_CONFIG.input_actor_id;
                 const request_body = {
                     actor_id: actor_id,
+                    from_container_id: drag_state.source_container_id,
                     item_instance_id: drag_state.item_instance_id,
                     tile_position: { x: tile_x, y: tile_y }
                 };
@@ -1765,6 +1771,8 @@ export function create_app_state(): AppState {
                     if (data.ok) {
                         debug_log(`[PlaceModule] on_drop: SUCCESS!`);
                         flash_status([`Dropped item at (${tile_x}, ${tile_y})`], 1500);
+                        // Refresh place view to show dropped item
+                        await update_current_place(place.id);
                         // Clear drag state
                         drag_state.is_dragging = false;
                         drag_state.item_instance_id = null;
@@ -2252,10 +2260,10 @@ export function create_app_state(): AppState {
             get_equipped_items: () => ui_state.character.equipped_items,
             get_weight_data: () => ui_state.character.weight,
             get_is_visible: () => ui_state.character.is_visible,
-            on_slot_click: (slot_name: string) => {
-                console.log(`[Character] Clicked body slot: ${slot_name}`);
+            on_slot_click: (slot_name: string, slot_type: SlotType, garb_index: number | null) => {
+                console.log(`[Character] Clicked body slot: ${slot_name}.${slot_type}${garb_index !== null ? `.${garb_index}` : ''}`);
             },
-            on_slot_hover: (slot_name: string | null, equipped_item: { instance: ItemInstance; definition: ItemDefinition } | null) => {
+            on_slot_hover: (slot_name: string | null, slot_type: SlotType | null, garb_index: number | null, equipped_item: { instance: ItemInstance; definition: ItemDefinition } | null) => {
                 if (equipped_item) {
                     ui_state.character.hovered_item = { name: equipped_item.definition.name, source: slot_name || 'character' };
                 } else if (slot_name) {
@@ -2271,12 +2279,12 @@ export function create_app_state(): AppState {
                 if (slot_name) {
                     const compatible_items = get_compatible_items_for_slot(slot_name);
                     ui_state.character.highlighted_items = compatible_items;
-                    debug_log(`[Character] Hovered slot ${slot_name} - highlighting ${compatible_items.length} compatible items`);
+                    debug_log(`[Character] Hovered slot ${slot_name}.${slot_type}${garb_index !== null ? `.${garb_index}` : ''} - highlighting ${compatible_items.length} compatible items`);
                 } else {
                     ui_state.character.highlighted_items = [];
                 }
             },
-            on_drag_start: (slot_name: string, item: ItemInstance, definition: ItemDefinition, container_id: string) => {
+            on_drag_start: (slot_name: string, slot_type: SlotType, garb_index: number | null, item: ItemInstance, definition: ItemDefinition, container_id: string) => {
                 // Validate drag using centralized drag_state.can_drag()
                 const validation = drag_state.can_drag(item.id, definition);
                 if (!validation.can) {
@@ -2290,30 +2298,20 @@ export function create_app_state(): AppState {
                 // Highlight compatible slots
                 const compatible = get_compatible_slots(definition);
                 ui_state.character.highlighted_slots = compatible;
-                console.log(`[Character] Drag started - highlighting slots:`, compatible);
+                console.log(`[Character] Drag started from ${slot_name}.${slot_type}${garb_index !== null ? `.${garb_index}` : ''} - highlighting slots:`, compatible);
             },
             on_drag_move: (x: number, y: number) => {
                 drag_state.update_position(x, y);
             },
-            on_drop: async (slot_name: string): Promise<boolean> => {
+            on_drop: async (slot_name: string, slot_type: SlotType, garb_index: number | null): Promise<boolean> => {
                 // Check if there's an active drag
                 if (!drag_state.is_dragging) return false;
                 
-                // Determine target container based on slot name
+                // Build target container ID with slot type
                 const actor_id = APP_CONFIG.input_actor_id;
-                const slot_to_container: Record<string, string> = {
-                    'hand_left': `container.${actor_id}.hand_left`,
-                    'hand_right': `container.${actor_id}.hand_right`,
-                    'head': `container.${actor_id}.head`,
-                    'torso': `container.${actor_id}.torso`,
-                    'leg_left': `container.${actor_id}.leg_left`,
-                    'leg_right': `container.${actor_id}.leg_right`,
-                };
-                const target_container_id = slot_to_container[slot_name];
-                
-                if (!target_container_id) {
-                    drag_state.end_drag();
-                    return false;
+                let target_container_id = `container.${actor_id}.${slot_name}.${slot_type}`;
+                if (garb_index !== null) {
+                    target_container_id += `.${garb_index}`;
                 }
                 
                 // Handle drag from container (inventory) to character slot
@@ -2340,7 +2338,7 @@ export function create_app_state(): AppState {
                         const transfer_data = await transfer_res.json();
 
                         if (transfer_data.ok) {
-                            flash_status([`${drag_state.item_definition?.name} equipped to ${slot_name}`], 1500);
+                            flash_status([`${drag_state.item_definition?.name} equipped to ${slot_name}.${slot_type}${garb_index !== null ? `.${garb_index}` : ''}`], 1500);
                             void refresh_container_data();
                             void refresh_character_data();
                             drag_state.end_drag();
@@ -2374,7 +2372,7 @@ export function create_app_state(): AppState {
                         const transfer_data = await transfer_res.json();
 
                         if (transfer_data.ok) {
-                            flash_status([`${drag_state.item_definition?.name} moved to ${slot_name}`], 1500);
+                            flash_status([`${drag_state.item_definition?.name} moved to ${slot_name}.${slot_type}${garb_index !== null ? `.${garb_index}` : ''}`], 1500);
                             void refresh_container_data();
                             void refresh_character_data();
                             drag_state.end_drag();
@@ -2394,7 +2392,13 @@ export function create_app_state(): AppState {
                 
                 return false;
             },
-            get_highlighted_slots: () => ui_state.character.highlighted_slots,
+            get_highlighted_slots: (): Array<{ slot_name: string; slot_type: SlotType; garb_index?: number }> => {
+                // Convert old string format to new object format
+                return (ui_state.character.highlighted_slots as string[]).map(slot => ({
+                    slot_name: slot,
+                    slot_type: 'armor' as SlotType // Default to armor for backward compatibility
+                }));
+            },
             render_drag_ghost: (c: any) => drag_state.render_drag_ghost(c),
             on_drag_rejected: () => drag_state.reject_drag(),
             on_cross_module_drop: async (x: number, y: number): Promise<boolean> => {
@@ -3618,10 +3622,10 @@ export function create_app_state(): AppState {
             get_equipped_items: () => equipped_items,
             get_weight_data: () => weight_data,
             get_is_visible: () => true,
-            on_slot_click: (slot_name: string) => {
-                debug_log(`[NPC Module] Clicked body slot: ${slot_name}`);
+            on_slot_click: (slot_name: string, slot_type: SlotType, garb_index: number | null) => {
+                debug_log(`[NPC Module] Clicked body slot: ${slot_name}.${slot_type}${garb_index !== null ? `.${garb_index}` : ''}`);
             },
-            on_drag_start: (slot_name: string, item: ItemInstance, definition: ItemDefinition, container_id: string) => {
+            on_drag_start: (slot_name: string, slot_type: SlotType, garb_index: number | null, item: ItemInstance, definition: ItemDefinition, container_id: string) => {
                 // Validate drag using centralized drag_state.can_drag()
                 const validation = drag_state.can_drag(item.id, definition);
                 if (!validation.can) {
@@ -3637,11 +3641,14 @@ export function create_app_state(): AppState {
             },
             render_drag_ghost: (c: any) => drag_state.render_drag_ghost(c),
             on_drag_rejected: () => drag_state.reject_drag(),
-            on_drop: async (slot_name: string): Promise<boolean> => {
+            on_drop: async (slot_name: string, slot_type: SlotType, garb_index: number | null): Promise<boolean> => {
                 // Handle equipping from player to NPC
                 if (!drag_state.is_dragging || drag_state.source_module !== 'container') return false;
                 
-                const target_container_id = `container.${npc_id}.${slot_name}`;
+                let target_container_id = `container.${npc_id}.${slot_name}.${slot_type}`;
+                if (garb_index !== null) {
+                    target_container_id += `.${garb_index}`;
+                }
                 
                 try {
                         const transfer_res = await fetch('http://localhost:8787/api/transfer', {
