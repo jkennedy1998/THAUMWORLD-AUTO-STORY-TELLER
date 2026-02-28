@@ -26,6 +26,7 @@ import { type BodySlots, get_slot_item_id } from '../types/body_slots.js';
 import { DEBUG_VISION, spawn_sense_broadcast_particles } from '../mono_ui/vision_debugger.js';
 import { get_senses_for_action } from '../action_system/sense_broadcast.js';
 import { UI_DEBUG } from '../mono_ui/runtime/ui_debug.js';
+import { get_facing } from '../npc_ai/facing_system.js';
 import { play_sfx } from '../mono_ui/sfx/sfx_player.js';
 
 export const APP_CONFIG = {
@@ -136,7 +137,7 @@ export function create_app_state(): AppState {
             body_slots: {} as BodySlots,
             equipped_items: new Map() as Map<string, { instance: ItemInstance; definition: ItemDefinition }>,
             weight: { current: 0, max: 100 },
-            highlighted_slots: [] as string[],  // Slots highlighted when hovering compatible items
+            highlighted_slots: [] as Array<{ slot_name: string; slot_type: SlotType }>,  // Slots highlighted when hovering compatible items
             hovered_item: null as { name: string; source: string } | null,  // Currently hovered item for debug display
             hovered_slot: null as string | null,  // Currently hovered body slot
             highlighted_items: [] as Array<{ container_id: string; slot_index: number }>,  // Items highlighted when hovering slot
@@ -300,17 +301,55 @@ export function create_app_state(): AppState {
 
 
 
+    // Helper function to determine slot types from item tags
+    // Returns which slot types (armor/garb/tool) an item can be equipped to
+    function get_item_slot_types(item_def: ItemDefinition): SlotType[] {
+        const slot_types: SlotType[] = [];
+        
+        if (!item_def.tags) return slot_types;
+        
+        for (const tag of item_def.tags) {
+            if (tag.name === 'ARMOR') {
+                slot_types.push('armor');
+            } else if (tag.name === 'GARB') {
+                slot_types.push('garb');
+            } else if (tag.name === 'TOOL') {
+                slot_types.push('tool');
+            }
+        }
+        
+        // Default to armor if no equipment tags found but has valid_body_slots
+        if (slot_types.length === 0 && item_def.valid_body_slots && item_def.valid_body_slots.length > 0) {
+            slot_types.push('armor');
+        }
+        
+        return slot_types;
+    }
+
     // Helper function to determine compatible body slots for an item
     // Now uses lowercase_snake_case consistently throughout the system
-    function get_compatible_slots(item_def: ItemDefinition): string[] {
+    // Returns array of {slot_name, slot_type} objects
+    function get_compatible_slots(item_def: ItemDefinition): Array<{ slot_name: string; slot_type: SlotType }> {
         if (!item_def.valid_body_slots || item_def.valid_body_slots.length === 0) {
             return [];
         }
 
-        // Return slot names directly - they're already in lowercase_snake_case
-        return item_def.valid_body_slots.filter(slot => 
+        const slot_types = get_item_slot_types(item_def);
+        const compatible: Array<{ slot_name: string; slot_type: SlotType }> = [];
+        
+        // Get valid body slots
+        const valid_slots = item_def.valid_body_slots.filter(slot => 
             ['head', 'torso', 'hand_left', 'hand_right', 'leg_left', 'leg_right'].includes(slot)
         );
+        
+        // For each valid slot, add entries for each compatible slot type
+        for (const slot_name of valid_slots) {
+            for (const slot_type of slot_types) {
+                compatible.push({ slot_name, slot_type });
+            }
+        }
+        
+        return compatible;
     }
 
     // Helper function to find items in open containers compatible with a body slot
@@ -2231,6 +2270,82 @@ export function create_app_state(): AppState {
             },
         }),
 
+        // Debug button: Drop random item
+        make_button_module({
+            id: 'debug_drop_item',
+            rect: { x0: DEBUG_X0 + 72, y0: DEBUG_Y_TOP, x1: DEBUG_X1 + 72, y1: DEBUG_Y_TOP + 1 },
+            label: 'DROP',
+            rgb: get_color_by_name('vivid_green').rgb,
+            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
+            async OnPress() {
+                console.log('[DEBUG BUTTON] DROP button pressed');
+                
+                // Safe list of items that can be dropped
+                const safe_items = [
+                    'coin',           // Basic currency
+                    'travelers_bread', // Food
+                    'healing_draught', // Consumable
+                    'torch',          // Light source
+                    'dagger',         // Weapon
+                    'rope_hemp_50ft', // Tool
+                    'simple_bandage', // Medical
+                    'flint_and_steel', // Tool
+                    'stone_fragment', // Junk
+                    'wolves_bane',    // Herb
+                    'crimson_mushroom', // Fungus
+                ];
+                
+                // Pick random item
+                const random_item = safe_items[Math.floor(Math.random() * safe_items.length)];
+                console.log(`[DEBUG BUTTON] Selected item: ${random_item}`);
+                
+                // Get actor's facing direction
+                const actor_ref = `actor.${APP_CONFIG.input_actor_id}`;
+                const facing = get_facing(actor_ref);
+                console.log(`[DEBUG BUTTON] Actor facing: ${facing}`);
+                
+                try {
+                    const response = await fetch('http://localhost:8787/api/spawn_item', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            item_def_id: random_item,
+                            actor_id: APP_CONFIG.input_actor_id,
+                            facing_direction: facing
+                        })
+                    });
+                    
+                    console.log('[DEBUG BUTTON] Response status:', response.status);
+                    const data = await response.json();
+                    
+                    if (data.ok) {
+                        console.log(`[DEBUG BUTTON] Dropped ${random_item} at (${data.position.x}, ${data.position.y}) facing ${data.direction}`);
+                        flash_status([`Dropped ${random_item} ${data.direction}`], 2000);
+                        
+                        // Refresh place view to show the new item
+                        const place_id = ui_state.place.current_place_id;
+                        if (place_id) {
+                            const place_res = await fetch(`${APP_CONFIG.place_endpoint}?place_id=${place_id}&slot=${APP_CONFIG.selected_data_slot}`);
+                            if (place_res.ok) {
+                                const place_data = await place_res.json();
+                                if (place_data.ok && place_data.place) {
+                                    ui_state.place.current_place = place_data.place;
+                                    console.log('[DEBUG BUTTON] Place data refreshed');
+                                }
+                            }
+                        }
+                    } else {
+                        console.log('[DEBUG BUTTON] Failed to drop item:', data.error);
+                        flash_status([`Failed: ${data.error}`], 2000);
+                    }
+                } catch (err) {
+                    console.error('[DEBUG BUTTON] Error:', err);
+                    flash_status(['Error: Could not connect'], 2000);
+                }
+            },
+        }),
+
         make_roller_module({
             id: 'roller',
             rect: { x0: ROLL_X0, y0: BTN_Y0, x1: ROLL_X1, y1: BTN_Y1 },
@@ -2393,11 +2508,8 @@ export function create_app_state(): AppState {
                 return false;
             },
             get_highlighted_slots: (): Array<{ slot_name: string; slot_type: SlotType; garb_index?: number }> => {
-                // Convert old string format to new object format
-                return (ui_state.character.highlighted_slots as string[]).map(slot => ({
-                    slot_name: slot,
-                    slot_type: 'armor' as SlotType // Default to armor for backward compatibility
-                }));
+                // Return highlighted slots with their types
+                return ui_state.character.highlighted_slots;
             },
             render_drag_ghost: (c: any) => drag_state.render_drag_ghost(c),
             on_drag_rejected: () => drag_state.reject_drag(),
@@ -2800,7 +2912,8 @@ export function create_app_state(): AppState {
 
                     // Check if this slot is compatible with the item
                     const compatible_slots = get_compatible_slots(drag_state.item_definition!);
-                    if (!compatible_slots.includes(target_slot_name)) {
+                    const is_compatible = compatible_slots.some(slot => slot.slot_name === target_slot_name);
+                    if (!is_compatible) {
                         console.log(`[Inventory] ${target_slot_name} is not compatible with ${drag_state.item_definition?.name}`);
                         flash_status([`${drag_state.item_definition?.name} cannot be equipped to ${target_slot_name}`], 1500);
                         drag_state.end_drag();

@@ -19,7 +19,7 @@ import { get_color_by_name } from '../colors.js';
 import type { SelectionBitmap, SelectionMode } from '../../ascii_painter/selection.js';
 import { createSelectionBitmap, selectRect, deselectRect, selectPolygon, isSelected, hasSelection, getSelectionBounds, isSelectionBorder, clearSelection, selectAll, invertSelection, applySelectionMode } from '../../ascii_painter/selection.js';
 import type { CopyData } from '../../ascii_painter/copy_paste.js';
-import { encodeToSpecialFormat, decodeFromSpecialFormat, copyFromGrid, pasteToGrid, textToCopyData } from '../../ascii_painter/copy_paste.js';
+import { encodeToSpecialFormat, decodeFromSpecialFormat, copyFromGrid, textToCopyData } from '../../ascii_painter/copy_paste.js';
 import { pasteImageFromClipboard } from '../../ascii_painter/image_import.js';
 import type { GradiatorState } from '../../ascii_painter/gradiator.js';
 import { scaleCopyData, scaleTextToCopyData } from '../../ascii_painter/gradiator.js';
@@ -59,6 +59,12 @@ export type PainterCanvasOptions = {
   // Gradiator and scale for paste
   get_gradiator_state: () => GradiatorState;
   get_paste_scale: () => number;
+  // Paste ignore options
+  get_paste_ignore_space: () => boolean;
+  get_paste_ignore_black: () => boolean;
+  get_paste_ignore_white: () => boolean;
+  get_paste_ignore_color: () => boolean;
+  get_paste_ignore_color_rgb: () => { r: number; g: number; b: number };
 };
 
 export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
@@ -334,13 +340,18 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         }
       }
 
-      // Draw paste preview - shows exactly what will be pasted
+      // Draw paste preview - shows exactly what will be pasted (with ignore filters applied)
       if (paste_preview_data && paste_preview_pos) {
         const space_replace = opts.get_paste_space_replace();
+        const ignore_space = opts.get_paste_ignore_space();
+        const ignore_black = opts.get_paste_ignore_black();
+        const ignore_white = opts.get_paste_ignore_white();
+        const ignore_color = opts.get_paste_ignore_color();
+        const ignore_color_rgb = opts.get_paste_ignore_color_rgb();
+        
         for (let y = 0; y < paste_preview_data.height; y++) {
           for (let x = 0; x < paste_preview_data.width; x++) {
             const paste_cell = paste_preview_data.cells[y]?.[x];
-            const is_space = !paste_cell || paste_cell.char === ' ';
             
             const grid_x = paste_preview_pos.x + x;
             const grid_y = paste_preview_pos.y + y;
@@ -353,28 +364,73 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             let char: string;
             let rgb: { r: number; g: number; b: number };
             let weight: number;
+            let should_show_paste = false;
             
-            if (!is_space) {
-              // Non-space: show the paste cell
-              char = paste_cell!.char;
-              rgb = paste_cell!.rgb;
-              weight = paste_cell!.weight_index;
+            if (paste_cell && paste_cell.char !== ' ') {
+              // Check if this cell should be ignored
+              let is_ignored = false;
+              
+              // Check ignore space
+              if (ignore_space && paste_cell.char === ' ') {
+                is_ignored = true;
+              }
+              
+              // Check ignore black (only pure black RGB 0,0,0)
+              if (!is_ignored && ignore_black) {
+                if (paste_cell.rgb.r === 0 && paste_cell.rgb.g === 0 && paste_cell.rgb.b === 0) {
+                  is_ignored = true;
+                }
+              }
+              
+              // Check ignore white (only pure white RGB 255,255,255)
+              if (!is_ignored && ignore_white) {
+                if (paste_cell.rgb.r === 255 && paste_cell.rgb.g === 255 && paste_cell.rgb.b === 255) {
+                  is_ignored = true;
+                }
+              }
+              
+              // Check ignore color
+              if (!is_ignored && ignore_color) {
+                const colorThreshold = 30;
+                const rDiff = Math.abs(paste_cell.rgb.r - ignore_color_rgb.r);
+                const gDiff = Math.abs(paste_cell.rgb.g - ignore_color_rgb.g);
+                const bDiff = Math.abs(paste_cell.rgb.b - ignore_color_rgb.b);
+                if (rDiff <= colorThreshold && gDiff <= colorThreshold && bDiff <= colorThreshold) {
+                  is_ignored = true;
+                }
+              }
+              
+              if (!is_ignored) {
+                // Show the paste cell
+                char = paste_cell.char;
+                rgb = paste_cell.rgb;
+                weight = paste_cell.weight_index;
+                should_show_paste = true;
+              } else {
+                // Ignored - show underlying cell
+                const underlying = getCell(opts.grid, grid_x, grid_y);
+                char = underlying?.char ?? ' ';
+                rgb = underlying?.rgb ?? { r: 0, g: 0, b: 0 };
+                weight = underlying?.weight_index ?? 0;
+                should_show_paste = false;
+              }
             } else if (space_replace) {
               // Space with replace mode: show space
               char = ' ';
               rgb = { r: 0, g: 0, b: 0 };
               weight = 0;
+              should_show_paste = true;
             } else {
               // Space with preserve mode: show underlying cell
               const underlying = getCell(opts.grid, grid_x, grid_y);
               char = underlying?.char ?? ' ';
               rgb = underlying?.rgb ?? { r: 0, g: 0, b: 0 };
               weight = underlying?.weight_index ?? 0;
+              should_show_paste = false;
             }
             
             // Flash effect for preview
-            const is_pasted_cell = !is_space || space_replace;
-            if (flash_state === 1 || !is_pasted_cell) {
+            if (flash_state === 1 || !should_show_paste) {
               c.set(canvas_x, canvas_y, {
                 char: char,
                 rgb: rgb,
@@ -518,13 +574,20 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const freshGradiatorState = opts.get_gradiator_state();
         
         // First check for images in clipboard
-        pasteImageFromClipboard(80, freshGradiatorState).then(imageData => {
+        // Pass targetWidth based on scale: 100% means use original image dimensions with pixel-perfect mapping
+        const targetWidth = scale === 1.0 ? undefined : 80;
+        const pixelPerfect = scale === 1.0;
+        pasteImageFromClipboard(targetWidth, freshGradiatorState, pixelPerfect).then(imageData => {
           if (imageData) {
             // Image found in clipboard - scale it if needed
             console.log('Image pasted from clipboard:', imageData.width, 'x', imageData.height);
             const scaledData = scale !== 1.0 ? scaleCopyData(imageData, scale) : imageData;
             paste_preview_data = scaledData;
-            paste_preview_pos = { x: grid_x, y: grid_y };
+            // Center the paste on the cursor
+            paste_preview_pos = { 
+              x: grid_x - Math.floor(scaledData.width / 2), 
+              y: grid_y - Math.floor(scaledData.height / 2) 
+            };
             showStatus(`Image paste: ${scaledData.width}x${scaledData.height} @ ${Math.round(scale * 100)}% - Click to place`);
           } else {
             // No image, try text clipboard
@@ -537,13 +600,21 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
                   // Special format with colors/weights - apply scaling
                   const scaledData = scale !== 1.0 ? scaleCopyData(specialData, scale) : specialData;
                   paste_preview_data = scaledData;
-                  paste_preview_pos = { x: grid_x, y: grid_y };
+                  // Center the paste on the cursor
+                  paste_preview_pos = { 
+                    x: grid_x - Math.floor(scaledData.width / 2), 
+                    y: grid_y - Math.floor(scaledData.height / 2) 
+                  };
                   showStatus(`Paste preview: ${scaledData.width}x${scaledData.height} @ ${Math.round(scale * 100)}% - Click to place`);
                 } else {
                   // Plain text - convert and scale
                   const textData = scaleTextToCopyData(clipboard, scale);
                   paste_preview_data = textData;
-                  paste_preview_pos = { x: grid_x, y: grid_y };
+                  // Center the paste on the cursor
+                  paste_preview_pos = { 
+                    x: grid_x - Math.floor(textData.width / 2), 
+                    y: grid_y - Math.floor(textData.height / 2) 
+                  };
                   showStatus(`Paste preview: ${textData.width}x${textData.height} @ ${Math.round(scale * 100)}% - Click to place`);
                 }
               } else {
@@ -925,10 +996,103 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       // Handle paste placement
       if (opts.get_current_tool() === 'paste' && paste_preview_data && paste_preview_pos) {
         const spaceReplace = opts.get_paste_space_replace();
-        console.log('Paste: spaceReplace =', spaceReplace);
+        const ignoreSpace = opts.get_paste_ignore_space();
+        const ignoreBlack = opts.get_paste_ignore_black();
+        const ignoreWhite = opts.get_paste_ignore_white();
+        const ignoreColor = opts.get_paste_ignore_color();
+        const ignoreColorRgb = opts.get_paste_ignore_color_rgb();
+        
+        console.log('Paste: spaceReplace =', spaceReplace, 'ignoreSpace =', ignoreSpace, 'ignoreBlack =', ignoreBlack, 'ignoreWhite =', ignoreWhite, 'ignoreColor =', ignoreColor);
+        
+        // Build ignore status message
+        const ignoredParts: string[] = [];
+        if (ignoreSpace) ignoredParts.push('spaces');
+        if (ignoreBlack) ignoredParts.push('black');
+        if (ignoreWhite) ignoredParts.push('white');
+        if (ignoreColor) ignoredParts.push('color');
+        const ignoreStatus = ignoredParts.length > 0 ? ignoredParts.join('+') : 'none';
+        
         opts.on_push_snapshot();
-        pasteToGrid(opts.grid, paste_preview_data, paste_preview_pos.x, paste_preview_pos.y, spaceReplace);
-        showStatus(`Pasted ${paste_preview_data.width}x${paste_preview_data.height} (space:${spaceReplace ? 'replace' : 'preserve'})`);
+        
+        // Custom paste with ignore support - ignored cells preserve underlying content
+        let placed = 0;
+        let preserved = 0;
+        let cleared = 0;
+        let skippedIgnored = 0;
+        
+        for (let y = 0; y < paste_preview_data.height; y++) {
+          for (let x = 0; x < paste_preview_data.width; x++) {
+            const cell = paste_preview_data.cells[y]?.[x];
+            const targetX = paste_preview_pos.x + x;
+            const targetY = paste_preview_pos.y + y;
+            
+            // Check bounds
+            if (targetX < 0 || targetX >= opts.grid.width || targetY < 0 || targetY >= opts.grid.height) {
+              continue;
+            }
+            
+            // Check if this cell should be ignored
+            let isIgnored = false;
+            
+            if (cell && cell.char !== ' ') {
+              // Check ignore space
+              if (ignoreSpace && cell.char === ' ') {
+                isIgnored = true;
+              }
+              
+              // Check ignore black (only pure black RGB 0,0,0)
+              if (!isIgnored && ignoreBlack) {
+                if (cell.rgb.r === 0 && cell.rgb.g === 0 && cell.rgb.b === 0) {
+                  isIgnored = true;
+                }
+              }
+              
+              // Check ignore white (only pure white RGB 255,255,255)
+              if (!isIgnored && ignoreWhite) {
+                if (cell.rgb.r === 255 && cell.rgb.g === 255 && cell.rgb.b === 255) {
+                  isIgnored = true;
+                }
+              }
+              
+              // Check ignore color
+              if (!isIgnored && ignoreColor) {
+                const colorThreshold = 30;
+                const rDiff = Math.abs(cell.rgb.r - ignoreColorRgb.r);
+                const gDiff = Math.abs(cell.rgb.g - ignoreColorRgb.g);
+                const bDiff = Math.abs(cell.rgb.b - ignoreColorRgb.b);
+                if (rDiff <= colorThreshold && gDiff <= colorThreshold && bDiff <= colorThreshold) {
+                  isIgnored = true;
+                }
+              }
+            }
+            
+            // Handle the cell
+            if (isIgnored) {
+              // Ignored cells always preserve underlying content
+              skippedIgnored++;
+              preserved++;
+            } else if (cell && cell.char !== ' ') {
+              // Non-space cell: place it
+              opts.grid.cells[targetY]![targetX] = { ...cell };
+              placed++;
+            } else {
+              // Space/empty cell: handle based on spaceReplace
+              if (spaceReplace) {
+                opts.grid.cells[targetY]![targetX] = {
+                  char: ' ',
+                  rgb: { r: 0, g: 0, b: 0 },
+                  weight_index: 0
+                };
+                cleared++;
+              } else {
+                preserved++;
+              }
+            }
+          }
+        }
+        
+        console.log(`Paste complete: ${placed} placed, ${skippedIgnored} ignored (preserved), ${cleared} cleared, ${preserved} preserved`);
+        showStatus(`Pasted ${paste_preview_data.width}x${paste_preview_data.height} (placed:${placed}, ignored:${skippedIgnored}, preserved:${preserved}, cleared:${cleared})`);
         paste_preview_data = null;
         paste_preview_pos = null;
         return;

@@ -93,3 +93,10 @@ export {
   parseScalePercent,
   formatScalePercent
 } from './gradiator.js';
+
+// Gradiator Storage
+export {
+  saveGradiatorState,
+  loadGradiatorState,
+  clearGradiatorState
+} from './gradiator_storage.js';

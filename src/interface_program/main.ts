@@ -24,10 +24,11 @@ import { get_timed_event_state, get_region_by_coords, is_timed_event_active } fr
 import { travel_between_places } from "../travel/movement.js";
 import { load_npc } from "../npc_storage/store.js";
 import { load_place, list_places_in_region, save_place, create_basic_place } from "../place_storage/store.js";
-import { load_container, list_containers_for_owner, transfer_item_between_containers, get_ground_items, build_ground_container_id, get_or_create_scattered_container, list_scattered_containers, delete_scattered_container_if_empty } from "../container_storage/store.js";
+import { load_container, list_containers_for_owner, transfer_item_between_containers, get_ground_items, build_ground_container_id, get_or_create_scattered_container, list_scattered_containers, delete_scattered_container_if_empty, add_item_to_container } from "../container_storage/store.js";
 import { find_empty_grid_position } from "../shared/migration.js";
 import { calculate_grid_dimensions } from "../types/container.js";
 import { load_item_def } from "../item_storage/store.js";
+import { create_inline_item } from "../item_instances/store.js";
 import { emitTagChange } from "../shared/event_emitter.js";
 import type { PlaceConnection, PlaceItem } from "../types/place.js";
 import { calculate_tile_distance, is_within_range } from "../types/container.js";
@@ -2460,6 +2461,166 @@ function start_http_server(log_path: string): void {
                     debug_error("API", `/api/place/drop request error`, err);
                     res.writeHead(500, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: err?.message ?? "drop_failed" }));
+                }
+            });
+            return;
+        }
+
+        // POST /api/spawn_item - Spawn a new item on the ground at actor's facing direction
+        if (url.pathname === "/api/spawn_item") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", (chunk) => { body += chunk; });
+            req.on("end", async () => {
+                try {
+                    const data = JSON.parse(body);
+                    const { item_def_id, actor_id, facing_direction } = data;
+
+                    if (!item_def_id || !actor_id) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                        return;
+                    }
+
+                    const slot = data_slot_number;
+                    
+                    // Load actor
+                    const actor_result = load_actor(slot, actor_id);
+                    if (!actor_result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "actor_not_found" }));
+                        return;
+                    }
+                    const actor = actor_result.actor as any;
+                    const actor_pos = actor.location?.tile;
+                    const actual_place_id = actor.location?.place_id;
+                    
+                    if (!actor_pos || !actual_place_id) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "actor_position_unknown" }));
+                        return;
+                    }
+
+                    // Calculate drop position based on facing direction (cardinal only)
+                    let drop_x = actor_pos.x;
+                    let drop_y = actor_pos.y;
+                    const direction = facing_direction || "south";
+                    
+                    switch (direction) {
+                        case "north": drop_y = actor_pos.y - 1; break;
+                        case "south": drop_y = actor_pos.y + 1; break;
+                        case "east": drop_x = actor_pos.x + 1; break;
+                        case "west": drop_x = actor_pos.x - 1; break;
+                        default: 
+                            // Default to south if invalid direction
+                            drop_y = actor_pos.y + 1;
+                    }
+
+                    // Load item definition
+                    const def_result = load_item_def(slot, item_def_id);
+                    if (!def_result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "item_def_not_found" }));
+                        return;
+                    }
+
+                    // Get or create scattered container at drop position
+                    const scattered_result = get_or_create_scattered_container(slot, actual_place_id, drop_x, drop_y);
+                    if (!scattered_result.ok) {
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "failed_to_create_container" }));
+                        return;
+                    }
+                    const scattered_container = scattered_result.container;
+
+                    // Create item instance
+                    const item_instance = create_inline_item(
+                        item_def_id,
+                        1, // qty
+                        "system", // owner
+                        scattered_container.id
+                    );
+
+                    // Find empty position in scattered container
+                    const ground_max_slots = scattered_container.capacity?.max_slots || scattered_container.contents.length + 1;
+                    const { cols: ground_cols } = calculate_grid_dimensions(ground_max_slots);
+                    const ground_empty_pos = find_empty_grid_position(
+                        scattered_container.contents,
+                        ground_cols,
+                        ground_max_slots
+                    ) || { x: 0, y: 0 };
+
+                    // Add item to scattered container
+                    const add_result = add_item_to_container(slot, scattered_container.id, {
+                        instance: item_instance,
+                        definition: def_result.item,
+                        grid_x: ground_empty_pos.x,
+                        grid_y: ground_empty_pos.y
+                    });
+
+                    if (!add_result.ok) {
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "failed_to_add_item" }));
+                        return;
+                    }
+
+                    // Update place's items_on_ground using the container that has the item
+                    // This ensures items_on_ground matches the scattered container (source of truth)
+                    const place_result = load_place(slot, actual_place_id);
+                    if (place_result.ok) {
+                        const place = place_result.place;
+                        if (!place.contents) {
+                            place.contents = { npcs_present: [], actors_present: [], items_on_ground: [], features: [] };
+                        }
+                        
+                        // Rebuild items_on_ground from the updated scattered container
+                        // This ensures consistency with how /api/place rebuilds it
+                        const container_name = `scattered_${drop_x}_${drop_y}`;
+                        const updated_container = place.containers?.[container_name];
+                        
+                        if (updated_container) {
+                            // Clear existing items at this position
+                            place.contents.items_on_ground = place.contents.items_on_ground.filter(
+                                (item: any) => {
+                                    const pos = item.tile_position;
+                                    return !(pos && pos.x === drop_x && pos.y === drop_y);
+                                }
+                            );
+                            
+                            // Add all items from the scattered container
+                            for (const entry of updated_container.contents) {
+                                place.contents.items_on_ground.push({
+                                    item_ref: entry.instance.id,
+                                    quantity: entry.instance.qty,
+                                    tile_position: { x: drop_x, y: drop_y }
+                                });
+                            }
+                        }
+                        
+                        save_place(slot, place);
+                    }
+
+                    debug_log("API", `/api/spawn_item: ${item_def_id} spawned at (${drop_x},${drop_y}) facing ${direction}`);
+                    
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ 
+                        ok: true, 
+                        item_instance_id: item_instance.id,
+                        item_def_id,
+                        position: { x: drop_x, y: drop_y },
+                        direction
+                    }));
+                    
+                } catch (err) {
+                    debug_error("API", `/api/spawn_item request error`, err);
+                    const errorMessage = err instanceof Error ? err.message : "spawn_failed";
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: errorMessage }));
                 }
             });
             return;

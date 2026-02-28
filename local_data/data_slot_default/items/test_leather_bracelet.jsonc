@@ -1,0 +1,26 @@
+{
+  "id": "test_leather_bracelet",
+  "name": "Leather Bracelet",
+  "description": "A woven leather bracelet for the wrist.",
+  "weight": 80,
+  "weight_mag": 1,
+  "mag": 1,
+  "size_mag": 1,
+  "hardness_mag": 1,
+  "conductivity_mag": 1,
+  "tags": [
+    {
+      "name": "GARB",
+      "mag": 1,
+      "meta": ["hand_left"],
+      "info": [1]
+    }
+  ],
+  "stackable": false,
+  "max_stack_size": 1,
+  "display_char": "b",
+  "valid_body_slots": ["hand_left"],
+  "occupies_slots": ["hand_left"],
+  "slot_shape": [[1]],
+  "fits_actor_kind": ["naked_ape"]
+}

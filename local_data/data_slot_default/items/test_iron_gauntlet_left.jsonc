@@ -1,0 +1,26 @@
+{
+  "id": "test_iron_gauntlet_left",
+  "name": "Iron Gauntlet (Left)",
+  "description": "A heavy iron gauntlet for the left hand.",
+  "weight": 600,
+  "weight_mag": 1,
+  "mag": 1,
+  "size_mag": 2,
+  "hardness_mag": 3,
+  "conductivity_mag": 1,
+  "tags": [
+    {
+      "name": "ARMOR",
+      "mag": 1,
+      "meta": ["hand_left"],
+      "info": [2]
+    }
+  ],
+  "stackable": false,
+  "max_stack_size": 1,
+  "display_char": "g",
+  "valid_body_slots": ["hand_left"],
+  "occupies_slots": ["hand_left"],
+  "slot_shape": [[1]],
+  "fits_actor_kind": ["naked_ape"]
+}

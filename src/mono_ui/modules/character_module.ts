@@ -16,6 +16,7 @@ import {
   DEFAULT_SLOT_LAYOUT,
   get_slot_color,
   SLOT_TYPE_COLORS,
+  SLOT_HIGHLIGHT_COLORS,
 } from "../../equipment/body_slot_resolver.js";
 
 // Character module configuration

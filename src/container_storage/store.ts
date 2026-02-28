@@ -451,12 +451,17 @@ function load_container_from_entity(slot: number, container_id: string): Contain
  * e.g., "container.gunther.leg_left" -> "leg_left"
  * New format: "container.gunther.hand_left.tool" -> "hand_left"
  * New format: "container.gunther.hand_left.garb.0" -> "hand_left"
+ * Place format: "container.place.<place_id>.<container_name>" -> "<container_name>"
  */
 function get_container_name_from_id(container_id: string): string {
     const parts = container_id.split(".");
     // Old format: container.actor_id.slot_name
     // New format: container.actor_id.slot_name.slot_type[.garb_index]
     if (parts.length >= 3) {
+        // Handle place containers: container.place.<place_id>.<container_name>
+        if (parts[1] === "place") {
+            return parts.slice(3).join(".") || "ground";
+        }
         // For body slots, the slot_name is at index 2
         // Everything after is slot_type and optional garb_index
         return parts[2] || "unknown";

@@ -104,6 +104,16 @@ export const SLOT_TYPE_COLORS = {
 };
 
 /**
+ * Vivid highlight colors for drag-over states
+ * Uses indexed color system vivid variants
+ */
+export const SLOT_HIGHLIGHT_COLORS = {
+  tool: { r: 220, g: 52, b: 38 },     // vivid_red (index 14)
+  armor: { r: 39, g: 73, b: 208 },    // vivid_blue (index 28)
+  garb: { r: 79, g: 157, b: 53 },     // vivid_green (index 24)
+};
+
+/**
  * Check if a body slot has equipment slot format (armor/garb/tool)
  */
 function is_equipment_format(slot: any): slot is EquipmentSlot {
@@ -198,10 +208,10 @@ export function resolve_body_slot(
     
   } else {
     // OLD FORMAT: Legacy BodySlot with item_instance_id
-    // Map to armor slot for backward compatibility
+    // Map to appropriate slot for backward compatibility
     const item_id = slot_data?.item_instance_id || null;
     
-    // For hands, show tool slot first (legacy items often are tools)
+    // For hands, put legacy items in TOOL slot only (not both tool and armor)
     if (supports_tool) {
       slots.push({
         body_slot: slot_name,
@@ -215,21 +225,35 @@ export function resolve_body_slot(
         screen_y: 0,
       });
       current_col++;
+      
+      // Armor slot for hands (empty in legacy format)
+      slots.push({
+        body_slot: slot_name,
+        slot_type: "armor",
+        garb_index: null,
+        item_id: null,  // Empty - don't duplicate the tool item
+        is_placeholder: false,
+        rel_x: current_col * (config.cell_width + config.gap),
+        rel_y: 0,
+        screen_x: 0,
+        screen_y: 0,
+      });
+      current_col++;
+    } else {
+      // For non-hands, put legacy items in ARMOR slot
+      slots.push({
+        body_slot: slot_name,
+        slot_type: "armor",
+        garb_index: null,
+        item_id: item_id,
+        is_placeholder: false,
+        rel_x: current_col * (config.cell_width + config.gap),
+        rel_y: 0,
+        screen_x: 0,
+        screen_y: 0,
+      });
+      current_col++;
     }
-    
-    // Armor slot (fallback for non-hands or if no tool)
-    slots.push({
-      body_slot: slot_name,
-      slot_type: "armor",
-      garb_index: null,
-      item_id: supports_tool ? null : item_id,
-      is_placeholder: false,
-      rel_x: current_col * (config.cell_width + config.gap),
-      rel_y: 0,
-      screen_x: 0,
-      screen_y: 0,
-    });
-    current_col++;
     
     // One empty garb slot for legacy format
     slots.push({
@@ -361,7 +385,8 @@ export function get_slot_color(
   is_highlighted: boolean = false
 ): { r: number; g: number; b: number } {
   if (is_highlighted) {
-    return { r: 0, g: 255, b: 100 }; // Bright green for highlighted
+    // Use vivid colors from indexed color system for highlights
+    return SLOT_HIGHLIGHT_COLORS[slot_type];
   }
   
   if (is_empty) {

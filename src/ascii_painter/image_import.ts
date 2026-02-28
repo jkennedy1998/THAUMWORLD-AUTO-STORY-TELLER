@@ -88,20 +88,28 @@ function findClosestIndexedColor(r: number, g: number, b: number): IndexedColor 
  * @param targetWidth - Desired output width (height calculated to maintain aspect ratio)
  * @param useColor - Whether to preserve colors
  * @param gradiatorState - The gradiator state to use for character mapping (optional, uses default if not provided)
+ * @param pixelPerfect - If true, maps 1 pixel to 1 character (no aspect ratio correction)
  * @returns CopyData containing the ASCII representation
  */
 export async function imageToAscii(
   imageData: ImageData,
   targetWidth: number = 80,
   useColor: boolean = false,
-  gradiatorState?: GradiatorState
+  gradiatorState?: GradiatorState,
+  pixelPerfect: boolean = false
 ): Promise<CopyData> {
   const { width: imgWidth, height: imgHeight, data } = imageData;
   
-  // Calculate target height maintaining aspect ratio
-  // Characters are roughly twice as tall as they are wide, so we adjust
-  const aspectRatio = imgWidth / imgHeight;
-  const targetHeight = Math.round(targetWidth / aspectRatio / 2);
+  // Calculate target height
+  let targetHeight: number;
+  if (pixelPerfect) {
+    // 1:1 pixel to character mapping
+    targetHeight = imgHeight;
+  } else {
+    // Maintain aspect ratio with character height correction (chars are ~2x tall)
+    const aspectRatio = imgWidth / imgHeight;
+    targetHeight = Math.round(targetWidth / aspectRatio / 2);
+  }
   
   // Get the gradiator ramp (user-defined or fallback)
   const ramp = gradiatorState ? getActiveGradiator(gradiatorState) : CHAR_RAMP_SIMPLE;
@@ -136,11 +144,20 @@ export async function imageToAscii(
       const charIndex = Math.floor((luminance / 255) * (rampLength - 1));
       const char = ramp[Math.min(rampLength - 1, Math.max(0, charIndex))]!;
       
-      // Always convert to indexed color
-      const indexedColor = findClosestIndexedColor(r, g, b);
+      // Check for pure white or pure black - keep original RGB for ignore filters
+      let finalRgb: { r: number; g: number; b: number };
+      if ((r === 255 && g === 255 && b === 255) || (r === 0 && g === 0 && b === 0)) {
+        // Keep pure white/black as-is for ignore filter detection
+        finalRgb = { r, g, b };
+      } else {
+        // Convert to indexed color for other colors
+        const indexedColor = findClosestIndexedColor(r, g, b);
+        finalRgb = indexedColor.rgb;
+      }
+      
       row.push({
         char,
-        rgb: indexedColor.rgb,
+        rgb: finalRgb,
         weight_index: 4
       });
     }
@@ -159,15 +176,19 @@ export async function imageToAscii(
  * 
  * @param dataUrl - The data URL from clipboard
  * @param targetWidth - Desired output width
+ * @param useColor - Whether to preserve colors
  * @param gradiatorState - The gradiator state to use for character mapping
+ * @param pixelPerfect - If true, maps 1 pixel to 1 character (no aspect ratio correction)
  */
 export async function dataUrlToAscii(
   dataUrl: string,
   targetWidth: number = 80,
-  gradiatorState?: GradiatorState
+  useColor: boolean = false,
+  gradiatorState?: GradiatorState,
+  pixelPerfect: boolean = false
 ): Promise<CopyData> {
   const imageData = await dataUrlToImageData(dataUrl);
-  return imageToAscii(imageData, targetWidth, true, gradiatorState);
+  return imageToAscii(imageData, targetWidth, useColor, gradiatorState, pixelPerfect);
 }
 
 /**
@@ -189,12 +210,14 @@ export async function clipboardHasImage(): Promise<boolean> {
 /**
  * Read image from clipboard and convert to ASCII
  * 
- * @param targetWidth - Desired output width
+ * @param targetWidth - Desired output width (undefined = use original image width for 1:1)
  * @param gradiatorState - The gradiator state to use for character mapping
+ * @param pixelPerfect - If true, maps 1 pixel to 1 character (no aspect ratio correction)
  */
 export async function pasteImageFromClipboard(
-  targetWidth: number = 80,
-  gradiatorState?: GradiatorState
+  targetWidth?: number,
+  gradiatorState?: GradiatorState,
+  pixelPerfect: boolean = false
 ): Promise<CopyData | null> {
   try {
     if (!window.electronAPI?.clipboardReadImage) {
@@ -208,8 +231,11 @@ export async function pasteImageFromClipboard(
       return null;
     }
     
-    console.log(`Converting image ${result.width}x${result.height} to ASCII...`);
-    const copyData = await dataUrlToAscii(result.dataUrl, targetWidth, gradiatorState);
+    // If no targetWidth specified, use original image width for 1:1 pixel-to-character
+    const finalTargetWidth = targetWidth ?? result.width;
+    
+    console.log(`Converting image ${result.width}x${result.height} to ASCII at width ${finalTargetWidth} (pixelPerfect=${pixelPerfect})...`);
+    const copyData = await dataUrlToAscii(result.dataUrl, finalTargetWidth, true, gradiatorState, pixelPerfect);
     console.log(`Converted to ${copyData.width}x${copyData.height} ASCII`);
     return copyData;
   } catch (e) {

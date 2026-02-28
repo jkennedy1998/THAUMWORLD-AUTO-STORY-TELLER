@@ -38,6 +38,17 @@ export type ToolPropertiesOptions = {
   on_paste_space_replace_change: (replace: boolean) => void;
   get_paste_scale: () => number; // 0.1 to 3.0
   on_paste_scale_change: (scale: number) => void;
+  // Paste ignore options
+  get_paste_ignore_space: () => boolean;
+  on_paste_ignore_space_change: (ignore: boolean) => void;
+  get_paste_ignore_black: () => boolean;
+  on_paste_ignore_black_change: (ignore: boolean) => void;
+  get_paste_ignore_white: () => boolean;
+  on_paste_ignore_white_change: (ignore: boolean) => void;
+  get_paste_ignore_color: () => boolean;
+  on_paste_ignore_color_change: (ignore: boolean) => void;
+  get_paste_ignore_color_rgb: () => { r: number; g: number; b: number };
+  on_paste_ignore_color_select: () => void;
   // Gradiator options
   get_gradiator_state: () => GradiatorState;
   on_gradiator_slot_select: (slot: GradiatorSlot) => void;
@@ -62,7 +73,7 @@ const SIZE_LABELS = ['1x1', '2x2', '3x3', '4x4', '5x5'];
 const MIN_WIDTH = 16;
 const MAX_WIDTH = 25;
 const MIN_HEIGHT = 8;
-const MAX_HEIGHT = 14;
+const MAX_HEIGHT = 24;
 
 export function make_tool_properties_module(opts: ToolPropertiesOptions): Module {
   let rect = opts.rect;
@@ -105,10 +116,34 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
     return y === checkbox_y && x >= rect.x0 + 2 && x <= rect.x0 + 4;
   }
 
-  // Check if position is on paste space_replace checkbox
-  function is_on_paste_space_checkbox(x: number, y: number): boolean {
+  // Check if position is on paste ignore_space checkbox
+  function is_on_paste_ignore_space(x: number, y: number): boolean {
     const checkbox_y = rect.y1 - 11;
     return y === checkbox_y && x >= rect.x0 + 2 && x <= rect.x0 + 4;
+  }
+
+  // Check if position is on paste ignore_black checkbox
+  function is_on_paste_ignore_black(x: number, y: number): boolean {
+    const checkbox_y = rect.y1 - 12;
+    return y === checkbox_y && x >= rect.x0 + 2 && x <= rect.x0 + 4;
+  }
+
+  // Check if position is on paste ignore_white checkbox
+  function is_on_paste_ignore_white(x: number, y: number): boolean {
+    const checkbox_y = rect.y1 - 13;
+    return y === checkbox_y && x >= rect.x0 + 2 && x <= rect.x0 + 4;
+  }
+
+  // Check if position is on paste ignore_color checkbox
+  function is_on_paste_ignore_color(x: number, y: number): boolean {
+    const checkbox_y = rect.y1 - 14;
+    return y === checkbox_y && x >= rect.x0 + 2 && x <= rect.x0 + 4;
+  }
+
+  // Check if position is on paste ignore color selector
+  function is_on_paste_ignore_color_selector(x: number, y: number): boolean {
+    const selector_y = rect.y1 - 14;
+    return y === selector_y && x >= rect.x0 + 14 && x <= rect.x0 + 16;
   }
 
   // Check if position is on gradiator slot selector
@@ -171,18 +206,30 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
     return null;
   }
 
-  // Check if position is on scale slider
+  // Check if position is on scale slider (between the buttons)
   function is_on_scale_slider(x: number, y: number): boolean {
     const scale_y = rect.y1 - 9;
-    const slider_start = rect.x0 + 8;
+    const slider_start = rect.x0 + 10;
     const slider_end = rect.x1 - 5;
     return y === scale_y && x >= slider_start && x <= slider_end;
   }
 
+  // Check if position is on scale minus button
+  function is_on_scale_minus(x: number, y: number): boolean {
+    const scale_y = rect.y1 - 9;
+    return y === scale_y && x === rect.x0 + 8;
+  }
+
+  // Check if position is on scale plus button
+  function is_on_scale_plus(x: number, y: number): boolean {
+    const scale_y = rect.y1 - 9;
+    return y === scale_y && x === rect.x1 - 3;
+  }
+
   // Get scale value from x position
   function get_scale_from_x(x: number): number {
-    const slider_start = rect.x0 + 8;
-    const slider_width = rect.x1 - slider_start - 7;
+    const slider_start = rect.x0 + 10;
+    const slider_width = rect.x1 - slider_start - 9;
     const relative_x = x - slider_start;
     const percent = 10 + (relative_x / slider_width) * 290;
     return Math.max(10, Math.min(300, Math.round(percent))) / 100;
@@ -538,9 +585,17 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
           });
         }
         
+        // Draw minus button for scale
+        c.set(rect.x0 + 8, scale_y, {
+          char: '-',
+          rgb: get_color_by_name('vivid_red').rgb,
+          style: 'regular',
+          weight_index: 4
+        });
+        
         // Scale slider track
-        const slider_start = rect.x0 + 8;
-        const slider_width = rect.x1 - slider_start - 2;
+        const slider_start = rect.x0 + 10;
+        const slider_width = rect.x1 - slider_start - 4;
         const scale_percent = Math.round(pasteScale * 100);
         const slider_pos = Math.floor(((scale_percent - 10) / 290) * slider_width);
         
@@ -553,9 +608,17 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
           });
         }
         
+        // Draw plus button for scale
+        c.set(rect.x1 - 3, scale_y, {
+          char: '+',
+          rgb: get_color_by_name('vivid_green').rgb,
+          style: 'regular',
+          weight_index: 4
+        });
+        
         // Scale percentage display
         const percent_str = `${scale_percent}%`;
-        const percent_x = rect.x1 - percent_str.length - 1;
+        const percent_x = rect.x1 - percent_str.length - 5;
         for (let i = 0; i < percent_str.length; i++) {
           c.set(percent_x + i, scale_y, {
             char: percent_str[i]!,
@@ -565,38 +628,124 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
           });
         }
         
-        // Show paste space_replace checkbox
-        const checkbox_y = rect.y1 - 11;
-        const checkbox_x = rect.x0 + 2;
+        // Get ignore options
+        const ignore_space = opts.get_paste_ignore_space();
+        const ignore_black = opts.get_paste_ignore_black();
+        const ignore_white = opts.get_paste_ignore_white();
+        const ignore_color = opts.get_paste_ignore_color();
+        const ignore_color_rgb = opts.get_paste_ignore_color_rgb();
         
-        c.set(checkbox_x, checkbox_y, {
-          char: paste_replace ? '☑' : '☐',
+        // Show ignore space checkbox and label
+        const ignore_space_y = rect.y1 - 11;
+        c.set(rect.x0 + 2, ignore_space_y, {
+          char: ignore_space ? '☑' : '☐',
           rgb: text_color,
           style: 'regular',
           weight_index: 4
         });
         
-        const label = 'space→" "';
-        for (let i = 0; i < label.length && i < rect.x1 - checkbox_x - 3; i++) {
-          c.set(checkbox_x + 2 + i, checkbox_y, {
-            char: label[i]!,
+        const ignore_space_label = 'ignore space';
+        for (let i = 0; i < ignore_space_label.length && i < rect.x1 - rect.x0 - 6; i++) {
+          c.set(rect.x0 + 4 + i, ignore_space_y, {
+            char: ignore_space_label[i]!,
             rgb: text_color,
             style: 'regular',
             weight_index: 4
           });
         }
         
-        // Show description
-        const paste_desc = paste_replace ? '(replaces gaps)' : '(preserves gaps)';
-        const paste_desc_y = rect.y1 - 12;
-        for (let i = 0; i < paste_desc.length && i < rect.x1 - rect.x0 - 2; i++) {
-          c.set(rect.x0 + 2 + i, paste_desc_y, {
-            char: paste_desc[i]!,
-            rgb: get_color_by_name('medium_gray').rgb,
+        // Show ignore black checkbox and label
+        const ignore_black_y = rect.y1 - 12;
+        c.set(rect.x0 + 2, ignore_black_y, {
+          char: ignore_black ? '☑' : '☐',
+          rgb: text_color,
+          style: 'regular',
+          weight_index: 4
+        });
+        
+        const ignore_black_label = 'ignore black';
+        for (let i = 0; i < ignore_black_label.length && i < rect.x1 - rect.x0 - 15; i++) {
+          c.set(rect.x0 + 4 + i, ignore_black_y, {
+            char: ignore_black_label[i]!,
+            rgb: text_color,
             style: 'regular',
-            weight_index: 3
+            weight_index: 4
           });
         }
+        
+        // Show black color indicator
+        c.set(rect.x0 + 15, ignore_black_y, {
+          char: '█',
+          rgb: { r: 0, g: 0, b: 0 },
+          style: 'regular',
+          weight_index: 4
+        });
+        
+        // Show ignore white checkbox and label
+        const ignore_white_y = rect.y1 - 13;
+        c.set(rect.x0 + 2, ignore_white_y, {
+          char: ignore_white ? '☑' : '☐',
+          rgb: text_color,
+          style: 'regular',
+          weight_index: 4
+        });
+        
+        const ignore_white_label = 'ignore white';
+        for (let i = 0; i < ignore_white_label.length && i < rect.x1 - rect.x0 - 15; i++) {
+          c.set(rect.x0 + 4 + i, ignore_white_y, {
+            char: ignore_white_label[i]!,
+            rgb: text_color,
+            style: 'regular',
+            weight_index: 4
+          });
+        }
+        
+        // Show white color indicator
+        c.set(rect.x0 + 15, ignore_white_y, {
+          char: '█',
+          rgb: { r: 255, g: 255, b: 255 },
+          style: 'regular',
+          weight_index: 4
+        });
+        
+        // Show ignore color checkbox and label
+        const ignore_color_y = rect.y1 - 14;
+        c.set(rect.x0 + 2, ignore_color_y, {
+          char: ignore_color ? '☑' : '☐',
+          rgb: text_color,
+          style: 'regular',
+          weight_index: 4
+        });
+        
+        const ignore_color_label = 'ignore color';
+        for (let i = 0; i < ignore_color_label.length && i < rect.x1 - rect.x0 - 17; i++) {
+          c.set(rect.x0 + 4 + i, ignore_color_y, {
+            char: ignore_color_label[i]!,
+            rgb: text_color,
+            style: 'regular',
+            weight_index: 4
+          });
+        }
+        
+        // Show color selector box (clickable)
+        c.set(rect.x0 + 14, ignore_color_y, {
+          char: '[',
+          rgb: text_color,
+          style: 'regular',
+          weight_index: 3
+        });
+        c.set(rect.x0 + 15, ignore_color_y, {
+          char: '█',
+          rgb: ignore_color_rgb,
+          style: 'regular',
+          weight_index: 4
+        });
+        c.set(rect.x0 + 16, ignore_color_y, {
+          char: ']',
+          rgb: text_color,
+          style: 'regular',
+          weight_index: 3
+        });
       } else {
         // Show message for non-brush tools
         const msg = 'No options';
@@ -714,9 +863,33 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
       
       // Handle paste tool interactions
       if (opts.get_current_tool() === 'paste') {
-        // Handle paste space_replace checkbox
-        if (is_on_paste_space_checkbox(e.x, e.y)) {
-          opts.on_paste_space_replace_change(!opts.get_paste_space_replace());
+        // Handle paste ignore_space checkbox
+        if (is_on_paste_ignore_space(e.x, e.y)) {
+          opts.on_paste_ignore_space_change(!opts.get_paste_ignore_space());
+          return;
+        }
+        
+        // Handle paste ignore_black checkbox
+        if (is_on_paste_ignore_black(e.x, e.y)) {
+          opts.on_paste_ignore_black_change(!opts.get_paste_ignore_black());
+          return;
+        }
+        
+        // Handle paste ignore_white checkbox
+        if (is_on_paste_ignore_white(e.x, e.y)) {
+          opts.on_paste_ignore_white_change(!opts.get_paste_ignore_white());
+          return;
+        }
+        
+        // Handle paste ignore_color checkbox
+        if (is_on_paste_ignore_color(e.x, e.y)) {
+          opts.on_paste_ignore_color_change(!opts.get_paste_ignore_color());
+          return;
+        }
+        
+        // Handle paste ignore color selector
+        if (is_on_paste_ignore_color_selector(e.x, e.y)) {
+          opts.on_paste_ignore_color_select();
           return;
         }
         
@@ -747,13 +920,26 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
           return;
         }
         
+        // Handle scale minus button
+        if (is_on_scale_minus(e.x, e.y)) {
+          const currentScale = opts.get_paste_scale();
+          const newScale = Math.max(0.1, currentScale - 0.01);
+          opts.on_paste_scale_change(newScale);
+          console.log('Scale decreased to', Math.round(newScale * 100) + '%');
+          return;
+        }
+        
+        // Handle scale plus button
+        if (is_on_scale_plus(e.x, e.y)) {
+          const currentScale = opts.get_paste_scale();
+          const newScale = Math.min(3.0, currentScale + 0.01);
+          opts.on_paste_scale_change(newScale);
+          console.log('Scale increased to', Math.round(newScale * 100) + '%');
+          return;
+        }
+        
         // Handle scale slider
         if (is_on_scale_slider(e.x, e.y)) {
-          // Double-click resets to 100%
-          if (e.click_count === 2) {
-            opts.on_paste_scale_change(1.0);
-            return;
-          }
           is_dragging_scale = true;
           const newScale = get_scale_from_x(e.x);
           opts.on_paste_scale_change(newScale);

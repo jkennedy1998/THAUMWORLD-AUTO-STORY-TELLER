@@ -1,0 +1,26 @@
+{
+  "id": "test_cloth_pants",
+  "name": "Cloth Pants",
+  "description": "Simple cloth pants for the legs.",
+  "weight": 280,
+  "weight_mag": 1,
+  "mag": 1,
+  "size_mag": 2,
+  "hardness_mag": 1,
+  "conductivity_mag": 1,
+  "tags": [
+    {
+      "name": "GARB",
+      "mag": 1,
+      "meta": ["leg_left"],
+      "info": [1]
+    }
+  ],
+  "stackable": false,
+  "max_stack_size": 1,
+  "display_char": "p",
+  "valid_body_slots": ["leg_left"],
+  "occupies_slots": ["leg_left"],
+  "slot_shape": [[1]],
+  "fits_actor_kind": ["naked_ape"]
+}

@@ -126,6 +126,21 @@ export function create_painter_app_state(): PainterAppState {
   // Paste tool: scale (0.1 to 3.0, representing 10% to 300%)
   let paste_scale = 1.0;
   
+  // Paste tool: ignore space option (true = skip null/space cells)
+  let paste_ignore_space = false;
+  
+  // Paste tool: ignore color option (true = skip cells matching ignore_color)
+  let paste_ignore_color = false;
+  
+  // Paste tool: color to ignore (indexed color rgb)
+  let paste_ignore_color_rgb: { r: number; g: number; b: number } = { r: 255, g: 255, b: 255 }; // Default to white
+  
+  // Paste tool: ignore pure black preset
+  let paste_ignore_black = false;
+  
+  // Paste tool: ignore pure white preset
+  let paste_ignore_white = false;
+  
   // Gradiator state for image/text conversion - load from storage or create default
   const gradiator_state = loadGradiatorState();
   
@@ -215,6 +230,11 @@ export function create_painter_app_state(): PainterAppState {
     get_paste_space_replace: () => paste_space_replace,
     get_paste_scale: () => paste_scale,
     get_gradiator_state: () => gradiator_state,
+    get_paste_ignore_space: () => paste_ignore_space,
+    get_paste_ignore_black: () => paste_ignore_black,
+    get_paste_ignore_white: () => paste_ignore_white,
+    get_paste_ignore_color: () => paste_ignore_color,
+    get_paste_ignore_color_rgb: () => paste_ignore_color_rgb,
     get_selection_mode: () => selection_mode,
     get_text_spacing: () => text_spacing,
     get_text_charlead: () => text_charlead,
@@ -380,6 +400,7 @@ export function create_painter_app_state(): PainterAppState {
         if (gradiator_state.isEditing && gradiator_state.editSlot !== null) {
           // Set the character in the gradiator at the selected position
           setGradiatorChar(gradiator_state, gradiator_state.editSlot, gradiator_state.editCursorX, char);
+          saveGradiatorState(gradiator_state);
           console.log('Set gradiator character:', char, 'at position', gradiator_state.editCursorX);
         } else {
           // Normal brush character selection
@@ -426,8 +447,15 @@ export function create_painter_app_state(): PainterAppState {
       rect: color_selector_rect,
       get_brush: () => brush,
       on_color_select: (rgb) => {
-        brush.rgb = rgb;
-        console.log('Selected color:', rgb);
+        // Check if we're selecting the ignore color
+        if ((globalThis as any).__selecting_ignore_color) {
+          paste_ignore_color_rgb = rgb;
+          (globalThis as any).__selecting_ignore_color = false;
+          console.log('Set ignore color:', rgb);
+        } else {
+          brush.rgb = rgb;
+          console.log('Selected color:', rgb);
+        }
       },
       on_move: (new_rect) => {
         if (color_selector_module) {
@@ -553,6 +581,33 @@ export function create_painter_app_state(): PainterAppState {
       on_paste_scale_change: (scale) => {
         paste_scale = Math.max(0.1, Math.min(3.0, scale));
         console.log('Paste scale:', paste_scale);
+      },
+      get_paste_ignore_space: () => paste_ignore_space,
+      on_paste_ignore_space_change: (ignore) => {
+        paste_ignore_space = ignore;
+        console.log('Paste ignore space:', ignore);
+      },
+      get_paste_ignore_black: () => paste_ignore_black,
+      on_paste_ignore_black_change: (ignore) => {
+        paste_ignore_black = ignore;
+        console.log('Paste ignore black:', ignore);
+      },
+      get_paste_ignore_white: () => paste_ignore_white,
+      on_paste_ignore_white_change: (ignore) => {
+        paste_ignore_white = ignore;
+        console.log('Paste ignore white:', ignore);
+      },
+      get_paste_ignore_color: () => paste_ignore_color,
+      on_paste_ignore_color_change: (ignore) => {
+        paste_ignore_color = ignore;
+        console.log('Paste ignore color:', ignore);
+      },
+      get_paste_ignore_color_rgb: () => paste_ignore_color_rgb,
+      on_paste_ignore_color_select: () => {
+        // Enter "color select mode" for ignore color
+        // We'll set a flag that the color selector will check
+        (globalThis as any).__selecting_ignore_color = true;
+        console.log('Select a color from the color selector to ignore');
       },
       get_gradiator_state: () => gradiator_state,
       on_gradiator_slot_select: (slot) => {
