@@ -2459,8 +2459,171 @@ function start_http_server(log_path: string): void {
                     }
                 } catch (err: any) {
                     debug_error("API", `/api/place/drop request error`, err);
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: err?.message ?? "drop_failed" }));
+                }
+            });
+            return;
+        }
+
+        // POST /api/place/throw - Throw item from hand tool slot to target tile
+        if (url.pathname === "/api/place/throw") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", (chunk) => { body += chunk; });
+            req.on("end", () => {
+                try {
+                    const data = JSON.parse(body);
+                    const item_instance_id = data.item_instance_id;
+                    const actor_id = data.actor_id;
+                    const from_slot = data.from_slot; // e.g., "hand_left.tool" or "hand_right.tool"
+                    const target_tile = data.target_tile;
+
+                    if (!item_instance_id || !actor_id || !from_slot || !target_tile) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                        return;
+                    }
+
+                    const slot = data_slot_number;
+                    
+                    // Load actor
+                    const actor_result = load_actor(slot, actor_id);
+                    if (!actor_result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "actor_not_found" }));
+                        return;
+                    }
+                    const actor = actor_result.actor as any;
+                    const actor_pos = actor.location?.tile;
+                    
+                    if (!actor_pos) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "actor_position_unknown" }));
+                        return;
+                    }
+                    
+                    const actual_place_id = actor.location?.place_id;
+                    if (!actual_place_id) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "actor_not_in_any_place" }));
+                        return;
+                    }
+                    
+                    // Calculate distance to target
+                    const target_x = target_tile.x;
+                    const target_y = target_tile.y;
+                    const dx = target_x - actor_pos.x;
+                    const dy = target_y - actor_pos.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    
+                    // Must be beyond drop range (cardinal adjacency)
+                    const is_cardinal_adjacent = (Math.abs(dx) === 1 && dy === 0) || (dx === 0 && Math.abs(dy) === 1);
+                    if (is_cardinal_adjacent) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "use_drop_for_adjacent_tiles" }));
+                        return;
+                    }
+                    
+                    // Calculate throw range (base 5 tiles, modified by strength/weight)
+                    // Simple implementation: base 5 tiles for now
+                    const throw_range = 5;
+                    
+                    if (distance > throw_range) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "target_too_far", max_range: throw_range, distance }));
+                        return;
+                    }
+                    
+                    debug_log("API", `Throw: ${item_instance_id} from ${from_slot} to (${target_x},${target_y})`);
+
+                    // Get or create scattered container at target position
+                    const scattered_result = get_or_create_scattered_container(slot, actual_place_id, target_x, target_y);
+                    if (!scattered_result.ok) {
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "failed_to_create_container" }));
+                        return;
+                    }
+                    const scattered_container = scattered_result.container;
+
+                    // Find empty position in scattered container
+                    const ground_max_slots = scattered_container.capacity?.max_slots || scattered_container.contents.length + 1;
+                    const { cols: ground_cols } = calculate_grid_dimensions(ground_max_slots);
+                    const ground_empty_pos = find_empty_grid_position(
+                        scattered_container.contents,
+                        ground_cols,
+                        ground_max_slots
+                    ) || { x: 0, y: 0 };
+
+                    // Parse source container ID from from_slot
+                    // from_slot format: "hand_left.tool" or "hand_right.tool"
+                    const from_container_id = `container.${actor_id}.${from_slot}`;
+
+                    // Transfer item from hand to scattered container
+                    const result = transfer_item_between_containers(
+                        slot, 
+                        item_instance_id, 
+                        from_container_id, 
+                        scattered_container.id,
+                        ground_empty_pos.x,
+                        ground_empty_pos.y
+                    );
+
+                    if (result.ok) {
+                        // Load place to add item to items_on_ground
+                        const place_result = load_place(slot, actual_place_id);
+                        if (place_result.ok) {
+                            const place = place_result.place;
+                            if (!place.contents) {
+                                place.contents = { npcs_present: [], actors_present: [], items_on_ground: [], features: [] };
+                            }
+                            
+                            const item_entry = scattered_container.contents.find((c: any) => c.instance.id === item_instance_id);
+                            const qty = item_entry ? item_entry.instance.qty : 1;
+                            
+                            const items_on_ground = place.contents.items_on_ground ?? [];
+                            const existing_idx = items_on_ground.findIndex(
+                                (i: any) => i.item_ref === item_instance_id
+                            );
+                            if (existing_idx >= 0 && items_on_ground[existing_idx]) {
+                                items_on_ground[existing_idx].tile_position = { x: target_x, y: target_y };
+                                items_on_ground[existing_idx].quantity = qty;
+                            } else {
+                                items_on_ground.push({
+                                    item_ref: item_instance_id,
+                                    quantity: qty,
+                                    tile_position: { x: target_x, y: target_y }
+                                });
+                            }
+                            place.contents.items_on_ground = items_on_ground;
+                            
+                            save_place(slot, place);
+                            debug_log("API", `/api/place/throw: ${item_instance_id} thrown to (${target_x},${target_y}) into ${scattered_container.id}`);
+                        }
+                        
+                        res.writeHead(200, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ 
+                            ok: true, 
+                            item_instance_id, 
+                            from: from_container_id,
+                            to: scattered_container.id,
+                            place_id: actual_place_id,
+                            position: { x: target_x, y: target_y },
+                            distance
+                        }));
+                    } else {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: result.error }));
+                    }
+                } catch (err: any) {
+                    debug_error("API", `/api/place/throw request error`, err);
                     res.writeHead(500, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ ok: false, error: err?.message ?? "drop_failed" }));
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? "throw_failed" }));
                 }
             });
             return;

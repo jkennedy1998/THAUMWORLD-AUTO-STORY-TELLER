@@ -5,6 +5,7 @@ import type { ItemDefinition } from "../../item_storage/store.js";
 import type { BodySlots, EquipmentSlots } from "../../types/body_slots.js";
 import { debug_log } from "../../shared/debug.js";
 import { draw_module_border, BORDER_STYLES, draw_horizontal_divider, draw_container_box } from "../module_borders.js";
+import { get_color_by_name } from "../colors.js";
 import type { ModuleGizmosConfig, GizmoState } from "../module_gizmos.js";
 import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area } from "../module_gizmos.js";
 import {
@@ -258,9 +259,17 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       const container_id = get_slot_container_id(opts.get_actor_id(), slot);
       const is_open = opts.get_open_containers?.().has(container_id) ?? false;
       
+      // Check if item is in tool slot but doesn't have TOOL tag
+      const is_tool_slot = slot.slot_type === 'tool';
+      const has_tool_tag = equipped_item.definition.tags?.some(tag => tag.name === 'TOOL');
+      const is_non_tool_in_tool_slot = is_tool_slot && !has_tool_tag;
+      
       // Item color priority
       let char_rgb: Rgb;
-      if (is_hovered) {
+      if (is_non_tool_in_tool_slot) {
+        // Non-tool items in tool slots are shown in medium gray
+        char_rgb = get_color_by_name("medium_gray").rgb;
+      } else if (is_hovered) {
         char_rgb = { r: 255, g: 255, b: 100 };
       } else if (is_open) {
         char_rgb = { r: 180, g: 100, b: 220 };
@@ -276,11 +285,14 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
                    equipped_item.definition.name?.charAt(0).toLowerCase() ||
                    "?";
       
+      // Non-tool items in tool slots use light weight (3), tools use normal weight
+      const weight_index = is_non_tool_in_tool_slot ? 3 : (is_hovered || is_highlighted ? 6 : 5);
+      
       c.set(x, y, {
         char,
         rgb: char_rgb,
         style: "regular",
-        weight_index: is_hovered || is_highlighted ? 6 : 5,
+        weight_index,
       });
     } else {
       // Empty slot - show colored dash based on slot type

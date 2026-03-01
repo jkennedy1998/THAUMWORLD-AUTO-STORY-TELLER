@@ -24,6 +24,7 @@ export type FileMenuOptions = {
   on_toggle_weight_selector?: () => void;
   on_toggle_brush_preview?: () => void;
   on_toggle_tool_properties?: () => void;
+  on_toggle_layer_palette?: () => void;
 };
 
 type MenuButton = {
@@ -77,6 +78,11 @@ export function make_file_menu_module(opts: FileMenuOptions): Module {
   if (opts.on_toggle_tool_properties) {
     buttons.push({ label: 'PROPS', shortcut: '', action: opts.on_toggle_tool_properties, x: module_button_x, y: 0, width: 7 });
     module_button_x += 8;
+  }
+  
+  if (opts.on_toggle_layer_palette) {
+    buttons.push({ label: 'LAYERS', shortcut: '', action: opts.on_toggle_layer_palette, x: module_button_x, y: 0, width: 8 });
+    module_button_x += 9;
   }
   
   // Add reset positions button if callback provided

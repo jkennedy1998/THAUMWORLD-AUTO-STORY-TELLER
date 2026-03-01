@@ -524,6 +524,122 @@ on_item_removed: (container_id: string) => {
 
 ---
 
+## 6.5 Throwing Items (Extended Drop)
+
+**Architecture Decision:** Throwing is an extension of the drop system, not a separate action.
+
+### Throwing Mechanics
+
+**Range Distinction:**
+- **Drop Range:** 1 tile (cardinal adjacent - touch range)
+- **Throw Range:** 5+ tiles (extended range based on item/actor)
+
+**User Interaction:**
+1. Click on ground tile in place module
+2. If distance <= 1: Drop item at actor's feet (current behavior)
+3. If distance > 1 and <= throw_range: Throw item to that tile
+4. If distance > throw_range: Show "too far" message
+
+### Throwing Implementation
+
+**Client-Side Detection:**
+```typescript
+// In place_module.ts click handler
+on_tile_click: (tile_x: number, tile_y: number) => {
+    const distance = calculate_distance(actor_pos, {x: tile_x, y: tile_y});
+    const held_item = get_held_item(); // Item in active hand tool slot
+    
+    if (distance <= 1) {
+        // Drop at feet (existing behavior)
+        drop_item(held_item, tile_x, tile_y);
+    } else if (distance <= calculate_throw_range(held_item)) {
+        // Throw to target tile
+        throw_item(held_item, tile_x, tile_y);
+    } else {
+        flash_status(['Too far to throw'], 1500);
+    }
+}
+```
+
+**Throw Range Calculation:**
+```typescript
+function calculate_throw_range(item: Item): number {
+    // Base throw range from hand
+    const base_range = 5;
+    
+    // Modified by actor strength vs item weight
+    const weight_mag = calculate_weight_mag(item.weight);
+    const str_bonus = actor.stats.strength;
+    const range_multiplier = Math.max(0.5, str_bonus / weight_mag);
+    
+    return Math.floor(base_range * range_multiplier);
+}
+
+// Weight MAG thresholds:
+// ≤ 5 units = MAG 1 (light: rock, dagger)
+// ≤ 15 units = MAG 2 (medium: sword, helmet)  
+// ≤ 30 units = MAG 3 (heavy: greatsword, armor)
+// ≤ 50 units = MAG 4 (very heavy: anvil, chest)
+// > 50 units = MAG 5+ (extreme: furniture, boulders)
+```
+
+**Server-Side API:**
+```typescript
+// POST /api/place/throw
+// Request:
+{
+    actor_id: string,
+    item_instance_id: string,
+    from_slot: string,  // "hand_left.tool" or "hand_right.tool"
+    target_tile: { x: number, y: number }
+}
+
+// Response:
+{
+    ok: true,
+    item_instance_id: string,
+    target_tile: { x, y },
+    distance: number,
+    scatter: { x, y } | null,  // If missed, where it scattered
+    container_id: string  // Scattered container where item landed
+}
+```
+
+### Throw vs Drop: Same Architecture
+
+**Both Operations:**
+1. Remove item from source (hand tool slot)
+2. Create/update scattered container at target tile
+3. Add item to scattered container
+4. Refresh place view to show item on ground
+5. Auto-delete scattered container if emptied
+
+**Key Difference:**
+- **Drop:** Distance validation = adjacent tiles only
+- **Throw:** Distance validation = up to throw_range tiles
+
+### Why This Architecture?
+
+1. **Consistent Retrieval:** Thrown items land in scattered containers, just like dropped items
+2. **No Special "Ammo" System:** Items don't get consumed - they land on the ground
+3. **Reusable Projectiles:** Arrows, rocks, or any thrown item can be picked back up
+4. **Simple Implementation:** Reuses existing drop infrastructure
+5. **Future Ammo:** Bow/crossbow ammo will use same system - ammo lands on ground after firing
+
+**Example Scenario:**
+```
+1. Player holds rock in left hand (tool slot)
+2. Player clicks tile 3 tiles away
+3. System validates: 3 tiles <= 5 (base throw range)
+4. Rock removed from hand slot
+5. Scattered container created at target tile
+6. Rock added to scattered container
+7. Place view refreshes - rock visible on ground
+8. Rock can be picked up again or left on ground
+```
+
+---
+
 ## 7. UI Changes
 
 ## 8. Files to Modify

@@ -35,16 +35,10 @@ export function check_tag_compatibility(
     const has_garb = item_def.tags?.some((t: TagInstance) => t.name === "GARB");
     const has_tool = item_def.tags?.some((t: TagInstance) => t.name === "TOOL");
     
-    // TOOL can go to any hand's tool slot (or any slot that supports tool)
+    // TOOL slot: ANY item can be held in hand tool slots
+    // This allows holding non-tool items (weapons, food, misc items)
     if (target_slot_type === "tool") {
-        if (has_tool) {
-            return { compatible: true, slot_type: "tool" };
-        }
-        return { 
-            compatible: false, 
-            slot_type: null,
-            reason: "Item lacks TOOL tag"
-        };
+        return { compatible: true, slot_type: "tool" };
     }
     
     // ARMOR and GARB check body_slot metadata
@@ -54,13 +48,16 @@ export function check_tag_compatibility(
     // Check ARMOR compatibility
     if (target_slot_type === "armor" && armor_tag) {
         // ARMOR must match body slot (e.g., helmet → head, chest plate → torso)
+        // Check for both generic categories AND specific slot names
         const armor_slot = armor_tag.meta?.find((m: string) => 
-            ["head", "torso", "hand", "leg"].includes(m)
+            ["head", "torso", "hand", "leg"].includes(m) ||
+            ["head", "torso", "hand_left", "hand_right", "leg_left", "leg_right"].includes(m)
         );
         
         if (armor_slot) {
-            // Check if armor slot matches target (e.g., "hand" matches "hand_left")
-            if (target_slot_name.includes(armor_slot)) {
+            // Check if armor slot matches target
+            // Supports: generic "leg" matching "leg_left", OR specific "leg_left" matching "leg_left"
+            if (target_slot_name.includes(armor_slot) || armor_slot.includes(target_slot_name)) {
                 return { compatible: true, slot_type: "armor" };
             }
         }
@@ -75,13 +72,16 @@ export function check_tag_compatibility(
     // Check GARB compatibility
     if (target_slot_type === "garb" && garb_tag) {
         // GARB must match body slot
+        // Check for both generic categories AND specific slot names
         const garb_slot = garb_tag.meta?.find((m: string) =>
-            ["head", "torso", "hand", "leg"].includes(m)
+            ["head", "torso", "hand", "leg"].includes(m) ||
+            ["head", "torso", "hand_left", "hand_right", "leg_left", "leg_right"].includes(m)
         );
         
         if (garb_slot) {
             // Check if garb slot matches target
-            if (target_slot_name.includes(garb_slot)) {
+            // Supports: generic "leg" matching "leg_left", OR specific "leg_left" matching "leg_left"
+            if (target_slot_name.includes(garb_slot) || garb_slot.includes(target_slot_name)) {
                 return { compatible: true, slot_type: "garb" };
             }
         }
@@ -104,7 +104,7 @@ export function check_tag_compatibility(
  * Get the primary slot type for an item
  * Used for pickup routing when no explicit destination specified
  * 
- * Priority: TOOL > ARMOR > GARB
+ * Priority: TOOL > ARMOR > GARB > TOOL (fallback for non-equipped items)
  * 
  * @param item_def - The item definition
  * @returns The slot type ("armor", "garb", "tool") or null if no equipment tags
@@ -113,7 +113,8 @@ export function get_primary_slot_type(item_def: ItemDefinition): "armor" | "garb
     if (item_def.tags?.some((t: TagInstance) => t.name === "TOOL")) return "tool";
     if (item_def.tags?.some((t: TagInstance) => t.name === "ARMOR")) return "armor";
     if (item_def.tags?.some((t: TagInstance) => t.name === "GARB")) return "garb";
-    return null;
+    // Items without equipment tags can still be held in tool slots
+    return "tool";
 }
 
 /**
@@ -127,7 +128,8 @@ export function get_compatible_slot_types(item_def: ItemDefinition): string[] {
     
     if (item_def.tags?.some((t: TagInstance) => t.name === "ARMOR")) compatible.push("armor");
     if (item_def.tags?.some((t: TagInstance) => t.name === "GARB")) compatible.push("garb");
-    if (item_def.tags?.some((t: TagInstance) => t.name === "TOOL")) compatible.push("tool");
+    // All items can be held in tool slots (hand slots)
+    compatible.push("tool");
     
     return compatible;
 }

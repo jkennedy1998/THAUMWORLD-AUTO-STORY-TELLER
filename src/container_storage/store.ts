@@ -447,6 +447,25 @@ function load_container_from_entity(slot: number, container_id: string): Contain
 }
 
 /**
+ * Get slot type from container ID
+ * e.g., "container.gunther.hand_left.tool" -> "tool"
+ * e.g., "container.gunther.leg_left.armor" -> "armor"
+ * e.g., "container.gunther.torso.garb.0" -> "garb"
+ * Returns null if not a body slot container
+ */
+function get_slot_type_from_container_id(container_id: string): string | null {
+    const parts = container_id.split(".");
+    // Format: container.actor_id.slot_name.slot_type[.garb_index]
+    if (parts.length >= 4) {
+        const slot_type = parts[3]!;
+        if (["tool", "armor", "garb"].includes(slot_type)) {
+            return slot_type;
+        }
+    }
+    return null;
+}
+
+/**
  * Get container name from container ID
  * e.g., "container.gunther.leg_left" -> "leg_left"
  * New format: "container.gunther.hand_left.tool" -> "hand_left"
@@ -522,13 +541,23 @@ function save_container_to_entity(slot: number, container: Container): { ok: boo
             }
             
             // Update body_slots based on container contents
-            // Each item in the container should be reflected in the appropriate slot type
+            // CRITICAL FIX: Only update the SPECIFIC slot type being saved, don't wipe others
             const slot_data = entity.body_slots[container_name];
             
-            // Clear existing
-            slot_data.tool = null;
-            slot_data.armor = null;
-            slot_data.garb = [];
+            // Extract slot type from container ID (e.g., container.actor.leg_left.armor -> "armor")
+            const target_slot_type = get_slot_type_from_container_id(container.id);
+            debug_log("container", `[SAVE_BODY_SLOT] Target slot type from container ID: ${target_slot_type}`);
+            
+            // Only clear the specific slot type being saved
+            if (target_slot_type === "tool") {
+                slot_data.tool = null;
+            } else if (target_slot_type === "armor") {
+                slot_data.armor = null;
+            } else if (target_slot_type === "garb") {
+                // For garb, we need to rebuild the array from current state
+                // First, collect all garb items from other containers on this body part
+                slot_data.garb = [];
+            }
             
             // Re-populate from container contents
             debug_log("container", `[SAVE_BODY_SLOT] Processing ${container.contents.length} items in ${container.id}`);
@@ -538,24 +567,27 @@ function save_container_to_entity(slot: number, container: Container): { ok: boo
                 const has_tags = entry.definition?.tags ? `tags: [${entry.definition.tags.map((t: any) => t.name).join(', ')}]` : 'no tags';
                 debug_log("container", `[SAVE_BODY_SLOT] Item: ${item_name} (${item_id}), ${has_tags}`);
                 
-                const slot_type = get_primary_slot_type(entry.definition as any);
-                debug_log("container", `[SAVE_BODY_SLOT]   -> slot_type: ${slot_type}`);
+                const item_slot_type = get_primary_slot_type(entry.definition as any);
+                debug_log("container", `[SAVE_BODY_SLOT]   -> item_slot_type: ${item_slot_type}, target_slot_type: ${target_slot_type}`);
                 
-                if (slot_type === "tool") {
-                    slot_data.tool = entry.instance.id;
-                    debug_log("container", `[SAVE_BODY_SLOT]   -> ADDED to tool`);
-                } else if (slot_type === "armor") {
-                    slot_data.armor = entry.instance.id;
-                    debug_log("container", `[SAVE_BODY_SLOT]   -> ADDED to armor`);
-                } else if (slot_type === "garb") {
-                    if (!slot_data.garb.includes(entry.instance.id)) {
-                        slot_data.garb.push(entry.instance.id);
-                        debug_log("container", `[SAVE_BODY_SLOT]   -> ADDED to garb, now: [${slot_data.garb.join(', ')}]`);
-                    } else {
-                        debug_log("container", `[SAVE_BODY_SLOT]   -> already in garb`);
+                // Only update if the item's slot type matches the target slot type
+                if (item_slot_type === target_slot_type) {
+                    if (item_slot_type === "tool") {
+                        slot_data.tool = entry.instance.id;
+                        debug_log("container", `[SAVE_BODY_SLOT]   -> ADDED to tool`);
+                    } else if (item_slot_type === "armor") {
+                        slot_data.armor = entry.instance.id;
+                        debug_log("container", `[SAVE_BODY_SLOT]   -> ADDED to armor`);
+                    } else if (item_slot_type === "garb") {
+                        if (!slot_data.garb.includes(entry.instance.id)) {
+                            slot_data.garb.push(entry.instance.id);
+                            debug_log("container", `[SAVE_BODY_SLOT]   -> ADDED to garb, now: [${slot_data.garb.join(', ')}]`);
+                        } else {
+                            debug_log("container", `[SAVE_BODY_SLOT]   -> already in garb`);
+                        }
                     }
                 } else {
-                    debug_log("container", `[SAVE_BODY_SLOT]   -> NOT ADDED (no matching slot_type)`);
+                    debug_log("container", `[SAVE_BODY_SLOT]   -> SKIPPED (item slot_type ${item_slot_type} doesn't match target ${target_slot_type})`);
                 }
             }
             
@@ -563,12 +595,18 @@ function save_container_to_entity(slot: number, container: Container): { ok: boo
             debug_log("container", `Saved ${container.id} references to inline body_slots`);
         }
         
-        // ALWAYS save container data to entity.containers (this is the actual storage)
-        if (!entity.containers) {
-            entity.containers = {};
+        // CRITICAL FIX: Only save NON-body-slot containers to entity.containers
+        // Body slot containers are stored inline in body_slots above, not in entity.containers
+        // This prevents slot type overwrites (e.g., torso.armor overwriting torso.garb)
+        if (!is_body_slot) {
+            if (!entity.containers) {
+                entity.containers = {};
+            }
+            entity.containers[container_name] = container;
+            debug_log("container", `Saved ${container.id} data to entity.containers`);
+        } else {
+            debug_log("container", `Skipped saving ${container.id} to entity.containers (body slot containers stored inline in body_slots)`);
         }
-        entity.containers[container_name] = container;
-        debug_log("container", `Saved ${container.id} data to entity.containers`);
 
         // Write back to file
         fs.writeFileSync(entity_path, JSON.stringify(entity, null, 2), "utf-8");
@@ -1582,8 +1620,9 @@ export function transfer_item_between_containers(
         const is_to_body_slot = is_body_slot_container(to_container_id);
         if (is_to_body_slot) {
             const target_slot_name = get_slot_name(to_container_id);
-            // Get slot_type from item's equipment tags for tag-based validation
-            const slot_type = get_primary_slot_type(removed_entry.definition);
+            // Get slot_type from TARGET container ID (e.g., container.actor.hand_left.armor -> "armor")
+            // NOT from the item's tags - we need to validate if item fits the specific slot being targeted
+            const slot_type = get_slot_type_from_container_id(to_container_id);
             const is_compatible = is_item_compatible_with_slot(removed_entry, target_slot_name, slot_type || undefined);
             debug_log("transfer", `[UNIFIED-TRANSFER] Body slot compatibility check: ${removed_entry.instance.def_id} -> ${target_slot_name} (type: ${slot_type}): ${is_compatible}`);
             if (!is_compatible) {

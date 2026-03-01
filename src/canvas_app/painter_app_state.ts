@@ -9,7 +9,7 @@ import type { Module, Rect, Rgb } from '../mono_ui/types.js';
 import { create_module_registry, type ModuleRegistry } from '../mono_ui/module_registry.js';
 import type { Grid, Brush, ToolType } from '../ascii_painter/types.js';
 import { createGrid, exportGrid, importGrid } from '../ascii_painter/types.js';
-import { createHistoryManager, pushSnapshot, undo, redo } from '../ascii_painter/history.js';
+import { createHistoryManager, logLayerAction, pushSnapshot, canUndo, canRedo, getHistoryState } from '../ascii_painter/history.js';
 import { get_color_by_name } from '../mono_ui/colors.js';
 import type { SelectionMode } from '../ascii_painter/selection.js';
 import { clearSelection, selectAll, invertSelection } from '../ascii_painter/selection.js';
@@ -35,8 +35,34 @@ import {
   autoSave,
   loadAutoSave,
   clearAutoSave,
-  generateFilename
+  generateFilename,
+  // 3D VoxelSpace support
+  exportVoxelSpaceToJSON,
+  importVoxelSpaceFromJSON,
+  autoSaveVoxelSpace,
+  loadAutoSaveVoxelSpace,
+  // Tool properties persistence
+  saveToolProperties,
+  loadToolProperties,
+  type ToolProperties,
 } from '../ascii_painter/save_system.js';
+// 3D VoxelSpace imports
+import type { VoxelSpace, VoxelLayer, CameraConfig, CameraMode } from '../ascii_painter/voxel_space.js';
+import { 
+  createVoxelSpace, 
+  getLayer, 
+  getOrCreateLayer, 
+  addLayer, 
+  removeLayer, 
+  duplicateLayer,
+  getVisibleLayers,
+  voxelSpaceToGrid,
+  gridToVoxelSpace,
+  debugVoxelSpace,
+  createDefaultCamera,
+} from '../ascii_painter/voxel_space.js';
+import { makeLayerRendererModule } from '../ascii_painter/layer_renderer_module.js';
+import { makeLayerPaletteModule } from '../ascii_painter/layer_palette_module.js';
 
 // Configuration matching the game but with relaxed letter spacing
 export const PAINTER_CONFIG = {
@@ -57,10 +83,26 @@ export type PainterAppState = {
   modules: readonly Module[];
   module_registry: ModuleRegistry;
 
-  // Grid operations
+  // Grid operations (legacy - operates on current layer)
   export_grid: () => string;
   import_grid: (json: string) => void;
   clear_canvas: () => void;
+
+  // VoxelSpace operations (new 3D system)
+  export_voxel_space: () => string;
+  import_voxel_space: (json: string) => void;
+  get_voxel_space: () => VoxelSpace;
+  set_camera_mode: (mode: CameraMode) => void;
+  set_parallax_intensity: (intensity: number) => void;
+  toggle_show_all_layers: () => void;
+  
+  // Layer operations
+  add_layer: () => void;
+  delete_layer: (z: number) => void;
+  duplicate_layer: (z: number) => void;
+  select_layer: (z: number) => void;
+  toggle_layer_visibility: (z: number) => void;
+  toggle_layer_lock: (z: number) => void;
 
   // Save system
   save_to_file: (filename?: string) => void;
@@ -71,29 +113,52 @@ export type PainterAppState = {
 };
 
 export function create_painter_app_state(): PainterAppState {
-  // Create the drawing grid
+  // Create the drawing grid (legacy 2D)
   const grid = createGrid(CANVAS_WIDTH, CANVAS_HEIGHT);
+  
+  // Create VoxelSpace (new 3D system) - wraps the grid
+  let voxelSpace = createVoxelSpace(CANVAS_WIDTH, CANVAS_HEIGHT, { defaultZ: 0 });
   
   // Create history manager
   const history = createHistoryManager(50);
 
-  // Try to load auto-save on startup
-  const saved_grid = loadAutoSave();
-  if (saved_grid) {
-    grid.width = saved_grid.width;
-    grid.height = saved_grid.height;
-    grid.cells = saved_grid.cells;
-    console.log('🎨 Loaded auto-saved artwork');
+  // Try to load auto-save on startup (try VoxelSpace first, then fallback to Grid)
+  const saved_voxel_space = loadAutoSaveVoxelSpace();
+  if (saved_voxel_space) {
+    voxelSpace = saved_voxel_space;
+    // Sync grid to current layer
+    const currentLayer = getLayer(voxelSpace, voxelSpace.camera.focus_plane);
+    if (currentLayer) {
+      grid.width = voxelSpace.bounds.width;
+      grid.height = voxelSpace.bounds.height;
+      grid.cells = currentLayer.cells;
+    }
+    console.log('🎨 Loaded auto-saved VoxelSpace artwork');
+    console.log(debugVoxelSpace(voxelSpace));
+  } else {
+    // Fallback to legacy grid auto-save
+    const saved_grid = loadAutoSave();
+    if (saved_grid) {
+      grid.width = saved_grid.width;
+      grid.height = saved_grid.height;
+      grid.cells = saved_grid.cells;
+      // Sync voxelSpace to grid
+      voxelSpace = gridToVoxelSpace(grid, 0);
+      console.log('🎨 Loaded auto-saved artwork (legacy format)');
+    }
   }
 
   pushSnapshot(history, grid);
+  
+  // Load saved tool properties
+  const saved_tool_props = loadToolProperties();
   
   // Current tool state
   let current_tool: ToolType = 'pencil';
   
   // Tool mapping for left/right click
-  let left_click_tool: ToolType = 'pencil';
-  let right_click_tool: ToolType = 'eraser';
+  let left_click_tool: ToolType = saved_tool_props.left_click_tool as ToolType || 'pencil';
+  let right_click_tool: ToolType = saved_tool_props.right_click_tool as ToolType || 'eraser';
   
   // Brush state
   const brush: Brush = {
@@ -103,43 +168,43 @@ export function create_painter_app_state(): PainterAppState {
   };
   
   // Brush tip size (1-5, for 1x1 to 5x5)
-  let brush_size = 1;
+  let brush_size = saved_tool_props.brush_size ?? 1;
   
   // Text tool: space replaces character or preserves it
   let space_replace = true;
   
   // Text tool: spacing (horizontal movement per character, -16 to 16)
-  let text_spacing = 1;
+  let text_spacing = saved_tool_props.text_spacing ?? 1;
   
   // Text tool: charlead (vertical movement per character, -16 to 16)
-  let text_charlead = 0;
+  let text_charlead = saved_tool_props.text_charlead ?? 0;
   
   // Text tool: enterlead (vertical movement on Enter key, -16 to 16)
-  let text_enterlead = 1;
+  let text_enterlead = saved_tool_props.text_enterlead ?? 1;
   
   // Text tool: enterspace (horizontal offset on Enter key, -16 to 16)
-  let text_enterspace = 0;
+  let text_enterspace = saved_tool_props.text_enterspace ?? 0;
   
   // Paste tool: space replaces character or preserves it
-  let paste_space_replace = true;
+  let paste_space_replace = saved_tool_props.paste_space_replace ?? true;
   
   // Paste tool: scale (0.1 to 3.0, representing 10% to 300%)
-  let paste_scale = 1.0;
+  let paste_scale = saved_tool_props.paste_scale ?? 1.0;
   
   // Paste tool: ignore space option (true = skip null/space cells)
-  let paste_ignore_space = false;
+  let paste_ignore_space = saved_tool_props.paste_ignore_space ?? false;
   
   // Paste tool: ignore color option (true = skip cells matching ignore_color)
-  let paste_ignore_color = false;
+  let paste_ignore_color = saved_tool_props.paste_ignore_color ?? false;
   
   // Paste tool: color to ignore (indexed color rgb)
-  let paste_ignore_color_rgb: { r: number; g: number; b: number } = { r: 255, g: 255, b: 255 }; // Default to white
+  let paste_ignore_color_rgb: { r: number; g: number; b: number } = saved_tool_props.paste_ignore_color_rgb ?? { r: 255, g: 255, b: 255 };
   
   // Paste tool: ignore pure black preset
-  let paste_ignore_black = false;
+  let paste_ignore_black = saved_tool_props.paste_ignore_black ?? false;
   
   // Paste tool: ignore pure white preset
-  let paste_ignore_white = false;
+  let paste_ignore_white = saved_tool_props.paste_ignore_white ?? false;
   
   // Gradiator state for image/text conversion - load from storage or create default
   const gradiator_state = loadGradiatorState();
@@ -168,10 +233,14 @@ export function create_painter_app_state(): PainterAppState {
       clearTimeout(auto_save_timer);
     }
     auto_save_timer = setTimeout(() => {
-      autoSave(grid, current_filename);
-      console.log('💾 Auto-saved to localStorage');
+      // Save VoxelSpace (new 3D format)
+      autoSaveVoxelSpace(voxelSpace, current_filename);
+      console.log('💾 Auto-saved VoxelSpace to localStorage');
     }, 60000); // Auto-save 60 seconds (1 minute) after last change
   }
+  
+  // Keyboard shortcuts for layer navigation
+  // NOTE: Page Up/Down and Tab removed - use Layer Palette UI buttons instead
   
   // Calculate layout - positions are in grid coordinates
   // Total grid is 200x50, we center the canvas with padding
@@ -223,6 +292,8 @@ export function create_painter_app_state(): PainterAppState {
     id: 'painter_canvas',
     rect: canvas_rect,
     grid,
+    space: voxelSpace,
+    get_selected_z: () => voxelSpace.camera.focus_plane,
     get_current_tool: () => current_tool,
     brush,
     get_brush_size: () => brush_size,
@@ -388,6 +459,14 @@ export function create_painter_app_state(): PainterAppState {
     y1: 18
   });
   
+  // Layer Palette - positioned on the right side
+  const layer_palette_rect: Rect = getModuleRectWithSave('layer_palette', {
+    x0: canvas_rect.x1 + 2,  // Right of canvas
+    y0: canvas_rect.y0,
+    x1: canvas_rect.x1 + 22, // 20 chars wide
+    y1: canvas_rect.y0 + 20  // Show up to ~17 layers
+  });
+  
   // Factory functions for creating modules
   function create_char_selector_module(): Module {
     console.log('Creating char selector module at rect:', char_selector_rect);
@@ -450,6 +529,7 @@ export function create_painter_app_state(): PainterAppState {
         // Check if we're selecting the ignore color
         if ((globalThis as any).__selecting_ignore_color) {
           paste_ignore_color_rgb = rgb;
+          saveToolProperties({ paste_ignore_color_rgb: rgb });
           (globalThis as any).__selecting_ignore_color = false;
           console.log('Set ignore color:', rgb);
         } else {
@@ -507,10 +587,12 @@ export function create_painter_app_state(): PainterAppState {
       },
       on_left_click_tool_change: (tool) => {
         left_click_tool = tool;
+        saveToolProperties({ left_click_tool: tool });
         console.log('Left-click tool:', tool);
       },
       on_right_click_tool_change: (tool) => {
         right_click_tool = tool;
+        saveToolProperties({ right_click_tool: tool });
         console.log('Right-click tool:', tool);
       },
       on_move: (new_rect) => {
@@ -540,6 +622,7 @@ export function create_painter_app_state(): PainterAppState {
       get_brush_size: () => brush_size,
       on_brush_size_change: (size) => {
         brush_size = size;
+        saveToolProperties({ brush_size: size });
         console.log('Selected brush size:', size);
       },
       get_space_replace: () => space_replace,
@@ -550,21 +633,25 @@ export function create_painter_app_state(): PainterAppState {
       get_text_spacing: () => text_spacing,
       on_text_spacing_change: (spacing) => {
         text_spacing = spacing;
+        saveToolProperties({ text_spacing: spacing });
         console.log('Text spacing:', spacing);
       },
       get_text_charlead: () => text_charlead,
       on_text_charlead_change: (charlead) => {
         text_charlead = charlead;
+        saveToolProperties({ text_charlead: charlead });
         console.log('Text charlead:', charlead);
       },
       get_text_enterlead: () => text_enterlead,
       on_text_enterlead_change: (enterlead) => {
         text_enterlead = enterlead;
+        saveToolProperties({ text_enterlead: enterlead });
         console.log('Text enterlead:', enterlead);
       },
       get_text_enterspace: () => text_enterspace,
       on_text_enterspace_change: (enterspace) => {
         text_enterspace = enterspace;
+        saveToolProperties({ text_enterspace: enterspace });
         console.log('Text enterspace:', enterspace);
       },
       get_selection_mode: () => selection_mode,
@@ -575,31 +662,37 @@ export function create_painter_app_state(): PainterAppState {
       get_paste_space_replace: () => paste_space_replace,
       on_paste_space_replace_change: (replace) => {
         paste_space_replace = replace;
+        saveToolProperties({ paste_space_replace: replace });
         console.log('Paste space replace:', replace);
       },
       get_paste_scale: () => paste_scale,
       on_paste_scale_change: (scale) => {
         paste_scale = Math.max(0.1, Math.min(3.0, scale));
+        saveToolProperties({ paste_scale });
         console.log('Paste scale:', paste_scale);
       },
       get_paste_ignore_space: () => paste_ignore_space,
       on_paste_ignore_space_change: (ignore) => {
         paste_ignore_space = ignore;
+        saveToolProperties({ paste_ignore_space: ignore });
         console.log('Paste ignore space:', ignore);
       },
       get_paste_ignore_black: () => paste_ignore_black,
       on_paste_ignore_black_change: (ignore) => {
         paste_ignore_black = ignore;
+        saveToolProperties({ paste_ignore_black: ignore });
         console.log('Paste ignore black:', ignore);
       },
       get_paste_ignore_white: () => paste_ignore_white,
       on_paste_ignore_white_change: (ignore) => {
         paste_ignore_white = ignore;
+        saveToolProperties({ paste_ignore_white: ignore });
         console.log('Paste ignore white:', ignore);
       },
       get_paste_ignore_color: () => paste_ignore_color,
       on_paste_ignore_color_change: (ignore) => {
         paste_ignore_color = ignore;
+        saveToolProperties({ paste_ignore_color: ignore });
         console.log('Paste ignore color:', ignore);
       },
       get_paste_ignore_color_rgb: () => paste_ignore_color_rgb,
@@ -722,21 +815,21 @@ export function create_painter_app_state(): PainterAppState {
       downloadFile(text, current_filename + '.txt', 'text/plain');
     },
     on_clear: () => {
-      if (confirm('Clear canvas? This cannot be undone.')) {
-        pushSnapshot(history, grid);
-        for (let y = 0; y < grid.height; y++) {
-          const row = grid.cells[y];
-          if (!row) continue;
-          for (let x = 0; x < grid.width; x++) {
-            row[x] = {
-              char: ' ',
-              rgb: { r: 0, g: 0, b: 0 },
-              weight_index: 0
-            };
-          }
+      // Clear current layer without confirmation (undo available)
+      pushSnapshot(history, grid);
+      for (let y = 0; y < grid.height; y++) {
+        const row = grid.cells[y];
+        if (!row) continue;
+        for (let x = 0; x < grid.width; x++) {
+          row[x] = {
+            char: ' ',
+            rgb: { r: 0, g: 0, b: 0 },
+            weight_index: 0
+          };
         }
-        schedule_auto_save();
       }
+      console.log('🗑️ Layer cleared (use Ctrl+Z to undo)');
+      schedule_auto_save();
     },
     on_reset_positions: () => {
       if (confirm('Reset all panel positions?')) {
@@ -798,12 +891,187 @@ export function create_painter_app_state(): PainterAppState {
         create_tool_properties_module,
         tool_properties_module
       );
+    },
+    on_toggle_layer_palette: () => {
+      toggleModule(
+        layer_palette_open,
+        (v) => { layer_palette_open = v; },
+        'layer_palette',
+        create_layer_palette_module,
+        layer_palette_module
+      );
     }
   });
+  
+  // Create Layer Palette module (3D layers UI)
+  let layer_palette_open = true;
+  let layer_palette_module: Module | null = null;
+  
+  function create_layer_palette_module(): Module {
+    return makeLayerPaletteModule({
+      id: 'layer_palette',
+      rect: layer_palette_rect,
+      space: voxelSpace,
+      onLayerSelect: (z) => {
+        console.log('Layer selected:', z);
+        // Switch to this layer
+        const layer = getLayer(voxelSpace, z);
+        if (layer && !layer.locked) {
+          voxelSpace.camera.focus_plane = z;
+          grid.cells = layer.cells; // Sync grid to new layer
+        }
+      },
+      onLayerVisibilityToggle: (z) => {
+        const layer = getLayer(voxelSpace, z);
+        if (layer) {
+          layer.visible = !layer.visible;
+          console.log('Layer', z, 'visibility:', layer.visible);
+        }
+      },
+      onLayerLockToggle: (z) => {
+        const layer = getLayer(voxelSpace, z);
+        if (layer) {
+          layer.locked = !layer.locked;
+          console.log('Layer', z, 'locked:', layer.locked);
+        }
+      },
+      onLayerRename: (z, newName) => {
+        const layer = getLayer(voxelSpace, z);
+        if (layer) {
+          const oldName = layer.name;
+          layer.name = newName;
+          console.log(`Renamed layer ${z}: "${oldName}" → "${newName}"`);
+        }
+      },
+      onAddLayer: () => {
+        // Find next available Z
+        const zs = Array.from(voxelSpace.layers.keys());
+        const maxZ = zs.length > 0 ? Math.max(...zs) : -1;
+        const newZ = maxZ + 1;
+        addLayer(voxelSpace, newZ, `Layer ${newZ}`);
+        // Select the new layer
+        voxelSpace.camera.focus_plane = newZ;
+        const newLayer = getLayer(voxelSpace, newZ);
+        if (newLayer) {
+          grid.cells = newLayer.cells;
+        }
+        // Log to history
+        logLayerAction(history, 'add_layer', `Add Layer ${newZ}`, newZ, newLayer);
+        console.log('Added layer at Z:', newZ);
+      },
+      onDeleteLayer: (z) => {
+        try {
+          // Capture layer data before deletion
+          const layerToDelete = getLayer(voxelSpace, z);
+          removeLayer(voxelSpace, z);
+          // Log to history
+          if (layerToDelete) {
+            logLayerAction(history, 'delete_layer', `Delete Layer ${z}`, z, layerToDelete);
+          }
+          // Switch to another layer if needed
+          if (voxelSpace.camera.focus_plane === z) {
+            const remainingZs = Array.from(voxelSpace.layers.keys());
+            if (remainingZs.length > 0) {
+              voxelSpace.camera.focus_plane = remainingZs[0]!;
+              const layer = getLayer(voxelSpace, remainingZs[0]!);
+              if (layer) {
+                grid.cells = layer.cells;
+              }
+            }
+          }
+          console.log('Deleted layer at Z:', z);
+        } catch (e) {
+          console.error('Cannot delete layer:', e);
+        }
+      },
+      onDuplicateLayer: (z) => {
+        const zs = Array.from(voxelSpace.layers.keys());
+        const maxZ = zs.length > 0 ? Math.max(...zs) : -1;
+        const newZ = maxZ + 1;
+        duplicateLayer(voxelSpace, z, newZ);
+        voxelSpace.camera.focus_plane = newZ;
+        const newLayer = getLayer(voxelSpace, newZ);
+        if (newLayer) {
+          grid.cells = newLayer.cells;
+        }
+        // Log to history
+        logLayerAction(history, 'duplicate_layer', `Duplicate Layer ${z} → ${newZ}`, newZ, newLayer, z, newZ);
+        console.log('Duplicated layer', z, 'to', newZ);
+      },
+      onMergeDown: (z) => {
+        const { mergeLayerDown } = require('../ascii_painter/voxel_space.js');
+        mergeLayerDown(voxelSpace, z);
+        console.log('Merged layer', z, 'down');
+      },
+      onReorderLayers: (newZOrder) => {
+        // Reorder layers based on the new Z order array
+        // newZOrder contains Z values in their new visual order (top to bottom)
+        const oldLayers = new Map(voxelSpace.layers);
+        voxelSpace.layers.clear();
+        
+        // Rebuild layers with new Z values
+        // Top layer (index 0) gets highest Z, bottom layer gets Z=0
+        // This matches getSortedLayers() which sorts by b.z - a.z (descending)
+        const oldToNewZ = new Map<number, number>();
+        const maxZ = newZOrder.length - 1;
+        
+        // Rebuild the layers map with new Z coordinates
+        for (let i = 0; i < newZOrder.length; i++) {
+          const oldZ = newZOrder[i]!;
+          const layer = oldLayers.get(oldZ);
+          if (layer) {
+            const newZ = maxZ - i; // Top layer gets highest Z
+            layer.z = newZ;
+            voxelSpace.layers.set(newZ, layer);
+            oldToNewZ.set(oldZ, newZ);
+          }
+        }
+        
+        // Update focus plane if needed
+        const oldFocusPlane = voxelSpace.camera.focus_plane;
+        if (oldToNewZ.has(oldFocusPlane)) {
+          voxelSpace.camera.focus_plane = oldToNewZ.get(oldFocusPlane)!;
+        }
+        
+        // Sync grid to current layer
+        const currentLayer = getLayer(voxelSpace, voxelSpace.camera.focus_plane);
+        if (currentLayer) {
+          grid.cells = currentLayer.cells;
+        }
+        
+        // Update bounds
+        voxelSpace.bounds.minZ = 0;
+        voxelSpace.bounds.maxZ = maxZ;
+        voxelSpace.bounds.depth = newZOrder.length;
+        
+        console.log('Reordered layers:', newZOrder, '→ Z values:', newZOrder.map((_, i) => maxZ - i));
+      },
+      onMove: (new_rect) => {
+        if (layer_palette_module) {
+          layer_palette_module.rect = new_rect;
+          saveModulePosition('layer_palette', new_rect);
+        }
+      },
+      onResize: (new_rect) => {
+        if (layer_palette_module) {
+          layer_palette_module.rect = new_rect;
+        }
+      },
+      onClose: () => {
+        layer_palette_open = false;
+        registry.unregister('layer_palette');
+        layer_palette_module = null;
+      }
+    });
+  }
   
   // Register initial modules
   registry.register(file_menu);
   registry.register(canvas_module);
+  
+  // Register Layer Palette (3D layers)
+  layer_palette_module = create_layer_palette_module();
+  registry.register(layer_palette_module);
   
   // Register floating modules (open by default)
   char_selector_module = create_char_selector_module();
@@ -820,6 +1088,11 @@ export function create_painter_app_state(): PainterAppState {
   registry.register(tool_properties_module);
   
   console.log('Registered modules:', registry.get_all().map(m => ({ id: m.id, rect: m.rect })));
+  
+  // Debug: Log VoxelSpace state on startup
+  console.log('🎨 ASCII Painter 3D initialized');
+  console.log(debugVoxelSpace(voxelSpace));
+  console.log('💡 3D VoxelSpace Mode Active - Data is always 3D, camera modes are views');
   
   return {
     modules: registry.get_all(),
@@ -863,20 +1136,29 @@ export function create_painter_app_state(): PainterAppState {
     save_to_file: (filename?: string) => {
       const name = filename || current_filename || generateFilename('ascii_art', 'json');
       if (filename) current_filename = filename;
-      const data = exportToJSON(grid, { title: current_filename, description: 'ASCII Art', tags: ['ascii_painter'] });
+      // Save VoxelSpace (new 3D format)
+      const data = exportVoxelSpaceToJSON(voxelSpace);
       downloadFile(data, name, 'application/json');
-      autoSave(grid, current_filename); // Also update auto-save
+      autoSaveVoxelSpace(voxelSpace, current_filename); // Also update auto-save
     },
 
     load_from_file: async (file: File) => {
       try {
         const content = await readFileAsText(file);
-        const new_grid = importFromJSON(content);
-        grid.width = new_grid.width;
-        grid.height = new_grid.height;
-        grid.cells = new_grid.cells;
+        // Try to import as VoxelSpace (handles both v1 and v2 formats)
+        const loadedSpace = importVoxelSpaceFromJSON(content);
+        voxelSpace = loadedSpace;
+        // Sync grid to current layer
+        const currentLayer = getLayer(voxelSpace, voxelSpace.camera.focus_plane);
+        if (currentLayer) {
+          grid.width = voxelSpace.bounds.width;
+          grid.height = voxelSpace.bounds.height;
+          grid.cells = currentLayer.cells;
+        }
         pushSnapshot(history, grid);
         current_filename = file.name.replace('.json', '');
+        console.log('📂 Loaded file:', current_filename);
+        console.log(debugVoxelSpace(voxelSpace));
         schedule_auto_save();
       } catch (e) {
         console.error('Failed to load file:', e);
@@ -889,15 +1171,126 @@ export function create_painter_app_state(): PainterAppState {
     },
 
     new_canvas: (width: number, height: number) => {
-      const new_grid = createGrid(width, height);
-      grid.width = new_grid.width;
-      grid.height = new_grid.height;
-      grid.cells = new_grid.cells;
+      // Create new VoxelSpace with default single layer
+      voxelSpace = createVoxelSpace(width, height, { defaultZ: 0 });
+      // Sync grid to the new VoxelSpace
+      const currentLayer = getLayer(voxelSpace, 0);
+      if (currentLayer) {
+        grid.width = width;
+        grid.height = height;
+        grid.cells = currentLayer.cells;
+      }
       pushSnapshot(history, grid);
       current_filename = 'untitled';
       clearAutoSave();
+      console.log('🆕 New canvas created:', width, 'x', height);
+      console.log(debugVoxelSpace(voxelSpace));
     },
 
-    current_filename
+    current_filename,
+    
+    // VoxelSpace operations (3D support)
+    export_voxel_space: () => {
+      const { exportVoxelSpace } = require('../ascii_painter/voxel_space.js');
+      const data = exportVoxelSpace(voxelSpace);
+      return JSON.stringify(data, null, 2);
+    },
+    
+    import_voxel_space: (json: string) => {
+      try {
+        const { importVoxelSpace } = require('../ascii_painter/voxel_space.js');
+        const parsed = JSON.parse(json);
+        voxelSpace = importVoxelSpace(parsed);
+        // Update grid reference to current layer
+        const currentLayer = getLayer(voxelSpace, voxelSpace.camera.focus_plane);
+        if (currentLayer) {
+          grid.width = voxelSpace.bounds.width;
+          grid.height = voxelSpace.bounds.height;
+          grid.cells = currentLayer.cells;
+        }
+        pushSnapshot(history, grid);
+        console.log('🎨 Imported VoxelSpace:', debugVoxelSpace(voxelSpace));
+      } catch (e) {
+        console.error('Failed to import VoxelSpace:', e);
+      }
+    },
+    
+    get_voxel_space: () => voxelSpace,
+    
+    set_camera_mode: (mode: CameraMode) => {
+      voxelSpace.camera.mode = mode;
+      console.log('📷 Camera mode:', mode);
+    },
+    
+    set_parallax_intensity: (intensity: number) => {
+      voxelSpace.camera.parallax_intensity = Math.max(0, Math.min(1, intensity));
+    },
+    
+    toggle_show_all_layers: () => {
+      voxelSpace.camera.show_all_layers = !voxelSpace.camera.show_all_layers;
+      console.log('👁 Show all layers:', voxelSpace.camera.show_all_layers);
+    },
+    
+    // Layer operations
+    add_layer: () => {
+      const zs = Array.from(voxelSpace.layers.keys());
+      const maxZ = zs.length > 0 ? Math.max(...zs) : 0;
+      const newZ = maxZ + 1;
+      addLayer(voxelSpace, newZ, `Layer ${newZ}`);
+      console.log('➕ Added layer at Z=', newZ);
+    },
+    
+    delete_layer: (z: number) => {
+      try {
+        removeLayer(voxelSpace, z);
+        // If we deleted the current layer, switch to another
+        if (z === voxelSpace.camera.focus_plane) {
+          const remainingZs = Array.from(voxelSpace.layers.keys());
+          if (remainingZs.length > 0) {
+            voxelSpace.camera.focus_plane = remainingZs[0]!;
+            const layer = getLayer(voxelSpace, voxelSpace.camera.focus_plane);
+            if (layer) {
+              grid.cells = layer.cells;
+            }
+          }
+        }
+        console.log('🗑️ Deleted layer at Z=', z);
+      } catch (e) {
+        console.error('Cannot delete layer:', e);
+      }
+    },
+    
+    duplicate_layer: (z: number) => {
+      const zs = Array.from(voxelSpace.layers.keys());
+      const maxZ = zs.length > 0 ? Math.max(...zs) : 0;
+      const newZ = maxZ + 1;
+      duplicateLayer(voxelSpace, z, newZ);
+      console.log('📋 Duplicated layer', z, 'to', newZ);
+    },
+    
+    select_layer: (z: number) => {
+      voxelSpace.camera.focus_plane = z;
+      const layer = getLayer(voxelSpace, z);
+      if (layer) {
+        grid.cells = layer.cells;
+        console.log('✓ Selected layer Z=', z);
+      }
+    },
+    
+    toggle_layer_visibility: (z: number) => {
+      const layer = getLayer(voxelSpace, z);
+      if (layer) {
+        layer.visible = !layer.visible;
+        console.log('👁 Layer', z, 'visible:', layer.visible);
+      }
+    },
+    
+    toggle_layer_lock: (z: number) => {
+      const layer = getLayer(voxelSpace, z);
+      if (layer) {
+        layer.locked = !layer.locked;
+        console.log('🔒 Layer', z, 'locked:', layer.locked);
+      }
+    },
   };
 }

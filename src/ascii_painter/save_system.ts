@@ -2,10 +2,13 @@
  * ASCII Painter Save/Export System
  *
  * Handles saving, loading, and exporting ASCII art creations.
+ * Supports both legacy Grid format (v1) and new VoxelSpace format (v2).
  */
 
 import type { Grid, GridExport } from './types.js';
 import { exportGrid, importGrid } from './types.js';
+import type { VoxelSpace, VoxelSpaceExport } from './voxel_space.js';
+import { exportVoxelSpace, importVoxelSpace, gridToVoxelSpace, voxelSpaceToGrid } from './voxel_space.js';
 
 /**
  * Export grid to JSON string
@@ -146,4 +149,174 @@ export function generateFilename(prefix: string = 'ascii_art', extension: string
   const date = new Date();
   const timestamp = date.toISOString().replace(/[:.]/g, '-').slice(0, 19);
   return `${prefix}_${timestamp}.${extension}`;
+}
+
+// ============================================================================
+// VoxelSpace Support (v2 format)
+// ============================================================================
+
+/**
+ * Export VoxelSpace to JSON string (v2 format)
+ */
+export function exportVoxelSpaceToJSON(space: VoxelSpace): string {
+  const data = exportVoxelSpace(space);
+  return JSON.stringify(data, null, 2);
+}
+
+/**
+ * Import VoxelSpace from JSON string (supports v1 and v2)
+ */
+export function importVoxelSpaceFromJSON(json: string): VoxelSpace {
+  const parsed = JSON.parse(json);
+  
+  // Detect version
+  if (parsed.version === 2 && parsed.type === 'voxel_space') {
+    // v2 format - VoxelSpace
+    return importVoxelSpace(parsed as VoxelSpaceExport);
+  } else if (parsed.version === 1) {
+    // v1 format - Legacy Grid, convert to VoxelSpace
+    const grid = importGrid(parsed as GridExport);
+    return gridToVoxelSpace(grid, 0);
+  } else {
+    throw new Error(`Unsupported file format version: ${parsed.version}`);
+  }
+}
+
+/**
+ * Export VoxelSpace to plain text (flattens all layers)
+ */
+export function exportVoxelSpaceToText(space: VoxelSpace): string {
+  // Flatten to a single grid and export as text
+  const { flattenLayers } = require('./voxel_space.js');
+  const flattened = flattenLayers(space);
+  const grid = voxelSpaceToGrid(flattened, 0);
+  return exportToText(grid);
+}
+
+/**
+ * Detect if JSON is VoxelSpace (v2) or legacy Grid (v1)
+ */
+export function detectFileFormat(json: string): 'voxel_space' | 'grid' | 'unknown' {
+  try {
+    const parsed = JSON.parse(json);
+    if (parsed.version === 2 && parsed.type === 'voxel_space') {
+      return 'voxel_space';
+    } else if (parsed.version === 1) {
+      return 'grid';
+    }
+    return 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * Auto-save VoxelSpace to localStorage
+ */
+export function autoSaveVoxelSpace(space: VoxelSpace, filename: string = 'untitled'): void {
+  try {
+    const data = exportVoxelSpaceToJSON(space);
+    localStorage.setItem(AUTOSAVE_KEY, data);
+  } catch (e) {
+    console.warn('VoxelSpace auto-save failed:', e);
+  }
+}
+
+/**
+ * Load auto-saved VoxelSpace from localStorage
+ * Returns null if no auto-save exists or if it's legacy format
+ */
+export function loadAutoSaveVoxelSpace(): VoxelSpace | null {
+  try {
+    const data = localStorage.getItem(AUTOSAVE_KEY);
+    if (!data) return null;
+    
+    const format = detectFileFormat(data);
+    if (format === 'voxel_space' || format === 'grid') {
+      return importVoxelSpaceFromJSON(data);
+    }
+    return null;
+  } catch (e) {
+    console.warn('Load VoxelSpace auto-save failed:', e);
+    return null;
+  }
+}
+
+// Tool properties persistence key
+const TOOL_PROPERTIES_KEY = 'thaumworld_ascii_painter_tool_properties';
+
+/**
+ * Tool properties that should persist between sessions
+ */
+export interface ToolProperties {
+  // Brush settings
+  brush_size: number;
+  
+  // Text tool settings
+  text_spacing: number;
+  text_charlead: number;
+  text_enterlead: number;
+  text_enterspace: number;
+  
+  // Paste settings
+  paste_space_replace: boolean;
+  paste_scale: number;
+  paste_ignore_space: boolean;
+  paste_ignore_color: boolean;
+  paste_ignore_color_rgb: { r: number; g: number; b: number };
+  paste_ignore_black: boolean;
+  paste_ignore_white: boolean;
+  
+  // Tool assignments
+  left_click_tool: string;
+  right_click_tool: string;
+}
+
+/**
+ * Default tool properties
+ */
+const DEFAULT_TOOL_PROPERTIES: ToolProperties = {
+  brush_size: 1,
+  text_spacing: 1,
+  text_charlead: 0,
+  text_enterlead: 1,
+  text_enterspace: 0,
+  paste_space_replace: true,
+  paste_scale: 1.0,
+  paste_ignore_space: false,
+  paste_ignore_color: false,
+  paste_ignore_color_rgb: { r: 255, g: 255, b: 255 },
+  paste_ignore_black: false,
+  paste_ignore_white: false,
+  left_click_tool: 'pencil',
+  right_click_tool: 'eraser',
+};
+
+/**
+ * Save tool properties to localStorage
+ */
+export function saveToolProperties(props: Partial<ToolProperties>): void {
+  try {
+    const existing = loadToolProperties();
+    const merged = { ...existing, ...props };
+    localStorage.setItem(TOOL_PROPERTIES_KEY, JSON.stringify(merged));
+  } catch (e) {
+    console.warn('Save tool properties failed:', e);
+  }
+}
+
+/**
+ * Load tool properties from localStorage
+ */
+export function loadToolProperties(): ToolProperties {
+  try {
+    const data = localStorage.getItem(TOOL_PROPERTIES_KEY);
+    if (!data) return DEFAULT_TOOL_PROPERTIES;
+    
+    const parsed = JSON.parse(data);
+    return { ...DEFAULT_TOOL_PROPERTIES, ...parsed };
+  } catch (e) {
+    console.warn('Load tool properties failed:', e);
+    return DEFAULT_TOOL_PROPERTIES;
+  }
 }

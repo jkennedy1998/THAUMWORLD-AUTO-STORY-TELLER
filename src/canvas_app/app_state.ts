@@ -306,21 +306,17 @@ export function create_app_state(): AppState {
     function get_item_slot_types(item_def: ItemDefinition): SlotType[] {
         const slot_types: SlotType[] = [];
         
-        if (!item_def.tags) return slot_types;
+        // All items can be held in tool slots (hand slots)
+        slot_types.push('tool');
         
-        for (const tag of item_def.tags) {
-            if (tag.name === 'ARMOR') {
-                slot_types.push('armor');
-            } else if (tag.name === 'GARB') {
-                slot_types.push('garb');
-            } else if (tag.name === 'TOOL') {
-                slot_types.push('tool');
+        if (item_def.tags) {
+            for (const tag of item_def.tags) {
+                if (tag.name === 'ARMOR') {
+                    slot_types.push('armor');
+                } else if (tag.name === 'GARB') {
+                    slot_types.push('garb');
+                }
             }
-        }
-        
-        // Default to armor if no equipment tags found but has valid_body_slots
-        if (slot_types.length === 0 && item_def.valid_body_slots && item_def.valid_body_slots.length > 0) {
-            slot_types.push('armor');
         }
         
         return slot_types;
@@ -330,23 +326,29 @@ export function create_app_state(): AppState {
     // Now uses lowercase_snake_case consistently throughout the system
     // Returns array of {slot_name, slot_type} objects
     function get_compatible_slots(item_def: ItemDefinition): Array<{ slot_name: string; slot_type: SlotType }> {
-        if (!item_def.valid_body_slots || item_def.valid_body_slots.length === 0) {
-            return [];
-        }
-
         const slot_types = get_item_slot_types(item_def);
         const compatible: Array<{ slot_name: string; slot_type: SlotType }> = [];
         
-        // Get valid body slots
-        const valid_slots = item_def.valid_body_slots.filter(slot => 
+        // Get valid body slots from item definition
+        const valid_slots = item_def.valid_body_slots?.filter(slot => 
             ['head', 'torso', 'hand_left', 'hand_right', 'leg_left', 'leg_right'].includes(slot)
-        );
+        ) || [];
         
-        // For each valid slot, add entries for each compatible slot type
+        // For each valid slot, add entries for each compatible slot type (armor/garb)
         for (const slot_name of valid_slots) {
             for (const slot_type of slot_types) {
-                compatible.push({ slot_name, slot_type });
+                if (slot_type !== 'tool') {  // tool handled separately below
+                    compatible.push({ slot_name, slot_type });
+                }
             }
+        }
+        
+        // ALL items can be held in hand tool slots, regardless of valid_body_slots
+        // This allows holding any item (food, clothing, misc) in hands
+        // BUG FIX: Previously returned early if valid_body_slots was empty, preventing hand use
+        if (slot_types.includes('tool')) {
+            compatible.push({ slot_name: 'hand_left', slot_type: 'tool' });
+            compatible.push({ slot_name: 'hand_right', slot_type: 'tool' });
         }
         
         return compatible;
@@ -357,24 +359,43 @@ export function create_app_state(): AppState {
     function get_compatible_items_for_slot(slot_name: string): Array<{ container_id: string; slot_index: number }> {
         const compatible_items: Array<{ container_id: string; slot_index: number }> = [];
         
+        debug_log(`[get_compatible_items_for_slot] Searching for items compatible with ${slot_name}`);
+        debug_log(`[get_compatible_items_for_slot] Open containers: ${Array.from(ui_state.container.open_containers).join(', ')}`);
+        
         // Search through all open containers
         for (const container_id of ui_state.container.open_containers) {
             const container_data = ui_state.container.container_data_map.get(container_id);
-            if (!container_data) continue;
+            if (!container_data) {
+                debug_log(`[get_compatible_items_for_slot] No data for container: ${container_id}`);
+                continue;
+            }
+            
+            debug_log(`[get_compatible_items_for_slot] Checking container: ${container_id} with ${container_data.contents.length} items`);
             
             const contents = container_data.contents;
             for (let i = 0; i < contents.length; i++) {
                 const entry = contents[i];
-                if (!entry?.definition) continue;
+                if (!entry?.definition) {
+                    debug_log(`[get_compatible_items_for_slot] Item ${i} in ${container_id} missing definition`);
+                    continue;
+                }
                 
                 // Check if this item can go in the specified slot
                 const valid_slots = entry.definition.valid_body_slots || [];
-                if (valid_slots.includes(slot_name)) {
+                const item_name = entry.definition.name || entry.instance?.def_id || 'unknown';
+                
+                // BUG FIX: Hand slots (tool slots) can hold ANY item, not just items with valid_body_slots
+                // This allows holding misc items like stone fragments, food, etc.
+                if (valid_slots.includes(slot_name) || slot_name === 'hand_left' || slot_name === 'hand_right') {
                     compatible_items.push({ container_id, slot_index: i });
+                    debug_log(`[get_compatible_items_for_slot] ✓ ${item_name} (slot ${i}) compatible with ${slot_name}`);
+                } else {
+                    debug_log(`[get_compatible_items_for_slot] ✗ ${item_name} (slot ${i}) NOT compatible - valid_slots: [${valid_slots.join(', ')}]`);
                 }
             }
         }
         
+        debug_log(`[get_compatible_items_for_slot] Found ${compatible_items.length} compatible items for ${slot_name}`);
         return compatible_items;
     }
 
@@ -491,17 +512,48 @@ export function create_app_state(): AppState {
             }
             
             // Reuse containers data from weight calculation above
-            // For each body slot, get the equipped item ID from body_slots and find it in containers
+            // For each body slot, get ALL equipped item IDs and their slot types
             for (const slot_name of body_slot_names) {
-                const item_id = get_slot_item_id(body_slots, slot_name);
-                debug_log(`[LOAD_EQUIPPED] Slot ${slot_name}: item_id=${item_id}`);
-                if (item_id) {
-                    const item_data = find_item_in_containers(full_containers, item_id);
-                    if (item_data && item_data.definition) {
+                const slot_data = (body_slots as Record<string, any>)[slot_name];
+                if (!slot_data) continue;
+                
+                // NEW format: load items from tool/armor/garb separately
+                if ('armor' in slot_data || 'garb' in slot_data || 'tool' in slot_data) {
+                    // Load tool slot item
+                    if (slot_data.tool) {
+                        const item_data = find_item_in_containers(full_containers, slot_data.tool);
+                        if (item_data) {
+                            ui_state.character.equipped_items.set(`${slot_name}.tool`, item_data);
+                            debug_log(`[Character] Found equipped item in ${slot_name}.tool: ${item_data.definition.name}`);
+                        }
+                    }
+                    
+                    // Load armor slot item
+                    if (slot_data.armor) {
+                        const item_data = find_item_in_containers(full_containers, slot_data.armor);
+                        if (item_data) {
+                            ui_state.character.equipped_items.set(`${slot_name}.armor`, item_data);
+                            debug_log(`[Character] Found equipped item in ${slot_name}.armor: ${item_data.definition.name}`);
+                        }
+                    }
+                    
+                    // Load garb slot items
+                    if (slot_data.garb && Array.isArray(slot_data.garb)) {
+                        for (let i = 0; i < slot_data.garb.length; i++) {
+                            const garb_id = slot_data.garb[i];
+                            const item_data = find_item_in_containers(full_containers, garb_id);
+                            if (item_data) {
+                                ui_state.character.equipped_items.set(`${slot_name}.garb.${i}`, item_data);
+                                debug_log(`[Character] Found equipped item in ${slot_name}.garb.${i}: ${item_data.definition.name}`);
+                            }
+                        }
+                    }
+                } else if (slot_data.item_instance_id) {
+                    // OLD format: single item per slot
+                    const item_data = find_item_in_containers(full_containers, slot_data.item_instance_id);
+                    if (item_data) {
                         ui_state.character.equipped_items.set(slot_name, item_data);
-                        debug_log(`[Character] Found equipped item in ${slot_name}: ${item_data.definition.name} (${item_id})`);
-                    } else {
-                        debug_log(`[Character] WARNING: Could not find item ${item_id} for slot ${slot_name} (data=${!!item_data}, def=${!!item_data?.definition})`);
+                        debug_log(`[Character] Found equipped item in ${slot_name} (legacy): ${item_data.definition.name}`);
                     }
                 }
             }
@@ -1812,6 +1864,8 @@ export function create_app_state(): AppState {
                         flash_status([`Dropped item at (${tile_x}, ${tile_y})`], 1500);
                         // Refresh place view to show dropped item
                         await update_current_place(place.id);
+                        // BUG FIX: Refresh source container to remove item from inventory display
+                        void refresh_container_data();
                         // Clear drag state
                         drag_state.is_dragging = false;
                         drag_state.item_instance_id = null;
@@ -1829,6 +1883,119 @@ export function create_app_state(): AppState {
                     debug_log(`[PlaceModule] on_drop: Exception: ${err}`);
                     drag_state.reject_drag();
                     flash_status([`Drop failed: ${err}`], 2000);
+                    return false;
+                }
+            },
+
+            on_throw: async (tile_x: number, tile_y: number): Promise<boolean> => {
+                debug_log(`[PlaceModule] ========== on_throw called ==========`);
+                debug_log(`[PlaceModule] Target tile: (${tile_x}, ${tile_y})`);
+                debug_log(`[PlaceModule] Drag state: is_dragging=${drag_state.is_dragging}, source_module=${drag_state.source_module}`);
+                debug_log(`[PlaceModule] Item: ${drag_state.item_instance_id} from ${drag_state.source_container_id}`);
+
+                if (!drag_state.is_dragging) {
+                    debug_log(`[PlaceModule] on_throw: Not dragging - rejecting`);
+                    return false;
+                }
+
+                const place = get_current_place();
+                if (!place) {
+                    debug_log(`[PlaceModule] on_throw: No place loaded - rejecting`);
+                    return false;
+                }
+                debug_log(`[PlaceModule] on_throw: Place is ${place.id}`);
+
+                // Get actor
+                const actor = place.contents.actors_present[0];
+                if (!actor) {
+                    debug_log(`[PlaceModule] on_throw: No actor present - rejecting`);
+                    return false;
+                }
+
+                // Determine which hand is holding the item
+                // source_container_id format: container.{actor_id}.{slot_name}.{slot_type}
+                const source_parts = drag_state.source_container_id?.split('.');
+                if (!source_parts || source_parts.length < 4) {
+                    debug_log(`[PlaceModule] on_throw: Invalid source container format`);
+                    drag_state.reject_drag();
+                    flash_status([`Cannot throw: item not in hand`], 2000);
+                    return false;
+                }
+                
+                const slot_name = source_parts[2]; // hand_left or hand_right
+                const slot_type = source_parts[3]; // tool, armor, or garb
+                
+                // Only allow throwing from tool slots (held items)
+                if (slot_type !== 'tool') {
+                    debug_log(`[PlaceModule] on_throw: Item not held in tool slot (${slot_type})`);
+                    drag_state.reject_drag();
+                    flash_status([`Cannot throw: must be holding item in hand`], 2000);
+                    return false;
+                }
+                
+                const from_slot = `${slot_name}.tool`;
+                debug_log(`[PlaceModule] on_throw: Throwing from ${from_slot}`);
+
+                // Call the throw API
+                const slot = APP_CONFIG.selected_data_slot;
+                const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+                const url = `${base_url}/api/place/throw?slot=${slot}`;
+                
+                const actor_id = APP_CONFIG.input_actor_id;
+                const request_body = {
+                    actor_id: actor_id,
+                    item_instance_id: drag_state.item_instance_id,
+                    from_slot: from_slot,
+                    target_tile: { x: tile_x, y: tile_y }
+                };
+                
+                debug_log(`[PlaceModule] on_throw: Calling API ${url}`);
+                debug_log(`[PlaceModule] on_throw: Request body: ${JSON.stringify(request_body)}`);
+
+                try {
+                    const response = await fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(request_body)
+                    });
+
+                    debug_log(`[PlaceModule] on_throw: Response status: ${response.status}`);
+
+                    if (!response.ok) {
+                        const error_text = await response.text();
+                        debug_log(`[PlaceModule] on_throw: HTTP error: ${response.status} - ${error_text}`);
+                        drag_state.reject_drag();
+                        flash_status([`Cannot throw: ${error_text}`], 2000);
+                        return false;
+                    }
+
+                    const data = await response.json();
+                    debug_log(`[PlaceModule] on_throw: Response data: ${JSON.stringify(data)}`);
+
+                    if (data.ok) {
+                        debug_log(`[PlaceModule] on_throw: SUCCESS!`);
+                        flash_status([`Threw item to (${tile_x}, ${tile_y})`], 1500);
+                        // Refresh place view to show thrown item
+                        await update_current_place(place.id);
+                        // Refresh character data to update hand slot display
+                        void refresh_character_data();
+                        // Clear drag state
+                        drag_state.is_dragging = false;
+                        drag_state.item_instance_id = null;
+                        drag_state.source_container_id = null;
+                        drag_state.item_definition = null;
+                        drag_state.source_module = null;
+                        return true;
+                    } else {
+                        debug_log(`[PlaceModule] on_throw: API returned error: ${data.error}`);
+                        drag_state.reject_drag();
+                        flash_status([`Cannot throw: ${data.error}`], 2000);
+                        return false;
+                    }
+                } catch (err) {
+                    debug_log(`[PlaceModule] on_throw: Exception: ${err}`);
+                    drag_state.reject_drag();
+                    flash_status([`Throw failed: ${err}`], 2000);
                     return false;
                 }
             },
@@ -2432,8 +2599,10 @@ export function create_app_state(): AppState {
                 // Handle drag from container (inventory) to character slot
                 if (drag_state.source_module === 'container') {
                     // Validate body slot compatibility before attempting transfer
+                    // TOOL slots can hold ANY item (hands can carry anything)
+                    // Only check valid_body_slots for ARMOR and GARB slots
                     const item_def = drag_state.item_definition;
-                    if (item_def?.valid_body_slots && !item_def.valid_body_slots.includes(slot_name)) {
+                    if (slot_type !== 'tool' && item_def?.valid_body_slots && !item_def.valid_body_slots.includes(slot_name)) {
                         flash_status([`${item_def.name} cannot be equipped to ${slot_name}`], 1500);
                         drag_state.reject_drag();
                         return false;
@@ -3578,6 +3747,13 @@ export function create_app_state(): AppState {
                             // Refresh both container and character data
                             void refresh_container_data();
                             void refresh_character_data();
+                            // BUG FIX: If source was a ground container, refresh place to update ground items display
+                            if (drag_state.source_container_id?.includes('.scattered_')) {
+                                const place = get_current_place();
+                                if (place) {
+                                    void update_current_place(place.id);
+                                }
+                            }
                             return true;
                         } else {
                             flash_status([`Transfer failed: ${transfer_data.error}`], 1500);

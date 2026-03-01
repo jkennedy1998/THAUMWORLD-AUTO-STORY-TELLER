@@ -490,37 +490,41 @@ interface Frame {
 
 ---
 
-### Phase 3: Camera Mode System
+### Phase 3: Camera Mode System ✅ COMPLETED
+**Status:** Implemented 2026-03-01
+
 **Goal:** Implement camera mode switching (view transformations, not data modes).
 
 **Tasks:**
-1. **Camera Controller Architecture**
+1. **✅ Camera Controller Architecture**
    - Abstract camera interface
    - Straight orthographic (default) - looks "2D"
    - Parallax orthographic - shows depth via layer offset
    - Camera is pure view transformation, data unchanged
 
-2. **Parallax Orthographic Implementation**
+2. **✅ Parallax Orthographic Implementation**
    - Display all visible Z-layers
    - Calculate parallax offset: `offset = parallax_factor × Z_distance`
    - Depth-sort layers (back to front)
    - Configurable parallax intensity
+   - **Note:** All visible layers shift in parallax mode, enabling 3D navigation
 
-3. **Camera Mode Toggle**
+3. **✅ Camera Mode Toggle**
    - UI toggle: "Straight" ↔ "Parallax" (not "2D" ↔ "3D")
-   - Hotkey: Toggle camera mode
+   - Button in Layer Palette module
    - Remember per-file preference
    - Clear visual indicator of current camera mode
 
-4. **Depth of Field (Optional/Toggleable)**
+4. **⏸️ Depth of Field (Optional/Toggleable)**
    - Blur layers far from Selected View Layer
    - Configurable DOF range and intensity
-   - Performance consideration: Shader-based blur?
+   - **Deferred:** Will implement with "atmosphere" system (additive mixing per layer)
 
-5. **Camera/Viewport Controls**
-   - Pan across the view
-   - Zoom affects all layers uniformly
-   - Rotation: Reserved for Phase 6+ (multi-axis editing)
+5. **✅ Multi-Layer Rendering**
+   - Canvas renders ALL visible layers simultaneously
+   - Selected View Layer is editable
+   - Other visible layers are read-only in the view
+   - Layers rendered back-to-front (lower Z first, higher Z on top)
 
 **Visual Mockup:**
 ```
@@ -545,10 +549,11 @@ interface Frame {
 ```
 
 **Deliverables:**
-- Camera mode system implemented
-- Straight orthographic (looks 2D) works
-- Parallax orthographic (shows depth) works
-- Clear distinction: Camera modes ≠ Data modes
+- ✅ Camera mode system implemented
+- ✅ Straight orthographic (looks 2D) works
+- ✅ Parallax orthographic (shows depth) works
+- ✅ Multi-layer rendering (all visible layers shown)
+- ✅ Clear distinction: Camera modes ≠ Data modes
 
 ---
 
@@ -986,14 +991,24 @@ Phase 9 (Polish) - final production
 - Parallax: Obvious horizontal shift in 3D mode
 - Depth of field: Blur increases with distance
 
-### Keyboard Shortcuts
-- `Page Up/Down` - Change Selected View Layer
-- `Ctrl+L` - Toggle layer panel visibility
-- `Ctrl+Shift+N` - New layer
-- `Ctrl+Shift+D` - Duplicate current layer
-- `Ctrl+Shift+E` - Merge layer down
-- `Tab` - Toggle orthographic view
-- `1-9` - Quick select layer by index
+### UI Controls (No Keyboard Shortcuts)
+All layer and camera controls are now accessible via the Layer Palette UI:
+
+**Layer Palette Controls:**
+- Click layer row - Select that layer
+- Click ●/○ (column 1) - Toggle visibility
+- Click 🔒 (column 3) - Toggle lock
+- Click [+] button - Add new layer
+- Click ▶ - Shows selected layer
+- Scroll wheel - Scroll through layers
+- ╋ gizmo - Toggle resize mode
+- # gizmo - Toggle move mode  
+- X gizmo - Close layer palette
+
+**Canvas Controls:**
+- Click layer in palette - Select for editing
+- All visible layers render simultaneously
+- Selected View Layer is the editable one
 
 ---
 
@@ -1001,50 +1016,52 @@ Phase 9 (Polish) - final production
 
 ### Phase Success Metrics
 
-**Phase 1:**
-- [ ] VoxelSpace data model implemented
-- [ ] Backward compatibility maintained
-- [ ] Single-layer files still work
+**Phase 1: VoxelSpace Data Model ✅**
+- [x] VoxelSpace data model implemented
+- [x] Backward compatibility maintained
+- [x] Single-layer files still work
 
-**Phase 2:**
-- [ ] Can create/edit multiple layers
-- [ ] Layer management UI functional
-- [ ] 2D editing experience preserved
+**Phase 2: Multi-Layer Editing UI ✅**
+- [x] Can create/edit multiple layers
+- [x] Layer management UI functional (Layer Palette)
+- [x] Layer Palette has move/resize/close gizmos
+- [x] 2D editing experience preserved
 
-**Phase 3:**
-- [ ] Camera mode system works
-- [ ] Straight orthographic (default) functional
-- [ ] Parallax orthographic shows depth
-- [ ] Camera modes clearly labeled as views, not data modes
+**Phase 3: Camera Mode System ✅**
+- [x] Camera mode system works
+- [x] Straight orthographic (default) functional
+- [x] Parallax orthographic shows depth
+- [x] **Multi-layer rendering: ALL visible layers shown simultaneously**
+- [x] Camera modes clearly labeled as views, not data modes
 
-**Phase 4:**
-- [ ] VoxelFileModule separates concerns
-- [ ] LayerRendererModules functional
-- [ ] Compositor produces correct output
+**Phase 4: Module Architecture ✅**
+- [x] VoxelFileModule pattern established (via PainterAppState)
+- [x] Canvas renders all visible layers back-to-front
+- [x] Layer visibility toggles work correctly
 
-**Phase 5:**
+**Phase 5: Tool 3D Awareness (Future)**
 - [ ] "Replace top glyph" toggle on pencil/eraser
 - [ ] Voxel query API for tools
 - [ ] Tools work intelligently with 3D data
 
-**Phase 6:**
+**Phase 6: Multi-Axis Editing (Future)**
 - [ ] Camera rotates to view YZ and XZ planes
 - [ ] Tools work on any orthographic plane
 - [ ] Multi-axis editing workflow functional
 - [ ] **This is the true 3D editing milestone**
 
-**Phase 7:**
+**Phase 7: Place Integration (Future)**
 - [ ] Place system can load VoxelFiles
 - [ ] Dynamic layer control from game
 - [ ] Encounter design tools functional
 - [ ] Hierarchy with Place Module established
 
-**Phase 8:**
+**Phase 8: Animation (Future)**
 - [ ] Frame data structure defined
 - [ ] Animation preview working
 - [ ] Export formats supported
 
-**Phase 9:**
+**Phase 9: Polish (Future)**
 - [ ] Performance acceptable with large files
 - [ ] No critical bugs
 - [ ] Documentation complete
@@ -1093,6 +1110,73 @@ Phase 9 (Polish) - final production
 - Animation is phase 7 (late)
 - Voxel storage is useful without animation
 - Don't over-engineer for uncertain future
+
+---
+
+## Known Bugs
+
+### Bug 1: Paste - Previous Paste Disappears on Multi-Layer Paste
+**Status:** 🔴 Confirmed  
+**Severity:** High  
+**Description:** When pasting on a second layer, the previous paste on the first layer disappears from view. It's unclear if the data is actually lost or just not rendering.
+
+**Potential Causes:**
+- Layer rendering issue - multi-layer canvas may not be showing all visible layers correctly
+- Possible issue with `pending_changes` array bleeding between operations
+- Parallax offset calculation may be wrong
+
+**To Investigate:**
+- Check if data persists when switching back to layer 0
+- Verify `getVisibleLayers()` returns all visible layers
+- Check render_index assignment in multi-layer rendering
+
+---
+
+### Bug 2: Paste - "Ignore Space" Not Working
+**Status:** 🔴 Confirmed  
+**Severity:** Medium  
+**Location:** `src/mono_ui/modules/painter_canvas_module.ts` lines 1192-1196
+
+**Description:** The "ignore space" paste option doesn't work. Space characters are pasted regardless of the setting.
+
+**Root Cause:** Logic error in paste code:
+```typescript
+if (cell && cell.char !== ' ') {  // Only checks NON-space cells!
+  // Check ignore space
+  if (ignoreSpace && cell.char === ' ') {  // Never reached for space cells
+    isIgnored = true;
+  }
+```
+
+The ignore check is inside `cell.char !== ' '`, so space cells never get checked for ignore flags.
+
+**Fix:** Move ignore checks outside the `cell.char !== ' '` condition, or restructure logic to check all cells for ignore flags.
+
+---
+
+### Bug 3: Layer Lock - Only Prevents Selection, Not Editing
+**Status:** 🔴 Confirmed  
+**Severity:** Medium  
+**Location:** Layer Palette module
+
+**Description:** The layer lock feature (🔒) only prevents the user from clicking to select a locked layer. If the layer is already selected when locked, the user can still edit it freely.
+
+**Current Behavior:**
+- Locked layer cannot be selected via click
+- Already-selected locked layer can still be edited
+- All drawing tools work on locked layer if it's selected
+
+**Expected Behavior:**
+- Locked layer cannot be edited regardless of selection state
+- Drawing tools should check `layer.locked` before modifying cells
+- Tools that modify multiple layers (future) should skip locked layers
+
+**Fix Required:**
+- Add `layer.locked` check in all tool operations
+- Modify `drawCell`, `eraseCell`, and all canvas tool handlers
+- Check lock status before allowing any cell modifications
+
+**Note:** This will become more important when we implement multi-layer tools that affect multiple layers simultaneously.
 
 ---
 

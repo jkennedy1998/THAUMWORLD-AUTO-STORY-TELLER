@@ -100,3 +100,41 @@ export {
   loadGradiatorState,
   clearGradiatorState
 } from './gradiator_storage.js';
+
+// 3D VoxelSpace System
+export type {
+  VoxelSpace,
+  VoxelLayer,
+  VoxelSpaceExport,
+  CameraConfig,
+  CameraMode,
+  CameraOrientation
+} from './voxel_space.js';
+
+export {
+  createVoxelSpace,
+  createDefaultCamera,
+  getLayer,
+  getOrCreateLayer,
+  getVoxel,
+  setVoxel,
+  getVisibleLayers,
+  getLayersForParallax,
+  addLayer,
+  removeLayer,
+  duplicateLayer,
+  mergeLayerDown,
+  flattenLayers,
+  exportVoxelSpace,
+  importVoxelSpace,
+  gridToVoxelSpace,
+  voxelSpaceToGrid,
+  debugVoxelSpace
+} from './voxel_space.js';
+
+// Save System & Tool Properties
+export type { ToolProperties } from './save_system.js';
+export {
+  saveToolProperties,
+  loadToolProperties
+} from './save_system.js';

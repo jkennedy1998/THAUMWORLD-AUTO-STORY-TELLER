@@ -10,6 +10,12 @@
   "conductivity_mag": 1,
   "tags": [
     {
+      "name": "GARB",
+      "mag": 1,
+      "meta": ["leg_left", "leg_right"],
+      "info": [1]
+    },
+    {
       "name": "CONTAINER",
       "mag": 1,
       "meta": []

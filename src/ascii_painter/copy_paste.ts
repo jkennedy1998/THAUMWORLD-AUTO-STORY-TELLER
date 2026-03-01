@@ -115,13 +115,14 @@ export function decodeFromSpecialFormat(encoded: string): CopyData | null {
       for (let y = 0; y < height && lineIndex < lines.length; y++) {
         const line = lines[lineIndex] ?? '';
         for (let x = 0; x < width && x < line.length; x++) {
-          const char = line[x];
-          if (char && char !== ' ') {
-            if (!cells[y]![x]) {
-              cells[y]![x] = { char, rgb: { r: 255, g: 255, b: 255 }, weight_index: 4 };
-            } else {
-              cells[y]![x]!.char = char;
-            }
+          const char = line[x] ?? ' ';
+          // Always create a cell for every position, even for spaces
+          // This ensures WEIGHT and COLOR sections update existing cells
+          // instead of creating placeholder cells with wrong char values
+          if (!cells[y]![x]) {
+            cells[y]![x] = { char, rgb: { r: 255, g: 255, b: 255 }, weight_index: 4 };
+          } else {
+            cells[y]![x]!.char = char;
           }
         }
         lineIndex++;
@@ -136,9 +137,9 @@ export function decodeFromSpecialFormat(encoded: string): CopyData | null {
         for (let x = 0; x < width && x < line.length; x++) {
           const weightChar = line[x];
           if (weightChar && weightChar >= '0' && weightChar <= '7') {
-            if (!cells[y]![x]) {
-              cells[y]![x] = { char: ' ', rgb: { r: 0, g: 0, b: 0 }, weight_index: parseInt(weightChar) };
-            } else {
+            // Only update existing cells - don't create placeholder cells
+            // The TEXT section should have already created all cells
+            if (cells[y]![x]) {
               cells[y]![x]!.weight_index = parseInt(weightChar);
             }
           }

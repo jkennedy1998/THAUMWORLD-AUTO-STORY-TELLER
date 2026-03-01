@@ -9,7 +9,7 @@
 import type { Canvas, Module, Rect, PointerEvent, DragEvent, WheelEvent } from '../types.js';
 import { get_color_by_name, INDEXED_COLORS } from '../colors.js';
 import type { ModuleGizmosConfig, GizmoState } from '../module_gizmos.js';
-import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area } from '../module_gizmos.js';
+import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area, get_resize_edge, handle_resize_drag } from '../module_gizmos.js';
 
 export type ColorSelectorOptions = {
   id: string;
@@ -38,10 +38,16 @@ const FLASH_INTERVAL = 500; // ms
 export function make_color_selector_module(opts: ColorSelectorOptions): Module {
   // Mutable rect for moving
   let rect = opts.rect;
-  
+
+  // Size constraints for resizing
+  const MIN_WIDTH = 10;  // Minimum width
+  const MAX_WIDTH = 40;  // Maximum width
+  const MIN_HEIGHT = 8;  // Minimum height
+  const MAX_HEIGHT = 40; // Maximum height
+
   // Gizmo configuration
   const gizmo_config: ModuleGizmosConfig = {
-    enabled: ['move', 'close'],
+    enabled: ['move', 'resize', 'close'],
     can_close: true,
     can_move: true,
     can_save_position: false,
@@ -192,14 +198,27 @@ export function make_color_selector_module(opts: ColorSelectorOptions): Module {
         }
         return;
       }
-      
+
+      // Check if clicking on resize border when in resize mode
+      if (gizmo_state.is_resize_mode) {
+        const edge = get_resize_edge(e.x, e.y, rect);
+        if (edge) {
+          gizmo_state.resize_edge = edge;
+          gizmo_state.is_dragging_resize = true;
+          gizmo_state.move_start_x = e.x;
+          gizmo_state.move_start_y = e.y;
+          gizmo_state.original_rect = { ...rect };
+          return;
+        }
+      }
+
       // Handle move mode
       if (gizmo_state.is_move_mode) {
         gizmo_state.move_start_x = e.x;
         gizmo_state.move_start_y = e.y;
         return;
       }
-      
+
       // Color selection
       const grid_pos = get_grid_pos_from_screen(e.x, e.y);
       if (grid_pos) {
@@ -210,22 +229,54 @@ export function make_color_selector_module(opts: ColorSelectorOptions): Module {
       }
     },
 
+    OnPointerMove(e: PointerEvent): void {
+      // Update resize edge hover state
+      if (gizmo_state.is_resize_mode && !gizmo_state.is_dragging_resize) {
+        gizmo_state.resize_edge = get_resize_edge(e.x, e.y, rect);
+      }
+    },
+
     OnDragMove(e: DragEvent): void {
       if (gizmo_state.is_move_mode && gizmo_state.original_rect) {
         const dx = e.x - gizmo_state.move_start_x;
         const dy = e.y - gizmo_state.move_start_y;
-        
+
         const new_rect: Rect = {
           x0: gizmo_state.original_rect.x0 + dx,
           y0: gizmo_state.original_rect.y0 + dy,
           x1: gizmo_state.original_rect.x1 + dx,
           y1: gizmo_state.original_rect.y1 + dy,
         };
-        
+
         rect = new_rect;
-        
+
         if (opts.on_move) {
           opts.on_move(rect);
+        }
+        return;
+      }
+
+      // Handle resize dragging
+      if (gizmo_state.is_resize_mode && gizmo_state.is_dragging_resize && gizmo_state.original_rect) {
+        const new_rect = handle_resize_drag(
+          e.x,
+          e.y,
+          gizmo_state,
+          gizmo_state.original_rect,
+          MIN_WIDTH,
+          MIN_HEIGHT,
+          MAX_WIDTH,
+          MAX_HEIGHT,
+          (newRect) => {
+            rect = newRect;
+            if (opts.on_move) {
+              opts.on_move(rect);
+            }
+          }
+        );
+
+        if (new_rect) {
+          rect = new_rect;
         }
       }
     },
@@ -233,6 +284,14 @@ export function make_color_selector_module(opts: ColorSelectorOptions): Module {
     OnPointerUp(): void {
       if (gizmo_state.is_move_mode) {
         gizmo_state.is_move_mode = false;
+        if (opts.on_move) {
+          opts.on_move(rect);
+        }
+      }
+
+      if (gizmo_state.is_dragging_resize) {
+        gizmo_state.is_dragging_resize = false;
+        gizmo_state.resize_edge = null;
         if (opts.on_move) {
           opts.on_move(rect);
         }

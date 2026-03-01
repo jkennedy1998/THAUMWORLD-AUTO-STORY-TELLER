@@ -164,7 +164,8 @@ export type PlaceModuleConfig = {
   get_actor_position?: () => { x: number; y: number } | null;  // For distance checking
 
   // Drag and drop callbacks
-  on_drop?: (tile_x: number, tile_y: number) => Promise<boolean>;  // Drop item onto ground tile
+  on_drop?: (tile_x: number, tile_y: number) => Promise<boolean>;  // Drop item onto ground tile (adjacent)
+  on_throw?: (tile_x: number, tile_y: number) => Promise<boolean>;  // Throw item to distant tile (within range)
   is_dragging?: () => boolean;  // Check if an item is being dragged
   get_drag_source?: () => { item_instance_id: string; source_container_id: string } | null;  // Get drag source info
 };
@@ -1344,7 +1345,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         return;
       }
 
-      // Check distance from actor (must be within 1 tile for dropping)
+      // Check distance from actor
       const actor_pos = config.get_actor_position?.();
       debug_log_place(`[OnDragEnd] Actor position: ${actor_pos ? `(${actor_pos.x}, ${actor_pos.y})` : 'null'}`);
       
@@ -1354,13 +1355,36 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         );
         debug_log_place(`[OnDragEnd] Distance from actor: ${distance.toFixed(2)} tiles`);
         
-        if (distance > 1.5) {
-          debug_log_place(`[OnDragEnd] Drop too far from actor: ${distance.toFixed(2)} tiles (max 1.5)`);
+        // Throw range is 5 tiles (beyond drop range of 1.5)
+        const throw_range = 5;
+        
+        if (distance > throw_range) {
+          debug_log_place(`[OnDragEnd] Target too far: ${distance.toFixed(2)} tiles (max ${throw_range})`);
           // Reject the drag
           if (config.get_drag_source) {
             debug_log_place(`[OnDragEnd] Calling get_drag_source for rejection`);
             const drag_source = config.get_drag_source();
             debug_log_place(`[OnDragEnd] Drag source: ${JSON.stringify(drag_source)}`);
+          }
+          return;
+        }
+        
+        // Distance 1.5 or less = DROP (cardinal adjacent tiles)
+        // Distance 1.5 to throw_range = THROW
+        if (distance > 1.5) {
+          // THROW: Call on_throw callback if configured
+          debug_log_place(`[OnDragEnd] ========== CALLING on_throw ==========`);
+          debug_log_place(`[OnDragEnd] Tile: (${tile_x}, ${tile_y}), Distance: ${distance.toFixed(2)}`);
+          
+          if (config.on_throw) {
+            debug_log_place(`[OnDragEnd] Calling config.on_throw callback...`);
+            void config.on_throw(tile_x, tile_y).then((success: boolean) => {
+              debug_log_place(`[OnDragEnd] Throw ${success ? 'successful' : 'failed'} at (${tile_x}, ${tile_y})`);
+            }).catch((err: any) => {
+              debug_log_place(`[OnDragEnd] Throw error: ${err}`);
+            });
+          } else {
+            debug_log_place(`[OnDragEnd] WARNING: config.on_throw callback not configured!`);
           }
           return;
         }

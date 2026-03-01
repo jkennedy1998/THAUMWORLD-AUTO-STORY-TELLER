@@ -10,11 +10,10 @@
  */
 
 import type { Canvas, Module, Rect, Rgb, PointerEvent, DragEvent, WheelEvent, Cell } from '../types.js';
-import type { Grid, Brush, ToolType } from '../../ascii_painter/types.js';
+import type { Grid, Brush, ToolType, GridCell } from '../../ascii_painter/types.js';
 import { createGrid, getCell, setCell } from '../../ascii_painter/types.js';
 import { drawCell, drawLine, eraseCell, applyTool, sampleCell, previewLine, previewRectStroke, previewRectFill } from '../../ascii_painter/tools.js';
-import { pushSnapshot, undo, redo, getHistoryState } from '../../ascii_painter/history.js';
-import type { HistoryManager } from '../../ascii_painter/history.js';
+import { logCellAction, logSelectionAction, startBatch, endBatch, addToBatch, cancelBatch, undo, redo, getHistoryState, type HistoryManager, type CellChange } from '../../ascii_painter/history.js';
 import { get_color_by_name } from '../colors.js';
 import type { SelectionBitmap, SelectionMode } from '../../ascii_painter/selection.js';
 import { createSelectionBitmap, selectRect, deselectRect, selectPolygon, isSelected, hasSelection, getSelectionBounds, isSelectionBorder, clearSelection, selectAll, invertSelection, applySelectionMode } from '../../ascii_painter/selection.js';
@@ -25,11 +24,15 @@ import type { GradiatorState } from '../../ascii_painter/gradiator.js';
 import { scaleCopyData, scaleTextToCopyData } from '../../ascii_painter/gradiator.js';
 import type { ModuleGizmosConfig, GizmoState } from '../module_gizmos.js';
 import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area, handle_move_drag, get_resize_edge, handle_resize_drag } from '../module_gizmos.js';
+import type { VoxelSpace } from '../../ascii_painter/voxel_space.js';
+import { getVisibleLayers } from '../../ascii_painter/voxel_space.js';
 
 export type PainterCanvasOptions = {
   id: string;
   rect: Rect;
   grid: Grid;
+  space: VoxelSpace;
+  get_selected_z: () => number;
   get_current_tool: () => ToolType;
   brush: Brush;
   get_brush_size: () => number;
@@ -131,6 +134,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   
   const gizmo_state: GizmoState = create_gizmo_state();
 
+  // Cell change tracking for action-based undo
+  let pending_changes: CellChange[] = [];
+  let is_drawing_batch = false;
+
   function showStatus(msg: string): void {
     status_message = msg;
     status_message_time = Date.now();
@@ -140,12 +147,86 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     return Math.max(lo, Math.min(hi, n));
   }
 
-  // Check if a cell can be edited (inside selection or no selection active)
+  // Check if a cell can be edited (inside selection or no selection active, and layer not locked)
   function canEditCell(x: number, y: number): boolean {
+    // Check if current layer is locked
+    const selectedZ = opts.get_selected_z();
+    const layer = opts.space.layers.get(selectedZ);
+    if (layer?.locked) return false;
+    
     // If no selection, allow editing anywhere
     if (!hasSelection(selection_bitmap)) return true;
     // If selection exists, only allow editing inside it
     return isSelected(selection_bitmap, x, y);
+  }
+
+  // Helper to get cell from grid at position
+  function getGridCell(x: number, y: number): GridCell | null {
+    if (x < 0 || x >= opts.grid.width || y < 0 || y >= opts.grid.height) return null;
+    const cell = opts.grid.cells[y]?.[x];
+    return cell ? { ...cell } : null;
+  }
+
+  // Track a cell change for undo
+  function trackChange(x: number, y: number, oldCell: GridCell, newCell: GridCell): void {
+    const existingIndex = pending_changes.findIndex(c => c.x === x && c.y === y);
+    if (existingIndex >= 0 && pending_changes[existingIndex]) {
+      // Update newCell but keep original oldCell
+      pending_changes[existingIndex].newCell = newCell;
+    } else {
+      pending_changes.push({ x, y, oldCell: { ...oldCell }, newCell: { ...newCell } });
+    }
+    
+    // Also add to batch if batching
+    if (is_drawing_batch) {
+      addToBatch(opts.history, { x, y, oldCell, newCell });
+    }
+  }
+
+  // Capture a region of the grid for before/after comparison
+  function captureRegion(minX: number, minY: number, maxX: number, maxY: number): Map<string, GridCell> {
+    const region = new Map<string, GridCell>();
+    const startX = Math.max(0, minX);
+    const endX = Math.min(opts.grid.width - 1, maxX);
+    const startY = Math.max(0, minY);
+    const endY = Math.min(opts.grid.height - 1, maxY);
+    
+    for (let y = startY; y <= endY; y++) {
+      for (let x = startX; x <= endX; x++) {
+        const cell = getGridCell(x, y);
+        if (cell) {
+          region.set(`${x},${y}`, { ...cell });
+        }
+      }
+    }
+    return region;
+  }
+
+  // Compare before/after regions and track changes
+  function diffRegion(before: Map<string, GridCell>, minX: number, minY: number, maxX: number, maxY: number): void {
+    const startX = Math.max(0, minX);
+    const endX = Math.min(opts.grid.width - 1, maxX);
+    const startY = Math.max(0, minY);
+    const endY = Math.min(opts.grid.height - 1, maxY);
+    
+    for (let y = startY; y <= endY; y++) {
+      for (let x = startX; x <= endX; x++) {
+        const key = `${x},${y}`;
+        const oldCell = before.get(key);
+        const newCell = getGridCell(x, y);
+        
+        if (oldCell && newCell) {
+          // Check if cell actually changed
+          if (oldCell.char !== newCell.char ||
+              oldCell.rgb.r !== newCell.rgb.r ||
+              oldCell.rgb.g !== newCell.rgb.g ||
+              oldCell.rgb.b !== newCell.rgb.b ||
+              oldCell.weight_index !== newCell.weight_index) {
+            trackChange(x, y, oldCell, newCell);
+          }
+        }
+      }
+    }
   }
 
   function drawWithBrushSize(x: number, y: number, is_eraser: boolean): void {
@@ -160,10 +241,21 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (draw_x >= 0 && draw_x < opts.grid.width &&
             draw_y >= 0 && draw_y < opts.grid.height &&
             canEditCell(draw_x, draw_y)) {
+          
+          const oldCell = getGridCell(draw_x, draw_y);
+          
           if (is_eraser) {
             eraseCell(opts.grid, draw_x, draw_y);
           } else {
             drawCell(opts.grid, draw_x, draw_y, opts.brush);
+          }
+          
+          // Always track changes
+          if (oldCell) {
+            const newCell = getGridCell(draw_x, draw_y);
+            if (newCell) {
+              trackChange(draw_x, draw_y, oldCell, newCell);
+            }
           }
         }
       }
@@ -186,6 +278,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       if (e2 > -dy) { err -= dy; curr_x += sx; }
       if (e2 < dx) { err += dx; curr_y += sy; }
     }
+    
+    // Note: Line tool logs immediately after each stroke
+    // The pending_changes will be logged in OnPointerUp for continuous drawing
   }
 
   // Apply weight to cells with brush size
@@ -201,9 +296,14 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (draw_x >= 0 && draw_x < opts.grid.width &&
             draw_y >= 0 && draw_y < opts.grid.height &&
             canEditCell(draw_x, draw_y)) {
+          const oldCell = getGridCell(draw_x, draw_y);
           const cell = getCell(opts.grid, draw_x, draw_y);
-          if (cell && cell.char !== ' ') {
+          if (cell && cell.char !== ' ' && oldCell) {
             cell.weight_index = weight_index;
+            const newCell = getGridCell(draw_x, draw_y);
+            if (newCell) {
+              trackChange(draw_x, draw_y, oldCell, newCell);
+            }
           }
         }
       }
@@ -223,9 +323,14 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (draw_x >= 0 && draw_x < opts.grid.width &&
             draw_y >= 0 && draw_y < opts.grid.height &&
             canEditCell(draw_x, draw_y)) {
+          const oldCell = getGridCell(draw_x, draw_y);
           const cell = getCell(opts.grid, draw_x, draw_y);
-          if (cell && cell.char !== ' ') {
+          if (cell && cell.char !== ' ' && oldCell) {
             cell.rgb = { ...rgb };
+            const newCell = getGridCell(draw_x, draw_y);
+            if (newCell) {
+              trackChange(draw_x, draw_y, oldCell, newCell);
+            }
           }
         }
       }
@@ -276,25 +381,48 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       const start_y = clamp(Math.floor(offset_y), 0, opts.grid.height - 1);
       const end_y = clamp(Math.floor(offset_y + CANVAS_HEIGHT), 0, opts.grid.height);
 
-      // Draw grid content
-      for (let gy = start_y; gy < end_y; gy++) {
-        for (let gx = start_x; gx < end_x; gx++) {
-          const cell = getCell(opts.grid, gx, gy);
-          if (!cell || cell.char === ' ') continue;
+      const selected_z = opts.get_selected_z();
+      const space = opts.space;
 
-          const canvas_x = rect.x0 + (gx - start_x);
-          const canvas_y = rect.y0 + (gy - start_y);
+      // Get all visible layers sorted by Z (back to front for proper rendering)
+      const visibleLayers = getVisibleLayers(space).sort((a, b) => a.z - b.z);
 
-          if (canvas_x < rect.x0 || canvas_x > rect.x1 ||
-              canvas_y < rect.y0 || canvas_y > rect.y1) continue;
+      // Draw all visible layers
+      for (const layer of visibleLayers) {
+        // Calculate parallax offset for this layer
+        let parallaxX = 0;
+        let parallaxY = 0;
+        
+        if (space.camera.mode === 'parallax_ortho') {
+          const zDistance = layer.z - selected_z;
+          parallaxX = Math.round(zDistance * space.camera.parallax_intensity * 2);
+          // parallaxY stays 0 for side-view parallax
+        }
 
-          c.set(canvas_x, canvas_y, {
-            char: cell.char,
-            rgb: cell.rgb,
-            style: 'regular',
-            weight_index: cell.weight_index,
-            render_index: 0
-          });
+        // Calculate render_index based on Z (higher Z = higher render_index = drawn on top)
+        // Add base offset to avoid negative indices
+        const layerRenderIndex = layer.z + 10;
+
+        // Draw this layer's cells
+        for (let gy = start_y; gy < end_y; gy++) {
+          for (let gx = start_x; gx < end_x; gx++) {
+            const cell = layer.cells[gy]?.[gx];
+            if (!cell || cell.char === ' ') continue;
+
+            const canvas_x = rect.x0 + (gx - start_x) + parallaxX;
+            const canvas_y = rect.y0 + (gy - start_y) + parallaxY;
+
+            if (canvas_x < rect.x0 || canvas_x > rect.x1 ||
+                canvas_y < rect.y0 || canvas_y > rect.y1) continue;
+
+            c.set(canvas_x, canvas_y, {
+              char: cell.char,
+              rgb: cell.rgb,
+              style: 'regular',
+              weight_index: cell.weight_index,
+              render_index: layerRenderIndex
+            });
+          }
         }
       }
 
@@ -482,23 +610,22 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         }
       }
 
-      // Draw gizmos (move, resize, close)
-      draw_module_gizmos(c, rect, gizmo_config, gizmo_state, 'CANVAS');
-
-      // Draw canvas border
-      const border_color = get_color_by_name('medium_gray').rgb;
-      for (let x = rect.x0; x <= rect.x1; x++) {
-        c.set(x, rect.y0, { char: '─', rgb: border_color, style: 'regular', weight_index: 3 });
-        c.set(x, rect.y1, { char: '─', rgb: border_color, style: 'regular', weight_index: 3 });
+      // Draw canvas border (only if NOT in resize mode - resize mode draws its own borders)
+      if (!gizmo_state.is_resize_mode) {
+        const border_color = get_color_by_name('medium_gray').rgb;
+        for (let x = rect.x0; x <= rect.x1; x++) {
+          c.set(x, rect.y0, { char: '─', rgb: border_color, style: 'regular', weight_index: 3 });
+          c.set(x, rect.y1, { char: '─', rgb: border_color, style: 'regular', weight_index: 3 });
+        }
+        for (let y = rect.y0; y <= rect.y1; y++) {
+          c.set(rect.x0, y, { char: '│', rgb: border_color, style: 'regular', weight_index: 3 });
+          c.set(rect.x1, y, { char: '│', rgb: border_color, style: 'regular', weight_index: 3 });
+        }
+        c.set(rect.x0, rect.y0, { char: '┌', rgb: border_color, style: 'regular', weight_index: 3 });
+        c.set(rect.x1, rect.y0, { char: '┐', rgb: border_color, style: 'regular', weight_index: 3 });
+        c.set(rect.x0, rect.y1, { char: '└', rgb: border_color, style: 'regular', weight_index: 3 });
+        c.set(rect.x1, rect.y1, { char: '┘', rgb: border_color, style: 'regular', weight_index: 3 });
       }
-      for (let y = rect.y0; y <= rect.y1; y++) {
-        c.set(rect.x0, y, { char: '│', rgb: border_color, style: 'regular', weight_index: 3 });
-        c.set(rect.x1, y, { char: '│', rgb: border_color, style: 'regular', weight_index: 3 });
-      }
-      c.set(rect.x0, rect.y0, { char: '┌', rgb: border_color, style: 'regular', weight_index: 3 });
-      c.set(rect.x1, rect.y0, { char: '┐', rgb: border_color, style: 'regular', weight_index: 3 });
-      c.set(rect.x0, rect.y1, { char: '└', rgb: border_color, style: 'regular', weight_index: 3 });
-      c.set(rect.x1, rect.y1, { char: '┘', rgb: border_color, style: 'regular', weight_index: 3 });
 
       // Draw text cursor
       if (text_mode_active) {
@@ -516,6 +643,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           });
         }
       }
+
+      // Draw gizmos LAST so they appear on top (including resize borders)
+      draw_module_gizmos(c, rect, gizmo_config, gizmo_state, 'CANVAS');
     },
 
     OnPointerDown(e: PointerEvent): void {
@@ -648,8 +778,21 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
         if (tool_for_button === 'bucket') {
           if (canEditCell(grid_x, grid_y)) {
-            opts.on_push_snapshot();
+            // Capture full grid before fill (bucket can affect large areas)
+            const beforeRegion = captureRegion(0, 0, opts.grid.width - 1, opts.grid.height - 1);
+            
+            // Apply bucket fill
             applyTool(opts.grid, 'bucket', grid_x, grid_y, opts.brush);
+            
+            // Diff and track changes
+            diffRegion(beforeRegion, 0, 0, opts.grid.width - 1, opts.grid.height - 1);
+            
+            // Log the action
+            if (pending_changes.length > 0) {
+              const selected_z = opts.get_selected_z();
+              logCellAction(opts.history, 'draw_cells', `Fill`, selected_z, pending_changes);
+              pending_changes = [];
+            }
           }
           return;
         }
@@ -666,7 +809,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (tool_for_button === 'pencil') {
           is_drawing = true;
           last_draw_pos = { x: grid_x, y: grid_y };
-          opts.on_push_snapshot();
           drawWithBrushSize(grid_x, grid_y, false);
           return;
         }
@@ -674,7 +816,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (tool_for_button === 'eraser') {
           is_erasing = true;
           last_draw_pos = { x: grid_x, y: grid_y };
-          opts.on_push_snapshot();
           drawWithBrushSize(grid_x, grid_y, true);
           return;
         }
@@ -683,7 +824,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (tool_for_button === 'weighter') {
           is_weighing = true;
           last_draw_pos = { x: grid_x, y: grid_y };
-          opts.on_push_snapshot();
           applyWeightWithBrushSize(grid_x, grid_y, opts.brush.weight_index);
           return;
         }
@@ -692,7 +832,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (tool_for_button === 'colorer') {
           is_coloring = true;
           last_draw_pos = { x: grid_x, y: grid_y };
-          opts.on_push_snapshot();
           applyColorWithBrushSize(grid_x, grid_y, opts.brush.rgb);
           return;
         }
@@ -978,8 +1117,31 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const local_y = e.y - rect.y0;
         const end_x = Math.floor(offset_x + local_x);
         const end_y = Math.floor(offset_y + local_y);
-        opts.on_push_snapshot();
+        const start_x = drag_start.x;
+        const start_y = drag_start.y;
+        
+        // Capture region before applying tool
+        const minX = Math.min(start_x, end_x);
+        const maxX = Math.max(start_x, end_x);
+        const minY = Math.min(start_y, end_y);
+        const maxY = Math.max(start_y, end_y);
+        const beforeRegion = captureRegion(minX, minY, maxX, maxY);
+        
+        // Apply the tool
         applyTool(opts.grid, tool_for_end, end_x, end_y, opts.brush, drag_start);
+        
+        // Diff and track changes
+        diffRegion(beforeRegion, minX, minY, maxX, maxY);
+        
+        // Log the action
+        if (pending_changes.length > 0) {
+          const selected_z = opts.get_selected_z();
+          const toolName = tool_for_end === 'line' ? 'Draw Line' : 
+                          tool_for_end === 'rect_stroke' ? 'Draw Rectangle (stroke)' : 
+                          'Draw Rectangle (fill)';
+          logCellAction(opts.history, 'draw_cells', toolName, selected_z, pending_changes);
+          pending_changes = [];
+        }
       }
 
       is_drawing = false;
@@ -995,6 +1157,14 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     OnPointerUp(e: PointerEvent): void {
       // Handle paste placement
       if (opts.get_current_tool() === 'paste' && paste_preview_data && paste_preview_pos) {
+        // Check if current layer is locked
+        const selectedZ = opts.get_selected_z();
+        const layer = opts.space.layers.get(selectedZ);
+        if (layer?.locked) {
+          showStatus('Cannot paste: layer is locked');
+          return;
+        }
+        
         const spaceReplace = opts.get_paste_space_replace();
         const ignoreSpace = opts.get_paste_ignore_space();
         const ignoreBlack = opts.get_paste_ignore_black();
@@ -1011,8 +1181,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (ignoreWhite) ignoredParts.push('white');
         if (ignoreColor) ignoredParts.push('color');
         const ignoreStatus = ignoredParts.length > 0 ? ignoredParts.join('+') : 'none';
-        
-        opts.on_push_snapshot();
         
         // Custom paste with ignore support - ignored cells preserve underlying content
         let placed = 0;
@@ -1034,8 +1202,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             // Check if this cell should be ignored
             let isIgnored = false;
             
-            if (cell && cell.char !== ' ') {
-              // Check ignore space
+            if (cell) {
+              // Check ignore space (must check first, before char !== ' ' filter)
               if (ignoreSpace && cell.char === ' ') {
                 isIgnored = true;
               }
@@ -1073,22 +1241,39 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
               preserved++;
             } else if (cell && cell.char !== ' ') {
               // Non-space cell: place it
+              const oldCell = getGridCell(targetX, targetY);
               opts.grid.cells[targetY]![targetX] = { ...cell };
+              const newCell = getGridCell(targetX, targetY);
+              if (oldCell && newCell) {
+                trackChange(targetX, targetY, oldCell, newCell);
+              }
               placed++;
             } else {
               // Space/empty cell: handle based on spaceReplace
               if (spaceReplace) {
+                const oldCell = getGridCell(targetX, targetY);
                 opts.grid.cells[targetY]![targetX] = {
                   char: ' ',
                   rgb: { r: 0, g: 0, b: 0 },
                   weight_index: 0
                 };
+                const newCell = getGridCell(targetX, targetY);
+                if (oldCell && newCell) {
+                  trackChange(targetX, targetY, oldCell, newCell);
+                }
                 cleared++;
               } else {
                 preserved++;
               }
             }
           }
+        }
+        
+        // Log the paste action
+        if (pending_changes.length > 0) {
+          const selected_z = opts.get_selected_z();
+          logCellAction(opts.history, 'draw_cells', `Paste`, selected_z, pending_changes);
+          pending_changes = [];
         }
         
         console.log(`Paste complete: ${placed} placed, ${skippedIgnored} ignored (preserved), ${cleared} cleared, ${preserved} preserved`);
@@ -1104,8 +1289,31 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const local_y = e.y - rect.y0;
         const end_x = Math.floor(offset_x + local_x);
         const end_y = Math.floor(offset_y + local_y);
-        opts.on_push_snapshot();
+        const start_x = drag_start.x;
+        const start_y = drag_start.y;
+        
+        // Capture region before applying tool
+        const minX = Math.min(start_x, end_x);
+        const maxX = Math.max(start_x, end_x);
+        const minY = Math.min(start_y, end_y);
+        const maxY = Math.max(start_y, end_y);
+        const beforeRegion = captureRegion(minX, minY, maxX, maxY);
+        
+        // Apply the tool
         applyTool(opts.grid, tool_for_up, end_x, end_y, opts.brush, drag_start);
+        
+        // Diff and track changes
+        diffRegion(beforeRegion, minX, minY, maxX, maxY);
+        
+        // Log the action
+        if (pending_changes.length > 0) {
+          const selected_z = opts.get_selected_z();
+          const toolName = tool_for_up === 'line' ? 'Draw Line' : 
+                          tool_for_up === 'rect_stroke' ? 'Draw Rectangle (stroke)' : 
+                          'Draw Rectangle (fill)';
+          logCellAction(opts.history, 'draw_cells', toolName, selected_z, pending_changes);
+          pending_changes = [];
+        }
       }
       
       // Handle selection in OnPointerUp as fallback (OnDragEnd might not fire for clicks)
@@ -1180,6 +1388,33 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         pan_start = null;
         view_start = null;
       }
+      
+      // Log pending changes to history when drawing ends
+      if ((is_drawing || is_erasing || is_weighing || is_coloring) && pending_changes.length > 0) {
+        const selected_z = opts.get_selected_z();
+        let tool_name = 'Draw';
+        let action_type: 'draw_cells' | 'erase_cells' = 'draw_cells';
+        
+        if (is_erasing) {
+          tool_name = 'Erase';
+          action_type = 'erase_cells';
+        } else if (is_weighing) {
+          tool_name = 'Apply Weight';
+        } else if (is_coloring) {
+          tool_name = 'Apply Color';
+        }
+        
+        logCellAction(opts.history, action_type, tool_name, selected_z, pending_changes);
+        pending_changes = [];
+      }
+      
+      // Log text changes when exiting text mode via click
+      if (text_mode_active && pending_changes.length > 0) {
+        const selected_z = opts.get_selected_z();
+        logCellAction(opts.history, 'draw_cells', `Type Text`, selected_z, pending_changes);
+        pending_changes = [];
+      }
+      
       is_drawing = false;
       is_erasing = false;
       is_weighing = false;
@@ -1219,10 +1454,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     OnKeyDown(e: KeyboardEvent): void {
       // Undo - Ctrl+Z
       if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
-        const success = undo(opts.history, opts.grid);
-        if (success) {
-          const state = getHistoryState(opts.history);
-          showStatus(`Undo (${state.current_position}/${state.total_snapshots})`);
+        const description = undo(opts.history, opts.space);
+        if (description) {
+          showStatus(`Undo: ${description}`);
         } else {
           showStatus('Nothing to undo!');
         }
@@ -1232,10 +1466,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       
       // Redo - Ctrl+Y or Ctrl+Shift+Z
       if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
-        const success = redo(opts.history, opts.grid);
-        if (success) {
-          const state = getHistoryState(opts.history);
-          showStatus(`Redo (${state.current_position}/${state.total_snapshots})`);
+        const description = redo(opts.history, opts.space);
+        if (description) {
+          showStatus(`Redo: ${description}`);
         } else {
           showStatus('Nothing to redo!');
         }
@@ -1269,7 +1502,22 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
       // Text mode handling
       if (text_mode_active) {
+        const selected_z = opts.get_selected_z();
+        
+        // Check if current layer is locked
+        const layer = opts.space.layers.get(selected_z);
+        if (layer?.locked) {
+          showStatus('Cannot type: layer is locked');
+          e.preventDefault();
+          return;
+        }
+        
         if (e.key === 'Enter') {
+          // Log text action before starting new line
+          if (pending_changes.length > 0) {
+            logCellAction(opts.history, 'draw_cells', `Type Text`, selected_z, pending_changes);
+            pending_changes = [];
+          }
           // Enter: New line using enterlead and enterspace
           text_current_line++;
           text_cursor_x = text_start_x + opts.get_text_enterspace();  // Horizontal offset on Enter
@@ -1279,6 +1527,11 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         }
         
         if (e.key === 'Escape') {
+          // Log text action before exiting text mode
+          if (pending_changes.length > 0) {
+            logCellAction(opts.history, 'draw_cells', `Type Text`, selected_z, pending_changes);
+            pending_changes = [];
+          }
           text_mode_active = false;
           e.preventDefault();
           return;
@@ -1294,11 +1547,17 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             }
             if (text_cursor_x >= 0 && text_cursor_x < opts.grid.width &&
                 text_cursor_y >= 0 && text_cursor_y < opts.grid.height) {
+              // Track the deletion for undo
+              const oldCell = getGridCell(text_cursor_x, text_cursor_y);
               opts.grid.cells[text_cursor_y]![text_cursor_x] = {
                 char: ' ',
                 rgb: { r: 0, g: 0, b: 0 },
                 weight_index: 0
               };
+              const newCell = getGridCell(text_cursor_x, text_cursor_y);
+              if (oldCell && newCell) {
+                trackChange(text_cursor_x, text_cursor_y, oldCell, newCell);
+              }
             }
           }
           e.preventDefault();
@@ -1308,11 +1567,17 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (e.key === 'Delete') {
           if (text_cursor_x >= 0 && text_cursor_x < opts.grid.width &&
               text_cursor_y >= 0 && text_cursor_y < opts.grid.height) {
+            // Track the deletion for undo
+            const oldCell = getGridCell(text_cursor_x, text_cursor_y);
             opts.grid.cells[text_cursor_y]![text_cursor_x] = {
               char: ' ',
               rgb: { r: 0, g: 0, b: 0 },
               weight_index: 0
             };
+            const newCell = getGridCell(text_cursor_x, text_cursor_y);
+            if (oldCell && newCell) {
+              trackChange(text_cursor_x, text_cursor_y, oldCell, newCell);
+            }
           }
           e.preventDefault();
           return;
@@ -1403,9 +1668,24 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     OnTextInput(text: string): void {
       if (!text_mode_active || !text) return;
       
+      const selected_z = opts.get_selected_z();
+      
+      // Check if current layer is locked
+      const layer = opts.space.layers.get(selected_z);
+      if (layer?.locked) {
+        showStatus('Cannot type: layer is locked');
+        return;
+      }
+      
       for (const char of text) {
         // Handle newline characters (from paste operations) like Enter key
         if (char === '\n' || char === '\r') {
+          // Log text action before starting new line
+          if (pending_changes.length > 0) {
+            logCellAction(opts.history, 'draw_cells', `Type Text`, selected_z, pending_changes);
+            pending_changes = [];
+          }
+          
           // New line using enterlead and enterspace (same as Enter key)
           text_current_line++;
           text_cursor_x = text_start_x + opts.get_text_enterspace();  // Horizontal offset on Enter
@@ -1423,6 +1703,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (text_cursor_x >= 0 && text_cursor_x < opts.grid.width &&
             text_cursor_y >= 0 && text_cursor_y < opts.grid.height) {
           
+          // Track the change for undo
+          const oldCell = getGridCell(text_cursor_x, text_cursor_y);
+          
           if (char === ' ') {
             if (opts.get_space_replace()) {
               opts.grid.cells[text_cursor_y]![text_cursor_x] = {
@@ -1430,6 +1713,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
                 rgb: { ...opts.brush.rgb },
                 weight_index: opts.brush.weight_index
               };
+              const newCell = getGridCell(text_cursor_x, text_cursor_y);
+              if (oldCell && newCell) {
+                trackChange(text_cursor_x, text_cursor_y, oldCell, newCell);
+              }
             }
           } else {
             opts.grid.cells[text_cursor_y]![text_cursor_x] = {
@@ -1437,6 +1724,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
               rgb: { ...opts.brush.rgb },
               weight_index: opts.brush.weight_index
             };
+            const newCell = getGridCell(text_cursor_x, text_cursor_y);
+            if (oldCell && newCell) {
+              trackChange(text_cursor_x, text_cursor_y, oldCell, newCell);
+            }
           }
           
           // Move cursor according to spacing and charlead
@@ -1448,6 +1739,11 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           // Check bounds
           if (text_cursor_x < 0 || text_cursor_x >= opts.grid.width ||
               text_cursor_y < 0 || text_cursor_y >= opts.grid.height) {
+            // Log remaining text before exiting
+            if (pending_changes.length > 0) {
+              logCellAction(opts.history, 'draw_cells', `Type Text`, selected_z, pending_changes);
+              pending_changes = [];
+            }
             text_mode_active = false;
             break;
           }
