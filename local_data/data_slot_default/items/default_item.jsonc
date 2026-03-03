@@ -1,23 +1,16 @@
 {
-  // Default item template
-  "schema_version": 1,
+  // Default item template - use this as a starting point for new items
   "id": "default_item",
   "name": "default item",
-  // weight is raw count for carry capacity math
-  // weight_mag is optional fallback when weight is unknown
+  "description": "",
   "weight": 0,
   "weight_mag": null,
   "mag": 1,
   "size_mag": 0,
   "hardness_mag": 0,
   "conductivity_mag": 0,
-  "tags": [],
-  // Inventory system fields
   "max_stack_size": 1,
   "display_char": "·",
-  "valid_body_slots": [],
-  "occupies_slots": [],
-  "slot_shape": [[1]],
-  "fits_actor_kind": ["*"],
-  "notes": ""
+  "tags": [],
+  "notes": "Template for creating new items. Copy this file and modify fields as needed."
 }

@@ -27,7 +27,7 @@ import { load_place, list_places_in_region, save_place, create_basic_place } fro
 import { load_container, list_containers_for_owner, transfer_item_between_containers, get_ground_items, build_ground_container_id, get_or_create_scattered_container, list_scattered_containers, delete_scattered_container_if_empty, add_item_to_container } from "../container_storage/store.js";
 import { find_empty_grid_position } from "../shared/migration.js";
 import { calculate_grid_dimensions } from "../types/container.js";
-import { load_item_def } from "../item_storage/store.js";
+import { load_item_def, load_master_item } from "../item_storage/store.js";
 import { create_inline_item } from "../item_instances/store.js";
 import { emitTagChange } from "../shared/event_emitter.js";
 import type { PlaceConnection, PlaceItem } from "../types/place.js";
@@ -2684,8 +2684,8 @@ function start_http_server(log_path: string): void {
                             drop_y = actor_pos.y + 1;
                     }
 
-                    // Load item definition
-                    const def_result = load_item_def(slot, item_def_id);
+                    // Load item definition from master database
+                    const def_result = load_master_item(item_def_id);
                     if (!def_result.ok) {
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: "item_def_not_found" }));
@@ -2786,6 +2786,86 @@ function start_http_server(log_path: string): void {
                     res.end(JSON.stringify({ ok: false, error: errorMessage }));
                 }
             });
+            return;
+        }
+
+        // GET /api/item/compatible_slots?item_def_id=xxx&actor_id=xxx - Get slots where item can be equipped
+        if (url.pathname === "/api/item/compatible_slots") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const item_def_id = url.searchParams.get("item_def_id");
+            const actor_id = url.searchParams.get("actor_id") || "henry_actor";
+            
+            if (!item_def_id) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_item_def_id" }));
+                return;
+            }
+
+            try {
+                // Load item definition from master database
+                const def_result = load_master_item(item_def_id);
+                if (!def_result.ok) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "item_def_not_found" }));
+                    return;
+                }
+
+                const item_def = def_result.item;
+                const compatible_slots: Array<{ slot_name: string; slot_type: string; garb_index?: number }> = [];
+
+                // Get slot types from tags
+                const has_tool = item_def.tags?.some((t: any) => t.name === "TOOL");
+                const has_armor = item_def.tags?.some((t: any) => t.name === "ARMOR");
+                const has_garb = item_def.tags?.some((t: any) => t.name === "GARB");
+
+                // TOOL items (and all items) can go in hand tool slots
+                compatible_slots.push({ slot_name: "hand_left", slot_type: "tool" });
+                compatible_slots.push({ slot_name: "hand_right", slot_type: "tool" });
+
+                // ARMOR items - check meta for body slot
+                if (has_armor) {
+                    const armor_tag = item_def.tags?.find((t: any) => t.name === "ARMOR");
+                    const armor_slot = armor_tag?.meta?.find((m: string) =>
+                        ["head", "torso", "hand_left", "hand_right", "leg_left", "leg_right"].includes(m)
+                    );
+                    if (armor_slot) {
+                        compatible_slots.push({ slot_name: armor_slot, slot_type: "armor" });
+                    }
+                }
+
+                // GARB items - check meta for body slot, add ALL garb slots
+                if (has_garb) {
+                    const garb_tag = item_def.tags?.find((t: any) => t.name === "GARB");
+                    const garb_slots = garb_tag?.meta?.filter((m: string) =>
+                        ["head", "torso", "hand_left", "hand_right", "leg_left", "leg_right"].includes(m)
+                    ) || [];
+                    
+                    for (const slot_name of garb_slots) {
+                        // Add multiple garb slot indices (0, 1, 2, etc.)
+                        for (let i = 0; i < 10; i++) {
+                            compatible_slots.push({ slot_name, slot_type: "garb", garb_index: i });
+                        }
+                    }
+                }
+
+                debug_log("API", `/api/item/compatible_slots: ${item_def_id} compatible with ${compatible_slots.length} slots`);
+
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ 
+                    ok: true, 
+                    item_def_id,
+                    compatible_slots
+                }));
+            } catch (err) {
+                debug_error("API", `/api/item/compatible_slots error`, err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "internal_error" }));
+            }
             return;
         }
 

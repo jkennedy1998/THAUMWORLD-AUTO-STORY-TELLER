@@ -8,26 +8,14 @@
   "size_mag": 2,
   "hardness_mag": 1,
   "conductivity_mag": 1,
+  "max_stack_size": 1,
+  "display_char": "t",
   "tags": [
-    {
-      "name": "CLOTHING",
-      "mag": 1,
-      "meta": []
-    },
     {
       "name": "GARB",
       "mag": 1,
       "meta": ["torso"],
       "info": [5]
     }
-  ],
-  "stackable": false,
-  // Inventory system fields
-  "max_stack_size": 1,
-  "display_char": "t",
-  "valid_body_slots": ["torso"],
-  "occupies_slots": ["torso"],
-  "slot_shape": [[1]],
-  "fits_actor_kind": ["naked_ape"],
-  "notes": "Basic torso clothing - armor system not yet implemented (damage system needed first)"
+  ]
 }

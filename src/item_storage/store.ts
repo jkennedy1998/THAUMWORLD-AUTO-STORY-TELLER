@@ -1,7 +1,8 @@
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { parse } from "jsonc-parser";
 import { ensure_dir_exists } from "../engine/log_store.js";
-import { get_item_dir, get_item_path, get_default_item_path, get_legacy_default_item_path } from "../engine/paths.js";
+import { get_item_dir, get_item_path, get_default_item_path, get_legacy_default_item_path, get_master_items_dir } from "../engine/paths.js";
 import type { TagInstance } from "../tag_system/registry.js";
 
 export type ItemDefLookupResult =
@@ -110,6 +111,52 @@ export function load_item_def(slot: number, def_id: string): ItemDefLookupResult
     };
     
     return { ok: true, item, path: item_path };
+}
+
+/**
+ * Load master item definition from categorized database
+ * Searches all category directories for the item
+ */
+export function load_master_item(def_id: string): ItemDefLookupResult {
+    const master_dir = get_master_items_dir();
+    const categories = ['weapons', 'armor', 'clothing', 'containers', 'currency'];
+    
+    // Search all category directories
+    for (const category of categories) {
+        const item_path = path.join(master_dir, category, `${def_id}.jsonc`);
+        if (fs.existsSync(item_path)) {
+            const raw = read_jsonc(item_path);
+            
+            // Apply defaults
+            const item: ItemDefinition = {
+                ...raw,
+                id: String(raw.id ?? def_id),
+                name: String(raw.name ?? def_id),
+                description: String(raw.description ?? ""),
+                weight: Number(raw.weight ?? 0),
+                weight_mag: Number(raw.weight_mag ?? 0),
+                mag: Number(raw.mag ?? 1),
+                size_mag: Number(raw.size_mag ?? 0),
+                hardness_mag: Number(raw.hardness_mag ?? 0),
+                conductivity_mag: Number(raw.conductivity_mag ?? 0),
+                tags: (raw.tags as TagInstance[]) ?? [],
+                max_stack_size: Number(raw.max_stack_size ?? 1),
+                display_char: String(raw.display_char ?? "·"),
+                valid_body_slots: [],
+                occupies_slots: [],
+                slot_shape: [[1]],
+                fits_actor_kind: ["*"],
+            };
+            
+            return { ok: true, item, path: item_path };
+        }
+    }
+    
+    return { 
+        ok: false, 
+        error: "master_item_not_found", 
+        todo: `Master item definition not found: ${def_id}. Create in local_data/items/{category}/${def_id}.jsonc` 
+    };
 }
 
 export function load_default_item(): ItemDefLookupResult {

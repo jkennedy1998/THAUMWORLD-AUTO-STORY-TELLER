@@ -7,6 +7,16 @@ export function get_data_slot_dir(slot: number): string {
     return path.join(process.cwd(), "local_data", `data_slot_${slot}`);
 }
 
+export function get_master_items_dir(): string {
+    // the path to master item definitions (categorized)
+    return path.join(process.cwd(), "local_data", "items");
+}
+
+export function get_master_tiles_dir(): string {
+    // the path to master tile definitions (categorized)
+    return path.join(process.cwd(), "local_data", "tiles");
+}
+
 export function get_log_path(slot: number): string {
     // the path to the log
     return path.join(get_data_slot_dir(slot), "log.jsonc");

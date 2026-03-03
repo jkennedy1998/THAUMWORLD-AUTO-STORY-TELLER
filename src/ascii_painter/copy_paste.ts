@@ -40,16 +40,21 @@ export function encodeToSpecialFormat(data: CopyData): string {
   
   // Encode characters
   const charLines: string[] = [];
+  let nonSpaceCount = 0;
   for (let y = 0; y < data.height; y++) {
     let line = '';
     for (let x = 0; x < data.width; x++) {
       const cell = data.cells[y]?.[x];
-      line += cell?.char ?? ' ';
+      const char = cell?.char ?? ' ';
+      if (char !== ' ') nonSpaceCount++;
+      line += char;
     }
     charLines.push(line);
   }
   lines.push('TEXT:');
   lines.push(...charLines);
+  
+  console.log(`ENCODE: ${nonSpaceCount} non-space characters encoded. First row: "${charLines[0]?.substring(0, 20)}"`);
   
   // Encode weights as numbers
   const weightLines: string[] = [];
@@ -95,61 +100,77 @@ export function encodeToSpecialFormat(data: CopyData): string {
 // Decode special format back to copy data
 export function decodeFromSpecialFormat(encoded: string): CopyData | null {
   try {
-    const lines = encoded.split('\n');
+    const lines = encoded.split(/\r?\n/);
     let lineIndex = 0;
     
     // Parse header
     const headerMatch = lines[lineIndex]?.match(/THAUM:(\d+)x(\d+)/);
-    if (!headerMatch) return null;
+    if (!headerMatch) {
+      console.log('DECODE: No header match, returning null');
+      return null;
+    }
     const width = parseInt(headerMatch[1]!);
     const height = parseInt(headerMatch[2]!);
     lineIndex++;
+    
+    console.log(`DECODE: Header parsed - ${width}x${height}, ${lines.length} lines total`);
     
     const cells: (GridCell | null)[][] = Array.from({ length: height }, () => 
       Array(width).fill(null)
     );
     
+    let textCellsCreated = 0;
+    let weightCellsUpdated = 0;
+    let colorCellsUpdated = 0;
+    let whiteCellsFound = 0;
+    
     // Parse TEXT section
-    if (lines[lineIndex] === 'TEXT:') {
+    if (lines[lineIndex]?.trim() === 'TEXT:') {
       lineIndex++;
       for (let y = 0; y < height && lineIndex < lines.length; y++) {
         const line = lines[lineIndex] ?? '';
         for (let x = 0; x < width && x < line.length; x++) {
           const char = line[x] ?? ' ';
-          // Always create a cell for every position, even for spaces
-          // This ensures WEIGHT and COLOR sections update existing cells
-          // instead of creating placeholder cells with wrong char values
-          if (!cells[y]![x]) {
-            cells[y]![x] = { char, rgb: { r: 255, g: 255, b: 255 }, weight_index: 4 };
-          } else {
-            cells[y]![x]!.char = char;
-          }
-        }
-        lineIndex++;
-      }
-    }
-    
-    // Parse WEIGHT section
-    if (lines[lineIndex] === 'WEIGHT:') {
-      lineIndex++;
-      for (let y = 0; y < height && lineIndex < lines.length; y++) {
-        const line = lines[lineIndex] ?? '';
-        for (let x = 0; x < width && x < line.length; x++) {
-          const weightChar = line[x];
-          if (weightChar && weightChar >= '0' && weightChar <= '7') {
-            // Only update existing cells - don't create placeholder cells
-            // The TEXT section should have already created all cells
-            if (cells[y]![x]) {
-              cells[y]![x]!.weight_index = parseInt(weightChar);
+          // Only create cells for non-space characters
+          // Space characters represent empty/null cells in the original grid
+          // and should remain null so paste doesn't clear the target
+          if (char !== ' ') {
+            if (!cells[y]![x]) {
+              cells[y]![x] = { char, rgb: { r: 255, g: 255, b: 255 }, weight_index: 4 };
+              textCellsCreated++;
+            } else {
+              cells[y]![x]!.char = char;
             }
           }
         }
         lineIndex++;
       }
     }
+    console.log(`DECODE: TEXT section - ${textCellsCreated} cells created`);
+    
+    // Parse WEIGHT section
+    if (lines[lineIndex]?.trim() === 'WEIGHT:') {
+      lineIndex++;
+      for (let y = 0; y < height && lineIndex < lines.length; y++) {
+        const line = lines[lineIndex] ?? '';
+        for (let x = 0; x < width && x < line.length; x++) {
+          const weightChar = line[x];
+          if (weightChar && weightChar >= '0' && weightChar <= '7') {
+            // Only update existing cells - don't create new ones
+            // If TEXT didn't create a cell here, it means it was empty in the original
+            if (cells[y]![x]) {
+              cells[y]![x]!.weight_index = parseInt(weightChar);
+              weightCellsUpdated++;
+            }
+          }
+        }
+        lineIndex++;
+      }
+    }
+    console.log(`DECODE: WEIGHT section - ${weightCellsUpdated} cells updated`);
     
     // Parse COLOR section
-    if (lines[lineIndex] === 'COLOR:') {
+    if (lines[lineIndex]?.trim() === 'COLOR:') {
       lineIndex++;
       for (let y = 0; y < height && lineIndex < lines.length; y++) {
         const line = lines[lineIndex] ?? '';
@@ -158,20 +179,37 @@ export function decodeFromSpecialFormat(encoded: string): CopyData | null {
           const gChar = line[x * 3 + 1] ?? ' ';
           const bChar = line[x * 3 + 2] ?? ' ';
           
-          if (rChar !== ' ' || gChar !== ' ' || bChar !== ' ') {
+          // Only update existing cells - don't create new ones
+          // If TEXT didn't create a cell here, it means it was empty in the original
+          if (cells[y]![x] && (rChar !== ' ' || gChar !== ' ' || bChar !== ' ')) {
             const r = Math.min(255, decodeByte(rChar) * 4);
             const g = Math.min(255, decodeByte(gChar) * 4);
             const b = Math.min(255, decodeByte(bChar) * 4);
+            cells[y]![x]!.rgb = { r, g, b };
+            colorCellsUpdated++;
             
-            if (!cells[y]![x]) {
-              cells[y]![x] = { char: ' ', rgb: { r, g, b }, weight_index: 4 };
-            } else {
-              cells[y]![x]!.rgb = { r, g, b };
+            // Track white cells
+            if (r === 255 && g === 255 && b === 255) {
+              whiteCellsFound++;
+              if (whiteCellsFound <= 3) {
+                console.log(`DECODE: White cell found at (${x},${y}), char='${cells[y]![x]!.char}'`);
+              }
             }
           }
         }
         lineIndex++;
       }
+    }
+    console.log(`DECODE: COLOR section - ${colorCellsUpdated} cells updated, ${whiteCellsFound} white cells`);
+    
+    // Debug: Show first few cells
+    for (let y = 0; y < Math.min(2, height); y++) {
+      let row = '';
+      for (let x = 0; x < Math.min(10, width); x++) {
+        const cell = cells[y]![x];
+        row += cell ? cell.char : '?';
+      }
+      console.log(`DECODE: Row ${y} preview: "${row}"`);
     }
     
     return { width, height, cells };
@@ -200,13 +238,25 @@ export function copyFromGrid(grid: Grid, selection: SelectionBitmap): CopyData |
   if (!bounds) return null;
   
   const cells: (GridCell | null)[][] = [];
+  let nonNullCount = 0;
+  let whiteCellCount = 0;
   
   for (let y = bounds.y; y < bounds.y + bounds.height; y++) {
     const row: (GridCell | null)[] = [];
     for (let x = bounds.x; x < bounds.x + bounds.width; x++) {
       if (isSelected(selection, x, y)) {
         const cell = grid.cells[y]?.[x];
-        row.push(cell ? { ...cell } : null);
+        if (cell) {
+          nonNullCount++;
+          // Check for white cells (RGB 255,255,255)
+          if (cell.rgb.r === 255 && cell.rgb.g === 255 && cell.rgb.b === 255) {
+            whiteCellCount++;
+            console.log(`COPY: Found white cell at (${x},${y}) char='${cell.char}', weight=${cell.weight_index}`);
+          }
+          row.push({ ...cell });
+        } else {
+          row.push(null);
+        }
       } else {
         row.push(null);
       }
@@ -214,6 +264,7 @@ export function copyFromGrid(grid: Grid, selection: SelectionBitmap): CopyData |
     cells.push(row);
   }
   
+  console.log(`COPY: Extracted ${nonNullCount} cells total, ${whiteCellCount} are white-colored. Grid: ${bounds.width}x${bounds.height}`);
   return { width: bounds.width, height: bounds.height, cells };
 }
 

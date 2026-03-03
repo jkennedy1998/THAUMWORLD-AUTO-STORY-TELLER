@@ -575,7 +575,9 @@ export class CanvasRuntime {
 
             if (this.capture_owner) {
                 // If the drag started on background, pan the entire canvas instead of routing to a module.
-                if (this.global_pan_active && (ev.buttons & 1)) {
+                // But if capture_owner is canvas module, allow it to handle panning itself
+                const is_canvas_module = this.capture_owner.id === 'painter_canvas' || this.capture_owner.id?.startsWith('canvas');
+                if (this.global_pan_active && (ev.buttons & 1) && !is_canvas_module) {
                     const dx = ev.clientX - this.last_pan_client_x;
                     const dy = ev.clientY - this.last_pan_client_y;
                     this.last_pan_client_x = ev.clientX;
@@ -802,6 +804,7 @@ export class CanvasRuntime {
             if (ev.code === 'Space') {
                 // Space is reserved for global UI pan gesture when not typing into input.
                 const typing = this.focused_owner?.id === 'input';
+                console.log('[RUNTIME-DEBUG] Space keydown - typing:', typing, 'focused_owner:', this.focused_owner?.id);
                 if (!typing) {
                     this.space_down = true;
                     ev.preventDefault();
@@ -817,6 +820,7 @@ export class CanvasRuntime {
             }
 
             if (this.dispatch_global_keydown(ev)) return;
+            console.log('[RUNTIME-DEBUG] Calling OnKeyDown on focused_owner:', this.focused_owner?.id, 'key:', ev.code);
             this.focused_owner?.OnKeyDown?.(ev);
         });
 

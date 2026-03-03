@@ -1,15 +1,15 @@
 {
-  "id": "test_gold_ring",
-  "name": "Gold Ring",
-  "description": "A shiny gold ring worn on the finger.",
-  "weight": 50,
+  "id": "test_silver_ring",
+  "name": "Silver Ring",
+  "description": "A polished silver ring with simple engraving.",
+  "weight": 40,
   "weight_mag": 1,
   "mag": 1,
   "size_mag": 1,
   "hardness_mag": 2,
   "conductivity_mag": 2,
   "max_stack_size": 1,
-  "display_char": "o",
+  "display_char": "s",
   "tags": [
     {
       "name": "GARB",

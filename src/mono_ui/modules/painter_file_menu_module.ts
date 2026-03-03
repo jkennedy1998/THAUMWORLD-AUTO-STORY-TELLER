@@ -18,6 +18,7 @@ export type FileMenuOptions = {
   on_export_text: () => void;
   on_clear: () => void;
   on_reset_positions?: () => void;
+  on_reset_camera?: () => void;
   on_toggle_toolbox?: () => void;
   on_toggle_char_selector?: () => void;
   on_toggle_color_selector?: () => void;
@@ -25,6 +26,7 @@ export type FileMenuOptions = {
   on_toggle_brush_preview?: () => void;
   on_toggle_tool_properties?: () => void;
   on_toggle_layer_palette?: () => void;
+  on_toggle_camera?: () => void;
 };
 
 type MenuButton = {
@@ -84,7 +86,12 @@ export function make_file_menu_module(opts: FileMenuOptions): Module {
     buttons.push({ label: 'LAYERS', shortcut: '', action: opts.on_toggle_layer_palette, x: module_button_x, y: 0, width: 8 });
     module_button_x += 9;
   }
-  
+
+  if (opts.on_toggle_camera) {
+    buttons.push({ label: 'CAMERA', shortcut: '', action: opts.on_toggle_camera, x: module_button_x, y: 0, width: 8 });
+    module_button_x += 9;
+  }
+
   // Add reset positions button if callback provided
   if (opts.on_reset_positions) {
     buttons.push({ 
@@ -94,6 +101,19 @@ export function make_file_menu_module(opts: FileMenuOptions): Module {
       x: module_button_x, 
       y: 0, 
       width: 7 
+    });
+    module_button_x += 8;
+  }
+
+  // Add reset camera button if callback provided
+  if (opts.on_reset_camera) {
+    buttons.push({ 
+      label: 'CAM-DEF', 
+      shortcut: '', 
+      action: opts.on_reset_camera, 
+      x: module_button_x, 
+      y: 0, 
+      width: 9 
     });
   }
 

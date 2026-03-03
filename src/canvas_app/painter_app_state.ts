@@ -44,6 +44,9 @@ import {
   // Tool properties persistence
   saveToolProperties,
   loadToolProperties,
+  saveCameraConfig,
+  loadCameraConfig,
+  clearCameraConfig,
   type ToolProperties,
 } from '../ascii_painter/save_system.js';
 // 3D VoxelSpace imports
@@ -63,6 +66,8 @@ import {
 } from '../ascii_painter/voxel_space.js';
 import { makeLayerRendererModule } from '../ascii_painter/layer_renderer_module.js';
 import { makeLayerPaletteModule } from '../ascii_painter/layer_palette_module.js';
+import { makeCameraControlModule } from '../ascii_painter/camera_control_module.js';
+import { VoxelDOMRenderer, createVoxelDOMRenderer } from '../ascii_painter/voxel_dom_renderer.js';
 
 // Configuration matching the game but with relaxed letter spacing
 export const PAINTER_CONFIG = {
@@ -95,7 +100,7 @@ export type PainterAppState = {
   set_camera_mode: (mode: CameraMode) => void;
   set_parallax_intensity: (intensity: number) => void;
   toggle_show_all_layers: () => void;
-  
+
   // Layer operations
   add_layer: () => void;
   delete_layer: (z: number) => void;
@@ -103,6 +108,16 @@ export type PainterAppState = {
   select_layer: (z: number) => void;
   toggle_layer_visibility: (z: number) => void;
   toggle_layer_lock: (z: number) => void;
+
+  // DOM Renderer operations
+  init_dom_renderer: () => void;
+  render_dom_layers: () => void;
+  set_mouse_parallax: (x: number, y: number) => void;
+  set_dom_viewport: (viewport: { x: number; y: number; width: number; height: number; offsetX: number; offsetY: number }) => void;
+
+  // Debug functions
+  debug_camera_config: () => void;
+  force_save_camera: () => void;
 
   // Save system
   save_to_file: (filename?: string) => void;
@@ -119,6 +134,48 @@ export function create_painter_app_state(): PainterAppState {
   // Create VoxelSpace (new 3D system) - wraps the grid
   let voxelSpace = createVoxelSpace(CANVAS_WIDTH, CANVAS_HEIGHT, { defaultZ: 0 });
   
+  // Load saved camera configuration
+  const savedCameraConfig = loadCameraConfig();
+  if (savedCameraConfig && Object.keys(savedCameraConfig).length > 0) {
+    voxelSpace.camera = { ...voxelSpace.camera, ...savedCameraConfig };
+  }
+
+  // Flag to prevent saving during initialization
+  let isAppInitialized = false;
+  // Set to true after a short delay to allow initial renders to complete
+  setTimeout(() => {
+    isAppInitialized = true;
+  }, 500);
+
+  // Create DOM-based voxel renderer for true off-grid rendering
+  let domRenderer: VoxelDOMRenderer | null = null;
+
+  // Initialize DOM renderer when container is available
+  function initDOMRenderer(): void {
+    if (domRenderer) return; // Already initialized
+
+    const container = document.getElementById('voxel_layers_container');
+    if (!container) {
+      console.warn('[Painter] Voxel layers container not found, DOM renderer not initialized');
+      return;
+    }
+
+    domRenderer = createVoxelDOMRenderer(
+      container,
+      PAINTER_CONFIG.font_family,
+      PAINTER_CONFIG.base_font_size_px
+    );
+    domRenderer.setSpace(voxelSpace);
+    console.log('[Painter] DOM renderer initialized');
+  }
+
+  // Sync DOM renderer with current voxelSpace
+  function syncDOMRenderer(): void {
+    if (domRenderer) {
+      domRenderer.setSpace(voxelSpace);
+    }
+  }
+
   // Create history manager
   const history = createHistoryManager(50);
 
@@ -126,6 +183,11 @@ export function create_painter_app_state(): PainterAppState {
   const saved_voxel_space = loadAutoSaveVoxelSpace();
   if (saved_voxel_space) {
     voxelSpace = saved_voxel_space;
+    // Re-apply saved camera config after loading auto-save (camera settings are global, not per-artwork)
+    const savedCameraConfig = loadCameraConfig();
+    if (savedCameraConfig && Object.keys(savedCameraConfig).length > 0) {
+      voxelSpace.camera = { ...voxelSpace.camera, ...savedCameraConfig };
+    }
     // Sync grid to current layer
     const currentLayer = getLayer(voxelSpace, voxelSpace.camera.focus_plane);
     if (currentLayer) {
@@ -133,8 +195,8 @@ export function create_painter_app_state(): PainterAppState {
       grid.height = voxelSpace.bounds.height;
       grid.cells = currentLayer.cells;
     }
+    syncDOMRenderer();
     console.log('🎨 Loaded auto-saved VoxelSpace artwork');
-    console.log(debugVoxelSpace(voxelSpace));
   } else {
     // Fallback to legacy grid auto-save
     const saved_grid = loadAutoSave();
@@ -144,6 +206,12 @@ export function create_painter_app_state(): PainterAppState {
       grid.cells = saved_grid.cells;
       // Sync voxelSpace to grid
       voxelSpace = gridToVoxelSpace(grid, 0);
+      // Re-apply saved camera config after loading legacy auto-save
+      const savedCameraConfig = loadCameraConfig();
+      if (savedCameraConfig && Object.keys(savedCameraConfig).length > 0) {
+        voxelSpace.camera = { ...voxelSpace.camera, ...savedCameraConfig };
+      }
+      syncDOMRenderer();
       console.log('🎨 Loaded auto-saved artwork (legacy format)');
     }
   }
@@ -372,9 +440,32 @@ export function create_painter_app_state(): PainterAppState {
         y1: canvas_start_y + CANVAS_DISPLAY_HEIGHT - 1
       };
       console.log('Canvas reset to default position');
+    },
+    on_viewport_change: (viewport) => {
+      // Forward viewport updates to DOM renderer
+      if (domRenderer) {
+        // Convert grid viewport to pixel viewport
+        // Grid Y=0 is at the bottom, but screen Y=0 is at the top, so flip Y
+        const cellW = PAINTER_CONFIG.base_font_size_px * (1 + PAINTER_CONFIG.base_letter_spacing_mult);
+        const cellH = PAINTER_CONFIG.base_font_size_px * PAINTER_CONFIG.base_line_height_mult;
+        domRenderer.setViewport({
+          x: viewport.x * cellW,
+          y: (PAINTER_CONFIG.grid_height - 1 - (viewport.y + viewport.height - 1)) * cellH,
+          width: viewport.width * cellW,
+          height: viewport.height * cellH,
+          offsetX: viewport.offsetX,
+          offsetY: viewport.offsetY
+        });
+      }
+    },
+    on_mouse_move: (offsetX, offsetY) => {
+      // Forward mouse parallax to DOM renderer
+      if (domRenderer) {
+        domRenderer.setMouseParallax(offsetX, offsetY);
+      }
     }
   });
-  
+
   // Track module visibility state - MUST be declared before file menu
   let char_selector_open = true;
   let brush_preview_open = true;
@@ -466,7 +557,15 @@ export function create_painter_app_state(): PainterAppState {
     x1: canvas_rect.x1 + 22, // 20 chars wide
     y1: canvas_rect.y0 + 20  // Show up to ~17 layers
   });
-  
+
+  // Camera Control - positioned below layer palette
+  const camera_control_rect: Rect = getModuleRectWithSave('camera_control', {
+    x0: canvas_rect.x1 + 2,  // Right of canvas
+    y0: canvas_rect.y0 + 22, // Below layer palette
+    x1: canvas_rect.x1 + 30, // 28 chars wide
+    y1: canvas_rect.y0 + 40  // 18 chars tall
+  });
+
   // Factory functions for creating modules
   function create_char_selector_module(): Module {
     console.log('Creating char selector module at rect:', char_selector_rect);
@@ -838,6 +937,17 @@ export function create_painter_app_state(): PainterAppState {
         window.location.reload();
       }
     },
+    on_reset_camera: () => {
+      if (confirm('Reset camera to default settings?')) {
+        clearCameraConfig();
+        // Apply default camera settings immediately
+        voxelSpace.camera = createDefaultCamera();
+        // Sync DOM renderer if it exists
+        if (domRenderer) {
+          domRenderer.setSpace(voxelSpace);
+        }
+      }
+    },
     on_toggle_toolbox: () => {
       toggleModule(
         toolbox_open,
@@ -900,9 +1010,18 @@ export function create_painter_app_state(): PainterAppState {
         create_layer_palette_module,
         layer_palette_module
       );
+    },
+    on_toggle_camera: () => {
+      toggleModule(
+        camera_control_open,
+        (v) => { camera_control_open = v; },
+        'camera_control',
+        create_camera_control_module,
+        camera_control_module
+      );
     }
   });
-  
+
   // Create Layer Palette module (3D layers UI)
   let layer_palette_open = true;
   let layer_palette_module: Module | null = null;
@@ -1072,7 +1191,120 @@ export function create_painter_app_state(): PainterAppState {
   // Register Layer Palette (3D layers)
   layer_palette_module = create_layer_palette_module();
   registry.register(layer_palette_module);
-  
+
+  // Create Camera Control module (closed by default)
+  let camera_control_open = false;
+  let camera_control_module: Module | null = null;
+
+  function create_camera_control_module(): Module {
+    return makeCameraControlModule({
+      id: 'camera_control',
+      rect: camera_control_rect,
+      getSpace: () => voxelSpace,
+      onParallaxMoveToggle: (enabled) => {
+        voxelSpace.camera.parallax_move_enabled = enabled;
+        if (isAppInitialized) {
+          saveCameraConfig({ parallax_move_enabled: enabled });
+        }
+        console.log('Parallax move:', enabled ? 'enabled' : 'disabled');
+      },
+      onParallaxSizeToggle: (enabled) => {
+        voxelSpace.camera.parallax_size_enabled = enabled;
+        if (isAppInitialized) {
+          saveCameraConfig({ parallax_size_enabled: enabled });
+        }
+        console.log('Parallax size:', enabled ? 'enabled' : 'disabled');
+      },
+      onOcclusionToggle: (enabled) => {
+        // When occlusion is enabled, we DON'T show all layers (show_all_layers = false)
+        voxelSpace.camera.show_all_layers = !enabled;
+        if (isAppInitialized) {
+          saveCameraConfig({ show_all_layers: voxelSpace.camera.show_all_layers });
+        }
+        console.log('Voxel occlusion:', enabled ? 'enabled' : 'disabled');
+      },
+      onOrientationChange: (orientation) => {
+        voxelSpace.camera.orientation = orientation;
+        if (isAppInitialized) {
+          saveCameraConfig({ orientation });
+        }
+      },
+      onEulerRotate: (axis, degrees) => {
+        if (!voxelSpace.camera.euler_rotation) {
+          voxelSpace.camera.euler_rotation = { x: 0, y: 0, z: 0 };
+        }
+        voxelSpace.camera.euler_rotation[axis] = degrees;
+        if (isAppInitialized) {
+          saveCameraConfig({ euler_rotation: voxelSpace.camera.euler_rotation });
+        }
+        console.log(`Euler rotation ${axis}: ${degrees}°`);
+        // TODO: Apply CSS transform to canvas container
+      },
+      onPanReset: () => {
+        // Reset pan offsets - handled in canvas module
+        console.log('Pan reset requested');
+      },
+      onCalibrationChange: (x, y) => {
+        if (domRenderer) {
+          domRenderer.setCalibration(x, y);
+        }
+        if (isAppInitialized) {
+          saveCameraConfig({ calibration: { x, y } });
+        }
+      },
+      onCalibrationReset: () => {
+        if (domRenderer && voxelSpace) {
+          domRenderer.setCalibration(0, 0);
+        }
+        if (isAppInitialized) {
+          saveCameraConfig({ calibration: { x: 0, y: 0 } });
+        }
+      },
+      onScalePerLayerChange: (value) => {
+        if (isAppInitialized) {
+          saveCameraConfig({ scale_per_layer: value });
+        }
+      },
+      onMovementPerLayerChange: (value) => {
+        if (isAppInitialized) {
+          saveCameraConfig({ movement_per_layer: value });
+        }
+      },
+      onBaseLayerScaleChange: (value) => {
+        if (isAppInitialized) {
+          saveCameraConfig({ base_layer_scale: value });
+        }
+      },
+      onCharSpacingXChange: (value) => {
+        if (isAppInitialized) {
+          saveCameraConfig({ char_spacing_x: value });
+        }
+      },
+      onCharSpacingYChange: (value) => {
+        if (isAppInitialized) {
+          saveCameraConfig({ char_spacing_y: value });
+        }
+      },
+      onMove: (new_rect) => {
+        if (camera_control_module) {
+          camera_control_module.rect = new_rect;
+          saveModulePosition('camera_control', new_rect);
+        }
+      },
+      onResize: (new_rect) => {
+        if (camera_control_module) {
+          camera_control_module.rect = new_rect;
+          saveModulePosition('camera_control', new_rect);
+        }
+      },
+      onClose: () => {
+        camera_control_open = false;
+        registry.unregister('camera_control');
+        camera_control_module = null;
+      }
+    });
+  }
+
   // Register floating modules (open by default)
   char_selector_module = create_char_selector_module();
   brush_preview_module = create_brush_preview_module();
@@ -1086,13 +1318,6 @@ export function create_painter_app_state(): PainterAppState {
   registry.register(weight_selector_module);
   registry.register(toolbox_module);
   registry.register(tool_properties_module);
-  
-  console.log('Registered modules:', registry.get_all().map(m => ({ id: m.id, rect: m.rect })));
-  
-  // Debug: Log VoxelSpace state on startup
-  console.log('🎨 ASCII Painter 3D initialized');
-  console.log(debugVoxelSpace(voxelSpace));
-  console.log('💡 3D VoxelSpace Mode Active - Data is always 3D, camera modes are views');
   
   return {
     modules: registry.get_all(),
@@ -1148,6 +1373,7 @@ export function create_painter_app_state(): PainterAppState {
         // Try to import as VoxelSpace (handles both v1 and v2 formats)
         const loadedSpace = importVoxelSpaceFromJSON(content);
         voxelSpace = loadedSpace;
+        syncDOMRenderer();
         // Sync grid to current layer
         const currentLayer = getLayer(voxelSpace, voxelSpace.camera.focus_plane);
         if (currentLayer) {
@@ -1173,6 +1399,7 @@ export function create_painter_app_state(): PainterAppState {
     new_canvas: (width: number, height: number) => {
       // Create new VoxelSpace with default single layer
       voxelSpace = createVoxelSpace(width, height, { defaultZ: 0 });
+      syncDOMRenderer();
       // Sync grid to the new VoxelSpace
       const currentLayer = getLayer(voxelSpace, 0);
       if (currentLayer) {
@@ -1201,6 +1428,7 @@ export function create_painter_app_state(): PainterAppState {
         const { importVoxelSpace } = require('../ascii_painter/voxel_space.js');
         const parsed = JSON.parse(json);
         voxelSpace = importVoxelSpace(parsed);
+        syncDOMRenderer();
         // Update grid reference to current layer
         const currentLayer = getLayer(voxelSpace, voxelSpace.camera.focus_plane);
         if (currentLayer) {
@@ -1219,7 +1447,6 @@ export function create_painter_app_state(): PainterAppState {
     
     set_camera_mode: (mode: CameraMode) => {
       voxelSpace.camera.mode = mode;
-      console.log('📷 Camera mode:', mode);
     },
     
     set_parallax_intensity: (intensity: number) => {
@@ -1228,7 +1455,6 @@ export function create_painter_app_state(): PainterAppState {
     
     toggle_show_all_layers: () => {
       voxelSpace.camera.show_all_layers = !voxelSpace.camera.show_all_layers;
-      console.log('👁 Show all layers:', voxelSpace.camera.show_all_layers);
     },
     
     // Layer operations
@@ -1291,6 +1517,51 @@ export function create_painter_app_state(): PainterAppState {
         layer.locked = !layer.locked;
         console.log('🔒 Layer', z, 'locked:', layer.locked);
       }
+    },
+
+    // DOM Renderer operations
+    init_dom_renderer: () => {
+      initDOMRenderer();
+    },
+
+    render_dom_layers: () => {
+      if (domRenderer) {
+        domRenderer.render();
+      }
+    },
+
+    set_mouse_parallax: (x: number, y: number) => {
+      if (domRenderer) {
+        domRenderer.setMouseParallax(x, y);
+      }
+    },
+
+    set_dom_viewport: (viewport: { x: number; y: number; width: number; height: number; offsetX: number; offsetY: number }) => {
+      if (domRenderer) {
+        domRenderer.setViewport(viewport);
+      }
+    },
+
+    // Debug function to check camera persistence
+    debug_camera_config: () => {
+      const config = loadCameraConfig();
+      console.log('[Camera Debug] Current saved config:', config);
+      console.log('[Camera Debug] Current voxelSpace camera:', voxelSpace.camera);
+      console.log('[Camera Debug] isAppInitialized:', isAppInitialized);
+      return config;
+    },
+
+    // Force save camera config
+    force_save_camera: () => {
+      saveCameraConfig({
+        calibration: voxelSpace.camera.calibration,
+        scale_per_layer: voxelSpace.camera.scale_per_layer,
+        movement_per_layer: voxelSpace.camera.movement_per_layer,
+        base_layer_scale: voxelSpace.camera.base_layer_scale,
+        char_spacing_x: voxelSpace.camera.char_spacing_x,
+        char_spacing_y: voxelSpace.camera.char_spacing_y,
+      });
+      console.log('[Camera Debug] Force saved camera config');
     },
   };
 }

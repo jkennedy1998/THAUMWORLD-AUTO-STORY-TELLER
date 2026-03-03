@@ -27,6 +27,15 @@ import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo
 import type { VoxelSpace } from '../../ascii_painter/voxel_space.js';
 import { getVisibleLayers } from '../../ascii_painter/voxel_space.js';
 
+export interface CanvasViewport {
+  x: number;      // Screen X position in pixels
+  y: number;      // Screen Y position in pixels
+  width: number;  // Width in pixels
+  height: number; // Height in pixels
+  offsetX: number; // Grid pan offset X
+  offsetY: number; // Grid pan offset Y
+}
+
 export type PainterCanvasOptions = {
   id: string;
   rect: Rect;
@@ -59,6 +68,10 @@ export type PainterCanvasOptions = {
   on_move?: (new_rect: Rect) => void;
   on_resize?: (new_rect: Rect) => void;
   on_close?: () => void;
+  // Viewport callback for DOM renderer
+  on_viewport_change?: (viewport: CanvasViewport) => void;
+  // Mouse parallax callback for DOM renderer
+  on_mouse_move?: (offsetX: number, offsetY: number) => void;
   // Gradiator and scale for paste
   get_gradiator_state: () => GradiatorState;
   get_paste_scale: () => number;
@@ -118,6 +131,24 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   let paste_preview_data: CopyData | null = null;
   let paste_preview_pos: { x: number; y: number } | null = null;
 
+  // Function to emit viewport updates for DOM renderer
+  function emitViewport() {
+    if (opts.on_viewport_change) {
+      opts.on_viewport_change({
+        x: rect.x0,
+        y: rect.y0,
+        width: rect.x1 - rect.x0 + 1,
+        height: rect.y1 - rect.y0 + 1,
+        offsetX: offset_x,
+        offsetY: offset_y
+      });
+    }
+  }
+
+  // Mouse position for parallax calculations (relative to canvas center, -1 to +1)
+  let mouse_offset_x = 0;
+  let mouse_offset_y = 0;
+
   // Status message for user feedback
   let status_message: string | null = null;
   let status_message_time = 0;
@@ -133,6 +164,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   };
   
   const gizmo_state: GizmoState = create_gizmo_state();
+
+  // Emit initial viewport
+  emitViewport();
 
   // Cell change tracking for action-based undo
   let pending_changes: CellChange[] = [];
@@ -356,6 +390,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     rect,
     Focusable: true,
     
+    OnFocus(): void {
+      console.log('[CANVAS-DEBUG] OnFocus - canvas module focused');
+    },
+    
     // Selection manipulation methods
     clearSelection: () => {
       clearSelection(selection_bitmap);
@@ -384,37 +422,58 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       const selected_z = opts.get_selected_z();
       const space = opts.space;
 
-      // Get all visible layers sorted by Z (back to front for proper rendering)
-      const visibleLayers = getVisibleLayers(space).sort((a, b) => a.z - b.z);
-
-      // Draw all visible layers
-      for (const layer of visibleLayers) {
-        // Calculate parallax offset for this layer
-        let parallaxX = 0;
-        let parallaxY = 0;
-        
-        if (space.camera.mode === 'parallax_ortho') {
-          const zDistance = layer.z - selected_z;
-          parallaxX = Math.round(zDistance * space.camera.parallax_intensity * 2);
-          // parallaxY stays 0 for side-view parallax
+      // NOTE: All layers (including selected) are now rendered by the DOM renderer
+      // with proper transforms, parallax, and scaling. 
+      // The type grid only renders editing overlays (selection, paste preview, etc).
+      // This allows you to see the full 3D effect with all layers visible.
+      
+      // ARCHIVE: Old type grid layer rendering - replaced by DOM renderer
+      /*
+      const selectedLayer = space.layers.get(selected_z);
+      if (selectedLayer && selectedLayer.visible) {
+        for (let gy = start_y; gy < end_y; gy++) {
+          for (let gx = start_x; gx < end_x; gx++) {
+            const cell = selectedLayer.cells[gy]?.[gx];
+            if (!cell || cell.char === ' ') continue;
+            const canvas_x = rect.x0 + (gx - start_x);
+            const canvas_y = rect.y0 + (gy - start_y);
+            if (canvas_x < rect.x0 || canvas_x > rect.x1 ||
+                canvas_y < rect.y0 || canvas_y > rect.y1) continue;
+            c.set(canvas_x, canvas_y, {
+              char: cell.char,
+              rgb: cell.rgb,
+              style: 'regular',
+              weight_index: cell.weight_index,
+              render_index: 100
+            });
+          }
         }
+      }
+      */
 
-        // Calculate render_index based on Z (higher Z = higher render_index = drawn on top)
-        // Add base offset to avoid negative indices
+      // ARCHIVE: Old multi-layer grid-based rendering (replaced by DOM renderer)
+      // See voxel_dom_renderer.ts for new implementation
+      /*
+      // OLD CODE - Rendered all layers to type grid with transforms
+      // This caused issues with scaling (gaps between cells) and positioning
+      const visibleLayers = getVisibleLayers(space).sort((a, b) => a.z - b.z);
+      const occlusionBuffer = new Map<string, number>();
+      
+      for (const layer of visibleLayers) {
+        const zDistance = layer.z - selected_z;
         const layerRenderIndex = layer.z + 10;
-
-        // Draw this layer's cells
+        
         for (let gy = start_y; gy < end_y; gy++) {
           for (let gx = start_x; gx < end_x; gx++) {
             const cell = layer.cells[gy]?.[gx];
             if (!cell || cell.char === ' ') continue;
-
-            const canvas_x = rect.x0 + (gx - start_x) + parallaxX;
-            const canvas_y = rect.y0 + (gy - start_y) + parallaxY;
-
+            
+            const canvas_x = rect.x0 + (gx - start_x);
+            const canvas_y = rect.y0 + (gy - start_y);
+            
             if (canvas_x < rect.x0 || canvas_x > rect.x1 ||
                 canvas_y < rect.y0 || canvas_y > rect.y1) continue;
-
+            
             c.set(canvas_x, canvas_y, {
               char: cell.char,
               rgb: cell.rgb,
@@ -425,6 +484,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           }
         }
       }
+      */
 
       // Draw selection
       if (hasSelection(selection_bitmap)) {
@@ -494,17 +554,17 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             let weight: number;
             let should_show_paste = false;
             
-            if (paste_cell && paste_cell.char !== ' ') {
-              // Check if this cell should be ignored
-              let is_ignored = false;
-              
-              // Check ignore space
-              if (ignore_space && paste_cell.char === ' ') {
-                is_ignored = true;
-              }
-              
+            // Check if this cell should be ignored
+            let is_ignored = false;
+            
+            // Check ignore space (null/undefined cells represent spaces in copy data)
+            if (ignore_space && (!paste_cell || paste_cell.char === ' ')) {
+              is_ignored = true;
+            }
+            
+            if (paste_cell && !is_ignored) {
               // Check ignore black (only pure black RGB 0,0,0)
-              if (!is_ignored && ignore_black) {
+              if (ignore_black) {
                 if (paste_cell.rgb.r === 0 && paste_cell.rgb.g === 0 && paste_cell.rgb.b === 0) {
                   is_ignored = true;
                 }
@@ -527,21 +587,21 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
                   is_ignored = true;
                 }
               }
-              
-              if (!is_ignored) {
-                // Show the paste cell
-                char = paste_cell.char;
-                rgb = paste_cell.rgb;
-                weight = paste_cell.weight_index;
-                should_show_paste = true;
-              } else {
-                // Ignored - show underlying cell
-                const underlying = getCell(opts.grid, grid_x, grid_y);
-                char = underlying?.char ?? ' ';
-                rgb = underlying?.rgb ?? { r: 0, g: 0, b: 0 };
-                weight = underlying?.weight_index ?? 0;
-                should_show_paste = false;
-              }
+            }
+            
+            if (is_ignored) {
+              // Ignored - show underlying cell
+              const underlying = getCell(opts.grid, grid_x, grid_y);
+              char = underlying?.char ?? ' ';
+              rgb = underlying?.rgb ?? { r: 0, g: 0, b: 0 };
+              weight = underlying?.weight_index ?? 0;
+              should_show_paste = false;
+            } else if (paste_cell && paste_cell.char !== ' ') {
+              // Show the paste cell
+              char = paste_cell.char;
+              rgb = paste_cell.rgb;
+              weight = paste_cell.weight_index;
+              should_show_paste = true;
             } else if (space_replace) {
               // Space with replace mode: show space
               char = ' ';
@@ -558,13 +618,15 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             }
             
             // Flash effect for preview
+            // Use high render_index (200) to ensure paste preview appears ABOVE all layers
+            // Layers use render_index = layerZ + 10, so minimum is 10, maximum depends on layer count
             if (flash_state === 1 || !should_show_paste) {
               c.set(canvas_x, canvas_y, {
                 char: char,
                 rgb: rgb,
                 style: 'regular',
                 weight_index: weight,
-                render_index: 2
+                render_index: 200
               });
             }
           }
@@ -654,6 +716,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       const local_y = e.y - rect.y0;
       const grid_x = Math.floor(offset_x + local_x);
       const grid_y = Math.floor(offset_y + local_y);
+      
+      // DEBUG: Trace panning issues
+      console.log('[CANVAS-DEBUG] OnPointerDown - space_held:', space_held, 'button:', e.button);
 
       // Handle gizmo clicks first
       if (is_in_gizmo_area(e.x, e.y, rect)) {
@@ -725,9 +790,20 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
               console.log('Paste tool clicked, clipboard data:', clipboard ? 'exists' : 'empty');
               if (clipboard) {
                 // Try to decode special format first
+                console.log('Decoding clipboard data, first 200 chars:', clipboard.substring(0, 200));
                 const specialData = decodeFromSpecialFormat(clipboard);
                 if (specialData) {
                   // Special format with colors/weights - apply scaling
+                  console.log(`Decoded special format: ${specialData.width}x${specialData.height}`);
+                  // Debug: Show first few cells
+                  for (let y = 0; y < Math.min(3, specialData.height); y++) {
+                    for (let x = 0; x < Math.min(5, specialData.width); x++) {
+                      const cell = specialData.cells[y]?.[x];
+                      if (cell) {
+                        console.log(`  Cell[${y}][${x}]: char='${cell.char}', rgb=(${cell.rgb.r},${cell.rgb.g},${cell.rgb.b}), weight=${cell.weight_index}`);
+                      }
+                    }
+                  }
                   const scaledData = scale !== 1.0 ? scaleCopyData(specialData, scale) : specialData;
                   paste_preview_data = scaledData;
                   // Center the paste on the cursor
@@ -915,8 +991,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       }
 
       if (is_panning && pan_start && view_start) {
+        console.log('[CANVAS-DEBUG] PANNING - delta:', { x: local_x - pan_start.x, y: local_y - pan_start.y });
         offset_x = clamp(view_start.x - (local_x - pan_start.x), 0, Math.max(0, opts.grid.width - CANVAS_WIDTH));
         offset_y = clamp(view_start.y - (local_y - pan_start.y), 0, Math.max(0, opts.grid.height - CANVAS_HEIGHT));
+        emitViewport();
         return;
       }
 
@@ -1188,11 +1266,27 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         let cleared = 0;
         let skippedIgnored = 0;
         
+        // Debug: Log first few cells of paste data
+        console.log('Paste data sample (first 3 rows):');
+        for (let y = 0; y < Math.min(3, paste_preview_data.height); y++) {
+          let row = '';
+          for (let x = 0; x < Math.min(10, paste_preview_data.width); x++) {
+            const cell = paste_preview_data.cells[y]?.[x];
+            row += cell ? cell.char : '?';
+          }
+          console.log(`  Row ${y}: "${row}"`);
+        }
+        
         for (let y = 0; y < paste_preview_data.height; y++) {
           for (let x = 0; x < paste_preview_data.width; x++) {
             const cell = paste_preview_data.cells[y]?.[x];
             const targetX = paste_preview_pos.x + x;
             const targetY = paste_preview_pos.y + y;
+            
+            // Debug first cell
+            if (y === 0 && x === 0 && cell) {
+              console.log(`First cell being pasted: char='${cell.char}', rgb=(${cell.rgb.r},${cell.rgb.g},${cell.rgb.b}), weight=${cell.weight_index}`);
+            }
             
             // Check bounds
             if (targetX < 0 || targetX >= opts.grid.width || targetY < 0 || targetY >= opts.grid.height) {
@@ -1202,14 +1296,14 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             // Check if this cell should be ignored
             let isIgnored = false;
             
-            if (cell) {
-              // Check ignore space (must check first, before char !== ' ' filter)
-              if (ignoreSpace && cell.char === ' ') {
-                isIgnored = true;
-              }
-              
+            // Check ignore space (null/undefined cells represent spaces in copy data)
+            if (ignoreSpace && (!cell || cell.char === ' ')) {
+              isIgnored = true;
+            }
+            
+            if (cell && !isIgnored) {
               // Check ignore black (only pure black RGB 0,0,0)
-              if (!isIgnored && ignoreBlack) {
+              if (ignoreBlack) {
                 if (cell.rgb.r === 0 && cell.rgb.g === 0 && cell.rgb.b === 0) {
                   isIgnored = true;
                 }
@@ -1434,6 +1528,22 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       if (gizmo_state.is_resize_mode && !gizmo_state.is_dragging_resize) {
         gizmo_state.resize_edge = get_resize_edge(e.x, e.y, rect);
       }
+      
+      // Track mouse position relative to canvas center for parallax
+      // Only track when inside the canvas rect
+      if (e.x >= rect.x0 && e.x <= rect.x1 && e.y >= rect.y0 && e.y <= rect.y1) {
+        const center_x = (rect.x0 + rect.x1) / 2;
+        const center_y = (rect.y0 + rect.y1) / 2;
+        const max_dist_x = (rect.x1 - rect.x0) / 2;
+        const max_dist_y = (rect.y1 - rect.y0) / 2;
+        
+        // Normalize to -1 to +1 range
+        mouse_offset_x = max_dist_x > 0 ? (e.x - center_x) / max_dist_x : 0;
+        mouse_offset_y = max_dist_y > 0 ? (e.y - center_y) / max_dist_y : 0;
+        
+        // Pass to DOM renderer
+        opts.on_mouse_move?.(mouse_offset_x, mouse_offset_y);
+      }
     },
 
     OnWheel(e: WheelEvent): void {
@@ -1449,6 +1559,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       } else {
         offset_y = clamp(offset_y + (e.delta_y > 0 ? scroll_step : -scroll_step), 0, Math.max(0, opts.grid.height - CANVAS_HEIGHT));
       }
+      emitViewport();
     },
 
     OnKeyDown(e: KeyboardEvent): void {
@@ -1630,6 +1741,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       // Space for panning (only when NOT in text mode)
       if (e.code === 'Space') {
         space_held = true;
+        console.log('[CANVAS-DEBUG] Space key DOWN - space_held set to true');
         e.preventDefault();
         return;
       }
@@ -1641,13 +1753,18 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         case 'ArrowLeft': offset_x = clamp(offset_x - pan_step, 0, opts.grid.width - CANVAS_WIDTH); break;
         case 'ArrowRight': offset_x = clamp(offset_x + pan_step, 0, opts.grid.width - CANVAS_WIDTH); break;
       }
+      emitViewport();
     },
 
     OnKeyUp(e: KeyboardEvent): void {
-      if (e.code === 'Space') space_held = false;
+      if (e.code === 'Space') {
+        space_held = false;
+        console.log('[CANVAS-DEBUG] Space key UP - space_held set to false');
+      }
     },
 
     OnBlur(): void {
+      console.log('[CANVAS-DEBUG] OnBlur - clearing state, space_held was:', space_held);
       space_held = false;
       is_panning = false;
       is_drawing = false;

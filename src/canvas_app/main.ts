@@ -14,15 +14,20 @@ let start_window_feed_polling: (interval_ms: number) => void;
 let module_registry: any;
 let on_drag_end_outside: ((x: number, y: number) => void) | undefined;
 
+let painter_state: ReturnType<typeof create_painter_app_state> | null = null;
+
 if (IS_PAINTER_MODE) {
     // PAINTER MODE
     console.log('🎨 Initializing ASCII Painter...');
-    const painter_state = create_painter_app_state();
+    painter_state = create_painter_app_state();
     modules = painter_state.modules;
     module_registry = painter_state.module_registry;
     start_window_feed_polling = () => {}; // No polling needed for painter
     on_drag_end_outside = undefined;
-    
+
+    // Initialize DOM renderer for voxel layers
+    painter_state.init_dom_renderer();
+
     // Expose painter API globally
     (window as any).painter = {
         export: painter_state.export_grid,
@@ -32,7 +37,7 @@ if (IS_PAINTER_MODE) {
         load: painter_state.load_from_file,
         new_canvas: painter_state.new_canvas,
         export_text: painter_state.export_as_text,
-        filename: () => painter_state.current_filename
+        filename: () => painter_state!.current_filename
     };
 } else {
     // GAME MODE
@@ -64,6 +69,59 @@ if (module_registry) {
     module_registry.subscribe(() => {
         runtime.set_modules(module_registry.get_all());
     });
+}
+
+// Hook DOM renderer into render loop for painter mode
+if (IS_PAINTER_MODE && painter_state) {
+    const painterRef = painter_state;
+    const originalTick = (runtime as any)['tick'].bind(runtime);
+    
+    // Track canvas transform
+    let canvasTransform = { x: 0, y: 0 };
+    let tileSize = { w: 0, h: 0 };
+    
+    // Listen to canvas pan events
+    window.addEventListener('thaumworld_ui_pan', ((ev: CustomEvent) => {
+        canvasTransform.x = ev.detail?.pan_x_px ?? 0;
+        canvasTransform.y = ev.detail?.pan_y_px ?? 0;
+        tileSize.w = ev.detail?.tile_w_px ?? 0;
+        tileSize.h = ev.detail?.tile_h_px ?? 0;
+        
+        // Apply the same transform to the voxel container that mono_canvas has
+        const container = document.getElementById('voxel_layers_container');
+        if (container) {
+            container.style.transform = `translate(${canvasTransform.x}px, ${canvasTransform.y}px)`;
+        }
+    }) as EventListener);
+    
+    (runtime as any)['tick'] = () => {
+        originalTick();
+        
+        // Render DOM layers each frame
+        painterRef.render_dom_layers();
+        
+        // Get the canvas module to calculate viewport
+        const canvasModule = modules.find(m => m.id === 'painter_canvas');
+        if (canvasModule && tileSize.w > 0) {
+            const rect = canvasModule.rect;
+            
+            // Viewport is relative to the transformed container
+            // So we just use the grid coordinates * tile size
+            const viewportX = rect.x0 * tileSize.w;
+            const viewportY = (config.grid_height - 1 - rect.y1) * tileSize.h;
+            const viewportW = (rect.x1 - rect.x0 + 1) * tileSize.w;
+            const viewportH = (rect.y1 - rect.y0 + 1) * tileSize.h;
+            
+            painterRef.set_dom_viewport({
+                x: viewportX,
+                y: viewportY,
+                width: viewportW,
+                height: viewportH,
+                offsetX: 0,
+                offsetY: 0
+            });
+        }
+    };
 }
 
 type TextureFilterEls = {

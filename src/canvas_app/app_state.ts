@@ -137,7 +137,7 @@ export function create_app_state(): AppState {
             body_slots: {} as BodySlots,
             equipped_items: new Map() as Map<string, { instance: ItemInstance; definition: ItemDefinition }>,
             weight: { current: 0, max: 100 },
-            highlighted_slots: [] as Array<{ slot_name: string; slot_type: SlotType }>,  // Slots highlighted when hovering compatible items
+            highlighted_slots: [] as Array<{ slot_name: string; slot_type: SlotType; garb_index?: number }>,  // Slots highlighted when hovering compatible items
             hovered_item: null as { name: string; source: string } | null,  // Currently hovered item for debug display
             hovered_slot: null as string | null,  // Currently hovered body slot
             highlighted_items: [] as Array<{ container_id: string; slot_index: number }>,  // Items highlighted when hovering slot
@@ -323,13 +323,25 @@ export function create_app_state(): AppState {
     }
 
     // Helper function to determine compatible body slots for an item
-    // Now uses lowercase_snake_case consistently throughout the system
-    // Returns array of {slot_name, slot_type} objects
-    function get_compatible_slots(item_def: ItemDefinition): Array<{ slot_name: string; slot_type: SlotType }> {
-        const slot_types = get_item_slot_types(item_def);
-        const compatible: Array<{ slot_name: string; slot_type: SlotType }> = [];
+    // Calls backend API for tag-based compatibility (single source of truth)
+    async function get_compatible_slots(item_def: ItemDefinition): Promise<Array<{ slot_name: string; slot_type: SlotType; garb_index?: number }>> {
+        try {
+            const response = await fetch(`http://localhost:8787/api/item/compatible_slots?item_def_id=${item_def.id}&actor_id=${APP_CONFIG.input_actor_id}`);
+            if (response.ok) {
+                const data = await response.json();
+                if (data.ok && data.compatible_slots) {
+                    return data.compatible_slots;
+                }
+            }
+        } catch (err) {
+            debug_log('[get_compatible_slots] API call failed, falling back to local logic');
+        }
         
-        // Get valid body slots from item definition
+        // Fallback to local logic if API fails
+        const slot_types = get_item_slot_types(item_def);
+        const compatible: Array<{ slot_name: string; slot_type: SlotType; garb_index?: number }> = [];
+        
+        // Get valid body slots from item definition (deprecated field)
         const valid_slots = item_def.valid_body_slots?.filter(slot => 
             ['head', 'torso', 'hand_left', 'hand_right', 'leg_left', 'leg_right'].includes(slot)
         ) || [];
@@ -337,15 +349,13 @@ export function create_app_state(): AppState {
         // For each valid slot, add entries for each compatible slot type (armor/garb)
         for (const slot_name of valid_slots) {
             for (const slot_type of slot_types) {
-                if (slot_type !== 'tool') {  // tool handled separately below
+                if (slot_type !== 'tool') {
                     compatible.push({ slot_name, slot_type });
                 }
             }
         }
         
-        // ALL items can be held in hand tool slots, regardless of valid_body_slots
-        // This allows holding any item (food, clothing, misc) in hands
-        // BUG FIX: Previously returned early if valid_body_slots was empty, preventing hand use
+        // ALL items can be held in hand tool slots
         if (slot_types.includes('tool')) {
             compatible.push({ slot_name: 'hand_left', slot_type: 'tool' });
             compatible.push({ slot_name: 'hand_right', slot_type: 'tool' });
@@ -2448,19 +2458,21 @@ export function create_app_state(): AppState {
             async OnPress() {
                 console.log('[DEBUG BUTTON] DROP button pressed');
                 
-                // Safe list of items that can be dropped
+                // Safe list of items that can be dropped (using cleaned item definitions)
                 const safe_items = [
-                    'coin',           // Basic currency
-                    'travelers_bread', // Food
-                    'healing_draught', // Consumable
-                    'torch',          // Light source
-                    'dagger',         // Weapon
-                    'rope_hemp_50ft', // Tool
-                    'simple_bandage', // Medical
-                    'flint_and_steel', // Tool
-                    'stone_fragment', // Junk
-                    'wolves_bane',    // Herb
-                    'crimson_mushroom', // Fungus
+                    'coin',                      // Basic currency
+                    'test_iron_sword',          // TOOL - weapon
+                    'test_torch',               // TOOL - light source
+                    'test_iron_dagger',         // TOOL - weapon
+                    'test_iron_helmet',         // ARMOR - head
+                    'test_iron_greaves',        // ARMOR - leg
+                    'test_iron_gauntlet_left',  // ARMOR - hand
+                    'test_cloth_tunic',         // GARB - torso
+                    'test_cloth_pants',         // GARB - leg
+                    'small_sack',               // CONTAINER - worn on leg
+                    'test_silver_ring',         // GARB - hand jewelry
+                    'test_gold_ring',           // GARB - hand jewelry
+                    'test_leather_bracelet',    // GARB - hand jewelry
                 ];
                 
                 // Pick random item
@@ -2566,7 +2578,7 @@ export function create_app_state(): AppState {
                     ui_state.character.highlighted_items = [];
                 }
             },
-            on_drag_start: (slot_name: string, slot_type: SlotType, garb_index: number | null, item: ItemInstance, definition: ItemDefinition, container_id: string) => {
+            on_drag_start: async (slot_name: string, slot_type: SlotType, garb_index: number | null, item: ItemInstance, definition: ItemDefinition, container_id: string) => {
                 // Validate drag using centralized drag_state.can_drag()
                 const validation = drag_state.can_drag(item.id, definition);
                 if (!validation.can) {
@@ -2577,8 +2589,8 @@ export function create_app_state(): AppState {
                 
                 // Store in shared drag state
                 drag_state.start_drag('character', item.id, container_id, definition);
-                // Highlight compatible slots
-                const compatible = get_compatible_slots(definition);
+                // Highlight compatible slots (call API for tag-based compatibility)
+                const compatible = await get_compatible_slots(definition);
                 ui_state.character.highlighted_slots = compatible;
                 console.log(`[Character] Drag started from ${slot_name}.${slot_type}${garb_index !== null ? `.${garb_index}` : ''} - highlighting slots:`, compatible);
             },
@@ -2598,14 +2610,18 @@ export function create_app_state(): AppState {
                 
                 // Handle drag from container (inventory) to character slot
                 if (drag_state.source_module === 'container') {
-                    // Validate body slot compatibility before attempting transfer
-                    // TOOL slots can hold ANY item (hands can carry anything)
-                    // Only check valid_body_slots for ARMOR and GARB slots
+                    // Validate body slot compatibility using backend API (single source of truth)
                     const item_def = drag_state.item_definition;
-                    if (slot_type !== 'tool' && item_def?.valid_body_slots && !item_def.valid_body_slots.includes(slot_name)) {
-                        flash_status([`${item_def.name} cannot be equipped to ${slot_name}`], 1500);
-                        drag_state.reject_drag();
-                        return false;
+                    if (item_def) {
+                        const compatible_slots = await get_compatible_slots(item_def);
+                        const is_compatible = compatible_slots.some((slot: { slot_name: string; slot_type: string; garb_index?: number }) => 
+                            slot.slot_name === slot_name && slot.slot_type === slot_type
+                        );
+                        if (!is_compatible) {
+                            flash_status([`${item_def.name} cannot be equipped to ${slot_name}.${slot_type}`], 1500);
+                            drag_state.reject_drag();
+                            return false;
+                        }
                     }
                     
                     try {
@@ -2927,10 +2943,10 @@ export function create_app_state(): AppState {
             on_drag_move: (x: number, y: number) => {
                 drag_state.update_position(x, y);
             },
-            on_slot_hover: (slot_index: number, item: ItemInstance, definition: ItemDefinition | null) => {
+            on_slot_hover: async (slot_index: number, item: ItemInstance, definition: ItemDefinition | null) => {
                 if (definition) {
-                    // Find compatible slots and highlight them
-                    const compatible = get_compatible_slots(definition);
+                    // Find compatible slots and highlight them (call API for tag-based compatibility)
+                    const compatible = await get_compatible_slots(definition);
                     ui_state.character.highlighted_slots = compatible;
                     ui_state.character.hovered_item = { name: definition.name, source: 'inventory' };
                     console.log(`[Inventory] Hovering ${definition.name} - compatible slots:`, compatible);
@@ -3079,36 +3095,74 @@ export function create_app_state(): AppState {
 
                     console.log(`[Inventory] Target slot: ${target_slot_name}`);
 
-                    // Check if this slot is compatible with the item
-                    const compatible_slots = get_compatible_slots(drag_state.item_definition!);
-                    const is_compatible = compatible_slots.some(slot => slot.slot_name === target_slot_name);
-                    if (!is_compatible) {
-                        console.log(`[Inventory] ${target_slot_name} is not compatible with ${drag_state.item_definition?.name}`);
-                        flash_status([`${drag_state.item_definition?.name} cannot be equipped to ${target_slot_name}`], 1500);
+                    // Determine slot type based on item tags
+                    const item_def = drag_state.item_definition;
+                    if (!item_def) {
+                        console.log(`[Inventory] No item definition - rejecting`);
                         drag_state.end_drag();
                         return false;
                     }
+                    const has_tool = item_def.tags?.some((t: any) => t.name === "TOOL");
+                    const has_armor = item_def.tags?.some((t: any) => t.name === "ARMOR");
+                    const has_garb = item_def.tags?.some((t: any) => t.name === "GARB");
+                    
+                    // Check if this slot is compatible with the item (call API for tag-based compatibility)
+                    const compatible_slots = await get_compatible_slots(item_def);
+                    
+                    // Find the best matching slot type for this target slot
+                    let target_slot_type: string | null = null;
+                    let target_garb_index: number | null = null;
+                    
+                    // Check if target slot is in compatible slots
+                    const compatible_for_slot = compatible_slots.filter((slot: { slot_name: string; slot_type: string; garb_index?: number }) => 
+                        slot.slot_name === target_slot_name
+                    );
+                    
+                    if (compatible_for_slot.length === 0) {
+                        console.log(`[Inventory] ${target_slot_name} is not compatible with ${item_def.name}`);
+                        flash_status([`${item_def.name} cannot be equipped to ${target_slot_name}`], 1500);
+                        drag_state.end_drag();
+                        return false;
+                    }
+                    
+                    // Determine which slot type to use based on item tags
+                    if (has_armor && compatible_for_slot.some((s: any) => s.slot_type === 'armor')) {
+                        target_slot_type = 'armor';
+                    } else if (has_garb && compatible_for_slot.some((s: any) => s.slot_type === 'garb')) {
+                        target_slot_type = 'garb';
+                        // Find first available garb slot
+                        const existing_garb_indices = compatible_for_slot
+                            .filter((s: any) => s.slot_type === 'garb' && s.garb_index !== undefined)
+                            .map((s: any) => s.garb_index);
+                        target_garb_index = existing_garb_indices.length > 0 ? Math.min(...existing_garb_indices) : 0;
+                    } else if (has_tool && compatible_for_slot.some((s: any) => s.slot_type === 'tool')) {
+                        target_slot_type = 'tool';
+                    } else if (compatible_for_slot.length > 0) {
+                        // Default to first compatible type
+                        const first_slot = compatible_for_slot[0];
+                        target_slot_type = first_slot?.slot_type ?? 'tool';
+                        if (target_slot_type === 'garb' && first_slot) {
+                            target_garb_index = first_slot.garb_index ?? 0;
+                        }
+                    } else {
+                        console.log(`[Inventory] No compatible slot type found for ${target_slot_name}`);
+                        flash_status([`Cannot determine slot type for ${target_slot_name}`], 1500);
+                        drag_state.end_drag();
+                        return false;
+                    }
+                    
+                    console.log(`[Inventory] Determined slot type: ${target_slot_type}${target_garb_index !== null ? '.' + target_garb_index : ''}`);
 
                     // Determine target container based on slot
                     const actor_id = APP_CONFIG.input_actor_id;
                     
-                    // Map slot names to container IDs (all lowercase_snake_case)
-                    // Format: container.{actor_id}.{slot} (NOT container.actor.{actor_id}.{slot})
-                    const slot_to_container: Record<string, string> = {
-                        'hand_left': `container.${actor_id}.hand_left`,
-                        'hand_right': `container.${actor_id}.hand_right`,
-                        'head': `container.${actor_id}.head`,
-                        'torso': `container.${actor_id}.torso`,
-                        'leg_left': `container.${actor_id}.leg_left`,
-                        'leg_right': `container.${actor_id}.leg_right`,
-                    };
-
-                    const target_container_id = slot_to_container[target_slot_name];
-                    if (!target_container_id) {
-                        console.log(`[Inventory] Slot ${target_slot_name} not recognized`);
-                        drag_state.end_drag();
-                        return false;
+                    // Build container ID with slot type
+                    let target_container_id = `container.${actor_id}.${target_slot_name}.${target_slot_type}`;
+                    if (target_garb_index !== null) {
+                        target_container_id += `.${target_garb_index}`;
                     }
+                    
+                    console.log(`[Inventory] Built target container ID: ${target_container_id}`);
 
                     console.log(`[Inventory] Transferring ${drag_state.item_definition?.name} to ${target_container_id}`);
 
@@ -3650,10 +3704,10 @@ export function create_app_state(): AppState {
                 on_drag_move: (x: number, y: number) => {
                     drag_state.update_position(x, y);
                 },
-                on_slot_hover: (slot_index: number, item: ItemInstance, definition: ItemDefinition | null) => {
+                on_slot_hover: async (slot_index: number, item: ItemInstance, definition: ItemDefinition | null) => {
                     if (definition) {
-                        // Highlight compatible body slots when hovering items
-                        const compatible = get_compatible_slots(definition);
+                        // Highlight compatible body slots when hovering items (call API for tag-based compatibility)
+                        const compatible = await get_compatible_slots(definition);
                         ui_state.character.highlighted_slots = compatible;
                         ui_state.character.hovered_item = { name: definition.name, source: container_id };
                     } else {

@@ -1,9 +1,9 @@
 # Character Module Rework
 
-**Status:** Planning  
+**Status:** ✅ Phase 9 Complete - Clean Inline Storage Architecture Implemented  
 **Priority:** High  
 **Created:** 2026-02-22  
-**Updated:** 2026-02-27  
+**Updated:** 2026-03-01  
 **Related Plans:** 
 - 2026_02_19_inventory_movement_plan.md (Phases 7.5, 8, 9)
 - 2026_02_14_item_system_unification.md
@@ -17,61 +17,59 @@ Refactor the CharacterModule to provide a comprehensive character inspection int
 
 **Critical Design Principle:** Characters and NPCs do NOT have a "main inventory." All items must be stored in equipped containers (bags, sacks, pouches) that are worn on body slots, held in hands, or equipped as armor/garb. The sidebar displays these equipped containers only.
 
-**Architecture Status (2026-02-27):**
+**Architecture Status (2026-03-01):**
 
-**✅ COMPLETED:** Tag-Based Slot System (Phase 9)
-- ARMOR/GARB/TOOL tags with body slot metadata implemented
-- Each body part has 3 slot types: ARMOR (1 max), GARB (∞), TOOL (1 per hand)
-- Backend fully functional: equip, unequip, and drag-drop working
-- Items properly route to correct slot types based on tags
-- Validation enforces slot type mapping (e.g., TOOL items can't go to head/torso/legs)
+**✅ COMPLETED:** Clean Inline Storage Architecture (Phase 9)
+- **Tag-Based System:** ARMOR/GARB/TOOL tags with body slot metadata fully implemented
+- **Storage Model:** Items stored inline in actor/npc/place files with body_slots as references
+  - `body_slots`: Reference IDs only (armor/garb/tool per body part)
+  - `equipped_items`: Full item data (instance + definition) stored inline
+  - Container items (sacks) store contents in `container_data.contents` inline
+- **Slot Layout:** Correct slot counts per body part
+  - Hands: TOOL slot (1 max) + ARMOR slot (1 max) + GARB slots (expandable)
+  - Head/Torso/Legs: ARMOR slot (1 max) + GARB slots (expandable)
+- **Validation:** Tag-based compatibility checking (ARMOR/GARB require body_slot match, TOOL is universal)
+- **Transfer System:** Direct body_slots updates, no sync complexity
+- **UI Rendering:** Single-slot display tuned and working correctly
 
-**CURRENT:** Backend Complete, Pickup/Drop Complete, UI Pending
-- Backend: Tag-based storage and validation ✅
-- Backend: Transfer system supports tag-based routing ✅
-- Backend: All container save/load operations working ✅
-- Backend: Pickup/Drop integration complete ✅
-  - ✅ Pickup from ground to equipped containers
-  - ✅ Drop from any slot to cardinal adjacent tiles
-  - ✅ Drop at cursor with immediate refresh
-- UI: CharacterModule still uses single-slot display (needs 3-position update)
-- UI: No slot type colors yet (blue/green/red)
-
-**NEXT:** Phase 4 - UI Enhancements
+**NEXT:** Data cleanup - manually create new clean item/actor data, remove deprecated fields
 
 ---
 
 ## Current State
 
 ### What's Working
-- ✅ Basic CharacterModule structure exists
+- ✅ Clean Inline Storage Architecture implemented
+- ✅ Body slots with correct slot counts per body part
+  - Hands: TOOL (1) + ARMOR (1) + GARB (expandable)
+  - Head/Torso/Legs: ARMOR (1) + GARB (expandable)
+- ✅ Tag-based validation (ARMOR/GARB/TOOL tags with body_slot metadata)
 - ✅ Weight bar visualization at bottom
 - ✅ Gizmos (X/#) implemented for close/move
-- ✅ Drag-and-drop equip/unequip functional (OLD system)
+- ✅ Drag-and-drop equip/unequip functional
 - ✅ Module positioning and registry system
 - ✅ Right-click container opening system (Phase 7)
 - ✅ Multi-instance ContainerModule support
 - ✅ Drag-and-drop routing to target modules (Phase 8)
+- ✅ Container sidebar showing EQUIPPED containers only
+- ✅ UI slot displays tuned and working correctly
 
-### What's Missing / Needs Update for Tag-Based System
-- ❌ UI: 3-position slot display per body part (armor/garb/tool)
-- ❌ UI: Slot type colors (blue=armor, green=garb, red=tool)
-- ❌ UI: Hand slot bug - items mirror to both visual slots (need 3 separate slots)
-- ❌ UI: Container sidebar showing EQUIPPED containers only
+### What's Missing
+- ❌ UI: Slot type colors (blue=armor, green=garb, red=tool) - Optional enhancement
 - ❌ UI: Health bar display
 - ❌ UI: Pan support for body slot area (for large creatures)
 - ❌ UI: Scrollable status section for extensibility
 - ❌ UI: Consistent border styling across modules
 - ❌ UI: Name truncation for long character names
-- ✅ Backend: Tag-based slot system complete
-- ✅ Backend: Container sidebar logic complete
-- ✅ Backend: Pickup/Drop integration complete
 
-### Known Issues (To Fix)
-- **Hand Slot Mirroring Bug:** Equipping to hand_left shows item in both visual hand slots
-  - Root cause: Both red (tool) and blue (equipment) visuals map to same body_slot
-  - Fix: Implement separate armor/garb/tool slot arrays per hand
-  - See Phase 9: Tag-Based Equipment Slot System
+### Data Cleanup Required
+- **Deprecated Fields to Remove:**
+  - `entity.containers` for equipped items (items now in `equipped_items` inline)
+  - Legacy `valid_body_slots` arrays on item definitions
+  - Old `container_id` and `owner_ref` fields from ItemInstance
+  - Dual-format compatibility code in body_slots.ts
+
+**Note:** All data stored in git. Create new clean item/actor data manually. Remove deprecated fields as you encounter them.
 
 ---
 
@@ -390,22 +388,156 @@ Uses box-drawing characters:
 
 ---
 
-## Phase 9: Tag-Based Equipment Slot System (NEW - PLANNED)
+## Phase 9: Clean Inline Storage Architecture ✅ IMPLEMENTED
 
-**Status:** Design Phase  
-**⚠️ NOT YET IMPLEMENTED**  
-**Goal:** Replace `valid_body_slots` array with ARMOR/GARB/TOOL tags that specify body slot compatibility
+**Status:** ✅ COMPLETE (2026-03-01)  
+**Goal:** Single source of truth with inline storage, body_slots as references only
 
-**Current Working System:** `valid_body_slots` array on ItemDefinition
-- Simple but functional
-- One item per body slot
-- Compatibility: `item_def.valid_body_slots.includes(target_slot)`
+**✅ COMPLETED:**
+- Tag-based equipment system (ARMOR/GARB/TOOL tags)
+- Clean inline storage model
+- Correct slot counts per body part
+- Direct body_slots updates (no sync complexity)
 
-**Future System:** Tag-based with ARMOR/GARB/TOOL
-- More flexible
-- Multiple items per slot (garb)
-- Better categorization for actions
-- Requires significant refactoring
+**Architecture Overview:**
+
+### Storage Model
+```typescript
+// Actor/NPC/Place file - Single Source of Truth
+{
+  "id": "henry_actor",
+  
+  // References only - what is equipped where
+  "body_slots": {
+    "hand_left": {
+      "armor": "inst_gauntlet_001",     // Max 1
+      "garb": ["inst_ring_001"],        // Expandable array
+      "tool": "inst_sword_001"          // Max 1 (hands only)
+    },
+    "torso": {
+      "armor": "inst_tunic_001",        // Max 1
+      "garb": ["inst_sash_001"]         // Expandable array
+    },
+    "leg_left": {
+      "garb": ["inst_sack_001"]         // Sack equipped here
+    }
+  },
+  
+  // Full item data stored inline
+  "equipped_items": {
+    "inst_sword_001": {
+      "instance": { "id": "inst_sword_001", "def_id": "iron_sword", ... },
+      "definition": { "name": "Iron Sword", "tags": [{"name": "TOOL"}], ... }
+    },
+    "inst_sack_001": {
+      "instance": {
+        "id": "inst_sack_001",
+        "container_data": {
+          "capacity": { "max_slots": 10 },
+          "contents": [  // Nested items stored here
+            { "instance": {...}, "definition": {...} },
+            { "instance": {...}, "definition": {...} }
+          ]
+        }
+      },
+      "definition": { "name": "Small Sack", "tags": [{"name": "CONTAINER"}, {"name": "GARB"}] }
+    }
+  },
+  
+  // Unequipped items
+  "inventory": [
+    { "instance": {...}, "definition": {...} }
+  ]
+}
+```
+
+### Key Principles
+1. **body_slots = References Only** - Just IDs mapping items to body parts
+2. **equipped_items = Full Data** - Complete instance + definition inline
+3. **No Dual Storage** - Items stored in ONE place (equipped_items or inventory)
+4. **Container Items** - Sacks/bags store contents in `container_data.contents`
+5. **Places** - Same pattern: items inline in `place.containers`
+
+### Slot Count by Body Part
+
+| Body Part | ARMOR (1) | GARB (∞) | TOOL (1) | Notes |
+|-----------|-----------|----------|----------|-------|
+| **Head** | ✓ | ✓ | | Helmets, masks, headbands |
+| **Torso** | ✓ | ✓ | | Armor, tunics, shirts, cloaks |
+| **Hand Left** | ✓ | ✓ | ✓ | Gauntlets, rings, weapons/tools |
+| **Hand Right** | ✓ | ✓ | ✓ | Gauntlets, rings, weapons/tools |
+| **Leg Left** | ✓ | ✓ | | Greaves, pants, boots, containers |
+| **Leg Right** | ✓ | ✓ | | Greaves, pants, boots, containers |
+
+**Hands get TOOL slots** for weapons/tools. **All parts get ARMOR + expandable GARB.**
+
+### Tag-Based Validation
+
+**ARMOR Tag:**
+```jsonc
+{
+  "name": "ARMOR",
+  "meta": ["hand"]  // Which body part this armor fits
+}
+```
+- Requires body_slot match (can't wear helmet on hand)
+- Max 1 per ARMOR slot
+
+**GARB Tag:**
+```jsonc
+{
+  "name": "GARB", 
+  "meta": ["hand"]  // Which body part this clothing fits
+}
+```
+- Requires body_slot match
+- Unlimited per GARB slot (expandable array)
+
+**TOOL Tag:**
+```jsonc
+{
+  "name": "TOOL"
+  // No body_slot meta - tools are held, not worn
+}
+```
+- No body_slot match required
+- Max 1 per TOOL slot
+- Universal (any TOOL can go in any hand TOOL slot)
+
+### Data Flow
+
+**Equip Item:**
+1. POST /api/equip {actor_id, item_id, slot_name, slot_type}
+2. Validate: Check item tags against target slot_type
+3. Update: body_slots[slot][type] = item_id
+4. Move: item from inventory → equipped_items
+5. Save: Single atomic write to actor file
+
+**Unequip Item:**
+1. POST /api/unequip {actor_id, slot_name, slot_type}
+2. Update: body_slots[slot][type] = null
+3. Move: item from equipped_items → inventory  
+4. Save: Single atomic write
+
+**Open Container (e.g., sack):**
+1. GET /api/container?id=item.inst_sack_001
+2. Look up in actor.equipped_items
+3. Return container_data.contents
+
+### Deprecated (To Remove)
+
+**Fields:**
+- `valid_body_slots` arrays on ItemDefinition
+- `entity.containers` for equipped items
+- `container_id` field on ItemInstance
+- `owner_ref` field on ItemInstance
+
+**Functions:**
+- `sync_body_slots_with_containers()` - no longer needed
+- Dual-format compatibility helpers
+- Legacy BodySlot format support
+
+**Note:** Data stored in git. Create new clean data manually. Remove deprecated code as encountered.
 
 ---
 
@@ -430,51 +562,7 @@ const can_equip = item_def.valid_body_slots?.includes(target_slot_name);
 // Example: sword.valid_body_slots = ["hand_left", "hand_right"]
 ```
 
-**Known Bug:** Hand slot visual mirroring
-- CharacterModule shows 2 positions per hand (red + blue)
-- Both positions display the same equipped item
-- Visual only - actual data only has 1 item per hand
-
----
-
-### Proposed Future System: Tag-Based Slot Types
-
-Each **body part** would have **3 functional slot types**:
-
-```
-Body Part (e.g., Left Hand)
-├─ [ARMOR]  Max 1  ← Requires ARMOR tag + body_slot match
-├─ [GARB]   Max ∞  ← Requires GARB tag + body_slot match
-└─ [TOOL]   Max 1  ← Requires TOOL tag (any body part)
-```
-
-#### Slot Type Definitions
-
-| Slot Type | Tag | Max Items | Body Slot Match | Purpose |
-|-----------|-----|-----------|-----------------|---------|
-| **ARMOR** | `ARMOR` | 1 | Yes | Protection (helmet, chest plate, gauntlet) |
-| **GARB** | `GARB` | ∞ | Yes | Clothing, jewelry, accessories (rings, tunics, cloaks) |
-| **TOOL** | `TOOL` | 1 | No | Weapons, tools, held items (sword, torch, potion) |
-
-**Key Insight:** TOOL slots don't require body slot matching because tools are "held", not "worn". Armor and garb must match the body part (can't wear a helmet on your hand).
-
-#### Body Part Slot Type Mapping
-
-Each body part has a specific set of available slot types:
-
-| Body Part | Armor | Garb | Tool | Notes |
-|-----------|-------|------|------|-------|
-| **Head** | ✓ | ✓ | | Helmets, hats, masks, headbands |
-| **Torso** | ✓ | ✓ | | Chest armor, tunics, shirts, cloaks |
-| **Hand Left** | ✓ | ✓ | ✓ | Gauntlets/bracers, rings/bracelets, weapons/tools |
-| **Hand Right** | ✓ | ✓ | ✓ | Gauntlets/bracers, rings/bracelets, weapons/tools |
-| **Leg Left** | ✓ | ✓ | | Greaves/leggings, pants, boots, accessories |
-| **Leg Right** | ✓ | ✓ | | Greaves/leggings, pants, boots, accessories |
-
-**Design Rationale:**
-- **Head/Torso/Legs**: No tool slots - these are "worn" body parts. Items here are passive (armor/clothing).
-- **Hands**: Have tool slots - hands are "active" and used to hold/wield items (weapons, torches, potions).
-- **Garb slots**: Hold clothing, accessories, and containers (sacks, pouches, bags worn on legs/hands).
+**✅ FIXED:** Hand slot displays now render correctly with separate slots for ARMOR, GARB, and TOOL.
 - **Initial Testing**: Use 1 item per garb slot for simplicity (support for multiple items can be added later).
 
 #### Tag Data Structure
@@ -565,106 +653,68 @@ Left Hand (hand_left):
    - TOOL: Is slot empty? (Max 1)
 4. **Execute Equip:** Add item to appropriate slot array
 
-#### Implementation Requirements
+#### ✅ Implementation Complete
 
-**⚠️ MAJOR REFACTORING REQUIRED**
+**Status:** All major components implemented and working (2026-03-01)
 
-To implement this system, the following changes are needed:
+**What Was Implemented:**
 
-**1. Tag Definitions** (`local_data/data_slot_default/tag_definitions.jsonc`)
-```jsonc
-// ADD THESE TAGS:
-{
-  "name": "ARMOR",
-  "description": "Protection equipment",
-  "scope": ["ITEM"],
-  "effects": [],
-  "meta_schema": {
-    "body_slot": "string",      // e.g., "head", "torso", "hand"
-    "armor_value": "number",    // Protection amount
-    "layer": "string"           // "inner", "outer", etc.
-  }
-}
-{
-  "name": "GARB",
-  "description": "Clothing and jewelry",
-  "scope": ["ITEM"],
-  "effects": [],
-  "meta_schema": {
-    "body_slot": "string",      // e.g., "hand", "torso"
-    "style": "string",          // Visual style
-    "layer": "string"
-  }
-}
-{
-  "name": "TOOL",
-  "description": "Usable items and weapons",
-  "scope": ["ITEM"],
-  "effects": [],
-  "meta_schema": {
-    "tool_type": "string",      // "weapon", "implement", etc.
-    "damage_dice": "string"     // e.g., "1d6"
-  }
-}
-```
+**1. ✅ Tag Definitions** (`local_data/data_slot_default/tag_definitions.jsonc`)
+- ARMOR tag with body_slot metadata
+- GARB tag with body_slot metadata  
+- TOOL tag (universal, no body_slot required)
 
-**2. Data Structure Changes**
+**2. ✅ Data Structure** (`src/types/body_slots.ts`)
 ```typescript
-// CURRENT (src/types/body_slots.ts)
-interface BodySlot {
-  name: string;
-  critical: boolean;
-  item_instance_id: string | null;
-}
-
-// FUTURE
 interface BodySlot {
   name: string;
   critical: boolean;
   armor: string | null;           // Max 1
-  garb: string[];                 // Unlimited
-  tool: string | null;            // Max 1
+  garb: string[];                 // Expandable
+  tool: string | null;            // Max 1 (hands only)
 }
 ```
 
-**3. Container ID Pattern Changes**
+**3. ✅ Container ID Pattern**
 ```typescript
-// CURRENT
-container.henry_actor.hand_left
-
-// FUTURE
 container.henry_actor.hand_left.armor    // Gauntlet
-container.henry_actor.hand_left.garb     // Rings (array)
+container.henry_actor.hand_left.garb.0   // First ring
 container.henry_actor.hand_left.tool     // Sword
 ```
 
-**4. Implementation Approach (No Migration Scripts)**
+**4. ✅ Storage Model**
+- **body_slots**: Reference IDs only (what is equipped where)
+- **equipped_items**: Full item data inline in actor file
+- **container_data.contents**: Nested items stored inline
+- **Single atomic writes**: No sync complexity
 
-**Strategy: Direct Implementation with Git Version Control**
+**5. ✅ Validation System**
+- Tag-based compatibility checking
+- ARMOR/GARB require body_slot match
+- TOOL is universal (any hand)
+- Backend rejects illegal equips
 
-Since we use git for version control and want to avoid leaving migration scripts behind:
+**6. ✅ UI Rendering**
+- Correct slot counts per body part
+- Hands: TOOL + ARMOR + expandable GARB
+- Other parts: ARMOR + expandable GARB
+- Single-slot displays tuned and working
 
-**Step 1: Add Tag Definitions**
-- Add ARMOR and GARB to `tag_definitions.jsonc`
-- Extend existing TOOL tag for equipment use
-- Test: Load game, verify tags register
+**Next Steps (Data Cleanup):**
 
-**Step 2: Update Types (Non-Breaking)**
-- Change `BodySlot` interface to support armor/garb/tool
-- Keep backward compatibility during transition
-- Test: TypeScript compiles, existing actors still load
+**Manual Data Creation:**
+- Create new clean item definitions with proper tags
+- Create new clean actor data with inline storage
+- Test thoroughly with fresh data
 
-**Step 3: Inline Data Migration (Manual)**
-Since we have minimal test data:
-- Manually update 1-2 test actors in data_slot_1
-- Add tags to a few test items
-- Test the new system with limited data
-- Iterate quickly
+**Code Cleanup (As You Go):**
+- Remove deprecated fields when encountered:
+  - `valid_body_slots` arrays
+  - `entity.containers` for equipped items  
+  - `container_id` and `owner_ref` from ItemInstance
+  - Legacy BodySlot compatibility code
 
-**Step 4: Code Updates with Dual Support**
-- Validation checks tags first, falls back to valid_body_slots
-- UI renders new slot structure when present
-- Old format still works (backward compatible)
+**No Migration Scripts:** All changes tracked in git. Create new clean data manually.
 - Test: Both old and new actor formats work
 
 **Step 5: Full Data Update**
@@ -1559,9 +1609,9 @@ As features are implemented, update the following documentation:
 
 ---
 
-**Status:** Phase 7 Complete ✓ | Phase 8 Core Complete ✓ | Phase 9 Design Phase
+**Status:** Phase 7 Complete ✓ | Phase 8 Core Complete ✓ | Phase 9 Complete ✓
 
-**Last Updated:** 2026-02-27
+**Last Updated:** 2026-03-01
 
 **Completed:**
 - ✅ Phase 7: Right-click container opening with multi-instance support
@@ -1574,27 +1624,36 @@ As features are implemented, update the following documentation:
 - ✅ Phase 8: **CRITICAL BUG FIX** - Intra-container duplication prevented
 - ✅ Phase 8: **Stacking implemented** - Compatible items merge automatically
 - ✅ Phase 8: Pickup/Drop APIs working (inline scattered containers)
+- ✅ Phase 9: **Tag-based slot system (ARMOR/GARB/TOOL) - IMPLEMENTED**
+  - Clean inline storage architecture
+  - body_slots = references only
+  - equipped_items = full data inline
+  - Correct slot counts per body part (hands get TOOL slot)
+  - Tag-based validation working
+  - UI slot displays tuned and working
 
 **Current State:**
 - ✅ Core inventory management working (move between containers)
-- ✅ Critical duplication bug fixed (same-container transfers rejected)
+- ✅ Clean inline storage architecture implemented
+- ✅ Tag-based equipment system (ARMOR/GARB/TOOL)
+- ✅ Correct slot layout (Hands: TOOL+ARMOR+GARB, Others: ARMOR+GARB)
 - ✅ Stacking working (items auto-merge when compatible)
 - ✅ Swap logic working (body slot to body slot exchanges)
 - ✅ Slot highlighting working (shows compatible targets)
 - ✅ **Bidirectional highlighting** (item↔slot cross-module highlighting)
 - ✅ **Drag ghost visual** (wiggling item at cursor during drag)
 - ✅ Pickup/Drop working with inline scattered containers
-- 📋 Phase 9: Tag-based slot system (ARMOR/GARB/TOOL) - Design Phase
 
 **Next Steps:**
-1. 🔧 **Phase 9: Implement tag-based slot system**
-   - Add ARMOR/GARB/TOOL tag schemas
-   - Update body_slots data structure
-   - Fix hand slot mirroring bug
-   - Update legality system for tags
-2. 📋 **Implement ground drop handling** (drag to background)
-3. 📋 **Implement range checking** for ground/NPC drops
-4. 📝 **Documentation updates** (see Section 9)
+1. 🧹 **Data Cleanup** - Create new clean item/actor data manually
+2. 🧹 **Code Cleanup** - Remove deprecated fields as encountered:
+   - `valid_body_slots` arrays
+   - `entity.containers` for equipped items
+   - `container_id` and `owner_ref` from ItemInstance
+   - Legacy BodySlot compatibility code
+3. 📋 **Implement ground drop handling** (drag to background)
+4. 📋 **Implement range checking** for ground/NPC drops
+5. 📝 **Documentation updates** (see Section 9)
 
 ---
 
@@ -1761,3 +1820,199 @@ Implement a Minecraft-style inventory system where items can be placed at ANY gr
 The grid coordinates are being sent from frontend but not reaching the backend transfer logic. The system falls back to legacy packed-array behavior, preventing sparse placement.
 
 **Decision Needed:** Debug Option A to find the data flow break, then choose B or C based on findings.
+
+---
+
+## 13. Master Item Database Architecture (NEW - 2026-03-01)
+
+**Status:** Design Complete - Ready for Implementation
+
+### Objective
+Separate item definitions (master templates) from item instances (spawned items with runtime state). Create a clean, categorized master database that serves as the point of truth for spawning, while instances live inline in save data.
+
+### Architecture Overview
+
+```
+local_data/
+├── items/                    # Master item definitions (point of truth)
+│   ├── weapons/              # TOOL tagged weapons
+│   │   ├── iron_sword.jsonc
+│   │   ├── iron_dagger.jsonc
+│   │   └── torch.jsonc
+│   ├── armor/                # ARMOR tagged protection
+│   │   ├── iron_helmet.jsonc
+│   │   ├── iron_greaves.jsonc
+│   │   └── iron_gauntlet.jsonc
+│   ├── clothing/             # GARB tagged wearables
+│   │   ├── cloth_tunic.jsonc
+│   │   ├── cloth_pants.jsonc
+│   │   ├── silver_ring.jsonc
+│   │   ├── gold_ring.jsonc
+│   │   └── leather_bracelet.jsonc
+│   ├── containers/           # CONTAINER tagged storage
+│   │   └── small_sack.jsonc
+│   └── currency/             # CURRENCY tagged money
+│       └── coin.jsonc
+│
+├── tiles/                    # Master tile definitions (parallel pattern)
+│   ├── terrain/
+│   │   ├── dirt.jsonc
+│   │   ├── grass.jsonc
+│   │   └── stone.jsonc
+│   ├── walls/
+│   │   ├── wood_wall.jsonc
+│   │   └── stone_wall.jsonc
+│   └── features/
+│       ├── door.jsonc
+│       └── stairs.jsonc
+│
+└── data_slot_1/              # Save data (instances only)
+    ├── actors/
+    ├── places/
+    └── (no items/ directory - instances inline)
+```
+
+### Key Principles
+
+**1. Master Definitions are Read-Only Templates**
+- Single point of truth for each item type
+- Stored in categorized directories
+- Never modified after creation
+- Loaded when spawning new instances
+
+**2. Instances are Inline and Mutable**
+- Spawned items exist only in context (actor.equipped_items, place.containers)
+- Each instance has unique ID: `inst_{def_id}_{random}`
+- Instances accumulate tags, condition, modifications during gameplay
+- Saved with parent entity (actor/place)
+
+**3. No Item Instance Files**
+- Items are NEVER standalone files
+- Always inline within actor.equipped_items or container.contents
+- This prevents file system bloat from thousands of item files
+
+**4. Parallel Pattern for Tiles**
+- Same architecture for tile definitions
+- Master tiles in `local_data/tiles/`
+- Instance data in place files (if tile has state)
+
+### Item Definition Format
+
+**File:** `local_data/items/weapons/iron_sword.jsonc`
+```jsonc
+{
+  "id": "iron_sword",
+  "name": "Iron Sword",
+  "description": "A balanced iron sword for combat.",
+  "weight": 600,
+  "weight_mag": 1,
+  "mag": 1,
+  "size_mag": 3,
+  "hardness_mag": 3,
+  "conductivity_mag": 1,
+  "max_stack_size": 1,
+  "display_char": "/",
+  "tags": [
+    {
+      "name": "TOOL",
+      "mag": 1,
+      "meta": ["weapon"],
+      "info": [2]
+    }
+  ]
+}
+```
+
+### Spawning Flow
+
+**1. Request:** `POST /api/spawn_item {item_def_id: "iron_sword"}`
+
+**2. Load Master:** 
+   - Look up `local_data/items/weapons/iron_sword.jsonc`
+   - Load definition into memory
+
+**3. Create Instance:**
+   - Generate unique ID: `inst_iron_sword_7a3f9d`
+   - Copy definition data
+   - Initialize instance fields (qty: 1, condition: "good", tags: [])
+
+**4. Place in World:**
+   - Add to scattered container at drop position
+   - Update place.items_on_ground
+   - Save place file
+
+**5. Instance Lives:**
+   - Item now exists inline in place data
+   - Can be picked up, equipped, modified
+   - Master definition remains unchanged
+
+### Migration from Current System
+
+**Current State:**
+- Items in `data_slot_default/items/` (18 cleaned files)
+- Copied to `data_slot_1/items/` (duplication)
+- spawn_item API looks in data_slot_X
+
+**Target State:**
+- Items in `local_data/items/` (master database)
+- No items/ in data_slot_X directories
+- spawn_item API looks in local_data/items/
+
+**Migration Steps:**
+1. Create `local_data/items/` directory structure
+2. Move all cleaned items from `data_slot_default/items/` to categorized locations
+3. Update `load_item_def()` function to look in master location
+4. Remove items/ directories from data_slot_X
+5. Test spawning from master database
+
+### ADR-004: Master Item Database (2026-03-01)
+
+**Decision:** Separate master definitions from runtime instances.
+
+**Context:**
+- Current system duplicates items across data slots
+- Item definitions are effectively read-only templates
+- Want single point of truth for item types
+- Need to support item modification without affecting master
+
+**Decision:**
+- Store master definitions in `local_data/items/` (categorized)
+- Store instances inline in save data (never as separate files)
+- Spawn API loads from master, creates instance in world
+- Parallel pattern for tiles in `local_data/tiles/`
+
+**Consequences:**
+- ✅ Single point of truth for item definitions
+- ✅ No duplication across data slots
+- ✅ Items can accumulate state (wear, mods) without affecting master
+- ✅ Clean separation between template and instance
+- ✅ No file system bloat from thousands of item files
+- ⚠️ Need to migrate existing items to new structure
+- ⚠️ Update all item loading code
+
+### Implementation Notes
+
+**Directory Creation:**
+```bash
+local_data/items/
+├── weapons/
+├── armor/
+├── clothing/
+├── containers/
+└── currency/
+
+local_data/tiles/
+├── terrain/
+├── walls/
+└── features/
+```
+
+**API Changes:**
+- `load_item_def(slot, item_def_id)` → `load_master_item(item_def_id)`
+- Remove slot parameter - masters are global
+- Search categorized directories by ID
+
+**Manual Migration:**
+- No automated scripts
+- Move files manually, verify each
+- Update plans as we go

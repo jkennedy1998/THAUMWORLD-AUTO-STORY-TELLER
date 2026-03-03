@@ -108,12 +108,14 @@ export type {
   VoxelSpaceExport,
   CameraConfig,
   CameraMode,
-  CameraOrientation
+  CameraOrientation,
+  CalibrationOffset
 } from './voxel_space.js';
 
 export {
   createVoxelSpace,
   createDefaultCamera,
+  DEFAULT_CAMERA_VALUES,
   getLayer,
   getOrCreateLayer,
   getVoxel,
@@ -132,9 +134,23 @@ export {
   debugVoxelSpace
 } from './voxel_space.js';
 
+// DOM Renderer
+export type { ViewportState } from './voxel_dom_renderer.js';
+export {
+  VoxelDOMRenderer,
+  createVoxelDOMRenderer
+} from './voxel_dom_renderer.js';
+
+// Camera Control
+export type { CameraControlOptions } from './camera_control_module.js';
+export { makeCameraControlModule } from './camera_control_module.js';
+
 // Save System & Tool Properties
-export type { ToolProperties } from './save_system.js';
+export type { ToolProperties, CameraConfigSaveData } from './save_system.js';
 export {
   saveToolProperties,
-  loadToolProperties
+  loadToolProperties,
+  saveCameraConfig,
+  loadCameraConfig,
+  clearCameraConfig
 } from './save_system.js';

@@ -320,3 +320,65 @@ export function loadToolProperties(): ToolProperties {
     return DEFAULT_TOOL_PROPERTIES;
   }
 }
+
+// Camera config persistence key
+const CAMERA_CONFIG_KEY = 'thaumworld_ascii_painter_camera_config';
+
+/**
+ * Camera configuration properties that should persist between sessions
+ */
+export interface CameraConfigSaveData {
+  calibration?: { x: number; y: number };
+  scale_per_layer?: number;
+  movement_per_layer?: number;
+  base_layer_scale?: number;
+  char_spacing_x?: number;
+  char_spacing_y?: number;
+  parallax_intensity?: number;
+  parallax_move_enabled?: boolean;
+  parallax_size_enabled?: boolean;
+  euler_rotation?: { x: number; y: number; z: number };
+  show_all_layers?: boolean;
+  mode?: 'straight_ortho' | 'parallax_ortho' | 'rotated_ortho';
+  orientation?: 'xy' | 'yz' | 'xz';
+}
+
+/**
+ * Save camera configuration to localStorage
+ */
+export function saveCameraConfig(config: CameraConfigSaveData): void {
+  try {
+    const existing = loadCameraConfig();
+    const merged = { ...existing, ...config };
+    localStorage.setItem(CAMERA_CONFIG_KEY, JSON.stringify(merged));
+  } catch (e) {
+    console.warn('Save camera config failed:', e);
+  }
+}
+
+/**
+ * Load camera configuration from localStorage
+ */
+export function loadCameraConfig(): CameraConfigSaveData {
+  try {
+    const data = localStorage.getItem(CAMERA_CONFIG_KEY);
+    if (!data) return {};
+    return JSON.parse(data);
+  } catch (e) {
+    console.warn('Load camera config failed:', e);
+    return {};
+  }
+}
+
+/**
+ * Clear camera configuration from localStorage
+ * Use this to reset to defaults
+ */
+export function clearCameraConfig(): void {
+  try {
+    localStorage.removeItem(CAMERA_CONFIG_KEY);
+    console.log('[Camera] Cleared saved config from localStorage');
+  } catch (e) {
+    console.warn('Clear camera config failed:', e);
+  }
+}

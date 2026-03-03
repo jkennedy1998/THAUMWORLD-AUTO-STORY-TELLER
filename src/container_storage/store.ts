@@ -170,9 +170,7 @@ function load_body_slot_container_inline(
         }
     }
 
-    if (equipped_items.length === 0) return null;
-
-    // Return container structure
+    // Return container structure (even if empty - allows transfers TO empty slots)
     return {
         id: container_id,
         kind: "actor",
@@ -1050,8 +1048,8 @@ function sync_body_slots_with_containers(
     // Parse container IDs to get actor info
     // New format: container.{actor_id}.{slot_name}.{slot_type}[.{garb_index}]
     // Examples: container.henry_actor.hand_left.tool, container.henry_actor.hand_left.garb.0
-    const from_match = from_container_id.match(/^container\.(actor\.[^.]+)\.(\w+)\.(tool|armor|garb)(?:\.(\d+))?$/);
-    const to_match = to_container_id.match(/^container\.(actor\.[^.]+)\.(\w+)\.(tool|armor|garb)(?:\.(\d+))?$/);
+    const from_match = from_container_id.match(/^container\.([^.]+)\.(\w+)\.(tool|armor|garb)(?:\.(\d+))?$/);
+    const to_match = to_container_id.match(/^container\.([^.]+)\.(\w+)\.(tool|armor|garb)(?:\.(\d+))?$/);
     
     debug_log("transfer", `[SYNC] from_match: ${from_match ? `${from_match[1]}.${from_match[2]}.${from_match[3]}${from_match[4] ? '.' + from_match[4] : ''}` : 'null'}`);
     debug_log("transfer", `[SYNC] to_match: ${to_match ? `${to_match[1]}.${to_match[2]}.${to_match[3]}${to_match[4] ? '.' + to_match[4] : ''}` : 'null'}`);

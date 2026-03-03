@@ -1,11 +1,11 @@
 {
-  "id": "test_iron_dagger",
-  "name": "Iron Dagger",
-  "description": "A sharp iron dagger for close combat.",
-  "weight": 350,
+  "id": "test_iron_sword",
+  "name": "Iron Sword",
+  "description": "A balanced iron sword for combat.",
+  "weight": 600,
   "weight_mag": 1,
   "mag": 1,
-  "size_mag": 1,
+  "size_mag": 3,
   "hardness_mag": 3,
   "conductivity_mag": 1,
   "max_stack_size": 1,
@@ -15,7 +15,7 @@
       "name": "TOOL",
       "mag": 1,
       "meta": ["weapon"],
-      "info": [1]
+      "info": [2]
     }
   ]
 }

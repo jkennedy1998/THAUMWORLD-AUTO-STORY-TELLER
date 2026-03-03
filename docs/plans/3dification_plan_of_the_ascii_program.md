@@ -1253,4 +1253,160 @@ The ignore check is inside `cell.char !== ' '`, so space cells never get checked
 
 ---
 
+## Phase 5: Camera Control Module (New)
+
+**Status:** 🟡 In Progress  
+**Goal:** Create an immersive 3D viewing experience with parallax, occlusion, and rotation controls
+
+### 5.1 Camera Control Module UI
+
+**Module Design:**
+- Floating panel (like Layer Palette) with move/resize/close gizmos
+- Accessible from toolbar button
+- Size: 28x18 characters
+
+**Controls:**
+
+```
+┌─ Camera ──────────────[×]─┐
+│                           │
+│ [👁] Parallax Move        │
+│ [👁] Parallax Size        │
+│ [■] Voxel Occlusion       │
+│                           │
+│ 90° Views:                │
+│ [XY] [YZ] [XZ]            │
+│                           │
+│ Euler Rotate (±30°):      │
+│ X: [←][→] 0°              │
+│ Y: [←][→] 0°              │
+│ Z: [←][→] 0°              │
+│                           │
+│ Pan: [Reset]              │
+└───────────────────────────┘
+```
+
+**Features:**
+
+1. **Parallax Movement Toggle** - Mouse-driven layer shifting
+   - Focus plane (selected layer) stays stationary
+   - Front layers shift more, back layers shift less
+   - Creates "looking around" 3D effect
+   - Toggle on/off
+
+2. **Parallax Size Toggle** - Independent from movement
+   - Front layers scale up (110-130%)
+   - Back layers scale down (70-90%)
+   - Creates "light box" depth effect
+   - Separate toggle for debugging
+
+3. **Voxel Occlusion Toggle** - Alpha blending mode
+   - ON: Front layers occlude rear layers with opacity blending
+   - OFF: All layers render (current behavior)
+   - Respects layer opacity settings
+   - Enables true 3D depth perception
+
+4. **90° Orientation Buttons** - Placeholder for Phase 6
+   - XY: Looking down Z-axis (current)
+   - YZ: Looking down X-axis (side view)
+   - XZ: Looking down Y-axis (top view)
+   - TODO: Matrix math for axis rotation
+
+5. **Euler Rotation Controls** - CSS transforms for immersion
+   - X rotation: Tilt up/down (±30°)
+   - Y rotation: Turn left/right (±30°)
+   - Z rotation: Roll (±30°)
+   - Applied to canvas container via CSS
+   - Smooth animated transitions
+
+6. **Pan Reset** - Reset view offset to origin
+
+### 5.2 Enhanced Panning
+
+**Current Limitation:**
+- Panning constrained to grid bounds
+- Only applies to selected layer
+
+**Enhancement:**
+- Remove bounds constraints (infinite panning)
+- Apply same offset to ALL layers simultaneously
+- Enables drawing on larger canvases
+
+### 5.3 Mouse-Driven Parallax
+
+**Algorithm:**
+```typescript
+// Mouse position relative to canvas center
+const mouseOffset = {
+  x: (mouseX - canvasCenterX) / canvasWidth,
+  y: (mouseY - canvasCenterY) / canvasHeight
+};
+
+// Parallax offset for each layer
+const zDistance = layerZ - focusPlane;
+const parallaxX = mouseOffset.x * zDistance * parallaxIntensity * 50;
+const parallaxY = mouseOffset.y * zDistance * parallaxIntensity * 50;
+```
+
+**Behavior:**
+- Center mouse = no parallax
+- Move mouse right = front layers shift right, back layers shift left
+- Creates perspective of looking around the scene
+- Selected layer (focus plane) stays perfectly still
+
+### 5.4 Size Parallax
+
+**Algorithm:**
+```typescript
+const zDistance = layerZ - focusPlane;
+const scale = 1 + (zDistance * sizeIntensity * 0.1);
+// Front: scale > 1 (bigger)
+// Back: scale < 1 (smaller)
+// Focus: scale = 1 (normal)
+```
+
+### 5.5 Occlusion Rendering
+
+**Alpha Blending:**
+- Render layers from back to front
+- For each (x,y) position, track accumulated opacity
+- Stop rendering when accumulated opacity reaches 1.0
+- Respect individual layer opacity settings
+
+**Implementation:**
+```typescript
+// Depth buffer: Map (x,y) → accumulated opacity
+const depthBuffer = new Map<string, number>();
+
+// Render layers in Z-order (back to front)
+for (const layer of layersSortedByZ) {
+  for (const cell of layer.cells) {
+    const key = `${cell.x},${cell.y}`;
+    const currentOpacity = depthBuffer.get(key) ?? 0;
+    
+    if (currentOpacity >= 1.0) continue; // Occluded
+    
+    // Render cell with alpha = layer.opacity * (1 - currentOpacity)
+    renderCell(cell, alpha);
+    
+    // Update depth buffer
+    depthBuffer.set(key, currentOpacity + layer.opacity);
+  }
+}
+```
+
+### 5.6 Files to Modify
+
+**New Files:**
+- `src/mono_ui/modules/camera_control_module.ts` - Camera UI module
+- `src/ascii_painter/camera_transforms.ts` - Transform utilities
+
+**Modified Files:**
+- `src/ascii_painter/voxel_space.ts` - Add euler_rotation, size_parallax_enabled
+- `src/ascii_painter/layer_renderer_module.ts` - Mouse parallax calculations
+- `src/mono_ui/modules/painter_canvas_module.ts` - Occlusion + enhanced panning
+- `src/canvas_app/painter_app_state.ts` - Register camera module, toolbar button
+
+---
+
 *This document is a living plan. As implementation progresses, update with learnings, adjust phases, and refine the vision based on what works.*

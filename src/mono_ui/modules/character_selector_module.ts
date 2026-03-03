@@ -184,7 +184,6 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
     Focusable: true,
 
     Draw(c: Canvas): void {
-      console.log('Drawing char selector at rect:', rect);
       const bg_color = get_color_by_name('off_black').rgb;
       const border_color = get_color_by_name('medium_gray').rgb;
       const text_color = get_color_by_name('off_white').rgb;

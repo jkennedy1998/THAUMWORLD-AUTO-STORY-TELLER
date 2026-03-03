@@ -8,6 +8,8 @@
   "size_mag": 3,
   "hardness_mag": 3,
   "conductivity_mag": 1,
+  "max_stack_size": 1,
+  "display_char": "/",
   "tags": [
     {
       "name": "TOOL",
@@ -15,12 +17,5 @@
       "meta": ["weapon"],
       "info": [2]
     }
-  ],
-  "stackable": false,
-  "max_stack_size": 1,
-  "display_char": "/",
-  "valid_body_slots": ["hand_left", "hand_right"],
-  "occupies_slots": ["hand_left"],
-  "slot_shape": [[1]],
-  "fits_actor_kind": ["naked_ape"]
+  ]
 }

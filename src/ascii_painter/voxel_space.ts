@@ -24,6 +24,23 @@ export type CameraMode = 'straight_ortho' | 'parallax_ortho' | 'rotated_ortho';
 export type CameraOrientation = 'xy' | 'yz' | 'xz';
 
 /**
+ * Euler rotation angles for camera view (in degrees)
+ */
+export interface EulerRotation {
+  x: number;  // Pitch (-30 to +30)
+  y: number;  // Yaw (-30 to +30)
+  z: number;  // Roll (-30 to +30)
+}
+
+/**
+ * Calibration offset for aligning layers with the ASCII grid
+ */
+export interface CalibrationOffset {
+  x: number;  // Horizontal offset in pixels
+  y: number;  // Vertical offset in pixels
+}
+
+/**
  * Camera configuration
  */
 export interface CameraConfig {
@@ -32,19 +49,51 @@ export interface CameraConfig {
   focus_plane: number;           // The Z/X/Y coordinate being edited (depends on orientation)
   parallax_intensity: number;    // 0.0 to 1.0, how much layers shift
   show_all_layers: boolean;      // If false, only show focus plane (like current behavior)
+
+  // New 3D camera features
+  parallax_move_enabled: boolean;     // Enable mouse-driven parallax movement
+  parallax_size_enabled: boolean;     // Enable size-based parallax (layers in front bigger)
+  euler_rotation: EulerRotation;      // Euler rotation angles for view transform
+
+  // Calibration for aligning rendered layers with the ASCII grid
+  calibration: CalibrationOffset;     // Pixel offset to align layers with grid
+
+  // Per-layer calibration for fine-tuning the 3D effect
+  scale_per_layer: number;            // Scale multiplier per Z layer (default 0.12)
+  movement_per_layer: number;         // Parallax movement per Z layer in pixels (default 50)
+
+  // Base layer scale and character spacing for grid alignment
+  base_layer_scale: number;           // Scale of the selected/reference layer (default 0.5, range 0.2-1.5)
+  char_spacing_x: number;             // Horizontal character spacing multiplier (default 1.0, range 0.5-2.0)
+  char_spacing_y: number;             // Vertical line height multiplier (default 1.0, range 0.5-2.0)
 }
+
+/**
+ * Default camera values - single source of truth
+ * These can be updated by the camera module UI
+ */
+export const DEFAULT_CAMERA_VALUES = {
+  mode: 'straight_ortho' as const,
+  orientation: 'xy' as const,
+  focus_plane: 0,
+  parallax_intensity: 0.7,
+  show_all_layers: false,
+  parallax_move_enabled: false,
+  parallax_size_enabled: false,
+  euler_rotation: { x: 0, y: 0, z: 0 },
+  calibration: { x: -377, y: -311 },
+  scale_per_layer: 0.12,
+  movement_per_layer: 29,
+  base_layer_scale: 0.57,
+  char_spacing_x: 0.59,
+  char_spacing_y: 1.24,
+};
 
 /**
  * Default camera configuration
  */
 export function createDefaultCamera(): CameraConfig {
-  return {
-    mode: 'straight_ortho',
-    orientation: 'xy',
-    focus_plane: 0,
-    parallax_intensity: 0.7,
-    show_all_layers: false,
-  };
+  return { ...DEFAULT_CAMERA_VALUES };
 }
 
 /**

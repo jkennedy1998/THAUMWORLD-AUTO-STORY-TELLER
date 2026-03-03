@@ -1,6 +1,6 @@
 {
   // Default Actor template (player character)
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "default_actor",
   "name": "default actor",
   "title": "",
@@ -117,14 +117,54 @@
   },
   "derived_overrides": {},
   "derived_effectors": {},
-  "body_slots": {},
+  "body_slots": {
+    "head": {
+      "name": "head",
+      "critical": true,
+      "armor": null,
+      "garb": [],
+      "tool": null
+    },
+    "torso": {
+      "name": "torso",
+      "critical": true,
+      "armor": null,
+      "garb": [],
+      "tool": null
+    },
+    "hand_left": {
+      "name": "hand_left",
+      "critical": true,
+      "armor": null,
+      "garb": [],
+      "tool": null
+    },
+    "hand_right": {
+      "name": "hand_right",
+      "critical": true,
+      "armor": null,
+      "garb": [],
+      "tool": null
+    },
+    "leg_left": {
+      "name": "leg_left",
+      "critical": true,
+      "armor": null,
+      "garb": [],
+      "tool": null
+    },
+    "leg_right": {
+      "name": "leg_right",
+      "critical": true,
+      "armor": null,
+      "garb": [],
+      "tool": null
+    }
+  },
+  "equipped_items": {},
+  "inventory": [],
   "equipment_weight": 0,
   "inventory_weight": 0,
-  "inventory": [],
-  "equipment": {
-    "body_slots": {},
-    "hand_slots": {}
-  },
   "tags": [],
   "character_mag": 1,
   "perks": [],
