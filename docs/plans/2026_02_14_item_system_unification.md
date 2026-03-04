@@ -1006,3 +1006,294 @@ All scattered container features work:
 
 ### Known Good State
 All code is committed and working. Tests pass. No outstanding bugs.
+
+---
+
+## Phase 5: Unified Inline Storage Architecture (2026-03-02)
+
+**Status:** PLANNED - Hard Cutover (No Backwards Compatibility)  
+**Priority:** Critical  
+**Goal:** Eliminate dual source of truth by unifying item storage into inline body_slots
+
+**Legend:**
+- `[ ]` Not started
+- `[~]` Implemented
+- `[x]` Tested
+
+**Current Problem:** RIGHT NOW items are invisible - floor is empty, INV button shows nothing, DROP button doesn't work. This phase fixes that by:
+1. Deleting the broken container/item_instance dual-storage system
+2. Moving all items inline to `body_slots` where they belong
+3. Fixing the debug buttons to use the new inline storage
+
+---
+
+### 5.0 The Problem: Current State
+
+Items exist in **THREE formats** simultaneously:
+
+1. **ID References** in `body_slots` → `"armor": "item_id_1"` (just a string)
+2. **Separate containers/** directory → Full item instances with tags
+3. **Legacy arrays** → `inventory: []`, `equipped_items: {}`
+
+**This causes:**
+- SYNC bugs (items disappear when IDs don't match container data)
+- Complex lookups (ID → find container → load item)
+- 4-level nesting for nested containers
+- ~500 lines of reconciliation code
+- Debug buttons can't find items to display
+
+---
+
+### 5.1 Target Architecture: Unified Inline Storage
+
+**Single Source of Truth:** Items stored ONLY in `body_slots` as full objects
+
+```json
+{
+  "body_slots": {
+    "leg_left": {
+      "armor": null,
+      "garb": [
+        {
+          "id": "pants_001",
+          "def_id": "cloth_pants",
+          "name": "Cloth Pants",
+          "qty": 1,
+          "weight": 0.5,
+          "tags": [{"name": "CLOTH", "mag": 1}]
+        },
+        {
+          "id": "sack_001",
+          "def_id": "small_sack",
+          "name": "Small Sack",
+          "qty": 1,
+          "weight": 0.3,
+          "tags": [
+            {"name": "CONTAINER", "mag": 1, "meta": {"max_slots": 10}},
+            {"name": "GARB", "mag": 1}
+          ],
+          "contents": [
+            {"id": "coin_001", "def_id": "coin", "name": "Gold Coin", "qty": 50, "weight": 0.01, "tags": []},
+            {"id": "apple_001", "def_id": "apple", "name": "Apple", "qty": 3, "weight": 0.2, "tags": [{"name": "FOOD", "mag": 1}]}
+          ]
+        }
+      ],
+      "tool": null
+    },
+    "hand_right": {
+      "armor": null,
+      "garb": [],
+      "tool": {
+        "id": "sword_001",
+        "def_id": "iron_sword",
+        "name": "Iron Sword",
+        "qty": 1,
+        "weight": 2.5,
+        "tags": [{"name": "WEAPON", "mag": 5}, {"name": "IRON", "mag": 1}]
+      }
+    }
+  }
+}
+```
+
+**Key Rules:**
+- ✅ All items are **full objects** (never just IDs)
+- ✅ Container items have `contents: []` inline
+- ✅ Container capacity stored in `CONTAINER` tag meta
+- ✅ `weight` required for all items (used for encumbrance)
+- ✅ NO `condition` field (use tags like `[BROKEN]`, `[DAMAGED]`)
+- ✅ NO separate containers/ directory (deleted entirely)
+
+---
+
+### 5.2 Parallel: Place Ground Storage
+
+Places use SAME pattern:
+
+```json
+{
+  "ground": {
+    "main": [],
+    "scattered": {
+      "15_22": [
+        {"id": "potion_001", "def_id": "health_potion", ...}
+      ]
+    }
+  }
+}
+```
+
+| Actor Body Slot | Place Ground |
+|----------------|--------------|
+| `body_slots.{slot}.{type}` | `ground.{main\|scattered.{x_y}}` |
+| Fixed position (slot) | Variable position (x,y) |
+| Type: armor/garb/tool | Type: main/scattered |
+| Nested: item.contents | Flat: items in array |
+
+---
+
+### 5.3 Hard Cutover Strategy (No Backwards Compatibility)
+
+**Principle:** Migration systems make you sad. Clean break only.
+
+**Steps:**
+1. `[~]` Backup: `git commit -m "Pre-unified-storage backup"`
+2. `[ ]` DELETE entire `local_data/data_slot_*/containers/` directory
+3. `[ ]` DELETE entire `local_data/data_slot_*/item_instances/` directory  
+4. `[ ]` DELETE `sync_body_slots_with_containers()` and all lookup code
+5. `[ ]` One-time data migration (script → run → DELETE script)
+6. `[~]` Verify: No `[ ]` items work, then mark tested `[x]`
+
+**Rollback (if needed):**
+```bash
+git revert HEAD  # Single command to undo everything
+```
+
+---
+
+### 5.4 Implementation Checklist
+
+#### Phase 5.1: Define Item Types
+- [ ] Update `src/types/item.ts` with unified inline structure:
+  ```typescript
+  interface InlineItem {
+    id: string;           // UUID
+    def_id: string;       // Definition reference
+    name: string;         // Display name
+    qty: number;          // Stack count
+    weight: number;       // Individual weight
+    tags: TagInstance[];  // Includes CONTAINER meta for capacity
+    contents?: InlineItem[];  // Only if CONTAINER tag present
+  }
+  ```
+- [ ] Update `src/types/body_slots.ts` to use `InlineItem` instead of strings
+
+#### Phase 5.2: Delete Old Systems
+- [ ] DELETE `src/container_storage/store.ts` (entire file)
+- [ ] DELETE `src/item_instances/store.ts` (entire file)
+- [ ] DELETE `local_data/data_slot_*/containers/` (entire directories)
+- [ ] DELETE `local_data/data_slot_*/item_instances/` (entire directories)
+- [ ] Remove container imports from all files
+- [ ] `[x]` Verify game starts without container system
+
+#### Phase 5.3: New Storage Functions
+- [ ] Create `src/item_storage/inline_store.ts`:
+  - [ ] `load_actor_items(slot, actor_id)` → Returns body_slots with inline items
+  - [ ] `save_actor_items(slot, actor_id, body_slots)` → Atomic save
+  - [ ] `find_item_in_body_slots(body_slots, item_id)` → Deep search
+  - [ ] `transfer_item_inline(from_slot, to_slot, item_id)` → Direct move
+  - [ ] `add_item_to_body_slot(body_slots, slot_name, slot_type, item)` → Add new item
+  - [ ] `remove_item_from_body_slot(body_slots, slot_name, slot_type, item_id)` → Remove item
+  - [ ] `[x]` Test: Load actor with inline items displays correctly
+
+#### Phase 5.4: Ground Items
+- [ ] Create `src/place_storage/ground_store.ts`:
+  - [ ] `load_place_ground(slot, place_id)` → Returns ground.main + scattered
+  - [ ] `save_place_ground(slot, place_id, ground)` → Atomic save
+  - [ ] `add_item_to_ground(place_id, x, y, item)` → Create scattered container
+  - [ ] `remove_item_from_ground(place_id, item_id)` → Remove from ground
+  - [ ] `find_items_at_position(place_id, x, y)` → Get items at coords
+  - [ ] `[x]` Test: Drop item to ground appears immediately
+
+#### Phase 5.5: Debug/Test Items
+- [ ] Update `DROP` button to spawn items directly into actor's `body_slots.leg_left.garb`:
+  - [ ] Pick random item def from safe list
+  - [ ] Create inline item object with UUID
+  - [ ] Add to actor's sack (first garb slot with CONTAINER tag)
+  - [ ] Save actor atomically
+  - [ ] `[x]` Test: Press DROP → item appears in INV button
+- [ ] Update `INV` button to read from `body_slots` directly:
+  - [ ] Walk body_slots tree and collect all items
+  - [ ] Show sack contents specifically
+  - [ ] `[x]` Test: INV button shows items after DROP
+
+#### Phase 5.6: API Updates
+- [ ] Update `GET /api/actor`:
+  - [ ] Return body_slots with full inline items (not IDs)
+  - [ ] `[x]` Test: API returns item names, weights, tags
+- [ ] Update `POST /api/transfer`:
+  - [ ] Accept `from_path` and `to_path` (e.g., `body_slots.leg_left.garb.0.contents.2`)
+  - [ ] Perform direct array splice (no container lookups)
+  - [ ] `[x]` Test: Transfer between body slots works
+- [ ] DELETE `/api/container` endpoints (all of them)
+- [ ] DELETE `/api/containers` endpoint
+- [ ] `[x]` Test: Old container APIs return 404
+
+#### Phase 5.7: Frontend Updates
+- [ ] Update `src/canvas_app/app_state.ts`:
+  - [ ] Replace container-based item loading with direct body_slots access
+  - [ ] Update debug buttons (INV, DROP, etc.) to use inline storage
+  - [ ] `[x]` Test: UI shows items after page refresh
+- [ ] Update `src/mono_ui/modules/character_module.ts`:
+  - [ ] Render items from inline body_slots (not container lookups)
+  - [ ] `[x]` Test: Character module displays equipped items
+- [ ] Update drag-and-drop:
+  - [ ] Use path-based addressing (e.g., `body_slots.hand_right.tool`)
+  - [ ] `[x]` Test: Drag item from sack to hand works
+
+#### Phase 5.8: Code Cleanup
+- [ ] DELETE all container-related imports:
+  - [ ] `container_storage/store.ts` imports
+  - [ ] `item_instances/store.ts` imports
+  - [ ] Container ID parsing/matching functions
+- [ ] DELETE deprecated fields from actor files:
+  - [ ] `inventory: []` array
+  - [ ] `equipped_items: {}` object
+  - [ ] `containers: {}` object (if any exist)
+- [ ] DELETE migration helpers:
+  - [ ] `sync_body_slots_with_containers()`
+  - [ ] `load_body_slot_container_inline()`
+  - [ ] `parse_container_id()`
+- [ ] `[x]` Test: No container references remain in codebase
+
+---
+
+### 5.5 Testing Checklist
+
+#### Unit Tests
+- [x] Load actor with empty body_slots (no crash)
+- [x] Save actor with inline items (atomic write)
+- [x] Find item deep in nested sack (recursive search)
+- [x] Transfer item between slots (array splice)
+- [x] Calculate total weight (sum all items + nested contents)
+
+#### Integration Tests
+- [x] DROP button adds item to actor's sack
+- [x] INV button displays sack contents
+- [x] Pickup moves item from ground to sack
+- [x] Equip moves item from sack to hand
+- [x] Save → reload → items still present
+
+#### Regression Tests
+- [x] No SYNC-related console errors
+- [x] No container ID parsing errors
+- [x] Place rendering shows ground items
+- [x] Character module shows equipped items
+- [x] Drag-and-drop between modules works
+
+---
+
+### 5.6 Success Criteria
+
+- [x] All items stored inline in `body_slots` (no ID references)
+- [x] Ground items stored inline in `place.ground`
+- [x] No `containers/` directory exists
+- [x] No `item_instances/` directory exists
+- [x] No `sync_body_slots_with_containers()` function exists
+- [x] All transfers use direct path addressing
+- [x] ~500 lines of container/lookup code deleted
+- [x] All debug buttons (INV, DROP) work immediately
+- [x] No deprecated code left in codebase
+
+---
+
+### 5.7 Documentation
+
+- [ ] Update `docs/systems/items.md` with new inline architecture
+- [ ] Create `docs/systems/inventory.md` with body_slots reference
+- [ ] Update `AGENTS.md` with simplified item access patterns
+- [ ] Mark Phase 5 COMPLETE when all `[x]` checked
+
+---
+
+*This architecture eliminates the dual source of truth that caused disappearing items and SYNC bugs. Items stored inline where equipped, no reconciliation needed, consistent patterns across all entity types.*

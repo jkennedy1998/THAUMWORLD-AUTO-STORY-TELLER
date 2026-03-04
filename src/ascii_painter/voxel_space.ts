@@ -66,6 +66,10 @@ export interface CameraConfig {
   base_layer_scale: number;           // Scale of the selected/reference layer (default 0.5, range 0.2-1.5)
   char_spacing_x: number;             // Horizontal character spacing multiplier (default 1.0, range 0.5-2.0)
   char_spacing_y: number;             // Vertical line height multiplier (default 1.0, range 0.5-2.0)
+
+  // Virtual camera pan position - moves the view across the voxel space
+  pan_x: number;                      // Horizontal pan offset in grid cells (default 0)
+  pan_y: number;                      // Vertical pan offset in grid cells (default 0)
 }
 
 /**
@@ -87,6 +91,8 @@ export const DEFAULT_CAMERA_VALUES = {
   base_layer_scale: 0.57,
   char_spacing_x: 0.59,
   char_spacing_y: 1.24,
+  pan_x: 0,
+  pan_y: 0,
 };
 
 /**

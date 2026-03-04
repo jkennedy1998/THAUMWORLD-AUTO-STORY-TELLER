@@ -32,8 +32,8 @@ export interface CanvasViewport {
   y: number;      // Screen Y position in pixels
   width: number;  // Width in pixels
   height: number; // Height in pixels
-  offsetX: number; // Grid pan offset X
-  offsetY: number; // Grid pan offset Y
+  // Note: Pan offset is stored in CameraConfig (camera.pan_x/y)
+  // The camera owns the view position in world space
 }
 
 export type PainterCanvasOptions = {
@@ -95,9 +95,38 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   const CANVAS_WIDTH = 80;
   const CANVAS_HEIGHT = 40;
 
-  let offset_x = 0;
-  let offset_y = 0;
   let scale = 1;
+  
+  // Helper to get camera pan values (always synced with camera config)
+  function getPan(): { x: number; y: number } {
+    return {
+      x: opts.space.camera.pan_x ?? 0,
+      y: opts.space.camera.pan_y ?? 0
+    };
+  }
+
+  // Atomic pan functions - all panning operations use these for consistency
+  // Positive deltaX = pan right (shows content to the left)
+  // Positive deltaY = pan up (shows content below)
+  function panBy(deltaX: number, deltaY: number): void {
+    const camera = opts.space.camera;
+    const oldX = camera.pan_x ?? 0;
+    const oldY = camera.pan_y ?? 0;
+    camera.pan_x = oldX + deltaX;
+    camera.pan_y = oldY + deltaY;
+    console.log('[CANVAS-PAN] panBy:', { deltaX, deltaY, from: { x: oldX, y: oldY }, to: { x: camera.pan_x, y: camera.pan_y } });
+    emitViewport();
+  }
+
+  function panTo(x: number, y: number): void {
+    const camera = opts.space.camera;
+    const oldX = camera.pan_x ?? 0;
+    const oldY = camera.pan_y ?? 0;
+    camera.pan_x = x;
+    camera.pan_y = y;
+    console.log('[CANVAS-PAN] panTo:', { from: { x: oldX, y: oldY }, to: { x, y } });
+    emitViewport();
+  }
 
   let is_panning = false;
   let is_drawing = false;
@@ -138,9 +167,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         x: rect.x0,
         y: rect.y0,
         width: rect.x1 - rect.x0 + 1,
-        height: rect.y1 - rect.y0 + 1,
-        offsetX: offset_x,
-        offsetY: offset_y
+        height: rect.y1 - rect.y0 + 1
+        // Pan is read directly from camera by DOM renderer
       });
     }
   }
@@ -267,6 +295,15 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     const size = opts.get_brush_size();
     const offset = Math.floor(size / 2);
     
+    // DEBUG: Track what coordinates are actually being drawn
+    console.log('[DRAW-CALIBRATION] drawWithBrushSize:', JSON.stringify({ 
+      input: { x, y }, 
+      brush_size: size, 
+      offset,
+      is_eraser,
+      pan: getPan()
+    }));
+    
     for (let dy = 0; dy < size; dy++) {
       for (let dx = 0; dx < size; dx++) {
         const draw_x = x - offset + dx;
@@ -385,13 +422,14 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     selectAll: () => void;
     invertSelection: () => void;
     hasSelection: () => boolean;
+    emitViewport: () => void;
   } = {
     id: opts.id,
     rect,
     Focusable: true,
     
     OnFocus(): void {
-      console.log('[CANVAS-DEBUG] OnFocus - canvas module focused');
+      // Canvas module gained focus
     },
     
     // Selection manipulation methods
@@ -408,16 +446,20 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       return hasSelection(selection_bitmap);
     },
 
+    emitViewport: () => {
+      emitViewport();
+    },
+
     Draw(c: Canvas): void {
       updateFlash();
       
       const bg_color = get_color_by_name('off_black').rgb;
       c.fill_rect(rect, { char: ' ', rgb: bg_color, style: 'regular' });
 
-      const start_x = clamp(Math.floor(offset_x), 0, opts.grid.width - 1);
-      const end_x = clamp(Math.floor(offset_x + CANVAS_WIDTH), 0, opts.grid.width);
-      const start_y = clamp(Math.floor(offset_y), 0, opts.grid.height - 1);
-      const end_y = clamp(Math.floor(offset_y + CANVAS_HEIGHT), 0, opts.grid.height);
+      const start_x = clamp(Math.floor(getPan().x), 0, opts.grid.width - 1);
+      const end_x = clamp(Math.floor(getPan().x + CANVAS_WIDTH), 0, opts.grid.width);
+      const start_y = clamp(Math.floor(getPan().y), 0, opts.grid.height - 1);
+      const end_y = clamp(Math.floor(getPan().y + CANVAS_HEIGHT), 0, opts.grid.height);
 
       const selected_z = opts.get_selected_z();
       const space = opts.space;
@@ -691,8 +733,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
       // Draw text cursor
       if (text_mode_active) {
-        const cursor_canvas_x = rect.x0 + (text_cursor_x - offset_x);
-        const cursor_canvas_y = rect.y0 + (text_cursor_y - offset_y);
+        const cursor_canvas_x = rect.x0 + (text_cursor_x - getPan().x);
+        const cursor_canvas_y = rect.y0 + (text_cursor_y - getPan().y);
         if (cursor_canvas_x >= rect.x0 && cursor_canvas_x <= rect.x1 &&
             cursor_canvas_y >= rect.y0 && cursor_canvas_y <= rect.y1) {
           const cursor_color = get_color_by_name('vivid_yellow').rgb;
@@ -706,6 +748,63 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         }
       }
 
+      // DEBUG: Draw calibration info
+      const pan = getPan();
+      const debug_color = get_color_by_name('vivid_cyan').rgb;
+      const debug_text = `PAN:${Math.floor(pan.x)},${Math.floor(pan.y)}`;
+      
+      // Draw pan values in top-left corner
+      for (let i = 0; i < debug_text.length; i++) {
+        const x = rect.x0 + i;
+        const y = rect.y0;
+        if (x <= rect.x1) {
+          c.set(x, y, {
+            char: debug_text[i] ?? ' ',
+            rgb: debug_color,
+            style: 'regular',
+            weight_index: 5,
+            render_index: 999
+          });
+        }
+      }
+      
+      // Draw crosshair at grid origin (0,0) for calibration reference
+      const origin_x = rect.x0 - Math.floor(pan.x);
+      const origin_y = rect.y0 - Math.floor(pan.y);
+      const origin_color = get_color_by_name('deep_red').rgb;
+      
+      // Draw vertical line at x=0
+      if (origin_x >= rect.x0 && origin_x <= rect.x1) {
+        for (let y = rect.y0; y <= rect.y1; y++) {
+          const existing = c.get(origin_x, y);
+          if (!existing || existing.char === ' ') {
+            c.set(origin_x, y, {
+              char: '|',
+              rgb: origin_color,
+              style: 'regular',
+              weight_index: 3,
+              render_index: 998
+            });
+          }
+        }
+      }
+      
+      // Draw horizontal line at y=0
+      if (origin_y >= rect.y0 && origin_y <= rect.y1) {
+        for (let x = rect.x0; x <= rect.x1; x++) {
+          const existing = c.get(x, origin_y);
+          if (!existing || existing.char === ' ') {
+            c.set(x, origin_y, {
+              char: '-',
+              rgb: origin_color,
+              style: 'regular',
+              weight_index: 3,
+              render_index: 998
+            });
+          }
+        }
+      }
+
       // Draw gizmos LAST so they appear on top (including resize borders)
       draw_module_gizmos(c, rect, gizmo_config, gizmo_state, 'CANVAS');
     },
@@ -714,11 +813,20 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       drag_start_buttons = e.buttons;
       const local_x = e.x - rect.x0;
       const local_y = e.y - rect.y0;
-      const grid_x = Math.floor(offset_x + local_x);
-      const grid_y = Math.floor(offset_y + local_y);
+      const pan = getPan();
+      const grid_x = Math.floor(pan.x + local_x);
+      const grid_y = Math.floor(pan.y + local_y);
       
-      // DEBUG: Trace panning issues
-      console.log('[CANVAS-DEBUG] OnPointerDown - space_held:', space_held, 'button:', e.button);
+      // DEBUG: Track coordinate conversion
+      console.log('[DRAW-CALIBRATION] OnPointerDown:', JSON.stringify({
+        raw: { x: e.x, y: e.y },
+        rect: { x0: rect.x0, y0: rect.y0, x1: rect.x1, y1: rect.y1 },
+        local: { x: local_x, y: local_y },
+        pan: { x: pan.x, y: pan.y },
+        grid: { x: grid_x, y: grid_y },
+        space_held,
+        tool: e.button === 2 ? opts.get_right_click_tool() : opts.get_left_click_tool()
+      }));
 
       // Handle gizmo clicks first
       if (is_in_gizmo_area(e.x, e.y, rect)) {
@@ -756,7 +864,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       if (space_held && e.button === 0) {
         is_panning = true;
         pan_start = { x: local_x, y: local_y };
-        view_start = { x: offset_x, y: offset_y };
+        // Use camera pan as the starting point
+        const camera = opts.space.camera;
+        view_start = { x: camera.pan_x ?? 0, y: camera.pan_y ?? 0 };
+        console.log('[CANVAS-PAN] Pan started:', { local_x, local_y, view_start });
         return;
       }
 
@@ -956,6 +1067,22 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     OnDragMove(e: DragEvent): void {
       const local_x = e.x - rect.x0;
       const local_y = e.y - rect.y0;
+      
+      // DEBUG: Track coordinate conversion during drag (only when drawing)
+      if (is_drawing || is_erasing) {
+        const pan = getPan();
+        const grid_x = Math.floor(pan.x + local_x);
+        const grid_y = Math.floor(pan.y + local_y);
+        console.log('[DRAW-CALIBRATION] OnDragMove:', JSON.stringify({
+          raw: { x: e.x, y: e.y },
+          rect: { x0: rect.x0, y0: rect.y0 },
+          local: { x: local_x, y: local_y },
+          pan: { x: pan.x, y: pan.y },
+          grid: { x: grid_x, y: grid_y },
+          is_drawing,
+          is_erasing
+        }));
+      }
 
       // Handle move mode dragging
       if (gizmo_state.is_move_mode && gizmo_state.original_rect) {
@@ -991,16 +1118,20 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       }
 
       if (is_panning && pan_start && view_start) {
-        console.log('[CANVAS-DEBUG] PANNING - delta:', { x: local_x - pan_start.x, y: local_y - pan_start.y });
-        offset_x = clamp(view_start.x - (local_x - pan_start.x), 0, Math.max(0, opts.grid.width - CANVAS_WIDTH));
-        offset_y = clamp(view_start.y - (local_y - pan_start.y), 0, Math.max(0, opts.grid.height - CANVAS_HEIGHT));
-        emitViewport();
+        // Drag panning: subtract delta from starting position
+        // Drag right (positive delta) = show content to left = decrease pan_x
+        // Drag down (positive delta) = show content above = decrease pan_y
+        const panSpeed = 0.5; // Convert pixel movement to grid cell pan
+        const newPanX = view_start.x - (local_x - pan_start.x) * panSpeed;
+        const newPanY = view_start.y - (local_y - pan_start.y) * panSpeed;
+        console.log('[CANVAS-PAN] Drag panning:', { local_x, local_y, pan_start, view_start, newPanX, newPanY });
+        panTo(newPanX, newPanY);
         return;
       }
 
       if (is_erasing && last_draw_pos) {
-        const grid_x = Math.floor(offset_x + local_x);
-        const grid_y = Math.floor(offset_y + local_y);
+        const grid_x = Math.floor(getPan().x + local_x);
+        const grid_y = Math.floor(getPan().y + local_y);
         if (grid_x < 0 || grid_x >= opts.grid.width || grid_y < 0 || grid_y >= opts.grid.height) return;
         if (grid_x !== last_draw_pos.x || grid_y !== last_draw_pos.y) {
           drawLineWithBrushSize(last_draw_pos.x, last_draw_pos.y, grid_x, grid_y, true);
@@ -1010,8 +1141,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       }
 
       if (is_drawing && last_draw_pos) {
-        const grid_x = Math.floor(offset_x + local_x);
-        const grid_y = Math.floor(offset_y + local_y);
+        const grid_x = Math.floor(getPan().x + local_x);
+        const grid_y = Math.floor(getPan().y + local_y);
         if (grid_x < 0 || grid_x >= opts.grid.width || grid_y < 0 || grid_y >= opts.grid.height) return;
         if (grid_x !== last_draw_pos.x || grid_y !== last_draw_pos.y) {
           drawLineWithBrushSize(last_draw_pos.x, last_draw_pos.y, grid_x, grid_y, false);
@@ -1022,8 +1153,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
       // Weighter tool - drag to apply weight with brush size
       if (is_weighing && last_draw_pos) {
-        const grid_x = Math.floor(offset_x + local_x);
-        const grid_y = Math.floor(offset_y + local_y);
+        const grid_x = Math.floor(getPan().x + local_x);
+        const grid_y = Math.floor(getPan().y + local_y);
         if (grid_x < 0 || grid_x >= opts.grid.width || grid_y < 0 || grid_y >= opts.grid.height) return;
         if (grid_x !== last_draw_pos.x || grid_y !== last_draw_pos.y) {
           applyWeightWithBrushSize(grid_x, grid_y, opts.brush.weight_index);
@@ -1034,8 +1165,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
       // Colorer tool - drag to apply color with brush size
       if (is_coloring && last_draw_pos) {
-        const grid_x = Math.floor(offset_x + local_x);
-        const grid_y = Math.floor(offset_y + local_y);
+        const grid_x = Math.floor(getPan().x + local_x);
+        const grid_y = Math.floor(getPan().y + local_y);
         if (grid_x < 0 || grid_x >= opts.grid.width || grid_y < 0 || grid_y >= opts.grid.height) return;
         if (grid_x !== last_draw_pos.x || grid_y !== last_draw_pos.y) {
           applyColorWithBrushSize(grid_x, grid_y, opts.brush.rgb);
@@ -1046,8 +1177,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
       // Selection preview - use distinctive dashed pattern
       if (is_selecting && selection_drag_start) {
-        const grid_x = Math.floor(offset_x + local_x);
-        const grid_y = Math.floor(offset_y + local_y);
+        const grid_x = Math.floor(getPan().x + local_x);
+        const grid_y = Math.floor(getPan().y + local_y);
         // Show preview rect
         const new_points = previewRectStroke(selection_drag_start.x, selection_drag_start.y, grid_x, grid_y);
         opts.preview_points.length = 0;
@@ -1063,8 +1194,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
       // Lasso selection - add points as user drags
       if (is_lasso_selecting) {
-        const grid_x = Math.floor(offset_x + local_x);
-        const grid_y = Math.floor(offset_y + local_y);
+        const grid_x = Math.floor(getPan().x + local_x);
+        const grid_y = Math.floor(getPan().y + local_y);
         // Add point if moved to a new cell
         const last_point = lasso_points[lasso_points.length - 1];
         if (!last_point || last_point.x !== grid_x || last_point.y !== grid_y) {
@@ -1078,8 +1209,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       }
 
       if (is_drawing && drag_start) {
-        const current_x = Math.floor(offset_x + local_x);
-        const current_y = Math.floor(offset_y + local_y);
+        const current_x = Math.floor(getPan().x + local_x);
+        const current_y = Math.floor(getPan().y + local_y);
         const tool_for_drag = (drag_start_buttons & 2) ? opts.get_right_click_tool() : opts.get_left_click_tool();
         let new_points: { x: number; y: number }[] = [];
         if (tool_for_drag === 'line') {
@@ -1097,8 +1228,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
       // Paste preview follows mouse
       if (opts.get_current_tool() === 'paste' && paste_preview_data) {
-        const grid_x = Math.floor(offset_x + local_x);
-        const grid_y = Math.floor(offset_y + local_y);
+        const grid_x = Math.floor(getPan().x + local_x);
+        const grid_y = Math.floor(getPan().y + local_y);
         paste_preview_pos = { x: grid_x, y: grid_y };
       }
     },
@@ -1117,8 +1248,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       if (is_selecting && selection_drag_start) {
         const local_x = e.x - rect.x0;
         const local_y = e.y - rect.y0;
-        const end_x = Math.floor(offset_x + local_x);
-        const end_y = Math.floor(offset_y + local_y);
+        const end_x = Math.floor(getPan().x + local_x);
+        const end_y = Math.floor(getPan().y + local_y);
         const start_x = selection_drag_start.x;
         const start_y = selection_drag_start.y;
         
@@ -1193,8 +1324,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       if ((tool_for_end === 'line' || tool_for_end.startsWith('rect_')) && drag_start) {
         const local_x = e.x - rect.x0;
         const local_y = e.y - rect.y0;
-        const end_x = Math.floor(offset_x + local_x);
-        const end_y = Math.floor(offset_y + local_y);
+        const end_x = Math.floor(getPan().x + local_x);
+        const end_y = Math.floor(getPan().y + local_y);
         const start_x = drag_start.x;
         const start_y = drag_start.y;
         
@@ -1381,8 +1512,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       if (is_drawing && drag_start && (tool_for_up === 'line' || tool_for_up.startsWith('rect_'))) {
         const local_x = e.x - rect.x0;
         const local_y = e.y - rect.y0;
-        const end_x = Math.floor(offset_x + local_x);
-        const end_y = Math.floor(offset_y + local_y);
+        const end_x = Math.floor(getPan().x + local_x);
+        const end_y = Math.floor(getPan().y + local_y);
         const start_x = drag_start.x;
         const start_y = drag_start.y;
         
@@ -1414,8 +1545,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       if (is_selecting && selection_drag_start) {
         const local_x = e.x - rect.x0;
         const local_y = e.y - rect.y0;
-        const end_x = Math.floor(offset_x + local_x);
-        const end_y = Math.floor(offset_y + local_y);
+        const end_x = Math.floor(getPan().x + local_x);
+        const end_y = Math.floor(getPan().y + local_y);
         const start_x = selection_drag_start.x;
         const start_y = selection_drag_start.y;
         
@@ -1553,13 +1684,17 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         return;
       }
 
-      const scroll_step = Math.max(1, Math.floor(3 * scale));
+      // Scroll updates camera pan position
+      // Note: In grid coordinates, Y increases upward
+      // Scroll down (delta_y > 0) = show content above = decrease pan_y
+      const scroll_step = 2; // Grid cells per scroll
       if (e.shift) {
-        offset_x = clamp(offset_x + (e.delta_x > 0 ? scroll_step : -scroll_step), 0, Math.max(0, opts.grid.width - CANVAS_WIDTH));
+        // Horizontal scroll: right shows content to the left = increase pan_x
+        panBy(e.delta_x > 0 ? scroll_step : -scroll_step, 0);
       } else {
-        offset_y = clamp(offset_y + (e.delta_y > 0 ? scroll_step : -scroll_step), 0, Math.max(0, opts.grid.height - CANVAS_HEIGHT));
+        // Vertical scroll: down shows content above = decrease pan_y
+        panBy(0, e.delta_y > 0 ? -scroll_step : scroll_step);
       }
-      emitViewport();
     },
 
     OnKeyDown(e: KeyboardEvent): void {
@@ -1741,30 +1876,29 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       // Space for panning (only when NOT in text mode)
       if (e.code === 'Space') {
         space_held = true;
-        console.log('[CANVAS-DEBUG] Space key DOWN - space_held set to true');
         e.preventDefault();
         return;
       }
 
-      const pan_step = 5;
+      // Arrow keys update camera pan position
+      // Note: In grid coordinates, Y increases upward
+      // ArrowUp = show content below = increase pan_y
+      const pan_step = 1; // Move 1 grid cell per keypress
       switch (e.key) {
-        case 'ArrowUp': offset_y = clamp(offset_y - pan_step, 0, opts.grid.height - CANVAS_HEIGHT); break;
-        case 'ArrowDown': offset_y = clamp(offset_y + pan_step, 0, opts.grid.height - CANVAS_HEIGHT); break;
-        case 'ArrowLeft': offset_x = clamp(offset_x - pan_step, 0, opts.grid.width - CANVAS_WIDTH); break;
-        case 'ArrowRight': offset_x = clamp(offset_x + pan_step, 0, opts.grid.width - CANVAS_WIDTH); break;
+        case 'ArrowUp': panBy(0, pan_step); break;
+        case 'ArrowDown': panBy(0, -pan_step); break;
+        case 'ArrowLeft': panBy(-pan_step, 0); break;
+        case 'ArrowRight': panBy(pan_step, 0); break;
       }
-      emitViewport();
     },
 
     OnKeyUp(e: KeyboardEvent): void {
       if (e.code === 'Space') {
         space_held = false;
-        console.log('[CANVAS-DEBUG] Space key UP - space_held set to false');
       }
     },
 
     OnBlur(): void {
-      console.log('[CANVAS-DEBUG] OnBlur - clearing state, space_held was:', space_held);
       space_held = false;
       is_panning = false;
       is_drawing = false;
@@ -1875,3 +2009,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 // Export selection operations for external UI controls
 export { clearSelection, selectAll, invertSelection, hasSelection };
 export type { SelectionBitmap };
+
+// Export type for the painter canvas module (includes emitViewport)
+export type PainterCanvasModule = ReturnType<typeof make_painter_canvas_module>;

@@ -354,6 +354,7 @@ export class CanvasRuntime {
         const final_x = this.base_pan_px_x + this.pan_tiles_x * tile_w;
         const final_y = this.base_pan_px_y + this.pan_tiles_y * tile_h;
 
+        // Apply CSS transform to move the entire canvas
         this.canvas_el.style.transform = `translate(${final_x}px, ${final_y}px)`;
 
         // Best-effort notification so the app shell can keep background patterns aligned.
@@ -573,11 +574,16 @@ export class CanvasRuntime {
                 this.engine_canvas.get(t.x, t.y),
             );
 
-            if (this.capture_owner) {
-                // If the drag started on background, pan the entire canvas instead of routing to a module.
-                // But if capture_owner is canvas module, allow it to handle panning itself
-                const is_canvas_module = this.capture_owner.id === 'painter_canvas' || this.capture_owner.id?.startsWith('canvas');
-                if (this.global_pan_active && (ev.buttons & 1) && !is_canvas_module) {
+            // Global pan: Check at top level so it works even with no capture_owner (blank space)
+            // This must come before the capture_owner check
+            if (this.global_pan_active && (ev.buttons & 1)) {
+                // When dragging, use capture_owner to determine if we should pan globally
+                // If no capture_owner (blank space), always pan globally
+                // If capture_owner exists, only pan globally if it's not the canvas module
+                const should_global_pan = !this.capture_owner || 
+                    !(this.capture_owner.id === 'painter_canvas' || this.capture_owner.id?.startsWith('canvas'));
+                
+                if (should_global_pan) {
                     const dx = ev.clientX - this.last_pan_client_x;
                     const dy = ev.clientY - this.last_pan_client_y;
                     this.last_pan_client_x = ev.clientX;
@@ -600,12 +606,15 @@ export class CanvasRuntime {
                     }
 
                     this.pan_dirty = true;
+                    console.log('[GLOBAL-PAN] Moving:', { capture_owner: this.capture_owner?.id ?? 'null', pan_tiles_x: this.pan_tiles_x, pan_tiles_y: this.pan_tiles_y, step_x, step_y });
                     this.recenter_or_clamp_pan();
 
                     this.last_tile = t;
                     return;
                 }
+            }
 
+            if (this.capture_owner) {
                 this.capture_owner.OnPointerMove?.(base);
 
                 if (this.down_tile) {
@@ -666,16 +675,42 @@ export class CanvasRuntime {
 
             let top = this.route_to_top_module(t.x, t.y) ?? null;
             
-            // If no module under cursor and space is held, use canvas as fallback
-            const typing = this.focused_owner?.id === 'input';
-            if (!top && !typing && this.space_down) {
-                top = this.get_canvas_module() ?? null;
-            }
-
-            // Global UI pan gesture:
-            // - Hold Space + drag anywhere (except while actively typing in input)
+            // Global UI pan gesture (GAME MODE ONLY):
+            // - Hold Space + drag anywhere (except while actively typing in input or on canvas module)
             // - Or drag on background/free space
-            this.global_pan_active = (!typing && this.space_down) || (top?.id === 'bg');
+            // NOTE: In painter mode, we use camera-based panning via the canvas module instead
+            const typing = this.focused_owner?.id === 'input';
+            const is_canvas_module = top?.id === 'painter_canvas' || top?.id?.startsWith('canvas');
+            const is_painter_mode = (window as any).electronAPI?.appMode === 'ascii_painter';
+            
+            if (is_painter_mode) {
+                // Painter mode: Smart panning routing
+                // - On canvas module: Camera pan (routes to canvas)
+                // - On blank space: Global UI pan (move entire mono_canvas)
+                // - On other modules: If module has OnDragMove, it handles it; otherwise global pan
+                if (!typing && this.space_down) {
+                    if (is_canvas_module) {
+                        // On canvas: Route to canvas module for camera pan
+                        this.global_pan_active = false;
+                        console.log('[PAN-ROUTING] Canvas module: camera pan (global_pan_active=false)');
+                    } else if (!top) {
+                        // On blank space: Enable global UI pan
+                        this.global_pan_active = true;
+                        console.log('[PAN-ROUTING] Blank space: global UI pan (global_pan_active=true)');
+                    } else {
+                        // On other module: Check if it has OnDragMove
+                        // If yes, let module handle it; if no, use global pan
+                        this.global_pan_active = !top.OnDragMove;
+                        console.log(`[PAN-ROUTING] Module ${top.id}: ${top.OnDragMove ? 'module handles pan' : 'global UI pan'} (global_pan_active=${this.global_pan_active})`);
+                    }
+                } else {
+                    this.global_pan_active = false;
+                }
+            } else {
+                // Game mode: Use global UI pan
+                this.global_pan_active = ((!typing && this.space_down) && !is_canvas_module) || (!top && !typing);
+            }
+            
             if (this.global_pan_active) {
                 this.last_pan_client_x = ev.clientX;
                 this.last_pan_client_y = ev.clientY;

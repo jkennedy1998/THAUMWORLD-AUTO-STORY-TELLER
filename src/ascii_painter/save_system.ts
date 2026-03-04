@@ -341,6 +341,8 @@ export interface CameraConfigSaveData {
   show_all_layers?: boolean;
   mode?: 'straight_ortho' | 'parallax_ortho' | 'rotated_ortho';
   orientation?: 'xy' | 'yz' | 'xz';
+  pan_x?: number;
+  pan_y?: number;
 }
 
 /**

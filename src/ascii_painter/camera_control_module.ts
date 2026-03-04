@@ -47,6 +47,8 @@ export type CameraControlOptions = {
   onBaseLayerScaleChange?: (value: number) => void;
   onCharSpacingXChange?: (value: number) => void;
   onCharSpacingYChange?: (value: number) => void;
+  onPanXChange?: (value: number) => void;
+  onPanYChange?: (value: number) => void;
   onMove?: (new_rect: Rect) => void;
   onResize?: (new_rect: Rect) => void;
   onClose?: () => void;
@@ -101,9 +103,17 @@ const ROW_SEPARATOR_10 = 38;
 const ROW_CHAR_SPACING_Y_LABEL = 39;
 const ROW_CHAR_SPACING_Y = 40;
 const ROW_CHAR_SPACING_Y_SLIDER = 41;
+const ROW_SEPARATOR_11 = 42;
+const ROW_PAN_X_LABEL = 43;
+const ROW_PAN_X_VALUE = 44;
+const ROW_PAN_X_SLIDER = 45;
+const ROW_SEPARATOR_12 = 46;
+const ROW_PAN_Y_LABEL = 47;
+const ROW_PAN_Y_VALUE = 48;
+const ROW_PAN_Y_SLIDER = 49;
 
 // Total content height
-const CONTENT_HEIGHT = 42;
+const CONTENT_HEIGHT = 50;
 
 // Column positions
 const COL_TOGGLE = 2;
@@ -119,7 +129,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
   let scroll_offset = 0;
   
   // Track what we're dragging
-  let is_dragging_slider: 'scale_per_layer' | 'movement_per_layer' | 'calibration_x' | 'calibration_y' | 'base_layer_scale' | 'char_spacing_x' | 'char_spacing_y' | null = null;
+  let is_dragging_slider: 'scale_per_layer' | 'movement_per_layer' | 'calibration_x' | 'calibration_y' | 'base_layer_scale' | 'char_spacing_x' | 'char_spacing_y' | 'pan_x' | 'pan_y' | null = null;
   
   // Colors
   const bgColor = get_color_by_name('off_black').rgb;
@@ -534,6 +544,38 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
       
       drawSlider(c, ROW_CHAR_SPACING_Y_SLIDER, camera.char_spacing_y ?? DEFAULT_CAMERA_VALUES.char_spacing_y, 0.5, 2.0, 0.01);
       
+      drawSeparator(c, ROW_SEPARATOR_11);
+      
+      // Pan X
+      drawLabel(c, ROW_PAN_X_LABEL, 'Pan X:');
+      
+      if (is_row_visible(ROW_PAN_X_VALUE)) {
+        const y = get_screen_y(ROW_PAN_X_VALUE);
+        const valueStr = Math.round(camera.pan_x ?? DEFAULT_CAMERA_VALUES.pan_x).toString();
+        const valueX = rect.x0 + Math.floor((rect.x1 - rect.x0 - valueStr.length) / 2);
+        for (let i = 0; i < valueStr.length; i++) {
+          c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 3, render_index: 10 });
+        }
+      }
+      
+      drawSlider(c, ROW_PAN_X_SLIDER, camera.pan_x ?? DEFAULT_CAMERA_VALUES.pan_x, -100, 100, 1);
+      
+      drawSeparator(c, ROW_SEPARATOR_12);
+      
+      // Pan Y
+      drawLabel(c, ROW_PAN_Y_LABEL, 'Pan Y:');
+      
+      if (is_row_visible(ROW_PAN_Y_VALUE)) {
+        const y = get_screen_y(ROW_PAN_Y_VALUE);
+        const valueStr = Math.round(camera.pan_y ?? DEFAULT_CAMERA_VALUES.pan_y).toString();
+        const valueX = rect.x0 + Math.floor((rect.x1 - rect.x0 - valueStr.length) / 2);
+        for (let i = 0; i < valueStr.length; i++) {
+          c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 3, render_index: 10 });
+        }
+      }
+      
+      drawSlider(c, ROW_PAN_Y_SLIDER, camera.pan_y ?? DEFAULT_CAMERA_VALUES.pan_y, -100, 100, 1);
+      
       // Draw gizmos
       draw_module_gizmos(c, rect, gizmo_config, gizmo_state, 'Camera');
       
@@ -715,7 +757,57 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
         pressedButtons.add('slider_plus');
         return;
       }
-      
+
+      // Check Pan X slider
+      if (is_on_slider(e.x, e.y, ROW_PAN_X_SLIDER)) {
+        is_dragging_slider = 'pan_x';
+        const newValue = get_slider_value(e.x, -100, 100);
+        const clampedValue = Math.max(-100, Math.min(100, Math.round(newValue)));
+        opts.onPanXChange?.(clampedValue);
+        return;
+      }
+
+      if (is_on_minus(e.x, e.y, ROW_PAN_X_SLIDER)) {
+        const current = opts.getSpace().camera.pan_x ?? DEFAULT_CAMERA_VALUES.pan_x;
+        const newValue = Math.max(-100, current - 1);
+        opts.onPanXChange?.(newValue);
+        pressedButtons.add('slider_minus');
+        return;
+      }
+
+      if (is_on_plus(e.x, e.y, ROW_PAN_X_SLIDER)) {
+        const current = opts.getSpace().camera.pan_x ?? DEFAULT_CAMERA_VALUES.pan_x;
+        const newValue = Math.min(100, current + 1);
+        opts.onPanXChange?.(newValue);
+        pressedButtons.add('slider_plus');
+        return;
+      }
+
+      // Check Pan Y slider
+      if (is_on_slider(e.x, e.y, ROW_PAN_Y_SLIDER)) {
+        is_dragging_slider = 'pan_y';
+        const newValue = get_slider_value(e.x, -100, 100);
+        const clampedValue = Math.max(-100, Math.min(100, Math.round(newValue)));
+        opts.onPanYChange?.(clampedValue);
+        return;
+      }
+
+      if (is_on_minus(e.x, e.y, ROW_PAN_Y_SLIDER)) {
+        const current = opts.getSpace().camera.pan_y ?? DEFAULT_CAMERA_VALUES.pan_y;
+        const newValue = Math.max(-100, current - 1);
+        opts.onPanYChange?.(newValue);
+        pressedButtons.add('slider_minus');
+        return;
+      }
+
+      if (is_on_plus(e.x, e.y, ROW_PAN_Y_SLIDER)) {
+        const current = opts.getSpace().camera.pan_y ?? DEFAULT_CAMERA_VALUES.pan_y;
+        const newValue = Math.min(100, current + 1);
+        opts.onPanYChange?.(newValue);
+        pressedButtons.add('slider_plus');
+        return;
+      }
+
       // Convert to local coordinates
       const localX = e.x - rect.x0;
       const localY = rect.y1 - e.y + scroll_offset; // Account for scroll
@@ -908,7 +1000,21 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
         opts.onCharSpacingYChange?.(opts.getSpace().camera.char_spacing_y);
         return;
       }
-      
+
+      if (is_dragging_slider === 'pan_x') {
+        const newValue = get_slider_value(e.x, -100, 100);
+        const clampedValue = Math.max(-100, Math.min(100, Math.round(newValue)));
+        opts.onPanXChange?.(clampedValue);
+        return;
+      }
+
+      if (is_dragging_slider === 'pan_y') {
+        const newValue = get_slider_value(e.x, -100, 100);
+        const clampedValue = Math.max(-100, Math.min(100, Math.round(newValue)));
+        opts.onPanYChange?.(clampedValue);
+        return;
+      }
+
       // Update resize edge hover state
       if (gizmo_state.is_resize_mode && !gizmo_state.is_dragging_resize) {
         gizmo_state.resize_edge = get_resize_edge(e.x, e.y, rect);

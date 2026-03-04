@@ -17,14 +17,16 @@ import type { VoxelSpace, VoxelLayer, CalibrationOffset } from './voxel_space.js
 import { DEFAULT_CAMERA_VALUES } from './voxel_space.js';
 
 export interface ViewportState {
-  // Canvas module position in screen pixels
+  // Canvas module position and size in screen pixels
   x: number;
   y: number;
   width: number;
   height: number;
-  // Grid pan offset (in grid cells)
-  offsetX: number;
-  offsetY: number;
+  // Global pan offset from mono_canvas CSS transform (for when UI is panned)
+  offsetX?: number;
+  offsetY?: number;
+  // Note: Camera pan offset is stored in CameraConfig
+  // The camera owns the view position in world space
 }
 
 export class VoxelDOMRenderer {
@@ -41,7 +43,7 @@ export class VoxelDOMRenderer {
   private lineHeight: number;
 
   // Viewport tracking
-  private viewport: ViewportState = { x: 0, y: 0, width: 0, height: 0, offsetX: 0, offsetY: 0 };
+  private viewport: ViewportState = { x: 0, y: 0, width: 0, height: 0 };
   private mouseParallax = { x: 0, y: 0 };
 
   constructor(
@@ -131,10 +133,43 @@ export class VoxelDOMRenderer {
   }
 
   /**
+   * Check for duplicate canvases in the DOM (debugging)
+   */
+  private checkForDuplicateCanvases(): void {
+    const container = this.clipContainer;
+    const canvases = container.querySelectorAll('canvas');
+    const zCounts = new Map<number, number>();
+    
+    for (const canvas of canvases) {
+      const zMatch = canvas.className.match(/layer-z-(\d+)/);
+      if (zMatch && zMatch[1]) {
+        const z = parseInt(zMatch[1]);
+        zCounts.set(z, (zCounts.get(z) || 0) + 1);
+      }
+    }
+    
+    let hasDuplicates = false;
+    const duplicates: string[] = [];
+    for (const [z, count] of zCounts) {
+      if (count > 1) {
+        duplicates.push(`z=${z}(${count}x)`);
+        hasDuplicates = true;
+      }
+    }
+    
+    if (hasDuplicates) {
+      console.error(`[PAN-DEBUG] DUPLICATE CANVASES: ${duplicates.join(', ')} | DOM=${canvases.length}, tracked=${this.layerCanvases.size}`);
+    }
+  }
+
+  /**
    * Create or update canvas elements for each layer
    */
   private createOrUpdateLayers(): void {
     if (!this.space) return;
+
+    // Check for duplicates before making changes
+    this.checkForDuplicateCanvases();
 
     const zValues = Array.from(this.space.layers.keys()).sort((a, b) => a - b);
 
@@ -216,9 +251,26 @@ export class VoxelDOMRenderer {
     const viewportCenterX = this.viewport.width / 2;
     const viewportCenterY = this.viewport.height / 2;
 
-    // Apply pan offset (moves all layers together)
-    const panOffsetX = -this.viewport.offsetX * cellW;
-    const panOffsetY = this.viewport.offsetY * cellH; // Note: positive offsetY moves content up (canvas coords)
+    // Apply pan offset from camera (moves layers with parallax based on Z distance)
+    // The focused layer moves by full amount, other layers scale with distance
+    const panX = camera.pan_x ?? DEFAULT_CAMERA_VALUES.pan_x;
+    const panY = camera.pan_y ?? DEFAULT_CAMERA_VALUES.pan_y;
+
+    // Calculate pan factor based on Z distance
+    // Focused layer (zDistance = 0) has factor of 1.0
+    // Other layers scale based on their distance from focus plane
+    const basePanFactor = 1.0;
+    const panFactorPerLayer = 0.1; // How much pan scales per Z layer
+    const panFactor = isSelected ? basePanFactor : basePanFactor + (zDistance * panFactorPerLayer);
+
+    // Clamp pan values to prevent extreme transforms
+    const MAX_PAN = 1000; // Maximum pan in grid cells
+    const clampedPanX = Math.max(-MAX_PAN, Math.min(MAX_PAN, panX));
+    const clampedPanY = Math.max(-MAX_PAN, Math.min(MAX_PAN, panY));
+
+    // Convert grid cell pan to pixel offset
+    const panOffsetX = -clampedPanX * cellW * panFactor;
+    const panOffsetY = clampedPanY * cellH * panFactor; // Note: positive offsetY moves content up (canvas coords)
 
     // Parallax (non-selected layers only)
     let parallaxX = 0;
@@ -246,9 +298,14 @@ export class VoxelDOMRenderer {
     // Get calibration from camera config
     const calibration = camera.calibration ?? { x: 0, y: 0 };
 
+    // Get global pan offset from mono_canvas CSS transform
+    // This moves the selected layer with the UI when panning blank space
+    const globalOffsetX = isSelected ? (this.viewport.offsetX ?? 0) : 0;
+    const globalOffsetY = isSelected ? (this.viewport.offsetY ?? 0) : 0;
+
     // Build transform - position is relative to clip container
-    const layerX = viewportCenterX + panOffsetX + parallaxX + calibration.x;
-    const layerY = viewportCenterY + panOffsetY + parallaxY + calibration.y;
+    const layerX = viewportCenterX + panOffsetX + parallaxX + calibration.x + globalOffsetX;
+    const layerY = viewportCenterY + panOffsetY + parallaxY + calibration.y + globalOffsetY;
 
     return `
       translate3d(${layerX}px, ${layerY}px, 0)
@@ -312,6 +369,7 @@ export class VoxelDOMRenderer {
 
   /**
    * Main render method
+   * Called every frame by the main loop to update all layer transforms
    */
   render(): void {
     if (!this.space) return;
@@ -320,6 +378,9 @@ export class VoxelDOMRenderer {
     const visibleLayers = Array.from(this.space.layers.values())
       .filter(layer => layer.visible)
       .sort((a, b) => a.z - b.z);
+
+    // Check for duplicates at start of render
+    this.checkForDuplicateCanvases();
 
     for (const layer of visibleLayers) {
       const canvas = this.layerCanvases.get(layer.z);

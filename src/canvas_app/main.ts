@@ -76,31 +76,25 @@ if (IS_PAINTER_MODE && painter_state) {
     const painterRef = painter_state;
     const originalTick = (runtime as any)['tick'].bind(runtime);
     
-    // Track canvas transform
-    let canvasTransform = { x: 0, y: 0 };
+    // Track tile size and global pan offset for viewport calculations
     let tileSize = { w: 0, h: 0 };
+    let globalPan = { x: 0, y: 0 };
     
-    // Listen to canvas pan events
+    // Listen to canvas pan events for tile size and global pan updates
     window.addEventListener('thaumworld_ui_pan', ((ev: CustomEvent) => {
-        canvasTransform.x = ev.detail?.pan_x_px ?? 0;
-        canvasTransform.y = ev.detail?.pan_y_px ?? 0;
         tileSize.w = ev.detail?.tile_w_px ?? 0;
         tileSize.h = ev.detail?.tile_h_px ?? 0;
+        // Track global pan offset from mono_canvas CSS transform
+        globalPan.x = ev.detail?.pan_x_px ?? 0;
+        globalPan.y = ev.detail?.pan_y_px ?? 0;
         
-        // Apply the same transform to the voxel container that mono_canvas has
-        const container = document.getElementById('voxel_layers_container');
-        if (container) {
-            container.style.transform = `translate(${canvasTransform.x}px, ${canvasTransform.y}px)`;
-        }
+        // Debug logging
+        console.log('[PAN-DEBUG] Global pan:', { x: globalPan.x, y: globalPan.y, tileW: tileSize.w, tileH: tileSize.h });
     }) as EventListener);
     
     (runtime as any)['tick'] = () => {
-        originalTick();
-        
-        // Render DOM layers each frame
-        painterRef.render_dom_layers();
-        
-        // Get the canvas module to calculate viewport
+        // IMPORTANT: Set viewport FIRST, then render DOM layers
+        // This ensures the DOM renderer uses the current viewport position
         const canvasModule = modules.find(m => m.id === 'painter_canvas');
         if (canvasModule && tileSize.w > 0) {
             const rect = canvasModule.rect;
@@ -112,15 +106,27 @@ if (IS_PAINTER_MODE && painter_state) {
             const viewportW = (rect.x1 - rect.x0 + 1) * tileSize.w;
             const viewportH = (rect.y1 - rect.y0 + 1) * tileSize.h;
             
+            // Debug logging
+            console.log('[PAN-DEBUG] Setting viewport:', { 
+                viewportX, viewportY, viewportW, viewportH, 
+                globalOffsetX: globalPan.x, globalOffsetY: globalPan.y 
+            });
+            
             painterRef.set_dom_viewport({
                 x: viewportX,
                 y: viewportY,
                 width: viewportW,
                 height: viewportH,
-                offsetX: 0,
-                offsetY: 0
+                offsetX: globalPan.x,
+                offsetY: globalPan.y
             });
         }
+        
+        // Render DOM layers with updated viewport
+        painterRef.render_dom_layers();
+        
+        // Render mono_canvas last (on top)
+        originalTick();
     };
 }
 
@@ -222,16 +228,19 @@ async function boot() {
         // ignore
     }
 
-    try {
-        window.addEventListener('thaumworld_ui_pan', (ev: any) => {
-            const pan_x_px = Number(ev?.detail?.pan_x_px);
-            const pan_y_px = Number(ev?.detail?.pan_y_px);
-            const tile_w_px = Number(ev?.detail?.tile_w_px);
-            const tile_h_px = Number(ev?.detail?.tile_h_px);
-            update_background_for_pan(pan_x_px, pan_y_px, tile_w_px, tile_h_px);
-        });
-    } catch {
-        // ignore
+    // Background pan tracking (game mode only - in painter mode canvas doesn't move)
+    if (!IS_PAINTER_MODE) {
+        try {
+            window.addEventListener('thaumworld_ui_pan', (ev: any) => {
+                const pan_x_px = Number(ev?.detail?.pan_x_px);
+                const pan_y_px = Number(ev?.detail?.pan_y_px);
+                const tile_w_px = Number(ev?.detail?.tile_w_px);
+                const tile_h_px = Number(ev?.detail?.tile_h_px);
+                update_background_for_pan(pan_x_px, pan_y_px, tile_w_px, tile_h_px);
+            });
+        } catch {
+            // ignore
+        }
     }
 
     if (!IS_PAINTER_MODE) {

@@ -452,10 +452,9 @@ export function create_painter_app_state(): PainterAppState {
           x: viewport.x * cellW,
           y: (PAINTER_CONFIG.grid_height - 1 - (viewport.y + viewport.height - 1)) * cellH,
           width: viewport.width * cellW,
-          height: viewport.height * cellH,
-          offsetX: viewport.offsetX,
-          offsetY: viewport.offsetY
+          height: viewport.height * cellH
         });
+        // Note: render() is called every frame by main loop, no need for separate updateTransforms()
       }
     },
     on_mouse_move: (offsetX, offsetY) => {
@@ -1284,6 +1283,20 @@ export function create_painter_app_state(): PainterAppState {
         if (isAppInitialized) {
           saveCameraConfig({ char_spacing_y: value });
         }
+      },
+      onPanXChange: (value) => {
+        voxelSpace.camera.pan_x = value;
+        if (isAppInitialized) {
+          saveCameraConfig({ pan_x: value });
+        }
+        // Viewport will be updated automatically on next frame by main loop
+      },
+      onPanYChange: (value) => {
+        voxelSpace.camera.pan_y = value;
+        if (isAppInitialized) {
+          saveCameraConfig({ pan_y: value });
+        }
+        // Viewport will be updated automatically on next frame by main loop
       },
       onMove: (new_rect) => {
         if (camera_control_module) {
