@@ -7,6 +7,7 @@
 
 import type { BodySlots } from "./body_slots.js";
 import type { Container } from "./container.js";
+import type { InlineItem } from "./inline_item.js";
 
 /**
  * A place represents a bounded area within a region where interactions are local.
@@ -33,8 +34,14 @@ export type Place = {
   // Contents tracking (denormalized for quick access)
   contents: PlaceContents;
 
-  // Container storage - inline containers for ground loot, furniture, etc.
+  // Container storage - DEPRECATED: Use ground instead
   containers?: Record<string, Container>;
+
+  // Ground storage - inline items on the ground (Phase 5)
+  ground?: {
+    main: InlineItem[];                    // Items without specific position
+    scattered: Record<string, InlineItem[]>;  // Key = "x_y", items at that position
+  };
 
   // Metadata
   is_public: boolean;            // Can random travelers enter?

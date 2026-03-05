@@ -79,6 +79,27 @@ if (IS_PAINTER_MODE && painter_state) {
     // Track tile size and global pan offset for viewport calculations
     let tileSize = { w: 0, h: 0 };
     let globalPan = { x: 0, y: 0 };
+    let uiScale = 1.0;
+    let gotPanEvent = false;
+    let boot_frames_left = 10;
+    let boot_recentering_done = false;
+
+    const metricsCanvas = document.createElement('canvas');
+    const metricsCtx = metricsCanvas.getContext('2d');
+
+    function computeTileMetrics(scale: number): { tileW: number; tileH: number; fontSizePx: number } | null {
+        if (!metricsCtx) return null;
+        const s = Number.isFinite(scale) ? Math.max(0.25, Math.min(6.0, scale)) : 1.0;
+        const fontSizePx = config.base_font_size_px * s;
+        const lineHeightPx = fontSizePx * config.base_line_height_mult;
+        const letterSpacingPx = fontSizePx * config.base_letter_spacing_mult;
+        metricsCtx.font = `400 ${fontSizePx}px ${config.font_family}`;
+        const glyphW = metricsCtx.measureText('M').width;
+        const tileW = glyphW + letterSpacingPx;
+        const tileH = lineHeightPx;
+        if (!Number.isFinite(tileW) || !Number.isFinite(tileH) || tileW <= 0 || tileH <= 0) return null;
+        return { tileW, tileH, fontSizePx };
+    }
     
     // Listen to canvas pan events for tile size and global pan updates
     window.addEventListener('thaumworld_ui_pan', ((ev: CustomEvent) => {
@@ -87,40 +108,92 @@ if (IS_PAINTER_MODE && painter_state) {
         // Track global pan offset from mono_canvas CSS transform
         globalPan.x = ev.detail?.pan_x_px ?? 0;
         globalPan.y = ev.detail?.pan_y_px ?? 0;
+        uiScale = ev.detail?.scale ?? uiScale;
+        gotPanEvent = true;
         
         // Debug logging
         console.log('[PAN-DEBUG] Global pan:', { x: globalPan.x, y: globalPan.y, tileW: tileSize.w, tileH: tileSize.h });
     }) as EventListener);
     
+    let lastViewportLogKey = '';
+
     (runtime as any)['tick'] = () => {
+        // During the first few frames after boot the DOM/layout/font metrics can settle.
+        // We re-sample metrics and canvas position to avoid a "snap" that only corrects
+        // itself after the first manual global pan.
+        const bootWarmup = boot_frames_left > 0;
+
+        // Ensure we have sane initial metrics even before the first pan event.
+        // On some boots the first recenter can run before the window layout is stable,
+        // so we fall back to DOM + derived font metrics until events arrive.
+        if (tileSize.w <= 0 || tileSize.h <= 0 || bootWarmup) {
+            const m = computeTileMetrics(runtime.get_scale());
+            if (m) {
+                tileSize.w = m.tileW;
+                tileSize.h = m.tileH;
+                uiScale = runtime.get_scale();
+            }
+        }
+
+        if (!gotPanEvent || bootWarmup) {
+            const r = el.getBoundingClientRect();
+            if (Number.isFinite(r.left) && Number.isFinite(r.top)) {
+                globalPan.x = r.left;
+                globalPan.y = r.top;
+            }
+        }
+
+        // Force a single recenter pass once the first couple frames have rendered.
+        // This mimics the "first manual pan" correction, but happens automatically.
+        if (!gotPanEvent && bootWarmup && !boot_recentering_done && boot_frames_left <= 8) {
+            boot_recentering_done = true;
+            const s = runtime.get_scale();
+            runtime.set_scale(s);
+        }
+
         // IMPORTANT: Set viewport FIRST, then render DOM layers
         // This ensures the DOM renderer uses the current viewport position
-        const canvasModule = modules.find(m => m.id === 'painter_canvas');
-        if (canvasModule && tileSize.w > 0) {
+        const currentModules: readonly Module[] = module_registry?.get_all ? module_registry.get_all() : modules;
+        const canvasModule = currentModules.find(m => m.id === 'painter_canvas');
+        if (canvasModule && tileSize.w > 0 && tileSize.h > 0) {
             const rect = canvasModule.rect;
             
-            // Viewport is relative to the transformed container
-            // So we just use the grid coordinates * tile size
-            const viewportX = rect.x0 * tileSize.w;
-            const viewportY = (config.grid_height - 1 - rect.y1) * tileSize.h;
+            // Viewport in screen CSS pixels.
+            // - Include global CSS pan (mono_canvas transform) so the mask tracks the UI.
+            // - Flip Y because module rects are bottom-left origin, but DOM is top-left.
+            const viewportX = globalPan.x + rect.x0 * tileSize.w;
+            const viewportY = globalPan.y + (config.grid_height - 1 - rect.y1) * tileSize.h;
             const viewportW = (rect.x1 - rect.x0 + 1) * tileSize.w;
             const viewportH = (rect.y1 - rect.y0 + 1) * tileSize.h;
+            const fontSizePx = config.base_font_size_px * (Number.isFinite(uiScale) ? uiScale : 1.0);
             
             // Debug logging
-            console.log('[PAN-DEBUG] Setting viewport:', { 
-                viewportX, viewportY, viewportW, viewportH, 
-                globalOffsetX: globalPan.x, globalOffsetY: globalPan.y 
-            });
+            const logKey = `${viewportX.toFixed(2)},${viewportY.toFixed(2)},${viewportW.toFixed(2)},${viewportH.toFixed(2)}|${tileSize.w.toFixed(3)},${tileSize.h.toFixed(3)}|${fontSizePx.toFixed(2)}`;
+            if (logKey !== lastViewportLogKey) {
+                lastViewportLogKey = logKey;
+                console.log('[PAN-DEBUG] Setting viewport:', {
+                    viewportX, viewportY, viewportW, viewportH,
+                    globalOffsetX: globalPan.x, globalOffsetY: globalPan.y,
+                    tileSizeW: tileSize.w, tileSizeH: tileSize.h,
+                    fontSizePx,
+                    gotPanEvent,
+                });
+            }
             
             painterRef.set_dom_viewport({
                 x: viewportX,
                 y: viewportY,
                 width: viewportW,
                 height: viewportH,
-                offsetX: globalPan.x,
-                offsetY: globalPan.y
+                tileW: tileSize.w,
+                tileH: tileSize.h,
+                fontSizePx,
+                offsetX: 0,
+                offsetY: 0
             });
         }
+
+        if (boot_frames_left > 0) boot_frames_left -= 1;
         
         // Render DOM layers with updated viewport
         painterRef.render_dom_layers();

@@ -731,6 +731,28 @@ These can be added later once basic equip/unequip via drag is working.
 
 ---
 
+## Addendum: Ground Tiles, Piles, and Container-Items (Tabletop UX)
+
+### Ground: Single vs Pile
+
+- If a tile has exactly 1 ground item, it should be directly draggable.
+- If a tile has 2+ ground items, it is treated as a pile:
+  - Double-click opens a ContainerModule representing that pile.
+  - Dragging the tile itself does not pick an arbitrary item.
+  - Users drag specific items from the opened pile module.
+- When a pile drops back to exactly 1 remaining item, it automatically reverts to the single-item behavior.
+
+### Container-Items: Drag Opens Instead of Transfers
+
+- Dragging an item that is itself a container should open that container's ContainerModule.
+- This avoids accidental container re-parenting and scales better for tabletop play.
+
+### UI Cleanup
+
+- If a container is removed/deleted/emptied, close any open ContainerModule bound to it.
+
+---
+
 ## ⚠️ IMPORTANT: Container Data Format Dependency
 
 **Status:** BLOCKED - See `container_format_standardization.md`

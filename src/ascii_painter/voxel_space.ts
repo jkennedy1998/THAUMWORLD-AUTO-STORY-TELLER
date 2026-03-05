@@ -85,12 +85,12 @@ export const DEFAULT_CAMERA_VALUES = {
   parallax_move_enabled: false,
   parallax_size_enabled: false,
   euler_rotation: { x: 0, y: 0, z: 0 },
-  calibration: { x: -377, y: -311 },
+  calibration: { x: 0, y: 0 },
   scale_per_layer: 0.12,
   movement_per_layer: 29,
-  base_layer_scale: 0.57,
-  char_spacing_x: 0.59,
-  char_spacing_y: 1.24,
+  base_layer_scale: 1.0,
+  char_spacing_x: 0.9,      // Match PAINTER_CONFIG: 1 + (-0.10) letter spacing
+  char_spacing_y: 0.93125,  // Match PAINTER_CONFIG: 29.8/32 line height
   pan_x: 0,
   pan_y: 0,
 };
@@ -159,7 +159,8 @@ export interface VoxelSpaceExport {
     locked: boolean;
     cells: GridCell[][];
   }>;
-  camera: CameraConfig;
+  // Camera config is UI/runtime state; artwork exports may omit it.
+  camera?: CameraConfig;
   metadata?: {
     title?: string;
     description?: string;
@@ -579,7 +580,7 @@ export function importVoxelSpace(data: VoxelSpaceExport): VoxelSpace {
   return {
     bounds: { ...data.bounds },
     layers,
-    camera: { ...data.camera },
+    camera: { ...(data.camera ?? createDefaultCamera()) },
     metadata: data.metadata ? { ...data.metadata } : undefined,
   };
 }

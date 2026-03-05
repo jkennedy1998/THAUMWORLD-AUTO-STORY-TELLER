@@ -147,7 +147,10 @@ declare global {
     electronAPI?: {
       readFile: (filePath: string) => Promise<{ success: boolean; content?: string; error?: string }>;
       writeFile: (filePath: string, content: string) => Promise<{ success: boolean; error?: string }>;
+      writeFileAtomic: (filePath: string, content: string) => Promise<{ success: boolean; error?: string }>;
       getDataSlotDir: (slot: number) => Promise<string>;
+      getAsciiDrawingsDir: () => Promise<string>;
+      showOpenDialog: (options: any) => Promise<{ success: boolean; result?: any; error?: string }>;
       // Clipboard operations
       clipboardReadText: () => Promise<{ success: boolean; text?: string; error?: string }>;
       clipboardWriteText: (text: string) => Promise<{ success: boolean; error?: string }>;

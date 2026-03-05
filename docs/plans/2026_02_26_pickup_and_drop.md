@@ -134,7 +134,7 @@ Enable seamless interaction between:
 
 #### Pickup Items from World
 - **Source:** Scattered loot containers (`container.place.<place_id>.scattered_<x>_<y>`)
-- **Destination:** Character's main inventory (equipped sack)
+ - **Destination:** Character's default container (player-selected), else dominant hand tool slot (hand_right), else reject
 - **Trigger:** Drag item from world container to inventory OR click "Pick Up" button
 - **Range:** 1 tile (touch range)
 
@@ -147,11 +147,61 @@ Enable seamless interaction between:
 
 #### Open External Containers
 - **Trigger:** Double-click on:
-  - Scattered loot pile (ground items)
-  - NPC character module (view their equipment)
-  - Future: Chests, shelves, furniture
+ - **Trigger:** Double-click on:
+   - Ground pile (multiple items on one tile)
+   - Ground container-item (an item with CONTAINER tag)
+   - NPC character module (view their equipment)
+   - Future: Chests, shelves, furniture
 - **Distance limit:** 1 tile to open, auto-close at 5 tiles
-- **Visual indicator:** Highlight accessible containers
+ - **Distance limit:** 1 tile to open, auto-close at 5 tiles
+ - **Visual indicator:** Highlight accessible containers
+
+---
+
+## 2.3 Ground Representation: Single vs Pile (Tabletop UX)
+
+To scale well for tabletop-style play and reduce ambiguity:
+
+### A) Single Item on a Tile
+
+- If a tile has exactly 1 ground item:
+  - It renders as that item on the floor.
+  - It can be dragged directly (ground -> inventory/body slot/container).
+  - Double-click behavior:
+    - If the item is a container-item (has CONTAINER tag): OPEN it.
+    - Otherwise: attempt PICKUP into the player's default container.
+
+### B) Pile (Multiple Items on a Tile)
+
+- If a tile has 2+ ground items, it is treated as a "pile":
+  - It renders as a pile glyph (implementation-defined) rather than a specific item.
+  - Double-click opens a ContainerModule view for that tile's pile.
+  - Dragging the tile itself does NOT pick a "top" item.
+  - To move items out, the user drags specific items from the pile's ContainerModule.
+
+### C) Pile Auto-Reversion
+
+- When a pile decreases to exactly 1 remaining item:
+  - It reverts to the single-item-on-floor behavior automatically.
+  - This restores direct dragging/pickup of the item without opening a pile UI.
+
+---
+
+## 2.4 Drag Policy: Container-Items Always Open
+
+To keep interaction consistent and avoid accidental re-parenting of containers:
+
+- Dragging a container-item (an item with CONTAINER tag) does not initiate a transfer.
+- Instead, it opens the corresponding ContainerModule for that container.
+- This applies to container-items on the ground and equipped container-items.
+
+---
+
+## 2.5 UI Lifecycle: Close UIs for Deleted Containers
+
+- If a container is deleted or ceases to exist (e.g., removed from ground / unequipped and destroyed / pile emptied):
+  - Any open ContainerModule for that container must be closed.
+  - This prevents "dangling" UIs showing stale contents.
 
 ### 2.2 Container Access Rules
 
@@ -224,7 +274,7 @@ function get_main_inventory(actor_data: Actor): MainInventoryResult {
         }
     }
     
-    // No containers - check dominant hand
+    // No containers - check dominant hand (right hand)
     const dominant_hand = actor_data.body_slots.hand_right;
     if (dominant_hand && !dominant_hand.tool) {
         return { type: 'hand_tool', hand_slot: 'hand_right' };

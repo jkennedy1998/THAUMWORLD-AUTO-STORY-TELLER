@@ -29,8 +29,94 @@ import { find_empty_grid_position } from "../shared/migration.js";
 import { calculate_grid_dimensions } from "../types/container.js";
 import { load_item_def, load_master_item } from "../item_storage/store.js";
 import { create_inline_item } from "../item_instances/store.js";
+import {
+    load_actor_with_items,
+    save_actor_with_items,
+    get_all_actor_items,
+    find_actor_item_by_id,
+    remove_actor_item_by_id,
+    add_item_to_body_slot,
+    add_item_to_container as add_item_to_inline_container,
+    remove_item_by_path,
+    transfer_item_between_slots,
+    find_first_container,
+    ensure_actor_has_sack,
+    create_inline_item as create_inline_item_from_store
+} from "../item_storage/inline_store.js";
+import {
+    load_place_with_ground,
+    save_place_with_ground,
+    add_item_to_ground,
+    add_item_to_main_ground,
+    remove_item_from_ground,
+    get_items_at_position,
+    find_nearby_items,
+    get_all_ground_items,
+    create_ground_item,
+    pickup_item_to_actor,
+    drop_item_to_ground
+} from "../place_storage/ground_store.js";
 import { emitTagChange } from "../shared/event_emitter.js";
 import type { PlaceConnection, PlaceItem } from "../types/place.js";
+
+function normalize_inline_container_grid(contents: any[], max_slots: number, log_ctx: string): Array<{ item: any; grid_x: number; grid_y: number }> {
+    const safe_contents = Array.isArray(contents) ? contents : [];
+    const ms = (typeof max_slots === 'number' && Number.isFinite(max_slots) && max_slots > 0) ? Math.floor(max_slots) : safe_contents.length;
+    const { cols, rows } = calculate_grid_dimensions(Math.max(1, ms));
+
+    const used = new Set<string>();
+    const normalized: Array<{ item: any; grid_x: number | null; grid_y: number | null }> = [];
+    let invalid = 0;
+
+    for (const it of safe_contents) {
+        const x = (it as any)?.grid_x;
+        const y = (it as any)?.grid_y;
+        const has_xy = typeof x === 'number' && typeof y === 'number' && Number.isFinite(x) && Number.isFinite(y);
+        const slot_index = has_xy ? (y * cols + x) : -1;
+        const in_bounds = has_xy && x >= 0 && y >= 0 && x < cols && y < rows && slot_index >= 0 && slot_index < ms;
+        const key = has_xy ? `${x}_${y}` : '';
+        const unique = in_bounds && !used.has(key);
+
+        if (unique) {
+            used.add(key);
+            normalized.push({ item: it, grid_x: x, grid_y: y });
+        } else {
+            if (has_xy) invalid++;
+            normalized.push({ item: it, grid_x: null, grid_y: null });
+        }
+    }
+
+    let assigned = 0;
+    for (const entry of normalized) {
+        if (entry.grid_x !== null && entry.grid_y !== null) continue;
+
+        let placed = false;
+        for (let idx = 0; idx < ms; idx++) {
+            const px = idx % cols;
+            const py = Math.floor(idx / cols);
+            const key = `${px}_${py}`;
+            if (used.has(key)) continue;
+            used.add(key);
+            entry.grid_x = px;
+            entry.grid_y = py;
+            assigned++;
+            placed = true;
+            break;
+        }
+
+        if (!placed) {
+            // No space - leave nulls.
+        }
+    }
+
+    if (invalid > 0 || assigned > 0) {
+        debug_log('API', `[GRID_SANITY] ${log_ctx} max_slots=${ms} invalid=${invalid} assigned=${assigned}`);
+    }
+
+    return normalized
+        .filter((e) => e.grid_x !== null && e.grid_y !== null)
+        .map((e) => ({ item: e.item, grid_x: e.grid_x as number, grid_y: e.grid_y as number }));
+}
 import { calculate_tile_distance, is_within_range } from "../types/container.js";
 import { get_npc_location } from "../npc_storage/location.js";
 import { get_entities_in_place } from "../place_storage/entity_index.js";
@@ -43,7 +129,10 @@ import {
   formatActionResult 
 } from "./action_integration.js";
 import { createIntent } from "../action_system/intent.js";
-import { format_inspection_result, type InspectorData, type InspectionResult } from "../inspection/data_service.js";
+import { 
+    format_inspection_result, type InspectorData, type InspectionResult 
+} from "../inspection/data_service.js";
+import type { InlineItem } from "../types/inline_item.js";
 import { extract_feature_keywords_for_inspection, extract_body_slot_for_inspection } from "../inspection/text_parser.js";
 import { 
   setActorTarget, 
@@ -1587,21 +1676,43 @@ function start_http_server(log_path: string): void {
                     });
                 }
 
-                // Sync items_on_ground from scattered containers (single source of truth)
-                // This ensures the renderer sees the same items as the API
+                // Sync items_on_ground from inline ground storage (Phase 5)
+                // Read from place.ground.scattered and place.ground.main
                 place.contents.items_on_ground = [];
-                const scattered_containers = list_scattered_containers(slot, place_id);
                 let synced_count = 0;
                 
-                for (const container of scattered_containers) {
-                    for (const entry of container.contents) {
-                        const position = container.position || 
-                            place.tile_grid?.default_entry || { x: 20, y: 20 };
+                // Ensure ground structure exists
+                if (!place.ground) {
+                    place.ground = { main: [], scattered: {} };
+                }
+                
+                // Sync from scattered items (position-specific)
+                if (place.ground.scattered) {
+                    for (const [position_key, items] of Object.entries(place.ground.scattered)) {
+                        const [x_str, y_str] = position_key.split('_');
+                        const x = parseInt(x_str!, 10);
+                        const y = parseInt(y_str!, 10);
                         
+                        for (const item of items) {
+                            const place_item: PlaceItem = {
+                                item_ref: item.id,
+                                quantity: item.qty,
+                                tile_position: { x, y }
+                            };
+                            place.contents.items_on_ground.push(place_item);
+                            synced_count++;
+                        }
+                    }
+                }
+                
+                // Sync from main ground (items without specific position)
+                if (place.ground.main) {
+                    const default_entry = place.tile_grid?.default_entry || { x: 20, y: 20 };
+                    for (const item of place.ground.main) {
                         const place_item: PlaceItem = {
-                            item_ref: entry.instance.id,
-                            quantity: entry.instance.qty,
-                            tile_position: position
+                            item_ref: item.id,
+                            quantity: item.qty,
+                            tile_position: { ...default_entry }
                         };
                         place.contents.items_on_ground.push(place_item);
                         synced_count++;
@@ -1609,8 +1720,10 @@ function start_http_server(log_path: string): void {
                 }
                 
                 if (synced_count > 0) {
-                    debug_log("API", `/api/place: Synced ${synced_count} ground items from ${scattered_containers.length} scattered containers`, {
-                        place_id
+                    debug_log("API", `/api/place: Synced ${synced_count} ground items from inline ground storage`, {
+                        place_id,
+                        scattered_keys: Object.keys(place.ground.scattered || {}).length,
+                        main_count: place.ground.main?.length || 0
                     });
                 }
 
@@ -2008,71 +2121,7 @@ function start_http_server(log_path: string): void {
             return;
         }
 
-        // POST /api/transfer - Transfer item between containers
-        if (url.pathname === "/api/transfer") {
-            if (req.method !== "POST") {
-                res.writeHead(405, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
-                return;
-            }
-
-            let body = "";
-            req.on("data", chunk => body += chunk);
-            req.on("end", async () => {
-                try {
-                    const data = JSON.parse(body);
-                    debug_log("DEBUG-GRID", `/api/transfer: Received request body:`, JSON.stringify(data, null, 2));
-                    const { item_instance_id, from_container, to_container, from_slot_index, to_slot_index, target_grid_x, target_grid_y, slot = data_slot_number } = data;
-
-                    debug_log("DEBUG-GRID", `/api/transfer: Parsed - target_grid_x=${target_grid_x}, target_grid_y=${target_grid_y}, typeof x=${typeof target_grid_x}, typeof y=${typeof target_grid_y}`);
-
-                    if (!item_instance_id || !from_container || !to_container) {
-                        res.writeHead(400, { "Content-Type": "application/json" });
-                        res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
-                        return;
-                    }
-
-                    debug_log("API", `/api/transfer: Transferring ${item_instance_id} from ${from_container} to ${to_container}${target_grid_x !== undefined ? ` at (${target_grid_x},${target_grid_y})` : ''}`);
-
-                    debug_log("API", `=== TRANSFER START ===`);
-                    debug_log("API", `Item: ${item_instance_id}`);
-                    debug_log("API", `From: ${from_container} -> To: ${to_container}`);
-                    debug_log("API", `Target grid: (${target_grid_x}, ${target_grid_y})`);
-                    
-                    // FIXED: Arguments now in correct order - grid coordinates come before slot indices
-                    const result = transfer_item_between_containers(slot, item_instance_id, from_container, to_container, target_grid_x, target_grid_y, from_slot_index, to_slot_index);
-
-                    if (result.ok) {
-                        debug_log("API", `=== TRANSFER SUCCESS ===`);
-                        debug_log("API", `${item_instance_id} moved ${from_container} -> ${to_container} at grid(${target_grid_x},${target_grid_y})`);
-                        
-                        // Verify the container was saved with new coordinates
-                        const verify_load = load_container(slot, to_container);
-                        if (verify_load.ok) {
-                            const moved_item = verify_load.container.contents.find((c: any) => c.instance.id === item_instance_id);
-                            if (moved_item) {
-                                debug_log("API", `✅ Verification: Item now at grid(${moved_item.grid_x},${moved_item.grid_y})`);
-                            } else {
-                                debug_log("API", `⚠️ Verification: Could not find item in destination container`);
-                            }
-                        }
-                        
-                        res.writeHead(200, { "Content-Type": "application/json" });
-                        res.end(JSON.stringify({ ok: true, item_instance_id, from_container, to_container, grid_x: target_grid_x, grid_y: target_grid_y }));
-                    } else {
-                        debug_log("API", `=== TRANSFER FAILED ===`);
-                        debug_log("API", `Error: ${result.error}`);
-                        res.writeHead(400, { "Content-Type": "application/json" });
-                        res.end(JSON.stringify({ ok: false, error: result.error }));
-                    }
-                } catch (err: any) {
-                    debug_error("API", `/api/transfer request error`, err);
-                    res.writeHead(500, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ ok: false, error: err?.message ?? "transfer_failed" }));
-                }
-            });
-            return;
-        }
+        // POST /api/transfer - DEPRECATED (replaced by inline /api/transfer below)
 
         // GET /api/place/ground_items?place_id=xxx - Get ground items in a place
         if (url.pathname === "/api/place/ground_items") {
@@ -3178,6 +3227,1816 @@ function start_http_server(log_path: string): void {
             }
             return;
         }
+
+        // ============================================
+        // NEW INLINE ITEM API ENDPOINTS (Phase 5)
+        // ============================================
+
+        // POST /api/place/spawn - Spawn item directly on ground (for testing)
+        if (url.pathname === "/api/place/spawn") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", (chunk) => { body += chunk; });
+            req.on("end", async () => {
+                try {
+                    const data = JSON.parse(body);
+                    const { item_def_id, place_id, x, y, qty = 1, contents } = data;
+
+                    if (!item_def_id || !place_id) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                        return;
+                    }
+
+                    // Load item definition
+                    const def_result = load_master_item(item_def_id);
+                    if (!def_result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "item_def_not_found" }));
+                        return;
+                    }
+
+                    const def = def_result.item;
+
+                    // Load place
+                    const place_result = load_place_with_ground(data_slot_number, place_id);
+                    if (!place_result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: place_result.error }));
+                        return;
+                    }
+
+                    // Create inline item
+                    const item = create_inline_item_from_store(
+                        item_def_id,
+                        def.name,
+                        def.weight,
+                        qty,
+                        def.tags || []
+                    );
+
+                    // If contents provided (for containers), add them
+                    if (contents && Array.isArray(contents) && contents.length > 0) {
+                        item.contents = [];
+                        for (const content_item of contents) {
+                            const content_def_result = load_master_item(content_item.def_id);
+                            if (content_def_result.ok) {
+                                const content_def = content_def_result.item;
+                                const content_inline = create_inline_item_from_store(
+                                    content_item.def_id,
+                                    content_def.name,
+                                    content_def.weight,
+                                    content_item.qty || 1,
+                                    content_def.tags || []
+                                );
+                                item.contents.push(content_inline);
+                            }
+                        }
+                    }
+
+                    // Add to ground at position
+                    const spawn_x = x ?? 0;
+                    const spawn_y = y ?? 0;
+                    const add_result = add_item_to_ground(place_result.place, spawn_x, spawn_y, item);
+                    
+                    if (!add_result.ok) {
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: add_result.error }));
+                        return;
+                    }
+
+                    // Save place
+                    const save_result = save_place_with_ground(data_slot_number, place_id, place_result.place);
+                    if (!save_result.ok) {
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: save_result.error }));
+                        return;
+                    }
+
+                    debug_log("API", `Spawned ${item_def_id} on ground at (${spawn_x}, ${spawn_y}) in ${place_id}${item.contents ? ` with ${item.contents.length} items inside` : ''}`);
+                    
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ 
+                        ok: true, 
+                        item_id: item.id,
+                        item_def_id,
+                        name: def.name,
+                        position: { x: spawn_x, y: spawn_y },
+                        place_id
+                    }));
+                } catch (err) {
+                    debug_error("API", "/api/place/spawn error", err);
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "internal_error" }));
+                }
+            });
+            return;
+        }
+
+        // GET /api/actor/items?actor_id=xxx - Get actor's inline items
+        if (url.pathname === "/api/actor/items") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const actor_id = url.searchParams.get("actor_id") || "henry_actor";
+
+            try {
+                const result = load_actor_with_items(data_slot_number, actor_id);
+                if (!result.ok) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: result.error }));
+                    return;
+                }
+
+                const items = get_all_actor_items(result.actor);
+                
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ 
+                    ok: true, 
+                    actor_id,
+                    items: items.map(({ item, path, slot_name, slot_type }) => ({
+                        item,
+                        path,
+                        slot_name,
+                        slot_type,
+                    }))
+                }));
+            } catch (err) {
+                debug_error("API", "/api/actor/items error", err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "internal_error" }));
+            }
+            return;
+        }
+
+        // POST /api/actor/items/add - Add item to actor's inventory
+        if (url.pathname === "/api/actor/items/add") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", (chunk) => { body += chunk; });
+            req.on("end", async () => {
+                try {
+                    const data = JSON.parse(body);
+                    const { actor_id, item_def_id, qty = 1 } = data;
+
+                    if (!actor_id || !item_def_id) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                        return;
+                    }
+
+                    // Load actor
+                    const actor_result = load_actor_with_items(data_slot_number, actor_id);
+                    if (!actor_result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: actor_result.error }));
+                        return;
+                    }
+
+                    const actor_before = JSON.parse(JSON.stringify(actor_result.actor));
+
+                    // Load item definition
+                    const def_result = load_master_item(item_def_id);
+                    if (!def_result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "item_def_not_found" }));
+                        return;
+                    }
+
+                    const def = def_result.item;
+
+                    // Ensure actor has a sack
+                    const sack_result = ensure_actor_has_sack(actor_result.actor);
+                    if (!sack_result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: sack_result.error }));
+                        return;
+                    }
+
+                    // Create inline item
+                    const item = create_inline_item_from_store(
+                        item_def_id,
+                        def.name,
+                        def.weight,
+                        qty,
+                        def.tags || []
+                    );
+
+                    // Add to sack
+                    const add_result = add_item_to_inline_container(actor_result.actor, sack_result.sack_path, item);
+                    if (!add_result.ok) {
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: add_result.error }));
+                        return;
+                    }
+
+                    // Save actor
+                    const save_result = save_actor_with_items(data_slot_number, actor_id, actor_result.actor);
+                    if (!save_result.ok) {
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: save_result.error }));
+                        return;
+                    }
+
+                    debug_log("API", `Added ${item_def_id} to ${actor_id}`);
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ 
+                        ok: true, 
+                        item_id: item.id,
+                        item_path: add_result.item_path
+                    }));
+                } catch (err) {
+                    debug_error("API", "/api/actor/items/add error", err);
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "internal_error" }));
+                }
+            });
+            return;
+        }
+
+        // POST /api/place/items/pickup - Pickup item from ground to actor
+        if (url.pathname === "/api/place/items/pickup") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", (chunk) => { body += chunk; });
+            req.on("end", async () => {
+                try {
+                    const data = JSON.parse(body);
+                    const { actor_id, place_id, item_id } = data;
+
+                    if (!actor_id || !place_id || !item_id) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                        return;
+                    }
+
+                    // Load place
+                    const place_result = load_place_with_ground(data_slot_number, place_id);
+                    if (!place_result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: place_result.error }));
+                        return;
+                    }
+
+                    // Load actor
+                    const actor_result = load_actor_with_items(data_slot_number, actor_id);
+                    if (!actor_result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: actor_result.error }));
+                        return;
+                    }
+
+                    const actor_before = JSON.parse(JSON.stringify(actor_result.actor));
+
+                    // Find item on ground
+                    const all_items: Array<{ item: InlineItem; position?: { x: number; y: number }; position_key?: string }> = get_all_ground_items(place_result.place);
+                    const target_item = all_items.find(({ item }: { item: InlineItem }) => item.id === item_id);
+                    
+                    if (!target_item) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "item_not_found_on_ground" }));
+                        return;
+                    }
+
+                    // Remove from ground
+                    const remove_result = remove_item_from_ground(place_result.place, item_id);
+                    if (!remove_result.ok) {
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: remove_result.error }));
+                        return;
+                    }
+
+                    // Determine default pickup target (no auto-created sacks)
+                    const actor_any = actor_result.actor as any;
+                    const body_slots = actor_any.body_slots || {};
+                    const slot_priority = ['leg_left', 'leg_right', 'torso', 'head', 'hand_left', 'hand_right'];
+
+                    function has_container_tag(it: any): boolean {
+                        return !!it?.tags?.some((t: any) => t?.name === 'CONTAINER');
+                    }
+
+                    let to_container: string | null = null;
+                    for (const slot_name of slot_priority) {
+                        const slot = body_slots[slot_name];
+                        if (!slot) continue;
+                        if (has_container_tag(slot.armor)) { to_container = `body_slots.${slot_name}.armor`; break; }
+                        if (has_container_tag(slot.tool)) { to_container = `body_slots.${slot_name}.tool`; break; }
+                        if (Array.isArray(slot.garb)) {
+                            for (let i = 0; i < slot.garb.length; i++) {
+                                if (has_container_tag(slot.garb[i])) { to_container = `body_slots.${slot_name}.garb.${i}`; break; }
+                            }
+                            if (to_container) break;
+                        }
+                    }
+
+                    // Fallback: dominant hand tool slot (right hand) if empty
+                    if (!to_container) {
+                        const right = body_slots.hand_right;
+                        if (right && !right.tool) {
+                            to_container = 'body_slots.hand_right.tool';
+                        }
+                    }
+
+                    if (!to_container) {
+                        // Put item back on ground
+                        if (target_item.position) {
+                            add_item_to_ground(place_result.place, target_item.position.x, target_item.position.y, remove_result.item);
+                        } else {
+                            add_item_to_main_ground(place_result.place, remove_result.item);
+                        }
+                        save_place_with_ground(data_slot_number, place_id, place_result.place);
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: 'no_space_no_container' }));
+                        return;
+                    }
+
+                    // Add to actor (slot or container-item)
+                    function parse_body_slots_path(p: string): { slot_name: string; slot_type: 'armor'|'tool'|'garb'; garb_index: number | null } | null {
+                        const parts = p.split('.');
+                        if (parts[0] !== 'body_slots') return null;
+                        if (!parts[1] || !parts[2]) return null;
+                        const slot_name = parts[1];
+                        const slot_type = parts[2] as any;
+                        const garb_index = (slot_type === 'garb' && parts[3] !== undefined) ? parseInt(parts[3], 10) : null;
+                        return { slot_name, slot_type, garb_index: isNaN(garb_index as any) ? null : garb_index };
+                    }
+
+                    function get_item_at_path(path: string): any {
+                        const parsed = parse_body_slots_path(path);
+                        if (!parsed) return null;
+                        const slot = body_slots[parsed.slot_name];
+                        if (!slot) return null;
+                        if (parsed.slot_type === 'armor') return slot.armor;
+                        if (parsed.slot_type === 'tool') return slot.tool;
+                        if (parsed.slot_type === 'garb') {
+                            if (parsed.garb_index === null) return null;
+                            return slot.garb?.[parsed.garb_index] ?? null;
+                        }
+                        return null;
+                    }
+
+                    let add_result: any = null;
+                    const dest_item = get_item_at_path(to_container);
+                    if (has_container_tag(dest_item)) {
+                        // capacity check
+                        if (!Array.isArray(dest_item.contents)) dest_item.contents = [];
+                        const max_slots = dest_item.container_capacity?.max_slots;
+                        if (typeof max_slots === 'number' && dest_item.contents.length >= max_slots) {
+                            add_result = { ok: false, error: 'container_full' };
+                        } else {
+                            dest_item.contents.push(remove_result.item);
+                            add_result = { ok: true, item_path: `${to_container}.contents.${dest_item.contents.length - 1}` };
+                        }
+                    } else {
+                        const parsed = parse_body_slots_path(to_container);
+                        if (!parsed) {
+                            add_result = { ok: false, error: 'invalid_to_container' };
+                        } else {
+                            const add_slot_res = add_item_to_body_slot(actor_result.actor, parsed.slot_name, parsed.slot_type, remove_result.item);
+                            add_result = add_slot_res.ok ? { ok: true, item_path: add_slot_res.path } : add_slot_res;
+                        }
+                    }
+
+                    if (!add_result.ok) {
+                        // Put item back on ground
+                        if (target_item.position) {
+                            add_item_to_ground(place_result.place, target_item.position.x, target_item.position.y, remove_result.item);
+                        } else {
+                            add_item_to_main_ground(place_result.place, remove_result.item);
+                        }
+                        save_place_with_ground(data_slot_number, place_id, place_result.place);
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: add_result.error }));
+                        return;
+                    }
+
+                    // Save actor first, then place. Roll back actor if place save fails.
+                    const save_actor_result = save_actor_with_items(data_slot_number, actor_id, actor_result.actor);
+                    if (!save_actor_result.ok) {
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: save_actor_result.error }));
+                        return;
+                    }
+
+                    const save_place_result = save_place_with_ground(data_slot_number, place_id, place_result.place);
+                    if (!save_place_result.ok) {
+                        const rollback = save_actor_with_items(data_slot_number, actor_id, actor_before);
+                        if (!rollback.ok) {
+                            debug_error("API", "pickup rollback failed", rollback.error);
+                        }
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: save_place_result.error }));
+                        return;
+                    }
+
+                    debug_log("API", `Picked up ${remove_result.item.name} to ${actor_id}`);
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ 
+                        ok: true, 
+                        item: remove_result.item,
+                        item_path: add_result.item_path
+                    }));
+                } catch (err) {
+                    debug_error("API", "/api/place/items/pickup error", err);
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "internal_error" }));
+                }
+            });
+            return;
+        }
+
+        // POST /api/place/items/pickup_to - Pickup a specific ground item into a specific body_slots target
+        if (url.pathname === "/api/place/items/pickup_to") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", (chunk) => { body += chunk; });
+            req.on("end", async () => {
+                try {
+                    const data = JSON.parse(body);
+                    const { actor_id, place_id, item_id, to_container } = data;
+
+                    if (!actor_id || !place_id || !item_id || !to_container) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                        return;
+                    }
+
+                    if (typeof to_container !== 'string' || (!to_container.startsWith('body_slots.') && !to_container.startsWith('actor.item.'))) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "invalid_to_container" }));
+                        return;
+                    }
+
+                    const place_result = load_place_with_ground(data_slot_number, place_id);
+                    if (!place_result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: place_result.error }));
+                        return;
+                    }
+
+                    const actor_result = load_actor_with_items(data_slot_number, actor_id);
+                    if (!actor_result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: actor_result.error }));
+                        return;
+                    }
+
+                    const actor_before = JSON.parse(JSON.stringify(actor_result.actor));
+
+                    const actor_any = actor_result.actor as any;
+                    const actor_pos = actor_any.location?.tile;
+
+                    const all_items: Array<{ item: InlineItem; position?: { x: number; y: number }; position_key?: string }> = get_all_ground_items(place_result.place);
+                    const found = all_items.find(({ item }: { item: InlineItem }) => item.id === item_id);
+                    if (!found) {
+                        res.writeHead(404, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "item_not_found_on_ground" }));
+                        return;
+                    }
+
+                    // Distance validation (touch range)
+                    if (actor_pos && found.position) {
+                        const dx = found.position.x - actor_pos.x;
+                        const dy = found.position.y - actor_pos.y;
+                        const dist = Math.sqrt(dx * dx + dy * dy);
+                        if (dist > 1.5) {
+                            res.writeHead(400, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: false, error: "too_far" }));
+                            return;
+                        }
+                    }
+
+                    const remove_result = remove_item_from_ground(place_result.place, item_id);
+                    if (!remove_result.ok) {
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: remove_result.error }));
+                        return;
+                    }
+
+                    const body_slots = actor_any.body_slots || {};
+
+                    function has_container_tag(it: any): boolean {
+                        return !!it?.tags?.some((t: any) => t?.name === 'CONTAINER');
+                    }
+
+                    function parse_body_slots_path(p: string): { slot_name: string; slot_type: 'armor'|'tool'|'garb'; garb_index: number | null } | null {
+                        const parts = p.split('.');
+                        if (parts[0] !== 'body_slots') return null;
+                        if (!parts[1] || !parts[2]) return null;
+                        const slot_name = parts[1];
+                        const slot_type = parts[2] as any;
+                        const garb_index = (slot_type === 'garb' && parts[3] !== undefined) ? parseInt(parts[3], 10) : null;
+                        return { slot_name, slot_type, garb_index: isNaN(garb_index as any) ? null : garb_index };
+                    }
+
+                    function parse_actor_item_container_id(p: string): { actor_id: string; item_id: string } | null {
+                        const parts = p.split('.');
+                        if (parts[0] !== 'actor' || parts[1] !== 'item') return null;
+                        if (!parts[2] || !parts[3]) return null;
+                        return { actor_id: parts[2], item_id: parts[3] };
+                    }
+
+                    function get_item_at_path(path: string): any {
+                        const parsed = parse_body_slots_path(path);
+                        if (!parsed) return null;
+                        const slot = body_slots[parsed.slot_name];
+                        if (!slot) return null;
+                        if (parsed.slot_type === 'armor') return slot.armor;
+                        if (parsed.slot_type === 'tool') return slot.tool;
+                        if (parsed.slot_type === 'garb') {
+                            if (parsed.garb_index === null) return null;
+                            return slot.garb?.[parsed.garb_index] ?? null;
+                        }
+                        return null;
+                    }
+
+                    function get_container_item(path: string): any {
+                        const actor_item = parse_actor_item_container_id(path);
+                        if (actor_item) {
+                            if (actor_item.actor_id !== actor_id) return null;
+                            const found = find_actor_item_by_id(actor_any, actor_item.item_id);
+                            return found?.item ?? null;
+                        }
+                        return get_item_at_path(path);
+                    }
+
+                    function get_container_capacity_max_slots(container_item: any): number {
+                        const cap = container_item?.container_capacity?.max_slots;
+                        if (typeof cap === 'number' && Number.isFinite(cap) && cap > 0) return cap;
+                        const fallback = Array.isArray(container_item?.contents) ? container_item.contents.length : 0;
+                        return Math.max(1, fallback);
+                    }
+
+                    function ensure_sparse_layout(container_item: any, reserved?: { x: number; y: number }): { ok: true } | { ok: false; error: string } {
+                        if (!container_item || !Array.isArray(container_item.contents)) return { ok: false, error: 'container_not_found' };
+                        const max_slots = get_container_capacity_max_slots(container_item);
+                        const { cols } = calculate_grid_dimensions(max_slots);
+                        const used = new Set<string>();
+                        for (const it of container_item.contents) {
+                            const x = (it as any)?.grid_x;
+                            const y = (it as any)?.grid_y;
+                            if (typeof x === 'number' && typeof y === 'number') {
+                                used.add(`${x}_${y}`);
+                            }
+                        }
+                        if (reserved) used.add(`${reserved.x}_${reserved.y}`);
+                        for (const it of container_item.contents) {
+                            const x = (it as any)?.grid_x;
+                            const y = (it as any)?.grid_y;
+                            if (typeof x === 'number' && typeof y === 'number') continue;
+                            let placed = false;
+                            for (let idx = 0; idx < max_slots; idx++) {
+                                const px = idx % cols;
+                                const py = Math.floor(idx / cols);
+                                const key = `${px}_${py}`;
+                                if (used.has(key)) continue;
+                                (it as any).grid_x = px;
+                                (it as any).grid_y = py;
+                                used.add(key);
+                                placed = true;
+                                break;
+                            }
+                            if (!placed) return { ok: false, error: 'container_full' };
+                        }
+                        return { ok: true };
+                    }
+
+                    // Add to destination
+                    let add_ok: { ok: true; item_path: string } | { ok: false; error: string };
+                    const dest_item = get_container_item(to_container);
+                    if (has_container_tag(dest_item)) {
+                        if (!Array.isArray(dest_item.contents)) dest_item.contents = [];
+                        const max_slots = dest_item.container_capacity?.max_slots;
+                        if (typeof max_slots === 'number' && dest_item.contents.length >= max_slots) {
+                            add_ok = { ok: false, error: 'container_full' };
+                        } else {
+                            // Stabilize sparse layout and assign grid coords for the inserted item.
+                            const sparse_res = ensure_sparse_layout(dest_item);
+                            if (!sparse_res.ok) {
+                                add_ok = { ok: false, error: sparse_res.error };
+                            } else {
+                                const max = get_container_capacity_max_slots(dest_item);
+                                const { cols } = calculate_grid_dimensions(max);
+                                const used = new Set<string>();
+                                for (const it of dest_item.contents) {
+                                    if (typeof it.grid_x === 'number' && typeof it.grid_y === 'number') used.add(`${it.grid_x}_${it.grid_y}`);
+                                }
+                                // find first free
+                                for (let idx = 0; idx < max; idx++) {
+                                    const px = idx % cols;
+                                    const py = Math.floor(idx / cols);
+                                    const key = `${px}_${py}`;
+                                    if (used.has(key)) continue;
+                                    (remove_result.item as any).grid_x = px;
+                                    (remove_result.item as any).grid_y = py;
+                                    break;
+                                }
+                                dest_item.contents.push(remove_result.item);
+                                add_ok = { ok: true, item_path: `${to_container}.contents.${dest_item.contents.length - 1}` };
+                            }
+                        }
+                    } else {
+                        const parsed = parse_body_slots_path(to_container);
+                        if (!parsed) {
+                            add_ok = { ok: false, error: 'invalid_to_container' };
+                        } else {
+                            const add_slot_res = add_item_to_body_slot(actor_result.actor, parsed.slot_name, parsed.slot_type, remove_result.item);
+                            add_ok = add_slot_res.ok ? { ok: true, item_path: add_slot_res.path } : add_slot_res;
+                        }
+                    }
+
+                    if (!add_ok.ok) {
+                        // Roll back to ground
+                        if (found.position) {
+                            add_item_to_ground(place_result.place, found.position.x, found.position.y, remove_result.item);
+                        } else {
+                            add_item_to_main_ground(place_result.place, remove_result.item);
+                        }
+                        save_place_with_ground(data_slot_number, place_id, place_result.place);
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: add_ok.error }));
+                        return;
+                    }
+
+                    const save_actor_result = save_actor_with_items(data_slot_number, actor_id, actor_result.actor);
+                    if (!save_actor_result.ok) {
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: save_actor_result.error }));
+                        return;
+                    }
+
+                    const save_place_result = save_place_with_ground(data_slot_number, place_id, place_result.place);
+                    if (!save_place_result.ok) {
+                        // Roll back actor to avoid item loss/duplication
+                        const rollback = save_actor_with_items(data_slot_number, actor_id, actor_before);
+                        if (!rollback.ok) {
+                            debug_error("API", "pickup_to rollback failed", rollback.error);
+                        }
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: save_place_result.error }));
+                        return;
+                    }
+
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, item_path: add_ok.item_path }));
+                } catch (err) {
+                    debug_error("API", "/api/place/items/pickup_to error", err);
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "internal_error" }));
+                }
+            });
+            return;
+        }
+
+        // POST /api/place/items/drop - Drop item from actor to ground
+        if (url.pathname === "/api/place/items/drop") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", (chunk) => { body += chunk; });
+            req.on("end", async () => {
+                try {
+                    const data = JSON.parse(body);
+                    const { actor_id, place_id, item_id, x, y } = data;
+
+                    if (!actor_id || !place_id || !item_id) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                        return;
+                    }
+
+                    // Load actor
+                    const actor_result = load_actor_with_items(data_slot_number, actor_id);
+                    if (!actor_result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: actor_result.error }));
+                        return;
+                    }
+
+                    const actor_before = JSON.parse(JSON.stringify(actor_result.actor));
+
+                    // Load place
+                    const place_result = load_place_with_ground(data_slot_number, place_id);
+                    if (!place_result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: place_result.error }));
+                        return;
+                    }
+
+                    debug_log("API", `[DROP] request actor=${actor_id} item=${item_id} place=${place_id}`);
+
+                    // Remove from actor (recursive)
+                    const removed = remove_actor_item_by_id(actor_result.actor, item_id);
+                    if (!removed.ok) {
+                        debug_log("API", `[DROP] not_found actor=${actor_id} item=${item_id}`);
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: removed.error }));
+                        return;
+                    }
+                    debug_log("API", `[DROP] removed path=${removed.path}`);
+
+                    // Get drop position (use actor position if not specified)
+                    const actor = actor_result.actor as any;
+                    const drop_x = x ?? actor.location?.tile?.x ?? 0;
+                    const drop_y = y ?? actor.location?.tile?.y ?? 0;
+
+                    // Add to ground
+                    const add_result = add_item_to_ground(place_result.place, drop_x, drop_y, removed.item);
+                    if (!add_result.ok) {
+                        // Put item back on actor (best-effort)
+                        add_item_to_body_slot(actor_result.actor, 'hand_right', 'tool', removed.item);
+                        save_actor_with_items(data_slot_number, actor_id, actor_result.actor);
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: add_result.error }));
+                        return;
+                    }
+
+                    // Save both
+                    const save_actor_result = save_actor_with_items(data_slot_number, actor_id, actor_result.actor);
+                    if (!save_actor_result.ok) {
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: save_actor_result.error }));
+                        return;
+                    }
+
+                    const save_place_result = save_place_with_ground(data_slot_number, place_id, place_result.place);
+                    if (!save_place_result.ok) {
+                        const rollback = save_actor_with_items(data_slot_number, actor_id, actor_before);
+                        if (!rollback.ok) {
+                            debug_error("API", "drop rollback failed", rollback.error);
+                        }
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: save_place_result.error }));
+                        return;
+                    }
+
+                    debug_log("API", `Dropped ${removed.item.name} to ground at (${drop_x}, ${drop_y})`);
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ 
+                        ok: true, 
+                        item: removed.item,
+                        position: { x: drop_x, y: drop_y }
+                    }));
+                } catch (err) {
+                    debug_error("API", "/api/place/items/drop error", err);
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "internal_error" }));
+                }
+            });
+            return;
+        }
+
+        // POST /api/place/items/deposit_to_container_item - Deposit an actor item into a ground container-item
+        if (url.pathname === "/api/place/items/deposit_to_container_item") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", (chunk) => { body += chunk; });
+            req.on("end", async () => {
+                try {
+                    const data = JSON.parse(body);
+                    const { actor_id, place_id, item_id, container_item_id, target_grid_x, target_grid_y } = data;
+
+                    if (!actor_id || !place_id || !item_id || !container_item_id) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                        return;
+                    }
+
+                    const actor_result = load_actor_with_items(data_slot_number, actor_id);
+                    if (!actor_result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: actor_result.error }));
+                        return;
+                    }
+
+                    const actor_before = JSON.parse(JSON.stringify(actor_result.actor));
+
+                    const place_result = load_place_with_ground(data_slot_number, place_id);
+                    if (!place_result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: place_result.error }));
+                        return;
+                    }
+
+                    // Find container-item on ground
+                    const all_ground = get_all_ground_items(place_result.place);
+                    const found = all_ground.find(({ item }: { item: InlineItem }) => item.id === container_item_id);
+                    if (!found) {
+                        res.writeHead(404, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "container_item_not_found" }));
+                        return;
+                    }
+
+                    const container_item = found.item as any;
+                    const is_container = container_item.tags?.some((t: any) => t?.name === 'CONTAINER');
+                    if (!is_container) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
+                        return;
+                    }
+
+                    if (!Array.isArray(container_item.contents)) container_item.contents = [];
+                    const max_slots = container_item.container_capacity?.max_slots;
+                    if (typeof max_slots === 'number' && container_item.contents.length >= max_slots) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "container_full" }));
+                        return;
+                    }
+
+                    // Validate item exists on actor before mutating
+                    const exists = find_actor_item_by_id(actor_result.actor, item_id);
+                    if (!exists) {
+                        res.writeHead(404, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "item_not_found_on_actor" }));
+                        return;
+                    }
+
+
+                    const max = typeof max_slots === 'number' && max_slots > 0 ? max_slots : Math.max(1, container_item.contents.length + 1);
+                    const { cols } = calculate_grid_dimensions(max);
+
+                    // Distance validation (touch range)
+                    const actor_any = actor_result.actor as any;
+                    const actor_pos = actor_any.location?.tile;
+                    if (actor_pos && found.position) {
+                        const dx = found.position.x - actor_pos.x;
+                        const dy = found.position.y - actor_pos.y;
+                        const dist = Math.sqrt(dx * dx + dy * dy);
+                        if (dist > 1.5) {
+                            res.writeHead(400, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: false, error: "too_far" }));
+                            return;
+                        }
+                    }
+
+                    // Ensure existing sparse layout (only assign missing)
+                    const used = new Set<string>();
+                    for (const it of container_item.contents) {
+                        if (typeof it.grid_x === 'number' && typeof it.grid_y === 'number') {
+                            used.add(`${it.grid_x}_${it.grid_y}`);
+                        }
+                    }
+
+                    // Fill missing coords
+                    for (const it of container_item.contents) {
+                        if (typeof it.grid_x === 'number' && typeof it.grid_y === 'number') continue;
+                        for (let idx = 0; idx < max; idx++) {
+                            const px = idx % cols;
+                            const py = Math.floor(idx / cols);
+                            const key = `${px}_${py}`;
+                            if (used.has(key)) continue;
+                            it.grid_x = px;
+                            it.grid_y = py;
+                            used.add(key);
+                            break;
+                        }
+                    }
+
+                    // Choose target cell before mutating actor
+                    let chosen_x: number | null = null;
+                    let chosen_y: number | null = null;
+                    const has_grid_target = typeof target_grid_x === 'number' && typeof target_grid_y === 'number';
+                    if (has_grid_target) {
+                        const key = `${target_grid_x}_${target_grid_y}`;
+                        if (used.has(key)) {
+                            res.writeHead(400, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: false, error: "target_slot_occupied" }));
+                            return;
+                        }
+                        chosen_x = target_grid_x;
+                        chosen_y = target_grid_y;
+                    } else {
+                        for (let idx = 0; idx < max; idx++) {
+                            const px = idx % cols;
+                            const py = Math.floor(idx / cols);
+                            const key = `${px}_${py}`;
+                            if (used.has(key)) continue;
+                            chosen_x = px;
+                            chosen_y = py;
+                            break;
+                        }
+                    }
+
+                    if (chosen_x === null || chosen_y === null) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "container_full" }));
+                        return;
+                    }
+
+                    // Remove item from actor (now safe)
+                    const removed = remove_actor_item_by_id(actor_result.actor, item_id);
+                    if (!removed.ok) {
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: removed.error }));
+                        return;
+                    }
+
+                    (removed.item as any).grid_x = chosen_x;
+                    (removed.item as any).grid_y = chosen_y;
+                    container_item.contents.push(removed.item);
+
+                    // Save actor first, then place. Roll back actor if place save fails.
+                    const save_actor_result = save_actor_with_items(data_slot_number, actor_id, actor_result.actor);
+                    if (!save_actor_result.ok) {
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: save_actor_result.error }));
+                        return;
+                    }
+
+                    const save_place_result = save_place_with_ground(data_slot_number, place_id, place_result.place);
+                    if (!save_place_result.ok) {
+                        const rollback = save_actor_with_items(data_slot_number, actor_id, actor_before);
+                        if (!rollback.ok) {
+                            debug_error("API", "deposit_to_container_item rollback failed", rollback.error);
+                        }
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: save_place_result.error }));
+                        return;
+                    }
+
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true }));
+                } catch (err) {
+                    debug_error("API", "/api/place/items/deposit_to_container_item error", err);
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "internal_error" }));
+                }
+            });
+            return;
+        }
+
+        // POST /api/transfer - Unified inline transfer (hard cutover)
+        if (url.pathname === "/api/transfer") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", (chunk) => { body += chunk; });
+            req.on("end", async () => {
+                try {
+                    const data = JSON.parse(body);
+                    const {
+                        actor_id,
+                        item_instance_id,
+                        from_container,
+                        to_container,
+                        from_slot_index,
+                        to_slot_index,
+                        target_grid_x,
+                        target_grid_y,
+                    } = data;
+
+                    debug_log("transfer", `[INLINE] /api/transfer request`, data);
+
+                    if (!actor_id || !item_instance_id || !from_container || !to_container) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                        return;
+                    }
+
+                    const actor_result = load_actor_with_items(data_slot_number, actor_id);
+                    if (!actor_result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: actor_result.error }));
+                        return;
+                    }
+
+                    const actor = actor_result.actor as any;
+                    if (!actor.body_slots) actor.body_slots = {};
+
+                    const has_grid_target = typeof target_grid_x === 'number' && typeof target_grid_y === 'number';
+
+                    function get_slot(slot_name: string): any {
+                        return (actor.body_slots as any)[slot_name];
+                    }
+
+                    function parse_body_slots_path(p: string): { slot_name: string; slot_type: 'armor'|'tool'|'garb'; garb_index: number | null } | null {
+                        const parts = p.split('.');
+                        if (parts[0] !== 'body_slots') return null;
+                        if (!parts[1] || !parts[2]) return null;
+                        const slot_name = parts[1];
+                        const slot_type = parts[2] as any;
+                        const garb_index = (slot_type === 'garb' && parts[3] !== undefined) ? parseInt(parts[3], 10) : null;
+                        return { slot_name, slot_type, garb_index: isNaN(garb_index as any) ? null : garb_index };
+                    }
+
+                    function parse_actor_item_container_id(p: string): { actor_id: string; item_id: string } | null {
+                        const parts = p.split('.');
+                        // actor.item.<actor_id>.<item_id>
+                        if (parts[0] !== 'actor' || parts[1] !== 'item') return null;
+                        if (!parts[2] || !parts[3]) return null;
+                        return { actor_id: parts[2], item_id: parts[3] };
+                    }
+
+                    // Prevent depositing a container into itself.
+                    const self_dest = parse_actor_item_container_id(String(to_container));
+                    if (self_dest && self_dest.actor_id === actor_id && self_dest.item_id === item_instance_id) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: 'self_deposit' }));
+                        return;
+                    }
+
+                    function get_item_at_path(path: string): any {
+                        const parsed = parse_body_slots_path(path);
+                        if (!parsed) return null;
+                        const slot = get_slot(parsed.slot_name);
+                        if (!slot) return null;
+                        if (parsed.slot_type === 'armor') return slot.armor;
+                        if (parsed.slot_type === 'tool') return slot.tool;
+                        if (parsed.slot_type === 'garb') {
+                            if (parsed.garb_index === null) return null;
+                            return slot.garb?.[parsed.garb_index] ?? null;
+                        }
+                        return null;
+                    }
+
+                    function get_container_item(path: string): any {
+                        const actor_item = parse_actor_item_container_id(path);
+                        if (actor_item) {
+                            // Prevent cross-actor writes
+                            if (actor_item.actor_id !== actor_id) return null;
+                            const found = find_actor_item_by_id(actor, actor_item.item_id);
+                            return found?.item ?? null;
+                        }
+                        return get_item_at_path(path);
+                    }
+
+                    function remove_from_container(container_path: string, child_id: string): any {
+                        const container_item = get_container_item(container_path);
+                        if (!container_item || !Array.isArray(container_item.contents)) return null;
+                        const idx = container_item.contents.findIndex((it: any) => it?.id === child_id);
+                        if (idx < 0) return null;
+                        const [removed] = container_item.contents.splice(idx, 1);
+                        return removed;
+                    }
+
+                    function add_to_container(container_path: string, item: any, index: number | null): boolean {
+                        const container_item = get_container_item(container_path);
+                        if (!container_item) return false;
+                        if (!Array.isArray(container_item.contents)) container_item.contents = [];
+                        if (index === null || index >= container_item.contents.length) {
+                            container_item.contents.push(item);
+                        } else {
+                            container_item.contents.splice(index, 0, item);
+                        }
+                        return true;
+                    }
+
+                    function get_container_capacity_max_slots(container_item: any): number {
+                        const cap = container_item?.container_capacity?.max_slots;
+                        if (typeof cap === 'number' && Number.isFinite(cap) && cap > 0) return cap;
+                        const fallback = Array.isArray(container_item?.contents) ? container_item.contents.length : 0;
+                        return Math.max(1, fallback);
+                    }
+
+                    function ensure_sparse_layout(container_item: any, reserved?: { x: number; y: number }): { ok: true; cols: number; rows: number } | { ok: false; error: string } {
+                        if (!container_item || !Array.isArray(container_item.contents)) return { ok: false, error: 'container_not_found' };
+                        const max_slots = get_container_capacity_max_slots(container_item);
+                        const { cols, rows } = calculate_grid_dimensions(max_slots);
+                        const used = new Set<string>();
+
+                        let repaired_invalid = 0;
+                        let repaired_dupe = 0;
+
+                        for (const it of container_item.contents) {
+                            const x = (it as any)?.grid_x;
+                            const y = (it as any)?.grid_y;
+                            if (typeof x === 'number' && typeof y === 'number') {
+                                const slot_index = (y * cols) + x;
+                                const in_bounds = x >= 0 && y >= 0 && x < cols && y < rows && slot_index >= 0 && slot_index < max_slots;
+                                const key = `${x}_${y}`;
+                                if (!in_bounds) {
+                                    delete (it as any).grid_x;
+                                    delete (it as any).grid_y;
+                                    repaired_invalid++;
+                                    continue;
+                                }
+                                if (used.has(key)) {
+                                    delete (it as any).grid_x;
+                                    delete (it as any).grid_y;
+                                    repaired_dupe++;
+                                    continue;
+                                }
+                                used.add(key);
+                            }
+                        }
+
+                        if (reserved) {
+                            used.add(`${reserved.x}_${reserved.y}`);
+                        }
+
+                        for (const it of container_item.contents) {
+                            const x = (it as any)?.grid_x;
+                            const y = (it as any)?.grid_y;
+                            if (typeof x === 'number' && typeof y === 'number') continue;
+
+                            let placed = false;
+                            for (let idx = 0; idx < max_slots; idx++) {
+                                const px = idx % cols;
+                                const py = Math.floor(idx / cols);
+                                const key = `${px}_${py}`;
+                                if (used.has(key)) continue;
+                                (it as any).grid_x = px;
+                                (it as any).grid_y = py;
+                                used.add(key);
+                                placed = true;
+                                break;
+                            }
+
+                            if (!placed) {
+                                return { ok: false, error: 'container_full' };
+                            }
+                        }
+
+                        if (repaired_invalid > 0 || repaired_dupe > 0) {
+                            debug_log('transfer', `[INLINE] grid_repair invalid=${repaired_invalid} dupe=${repaired_dupe}`);
+                        }
+
+                        return { ok: true, cols, rows };
+                    }
+
+                    function remove_from_body_slot(path: string, child_id: string): any {
+                        const parsed = parse_body_slots_path(path);
+                        if (!parsed) return null;
+                        const slot = get_slot(parsed.slot_name);
+                        if (!slot) return null;
+                        if (parsed.slot_type === 'armor' && slot.armor?.id === child_id) {
+                            const it = slot.armor; slot.armor = null; return it;
+                        }
+                        if (parsed.slot_type === 'tool' && slot.tool?.id === child_id) {
+                            const it = slot.tool; slot.tool = null; return it;
+                        }
+                        if (parsed.slot_type === 'garb' && parsed.garb_index !== null) {
+                            const it = slot.garb?.[parsed.garb_index];
+                            if (it?.id !== child_id) return null;
+                            slot.garb.splice(parsed.garb_index, 1);
+                            return it;
+                        }
+                        return null;
+                    }
+
+                    function add_to_body_slot(path: string, item: any): { ok: true } | { ok: false; error: string } {
+                        const parsed = parse_body_slots_path(path);
+                        if (!parsed) return { ok: false, error: 'invalid_to_path' };
+                        const slot = get_slot(parsed.slot_name);
+                        if (!slot) return { ok: false, error: 'slot_not_found' };
+                        if (parsed.slot_type === 'armor') {
+                            if (slot.armor) return { ok: false, error: 'armor_slot_occupied' };
+                            slot.armor = item; return { ok: true };
+                        }
+                        if (parsed.slot_type === 'tool') {
+                            if (slot.tool) return { ok: false, error: 'tool_slot_occupied' };
+                            slot.tool = item; return { ok: true };
+                        }
+                        if (parsed.slot_type === 'garb') {
+                            if (!Array.isArray(slot.garb)) slot.garb = [];
+                            const idx = parsed.garb_index;
+                            if (idx === null || idx === slot.garb.length) {
+                                slot.garb.push(item);
+                                return { ok: true };
+                            }
+                            if (idx < 0 || idx > slot.garb.length) return { ok: false, error: 'invalid_garb_index' };
+                            if (slot.garb[idx]) return { ok: false, error: 'garb_slot_occupied' };
+                            slot.garb.splice(idx, 0, item);
+                            return { ok: true };
+                        }
+                        return { ok: false, error: 'invalid_to_path' };
+                    }
+
+                    // Same-container move
+                    if (from_container === to_container) {
+                        const container_item = get_container_item(from_container);
+                        if (!container_item || !Array.isArray(container_item.contents)) {
+                            res.writeHead(400, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: false, error: 'source_container_not_found' }));
+                            return;
+                        }
+
+                        const moving = container_item.contents.find((it: any) => it?.id === item_instance_id);
+                        if (!moving) {
+                            res.writeHead(404, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: false, error: 'item_not_found_in_container' }));
+                            return;
+                        }
+
+                        // Grid placement (sparse) has priority over packed reorder.
+                        if (has_grid_target) {
+                            const tx = target_grid_x as number;
+                            const ty = target_grid_y as number;
+
+                            // Ensure existing items are sparsified so the layout becomes stable.
+                            // Reserve the target cell so sparsification doesn't claim it.
+                            const sparse_res = ensure_sparse_layout(container_item, { x: tx, y: ty });
+                            if (!sparse_res.ok) {
+                                res.writeHead(400, { "Content-Type": "application/json" });
+                                res.end(JSON.stringify({ ok: false, error: sparse_res.error }));
+                                return;
+                            }
+
+                            // Allow moving onto its current position.
+                            const occupied = container_item.contents.find((it: any) =>
+                                it?.id !== item_instance_id && it?.grid_x === tx && it?.grid_y === ty
+                            );
+                            if (occupied) {
+                                res.writeHead(400, { "Content-Type": "application/json" });
+                                res.end(JSON.stringify({ ok: false, error: 'target_slot_occupied' }));
+                                return;
+                            }
+
+                            (moving as any).grid_x = tx;
+                            (moving as any).grid_y = ty;
+
+                            const save_result = save_actor_with_items(data_slot_number, actor_id, actor_result.actor);
+                            if (!save_result.ok) {
+                                res.writeHead(500, { "Content-Type": "application/json" });
+                                res.end(JSON.stringify({ ok: false, error: save_result.error }));
+                                return;
+                            }
+                            res.writeHead(200, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: true }));
+                            return;
+                        }
+
+                        // Packed reorder (legacy behavior)
+                        if (typeof from_slot_index === 'number' && typeof to_slot_index === 'number') {
+                            debug_log("transfer", `[INLINE] Same-container reorder from ${from_slot_index} to ${to_slot_index}`);
+                            const to_idx = to_slot_index;
+                            const actual_from = container_item.contents.findIndex((it: any) => it?.id === item_instance_id);
+                            container_item.contents.splice(actual_from, 1);
+                            const clamped_to = Math.max(0, Math.min(to_idx, container_item.contents.length));
+                            container_item.contents.splice(clamped_to, 0, moving);
+
+                            const save_result = save_actor_with_items(data_slot_number, actor_id, actor_result.actor);
+                            if (!save_result.ok) {
+                                res.writeHead(500, { "Content-Type": "application/json" });
+                                res.end(JSON.stringify({ ok: false, error: save_result.error }));
+                                return;
+                            }
+                            res.writeHead(200, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: true }));
+                            return;
+                        }
+                    }
+
+                    // Remove item from source
+                    let removed: any = null;
+                    if (from_container.startsWith('body_slots.') || from_container.startsWith('actor.item.')) {
+                        // try container contents first
+                        removed = remove_from_container(from_container, item_instance_id);
+                        if (!removed && from_container.startsWith('body_slots.')) {
+                            removed = remove_from_body_slot(from_container, item_instance_id);
+                        }
+                    }
+
+                    if (!removed) {
+                        res.writeHead(404, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "item_not_found_in_source" }));
+                        return;
+                    }
+
+                    // Add item to destination
+                    let add_ok = false;
+                    if (to_container.startsWith('body_slots.') || to_container.startsWith('actor.item.')) {
+                        const dest_item = get_container_item(to_container);
+                        const is_dest_container = dest_item?.tags?.some((t: any) => t?.name === 'CONTAINER');
+                        if (is_dest_container) {
+                            if (!Array.isArray(dest_item.contents)) dest_item.contents = [];
+                            const max_slots = get_container_capacity_max_slots(dest_item);
+                            if (dest_item.contents.length >= max_slots) {
+                                res.writeHead(400, { "Content-Type": "application/json" });
+                                res.end(JSON.stringify({ ok: false, error: 'container_full' }));
+                                return;
+                            }
+
+                            if (has_grid_target) {
+                                const tx = target_grid_x as number;
+                                const ty = target_grid_y as number;
+                                // Stabilize container layout before placing into a specific cell.
+                                const sparse_res = ensure_sparse_layout(dest_item, { x: tx, y: ty });
+                                if (!sparse_res.ok) {
+                                    res.writeHead(400, { "Content-Type": "application/json" });
+                                    res.end(JSON.stringify({ ok: false, error: sparse_res.error }));
+                                    return;
+                                }
+                                const occupied = dest_item.contents?.find((it: any) => it?.grid_x === tx && it?.grid_y === ty);
+                                if (occupied) {
+                                    res.writeHead(400, { "Content-Type": "application/json" });
+                                    res.end(JSON.stringify({ ok: false, error: 'target_slot_occupied' }));
+                                    return;
+                                }
+                                (removed as any).grid_x = tx;
+                                (removed as any).grid_y = ty;
+                            } else {
+                                // Stabilize existing layout and choose first free cell for the inserted item.
+                                const sparse_res = ensure_sparse_layout(dest_item);
+                                if (!sparse_res.ok) {
+                                    res.writeHead(400, { "Content-Type": "application/json" });
+                                    res.end(JSON.stringify({ ok: false, error: sparse_res.error }));
+                                    return;
+                                }
+
+                                const max = get_container_capacity_max_slots(dest_item);
+                                const { cols } = calculate_grid_dimensions(max);
+                                const used = new Set<string>();
+                                for (const it of dest_item.contents) {
+                                    if (typeof it.grid_x === 'number' && typeof it.grid_y === 'number') {
+                                        used.add(`${it.grid_x}_${it.grid_y}`);
+                                    }
+                                }
+
+                                // Find first free position
+                                let placed = false;
+                                for (let idx = 0; idx < max; idx++) {
+                                    const px = idx % cols;
+                                    const py = Math.floor(idx / cols);
+                                    const key = `${px}_${py}`;
+                                    if (used.has(key)) continue;
+                                    (removed as any).grid_x = px;
+                                    (removed as any).grid_y = py;
+                                    placed = true;
+                                    break;
+                                }
+
+                                if (!placed) {
+                                    res.writeHead(400, { "Content-Type": "application/json" });
+                                    res.end(JSON.stringify({ ok: false, error: 'container_full' }));
+                                    return;
+                                }
+                            }
+                            add_ok = add_to_container(to_container, removed, null);
+                        } else {
+                            if (!to_container.startsWith('body_slots.')) {
+                                res.writeHead(400, { "Content-Type": "application/json" });
+                                res.end(JSON.stringify({ ok: false, error: 'invalid_destination' }));
+                                return;
+                            }
+                            const add_result = add_to_body_slot(to_container, removed);
+                            if (!add_result.ok) {
+                                res.writeHead(400, { "Content-Type": "application/json" });
+                                res.end(JSON.stringify({ ok: false, error: add_result.error }));
+                                return;
+                            }
+                            add_ok = true;
+                        }
+                    }
+
+                    if (!add_ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "invalid_destination" }));
+                        return;
+                    }
+
+                    const save_result = save_actor_with_items(data_slot_number, actor_id, actor_result.actor);
+                    if (!save_result.ok) {
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: save_result.error }));
+                        return;
+                    }
+
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true }));
+                } catch (err) {
+                    debug_error("transfer", "/api/transfer inline error", err);
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "internal_error" }));
+                }
+            });
+            return;
+        }
+
+        // GET /api/place/items?place_id=xxx - Get items on ground
+        if (url.pathname === "/api/place/items") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const place_id = url.searchParams.get("place_id");
+            if (!place_id) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_place_id" }));
+                return;
+            }
+
+            try {
+                const result = load_place_with_ground(data_slot_number, place_id);
+                if (!result.ok) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: result.error }));
+                    return;
+                }
+
+                const items: Array<{ item: InlineItem; position?: { x: number; y: number }; position_key?: string }> = get_all_ground_items(result.place);
+                
+                res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ 
+                        ok: true, 
+                        place_id,
+                        items: items.map(({ item, position, position_key }: { item: InlineItem; position?: { x: number; y: number }; position_key?: string }) => ({
+                            id: item.id,
+                            def_id: item.def_id,
+                            name: item.name,
+                            qty: item.qty,
+                            weight: item.weight,
+                            tags: (item as any).tags || [],
+                            position,
+                            position_key
+                        }))
+                    }));
+            } catch (err) {
+                debug_error("API", "/api/place/items error", err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "internal_error" }));
+            }
+            return;
+        }
+
+        // GET /api/place/container_item?place_id=xxx&item_id=yyy - Open a container-item on the ground
+        if (url.pathname === "/api/place/container_item") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const place_id = url.searchParams.get("place_id");
+            const item_id = url.searchParams.get("item_id");
+            if (!place_id || !item_id) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                return;
+            }
+
+            try {
+                const place_result = load_place_with_ground(data_slot_number, place_id);
+                if (!place_result.ok) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: place_result.error }));
+                    return;
+                }
+
+                const all_items = get_all_ground_items(place_result.place);
+                const found = all_items.find(({ item }: { item: InlineItem }) => item.id === item_id);
+                if (!found) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "item_not_found" }));
+                    return;
+                }
+
+                const container_item = found.item as any;
+                const is_container = container_item.tags?.some((t: any) => t?.name === 'CONTAINER');
+                if (!is_container) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
+                    return;
+                }
+
+                const contents_raw = Array.isArray(container_item.contents) ? container_item.contents : [];
+                const max_slots = container_item.container_capacity?.max_slots ?? contents_raw.length;
+                const contents = normalize_inline_container_grid(contents_raw, max_slots, `place_container_item:${place_id}:${item_id}`);
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({
+                    ok: true,
+                    container: {
+                        id: container_item.id,
+                        name: container_item.name,
+                        def_id: container_item.def_id,
+                        capacity: { max_slots },
+                        contents: contents.map(({ item, grid_x, grid_y }: any) => ({
+                            instance: { id: item.id, def_id: item.def_id, qty: item.qty, tags: item.tags },
+                            definition: { id: item.def_id, name: item.name, weight: item.weight, tags: item.tags },
+                            grid_x,
+                            grid_y,
+                        })),
+                    }
+                }));
+            } catch (err) {
+                debug_error("API", "/api/place/container_item error", err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "internal_error" }));
+            }
+            return;
+        }
+
+        // GET /api/actor/container_item?actor_id=xxx&item_id=yyy - Open an actor-owned container-item by id
+        if (url.pathname === "/api/actor/container_item") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const actor_id = url.searchParams.get("actor_id");
+            const item_id = url.searchParams.get("item_id");
+            if (!actor_id || !item_id) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                return;
+            }
+
+            try {
+                const actor_result = load_actor_with_items(data_slot_number, actor_id);
+                if (!actor_result.ok) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: actor_result.error }));
+                    return;
+                }
+
+                const found = find_actor_item_by_id(actor_result.actor, item_id);
+                if (!found) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "item_not_found" }));
+                    return;
+                }
+
+                const container_item = found.item as any;
+                const is_container = container_item.tags?.some((t: any) => t?.name === 'CONTAINER');
+                if (!is_container) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
+                    return;
+                }
+
+                const contents_raw = Array.isArray(container_item.contents) ? container_item.contents : [];
+                const max_slots = container_item.container_capacity?.max_slots ?? contents_raw.length;
+                const contents = normalize_inline_container_grid(contents_raw, max_slots, `actor_container_item:${actor_id}:${item_id}`);
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({
+                    ok: true,
+                    container: {
+                        id: container_item.id,
+                        name: container_item.name,
+                        def_id: container_item.def_id,
+                        capacity: { max_slots },
+                        contents: contents.map(({ item, grid_x, grid_y }: any) => ({
+                            instance: { id: item.id, def_id: item.def_id, qty: item.qty, tags: item.tags },
+                            definition: { id: item.def_id, name: item.name, weight: item.weight, tags: item.tags },
+                            grid_x,
+                            grid_y,
+                        })),
+                    }
+                }));
+            } catch (err) {
+                debug_error("API", "/api/actor/container_item error", err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "internal_error" }));
+            }
+            return;
+        }
+
+        // GET /api/body_slot/container - Open container from body_slots (inline system)
+        if (url.pathname === "/api/body_slot/container") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const actor_id = url.searchParams.get("actor_id");
+            const container_path = url.searchParams.get("path"); // e.g., "leg_left.garb.0"
+
+            if (!actor_id || !container_path) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                return;
+            }
+
+            try {
+                debug_log("API", `/api/body_slot/container: Opening ${container_path} for ${actor_id}`);
+
+                // Load actor with inline items
+                const actor_result = load_actor_with_items(data_slot_number, actor_id);
+                if (!actor_result.ok) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: actor_result.error }));
+                    return;
+                }
+
+                // Parse path: slot_name.slot_type.index
+                const path_parts = container_path.split('.');
+                if (path_parts.length < 2) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "invalid_path_format" }));
+                    return;
+                }
+
+                const slot_name = path_parts[0]!;
+                const slot_type = path_parts[1]!;
+                const slot_index = path_parts.length > 2 ? parseInt(path_parts[2]!, 10) : null;
+
+                const body_slots = actor_result.actor.body_slots as Record<string, any>;
+                const slot = body_slots?.[slot_name];
+
+                if (!slot) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "slot_not_found" }));
+                    return;
+                }
+
+                let container_item: any = null;
+
+                // Find the container item based on slot type
+                if (slot_type === 'armor' && slot.armor) {
+                    container_item = slot.armor;
+                } else if (slot_type === 'tool' && slot.tool) {
+                    container_item = slot.tool;
+                } else if (slot_type === 'garb' && slot.garb && slot_index !== null) {
+                    container_item = slot.garb[slot_index];
+                }
+
+                if (!container_item) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "container_not_found" }));
+                    return;
+                }
+
+                // Check if it's a container
+                const is_container = container_item.tags?.some((tag: any) => tag.name === 'CONTAINER');
+                if (!is_container) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
+                    return;
+                }
+
+                // Return container data with contents
+                const contents_raw = container_item.contents || [];
+                const max_slots = container_item.container_capacity?.max_slots ?? contents_raw.length;
+                const contents = normalize_inline_container_grid(contents_raw, max_slots, `body_slot:${actor_id}:${container_path}`);
+                
+                debug_log("API", `/api/body_slot/container: Found container with ${contents.length} items`);
+
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({
+                    ok: true,
+                    container: {
+                        id: container_item.id,
+                        name: container_item.name,
+                        def_id: container_item.def_id,
+                        path: container_path,
+                        capacity: {
+                            max_slots,
+                        },
+                        contents: contents.map(({ item, grid_x, grid_y }: any) => ({
+                            instance: {
+                                id: item.id,
+                                def_id: item.def_id,
+                                qty: item.qty,
+                                tags: item.tags
+                            },
+                            definition: {
+                                id: item.def_id,
+                                name: item.name,
+                                weight: item.weight,
+                                tags: item.tags
+                            },
+                            grid_x,
+                            grid_y,
+                        }))
+                    }
+                }));
+            } catch (err) {
+                debug_error("API", `/api/body_slot/container error`, err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "internal_error" }));
+            }
+            return;
+        }
+
+        // GET /api/place/ground_container - Open container on ground (inline system)
+        if (url.pathname === "/api/place/ground_container") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const place_id = url.searchParams.get("place_id");
+            const position_key = url.searchParams.get("position_key"); // e.g., "4_5"
+            const item_index = url.searchParams.get("index");
+
+            if (!place_id || !position_key || item_index === null) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                return;
+            }
+
+            try {
+                debug_log("API", `/api/place/ground_container: Opening container at ${position_key}[${item_index}] in ${place_id}`);
+
+                // Load place with ground items
+                const place_result = load_place_with_ground(data_slot_number, place_id);
+                if (!place_result.ok) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: place_result.error }));
+                    return;
+                }
+
+                const ground = place_result.place.ground as any;
+                if (!ground?.scattered?.[position_key]) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "ground_items_not_found" }));
+                    return;
+                }
+
+                const items_at_position = ground.scattered[position_key];
+                const index = parseInt(item_index, 10);
+
+                if (isNaN(index) || index < 0 || index >= items_at_position.length) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "item_not_found" }));
+                    return;
+                }
+
+                const container_item = items_at_position[index];
+
+                // Check if it's a container
+                const is_container = container_item.tags?.some((tag: any) => tag.name === 'CONTAINER');
+                if (!is_container) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
+                    return;
+                }
+
+                // Return container data with contents
+                const contents = container_item.contents || [];
+                
+                debug_log("API", `/api/place/ground_container: Found container with ${contents.length} items`);
+
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({
+                    ok: true,
+                    container: {
+                        id: container_item.id,
+                        name: container_item.name,
+                        def_id: container_item.def_id,
+                        position_key: position_key,
+                        index: index,
+                        capacity: {
+                            max_slots: container_item.container_capacity?.max_slots ?? contents.length,
+                        },
+                        contents: contents.map((item: any) => ({
+                            instance: {
+                                id: item.id,
+                                def_id: item.def_id,
+                                qty: item.qty,
+                                tags: item.tags
+                            },
+                            definition: {
+                                id: item.def_id,
+                                name: item.name,
+                                weight: item.weight,
+                                tags: item.tags
+                            }
+                        }))
+                    }
+                }));
+            } catch (err) {
+                debug_error("API", `/api/place/ground_container error`, err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "internal_error" }));
+            }
+            return;
+        }
+
+        // ============================================
+        // END NEW INLINE ITEM API ENDPOINTS
+        // ============================================
 
         if (url.pathname !== "/api/input") {
             res.writeHead(404, { "Content-Type": "application/json" });

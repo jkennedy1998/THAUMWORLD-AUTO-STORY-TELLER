@@ -38,9 +38,11 @@ import {
   generateFilename,
   // 3D VoxelSpace support
   exportVoxelSpaceToJSON,
+  exportVoxelSpaceArtworkToJSON,
   importVoxelSpaceFromJSON,
   autoSaveVoxelSpace,
   loadAutoSaveVoxelSpace,
+  exportVoxelSpaceToText,
   // Tool properties persistence
   saveToolProperties,
   loadToolProperties,
@@ -113,7 +115,17 @@ export type PainterAppState = {
   init_dom_renderer: () => void;
   render_dom_layers: () => void;
   set_mouse_parallax: (x: number, y: number) => void;
-  set_dom_viewport: (viewport: { x: number; y: number; width: number; height: number; offsetX: number; offsetY: number }) => void;
+  set_dom_viewport: (viewport: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    tileW?: number;
+    tileH?: number;
+    fontSizePx?: number;
+    offsetX?: number;
+    offsetY?: number;
+  }) => void;
 
   // Debug functions
   debug_camera_config: () => void;
@@ -176,6 +188,17 @@ export function create_painter_app_state(): PainterAppState {
     }
   }
 
+  function ensureValidFocusPlane(): void {
+    const zs = Array.from(voxelSpace.layers.keys()).sort((a, b) => a - b);
+    if (zs.length === 0) {
+      voxelSpace.camera.focus_plane = 0;
+      return;
+    }
+    if (!voxelSpace.layers.has(voxelSpace.camera.focus_plane)) {
+      voxelSpace.camera.focus_plane = zs[0]!;
+    }
+  }
+
   // Create history manager
   const history = createHistoryManager(50);
 
@@ -188,6 +211,7 @@ export function create_painter_app_state(): PainterAppState {
     if (savedCameraConfig && Object.keys(savedCameraConfig).length > 0) {
       voxelSpace.camera = { ...voxelSpace.camera, ...savedCameraConfig };
     }
+    ensureValidFocusPlane();
     // Sync grid to current layer
     const currentLayer = getLayer(voxelSpace, voxelSpace.camera.focus_plane);
     if (currentLayer) {
@@ -211,6 +235,7 @@ export function create_painter_app_state(): PainterAppState {
       if (savedCameraConfig && Object.keys(savedCameraConfig).length > 0) {
         voxelSpace.camera = { ...voxelSpace.camera, ...savedCameraConfig };
       }
+      ensureValidFocusPlane();
       syncDOMRenderer();
       console.log('🎨 Loaded auto-saved artwork (legacy format)');
     }
@@ -288,6 +313,55 @@ export function create_painter_app_state(): PainterAppState {
 
   // Current filename for save operations
   let current_filename = 'untitled';
+  let current_file_path: string | null = null;
+  const LAST_FILE_PATH_KEY = 'thaumworld_ascii_painter_last_file_path';
+
+  async function getAsciiDrawingsDir(): Promise<string | null> {
+    try {
+      if (!window.electronAPI?.getAsciiDrawingsDir) return null;
+      return await window.electronAPI.getAsciiDrawingsDir();
+    } catch {
+      return null;
+    }
+  }
+
+  function inferFilenameFromPath(path: string): string {
+    const parts = path.split(/[/\\]/g);
+    const last = parts[parts.length - 1] || 'untitled.json';
+    return last.replace(/\.json$/i, '');
+  }
+
+  function makeNewFileBasename(): string {
+    const d = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+    return `drawing_${stamp}.json`;
+  }
+
+  async function writeArtworkToFileAtomic(filePath: string): Promise<void> {
+    const data = exportVoxelSpaceArtworkToJSON(voxelSpace);
+    const api = window.electronAPI;
+    if (!api?.writeFileAtomic) {
+      throw new Error('electronAPI.writeFileAtomic unavailable');
+    }
+    const result = await api.writeFileAtomic(filePath, data);
+    if (!result?.success) {
+      throw new Error(result?.error || 'Failed to write file');
+    }
+  }
+
+  async function flush_auto_save(): Promise<void> {
+    if (auto_save_timer) {
+      clearTimeout(auto_save_timer);
+      auto_save_timer = null;
+    }
+    // Prefer file-backed autosave when a file is active.
+    if (current_file_path && window.electronAPI?.writeFileAtomic) {
+      await writeArtworkToFileAtomic(current_file_path);
+      return;
+    }
+    autoSaveVoxelSpace(voxelSpace, current_filename);
+  }
 
   // Auto-save timer
   let auto_save_timer: ReturnType<typeof setTimeout> | null = null;
@@ -301,10 +375,191 @@ export function create_painter_app_state(): PainterAppState {
       clearTimeout(auto_save_timer);
     }
     auto_save_timer = setTimeout(() => {
-      // Save VoxelSpace (new 3D format)
-      autoSaveVoxelSpace(voxelSpace, current_filename);
-      console.log('💾 Auto-saved VoxelSpace to localStorage');
-    }, 60000); // Auto-save 60 seconds (1 minute) after last change
+      void flush_auto_save().then(() => {
+        console.log('💾 Auto-saved artwork');
+      }).catch((e) => {
+        console.warn('Auto-save failed:', e);
+      });
+    }, 2000); // Auto-save shortly after last change
+  }
+
+  // Ensure we don't lose the last few strokes if the app closes quickly.
+  window.addEventListener('beforeunload', () => {
+    try {
+      void flush_auto_save();
+    } catch {
+      // ignore
+    }
+  });
+
+  async function loadArtworkFromContent(content: string, loadedPath?: string): Promise<void> {
+    voxelSpace = importVoxelSpaceFromJSON(content);
+
+    // Apply persisted camera/UI settings (do not import from file)
+    const savedCam = loadCameraConfig();
+    if (savedCam && Object.keys(savedCam).length > 0) {
+      voxelSpace.camera = { ...createDefaultCamera(), ...savedCam };
+    }
+
+    ensureValidFocusPlane();
+    syncDOMRenderer();
+
+    const currentLayer = getLayer(voxelSpace, voxelSpace.camera.focus_plane);
+    if (currentLayer) {
+      grid.width = voxelSpace.bounds.width;
+      grid.height = voxelSpace.bounds.height;
+      grid.cells = currentLayer.cells;
+    }
+
+    pushSnapshot(history, grid);
+
+    if (loadedPath) {
+      current_file_path = loadedPath;
+      current_filename = inferFilenameFromPath(loadedPath);
+      try {
+        window.localStorage.setItem(LAST_FILE_PATH_KEY, loadedPath);
+      } catch {
+        // ignore
+      }
+    }
+
+    schedule_auto_save();
+  }
+
+  async function new_file(): Promise<void> {
+    const dir = await getAsciiDrawingsDir();
+    if (!dir) {
+      // Fallback: just create a new in-memory canvas
+      voxelSpace = createVoxelSpace(CANVAS_WIDTH, CANVAS_HEIGHT, { defaultZ: 0 });
+      const savedCam = loadCameraConfig();
+      if (savedCam && Object.keys(savedCam).length > 0) {
+        voxelSpace.camera = { ...voxelSpace.camera, ...savedCam };
+      }
+      ensureValidFocusPlane();
+      syncDOMRenderer();
+      const currentLayer = getLayer(voxelSpace, 0);
+      if (currentLayer) {
+        grid.width = CANVAS_WIDTH;
+        grid.height = CANVAS_HEIGHT;
+        grid.cells = currentLayer.cells;
+      }
+      pushSnapshot(history, grid);
+      current_filename = 'untitled';
+      current_file_path = null;
+      clearAutoSave();
+      return;
+    }
+
+    const basename = makeNewFileBasename();
+    const filePath = `${dir}\\${basename}`;
+
+    voxelSpace = createVoxelSpace(CANVAS_WIDTH, CANVAS_HEIGHT, { defaultZ: 0 });
+    const savedCam = loadCameraConfig();
+    if (savedCam && Object.keys(savedCam).length > 0) {
+      voxelSpace.camera = { ...voxelSpace.camera, ...savedCam };
+    }
+    ensureValidFocusPlane();
+    syncDOMRenderer();
+
+    const currentLayer = getLayer(voxelSpace, 0);
+    if (currentLayer) {
+      grid.width = CANVAS_WIDTH;
+      grid.height = CANVAS_HEIGHT;
+      grid.cells = currentLayer.cells;
+    }
+    pushSnapshot(history, grid);
+
+    current_file_path = filePath;
+    current_filename = inferFilenameFromPath(filePath);
+    try {
+      window.localStorage.setItem(LAST_FILE_PATH_KEY, filePath);
+    } catch {
+      // ignore
+    }
+
+    await writeArtworkToFileAtomic(filePath);
+  }
+
+  async function save_file(): Promise<void> {
+    const dir = await getAsciiDrawingsDir();
+    if (!current_file_path && dir) {
+      current_file_path = `${dir}\\${makeNewFileBasename()}`;
+      current_filename = inferFilenameFromPath(current_file_path);
+    }
+    if (!current_file_path) {
+      // Fallback for non-electron
+      const name = generateFilename('ascii_art', 'json');
+      const data = exportVoxelSpaceArtworkToJSON(voxelSpace);
+      downloadFile(data, name, 'application/json');
+      return;
+    }
+    await writeArtworkToFileAtomic(current_file_path);
+  }
+
+  async function load_file(): Promise<void> {
+    const dir = await getAsciiDrawingsDir();
+    const api = window.electronAPI;
+    if (!dir || !api?.showOpenDialog || !api?.readFile) {
+      // Browser fallback
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.json';
+      input.onchange = async (e) => {
+        const file = (e.target as HTMLInputElement).files?.[0];
+        if (!file) return;
+        const content = await readFileAsText(file);
+        await loadArtworkFromContent(content);
+      };
+      input.click();
+      return;
+    }
+
+    const openResp = await api.showOpenDialog({
+      defaultPath: dir,
+      properties: ['openFile'],
+      filters: [
+        { name: 'ASCII Drawings', extensions: ['json'] },
+      ],
+    });
+
+    if (!openResp?.success) throw new Error(openResp?.error || 'Open dialog failed');
+    const result = openResp.result;
+    if (!result || result.canceled || !result.filePaths || result.filePaths.length === 0) return;
+
+    const path = result.filePaths[0];
+    const readResp = await api.readFile(path);
+    if (!readResp?.success) throw new Error(readResp?.error || 'Failed to read file');
+    await loadArtworkFromContent(readResp.content || '', path);
+  }
+
+  // Attach current session to a file in ascii_drawings.
+  // Artwork persists to disk; UI/camera/module positions persist separately via localStorage.
+  try {
+    const last = window.localStorage.getItem(LAST_FILE_PATH_KEY);
+    if (last) {
+      current_file_path = last;
+      current_filename = inferFilenameFromPath(last);
+    }
+  } catch {
+    // ignore
+  }
+
+  if (!current_file_path && window.electronAPI?.getAsciiDrawingsDir) {
+    void (async () => {
+      const dir = await getAsciiDrawingsDir();
+      if (!dir) return;
+      const fp = `${dir}\\${makeNewFileBasename()}`;
+      current_file_path = fp;
+      current_filename = inferFilenameFromPath(fp);
+      try {
+        window.localStorage.setItem(LAST_FILE_PATH_KEY, fp);
+      } catch {
+        // ignore
+      }
+      await writeArtworkToFileAtomic(fp);
+    })().catch(() => {
+      // ignore
+    });
   }
   
   // Keyboard shortcuts for layer navigation
@@ -360,7 +615,7 @@ export function create_painter_app_state(): PainterAppState {
     id: 'painter_canvas',
     rect: canvas_rect,
     grid,
-    space: voxelSpace,
+    get_space: () => voxelSpace,
     get_selected_z: () => voxelSpace.camera.focus_plane,
     get_current_tool: () => current_tool,
     brush,
@@ -442,20 +697,9 @@ export function create_painter_app_state(): PainterAppState {
       console.log('Canvas reset to default position');
     },
     on_viewport_change: (viewport) => {
-      // Forward viewport updates to DOM renderer
-      if (domRenderer) {
-        // Convert grid viewport to pixel viewport
-        // Grid Y=0 is at the bottom, but screen Y=0 is at the top, so flip Y
-        const cellW = PAINTER_CONFIG.base_font_size_px * (1 + PAINTER_CONFIG.base_letter_spacing_mult);
-        const cellH = PAINTER_CONFIG.base_font_size_px * PAINTER_CONFIG.base_line_height_mult;
-        domRenderer.setViewport({
-          x: viewport.x * cellW,
-          y: (PAINTER_CONFIG.grid_height - 1 - (viewport.y + viewport.height - 1)) * cellH,
-          width: viewport.width * cellW,
-          height: viewport.height * cellH
-        });
-        // Note: render() is called every frame by main loop, no need for separate updateTransforms()
-      }
+      // Viewport is driven by the main render loop (src/canvas_app/main.ts) using runtime tile metrics.
+      // No-op to avoid mixing coordinate systems.
+      void viewport;
     },
     on_mouse_move: (offsetX, offsetY) => {
       // Forward mouse parallax to DOM renderer
@@ -862,55 +1106,23 @@ export function create_painter_app_state(): PainterAppState {
     id: 'painter_file_menu',
     rect: file_menu_rect,
     on_save: () => {
-      // Create filename input dialog
-      const filename = prompt('Save as:', current_filename + '.json');
-      if (filename) {
-        const name = filename.replace('.json', '');
-        const data = exportToJSON(grid, { title: name, description: 'ASCII Art', tags: ['ascii_painter'] });
-        downloadFile(data, filename, 'application/json');
-        current_filename = name;
-        autoSave(grid, current_filename);
-      }
+      void save_file().catch((e) => {
+        console.error('Save failed:', e);
+        alert('Save failed: ' + (e as Error).message);
+      });
     },
     on_load: () => {
-      // Create file input element
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.accept = '.json';
-      input.onchange = async (e) => {
-        const file = (e.target as HTMLInputElement).files?.[0];
-        if (file) {
-          try {
-            const content = await readFileAsText(file);
-            const new_grid = importFromJSON(content);
-            grid.width = new_grid.width;
-            grid.height = new_grid.height;
-            grid.cells = new_grid.cells;
-            pushSnapshot(history, grid);
-            current_filename = file.name.replace('.json', '');
-            schedule_auto_save();
-          } catch (err) {
-            console.error('Failed to load file:', err);
-            alert('Failed to load file: ' + (err as Error).message);
-          }
-        }
-      };
-      input.click();
+      void load_file().catch((e) => {
+        console.error('Load failed:', e);
+        alert('Load failed: ' + (e as Error).message);
+      });
     },
     on_new: () => {
-      if (confirm('Create new canvas? Unsaved changes will be lost.')) {
-        const new_grid = createGrid(CANVAS_WIDTH, CANVAS_HEIGHT);
-        grid.width = new_grid.width;
-        grid.height = new_grid.height;
-        grid.cells = new_grid.cells;
-        pushSnapshot(history, grid);
-        current_filename = 'untitled';
-        clearAutoSave();
-      }
-    },
-    on_export_text: () => {
-      const text = exportToText(grid);
-      downloadFile(text, current_filename + '.txt', 'text/plain');
+      if (!confirm('Create new file? Unsaved changes will be lost.')) return;
+      void new_file().catch((e) => {
+        console.error('New file failed:', e);
+        alert('New file failed: ' + (e as Error).message);
+      });
     },
     on_clear: () => {
       // Clear current layer without confirmation (undo available)
@@ -1372,30 +1584,27 @@ export function create_painter_app_state(): PainterAppState {
     },
 
     save_to_file: (filename?: string) => {
-      const name = filename || current_filename || generateFilename('ascii_art', 'json');
-      if (filename) current_filename = filename;
-      // Save VoxelSpace (new 3D format)
-      const data = exportVoxelSpaceToJSON(voxelSpace);
-      downloadFile(data, name, 'application/json');
-      autoSaveVoxelSpace(voxelSpace, current_filename); // Also update auto-save
+      void (async () => {
+        if (filename) {
+          const dir = await getAsciiDrawingsDir();
+          if (dir) {
+            const base = filename.endsWith('.json') ? filename : `${filename}.json`;
+            current_file_path = `${dir}\\${base}`;
+            current_filename = inferFilenameFromPath(current_file_path);
+          }
+        }
+        await save_file();
+      })().catch((e) => {
+        console.error('Save failed:', e);
+      });
     },
 
     load_from_file: async (file: File) => {
       try {
         const content = await readFileAsText(file);
-        // Try to import as VoxelSpace (handles both v1 and v2 formats)
-        const loadedSpace = importVoxelSpaceFromJSON(content);
-        voxelSpace = loadedSpace;
-        syncDOMRenderer();
-        // Sync grid to current layer
-        const currentLayer = getLayer(voxelSpace, voxelSpace.camera.focus_plane);
-        if (currentLayer) {
-          grid.width = voxelSpace.bounds.width;
-          grid.height = voxelSpace.bounds.height;
-          grid.cells = currentLayer.cells;
-        }
-        pushSnapshot(history, grid);
-        current_filename = file.name.replace('.json', '');
+        await loadArtworkFromContent(content);
+        current_filename = file.name.replace(/\.json$/i, '');
+        current_file_path = null;
         console.log('📂 Loaded file:', current_filename);
         console.log(debugVoxelSpace(voxelSpace));
         schedule_auto_save();
@@ -1406,12 +1615,21 @@ export function create_painter_app_state(): PainterAppState {
     },
 
     export_as_text: () => {
-      return exportToText(grid);
+      return exportVoxelSpaceToText(voxelSpace);
     },
 
     new_canvas: (width: number, height: number) => {
       // Create new VoxelSpace with default single layer
       voxelSpace = createVoxelSpace(width, height, { defaultZ: 0 });
+
+      // Apply persisted camera config to the new space
+      const savedCam = loadCameraConfig();
+      if (savedCam && Object.keys(savedCam).length > 0) {
+        voxelSpace.camera = { ...voxelSpace.camera, ...savedCam };
+      }
+
+      ensureValidFocusPlane();
+
       syncDOMRenderer();
       // Sync grid to the new VoxelSpace
       const currentLayer = getLayer(voxelSpace, 0);
@@ -1441,6 +1659,7 @@ export function create_painter_app_state(): PainterAppState {
         const { importVoxelSpace } = require('../ascii_painter/voxel_space.js');
         const parsed = JSON.parse(json);
         voxelSpace = importVoxelSpace(parsed);
+        ensureValidFocusPlane();
         syncDOMRenderer();
         // Update grid reference to current layer
         const currentLayer = getLayer(voxelSpace, voxelSpace.camera.focus_plane);
@@ -1509,6 +1728,9 @@ export function create_painter_app_state(): PainterAppState {
     
     select_layer: (z: number) => {
       voxelSpace.camera.focus_plane = z;
+      if (isAppInitialized) {
+        saveCameraConfig({ focus_plane: z });
+      }
       const layer = getLayer(voxelSpace, z);
       if (layer) {
         grid.cells = layer.cells;
@@ -1549,7 +1771,17 @@ export function create_painter_app_state(): PainterAppState {
       }
     },
 
-    set_dom_viewport: (viewport: { x: number; y: number; width: number; height: number; offsetX: number; offsetY: number }) => {
+    set_dom_viewport: (viewport: {
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      tileW?: number;
+      tileH?: number;
+      fontSizePx?: number;
+      offsetX?: number;
+      offsetY?: number;
+    }) => {
       if (domRenderer) {
         domRenderer.setViewport(viewport);
       }

@@ -164,6 +164,16 @@ export function exportVoxelSpaceToJSON(space: VoxelSpace): string {
 }
 
 /**
+ * Export VoxelSpace artwork only (no camera/UI state)
+ */
+export function exportVoxelSpaceArtworkToJSON(space: VoxelSpace): string {
+  const data = exportVoxelSpace(space) as any;
+  // Camera is persisted separately via saveCameraConfig(); don't bake it into art exports.
+  delete data.camera;
+  return JSON.stringify(data, null, 2);
+}
+
+/**
  * Import VoxelSpace from JSON string (supports v1 and v2)
  */
 export function importVoxelSpaceFromJSON(json: string): VoxelSpace {
@@ -215,7 +225,7 @@ export function detectFileFormat(json: string): 'voxel_space' | 'grid' | 'unknow
  */
 export function autoSaveVoxelSpace(space: VoxelSpace, filename: string = 'untitled'): void {
   try {
-    const data = exportVoxelSpaceToJSON(space);
+    const data = exportVoxelSpaceArtworkToJSON(space);
     localStorage.setItem(AUTOSAVE_KEY, data);
   } catch (e) {
     console.warn('VoxelSpace auto-save failed:', e);
@@ -328,6 +338,7 @@ const CAMERA_CONFIG_KEY = 'thaumworld_ascii_painter_camera_config';
  * Camera configuration properties that should persist between sessions
  */
 export interface CameraConfigSaveData {
+  focus_plane?: number;
   calibration?: { x: number; y: number };
   scale_per_layer?: number;
   movement_per_layer?: number;

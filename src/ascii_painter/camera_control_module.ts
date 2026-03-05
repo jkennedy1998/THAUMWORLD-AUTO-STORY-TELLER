@@ -817,6 +817,14 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
       if (localY === ROW_PARALLAX_MOVE && localX >= COL_TOGGLE && localX <= COL_TOGGLE + 2) {
         const newValue = !(camera.parallax_move_enabled ?? false);
         camera.parallax_move_enabled = newValue;
+
+        // Treat Parallax Move as the master "perspective" switch.
+        // When disabled, force orthographic behavior by also disabling size parallax.
+        if (!newValue) {
+          camera.parallax_size_enabled = false;
+          opts.onParallaxSizeToggle?.(false);
+        }
+
         opts.onParallaxMoveToggle?.(newValue);
         pressedButtons.add('parallax_move');
         return;
@@ -824,6 +832,14 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
       
       if (localY === ROW_PARALLAX_SIZE && localX >= COL_TOGGLE && localX <= COL_TOGGLE + 2) {
         const newValue = !(camera.parallax_size_enabled ?? false);
+
+        // Size parallax only makes sense when perspective is enabled.
+        // Enabling size parallax auto-enables Parallax Move.
+        if (newValue && !(camera.parallax_move_enabled ?? false)) {
+          camera.parallax_move_enabled = true;
+          opts.onParallaxMoveToggle?.(true);
+        }
+
         camera.parallax_size_enabled = newValue;
         opts.onParallaxSizeToggle?.(newValue);
         pressedButtons.add('parallax_size');

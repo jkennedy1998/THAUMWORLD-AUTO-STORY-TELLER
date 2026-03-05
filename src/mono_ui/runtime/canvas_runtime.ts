@@ -535,6 +535,94 @@ export class CanvasRuntime {
     }
 
     private attach_events(): void {
+        // Help pen/touch input behave consistently.
+        // (Prevents browser gesture handling from stealing pointer events.)
+        try {
+            (this.canvas_el.style as any).touchAction = 'none';
+        } catch {
+            // ignore
+        }
+
+        const is_painter_mode = (window as any).electronAPI?.appMode === 'ascii_painter';
+        const stylus_debug_enabled = is_painter_mode;
+        let last_stylus_move_log_ms = 0;
+
+        const log_stylus = (kind: string, ev: any, tile: { x: number; y: number } | null) => {
+            if (!stylus_debug_enabled) return;
+            const pointerType = ev?.pointerType;
+            const isPenLike = pointerType === 'pen' || pointerType === 'touch';
+
+            // Always log down/up/cancel for any pointer. Only log move for pen/touch.
+            if (kind === 'move' && !isPenLike) return;
+
+            if (kind === 'move') {
+                const now = performance.now();
+                if (now - last_stylus_move_log_ms < 50) return;
+                last_stylus_move_log_ms = now;
+            }
+
+            const payload = {
+                kind,
+                pointerType: ev?.pointerType,
+                pointerId: ev?.pointerId,
+                isPrimary: ev?.isPrimary,
+                button: ev?.button,
+                buttons: ev?.buttons,
+                pressure: ev?.pressure,
+                tiltX: ev?.tiltX,
+                tiltY: ev?.tiltY,
+                twist: ev?.twist,
+                tangentialPressure: ev?.tangentialPressure,
+                width: ev?.width,
+                height: ev?.height,
+                clientX: ev?.clientX,
+                clientY: ev?.clientY,
+                offsetX: ev?.offsetX,
+                offsetY: ev?.offsetY,
+                tile,
+                capture_owner: this.capture_owner?.id ?? null,
+                down_tile: this.down_tile ?? null,
+                dragging: this.dragging,
+            };
+
+            // Stringify to keep Electron log single-line and greppable.
+            console.log('[STYLUS-DEBUG]', JSON.stringify(payload));
+        };
+
+        // Stylus/tablet debugging: log PointerEvents if the browser provides them.
+        this.canvas_el.addEventListener('pointerdown', (ev: any) => {
+            const t = this.mouse_to_tile(ev as any);
+            log_stylus('down', ev, t);
+            try {
+                // Ensures we still receive move/up if pen leaves canvas.
+                (ev.target as HTMLElement | null)?.setPointerCapture?.(ev.pointerId);
+            } catch {
+                // ignore
+            }
+        });
+        this.canvas_el.addEventListener('pointermove', (ev: any) => {
+            const t = this.mouse_to_tile(ev as any);
+            log_stylus('move', ev, t);
+        });
+        this.canvas_el.addEventListener('pointerup', (ev: any) => {
+            const t = this.mouse_to_tile(ev as any);
+            log_stylus('up', ev, t);
+            try {
+                (ev.target as HTMLElement | null)?.releasePointerCapture?.(ev.pointerId);
+            } catch {
+                // ignore
+            }
+        });
+        this.canvas_el.addEventListener('pointercancel', (ev: any) => {
+            const t = this.mouse_to_tile(ev as any);
+            log_stylus('cancel', ev, t);
+            try {
+                (ev.target as HTMLElement | null)?.releasePointerCapture?.(ev.pointerId);
+            } catch {
+                // ignore
+            }
+        });
+
         this.canvas_el.addEventListener('contextmenu', (ev) => {
             ev.preventDefault();
         });
@@ -546,6 +634,26 @@ export class CanvasRuntime {
 
         this.canvas_el.addEventListener('mousemove', (ev) => {
             const t = this.mouse_to_tile(ev);
+
+            // Some tablet drivers (or Chromium pen-to-mouse synthesis) report buttons=0 while dragging.
+            // Log this so we can see what the input stream looks like.
+            if (stylus_debug_enabled && this.capture_owner && this.down_tile && ev.buttons === 0) {
+                const now = performance.now();
+                if (now - last_stylus_move_log_ms >= 50) {
+                    last_stylus_move_log_ms = now;
+                    console.log('[STYLUS-DEBUG]', JSON.stringify({
+                        kind: 'mousemove_buttons_zero',
+                        button: ev.button,
+                        buttons: ev.buttons,
+                        clientX: ev.clientX,
+                        clientY: ev.clientY,
+                        tile: t,
+                        capture_owner: this.capture_owner?.id ?? null,
+                        down_tile: this.down_tile,
+                        dragging: this.dragging,
+                    }));
+                }
+            }
 
             if (!t) {
                 if (!this.capture_owner && this.hover_owner?.OnPointerLeave && this.last_tile) {
@@ -606,7 +714,14 @@ export class CanvasRuntime {
                     }
 
                     this.pan_dirty = true;
-                    console.log('[GLOBAL-PAN] Moving:', { capture_owner: this.capture_owner?.id ?? 'null', pan_tiles_x: this.pan_tiles_x, pan_tiles_y: this.pan_tiles_y, step_x, step_y });
+                    console.log('[GLOBAL-PAN] Moving:', JSON.stringify({ capture_owner: this.capture_owner?.id ?? 'null', pan_tiles_x: this.pan_tiles_x, pan_tiles_y: this.pan_tiles_y, step_x, step_y }));
+                    
+                    // Notify canvas module of global pan offset (convert tile offset to grid cells)
+                    const canvas_module = this.get_canvas_module();
+                    if (canvas_module && (canvas_module as any).setGlobalPanOffset) {
+                        (canvas_module as any).setGlobalPanOffset(this.pan_tiles_x, -this.pan_tiles_y); // Y is inverted
+                    }
+                    
                     this.recenter_or_clamp_pan();
 
                     this.last_tile = t;
@@ -693,6 +808,11 @@ export class CanvasRuntime {
                         // On canvas: Route to canvas module for camera pan
                         this.global_pan_active = false;
                         console.log('[PAN-ROUTING] Canvas module: camera pan (global_pan_active=false)');
+                        // Reset global pan offset on canvas module
+                        const canvas_module = this.get_canvas_module();
+                        if (canvas_module && (canvas_module as any).setGlobalPanOffset) {
+                            (canvas_module as any).setGlobalPanOffset(0, 0);
+                        }
                     } else if (!top) {
                         // On blank space: Enable global UI pan
                         this.global_pan_active = true;

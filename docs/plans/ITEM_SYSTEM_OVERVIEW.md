@@ -94,6 +94,23 @@ Each Body Part → 3 Slot Types:
 5. Update place.items_on_ground
 ```
 
+### Ground UX: Single vs Pile
+
+- A tile with exactly 1 ground item behaves like a direct, draggable floor item.
+- A tile with 2+ ground items behaves like a pile:
+  - It opens as a container UI on double-click.
+  - Dragging the tile itself does not choose an arbitrary "top" item; users drag items out of the opened pile UI.
+- When a pile drops back to exactly 1 item, it automatically reverts to the single-item behavior.
+
+### Container-Items: Open-Only Interaction
+
+- Items that are containers (CONTAINER tag) open on interaction.
+- Dragging container-items is routed to opening their ContainerModule rather than transferring the container itself.
+
+### UI Lifecycle
+
+- If a container ceases to exist (emptied/deleted), any open ContainerModule for it must be closed to avoid stale UIs.
+
 ### Drop Item (to ground)
 ```
 1. Drag item from equipped slot

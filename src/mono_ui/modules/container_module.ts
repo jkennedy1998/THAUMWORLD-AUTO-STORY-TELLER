@@ -35,6 +35,8 @@ export type ContainerModuleConfig = {
   set_is_visible: (visible: boolean) => void;
   on_slot_click?: (slot_index: number) => void;
   on_drag_start?: (slot_index: number, item: ItemInstance, definition: ItemDefinition, container_id: string) => void;
+  // If the dragged item is a container-item, open it instead of dragging.
+  on_open_container_item?: (item: ItemInstance, definition: ItemDefinition, parent_container_id: string) => void;
   on_cross_module_drop?: (x: number, y: number) => Promise<boolean>;
   on_drop?: (slot_index: number, grid_x?: number, grid_y?: number) => Promise<boolean>; // Returns true if drop was successful
   get_compatible_slots?: (item_def: ItemDefinition) => string[];
@@ -62,6 +64,14 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
   const gizmo_state: GizmoState = create_gizmo_state();
 
   debug_log("[ContainerModule] Created module:", opts.id);
+
+  function is_container_item(definition: ItemDefinition): boolean {
+    const tags: any[] = (definition as any)?.tags ?? [];
+    return tags.some((t: any) => {
+      const name = String(t?.name ?? '').toUpperCase();
+      return ['CONTAINER', 'BAG', 'SACK', 'POUCH', 'BACKPACK', 'WALLET', 'CHEST', 'BOX'].includes(name);
+    });
+  }
 
   function get_slot_at_position(x: number, y: number): number {
     const container = opts.get_container();
@@ -334,6 +344,17 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
         const slots = opts.get_slot_items();
         const slot = slots.find(s => s.slot_index === slot_index);
         debug_log(`[ContainerModule] Clicked slot ${slot_index}: ${slot?.definition?.name || "empty"}`);
+
+        // Double-click container-items to open them.
+        const click_count = (e as any).click_count;
+        if (click_count === 2 && slot?.instance && slot.definition && is_container_item(slot.definition)) {
+          const container = opts.get_container();
+          if (container) {
+            opts.on_open_container_item?.(slot.instance, slot.definition, container.id);
+          }
+          return;
+        }
+
         opts.on_slot_click?.(slot_index);
       }
     },

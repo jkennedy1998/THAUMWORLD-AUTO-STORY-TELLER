@@ -22,7 +22,11 @@ export interface ViewportState {
   y: number;
   width: number;
   height: number;
-  // Global pan offset from mono_canvas CSS transform (for when UI is panned)
+  // Runtime tile metrics (in CSS pixels). When present these MUST match mono_ui runtime.
+  tileW?: number;
+  tileH?: number;
+  fontSizePx?: number;
+  // Legacy global pan offsets (prefer folding pan into x/y instead)
   offsetX?: number;
   offsetY?: number;
   // Note: Camera pan offset is stored in CameraConfig
@@ -114,12 +118,24 @@ export class VoxelDOMRenderer {
    * Uses camera char_spacing multipliers if available
    */
   private getCellSize(): { w: number; h: number } {
+    const vw = this.viewport?.tileW;
+    const vh = this.viewport?.tileH;
+    if (Number.isFinite(vw) && Number.isFinite(vh) && (vw as number) > 0 && (vh as number) > 0) {
+      return { w: vw as number, h: vh as number };
+    }
+
     const camera = this.space?.camera;
     const spacingX = camera?.char_spacing_x ?? DEFAULT_CAMERA_VALUES.char_spacing_x;
     const spacingY = camera?.char_spacing_y ?? DEFAULT_CAMERA_VALUES.char_spacing_y;
     const w = this.baseFontSize * (1 + this.letterSpacing) * spacingX;
     const h = this.baseFontSize * this.lineHeight * spacingY;
     return { w, h };
+  }
+
+  private getFontSizePx(): number {
+    const fs = this.viewport?.fontSizePx;
+    if (Number.isFinite(fs) && (fs as number) > 0) return fs as number;
+    return this.baseFontSize;
   }
 
   /**
@@ -200,6 +216,9 @@ export class VoxelDOMRenderer {
       canvas = document.createElement('canvas');
       canvas.className = `voxel-layer layer-z-${z}`;
       canvas.style.position = 'absolute';
+      // Override CSS centering rules; renderer positions via transforms.
+      canvas.style.left = '0px';
+      canvas.style.top = '0px';
       canvas.style.transformOrigin = 'center center';
       canvas.style.willChange = 'transform';
       canvas.style.imageRendering = 'pixelated';
@@ -244,6 +263,10 @@ export class VoxelDOMRenderer {
     const zDistance = layer.z - selectedZ;
     const isSelected = zDistance === 0;
 
+    // Orthographic mode: when parallax is disabled, ALL layers share the same transform
+    // so they align perfectly with the type grid (no perspective effects by layer order).
+    const perspectiveEnabled = !!camera.parallax_move_enabled;
+
     // Get cell size
     const { w: cellW, h: cellH } = this.getCellSize();
 
@@ -256,12 +279,12 @@ export class VoxelDOMRenderer {
     const panX = camera.pan_x ?? DEFAULT_CAMERA_VALUES.pan_x;
     const panY = camera.pan_y ?? DEFAULT_CAMERA_VALUES.pan_y;
 
-    // Calculate pan factor based on Z distance
-    // Focused layer (zDistance = 0) has factor of 1.0
-    // Other layers scale based on their distance from focus plane
+    // Pan factor based on Z distance (perspective mode only)
     const basePanFactor = 1.0;
     const panFactorPerLayer = 0.1; // How much pan scales per Z layer
-    const panFactor = isSelected ? basePanFactor : basePanFactor + (zDistance * panFactorPerLayer);
+    const panFactor = perspectiveEnabled
+      ? (isSelected ? basePanFactor : basePanFactor + (zDistance * panFactorPerLayer))
+      : 1.0;
 
     // Clamp pan values to prevent extreme transforms
     const MAX_PAN = 1000; // Maximum pan in grid cells
@@ -269,25 +292,25 @@ export class VoxelDOMRenderer {
     const clampedPanY = Math.max(-MAX_PAN, Math.min(MAX_PAN, panY));
 
     // Convert grid cell pan to pixel offset
+    // Use cellW/cellH to match viewport coordinate system
     const panOffsetX = -clampedPanX * cellW * panFactor;
-    const panOffsetY = clampedPanY * cellH * panFactor; // Note: positive offsetY moves content up (canvas coords)
+    const panOffsetY = clampedPanY * cellH * panFactor;
 
-    // Parallax (non-selected layers only)
+    // Mouse parallax (non-selected layers only, perspective mode)
     let parallaxX = 0;
     let parallaxY = 0;
-    if (camera.parallax_move_enabled && !isSelected) {
+    if (perspectiveEnabled && !isSelected) {
       const movePerLayer = camera.movement_per_layer ?? DEFAULT_CAMERA_VALUES.movement_per_layer;
       const intensity = camera.parallax_intensity * movePerLayer;
       parallaxX = -this.mouseParallax.x * zDistance * intensity;
       parallaxY = this.mouseParallax.y * zDistance * intensity;
     }
 
-    // Size scale - selected layer uses base_layer_scale, others scale relative to it
+    // Size scale
     const baseLayerScale = camera.base_layer_scale ?? DEFAULT_CAMERA_VALUES.base_layer_scale;
     let scale = baseLayerScale;
-    if (camera.parallax_size_enabled && !isSelected) {
+    if (perspectiveEnabled && camera.parallax_size_enabled && !isSelected) {
       const scalePerLayer = camera.scale_per_layer ?? 0.12;
-      // Other layers scale relative to the base layer
       const relativeScale = 1 + (zDistance * scalePerLayer);
       scale = baseLayerScale * Math.max(0.75, Math.min(1.35, relativeScale));
     }
@@ -298,14 +321,10 @@ export class VoxelDOMRenderer {
     // Get calibration from camera config
     const calibration = camera.calibration ?? { x: 0, y: 0 };
 
-    // Get global pan offset from mono_canvas CSS transform
-    // This moves the selected layer with the UI when panning blank space
-    const globalOffsetX = isSelected ? (this.viewport.offsetX ?? 0) : 0;
-    const globalOffsetY = isSelected ? (this.viewport.offsetY ?? 0) : 0;
-
-    // Build transform - position is relative to clip container
-    const layerX = viewportCenterX + panOffsetX + parallaxX + calibration.x + globalOffsetX;
-    const layerY = viewportCenterY + panOffsetY + parallaxY + calibration.y + globalOffsetY;
+    // Build transform - position relative to viewport center
+    // This ensures zoom scales from the center, keeping content aligned
+    const layerX = viewportCenterX + panOffsetX + parallaxX + calibration.x;
+    const layerY = viewportCenterY + panOffsetY + parallaxY + calibration.y;
 
     return `
       translate3d(${layerX}px, ${layerY}px, 0)
@@ -323,19 +342,25 @@ export class VoxelDOMRenderer {
    */
   private renderLayer(layer: VoxelLayer, ctx: CanvasRenderingContext2D): void {
     const { w: cellW, h: cellH } = this.getCellSize();
+    const fontSizePx = this.getFontSizePx();
+
+    const gridW = layer.cells[0]?.length ?? 0;
+    const gridH = layer.cells.length;
+    const gridPxW = gridW * cellW;
+    const gridPxH = gridH * cellH;
+
+    // Non-selected layers may use a larger canvas (padding) to avoid clipping during transforms.
+    // Center the grid content inside the canvas so all layers share the same visual origin.
+    const padX = Math.max(0, (ctx.canvas.width - gridPxW) / 2);
+    const padY = Math.max(0, (ctx.canvas.height - gridPxH) / 2);
 
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
 
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
-    // Center the grid in the canvas
-    const canvasCenterX = ctx.canvas.width / 2;
-    const canvasCenterY = ctx.canvas.height / 2;
-    const gridW = (layer.cells[0]?.length ?? 0) * cellW;
-    const gridH = layer.cells.length * cellH;
-    const startX = canvasCenterX - gridW / 2;
-    const startY = canvasCenterY - gridH / 2;
+    const startX = padX;
+    const startY = padY;
 
     // Weight index to CSS font weight mapping
     const weightMap = [100, 200, 300, 400, 500, 600, 700, 800];
@@ -359,7 +384,7 @@ export class VoxelDOMRenderer {
         // Apply font weight from cell
         const weightIndex = cell.weight_index ?? 4;
         const cssWeight = weightMap[weightIndex] ?? 400;
-        ctx.font = `${cssWeight} ${this.baseFontSize}px ${this.fontFamily}`;
+        ctx.font = `${cssWeight} ${fontSizePx}px ${this.fontFamily}`;
 
         ctx.fillStyle = `rgb(${cell.rgb.r}, ${cell.rgb.g}, ${cell.rgb.b})`;
         ctx.fillText(cell.char, px, py);

@@ -163,6 +163,11 @@ export type PlaceModuleConfig = {
   on_double_click_ground?: (tile_x: number, tile_y: number) => void;  // Open scattered container
   get_actor_position?: () => { x: number; y: number } | null;  // For distance checking
 
+  // Ground item UX (tabletop): direct drag only when exactly one item exists on the tile.
+  on_drag_start_ground_item?: (tile_x: number, tile_y: number) => void;
+  // Hover signal for compatible-slot highlighting (item_id is PlaceItem.item_ref)
+  on_hover_ground_item?: (tile_x: number, tile_y: number, item_id: string | null) => void;
+
   // Drag and drop callbacks
   on_drop?: (tile_x: number, tile_y: number) => Promise<boolean>;  // Drop item onto ground tile (adjacent)
   on_throw?: (tile_x: number, tile_y: number) => Promise<boolean>;  // Throw item to distant tile (within range)
@@ -999,46 +1004,57 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       });
     }
 
-    // CRITICAL FIX STEP 5: Draw items on ground (after entities, before highlights)
-    // Items appear as small objects that can be inspected and picked up
-    debug_log_place(`[GroundItems] Rendering ${place.contents.items_on_ground.length} ground items`);
-    for (const item of place.contents.items_on_ground) {
-      debug_log_place(`[GroundItems] Processing item: ${item.item_ref} at (${item.tile_position.x},${item.tile_position.y}), qty: ${item.quantity}`);
-      const screen_x = inner.x0 + Math.floor((item.tile_position.x - view.offset_x) / view.scale);
-      const screen_y = inner.y0 + Math.floor((item.tile_position.y - view.offset_y) / view.scale);
-      
-      debug_log_place(`[GroundItems] Screen position: (${screen_x},${screen_y}), bounds: [${inner.x0},${inner.y0}]-[${inner.x1},${inner.y1}]`);
-      
-      if (screen_x >= inner.x0 && screen_x <= inner.x1 &&
-          screen_y >= inner.y0 && screen_y <= inner.y1) {
-        // Don't draw if an entity is on the same tile (entity takes precedence)
-        let entity_present = false;
-        for (const [, pos] of entity_positions) {
-          if (pos.x === screen_x && pos.y === screen_y) {
-            entity_present = true;
-            break;
-          }
-        }
-        
-        debug_log_place(`[GroundItems] Entity present: ${entity_present}`);
-        
-        if (!entity_present) {
-          // Choose character based on quantity
-          const item_char = item.quantity > 10 ? '$' : 
-                           item.quantity > 1 ? '*' : '·';
-          
-          debug_log_place(`[GroundItems] Drawing item at (${screen_x},${screen_y}) with char: ${item_char}`);
-          
-          canvas.set(screen_x, screen_y, {
-            char: item_char,
-            rgb: get_color_by_name("vivid_yellow").rgb, // Gold/yellow for treasure
-            weight_index: 5, // Below entities (6) but above floor
-            render_index: 3, // Below entities
-          });
-        }
-      } else {
-        debug_log_place(`[GroundItems] Item out of bounds, skipping`);
+    // Draw items on ground (tabletop UX)
+    // - Exactly 1 item on a tile: draw the item (qty-based glyph)
+    // - 2+ items on a tile: draw a pile glyph (single interaction target)
+    const ground_by_tile = new Map<string, typeof place.contents.items_on_ground>();
+    for (const it of place.contents.items_on_ground) {
+      const key = `${it.tile_position.x}_${it.tile_position.y}`;
+      const arr = ground_by_tile.get(key);
+      if (arr) arr.push(it);
+      else ground_by_tile.set(key, [it]);
+    }
+
+    debug_log_place(`[GroundItems] Rendering ${ground_by_tile.size} ground tile(s)`);
+    for (const [key, items] of ground_by_tile.entries()) {
+      const [txs, tys] = key.split('_');
+      const tile_x = parseInt(txs || '0', 10);
+      const tile_y = parseInt(tys || '0', 10);
+
+      const screen_x = inner.x0 + Math.floor((tile_x - view.offset_x) / view.scale);
+      const screen_y = inner.y0 + Math.floor((tile_y - view.offset_y) / view.scale);
+
+      if (!(screen_x >= inner.x0 && screen_x <= inner.x1 && screen_y >= inner.y0 && screen_y <= inner.y1)) {
+        continue;
       }
+
+      // Don't draw if an entity is on the same tile (entity takes precedence)
+      let entity_present = false;
+      for (const [, pos] of entity_positions) {
+        if (pos.x === screen_x && pos.y === screen_y) {
+          entity_present = true;
+          break;
+        }
+      }
+      if (entity_present) continue;
+
+      let char = '·';
+      if (items.length >= 2) {
+        // pile
+        char = items.length > 10 ? '#' : '*';
+      } else {
+        // single item glyph uses quantity
+        const single = items[0];
+        const qty = single ? single.quantity : 1;
+        char = qty > 10 ? '$' : qty > 1 ? '*' : '·';
+      }
+
+      canvas.set(screen_x, screen_y, {
+        char,
+        rgb: get_color_by_name("vivid_yellow").rgb,
+        weight_index: 5,
+        render_index: 3,
+      });
     }
 
     // Draw target highlight (follows entity movement) - draw AFTER entities
@@ -1269,18 +1285,64 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       if (tile) {
         const entity = get_entity_at(tile.x, tile.y, place);
         hovered = { x: tile.x, y: tile.y, entity: entity ?? undefined };
+
+        // Ground hover callback for highlighting (single item only)
+        if (config.on_hover_ground_item) {
+          const items_on_ground = place.contents.items_on_ground.filter(
+            item => item.tile_position.x === tile.x && item.tile_position.y === tile.y
+          );
+          if (items_on_ground.length === 1) {
+            config.on_hover_ground_item(tile.x, tile.y, items_on_ground[0]!.item_ref);
+          } else {
+            config.on_hover_ground_item(tile.x, tile.y, null);
+          }
+        }
       } else {
         hovered = null;
+        config.on_hover_ground_item?.(-1, -1, null);
       }
 
       last_pointer_x = e.x;
       last_pointer_y = e.y;
     },
 
+    OnDragStart(e: DragEvent): void {
+      const place = config.get_place();
+      if (!place) return;
+
+      // Don't start a ground drag if a UI drag is active.
+      if (config.is_dragging?.()) return;
+
+      const tile = screen_to_tile(e.start_x, e.start_y);
+      if (!tile) return;
+
+      // Range check (touch)
+      const actor_pos = config.get_actor_position?.();
+      if (actor_pos) {
+        const distance = Math.sqrt(
+          Math.pow(actor_pos.x - tile.x, 2) +
+          Math.pow(actor_pos.y - tile.y, 2)
+        );
+        if (distance > 1.5) return;
+      }
+
+      const items_on_ground = place.contents.items_on_ground.filter(
+        item => item.tile_position.x === tile.x && item.tile_position.y === tile.y
+      );
+
+      // Only allow direct dragging when exactly one item exists.
+      if (items_on_ground.length !== 1) return;
+
+      config.on_drag_start_ground_item?.(tile.x, tile.y);
+    },
+
     OnDragMove(e): void {
       const place = config.get_place();
       if (!place) return;
       if (!(e.buttons & 1)) return;
+
+      // When dragging an item (inventory/ground), do not pan the view.
+      if (config.is_dragging?.()) return;
 
       const dx = e.step_dx;
       const dy = e.step_dy;
@@ -1424,14 +1486,14 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         );
         
         if (items_on_ground.length > 0) {
-          // Check distance (must be within 1 tile)
+          // Check distance (touch range)
           const actor_pos = config.get_actor_position?.();
           if (actor_pos) {
             const distance = Math.sqrt(
               Math.pow(actor_pos.x - tile.x, 2) +
               Math.pow(actor_pos.y - tile.y, 2)
             );
-            if (distance <= 1) {
+            if (distance <= 1.5) {
               debug_log_place(`Double-click on ground items at (${tile.x},${tile.y}), count: ${items_on_ground.length}`);
               config.on_double_click_ground(tile.x, tile.y);
             } else {

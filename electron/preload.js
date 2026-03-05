@@ -15,8 +15,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Write file via main process
   writeFile: (filePath, content) => ipcRenderer.invoke('write-file', filePath, content),
 
+  // Atomic write (temp + rename)
+  writeFileAtomic: (filePath, content) => ipcRenderer.invoke('write-file-atomic', filePath, content),
+
   // Get data slot directory
   getDataSlotDir: (slot) => ipcRenderer.invoke('get-data-slot-dir', slot),
+
+  // Painter save directory
+  getAsciiDrawingsDir: () => ipcRenderer.invoke('get-ascii-drawings-dir'),
+
+  // File dialogs
+  showOpenDialog: (options) => ipcRenderer.invoke('show-open-dialog', options),
 
   // App mode (game or ascii_painter) - set before page loads
   appMode: appMode,

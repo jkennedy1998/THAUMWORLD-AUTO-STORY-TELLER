@@ -120,6 +120,13 @@ function is_equipment_format(slot: any): slot is EquipmentSlot {
   return slot && ("armor" in slot || "garb" in slot || "tool" in slot);
 }
 
+function extract_item_id(maybe_item: any): string | null {
+  if (!maybe_item) return null;
+  if (typeof maybe_item === "string") return maybe_item;
+  if (typeof maybe_item === "object" && typeof maybe_item.id === "string") return maybe_item.id;
+  return null;
+}
+
 /**
  * Resolve slots for a single body part
  * 
@@ -150,7 +157,7 @@ export function resolve_body_slot(
         body_slot: slot_name,
         slot_type: "tool",
         garb_index: null,
-        item_id: slot_data.tool ?? null,
+        item_id: extract_item_id(slot_data.tool),
         is_placeholder: false,
         rel_x: current_col * (config.cell_width + config.gap),
         rel_y: 0,
@@ -165,7 +172,7 @@ export function resolve_body_slot(
       body_slot: slot_name,
       slot_type: "armor",
       garb_index: null,
-      item_id: slot_data.armor ?? null,
+      item_id: extract_item_id(slot_data.armor),
       is_placeholder: false,
       rel_x: current_col * (config.cell_width + config.gap),
       rel_y: 0,
@@ -175,10 +182,10 @@ export function resolve_body_slot(
     current_col++;
     
     // 3. GARB slots (equipped items first, no gaps)
-    const garb_items: string[] = slot_data.garb || [];
+    const garb_items: any[] = slot_data.garb || [];
     for (let i = 0; i < garb_items.length; i++) {
-      const item_id = garb_items[i];
-      if (item_id === undefined) continue;
+      const item_id = extract_item_id(garb_items[i]);
+      if (!item_id) continue;
       slots.push({
         body_slot: slot_name,
         slot_type: "garb",
@@ -338,10 +345,12 @@ export function find_slot_at_position(
  * @returns Container ID string
  */
 export function get_slot_container_id(actor_id: string, slot: ResolvedSlot): string {
+  // Phase 5 inline path IDs
+  // body_slots.<body_slot>.<slot_type>[.<garb_index>]
   if (slot.slot_type === "garb" && slot.garb_index !== null) {
-    return `container.${actor_id}.${slot.body_slot}.${slot.slot_type}.${slot.garb_index}`;
+    return `body_slots.${slot.body_slot}.${slot.slot_type}.${slot.garb_index}`;
   }
-  return `container.${actor_id}.${slot.body_slot}.${slot.slot_type}`;
+  return `body_slots.${slot.body_slot}.${slot.slot_type}`;
 }
 
 /**
@@ -351,19 +360,16 @@ export function get_slot_container_id(actor_id: string, slot: ResolvedSlot): str
  * @returns Parsed info or null if invalid
  */
 export function parse_slot_container_id(container_id: string): {
-  actor_id: string;
   body_slot: string;
   slot_type: SlotType;
   garb_index: number | null;
 } | null {
-  const match = container_id.match(/^container\.(\w+)\.(\w+)\.(tool|armor|garb)(?:\.(\d+))?$/);
-  if (!match || match[1] === undefined || match[2] === undefined || match[3] === undefined) return null;
-  
+  const match = container_id.match(/^body_slots\.(\w+)\.(tool|armor|garb)(?:\.(\d+))?$/);
+  if (!match || match[1] === undefined || match[2] === undefined) return null;
   return {
-    actor_id: match[1]!,
-    body_slot: match[2]!,
-    slot_type: match[3] as SlotType,
-    garb_index: match[4] ? parseInt(match[4], 10) : null,
+    body_slot: match[1]!,
+    slot_type: match[2] as SlotType,
+    garb_index: match[3] ? parseInt(match[3], 10) : null,
   };
 }
 
@@ -371,9 +377,7 @@ export function parse_slot_container_id(container_id: string): {
  * Check if a container ID represents a body slot (not a nested item container)
  */
 export function is_body_slot_container_id(container_id: string): boolean {
-  return container_id.startsWith("container.") && 
-         !container_id.includes(".place.") &&
-         !container_id.startsWith("container.place.");
+  return container_id.startsWith("body_slots.");
 }
 
 /**

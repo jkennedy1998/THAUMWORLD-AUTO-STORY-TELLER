@@ -79,6 +79,9 @@ export type CharacterModuleConfig = {
     container_id: string;
   }>;
   on_container_click?: (container_id: string) => void;
+  // Default container selection (used for pickup routing)
+  get_default_container_id?: () => string | null;
+  on_set_default_container?: (container_id: string) => void;
   
   // Phase 7: Right-click container opening
   on_open_container?: (container_id: string, slot_name: string) => Promise<void>;
@@ -357,6 +360,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       sidebar_boxes = [];
       if (opts.get_equipped_containers) {
         const equipped_containers = opts.get_equipped_containers();
+        const default_container_id = opts.get_default_container_id?.() ?? null;
         const box_width = 3;
         const box_height = 3;
         const gap = 1;
@@ -368,16 +372,23 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
           if (container_info?.container_id) {
             const display_char = container_info.item_definition.display_char || "C";
             const is_open = opts.get_open_containers?.().has(container_info.container_id) || false;
-            const container_color: Rgb = is_open 
-              ? { r: 180, g: 100, b: 220 }
-              : { r: 255, g: 165, b: 0 };
+            const is_default = default_container_id === container_info.container_id;
+
+            // Visual priority: default (yellow) > open (purple) > container (orange)
+            const container_color: Rgb = is_default
+              ? { r: 255, g: 255, b: 100 }
+              : (is_open ? { r: 180, g: 100, b: 220 } : { r: 255, g: 165, b: 0 });
+
+            const border_color: Rgb = is_default
+              ? { r: 255, g: 255, b: 100 }
+              : { r: 100, g: 100, b: 100 };
             
             draw_container_box(
               c,
               { x0: sidebar_x, y0: sidebar_y, x1: sidebar_x + box_width - 1, y1: sidebar_y + box_height - 1 },
               display_char,
               container_color,
-              { r: 100, g: 100, b: 100 },
+              border_color,
               3
             );
             
@@ -592,8 +603,14 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
             debug_log(`[CharacterModule] Right-clicked sidebar container: ${box.container_id}`);
             void opts.on_open_container?.(box.container_id, 'sidebar');
           } else {
-            debug_log(`[CharacterModule] Clicked sidebar container: ${box.container_id}`);
-            void opts.on_container_click?.(box.container_id);
+            if (e.click_count === 2) {
+              debug_log(`[CharacterModule] Double-clicked sidebar container (set default): ${box.container_id}`);
+              opts.on_set_default_container?.(box.container_id);
+              void opts.on_open_container?.(box.container_id, 'sidebar');
+            } else {
+              debug_log(`[CharacterModule] Clicked sidebar container: ${box.container_id}`);
+              void opts.on_container_click?.(box.container_id);
+            }
           }
           return;
         }

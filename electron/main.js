@@ -1,6 +1,17 @@
-import { app, BrowserWindow, ipcMain, clipboard, nativeImage } from 'electron';
-import { readFileSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { app, BrowserWindow, ipcMain, clipboard, dialog } from 'electron';
+import {
+    readFileSync,
+    writeFileSync,
+    existsSync,
+    mkdirSync,
+    openSync,
+    writeSync,
+    fsyncSync,
+    closeSync,
+    renameSync,
+    unlinkSync,
+} from 'fs';
+import { join, dirname, basename } from 'path';
 
 // Determine which mode we're in
 const IS_PAINTER_MODE = process.env.THAUM_APP_MODE === 'ascii_painter';
@@ -50,6 +61,60 @@ function create_window() {
     console.log('[Electron] Window created successfully');
 }
 
+function get_ascii_drawings_dir() {
+    const dir = join(process.cwd(), 'ascii_drawings');
+    try {
+        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    } catch {
+        // ignore
+    }
+    return dir;
+}
+
+function write_file_atomic(targetPath, content) {
+    const dir = dirname(targetPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+
+    const base = basename(targetPath);
+    const tmpPath = join(dir, `.${base}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    const bakPath = join(dir, `.${base}.bak`);
+
+    const fd = openSync(tmpPath, 'w');
+    try {
+        writeSync(fd, content, 0, 'utf-8');
+        fsyncSync(fd);
+    } finally {
+        closeSync(fd);
+    }
+
+    // Swap in atomically as best-effort on Windows (rename won't overwrite).
+    try {
+        if (existsSync(bakPath)) {
+            try { unlinkSync(bakPath); } catch { /* ignore */ }
+        }
+
+        if (existsSync(targetPath)) {
+            renameSync(targetPath, bakPath);
+        }
+        renameSync(tmpPath, targetPath);
+        if (existsSync(bakPath)) {
+            try { unlinkSync(bakPath); } catch { /* ignore */ }
+        }
+    } catch (e) {
+        // Attempt to restore from backup if the swap failed
+        try {
+            if (existsSync(bakPath) && !existsSync(targetPath)) {
+                renameSync(bakPath, targetPath);
+            }
+        } catch {
+            // ignore
+        }
+
+        try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch { /* ignore */ }
+        throw e;
+    }
+}
+
 // IPC handlers for renderer communication
 ipcMain.handle('read-file', async (event, filePath) => {
     try {
@@ -64,6 +129,29 @@ ipcMain.handle('write-file', async (event, filePath, content) => {
     try {
         writeFileSync(filePath, content, 'utf-8');
         return { success: true };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('write-file-atomic', async (event, filePath, content) => {
+    try {
+        write_file_atomic(filePath, content);
+        return { success: true };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('get-ascii-drawings-dir', async () => {
+    return get_ascii_drawings_dir();
+});
+
+ipcMain.handle('show-open-dialog', async (event, options) => {
+    try {
+        const win = BrowserWindow.fromWebContents(event.sender);
+        const result = await dialog.showOpenDialog(win, options);
+        return { success: true, result };
     } catch (error) {
         return { success: false, error: error.message };
     }

@@ -15,7 +15,7 @@ export type FileMenuOptions = {
   on_save: () => void;
   on_load: () => void;
   on_new: () => void;
-  on_export_text: () => void;
+  on_export_text?: () => void;
   on_clear: () => void;
   on_reset_positions?: () => void;
   on_reset_camera?: () => void;
@@ -45,12 +45,12 @@ export function make_file_menu_module(opts: FileMenuOptions): Module {
     { label: 'NEW', shortcut: 'N', action: opts.on_new, x: 1, y: 0, width: 6 },
     { label: 'SAVE', shortcut: 'S', action: opts.on_save, x: 8, y: 0, width: 6 },
     { label: 'LOAD', shortcut: 'O', action: opts.on_load, x: 15, y: 0, width: 6 },
-    { label: 'EXPORT', shortcut: 'E', action: opts.on_export_text, x: 22, y: 0, width: 8 },
-    { label: 'CLEAR', shortcut: 'C', action: opts.on_clear, x: 31, y: 0, width: 7 },
+    // CLEAR is intentionally placed farther right so it's not adjacent to save/load.
+    { label: 'CLEAR', shortcut: 'C', action: opts.on_clear, x: 45, y: 0, width: 7 },
   ];
   
   // Add module toggle buttons
-  let module_button_x = 50;
+  let module_button_x = 60;
   
   if (opts.on_toggle_toolbox) {
     buttons.push({ label: 'TOOLS', shortcut: '', action: opts.on_toggle_toolbox, x: module_button_x, y: 0, width: 7 });
