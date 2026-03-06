@@ -1330,8 +1330,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         item => item.tile_position.x === tile.x && item.tile_position.y === tile.y
       );
 
-      // Only allow direct dragging when exactly one item exists.
-      if (items_on_ground.length !== 1) return;
+      // Allow direct dragging when at least one item exists.
+      // Single item = drag that item; 2+ items = drag the whole pile (sweep).
+      if (items_on_ground.length < 1) return;
 
       config.on_drag_start_ground_item?.(tile.x, tile.y);
     },

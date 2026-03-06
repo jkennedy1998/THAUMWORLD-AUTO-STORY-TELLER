@@ -57,10 +57,6 @@ export type CharacterModuleConfig = {
     equipped_item: { instance: ItemInstance; definition: ItemDefinition } | null
   ) => void;
   get_highlighted_slots?: () => Array<{ slot_name: string; slot_type: SlotType; garb_index?: number }>;
-  
-  // Drag visualization
-  on_drag_move?: (x: number, y: number) => void;
-  render_drag_ghost?: (c: Canvas) => void;
   on_drag_rejected?: () => void;
 
   // Styling
@@ -547,8 +543,6 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
         }
       });
 
-      // Render drag ghost
-      opts.render_drag_ghost?.(c);
     },
 
     OnPointerMove(e: PointerEvent): void {
@@ -745,8 +739,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
         debug_log(`[CharacterModule] Panning: offset (${pan_offset.x}, ${pan_offset.y}), bounds:`, bounds);
         return;
       }
-      
-      opts.on_drag_move?.(e.x, e.y);
+
     },
 
     OnDragEnd(e: DragEvent): void {

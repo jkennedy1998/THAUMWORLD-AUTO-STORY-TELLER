@@ -24,6 +24,12 @@ export type CanvasRuntimeOptions = {
     
     // Called when a drag ends outside any module (for rejection feedback)
     on_drag_end_outside?: (x: number, y: number) => void;
+
+    // Called on every pointer move (global hook; does not affect routing)
+    on_pointer_move_global?: (x: number, y: number, e: PointerEvent) => void;
+
+    // Called after modules compose each frame (for overlays)
+    on_after_compose?: (canvas: Canvas) => void;
 };
 
 const DEFAULT_WEIGHT_INDEX_TO_CSS: readonly number[] = [100, 200, 300, 400, 500, 600, 700, 800] as const;
@@ -68,6 +74,12 @@ export class CanvasRuntime {
     private wheel_accum_dy = 0;
     private wheel_pending: { x: number; y: number; mods: any; delta_mode: number } | null = null;
 
+    // Pointer (pen/touch) state tracking
+    private active_pointer_id: number | null = null;
+    private active_pointer_buttons: number = 0;
+    private active_pointer_button: number = 0;
+    private suppress_mouse_until_ms: number = 0;
+
     private hover_owner: Module | null = null;
     private capture_owner: Module | null = null;
     private down_owner: Module | null = null;
@@ -75,6 +87,8 @@ export class CanvasRuntime {
     private dragging = false;
     
     private on_drag_end_outside: ((x: number, y: number) => void) | null = null;
+    private on_pointer_move_global: ((x: number, y: number, e: PointerEvent) => void) | null = null;
+    private on_after_compose: ((canvas: Canvas) => void) | null = null;
 
     private readonly DBLCLICK_MS = 180;
     private readonly DBLCLICK_TILE_RADIUS = 1;
@@ -116,6 +130,8 @@ export class CanvasRuntime {
         this.weight_index_to_css = opts.weight_index_to_css ?? DEFAULT_WEIGHT_INDEX_TO_CSS;
         this.modules = opts.modules;
         this.on_drag_end_outside = opts.on_drag_end_outside ?? null;
+        this.on_pointer_move_global = opts.on_pointer_move_global ?? null;
+        this.on_after_compose = opts.on_after_compose ?? null;
 
         this.engine_canvas = create_canvas(this.grid_width, this.grid_height);
         this.key_sink = opts.key_sink ?? this.ensure_key_sink();
@@ -201,24 +217,27 @@ export class CanvasRuntime {
         kind: PointerEvent['kind'],
         x: number,
         y: number,
-        ev: MouseEvent,
+        ev: any,
         cell?: Cell,
         click_count?: 1 | 2,
     ): PointerEvent {
         const e: any = {
-            pointer_id: 0,
+            pointer_id: typeof ev?.pointerId === 'number' ? ev.pointerId : 0,
             kind,
             x,
             y,
 
-            buttons: ev.buttons,
-            button: ev.button,
+            buttons: typeof ev?.buttons === 'number' ? ev.buttons : 0,
+            button: typeof ev?.button === 'number' ? ev.button : 0,
 
             shift: ev.shiftKey,
             ctrl: ev.ctrlKey,
             alt: ev.altKey,
             meta: ev.metaKey,
         };
+
+        if (typeof ev?.pointerType === 'string') e.pointer_type = ev.pointerType;
+        if (typeof ev?.pressure === 'number') e.pressure = ev.pressure;
 
         if (this.last_tile) {
             e.prev_x = this.last_tile.x;
@@ -255,6 +274,8 @@ export class CanvasRuntime {
             step_dy: y - prev.y,
             buttons,
         };
+
+        // caller may attach pointer metadata later
 
         if (cell !== undefined) e.cell = cell;
         return e;
@@ -543,89 +564,358 @@ export class CanvasRuntime {
             // ignore
         }
 
-        const is_painter_mode = (window as any).electronAPI?.appMode === 'ascii_painter';
-        const stylus_debug_enabled = is_painter_mode;
-        let last_stylus_move_log_ms = 0;
+        // Debug logging for pen/stylus input was used during development.
+        // Keep runtime free of noisy event logs in normal operation.
 
-        const log_stylus = (kind: string, ev: any, tile: { x: number; y: number } | null) => {
-            if (!stylus_debug_enabled) return;
-            const pointerType = ev?.pointerType;
-            const isPenLike = pointerType === 'pen' || pointerType === 'touch';
+        const now_ms = () => performance.now();
 
-            // Always log down/up/cancel for any pointer. Only log move for pen/touch.
-            if (kind === 'move' && !isPenLike) return;
+        const normalize_buttons = (ev: any): { buttons: number; button: number } => {
+            // PointerEvent move often has button=-1; keep last known.
+            let buttons = typeof ev?.buttons === 'number' ? ev.buttons : 0;
+            let button = typeof ev?.button === 'number' ? ev.button : 0;
 
-            if (kind === 'move') {
-                const now = performance.now();
-                if (now - last_stylus_move_log_ms < 50) return;
-                last_stylus_move_log_ms = now;
+            if (typeof ev?.pointerId === 'number') {
+                if (ev.type === 'pointerdown') {
+                    // Some pen drivers report button=0 even for barrel buttons.
+                    if (button === 0 && buttons) {
+                        if (buttons & 2) button = 2;      // secondary
+                        else if (buttons & 4) button = 1; // auxiliary/middle
+                        else if (buttons & 8) button = 2; // back -> treat as secondary
+                        else if (buttons & 16) button = 2; // forward -> treat as secondary
+                        else if (buttons & 32) {
+                            // "Eraser" / pen barrel often maps to buttons=32.
+                            // Treat it as secondary for tool routing.
+                            button = 2;
+                            buttons = buttons | 2;
+                        }
+                    }
+
+                    this.active_pointer_id = ev.pointerId;
+                    this.active_pointer_buttons = buttons || 1;
+                    this.active_pointer_button = button;
+                }
+
+                const is_active = this.active_pointer_id === ev.pointerId;
+                if (is_active) {
+                    // Some tablet drivers drop buttons to 0 during pen drag.
+                    const pressure = typeof ev?.pressure === 'number' ? ev.pressure : 0;
+                    const pointerType = typeof ev?.pointerType === 'string' ? ev.pointerType : '';
+                    const pen_like = pointerType === 'pen' || pointerType === 'touch';
+                    const is_move = ev.type === 'pointermove';
+                    if (is_move && buttons === 0 && (pressure > 0 || pen_like) && this.active_pointer_buttons) {
+                        buttons = this.active_pointer_buttons;
+                    }
+                    if (is_move && (button === -1 || button === 0) && this.active_pointer_button) {
+                        // Preserve which button initiated the stroke.
+                        button = this.active_pointer_button;
+                    }
+
+                    // If this pointer is in "eraser" mode, ensure secondary bit stays present.
+                    if (is_move && (buttons & 32) && !(buttons & 2)) {
+                        buttons = buttons | 2;
+                    }
+
+                    if (ev.type === 'pointerup' || ev.type === 'pointercancel') {
+                        this.active_pointer_id = null;
+                        this.active_pointer_buttons = 0;
+                        this.active_pointer_button = 0;
+                    }
+                }
             }
 
-            const payload = {
-                kind,
-                pointerType: ev?.pointerType,
-                pointerId: ev?.pointerId,
-                isPrimary: ev?.isPrimary,
-                button: ev?.button,
-                buttons: ev?.buttons,
-                pressure: ev?.pressure,
-                tiltX: ev?.tiltX,
-                tiltY: ev?.tiltY,
-                twist: ev?.twist,
-                tangentialPressure: ev?.tangentialPressure,
-                width: ev?.width,
-                height: ev?.height,
-                clientX: ev?.clientX,
-                clientY: ev?.clientY,
-                offsetX: ev?.offsetX,
-                offsetY: ev?.offsetY,
-                tile,
-                capture_owner: this.capture_owner?.id ?? null,
-                down_tile: this.down_tile ?? null,
-                dragging: this.dragging,
-            };
-
-            // Stringify to keep Electron log single-line and greppable.
-            console.log('[STYLUS-DEBUG]', JSON.stringify(payload));
+            return { buttons, button };
         };
 
-        // Stylus/tablet debugging: log PointerEvents if the browser provides them.
+        const attach_pointer_meta = (out: any, ev: any) => {
+            if (!out) return;
+            if (typeof ev?.pointerType === 'string') out.pointer_type = ev.pointerType;
+            if (typeof ev?.pressure === 'number') out.pressure = ev.pressure;
+        };
+
+        const route_move = (ev: any) => {
+            const t = this.mouse_to_tile(ev);
+
+            if (!t) {
+                if (!this.capture_owner && this.hover_owner?.OnPointerLeave && this.last_tile) {
+                    const leave_ev: any = this.make_pointer_event(
+                        'leave',
+                        this.last_tile.x,
+                        this.last_tile.y,
+                        ev,
+                        this.engine_canvas.get(this.last_tile.x, this.last_tile.y),
+                    );
+                    attach_pointer_meta(leave_ev, ev);
+                    this.hover_owner.OnPointerLeave(leave_ev);
+                }
+                this.hover_owner = null;
+                this.last_tile = null;
+                return;
+            }
+
+            const top = this.route_to_top_module(t.x, t.y) ?? null;
+
+            const nb = normalize_buttons(ev);
+            const base: any = this.make_pointer_event(
+                'move',
+                t.x,
+                t.y,
+                { ...ev, buttons: nb.buttons, button: nb.button },
+                this.engine_canvas.get(t.x, t.y),
+            );
+            attach_pointer_meta(base, ev);
+
+            // Global pointer move hook (does not participate in routing).
+            // Useful for cross-module drag visuals/state.
+            if (this.on_pointer_move_global) {
+                try {
+                    this.on_pointer_move_global(base.x, base.y, base as PointerEvent);
+                } catch {
+                    // ignore
+                }
+            }
+
+            // Global pan: Check at top level so it works even with no capture_owner (blank space)
+            if (this.global_pan_active && (nb.buttons & 1)) {
+                const should_global_pan = !this.capture_owner ||
+                    !(this.capture_owner.id === 'painter_canvas' || this.capture_owner.id?.startsWith('canvas'));
+
+                if (should_global_pan) {
+                    const dx = ev.clientX - this.last_pan_client_x;
+                    const dy = ev.clientY - this.last_pan_client_y;
+                    this.last_pan_client_x = ev.clientX;
+                    this.last_pan_client_y = ev.clientY;
+
+                    const { tile_w, tile_h } = this.get_metrics();
+                    this.pan_accum_px_x += dx;
+                    this.pan_accum_px_y += dy;
+
+                    const step_x = tile_w > 0 ? Math.trunc(this.pan_accum_px_x / tile_w) : 0;
+                    const step_y = tile_h > 0 ? Math.trunc(this.pan_accum_px_y / tile_h) : 0;
+
+                    if (step_x !== 0) {
+                        this.pan_tiles_x += step_x;
+                        this.pan_accum_px_x -= step_x * tile_w;
+                    }
+                    if (step_y !== 0) {
+                        this.pan_tiles_y += step_y;
+                        this.pan_accum_px_y -= step_y * tile_h;
+                    }
+
+                    this.pan_dirty = true;
+
+                    const canvas_module = this.get_canvas_module();
+                    if (canvas_module && (canvas_module as any).setGlobalPanOffset) {
+                        (canvas_module as any).setGlobalPanOffset(this.pan_tiles_x, -this.pan_tiles_y);
+                    }
+
+                    this.recenter_or_clamp_pan();
+                    this.last_tile = t;
+                    return;
+                }
+            }
+
+            if (this.capture_owner) {
+                this.capture_owner.OnPointerMove?.(base);
+
+                if (this.down_tile) {
+                    const dist = this.drag_distance_tiles(t.x, t.y);
+                    if (!this.dragging && dist >= this.DRAG_THRESHOLD_TILES) {
+                        this.dragging = true;
+                        const de: any = this.make_drag_event('drag_start', t.x, t.y, nb.buttons, this.engine_canvas.get(t.x, t.y));
+                        attach_pointer_meta(de, ev);
+                        de.pointer_id = typeof ev?.pointerId === 'number' ? ev.pointerId : 0;
+                        this.capture_owner.OnDragStart?.(de);
+                    }
+
+                    if (this.dragging) {
+                        const de: any = this.make_drag_event('drag_move', t.x, t.y, nb.buttons, this.engine_canvas.get(t.x, t.y));
+                        attach_pointer_meta(de, ev);
+                        de.pointer_id = typeof ev?.pointerId === 'number' ? ev.pointerId : 0;
+                        this.capture_owner.OnDragMove?.(de);
+                    }
+                }
+
+                this.last_tile = t;
+                return;
+            }
+
+            if (top !== this.hover_owner) {
+                this.hover_owner?.OnPointerLeave?.({ ...base, kind: 'leave' });
+                top?.OnPointerEnter?.({ ...base, kind: 'enter' });
+                this.hover_owner = top;
+            }
+
+            top?.OnPointerMove?.(base);
+            this.last_tile = t;
+        };
+
+        const route_down = (ev: any) => {
+            ev.preventDefault?.();
+            this.focus_key_sink();
+
+            const t = this.mouse_to_tile(ev);
+            if (!t) return;
+
+            const nb = normalize_buttons(ev);
+            // Mark that we should ignore mouse compatibility events for a moment.
+            this.suppress_mouse_until_ms = now_ms() + 500;
+
+            let top = this.route_to_top_module(t.x, t.y) ?? null;
+
+            const typing = this.focused_owner?.id === 'input';
+            const is_canvas_module = top?.id === 'painter_canvas' || top?.id?.startsWith('canvas');
+            const is_painter_mode2 = (window as any).electronAPI?.appMode === 'ascii_painter';
+
+            if (is_painter_mode2) {
+                if (!typing && this.space_down) {
+                    if (is_canvas_module) {
+                        this.global_pan_active = false;
+                        const canvas_module = this.get_canvas_module();
+                        if (canvas_module && (canvas_module as any).setGlobalPanOffset) {
+                            (canvas_module as any).setGlobalPanOffset(0, 0);
+                        }
+                    } else if (!top) {
+                        this.global_pan_active = true;
+                    } else {
+                        this.global_pan_active = !top.OnDragMove;
+                    }
+                } else {
+                    this.global_pan_active = false;
+                }
+            } else {
+                this.global_pan_active = ((!typing && this.space_down) && !is_canvas_module) || (!top && !typing);
+            }
+
+            if (this.global_pan_active) {
+                this.last_pan_client_x = ev.clientX;
+                this.last_pan_client_y = ev.clientY;
+            }
+
+            this.down_owner = top;
+            this.down_tile = t;
+            this.dragging = false;
+            this.capture_owner = top;
+
+            if (top?.Focusable && top !== this.focused_owner) {
+                this.focused_owner?.OnBlur?.();
+                this.focused_owner = top;
+                this.focused_owner?.OnFocus?.();
+            }
+
+            const pe: any = this.make_pointer_event('down', t.x, t.y, { ...ev, buttons: nb.buttons, button: nb.button }, this.engine_canvas.get(t.x, t.y));
+            attach_pointer_meta(pe, ev);
+            top?.OnPointerDown?.(pe);
+        };
+
+        const route_up = (ev: any) => {
+            const t = this.mouse_to_tile(ev);
+            const nb = normalize_buttons(ev);
+
+            if (!t) {
+                if (this.dragging && this.on_drag_end_outside) {
+                    this.on_drag_end_outside(-1, -1);
+                }
+                this.capture_owner = null;
+                this.down_owner = null;
+                this.down_tile = null;
+                this.dragging = false;
+                this.global_pan_active = false;
+                return;
+            }
+
+            const top = this.route_to_top_module(t.x, t.y) ?? null;
+            const target = this.capture_owner ?? top;
+
+            const pe: any = this.make_pointer_event('up', t.x, t.y, { ...ev, buttons: nb.buttons, button: nb.button }, this.engine_canvas.get(t.x, t.y));
+            attach_pointer_meta(pe, ev);
+            target?.OnPointerUp?.(pe);
+
+            this.global_pan_active = false;
+
+            if (this.dragging && top) {
+                const de: any = this.make_drag_event('drag_end', t.x, t.y, nb.buttons, this.engine_canvas.get(t.x, t.y));
+                attach_pointer_meta(de, ev);
+                de.pointer_id = typeof ev?.pointerId === 'number' ? ev.pointerId : 0;
+                top.OnDragEnd?.(de);
+            } else if (this.dragging && !top && this.on_drag_end_outside) {
+                this.on_drag_end_outside(t.x, t.y);
+            }
+
+            if (!this.dragging && this.down_owner && target && this.down_owner === target) {
+                if (rect_contains(target.rect, t.x, t.y)) {
+                    const now = performance.now();
+                    const button = nb.button;
+
+                    const p = this.pending_single_click;
+                    const is_double =
+                        !!p &&
+                        now <= p.run_at_ms &&
+                        p.target.id === target.id &&
+                        p.button === button &&
+                        Math.max(Math.abs(t.x - p.x), Math.abs(t.y - p.y)) <= this.DBLCLICK_TILE_RADIUS;
+
+                    if (is_double) {
+                        this.pending_single_click = null;
+                        const ce: any = this.make_pointer_event('click', t.x, t.y, { ...ev, buttons: nb.buttons, button: nb.button }, this.engine_canvas.get(t.x, t.y), 2);
+                        attach_pointer_meta(ce, ev);
+                        target.OnClick?.(ce);
+                    } else {
+                        this.pending_single_click = {
+                            run_at_ms: now + this.DBLCLICK_MS,
+                            target,
+                            button,
+                            x: t.x,
+                            y: t.y,
+                            ev,
+                        };
+                    }
+                }
+            }
+
+            this.capture_owner = null;
+            this.down_owner = null;
+            this.down_tile = null;
+            this.dragging = false;
+        };
+
+        // Stylus/tablet: route PointerEvents for real pen/touch support.
         this.canvas_el.addEventListener('pointerdown', (ev: any) => {
-            const t = this.mouse_to_tile(ev as any);
-            log_stylus('down', ev, t);
-            try {
-                // Ensures we still receive move/up if pen leaves canvas.
-                (ev.target as HTMLElement | null)?.setPointerCapture?.(ev.pointerId);
-            } catch {
-                // ignore
-            }
-        });
+            try { (ev.target as HTMLElement | null)?.setPointerCapture?.(ev.pointerId); } catch { /* ignore */ }
+            route_down(ev);
+        }, { passive: false } as any);
         this.canvas_el.addEventListener('pointermove', (ev: any) => {
-            const t = this.mouse_to_tile(ev as any);
-            log_stylus('move', ev, t);
-        });
+            route_move(ev);
+        }, { passive: false } as any);
         this.canvas_el.addEventListener('pointerup', (ev: any) => {
-            const t = this.mouse_to_tile(ev as any);
-            log_stylus('up', ev, t);
-            try {
-                (ev.target as HTMLElement | null)?.releasePointerCapture?.(ev.pointerId);
-            } catch {
-                // ignore
-            }
-        });
+            try { (ev.target as HTMLElement | null)?.releasePointerCapture?.(ev.pointerId); } catch { /* ignore */ }
+            route_up(ev);
+        }, { passive: false } as any);
         this.canvas_el.addEventListener('pointercancel', (ev: any) => {
-            const t = this.mouse_to_tile(ev as any);
-            log_stylus('cancel', ev, t);
-            try {
-                (ev.target as HTMLElement | null)?.releasePointerCapture?.(ev.pointerId);
-            } catch {
-                // ignore
-            }
-        });
+            try { (ev.target as HTMLElement | null)?.releasePointerCapture?.(ev.pointerId); } catch { /* ignore */ }
+            route_up({ ...ev, type: 'pointercancel' });
+        }, { passive: false } as any);
 
         this.canvas_el.addEventListener('contextmenu', (ev) => {
             ev.preventDefault();
         });
+
+        // Some drivers / browsers emit auxclick for middle/right.
+        // Route it as a regular click so pen/mouse middle/right clicks are usable.
+        this.canvas_el.addEventListener('auxclick', (ev: any) => {
+            if (now_ms() < this.suppress_mouse_until_ms) {
+                if (ev?.button === 0) return;
+            }
+            ev.preventDefault?.();
+
+            const t = this.mouse_to_tile(ev);
+            if (!t) return;
+            const top = this.route_to_top_module(t.x, t.y) ?? null;
+
+            const nb = { buttons: typeof ev?.buttons === 'number' ? ev.buttons : 0, button: typeof ev?.button === 'number' ? ev.button : 0 };
+            top?.OnClick?.(
+                this.make_pointer_event('click', t.x, t.y, { ...ev, buttons: nb.buttons, button: nb.button }, this.engine_canvas.get(t.x, t.y), 1),
+            );
+        }, { passive: false } as any);
 
         // Unlock WebAudio on first user gesture.
         this.canvas_el.addEventListener('mousedown', () => {
@@ -633,27 +923,14 @@ export class CanvasRuntime {
         });
 
         this.canvas_el.addEventListener('mousemove', (ev) => {
-            const t = this.mouse_to_tile(ev);
-
-            // Some tablet drivers (or Chromium pen-to-mouse synthesis) report buttons=0 while dragging.
-            // Log this so we can see what the input stream looks like.
-            if (stylus_debug_enabled && this.capture_owner && this.down_tile && ev.buttons === 0) {
-                const now = performance.now();
-                if (now - last_stylus_move_log_ms >= 50) {
-                    last_stylus_move_log_ms = now;
-                    console.log('[STYLUS-DEBUG]', JSON.stringify({
-                        kind: 'mousemove_buttons_zero',
-                        button: ev.button,
-                        buttons: ev.buttons,
-                        clientX: ev.clientX,
-                        clientY: ev.clientY,
-                        tile: t,
-                        capture_owner: this.capture_owner?.id ?? null,
-                        down_tile: this.down_tile,
-                        dragging: this.dragging,
-                    }));
-                }
+            if (now_ms() < this.suppress_mouse_until_ms) {
+                // Allow non-left mouse streams through during suppression. Some tablet drivers
+                // emit real mouse right/middle events for barrel buttons.
+                const buttons = typeof (ev as any).buttons === 'number' ? (ev as any).buttons : 0;
+                const has_non_left = (buttons & ~1) !== 0;
+                if (!has_non_left) return;
             }
+            const t = this.mouse_to_tile(ev);
 
             if (!t) {
                 if (!this.capture_owner && this.hover_owner?.OnPointerLeave && this.last_tile) {
@@ -782,6 +1059,10 @@ export class CanvasRuntime {
         });
 
         this.canvas_el.addEventListener('mousedown', (ev) => {
+            if (now_ms() < this.suppress_mouse_until_ms) {
+                // Allow right/middle mouse downs (pen barrel) through.
+                if (ev.button === 0) return;
+            }
             ev.preventDefault();
             this.focus_key_sink();
 
@@ -881,6 +1162,9 @@ export class CanvasRuntime {
         });
 
         this.canvas_el.addEventListener('mouseup', (ev) => {
+            if (now_ms() < this.suppress_mouse_until_ms) {
+                if (ev.button === 0) return;
+            }
             const t = this.mouse_to_tile(ev);
             if (!t) {
                 // Drag ended outside canvas - notify for rejection feedback
@@ -1010,6 +1294,14 @@ export class CanvasRuntime {
         }
 
         compose_modules(this.engine_canvas, this.modules);
+
+        if (this.on_after_compose) {
+            try {
+                this.on_after_compose(this.engine_canvas);
+            } catch {
+                // ignore
+            }
+        }
 
         if (this.wheel_pending) {
             const { x, y, delta_mode, mods } = this.wheel_pending;

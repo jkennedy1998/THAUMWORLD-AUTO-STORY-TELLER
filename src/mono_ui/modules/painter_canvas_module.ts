@@ -156,7 +156,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   function setGlobalPanOffset(x: number, y: number): void {
     global_pan_offset.x = x;
     global_pan_offset.y = y;
-    console.log('[CANVAS-PAN] Global offset updated:', JSON.stringify({ x, y }));
   }
 
   // Legacy helper - kept for compatibility but uses unified system
@@ -173,7 +172,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     const oldY = camera.pan_y ?? 0;
     camera.pan_x = oldX + deltaX;
     camera.pan_y = oldY + deltaY;
-    console.log('[CANVAS-PAN] panBy:', JSON.stringify({ deltaX, deltaY, from: { x: oldX, y: oldY }, to: { x: camera.pan_x, y: camera.pan_y } }));
     emitViewport();
   }
 
@@ -183,7 +181,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     const oldY = camera.pan_y ?? 0;
     camera.pan_x = x;
     camera.pan_y = y;
-    console.log('[CANVAS-PAN] panTo:', JSON.stringify({ from: { x: oldX, y: oldY }, to: { x, y } }));
     emitViewport();
   }
 
@@ -357,14 +354,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     const size = opts.get_brush_size();
     const offset = Math.floor(size / 2);
     
-    // DEBUG: Track what coordinates are actually being drawn
-    console.log('[DRAW-CALIBRATION] drawWithBrushSize:', JSON.stringify({ 
-      input: { x, y }, 
-      brush_size: size, 
-      offset,
-      is_eraser,
-      pan: getPan()
-    }));
+    // (debug logging removed)
     
     for (let dy = 0; dy < size; dy++) {
       for (let dx = 0; dx < size; dx++) {
@@ -955,16 +945,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       const local_y = e.y - rect.y0;
       const totalPan = getTotalPan();
       
-      // DEBUG: Track coordinate conversion with pixel-level detail
-      console.log('[DRAW-CALIBRATION] OnPointerDown:', JSON.stringify({
-        raw_screen: { x: e.x, y: e.y },
-        rect: { x0: rect.x0, y0: rect.y0, x1: rect.x1, y1: rect.y1 },
-        local: { x: local_x, y: local_y },
-        pan: { camera: { x: getSpace().camera.pan_x ?? 0, y: getSpace().camera.pan_y ?? 0 }, global: global_pan_offset, total: totalPan },
-        grid: { x: grid_x, y: grid_y },
-        space_held,
-        tool: e.button === 2 ? opts.get_right_click_tool() : opts.get_left_click_tool()
-      }));
+      // (debug logging removed)
       
       // Store last click for visual debug
       (module as any).last_click = { x: e.x, y: e.y, grid_x, grid_y };
@@ -1008,7 +989,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         // Use camera pan as the starting point
         const camera = getSpace().camera;
         view_start = { x: camera.pan_x ?? 0, y: camera.pan_y ?? 0 };
-        console.log('[CANVAS-PAN] Pan started:', JSON.stringify({ local_x, local_y, view_start }));
         return;
       }
 
@@ -1210,21 +1190,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       const local_x = e.x - rect.x0;
       const local_y = e.y - rect.y0;
       
-      // DEBUG: Track coordinate conversion during drag (only when drawing)
-      if (is_drawing || is_erasing) {
-        const grid_coords = localToGrid(local_x, local_y);
-        const totalPan = getTotalPan();
-        console.log('[DRAW-CALIBRATION] OnDragMove:', JSON.stringify({
-          raw: { x: e.x, y: e.y },
-          rect: { x0: rect.x0, y0: rect.y0 },
-          local: { x: local_x, y: local_y },
-          totalPan: { x: totalPan.x, y: totalPan.y },
-          globalOffset: { x: global_pan_offset.x, y: global_pan_offset.y },
-          grid: { x: grid_coords.x, y: grid_coords.y },
-          is_drawing,
-          is_erasing
-        }));
-      }
+      // (debug logging removed)
 
       // Handle move mode dragging
       if (gizmo_state.is_move_mode && gizmo_state.original_rect) {
@@ -1266,7 +1232,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const panSpeed = 0.5; // Convert pixel movement to grid cell pan
         const newPanX = view_start.x - (local_x - pan_start.x) * panSpeed;
         const newPanY = view_start.y - (local_y - pan_start.y) * panSpeed;
-        console.log('[CANVAS-PAN] Drag panning:', JSON.stringify({ local_x, local_y, pan_start, view_start, newPanX, newPanY }));
         panTo(newPanX, newPanY);
         return;
       }

@@ -73,10 +73,10 @@ This plan creates a standalone ASCII Painter development mode using the existing
 - Any hardcoded log paths in scripts
 
 **Tasks:**
-- [ ] List all locations where logs are currently written
-- [ ] Identify any log files/directories outside `local_data/data_slot_*/logs/`
-- [ ] Document existing log file patterns
-- [ ] **Test:** Run `find . -name "*.log" -mtime -1` to find recent logs
+- [x] List all locations where logs are currently written
+- [x] Identify any log files/directories outside `local_data/data_slot_*/logs/`
+- [x] Document existing log file patterns
+- [x] **Test:** Run `find . -name "*.log" -mtime -1` to find recent logs
 
 **Success Criteria:**
 - Complete inventory of all log locations
@@ -140,7 +140,7 @@ function formatDateLocal(date: Date): string {
 ```
 
 **Tasks:**
-- [ ] Update all date formatting to use local time
+- [x] Update all date formatting to use local time
 - [ ] Add timezone offset to log header for debugging
 - [ ] Update `scripts/view_logs.js` to handle both UTC and local date folders during transition
 
@@ -167,9 +167,9 @@ function formatDateLocal(date: Date): string {
 - `src/launcher/log_capture.ts:164-166`: Remove time suffix from process logs
 
 **Tasks:**
-- [ ] Standardize on `${sessionId}.log` format everywhere
-- [ ] Update process log naming: `${sessionId}_${processName}.log`
-- [ ] Remove HHMMSS suffix generation entirely
+- [x] Standardize on `${sessionId}.log` format everywhere
+- [x] Update process log naming: `${sessionId}_${processName}.log`
+- [x] Remove HHMMSS suffix generation entirely
 
 **Test Plan:**
 - [ ] Run `npm run dev:logs`, verify filename format
@@ -196,8 +196,8 @@ const sessions = day.files.filter(f => f.name.match(/session_\d+_[a-z0-9]+\.log$
 ```
 
 **Tasks:**
-- [ ] Update regex to accept alphanumeric suffixes
-- [ ] Ensure regex matches standardized format from 1.4
+- [x] Update regex to accept alphanumeric suffixes
+- [x] Ensure regex matches standardized format from 1.4
 - [ ] Add test cases for filename matching
 
 **Test Plan:**
@@ -226,9 +226,9 @@ const sessions = day.files.filter(f => f.name.match(/session_\d+_[a-z0-9]+\.log$
 - `scripts/validate_logs.js`: Already has logic, ensure it uses shared utils
 
 **Tasks:**
-- [ ] Implement `validateAndRepairLatest()` function
-- [ ] Add option to auto-repair or just report
-- [ ] Update all log consumers to use fallback
+- [x] Implement `validateAndRepairLatest()` function
+- [x] Add option to auto-repair or just report
+- [x] Update all log consumers to use fallback
 
 **Test Plan:**
 - [ ] Delete file referenced by `latest.log`
@@ -253,10 +253,10 @@ local_data/data_slot_1/logs/YYYY-MM-DD/
 ```
 
 **Clean up tasks:**
-- [ ] Move any root-level temp logs to appropriate slot
-- [ ] Document the complete directory structure
-- [ ] Ensure no logs written outside `local_data/`
-- [ ] Add .gitignore entries if needed
+- [x] Move any root-level temp logs to appropriate slot
+- [x] Document the complete directory structure
+- [x] Ensure no logs written outside `local_data/`
+- [x] Add .gitignore entries if needed
 
 **Files to check:**
 - `tmp_dev_logs_out.log` (if exists at root)
@@ -298,11 +298,11 @@ local_data/data_slot_1/logs/YYYY-MM-DD/
 
 - [ ] All log discovery issues from assessment resolved
 - [ ] Shared `log_utils.ts` module created and tested
-- [ ] Session naming standardized across all launch paths
-- [ ] Date handling uses local time consistently
+- [x] Session naming standardized across all launch paths
+- [x] Date handling uses local time consistently
 - [ ] Viewer scripts find all log files reliably
-- [ ] Stale reference recovery implemented
-- [ ] All logs consolidated to proper directory structure
+- [x] Stale reference recovery implemented
+- [x] All logs consolidated to proper directory structure
 - [ ] Comprehensive test coverage for logging utilities
 
 **Definition of Done:**
@@ -327,9 +327,9 @@ local_data/data_slot_1/logs_ascii_painter/YYYY-MM-DD/
 ```
 
 **Tasks:**
-- [ ] Update `getLogDir()` to support `mode: 'painter'`
-- [ ] Ensure painter logs never write to game log directory
-- [ ] Create directory structure on first painter launch
+- [x] Update `getLogDir()` to support `mode: 'painter'`
+- [x] Ensure painter logs never write to game log directory
+- [x] Create directory structure on first painter launch
 
 ### 2.2 Create Painter Launcher Script
 
@@ -342,9 +342,9 @@ local_data/data_slot_1/logs_ascii_painter/YYYY-MM-DD/
 - Sets `THAUM_APP_MODE=ascii_painter` environment variable
 
 **Tasks:**
-- [ ] Create launcher script
-- [ ] Add to package.json scripts: `"dev:ascii": "node scripts/dev_ascii.js"`
-- [ ] Ensure clean shutdown and log finalization
+- [x] Create launcher script
+- [x] Add to package.json scripts: `"dev:ascii": "node scripts/dev_ascii.js"`
+- [x] Ensure clean shutdown and log finalization
 
 ### 2.3 Update Viewer for Multi-Mode Support
 
@@ -362,10 +362,10 @@ local_data/data_slot_1/logs_ascii_painter/YYYY-MM-DD/
 
 ### Phase 2 Success Criteria
 
-- [ ] `npm run dev:ascii` launches painter mode
-- [ ] Painter logs isolated from game logs
+- [x] `npm run dev:ascii` launches painter mode
+- [x] Painter logs isolated from game logs
 - [ ] Viewer can access both log namespaces
-- [ ] Clean shutdown writes proper log footers
+- [x] Clean shutdown writes proper log footers
 
 ---
 
@@ -405,6 +405,8 @@ font_family: '"Martian Mono", "Noto Sans Mono", monospace',
 
 **Status:** ✅ COMPLETE - Both game and painter modes set to `-0.10`
 
+**Additional status:** ✅ Viewport/mask alignment stabilized across pan/zoom in painter mode.
+
 ### 3.4 Add Glyph Coverage Test Panel
 
 **New:** Built into painter mode for verification
@@ -418,9 +420,9 @@ font_family: '"Martian Mono", "Noto Sans Mono", monospace',
 ### Phase 3 Success Criteria
 
 - [ ] Font fallback stack works for extended characters
-- [ ] Letter spacing improved for readability
+- [x] Letter spacing improved for readability
 - [ ] Glyph coverage panel verifies fallback fonts
-- [ ] Changes apply to both game and painter modes
+- [x] Changes apply to both game and painter modes
 
 ---
 
@@ -458,24 +460,24 @@ interface Grid {
 
 ### 4.3 Implement Tools
 
-- [ ] Pencil (single cell)
-- [ ] Eraser (clear cell)
-- [ ] Line (Bresenham)
-- [ ] Rectangle (stroke/fill)
-- [ ] Bucket fill (flood fill)
-- [ ] Eyedropper (sample cell)
+- [x] Pencil (single cell)
+- [x] Eraser (clear cell)
+- [x] Line (Bresenham)
+- [x] Rectangle (stroke/fill)
+- [x] Bucket fill (flood fill)
+- [x] Eyedropper (sample cell)
 
 ### 4.4 Implement History
 
-- [ ] Undo stack (max 50)
-- [ ] Redo stack
-- [ ] Snapshots on tool completion
+- [x] Undo stack (max 50)
+- [x] Redo stack
+- [x] Snapshots on tool completion
 
 ### Phase 4 Success Criteria
 
-- [ ] All tools functional
-- [ ] Undo/redo works
-- [ ] Grid import/export works
+- [x] All tools functional
+- [x] Undo/redo works
+- [x] Grid import/export works
 - [ ] Module is engine-agnostic
 
 ---
@@ -520,9 +522,9 @@ getClipboardImage: () => ipcRenderer.invoke('get-clipboard-image'),
 
 ### Phase 5 Success Criteria
 
-- [ ] Paste image from clipboard works
-- [ ] Reasonable ASCII representation
-- [ ] Configurable target dimensions
+- [x] Paste image from clipboard works
+- [x] Reasonable ASCII representation
+- [x] Configurable target dimensions
 - [ ] Optional color preservation
 
 ---
@@ -566,20 +568,24 @@ getClipboardImage: () => ipcRenderer.invoke('get-clipboard-image'),
 
 ### 6.4 Create Modules
 
-- [ ] Tool palette (brush selector, char picker)
-- [ ] Color picker
-- [ ] Weight selector
-- [ ] Canvas viewport (grid display)
-- [ ] Import/export panel
+- [x] Tool palette (brush selector, char picker)
+- [x] Color picker
+- [x] Weight selector
+- [x] Canvas viewport (grid display)
+- [x] Import/export panel
 - [ ] Glyph coverage tester
 
 ### Phase 6 Success Criteria
 
-- [ ] Painter launches independently
-- [ ] All tools accessible via UI
-- [ ] Mouse painting works
-- [ ] Import/export works
-- [ ] Renders using shared renderer
+- [x] Painter launches independently
+- [x] All tools accessible via UI
+- [x] Mouse painting works
+- [x] Import/export works
+- [x] Renders using shared renderer
+
+**Additional status:**
+- ✅ Layer palette stays in sync when layers are added/removed/reordered
+- ✅ Pen input supported via Pointer Events (driver-dependent; Windows Ink off recommended for Huion)
 
 ---
 

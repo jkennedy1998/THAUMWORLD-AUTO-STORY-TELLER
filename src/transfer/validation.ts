@@ -1,5 +1,6 @@
 import type { ItemInstance } from "../item_instances/store.js";
 import type { ItemDefinition } from "../item_storage/store.js";
+import { check_tag_compatibility } from "../equipment/tag_validation.js";
 import { debug_log, debug_error } from "../shared/debug.js";
 
 /**
@@ -69,10 +70,7 @@ export function can_stack(
 }
 
 /**
- * Check if two items can be swapped between slots
- * Requirements:
- * - Item A fits in Slot B (via valid_body_slots)
- * - Item B fits in Slot A (via valid_body_slots)
+ * Check if two items can be swapped between slots (tag-based)
  */
 export function can_swap_items(
     item_a: ItemInstance,
@@ -82,11 +80,16 @@ export function can_swap_items(
     def_b: ItemDefinition,
     slot_b: string
 ): boolean {
-    // Check if item_a fits in slot_b
-    const a_fits_b = def_a.valid_body_slots?.includes(slot_b) ?? false;
-    
-    // Check if item_b fits in slot_a
-    const b_fits_a = def_b.valid_body_slots?.includes(slot_a) ?? false;
+    function fits(def: ItemDefinition, slot: string): boolean {
+        return (
+            check_tag_compatibility(def, slot, 'armor').compatible ||
+            check_tag_compatibility(def, slot, 'garb').compatible ||
+            check_tag_compatibility(def, slot, 'tool').compatible
+        );
+    }
+
+    const a_fits_b = fits(def_a, slot_b);
+    const b_fits_a = fits(def_b, slot_a);
     
     const can_swap = a_fits_b && b_fits_a;
     

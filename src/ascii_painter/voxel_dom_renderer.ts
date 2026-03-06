@@ -174,7 +174,7 @@ export class VoxelDOMRenderer {
     }
     
     if (hasDuplicates) {
-      console.error(`[PAN-DEBUG] DUPLICATE CANVASES: ${duplicates.join(', ')} | DOM=${canvases.length}, tracked=${this.layerCanvases.size}`);
+      console.error(`[VoxelDOMRenderer] duplicate canvases: ${duplicates.join(', ')} | DOM=${canvases.length}, tracked=${this.layerCanvases.size}`);
     }
   }
 
@@ -399,6 +399,10 @@ export class VoxelDOMRenderer {
   render(): void {
     if (!this.space) return;
 
+    // Layers can be added/removed at runtime (e.g. via the layer palette).
+    // Keep the backing canvas set in sync so newly-created layers render immediately.
+    this.createOrUpdateLayers();
+
     const selectedZ = this.space.camera.focus_plane;
     const visibleLayers = Array.from(this.space.layers.values())
       .filter(layer => layer.visible)
@@ -408,12 +412,10 @@ export class VoxelDOMRenderer {
     this.checkForDuplicateCanvases();
 
     for (const layer of visibleLayers) {
-      const canvas = this.layerCanvases.get(layer.z);
+      // Ensure canvas/context exist (layer may have been added since last frame)
+      const canvas = this.getOrCreateCanvas(layer.z);
       const ctx = this.layerContexts.get(layer.z);
-      if (!canvas || !ctx) continue;
-
-      // Update canvas size if needed
-      this.getOrCreateCanvas(layer.z);
+      if (!ctx) continue;
 
       // Render layer content
       this.renderLayer(layer, ctx);

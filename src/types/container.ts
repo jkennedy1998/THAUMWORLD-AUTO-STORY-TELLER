@@ -29,7 +29,6 @@ export interface ContainerContentEntry {
         stackable?: boolean;
         max_stack_size?: number;
         display_char?: string;
-        valid_body_slots?: string[];
         occupies_slots?: string[];
         slot_shape?: number[][];
         fits_actor_kind?: string[];

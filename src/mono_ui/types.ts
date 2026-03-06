@@ -93,6 +93,10 @@ export type PointerEvent = {
 
     // click synthesis (optional)
     click_count?: 1 | 2;
+
+    // Pointer Events metadata (optional; present for pen/touch)
+    pointer_type?: string;
+    pressure?: number;
 };
 
 export type DragKind = 'drag_start' | 'drag_move' | 'drag_end';
@@ -115,6 +119,10 @@ export type DragEvent = {
 
     buttons: number;
     cell?: Cell;
+
+    // Pointer Events metadata (optional)
+    pointer_type?: string;
+    pressure?: number;
 };
 
 // this is the parent to anything that lives on the screen that can be interacted with. 

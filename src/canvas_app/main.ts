@@ -13,6 +13,8 @@ let modules: readonly Module[];
 let start_window_feed_polling: (interval_ms: number) => void;
 let module_registry: any;
 let on_drag_end_outside: ((x: number, y: number) => void) | undefined;
+let on_pointer_move_global: ((x: number, y: number, e: any) => void) | undefined;
+let on_after_compose: ((canvas: any) => void) | undefined;
 
 let painter_state: ReturnType<typeof create_painter_app_state> | null = null;
 
@@ -47,6 +49,8 @@ if (IS_PAINTER_MODE) {
     start_window_feed_polling = game_state.start_window_feed_polling;
     module_registry = game_state.module_registry;
     on_drag_end_outside = game_state.on_drag_end_outside;
+    on_pointer_move_global = game_state.on_pointer_move_global;
+    on_after_compose = game_state.on_after_compose;
 }
 
 const config = IS_PAINTER_MODE ? PAINTER_CONFIG : APP_CONFIG;
@@ -62,6 +66,8 @@ const runtime = new CanvasRuntime({
     weight_index_to_css: config.weight_index_to_css,
     modules,
     on_drag_end_outside,
+    on_pointer_move_global,
+    on_after_compose,
 });
 
 // Subscribe to module registry changes
@@ -111,8 +117,7 @@ if (IS_PAINTER_MODE && painter_state) {
         uiScale = ev.detail?.scale ?? uiScale;
         gotPanEvent = true;
         
-        // Debug logging
-        console.log('[PAN-DEBUG] Global pan:', { x: globalPan.x, y: globalPan.y, tileW: tileSize.w, tileH: tileSize.h });
+        // (debug logging removed)
     }) as EventListener);
     
     let lastViewportLogKey = '';
@@ -167,18 +172,8 @@ if (IS_PAINTER_MODE && painter_state) {
             const viewportH = (rect.y1 - rect.y0 + 1) * tileSize.h;
             const fontSizePx = config.base_font_size_px * (Number.isFinite(uiScale) ? uiScale : 1.0);
             
-            // Debug logging
             const logKey = `${viewportX.toFixed(2)},${viewportY.toFixed(2)},${viewportW.toFixed(2)},${viewportH.toFixed(2)}|${tileSize.w.toFixed(3)},${tileSize.h.toFixed(3)}|${fontSizePx.toFixed(2)}`;
-            if (logKey !== lastViewportLogKey) {
-                lastViewportLogKey = logKey;
-                console.log('[PAN-DEBUG] Setting viewport:', {
-                    viewportX, viewportY, viewportW, viewportH,
-                    globalOffsetX: globalPan.x, globalOffsetY: globalPan.y,
-                    tileSizeW: tileSize.w, tileSizeH: tileSize.h,
-                    fontSizePx,
-                    gotPanEvent,
-                });
-            }
+            lastViewportLogKey = logKey;
             
             painterRef.set_dom_viewport({
                 x: viewportX,

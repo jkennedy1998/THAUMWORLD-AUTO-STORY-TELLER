@@ -2,7 +2,7 @@
  * Tag-based equipment validation
  * 
  * Validates equipment compatibility using ARMOR/GARB/TOOL tags
- * Replaces/extends the valid_body_slots array approach
+ * Tag-based equipment validation (no legacy slot arrays)
  */
 
 import type { ItemDefinition } from "../item_storage/store.js";
@@ -135,29 +135,18 @@ export function get_compatible_slot_types(item_def: ItemDefinition): string[] {
 }
 
 /**
- * Check backward compatibility with valid_body_slots
- * 
- * This allows items without equipment tags to still work
- * during the transition period.
- * 
- * @param item_def - The item definition
- * @param slot_name - The slot name to check
- * @returns True if item is compatible via legacy system
+ * Legacy compatibility hook (disabled).
+ *
+ * Kept only so older callers can compile while the ruleset fully
+ * relies on tag-based equipment validation.
  */
 export function check_legacy_compatibility(
     item_def: ItemDefinition,
     slot_name: string
 ): boolean {
-    // Check if item has any equipment tags
-    const has_equip_tags = item_def.tags?.some((t: TagInstance) =>
-        ["ARMOR", "GARB", "TOOL"].includes(t.name)
-    );
-    
-    // If no equipment tags, fall back to valid_body_slots
-    if (!has_equip_tags && item_def.valid_body_slots) {
-        return item_def.valid_body_slots.includes(slot_name);
-    }
-    
+    // Legacy compatibility is disabled.
+    void item_def;
+    void slot_name;
     return false;
 }
 

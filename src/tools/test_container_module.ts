@@ -35,7 +35,6 @@ const coin_def: ItemDefinition = {
   tags: [],
   max_stack_size: 99,
   display_char: "$",
-  valid_body_slots: [],
   occupies_slots: [],
   slot_shape: [[1]],
   fits_actor_kind: ["*"],
@@ -55,7 +54,6 @@ const sword_def: ItemDefinition = {
   tags: [],
   max_stack_size: 1,
   display_char: "/",  // Sword character
-  valid_body_slots: ["hand_left", "hand_right"],
   occupies_slots: ["hand_left"],
   slot_shape: [[1]],
   fits_actor_kind: ["*"],

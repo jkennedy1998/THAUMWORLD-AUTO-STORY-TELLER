@@ -9,7 +9,6 @@ if (coin.ok) {
     console.log("✓ Coin loaded successfully");
     console.log(`  - max_stack_size: ${coin.item.max_stack_size} (expected: 99)`);
     console.log(`  - display_char: ${coin.item.display_char} (expected: $)`);
-    console.log(`  - valid_body_slots: [${coin.item.valid_body_slots.join(", ")}] (expected: [])`);
     console.log(`  - fits_actor_kind: [${coin.item.fits_actor_kind.join(", ")}] (expected: [*])`);
 } else {
     console.log("✗ Failed to load coin:", coin.error);
@@ -23,7 +22,6 @@ if (tunic.ok) {
     console.log("✓ Tunic loaded successfully");
     console.log(`  - max_stack_size: ${tunic.item.max_stack_size} (expected: 1)`);
     console.log(`  - display_char: ${tunic.item.display_char} (expected: t)`);
-    console.log(`  - valid_body_slots: [${tunic.item.valid_body_slots.join(", ")}] (expected: [chest])`);
     console.log(`  - occupies_slots: [${tunic.item.occupies_slots.join(", ")}] (expected: [chest])`);
     console.log(`  - fits_actor_kind: [${tunic.item.fits_actor_kind.join(", ")}] (expected: [naked_ape])`);
 } else {
@@ -38,7 +36,6 @@ if (sack.ok) {
     console.log("✓ Small sack loaded successfully");
     console.log(`  - max_stack_size: ${sack.item.max_stack_size} (expected: 1)`);
     console.log(`  - display_char: ${sack.item.display_char} (expected: b)`);
-    console.log(`  - valid_body_slots: [${sack.item.valid_body_slots.join(", ")}] (expected: [])`);
     console.log(`  - fits_actor_kind: [${sack.item.fits_actor_kind.join(", ")}] (expected: [*])`);
 } else {
     console.log("✗ Failed to load sack:", sack.error);

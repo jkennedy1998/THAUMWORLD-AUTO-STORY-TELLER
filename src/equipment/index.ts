@@ -2,7 +2,7 @@
  * Equipment System Module
  * 
  * Provides tag-based equipment validation and management.
- * Replaces the valid_body_slots approach with ARMOR/GARB/TOOL tags.
+ * Equipment system based on ARMOR/GARB/TOOL tags.
  */
 
 export {

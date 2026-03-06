@@ -10,6 +10,18 @@
 
 Complete the item system by implementing interactive Container and Character modules with drag-and-drop inventory management, slot-based storage, and proper equipment rules.
 
+## Implementation Status (2026-03-05)
+
+- [x] ContainerModule + CharacterModule core interactions
+- [x] Ground: single item drag, multi-item pile UI, pile auto-reversion
+- [x] Default container selection in CharacterModule sidebar
+- [x] Deposit shortcut: drop onto a container-item to insert
+- [x] Snapshot-only legality: instance tags drive compatible slot highlighting/validation
+- [ ] Server-authoritative legality gate (single module; enforced by /api/transfer + pickup)
+- [x] Atomicity fixes for pickup/drop paths to prevent item loss
+
+Next work focuses on server-side enforcement + remaining tabletop scaling edges.
+
 ---
 
 ## Existing Systems Audit

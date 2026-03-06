@@ -43,9 +43,6 @@ export type ContainerModuleConfig = {
   on_slot_hover?: (slot_index: number, item: ItemInstance, definition: ItemDefinition | null) => void;
   // Bidirectional highlighting: items highlighted when hovering body slots
   get_highlighted_items?: () => Array<{ container_id: string; slot_index: number }>;
-  // Drag visualization
-  on_drag_move?: (x: number, y: number) => void;
-  render_drag_ghost?: (c: Canvas) => void;
   on_drag_rejected?: () => void;
   border_rgb?: Rgb;
   bg_rgb?: Rgb;
@@ -78,6 +75,7 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
     if (!container) return -1;
 
     const { cols, rows } = get_container_grid(container);
+    const max_slots = container.capacity?.max_slots ?? (cols * rows);
     
     // MUST MATCH the drawing logic exactly!
     // Drawing uses: slot_spacing_x = 2, slot_spacing_y = 1
@@ -103,7 +101,7 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
     if (row < 0 || row >= rows) return -1;
     
     const slot_index = row * cols + col;
-    return slot_index < cols * rows ? slot_index : -1;
+    return slot_index >= 0 && slot_index < max_slots ? slot_index : -1;
   }
 
   function draw_slot(c: Canvas, slot_x: number, slot_y: number, slot_item: SlotItem | undefined, is_hovered: boolean, slot_index: number): void {
@@ -240,6 +238,7 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
       // Draw grid of slots
       if (container) {
         const { cols, rows } = get_container_grid(container);
+        const max_slots = container.capacity?.max_slots ?? (cols * rows);
         
         // Use smaller spacing to fit more slots
         const slot_spacing_x = 2;  // Horizontal spacing between slots
@@ -263,6 +262,7 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
         for (let row = 0; row < rows; row++) {
           for (let col = 0; col < cols; col++) {
             const slot_index = row * cols + col;
+            if (slot_index >= max_slots) continue;
             // Position: x increases right, y decreases upward (canvas coordinates)
             const slot_x = start_x + col * slot_spacing_x;
             const slot_y = start_y - row * slot_spacing_y;
@@ -288,8 +288,6 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
         }
       }
       
-      // Render drag ghost if active
-      opts.render_drag_ghost?.(c);
     },
 
     OnGlobalKeyDown(e: KeyboardEvent): void {
@@ -522,12 +520,6 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
         return;
       }
       
-      // Track drag position for highlighting compatible slots in other modules
-      // This is handled by the parent app_state which has access to both modules
-      // We just ensure the drag state stays active
-      if (opts.on_drag_move) {
-        opts.on_drag_move(e.x, e.y);
-      }
       debug_log(`[ContainerModule] OnDragMove at (${e.x}, ${e.y})`);
     },
   };

@@ -13,18 +13,80 @@
 
 ## Quick Status
 
-**✅ COMPLETE:** Pickup and Drop fully functional
-- Pickup from ground scattered containers to equipped containers
-- Drop from any equipped slot to cardinal adjacent tiles
-- Drop at cursor position with immediate visual feedback
+**✅ COMPLETE:** Pickup/Drop + Drag/Deposit loops functional
+- Pickup from ground to default container / hand_right.tool, with clear errors
+- Drop from actor (including nested container contents) to ground
+- Drag ground single items directly; 2+ items become a pile UI; auto-revert at 1
+- Deposit shortcut: drop onto a container-item to put item inside (capacity checked)
 - Works with tag-based equipment system (ARMOR/GARB/TOOL)
+- Snapshot-only legality: instance tags drive compatibility
 
-**🔵 PLANNED:** Tag-based equipment system UI enhancements (Phase 4-5)
+**🔵 PLANNED:** Remaining refinements
+- Server-side legality enforcement for /api/transfer + pickup/deposit (authoritative)
+- NPC range-based access + auto-close
+- Nested ground-container addressing (container-in-container on ground)
+- Ground DRAG (sweep): move single ground items and whole piles tile-to-tile within cardinal touch range; merges piles on overlap
 
-**Current System:** Uses `valid_body_slots` array - simple but functional  
-**Future System:** ARMOR/GARB/TOOL tags - more flexible but requires major refactoring
+**Decision:** Snapshot-only items (instance is authoritative). Item defs are spawn defaults.
 
-**Decision:** Fix current system bugs first, defer tag-based migration until core gameplay stable.
+---
+
+## 4. Server-Side Legality Gate (Authoritative)
+
+### Why
+
+- Client highlighting/compatibility is UX-only.
+- Server must be the single source of truth for legality to prevent bypasses and reduce drift.
+- Snapshot-only rule: legality uses inline item `tags/meta` from the instance, not the definition.
+
+### Scope
+
+All item moves that can change equipment/inventories must pass the same legality function:
+
+- `POST /api/transfer` (primary)
+- `POST /api/place/items/pickup_to`
+- `POST /api/place/items/pickup` (default routing)
+- `POST /api/place/items/deposit_to_container_item`
+
+### Rules (high level)
+
+- If destination is a **body slot** (`body_slots.<slot>.<armor|tool|garb[.idx]>`): enforce equip legality from instance tags.
+- If destination is a **container-item** (`actor.item.<actor_id>.<item_id>` or a container-item referenced via body_slots path): enforce capacity/grid/weight only.
+- Tool slots: allow any item (tabletop flexibility + pickup fallback).
+- Meta expansion supported in tags: `hand -> hand_left/hand_right`, `leg -> leg_left/leg_right`.
+
+### Implementation Checklist
+
+- [x] Create a single legality module (pure functions) used by all endpoints
+- [x] Validate-before-mutate in `/api/transfer` (peek item, validate, then apply)
+- [x] Enforce legality in `pickup_to` and `pickup` before saving
+- [x] Enforce container-only checks in `deposit_to_container_item` (no equip tags)
+- [x] Standardize error codes (`incompatible_slot`, `slot_occupied`, `container_full`, `container_overweight`, ...)
+- [x] Add log markers:
+  - [x] `[LEGALITY] req ...`
+  - [x] `[LEGALITY] allow ...`
+  - [x] `[LEGALITY] reject error=... detail=...`
+
+---
+
+## 5. Deprecation / Cleanup (Don’t Leave Old Formats Behind)
+
+We are in a transition where some legacy formats are still supported to avoid breaking existing saves. Track and remove them deliberately.
+
+### Legacy Support to Track
+
+- `item.<instance_id>` container ids (legacy nested container format)
+- `valid_body_slots` legacy compatibility paths in validation code
+- One-off migration scripts (scattered-to-inline, etc.)
+
+### Cleanup Checklist
+
+- [ ] Add a single feature flag / constant to mark legacy container id support
+- [ ] Inventory open/resolve: stop using `item.<id>` fallback once all saves migrated
+- [ ] Remove or archive old scattered container migration scripts when no longer needed
+- [x] Strip `definition.valid_body_slots` from saved place containers and stop persisting it going forward
+- [ ] Remove `valid_body_slots` fallback logic after all items use snapshot tags
+- [x] Add a save-slot audit command/script to report remaining legacy patterns (`npx tsx src/tools/audit_legacy_patterns.ts <slot>`)
 
 ---
 
@@ -145,6 +207,15 @@ Enable seamless interaction between:
 - **Auto-create:** New scattered container if none exists at position
 - **Auto-delete:** Container removed when last item taken
 
+#### Drag Items Around on Ground (DRAG / Sweep)
+
+- **Source:** Inline ground storage (`place.ground.scattered["x_y"]`)
+- **Destination:** Another ground tile within cardinal touch range
+- **Trigger:** Drag an item or pile on the place grid (not pickup)
+- **Merge:** Dropping onto another tile with ground items merges (arrays join -> bigger pile)
+- **Range:** Cardinal touch range (actor must be adjacent to BOTH the source and destination tiles)
+- **Action Pipeline Note:** Implemented now as a direct UI endpoint; later becomes an ActionIntent `verb=USE` with subtype `DRAG` and `actionCost` same as DROP/PLACE
+
 #### Open External Containers
 - **Trigger:** Double-click on:
  - **Trigger:** Double-click on:
@@ -189,11 +260,11 @@ To scale well for tabletop-style play and reduce ambiguity:
 
 ## 2.4 Drag Policy: Container-Items Always Open
 
-To keep interaction consistent and avoid accidental re-parenting of containers:
+Updated policy (tabletop UX, but supports moving containers):
 
-- Dragging a container-item (an item with CONTAINER tag) does not initiate a transfer.
-- Instead, it opens the corresponding ContainerModule for that container.
-- This applies to container-items on the ground and equipped container-items.
+- Double-click container-items to open.
+- Container-items are draggable like any other item.
+- Dropping onto a container-item deposits into it (if capacity allows and not self).
 
 ---
 

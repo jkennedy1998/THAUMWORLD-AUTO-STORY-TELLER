@@ -857,10 +857,7 @@ function get_slot_name(container_id: string): string {
 }
 
 /**
- * Check if two items can be swapped between slots
- * Requirements:
- * - Item A fits in Slot B (via valid_body_slots)
- * - Item B fits in Slot A (via valid_body_slots)
+ * Check if two items can be swapped between slots (tag-based)
  */
 function can_swap_items(
     source_entry: { instance: ItemInstance; definition: any },
@@ -871,11 +868,19 @@ function can_swap_items(
     const source_def = source_entry.definition;
     const target_def = target_entry.definition;
     
-    // Check if source item fits in target slot
-    const source_fits_target = source_def.valid_body_slots?.includes(target_slot) ?? false;
+    // Check if source item fits in target slot (tag-based; allow any tool)
+    const source_fits_target = (
+        check_tag_compatibility(source_def, target_slot, "armor").compatible ||
+        check_tag_compatibility(source_def, target_slot, "garb").compatible ||
+        check_tag_compatibility(source_def, target_slot, "tool").compatible
+    );
     
     // Check if target item fits in source slot
-    const target_fits_source = target_def.valid_body_slots?.includes(source_slot) ?? false;
+    const target_fits_source = (
+        check_tag_compatibility(target_def, source_slot, "armor").compatible ||
+        check_tag_compatibility(target_def, source_slot, "garb").compatible ||
+        check_tag_compatibility(target_def, source_slot, "tool").compatible
+    );
     
     const can_swap = source_fits_target && target_fits_source;
     
@@ -891,8 +896,7 @@ function can_swap_items(
 /**
  * Check if an item is compatible with a body slot
  * 
- * DUAL VALIDATION: Checks both equipment tags and legacy valid_body_slots
- * during the transition period.
+ * Tag-based validation (legacy slot lists removed)
  * 
  * @param item_entry - The item to check
  * @param slot_name - The body slot name (e.g., "hand_left", "torso")
@@ -959,7 +963,10 @@ function is_item_compatible_with_slot(
         return true;
     }
     
-    // If item has no equipment tags, reject (all items must have tags)
+    // Items without equipment tags still can be held in tool slots.
+    if (!has_equipment_tags(def)) {
+        return slot_type === 'tool';
+    }
     return false;
 }
 
@@ -1504,14 +1511,14 @@ export function transfer_item_between_containers(
                 debug_log("transfer", "[UNIFIED-TRANSFER] CANNOT STACK - attempting SWAP");
                 // Items can't stack - check if we can swap
                 // For containers (not body slots), we can swap any items
-                // For body slots, check valid_body_slots
+                // For body slots, check tag-based compatibility
                 const is_body_slot = is_body_slot_container(from_container_id);
                 debug_log("transfer", "[UNIFIED-TRANSFER] is_body_slot: " + is_body_slot);
                 
                 if (is_body_slot) {
                     const slot_name = get_slot_name(from_container_id);
-                    const source_fits = source_entry.definition.valid_body_slots?.includes(slot_name) ?? false;
-                    const target_fits = target_entry.definition.valid_body_slots?.includes(slot_name) ?? false;
+                    const source_fits = is_item_compatible_with_slot(source_entry as any, slot_name);
+                    const target_fits = is_item_compatible_with_slot(target_entry as any, slot_name);
                     
                     debug_log("transfer", "[UNIFIED-TRANSFER] Body slot check: slot_name=" + slot_name + " source_fits=" + source_fits + " target_fits=" + target_fits);
                     

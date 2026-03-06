@@ -532,31 +532,32 @@ export function create_painter_app_state(): PainterAppState {
     await loadArtworkFromContent(readResp.content || '', path);
   }
 
-  // Attach current session to a file in ascii_drawings.
-  // Artwork persists to disk; UI/camera/module positions persist separately via localStorage.
-  try {
-    const last = window.localStorage.getItem(LAST_FILE_PATH_KEY);
-    if (last) {
-      current_file_path = last;
-      current_filename = inferFilenameFromPath(last);
-    }
-  } catch {
-    // ignore
-  }
-
-  if (!current_file_path && window.electronAPI?.getAsciiDrawingsDir) {
+  // Auto-open the last file on boot (best effort).
+  // IMPORTANT: Never set current_file_path without loading, otherwise beforeunload autosave
+  // could overwrite the last file with whatever is currently in memory.
+  if (window.electronAPI?.readFile) {
     void (async () => {
-      const dir = await getAsciiDrawingsDir();
-      if (!dir) return;
-      const fp = `${dir}\\${makeNewFileBasename()}`;
-      current_file_path = fp;
-      current_filename = inferFilenameFromPath(fp);
+      const api = window.electronAPI;
+      if (!api?.readFile) return;
+      let last: string | null = null;
       try {
-        window.localStorage.setItem(LAST_FILE_PATH_KEY, fp);
+        last = window.localStorage.getItem(LAST_FILE_PATH_KEY);
       } catch {
-        // ignore
+        last = null;
       }
-      await writeArtworkToFileAtomic(fp);
+      if (!last) return;
+
+      const res = await api.readFile(last);
+      if (!res?.success || typeof res.content !== 'string') {
+        try {
+          window.localStorage.removeItem(LAST_FILE_PATH_KEY);
+        } catch {
+          // ignore
+        }
+        return;
+      }
+
+      await loadArtworkFromContent(res.content, last);
     })().catch(() => {
       // ignore
     });
@@ -1241,7 +1242,7 @@ export function create_painter_app_state(): PainterAppState {
     return makeLayerPaletteModule({
       id: 'layer_palette',
       rect: layer_palette_rect,
-      space: voxelSpace,
+      getSpace: () => voxelSpace,
       onLayerSelect: (z) => {
         console.log('Layer selected:', z);
         // Switch to this layer

@@ -159,8 +159,8 @@ Each Body Part → 3 Slot Types:
 ### ✅ Complete (Working Now)
 - [x] Container system (inline storage in entity files)
 - [x] Drag-and-drop between containers
-- [x] Item stacking (same def_id, stackable=true)
-- [x] Body slot equip/unequip (using valid_body_slots)
+- [ ] Item stacking (same def_id, stackable=true)
+- [x] Body slot equip/unequip (ARMOR/GARB/TOOL tags)
 - [x] Pickup/Drop APIs (ground interaction)
 - [x] Scattered containers (loot piles)
 - [x] Right-click container opening
@@ -168,6 +168,9 @@ Each Body Part → 3 Slot Types:
 - [x] Visual drag ghost during drag
 - [x] Slot highlighting for compatible drops
 - [x] Grid-based sparse inventory (Minecraft-style)
+- [x] Piles on ground (2+ items open as pile; auto-revert to single)
+- [x] Default container selection (CharacterModule sidebar)
+- [x] Snapshot-only compatibility (instance tags via API)
 
 ### 🔧 Working But Needs Refinement
 - [x] Hand slot visual bug (shows 2 positions, both map to same slot)
@@ -175,12 +178,13 @@ Each Body Part → 3 Slot Types:
   - **Planned:** Separate armor/garb/tool slots per hand (Phase 9)
 
 ### 📋 Planned (Phase 9+)
-- [ ] Tag-based slot system (ARMOR/GARB/TOOL tags)
-- [ ] Separate slot types per body part (armor/garb/tool)
-- [ ] Unlimited garb capacity (multiple rings per hand)
-- [ ] "Main container" selection (rearrangeable sidebar)
-- [ ] Legality system with tag validation
-- [ ] Ground drop drag-and-drop (visual)
+- [x] Tag-based slot system (ARMOR/GARB/TOOL tags)
+- [x] Separate slot types per body part (armor/garb/tool)
+- [x] Unlimited garb capacity (multiple rings per hand)
+- [x] "Main container" selection (rearrangeable sidebar)
+- [ ] Server-authoritative legality enforcement (single gate for /api/transfer + pickup)
+- [x] Legality system with tag validation (client-side + compatibility API)
+- [x] Ground drop drag-and-drop (visual)
 - [ ] Range checking for NPC drops
 - [ ] Equipment layering system
 - [ ] Action pipeline integration
@@ -191,11 +195,11 @@ Each Body Part → 3 Slot Types:
 
 | Feature | Current (Working) | Planned (Phase 9) |
 |---------|-------------------|-------------------|
-| **Compatibility** | `valid_body_slots` array | ARMOR/GARB/TOOL tags |
-| **Items per Hand** | 1 item | 3 slots (armor/garb/tool) |
-| **Jewelry** | 1 ring per hand | Unlimited rings (garb slots) |
-| **Validation** | Array includes check | Tag + body_slot match |
-| **Hand Slots** | Simple (bug: mirrors) | Separate armor/garb/tool |
+| **Compatibility** | Snapshot instance tags (API) | Snapshot instance tags (API) |
+| **Items per Hand** | 3 slot types (armor/garb/tool) | 3 slot types (armor/garb/tool) |
+| **Jewelry** | Unlimited garb per hand | Unlimited garb per hand |
+| **Validation** | Tag + body_slot match | Server-enforced tag + body_slot match |
+| **Hand Slots** | Separate armor/garb/tool | Separate armor/garb/tool |
 
 **Current System Status:** ~70% of functionality working with simpler architecture
 

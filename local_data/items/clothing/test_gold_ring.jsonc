@@ -14,7 +14,7 @@
     {
       "name": "GARB",
       "mag": 1,
-      "meta": ["hand_left"],
+      "meta": ["hand"],
       "info": [1]
     }
   ]

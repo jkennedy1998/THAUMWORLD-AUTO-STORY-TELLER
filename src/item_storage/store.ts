@@ -23,7 +23,6 @@ export interface ItemDefinition {
     // New fields for inventory system
     max_stack_size: number;           // Max quantity per stack (default: 1)
     display_char: string;             // Single char for UI representation (default: "·")
-    valid_body_slots: string[];       // ["hand_left", "chest", ...] (default: [])
     occupies_slots: string[];         // ["leg_left", "leg_right"] for multi-slot items
     slot_shape: number[][];           // [[1]] for 1x1, future tetris shapes
     fits_actor_kind: string[];        // ["naked_ape"] for race restrictions (default: ["*"])
@@ -100,7 +99,6 @@ export function load_item_def(slot: number, def_id: string): ItemDefLookupResult
         // New fields with defaults
         max_stack_size: Number(raw.max_stack_size ?? 1),
         display_char: String(raw.display_char ?? "·"),
-        valid_body_slots: (raw.valid_body_slots as string[]) ?? [],
         occupies_slots: (raw.occupies_slots as string[]) ?? [],
         slot_shape: (raw.slot_shape as number[][]) ?? [[1]],
         fits_actor_kind: (raw.fits_actor_kind as string[]) ?? ["*"],
@@ -142,7 +140,6 @@ export function load_master_item(def_id: string): ItemDefLookupResult {
                 tags: (raw.tags as TagInstance[]) ?? [],
                 max_stack_size: Number(raw.max_stack_size ?? 1),
                 display_char: String(raw.display_char ?? "·"),
-                valid_body_slots: [],
                 occupies_slots: [],
                 slot_shape: [[1]],
                 fits_actor_kind: ["*"],

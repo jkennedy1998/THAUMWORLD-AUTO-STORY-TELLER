@@ -26,7 +26,8 @@ import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo
 export type LayerPaletteOptions = {
   id: string;
   rect: Rect;
-  space: VoxelSpace;
+  // Always fetch the latest space (it can be replaced on load/new).
+  getSpace: () => VoxelSpace;
   onLayerSelect: (z: number) => void;
   onLayerVisibilityToggle: (z: number) => void;
   onLayerLockToggle: (z: number) => void;
@@ -61,6 +62,10 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
   let rect = opts.rect;
   let scrollOffset = 0;
   const headerHeight = 3;
+
+  function getSpace(): VoxelSpace {
+    return opts.getSpace();
+  }
   
   // Colors
   const bgColor = get_color_by_name('off_black').rgb;
@@ -120,7 +125,8 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
   const gizmo_state: GizmoState = create_gizmo_state();
   
   function getSortedLayers(): VoxelLayer[] {
-    return Array.from(opts.space.layers.values())
+    const space = getSpace();
+    return Array.from(space.layers.values())
       .sort((a, b) => b.z - a.z);
   }
   
@@ -230,7 +236,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
           continue;
         }
         
-        const isSelected = layer.z === opts.space.camera.focus_plane;
+        const isSelected = layer.z === getSpace().camera.focus_plane;
         const isBeingRenamed = renameState.isRenaming && renameState.layerZ === layer.z;
         const rowColor = isSelected ? selectedColor : textColor;
         const visualOrder = getVisualOrder(layer.z);
@@ -345,7 +351,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
       if (dragState.isDragging && dragState.draggedLayer) {
         const mouseY = dragState.dragStartY;
         const layer = dragState.draggedLayer;
-        const isSelected = layer.z === opts.space.camera.focus_plane;
+        const isSelected = layer.z === getSpace().camera.focus_plane;
         const rowColor = isSelected ? selectedColor : textColor;
         const dragBgColor = get_color_by_name('deep_blue').rgb;
         
