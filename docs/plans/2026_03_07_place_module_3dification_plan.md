@@ -26,6 +26,9 @@ This is not a perspective renderer. World Z is treated as "height" for simulatio
 - One source of truth for world contents per place.
 - Rendering uses painter-style layered canvases (DOM) but shading/glyph choice uses the unified shader resolver.
 - Selection/editing mirrors ASCII painter semantics: click resolves to (x,y) on the selected world layer; no implicit "pick topmost".
+- Keep two concepts separate:
+  - **World Z** (0/1/2): which world-height canvas a voxel lives on.
+  - **In-tile render ordering**: which thing wins when multiple things occupy the same (x,y,z) plane (e.g. 2 characters in same tile).
 - Simulation math (distance, LOS, hearing) is 3D in helpers, even if walking stays 2D.
 - Keep migration incremental: introduce 3D world coordinates without refactoring everything to 3D at once.
 
@@ -119,6 +122,29 @@ Render the place as three stacked canvas layers clipped to the place module rect
 - Exactly 3 canvases for world z=0/1/2
 - Each canvas is rendered from shaded `Cell` values derived from shader resolver
 
+Important clarification:
+
+- The existing render pass ordering (`tile > item > character > particle > ui`) is an **in-tile composition policy**.
+- World Z is a separate axis. Each world-z canvas can still use an in-tile ordering when multiple things overlap.
+
+In-tile overwrite ordering (within the same `(x,y,z)`):
+
+- Tiles (exactly one per coordinate)
+- Items (including piles/storage representation when multiple items occupy the coordinate)
+- Characters (actors/NPCs). If 2+ characters share the same coordinate, they may flash between each other.
+- Particles
+- UI overlays
+
+Interpretation:
+
+- Earlier entries draw first and may be overwritten.
+- Later entries draw last and "win" for the final visible cell at that coordinate.
+
+Stacked character flash policy:
+
+- Deterministic ordering: actor(s) before npc(s), then stable by ref/id.
+- Flash period: 240ms.
+
 `place_module.ts` remains responsible for input + UI overlays (cursor, borders, debug), but the world visuals move to the layered renderer.
 
 ### E) Selection & Editing
@@ -129,7 +155,23 @@ Selection behavior matches ASCII painter:
 - Click resolves to `(tile_x, tile_y, focus_z)`.
 - No implicit "pick topmost".
 
-For now, `focus_z` is hard-set to the controlled actor's z (typically `z=1`).
+For now:
+
+- `focus_z` defaults to `z=1`.
+- Mouse wheel cycles `focus_z` between `0..2`.
+  - Wheel is reserved for layer selection (no zoom bound to wheel in Place module).
+  - Wheel is clamped (no wrap/cycle).
+- Clicks/edits always resolve to `(x,y,focus_z)`.
+
+Targeting policy:
+
+- If an entity/item is not on the focused layer, it is not targetable.
+
+Focus z affordance (visual):
+
+- Focus is communicated primarily through parallax separation between world-z canvases.
+  - Non-focused layers transform so motion parallax makes the 3D stack readable.
+  - Use the same parallax size/movement parameters as the ASCII painter.
 
 ### F) 3D Helpers for Simulation (Distance/LOS/Hearing)
 
@@ -155,18 +197,61 @@ Legend:
 
 ### Phase 0: Decisions + Contracts
 
-- [ ] Define world z semantics + constants (0/1/2)
-- [ ] Define selection policy and confirm it matches painter
-- [ ] Define `blocks_movement` vs `blocks_los` semantics
-- [ ] Confirm initial LOS behavior: ray in actor plane (z=1) only
+- [x] Define world z semantics + constants (0/1/2) for the initial "zoo" test place:
+  - `z=0` is fully filled with a single collidable tile type (the walk surface).
+  - `z=1` is where characters stand and where items rest (they occupy the walk plane above the tile).
+  - `z=2` is "air" reserved for later.
+  - Footsteps are intended to render as particles on `z=0` (ground-attached effects).
+- [x] Define selection policy: no implicit "pick topmost" (click resolves to focused world layer only).
+- [x] Add focus layer control: mouse wheel cycles `focus_z` up/down in Place module (clamped to 0..2).
+- [x] Confirm wheel binding: Place module wheel is reserved for layer selection (no zoom).
+- [ ] Define `blocks_movement` vs `blocks_los` semantics (tile vs entity vs item)
+- [x] Confirm initial LOS behavior: ray in actor plane (z=1) only
+
+### Phase 0.5: DOM Layer Lifecycle (Stability)
+
+- [ ] Define a single owner + lifecycle API for `#voxel_layers_container` in game mode:
+  - Place module acquires the container when visible.
+  - Place module releases/unmounts when hidden or when switching places.
+  - No stale canvases across sessions/place switches.
+- [ ] Efficiency constraint: update only changed regions where possible; avoid full re-paint every tick if the world did not change.
+- [ ] Deterministic alignment: one source of truth for mapping Place module tile rect -> DOM clip rect.
+
+### Phase 0.6: Camera + Persistence (Maintainability)
+
+- [ ] Create a Place "camera" controller with the same settings/behaviors as the ASCII painter camera.
+  - It drives Place module view (pan offsets) + layered DOM transforms.
+  - Reuse the same helper logic as painter where possible so changes apply to both.
+
+Persistence policy:
+
+- Shared (global) across both programs (game + painter):
+  - glyph sizing / base size
+  - character spacing
+  - leading
+  - positional offsets
+  - parallax parameters (size + motion)
+- Per-program / per-module:
+  - module position + size
+  - module pan position
+
+Implementation note (storage):
+
+- Use shared storage keys for global tuning so painter and game stay in sync.
+- Keep module layout/pan stored per module id (game modules vs painter modules).
 
 ### Phase 1: Authoritative Tiles (z=0)
 
 - [ ] Reuse `src/tile_storage/*` (no new tile definition system)
-- [ ] Add per-place tile grid storage (instances) for z=0
+- [ ] Add per-place tile grid storage (instances) for z=0, owned by the server backend
 - [ ] Add a default tile id for fill (e.g. `tile.stone_bricks`)
 - [ ] Add `tile.stone_bricks` to `local_data/shared/tiles/default_tiles.jsonc` if missing
 - [ ] Map rule semantics to existing fields: `walkable`, `blocks_sight`, `blocks_sound`, plus `tags`
+
+Storage preference:
+
+- Prefer storing the tile grid inline on the Place (single source of truth) rather than splitting across multiple stores.
+- Use the ASCII systems' saved data structures as inspiration for compact grid storage and deterministic reconstruction.
 
 ### Phase 2: PlaceVoxelGrid3 view + Occupancy Index
 
@@ -174,11 +259,24 @@ Legend:
 - [ ] Implement cached occupancy index for blocks_movement + blocks_los
 - [ ] Integrate collision checks to read `blocks_movement` from the index
 
+Initial movement semantics (zoo):
+
+- Walking occurs on `z=1`.
+- Movement is blocked by:
+  - `z=0` tile below being non-walkable (`walkable === false`) and/or tags.
+  - `z=1` occupants (actors/NPCs) marked as occupying.
+- Items on `z=1` do not block movement by default.
+
 ### Phase 3: Place DOM Layer Renderer (3 canvases)
 
 - [ ] Build a place-specific DOM renderer (3 layers) based on `VoxelDOMRenderer` architecture
 - [ ] Clip and align to the place module viewport (type grid alignment)
 - [ ] Render shaded cells for each world z
+
+Ownership note:
+
+- The layered DOM canvases represent the world/place. The Place system owns the DOM layer container lifecycle.
+  - This still needs an explicit mount/unmount path to prevent stale canvases between place switches.
 
 ### Phase 4: Shader Integration for Tiles/Entities
 
@@ -205,6 +303,7 @@ Legend:
 - A place renders as three clipped layers aligned to the type grid.
 - `z=0` shows authoritative tiles (default stone bricks).
 - `z=1` shows entities and items.
+- Mouse wheel changes focused world layer (0/1/2) and click always targets only that layer.
 - Clicking edits/targets only the focused world layer.
 - Collision reads `blocks_movement` from place occupancy index.
 - LOS/hearing debug uses 3D helpers and culls out-of-range particles.
