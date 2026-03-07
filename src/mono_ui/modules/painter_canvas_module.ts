@@ -15,6 +15,7 @@ import { createGrid, getCell, setCell } from '../../ascii_painter/types.js';
 import { drawCell, drawLine, eraseCell, applyTool, sampleCell, previewLine, previewRectStroke, previewRectFill } from '../../ascii_painter/tools.js';
 import { logCellAction, logSelectionAction, startBatch, endBatch, addToBatch, cancelBatch, undo, redo, getHistoryState, type HistoryManager, type CellChange } from '../../ascii_painter/history.js';
 import { get_color_by_name } from '../colors.js';
+import { draw_module_border, BORDER_STYLES } from '../module_borders.js';
 import type { SelectionBitmap, SelectionMode } from '../../ascii_painter/selection.js';
 import { createSelectionBitmap, selectRect, deselectRect, selectPolygon, isSelected, hasSelection, getSelectionBounds, isSelectionBorder, clearSelection, selectAll, invertSelection, applySelectionMode } from '../../ascii_painter/selection.js';
 import type { CopyData } from '../../ascii_painter/copy_paste.js';
@@ -23,7 +24,7 @@ import { pasteImageFromClipboard } from '../../ascii_painter/image_import.js';
 import type { GradiatorState } from '../../ascii_painter/gradiator.js';
 import { scaleCopyData, scaleTextToCopyData } from '../../ascii_painter/gradiator.js';
 import type { ModuleGizmosConfig, GizmoState } from '../module_gizmos.js';
-import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area, handle_move_drag, get_resize_edge, handle_resize_drag } from '../module_gizmos.js';
+import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area, handle_move_drag, get_resize_edge, handle_resize_drag, handle_global_pointer_down_for_gizmos } from '../module_gizmos.js';
 import type { VoxelSpace } from '../../ascii_painter/voxel_space.js';
 import { getVisibleLayers } from '../../ascii_painter/voxel_space.js';
 
@@ -772,21 +773,19 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         }
       }
 
-      // Draw canvas border (only if NOT in resize mode - resize mode draws its own borders)
-      if (!gizmo_state.is_resize_mode) {
+      // Draw canvas border (standard double border; resize mode only tints it).
+      {
         const border_color = get_color_by_name('medium_gray').rgb;
-        for (let x = rect.x0; x <= rect.x1; x++) {
-          c.set(x, rect.y0, { char: '─', rgb: border_color, style: 'regular', weight_index: 3 });
-          c.set(x, rect.y1, { char: '─', rgb: border_color, style: 'regular', weight_index: 3 });
-        }
-        for (let y = rect.y0; y <= rect.y1; y++) {
-          c.set(rect.x0, y, { char: '│', rgb: border_color, style: 'regular', weight_index: 3 });
-          c.set(rect.x1, y, { char: '│', rgb: border_color, style: 'regular', weight_index: 3 });
-        }
-        c.set(rect.x0, rect.y0, { char: '┌', rgb: border_color, style: 'regular', weight_index: 3 });
-        c.set(rect.x1, rect.y0, { char: '┐', rgb: border_color, style: 'regular', weight_index: 3 });
-        c.set(rect.x0, rect.y1, { char: '└', rgb: border_color, style: 'regular', weight_index: 3 });
-        c.set(rect.x1, rect.y1, { char: '┘', rgb: border_color, style: 'regular', weight_index: 3 });
+        draw_module_border(c, {
+          rect,
+          style: BORDER_STYLES.double,
+          border_rgb: border_color,
+          weight_index: 3,
+          header: {
+            text: 'CANVAS',
+            reserve_left_cols: 2 + ((gizmo_config.enabled?.length ?? 0) * 2),
+          },
+        });
       }
 
       // Draw text cursor
@@ -982,8 +981,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         return;
       }
 
-      // Space + Left click = pan mode (now works anywhere on canvas, not just in modules)
-      if (space_held && e.button === 0) {
+      // Space + Left click = pan mode.
+      // Use event-captured keyboard state so this works even if key focus routing is imperfect.
+      if (!text_mode_active && e.space && e.button === 0) {
         is_panning = true;
         pan_start = { x: local_x, y: local_y };
         // Use camera pan as the starting point
@@ -2017,6 +2017,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         case 'ArrowLeft': panBy(-pan_step, 0); break;
         case 'ArrowRight': panBy(pan_step, 0); break;
       }
+    },
+
+    OnGlobalPointerDown(e: PointerEvent): void {
+      handle_global_pointer_down_for_gizmos(e, rect, gizmo_config, gizmo_state);
     },
 
     OnKeyUp(e: KeyboardEvent): void {

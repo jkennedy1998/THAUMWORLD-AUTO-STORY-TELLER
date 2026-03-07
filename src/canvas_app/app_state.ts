@@ -12,6 +12,7 @@ import { create_module_registry, type ModuleRegistry } from '../mono_ui/module_r
 import { handleEntityClick } from '../interface_program/frontend_api.js';
 import type { Place } from '../types/place.js';
 import { debug_warn, debug_log } from '../shared/debug.js';
+import { resolve_char } from '../render_shaders/resolver.js';
 import { init_npc_movement, stop_place_movement, is_npc_moving } from '../npc_ai/movement_loop.js';
 import { start_movement_command_handler, set_command_handler_place } from '../mono_ui/modules/movement_command_handler.js';
 import { get_color_by_name } from '../mono_ui/colors.js';
@@ -28,6 +29,20 @@ import { get_senses_for_action } from '../action_system/sense_broadcast.js';
 import { UI_DEBUG } from '../mono_ui/runtime/ui_debug.js';
 import { get_facing } from '../npc_ai/facing_system.js';
 import { play_sfx } from '../mono_ui/sfx/sfx_player.js';
+import {
+    api_deposit_to_container_item,
+    api_deposit_ground_to_container_item,
+    api_move_within_container_item,
+    api_move_place_sourced_item,
+    api_place_drag,
+    api_place_drop,
+    api_pickup_to,
+    api_reorder_pile,
+    api_transfer_inline,
+    api_spill_from_container_item,
+    api_transfer_between_container_items,
+    api_withdraw_from_ground_container_item,
+} from './transfer_api.js';
 
 export const APP_CONFIG = {
     font_family: 'Martian Mono',
@@ -143,6 +158,9 @@ export function create_app_state(): AppState {
             opening_containers: new Set<string>(),
             // Phase 7: Track container_id -> module_id mapping for closing
             container_module_map: new Map<string, string>(), // container_id -> module_id
+            // Container window slots (1..5): stable positions by slot index
+            container_slot_by_container_id: new Map<string, number>(),
+            container_slots: [null, null, null, null, null] as Array<string | null>,
             // Track container data for all open containers (shared state for refreshing)
             container_data_map: new Map<string, { container: Container; contents: any[] }>(),
         },
@@ -166,6 +184,78 @@ export function create_app_state(): AppState {
             open_npc_modules: new Set<string>(),
         },
     };
+
+    const MODULE_LAYOUT_STORAGE_KEY = 'thaumworld:module_layout:v1';
+
+    function is_rect(v: any): v is Rect {
+        return !!v &&
+            Number.isFinite(v.x0) && Number.isFinite(v.y0) && Number.isFinite(v.x1) && Number.isFinite(v.y1);
+    }
+
+    function load_persisted_module_layout(): void {
+        try {
+            const raw = window.localStorage?.getItem(MODULE_LAYOUT_STORAGE_KEY);
+            if (!raw) return;
+            const parsed = JSON.parse(raw);
+            const pos = parsed?.positions && typeof parsed.positions === 'object' ? parsed.positions : null;
+            const vis = parsed?.visibility && typeof parsed.visibility === 'object' ? parsed.visibility : null;
+
+            if (pos) {
+                for (const [id, r] of Object.entries(pos)) {
+                    if (typeof id !== 'string' || id.length === 0) continue;
+                    if (is_rect(r)) ui_state.modules.positions.set(id, r);
+                }
+            }
+            if (vis) {
+                for (const [id, v] of Object.entries(vis)) {
+                    if (typeof id !== 'string' || id.length === 0) continue;
+                    ui_state.modules.visibility.set(id, Boolean(v));
+                }
+            }
+        } catch {
+            // ignore
+        }
+    }
+
+    let persist_timer: number | null = null;
+    function persist_module_layout_debounced(): void {
+        if (persist_timer) clearTimeout(persist_timer);
+        persist_timer = window.setTimeout(() => {
+            persist_timer = null;
+            try {
+                const positions_obj: Record<string, Rect> = {};
+                for (const [id, r] of ui_state.modules.positions.entries()) {
+                    if (typeof id !== 'string' || !is_rect(r)) continue;
+                    positions_obj[id] = r;
+                }
+                const visibility_obj: Record<string, boolean> = {};
+                for (const [id, v] of ui_state.modules.visibility.entries()) {
+                    if (typeof id !== 'string') continue;
+                    visibility_obj[id] = Boolean(v);
+                }
+                window.localStorage?.setItem(
+                    MODULE_LAYOUT_STORAGE_KEY,
+                    JSON.stringify({ positions: positions_obj, visibility: visibility_obj }),
+                );
+            } catch {
+                // ignore
+            }
+        }, 200);
+    }
+
+    function get_persisted_rect(module_id: string, fallback: Rect): Rect {
+        return ui_state.modules.positions.get(module_id) ?? fallback;
+    }
+
+    function set_module_visible(module_id: string, visible: boolean): void {
+        ui_state.modules.visibility.set(module_id, visible);
+        ui_state.modules.registry?.set_visibility(module_id, visible);
+        if (module_id === 'character_module') ui_state.character.is_visible = visible;
+        persist_module_layout_debounced();
+    }
+
+    // Load persisted module state early so it affects initial rects/visibility.
+    load_persisted_module_layout();
 
     // Shared drag state for cross-module drag-and-drop
     const drag_state = {
@@ -220,13 +310,24 @@ export function create_app_state(): AppState {
 
         get_display_char(): string {
             if (!this.item_definition) return "?";
-            // Priority: display_char > first letter of name > "?"
-            if (this.item_definition.display_char && this.item_definition.display_char !== "·") {
-                return this.item_definition.display_char;
-            } else if (this.item_definition.name) {
-                return this.item_definition.name.charAt(0).toLowerCase();
-            }
-            return "?";
+            return resolve_char(
+                {
+                    kind: 'item',
+                    def_id: this.item_definition.id,
+                    name: this.item_definition.name,
+                    qty: 1,
+                    display_char: this.item_definition.display_char,
+                    tags: (this.item_definition as any)?.tags ?? [],
+                },
+                {
+                    where: 'drag_ghost',
+                    space: 'screen',
+                    x: this.current_x,
+                    y: this.current_y,
+                    time_ms: Date.now(),
+                    ui: { dragging: true },
+                },
+            );
         },
 
         get_wiggle_weight(): number {
@@ -535,7 +636,13 @@ export function create_app_state(): AppState {
                         const item = value as any;
                         ui_state.character.equipped_items.set(item.id, {
                             instance: { id: item.id, def_id: item.def_id, qty: item.qty || 1, tags: item.tags || [] } as ItemInstance,
-                            definition: { id: item.def_id, name: item.name, weight: item.weight || 0, tags: item.tags || [] } as ItemDefinition,
+                            definition: {
+                                id: item.def_id,
+                                name: item.name,
+                                weight: item.weight || 0,
+                                tags: item.tags || [],
+                                display_char: (typeof item.display_char === 'string' && item.display_char.length > 0) ? String(item.display_char).charAt(0) : '·',
+                            } as ItemDefinition,
                         });
                         total_weight += add_weight(item);
                         debug_log(`[LOAD_EQUIPPED] ${slot_name}.${slot_type}: ${item.name} (${item.id})`);
@@ -547,7 +654,13 @@ export function create_app_state(): AppState {
                         if (item && typeof item.id === 'string') {
                             ui_state.character.equipped_items.set(item.id, {
                                 instance: { id: item.id, def_id: item.def_id, qty: item.qty || 1, tags: item.tags || [] } as ItemInstance,
-                                definition: { id: item.def_id, name: item.name, weight: item.weight || 0, tags: item.tags || [] } as ItemDefinition,
+                                definition: {
+                                    id: item.def_id,
+                                    name: item.name,
+                                    weight: item.weight || 0,
+                                    tags: item.tags || [],
+                                    display_char: (typeof (item as any).display_char === 'string' && String((item as any).display_char).length > 0) ? String((item as any).display_char).charAt(0) : '·',
+                                } as ItemDefinition,
                             });
                             total_weight += add_weight(item);
                             debug_log(`[LOAD_EQUIPPED] ${slot_name}.garb.${i}: ${item.name} (${item.id})`);
@@ -1768,6 +1881,13 @@ export function create_app_state(): AppState {
     const module_registry = create_module_registry();
     ui_state.modules.registry = module_registry;
 
+    // Apply persisted visibility defaults before modules are used.
+    // (ModuleRegistry defaults visibility to true on register.)
+    {
+        const v_char = ui_state.modules.visibility.get('character_module');
+        if (typeof v_char === 'boolean') ui_state.character.is_visible = v_char;
+    }
+
     const modules: Module[] = [
         make_fill_module({
             id: 'bg',
@@ -1966,8 +2086,6 @@ export function create_app_state(): AppState {
             },
             border_rgb: get_color_by_name('light_gray').rgb,
             bg_rgb: get_color_by_name('off_black').rgb,
-            floor_char: '.',
-            floor_rgb: get_color_by_name('dark_gray').rgb,
             npc_rgb: get_color_by_name('vivid_yellow').rgb,  // Brighter yellow for visibility
             actor_rgb: get_color_by_name('vivid_green').rgb,
             grid_rgb: get_color_by_name('medium_gray').rgb,
@@ -2044,20 +2162,16 @@ export function create_app_state(): AppState {
                         }
 
                         const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                        const res = await fetch(`${base_url}/api/place/items/pickup_to`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                actor_id: APP_CONFIG.input_actor_id,
-                                place_id: place.id,
-                                item_id,
-                                to_container: target,
-                            })
+                        const data = await api_pickup_to({
+                            base_url,
+                            actor_id: APP_CONFIG.input_actor_id,
+                            place_id: place.id,
+                            item_id,
+                            to_container: target,
                         });
 
-                        const data = await res.json().catch(() => null as any);
-                        if (!res.ok || !data?.ok) {
-                            const err = data?.error ? String(data.error) : `HTTP ${res.status}`;
+                        if (!data.ok) {
+                            const err = data.error ? String(data.error) : 'unknown error';
                             flash_status([`Cannot pick up: ${err}`], 2200);
                             return;
                         }
@@ -2169,6 +2283,15 @@ export function create_app_state(): AppState {
                 })();
             },
 
+            get_ground_item_ids_at: (tile_x: number, tile_y: number): string[] => {
+                return ui_state.place.ground_items_by_position.get(`${tile_x}_${tile_y}`) ?? [];
+            },
+            get_ground_item_meta: (item_instance_id: string): any | null => {
+                return ui_state.place.ground_items_by_id.get(item_instance_id) ?? null;
+            },
+
+            get_open_containers: () => ui_state.container.open_containers,
+
             // Drag and drop callbacks for dropping items onto ground
             is_dragging: () => {
                 const dragging = drag_state.is_dragging;
@@ -2225,29 +2348,25 @@ export function create_app_state(): AppState {
                         const from_x = parseInt(xs || '0', 10);
                         const from_y = parseInt(ys || '0', 10);
                         const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                        const res = await fetch(`${base_url}/api/place/items/drag`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                actor_id: APP_CONFIG.input_actor_id,
-                                place_id,
-                                from_x,
-                                from_y,
-                                to_x: tile_x,
-                                to_y: tile_y,
-                                item_id: drag_state.item_instance_id,
-                                action_cost: ui_state.controls.override_cost ?? undefined,
-                            })
+                        const mv = await api_place_drag({
+                            base_url,
+                            actor_id: APP_CONFIG.input_actor_id,
+                            place_id,
+                            from_x,
+                            from_y,
+                            to_x: tile_x,
+                            to_y: tile_y,
+                            item_id: String(drag_state.item_instance_id ?? ''),
+                            action_cost: (ui_state.controls.override_cost ?? undefined) as any,
                         });
-                        const mv = await res.json().catch(() => null as any);
-                        if (res.ok && mv?.ok) {
+                        if (mv.ok) {
                             flash_status(['Dragged'], 900);
                             drag_state.end_drag();
                             await update_current_place(place_id);
                             void refresh_container_data();
                             return true;
                         }
-                        flash_status([`Cannot drag: ${mv?.error || `HTTP ${res.status}`}`], 2000);
+                        flash_status([`Cannot drag: ${mv.error}`], 2000);
                         drag_state.reject_drag();
                         return false;
                     } catch {
@@ -2281,30 +2400,26 @@ export function create_app_state(): AppState {
                         const from_x = parseInt(xs || '0', 10);
                         const from_y = parseInt(ys || '0', 10);
                         const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                        const res = await fetch(`${base_url}/api/place/items/drag`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                actor_id: APP_CONFIG.input_actor_id,
-                                place_id,
-                                from_x,
-                                from_y,
-                                to_x: tile_x,
-                                to_y: tile_y,
-                                mode: kind === 'pile' ? 'pile' : undefined,
-                                item_id: kind === 'ground' ? drag_state.item_instance_id : undefined,
-                                action_cost: ui_state.controls.override_cost ?? undefined,
-                            })
+                        const mv = await api_place_drag({
+                            base_url,
+                            actor_id: APP_CONFIG.input_actor_id,
+                            place_id,
+                            from_x,
+                            from_y,
+                            to_x: tile_x,
+                            to_y: tile_y,
+                            mode: kind === 'pile' ? 'pile' : undefined,
+                            item_id: kind === 'ground' ? String(drag_state.item_instance_id ?? '') : undefined,
+                            action_cost: (ui_state.controls.override_cost ?? undefined) as any,
                         });
-                        const mv = await res.json().catch(() => null as any);
-                        if (res.ok && mv?.ok) {
+                        if (mv.ok) {
                             flash_status(['Dragged'], 900);
                             drag_state.end_drag();
                             await update_current_place(place_id);
                             void refresh_container_data();
                             return true;
                         }
-                        flash_status([`Cannot drag: ${mv?.error || `HTTP ${res.status}`}`], 2000);
+                        flash_status([`Cannot drag: ${mv.error}`], 2000);
                         drag_state.reject_drag();
                         return false;
                     } catch {
@@ -2351,28 +2466,23 @@ export function create_app_state(): AppState {
                                     return false;
                                 }
 
-                                const res = await fetch(`${base_url}/api/place/items/transfer_between_container_items`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        actor_id: APP_CONFIG.input_actor_id,
-                                        place_id: place.id,
-                                        from_container_item_id: src_container_item_id,
-                                        to_container_item_id: ground_item_id,
-                                        item_id: drag_state.item_instance_id,
-                                        action_cost: ui_state.controls.override_cost ?? undefined,
-                                    })
+                                const tx = await api_transfer_between_container_items({
+                                    base_url,
+                                    actor_id: APP_CONFIG.input_actor_id,
+                                    place_id: place.id,
+                                    from_container_item_id: String(src_container_item_id),
+                                    to_container_item_id: String(ground_item_id),
+                                    item_id: String(drag_state.item_instance_id ?? ''),
+                                    action_cost: (ui_state.controls.override_cost ?? undefined) as any,
                                 });
-                                const tx = await res.json().catch(() => null as any);
-                                if (res.ok && tx?.ok) {
+                                if (tx.ok) {
                                     flash_status([`Moved into ${meta?.name ?? 'container'}`], 1500);
                                     drag_state.end_drag();
                                     await update_current_place(place.id);
                                     void refresh_container_data();
                                     return true;
                                 }
-                                const err = tx?.error ? String(tx.error) : `HTTP ${res.status}`;
-                                flash_status([`Cannot deposit: ${err}`], 2000);
+                                flash_status([`Cannot deposit: ${tx.error}`], 2000);
                                 drag_state.reject_drag();
                                 return false;
                             }
@@ -2396,21 +2506,17 @@ export function create_app_state(): AppState {
                                 const from_x = parseInt(xs || '0', 10);
                                 const from_y = parseInt(ys || '0', 10);
 
-                                const res = await fetch(`${base_url}/api/place/items/deposit_ground_to_container_item`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        actor_id: APP_CONFIG.input_actor_id,
-                                        place_id: place.id,
-                                        from_x,
-                                        from_y,
-                                        item_id: drag_state.item_instance_id,
-                                        container_item_id: ground_item_id,
-                                        action_cost: ui_state.controls.override_cost ?? undefined,
-                                    })
+                                const dep = await api_deposit_ground_to_container_item({
+                                    base_url,
+                                    actor_id: APP_CONFIG.input_actor_id,
+                                    place_id: place.id,
+                                    from_x,
+                                    from_y,
+                                    item_id: String(drag_state.item_instance_id ?? ''),
+                                    container_item_id: String(ground_item_id),
+                                    action_cost: (ui_state.controls.override_cost ?? undefined) as any,
                                 });
-                                const dep = await res.json().catch(() => null as any);
-                                if (res.ok && dep?.ok) {
+                                if (dep.ok) {
                                     flash_status([`Moved into ${meta?.name ?? 'container'}`], 1500);
                                     drag_state.end_drag();
                                     await update_current_place(place.id);
@@ -2418,8 +2524,7 @@ export function create_app_state(): AppState {
                                     void refresh_character_data();
                                     return true;
                                 }
-                                const err = dep?.error ? String(dep.error) : `HTTP ${res.status}`;
-                                flash_status([`Cannot deposit: ${err}`], 2000);
+                                flash_status([`Cannot deposit: ${dep.error}`], 2000);
                                 drag_state.reject_drag();
                                 return false;
                             }
@@ -2431,19 +2536,16 @@ export function create_app_state(): AppState {
                                 return false;
                             }
 
-                            const res = await fetch(`${base_url}/api/place/items/deposit_to_container_item`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    actor_id: APP_CONFIG.input_actor_id,
-                                    place_id: place.id,
-                                    item_id: drag_state.item_instance_id,
-                                    container_item_id: ground_item_id,
-                                    action_cost: ui_state.controls.override_cost ?? undefined,
-                                })
+                            const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
+                            const dep = await api_deposit_to_container_item({
+                                base_url,
+                                actor_id: APP_CONFIG.input_actor_id,
+                                place_id: place.id,
+                                item_id: String(drag_state.item_instance_id ?? ''),
+                                container_item_id: ground_item_id,
+                                action_cost,
                             });
-                            const dep = await res.json().catch(() => null as any);
-                            if (res.ok && dep?.ok) {
+                            if (dep.ok) {
                                 flash_status([`Moved into ${meta?.name ?? 'container'}`], 1500);
                                 drag_state.end_drag();
                                 await update_current_place(place.id);
@@ -2451,7 +2553,7 @@ export function create_app_state(): AppState {
                                 void refresh_character_data();
                                 return true;
                             }
-                            const err = dep?.error ? String(dep.error) : `HTTP ${res.status}`;
+                            const err = dep.error ? String(dep.error) : 'unknown error';
                             flash_status([`Cannot deposit: ${err}`], 2000);
                             drag_state.reject_drag();
                             return false;
@@ -2477,28 +2579,24 @@ export function create_app_state(): AppState {
 
                     try {
                         const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                        const res = await fetch(`${base_url}/api/place/items/spill_from_container_item`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                actor_id: APP_CONFIG.input_actor_id,
-                                place_id: place.id,
-                                container_item_id: src_container_item_id,
-                                item_id: drag_state.item_instance_id,
-                                x: tile_x,
-                                y: tile_y,
-                                action_cost: ui_state.controls.override_cost ?? undefined,
-                            })
+                        const sp = await api_spill_from_container_item({
+                            base_url,
+                            actor_id: APP_CONFIG.input_actor_id,
+                            place_id: place.id,
+                            container_item_id: String(src_container_item_id),
+                            item_id: String(drag_state.item_instance_id ?? ''),
+                            x: tile_x,
+                            y: tile_y,
+                            action_cost: (ui_state.controls.override_cost ?? undefined) as any,
                         });
-                        const sp = await res.json().catch(() => null as any);
-                        if (res.ok && sp?.ok) {
+                        if (sp.ok) {
                             flash_status(['Dropped'], 1200);
                             drag_state.end_drag();
                             await update_current_place(place.id);
                             void refresh_container_data();
                             return true;
                         }
-                        flash_status([`Cannot drop: ${sp?.error || `HTTP ${res.status}`}`], 2000);
+                        flash_status([`Cannot drop: ${sp.error}`], 2000);
                         drag_state.reject_drag();
                         return false;
                     } catch {
@@ -2535,26 +2633,18 @@ export function create_app_state(): AppState {
                 debug_log(`[PlaceModule] on_drop: Request body: ${JSON.stringify(request_body)}`);
 
                 try {
-                    const response = await fetch(url, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(request_body)
+                    const drop_res = await api_place_drop({
+                        base_url,
+                        actor_id,
+                        place_id: place.id,
+                        item_id: String(drag_state.item_instance_id ?? ''),
+                        x: tile_x,
+                        y: tile_y,
                     });
 
-                    debug_log(`[PlaceModule] on_drop: Response status: ${response.status}`);
+                    debug_log(`[PlaceModule] on_drop: Response data: ${JSON.stringify(drop_res)}`);
 
-                    if (!response.ok) {
-                        const error_text = await response.text();
-                        debug_log(`[PlaceModule] on_drop: HTTP error: ${response.status} - ${error_text}`);
-                        drag_state.reject_drag();
-                        flash_status([`Cannot drop: ${error_text}`], 2000);
-                        return false;
-                    }
-
-                    const data = await response.json();
-                    debug_log(`[PlaceModule] on_drop: Response data: ${JSON.stringify(data)}`);
-
-                    if (data.ok) {
+                    if (drop_res.ok) {
                         debug_log(`[PlaceModule] on_drop: SUCCESS!`);
                         flash_status([`Dropped item at (${tile_x}, ${tile_y})`], 1500);
                         // Refresh place view to show dropped item
@@ -2569,9 +2659,9 @@ export function create_app_state(): AppState {
                         drag_state.source_module = null;
                         return true;
                     } else {
-                        debug_log(`[PlaceModule] on_drop: API returned error: ${data.error}`);
+                        debug_log(`[PlaceModule] on_drop: API returned error: ${drop_res.error}`);
                         drag_state.reject_drag();
-                        flash_status([`Cannot drop: ${data.error}`], 2000);
+                        flash_status([`Cannot drop: ${drop_res.error}`], 2000);
                         return false;
                     }
                 } catch (err) {
@@ -2699,7 +2789,7 @@ export function create_app_state(): AppState {
         // System status bar (includes time prefix)
         make_text_window_module({
             id: 'status',
-            rect: { x0: L_X0, y0: Y_SYS0, x1: L_X1, y1: Y_SYS1 },
+            rect: get_persisted_rect('status', { x0: L_X0, y0: Y_SYS0, x1: L_X1, y1: Y_SYS1 }),
             get_source: () => ui_state.text_windows.get('status') ?? { messages: [], rev: 0 },
             border_rgb: get_color_by_name('medium_gray').rgb,
             text_rgb: get_color_by_name('pale_gray').rgb,
@@ -2709,7 +2799,7 @@ export function create_app_state(): AppState {
 
         make_text_window_module({
             id: 'transcript',
-            rect: { x0: L_X0, y0: Y_TRANSCRIPT0, x1: L_X1, y1: Y_TRANSCRIPT1 },
+            rect: get_persisted_rect('transcript', { x0: L_X0, y0: Y_TRANSCRIPT0, x1: L_X1, y1: Y_TRANSCRIPT1 }),
             get_source: () => ui_state.text_windows.get('transcript') ?? { messages: [], rev: 0 },
             border_rgb: get_color_by_name('light_gray').rgb,
             text_rgb: get_color_by_name('off_white').rgb,
@@ -2763,7 +2853,7 @@ export function create_app_state(): AppState {
         // Debug reader window (always visible)
         make_text_window_module({
             id: 'debug',
-            rect: { x0: R_X0, y0: Y_PLACE0, x1: R_X1, y1: Y_PLACE1 },
+            rect: get_persisted_rect('debug', { x0: R_X0, y0: Y_PLACE0, x1: R_X1, y1: Y_PLACE1 }),
             get_source: () => ui_state.text_windows.get('debug') ?? { messages: [], rev: 0 },
             border_rgb: get_color_by_name('light_gray').rgb,
             text_rgb: get_color_by_name('off_white').rgb,
@@ -2772,6 +2862,33 @@ export function create_app_state(): AppState {
             hint_rgb: get_color_by_name('pale_yellow').rgb,
             npc_rgb: get_color_by_name('pumpkin').rgb,
             state_rgb: get_color_by_name('dark_gray').rgb,
+            title: 'DEBUG',
+            gizmos: {
+                enabled: ['close', 'move', 'resize'],
+                can_close: true,
+                can_move: true,
+                can_save_position: false,
+                on_close: () => {
+                    set_module_visible('debug', false);
+                    flash_status(['Debug hidden'], 800);
+                },
+                on_move: (new_rect) => {
+                    ui_state.modules.positions.set('debug', new_rect);
+                    persist_module_layout_debounced();
+                },
+                on_move_end: (final_rect) => {
+                    ui_state.modules.positions.set('debug', final_rect);
+                    persist_module_layout_debounced();
+                },
+                on_resize: (new_rect) => {
+                    ui_state.modules.positions.set('debug', new_rect);
+                    persist_module_layout_debounced();
+                },
+                on_resize_end: (final_rect) => {
+                    ui_state.modules.positions.set('debug', final_rect);
+                    persist_module_layout_debounced();
+                },
+            },
         }),
 
         // Action cost buttons
@@ -2967,6 +3084,36 @@ export function create_app_state(): AppState {
                     console.error('[DEBUG BUTTON] Error:', err);
                     flash_status(['Error: Could not load inventory'], 1500);
                 }
+            },
+        }),
+
+        // Quick UI toggles (temporary; will move to a real bottom bar later)
+        make_button_module({
+            id: 'ui_toggle_character',
+            rect: { x0: DEBUG_X0 + 24, y0: DEBUG_Y_TOP, x1: DEBUG_X1 + 24, y1: DEBUG_Y_TOP + 1 },
+            label: 'CHAR',
+            rgb: get_color_by_name('pale_yellow').rgb,
+            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
+            OnPress() {
+                const cur = module_registry.is_visible('character_module');
+                const next = !cur;
+                set_module_visible('character_module', next);
+                flash_status([next ? 'Character shown' : 'Character hidden'], 900);
+            },
+        }),
+        make_button_module({
+            id: 'ui_toggle_debug',
+            rect: { x0: DEBUG_X0 + 36, y0: DEBUG_Y_TOP, x1: DEBUG_X1 + 36, y1: DEBUG_Y_TOP + 1 },
+            label: 'DEBUG',
+            rgb: get_color_by_name('pale_yellow').rgb,
+            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
+            OnPress() {
+                const cur = module_registry.is_visible('debug');
+                const next = !cur;
+                set_module_visible('debug', next);
+                flash_status([next ? 'Debug shown' : 'Debug hidden'], 900);
             },
         }),
 
@@ -3253,7 +3400,7 @@ export function create_app_state(): AppState {
         // Shows equipped items and weight
         make_character_module({
             id: 'character_module',
-            rect: { x0: 160, y0: 2, x1: 198, y1: 17 },
+            rect: get_persisted_rect('character_module', { x0: 160, y0: 2, x1: 198, y1: 17 }),
             get_actor_name: () => APP_CONFIG.input_actor_id.split('_')[0] || 'Actor',
             get_actor_id: () => APP_CONFIG.input_actor_id,
             get_body_slots: () => ui_state.character.body_slots,
@@ -3349,18 +3496,15 @@ export function create_app_state(): AppState {
                                 return false;
                             }
                             const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                            const res = await fetch(`${base_url}/api/place/items/pickup_to`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    actor_id,
-                                    place_id: place.id,
-                                    item_id: drag_state.item_instance_id,
-                                    to_container: nested_dest,
-                                    action_cost: ui_state.controls.override_cost ?? undefined,
-                                })
+                            const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
+                            const data = await api_pickup_to({
+                                base_url,
+                                actor_id,
+                                place_id: place.id,
+                                item_id: String(drag_state.item_instance_id ?? ''),
+                                to_container: nested_dest,
+                                action_cost,
                             });
-                            const data = await res.json();
                             if (data.ok) {
                                 flash_status([`Moved into ${existing.name || 'container'}`], 1500);
                                 drag_state.end_drag();
@@ -3374,18 +3518,45 @@ export function create_app_state(): AppState {
                             return false;
                         }
 
+                        // Ground container-item -> nested container uses withdraw endpoint.
+                        if (src.startsWith('place.item.')) {
+                            const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+                            try {
+                                const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
+                                const wd = await api_withdraw_from_ground_container_item({
+                                    base_url,
+                                    actor_id,
+                                    src_container_id: src,
+                                    item_id: String(drag_state.item_instance_id ?? ''),
+                                    to_container: nested_dest,
+                                    action_cost,
+                                });
+                                if (wd.ok) {
+                                    flash_status([`Moved into ${existing.name || 'container'}`], 1500);
+                                    drag_state.end_drag();
+                                    await update_current_place(wd.place_id);
+                                    void refresh_container_data();
+                                    void refresh_character_data();
+                                    return true;
+                                }
+                                const detail = wd.detail ? ` (${JSON.stringify(wd.detail)})` : '';
+                                flash_status([`Failed to move: ${wd.error}${detail}`], 1500);
+                                drag_state.reject_drag();
+                                return false;
+                            } catch {
+                                flash_status(['Failed to move'], 1500);
+                                drag_state.reject_drag();
+                                return false;
+                            }
+                        }
+
                         // Inventory/container/character -> nested container uses transfer
-                        const transfer_res = await fetch('http://localhost:8787/api/transfer', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                actor_id,
-                                item_instance_id: drag_state.item_instance_id,
-                                from_container: drag_state.source_container_id,
-                                to_container: nested_dest,
-                            }),
+                        const transfer_data = await api_transfer_inline({
+                            actor_id,
+                            item_instance_id: String(drag_state.item_instance_id ?? ''),
+                            from_container: String(drag_state.source_container_id ?? ''),
+                            to_container: nested_dest,
                         });
-                        const transfer_data = await transfer_res.json();
                         if (transfer_data.ok) {
                             flash_status([`Moved into ${existing.name || 'container'}`], 1500);
                             void refresh_container_data();
@@ -3433,18 +3604,16 @@ export function create_app_state(): AppState {
 
                     try {
                         const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                        const res = await fetch(`${base_url}/api/place/items/pickup_to`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                actor_id,
-                                place_id: place.id,
-                                item_id: drag_state.item_instance_id,
-                                to_container: target_container_id,
-                                action_cost: ui_state.controls.override_cost ?? undefined,
-                            })
+                        const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
+                        const pickup_data = await api_pickup_to({
+                            base_url,
+                            actor_id,
+                            place_id: place.id,
+                            item_id: String(drag_state.item_instance_id ?? ''),
+                            to_container: target_container_id,
+                            action_cost,
                         });
-                        const pickup_data = await res.json();
+
                         if (pickup_data.ok) {
                             flash_status([`${drag_state.item_definition?.name} picked up`], 1500);
                             drag_state.end_drag();
@@ -3459,6 +3628,39 @@ export function create_app_state(): AppState {
                     } catch (err) {
                         console.error('[Character] pickup_to error:', err);
                         flash_status(['Error picking up item'], 1500);
+                        drag_state.reject_drag();
+                        return false;
+                    }
+                }
+
+                // Dragging from a ground container-item window -> body slot: withdraw.
+                if (src.startsWith('place.item.')) {
+                    const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+                    try {
+                        const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
+                        const wd = await api_move_place_sourced_item({
+                            base_url,
+                            actor_id,
+                            source_container_id: src,
+                            item_id: String(drag_state.item_instance_id ?? ''),
+                            to_container: target_container_id,
+                            action_cost,
+                        });
+
+                        if (wd.ok) {
+                            flash_status([`${drag_state.item_definition?.name || 'Item'} withdrawn`], 1500);
+                            drag_state.end_drag();
+                            await update_current_place(wd.place_id);
+                            void refresh_container_data();
+                            void refresh_character_data();
+                            return true;
+                        }
+                        const detail = wd.detail ? ` (${JSON.stringify(wd.detail)})` : '';
+                        flash_status([`Withdraw failed: ${wd.error}${detail}`], 1800);
+                        drag_state.reject_drag();
+                        return false;
+                    } catch {
+                        flash_status(['Withdraw failed'], 1500);
                         drag_state.reject_drag();
                         return false;
                     }
@@ -3481,18 +3683,12 @@ export function create_app_state(): AppState {
                     }
                     
                     try {
-                        const transfer_res = await fetch('http://localhost:8787/api/transfer', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                actor_id,
-                                item_instance_id: drag_state.item_instance_id,
-                                from_container: drag_state.source_container_id,
-                                to_container: target_container_id,
-                            }),
+                        const transfer_data = await api_transfer_inline({
+                            actor_id,
+                            item_instance_id: String(drag_state.item_instance_id ?? ''),
+                            from_container: String(drag_state.source_container_id ?? ''),
+                            to_container: target_container_id,
                         });
-
-                        const transfer_data = await transfer_res.json();
 
                         if (transfer_data.ok) {
                             flash_status([`${drag_state.item_definition?.name} equipped to ${slot_name}.${slot_type}${garb_index !== null ? `.${garb_index}` : ''}`], 1500);
@@ -3530,18 +3726,12 @@ export function create_app_state(): AppState {
                     }
 
                     try {
-                        const transfer_res = await fetch('http://localhost:8787/api/transfer', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                actor_id,
-                                item_instance_id: drag_state.item_instance_id,
-                                from_container: drag_state.source_container_id,
-                                to_container: target_container_id,
-                            }),
+                        const transfer_data = await api_transfer_inline({
+                            actor_id,
+                            item_instance_id: String(drag_state.item_instance_id ?? ''),
+                            from_container: String(drag_state.source_container_id ?? ''),
+                            to_container: target_container_id,
                         });
-
-                        const transfer_data = await transfer_res.json();
 
                         if (transfer_data.ok) {
                             flash_status([`${drag_state.item_definition?.name} moved to ${slot_name}.${slot_type}${garb_index !== null ? `.${garb_index}` : ''}`], 1500);
@@ -3619,19 +3809,14 @@ export function create_app_state(): AppState {
                     }
 
                     try {
-                        const transfer_res = await fetch('http://localhost:8787/api/transfer', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                item_instance_id: drag_state.item_instance_id,
-                                from_container: drag_state.source_container_id,
-                                to_container: container.id,
-                                target_grid_x,
-                                target_grid_y,
-                            }),
+                        const transfer_data = await api_transfer_inline({
+                            actor_id: APP_CONFIG.input_actor_id,
+                            item_instance_id: String(drag_state.item_instance_id ?? ''),
+                            from_container: String(drag_state.source_container_id ?? ''),
+                            to_container: container.id,
+                            target_grid_x,
+                            target_grid_y,
                         });
-
-                        const transfer_data = await transfer_res.json();
 
                         if (transfer_data.ok) {
                             flash_status([`${drag_state.item_definition?.name} unequipped`], 1500);
@@ -3659,22 +3844,36 @@ export function create_app_state(): AppState {
                 return false;
             },
             border_rgb: get_color_by_name('light_gray').rgb,
-            // Player character module: can move but cannot close
+            // Player character module: standard widgets
             gizmos: {
-                enabled: ['move'],
-                can_close: false,
+                enabled: ['close', 'move', 'resize'],
+                can_close: true,
                 can_move: true,
                 can_save_position: false,
+                on_close: () => {
+                    set_module_visible('character_module', false);
+                    flash_status(['Character hidden'], 800);
+                },
                 on_move_start: () => {
                     debug_log('[CharacterModule] Move mode started');
                 },
                 on_move: (new_rect) => {
                     ui_state.modules.positions.set('character_module', new_rect);
                     debug_log(`[CharacterModule] Moving to (${new_rect.x0},${new_rect.y0})`);
+                    persist_module_layout_debounced();
                 },
                 on_move_end: (final_rect) => {
                     ui_state.modules.positions.set('character_module', final_rect);
                     flash_status([`Character panel moved`], 1000);
+                    persist_module_layout_debounced();
+                },
+                on_resize: (new_rect) => {
+                    ui_state.modules.positions.set('character_module', new_rect);
+                    persist_module_layout_debounced();
+                },
+                on_resize_end: (final_rect) => {
+                    ui_state.modules.positions.set('character_module', final_rect);
+                    persist_module_layout_debounced();
                 },
             },
             // Container sidebar: Show equipped containers only (NEW INLINE SYSTEM)
@@ -3869,6 +4068,12 @@ export function create_app_state(): AppState {
                 // Store in shared drag state
                 drag_state.start_drag('container', item.id, container_id, definition, slot_index);
             },
+            get_open_containers: () => ui_state.container.open_containers,
+            get_open_container_id_for_item: (item_instance_id: string): string | null => {
+                const actor_id = String(APP_CONFIG.input_actor_id ?? '');
+                if (!actor_id) return null;
+                return `actor.item.${actor_id}.${item_instance_id}`;
+            },
             on_open_container_item: (item: ItemInstance, definition: ItemDefinition, parent_container_id: string) => {
                 // Route container-item drags to opening.
                 const place = get_current_place();
@@ -3959,38 +4164,27 @@ export function create_app_state(): AppState {
 
                 // Ground container-item -> actor container: withdraw nested item.
                 if (src.startsWith('place.item.')) {
-                    const parts = src.split('.');
-                    const place_id = parts[2];
-                    const container_item_id = parts[3];
-                    if (!place_id || !container_item_id) {
-                        drag_state.reject_drag();
-                        return false;
-                    }
-
+                    const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
                     try {
-                        const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                        const res = await fetch(`${base_url}/api/place/items/withdraw_from_container_item`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                actor_id: APP_CONFIG.input_actor_id,
-                                place_id,
-                                container_item_id,
-                                item_id: drag_state.item_instance_id,
-                                to_container: target_container_id,
-                                action_cost: ui_state.controls.override_cost ?? undefined,
-                            })
+                        const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
+                        const wd = await api_withdraw_from_ground_container_item({
+                            base_url,
+                            actor_id: APP_CONFIG.input_actor_id,
+                            src_container_id: src,
+                            item_id: String(drag_state.item_instance_id ?? ''),
+                            to_container: target_container_id,
+                            action_cost,
                         });
-                        const wd = await res.json().catch(() => null as any);
-                        if (res.ok && wd?.ok) {
+                        if (wd.ok) {
                             flash_status([`${drag_state.item_definition?.name} moved to ${target_name}`], 1500);
                             drag_state.end_drag();
-                            await update_current_place(place_id);
+                            await update_current_place(wd.place_id);
                             void refresh_container_data();
                             void refresh_character_data();
                             return true;
                         }
-                        flash_status([`Failed to pick up: ${wd?.error || `HTTP ${res.status}`}`], 1500);
+                        const detail = wd.detail ? ` (${JSON.stringify(wd.detail)})` : '';
+                        flash_status([`Failed to pick up: ${wd.error}${detail}`], 1500);
                         drag_state.reject_drag();
                         return false;
                     } catch {
@@ -4016,18 +4210,16 @@ export function create_app_state(): AppState {
 
                     try {
                         const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                        const res = await fetch(`${base_url}/api/place/items/pickup_to`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                actor_id: APP_CONFIG.input_actor_id,
-                                place_id: place.id,
-                                item_id: drag_state.item_instance_id,
-                                to_container: target_container_id,
-                                action_cost: ui_state.controls.override_cost ?? undefined,
-                            })
+                        const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
+                        const pickup_data = await api_pickup_to({
+                            base_url,
+                            actor_id: APP_CONFIG.input_actor_id,
+                            place_id: place.id,
+                            item_id: String(drag_state.item_instance_id ?? ''),
+                            to_container: target_container_id,
+                            action_cost,
                         });
-                        const pickup_data = await res.json();
+
                         if (pickup_data.ok) {
                             flash_status([`${drag_state.item_definition?.name} moved to ${target_name}`], 1500);
                             drag_state.end_drag();
@@ -4050,18 +4242,12 @@ export function create_app_state(): AppState {
                 console.log(`[Inventory] Transferring ${drag_state.item_definition?.name} to ${target_container_id}`);
 
                 try {
-                    const transfer_res = await fetch('http://localhost:8787/api/transfer', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            actor_id: APP_CONFIG.input_actor_id,
-                            item_instance_id: drag_state.item_instance_id,
-                            from_container: drag_state.source_container_id,
-                            to_container: target_container_id,
-                        }),
+                    const transfer_data = await api_transfer_inline({
+                        actor_id: APP_CONFIG.input_actor_id,
+                        item_instance_id: String(drag_state.item_instance_id ?? ''),
+                        from_container: String(drag_state.source_container_id ?? ''),
+                        to_container: target_container_id,
                     });
-
-                    const transfer_data = await transfer_res.json();
 
                     if (transfer_data.ok) {
                         console.log(`[Inventory] Transfer successful: ${drag_state.item_definition?.name} -> ${target_container_id}`);
@@ -4212,18 +4398,12 @@ export function create_app_state(): AppState {
                     console.log(`[Inventory] Transferring ${drag_state.item_definition?.name} to ${target_container_id}`);
 
                     try {
-                        const transfer_res = await fetch('http://localhost:8787/api/transfer', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                actor_id: APP_CONFIG.input_actor_id,
-                                item_instance_id: drag_state.item_instance_id,
-                                from_container: drag_state.source_container_id,
-                                to_container: target_container_id,
-                            }),
+                        const transfer_data = await api_transfer_inline({
+                            actor_id: APP_CONFIG.input_actor_id,
+                            item_instance_id: String(drag_state.item_instance_id ?? ''),
+                            from_container: String(drag_state.source_container_id ?? ''),
+                            to_container: target_container_id,
                         });
-
-                        const transfer_data = await transfer_res.json();
 
                         if (transfer_data.ok) {
                             console.log(`[Inventory] Equip successful: ${drag_state.item_definition?.name} -> ${target_slot_name}`);
@@ -4257,7 +4437,7 @@ export function create_app_state(): AppState {
             text_rgb: get_color_by_name('off_white').rgb,
             // Phase 8: Enable gizmos (close X, move #)
             gizmos: {
-                enabled: ['close', 'move'],
+                enabled: ['close', 'move', 'resize'],
                 can_close: true,
                 can_move: true,
                 can_save_position: false,
@@ -4325,10 +4505,27 @@ export function create_app_state(): AppState {
     for (const module of modules) {
         module_registry.register(module);
     }
+
+    // Apply persisted visibility for registered modules.
+    for (const [id, visible] of ui_state.modules.visibility.entries()) {
+        module_registry.set_visibility(id, visible);
+    }
+    // Ensure visibility defaults are persisted for key closable modules.
+    if (!ui_state.modules.visibility.has('character_module')) {
+        ui_state.modules.visibility.set('character_module', ui_state.character.is_visible);
+    }
+    if (!ui_state.modules.visibility.has('debug')) {
+        ui_state.modules.visibility.set('debug', module_registry.is_visible('debug'));
+    }
+    persist_module_layout_debounced();
     
-    // Set initial positions for static modules (needed for NPC module positioning)
-    ui_state.modules.positions.set('character_module', { x0: 160, y0: 2, x1: 198, y1: 17 });
-    ui_state.modules.positions.set('inventory_container', { x0: 160, y0: 18, x1: 198, y1: 35 });
+    // Seed default positions if not persisted yet (used by NPC module positioning).
+    if (!ui_state.modules.positions.has('character_module')) {
+        ui_state.modules.positions.set('character_module', { x0: 160, y0: 2, x1: 198, y1: 17 });
+    }
+    if (!ui_state.modules.positions.has('inventory_container')) {
+        ui_state.modules.positions.set('inventory_container', { x0: 160, y0: 18, x1: 198, y1: 35 });
+    }
 
     register_window_feed({
         window_id: 'transcript',
@@ -4368,6 +4565,8 @@ export function create_app_state(): AppState {
     // ============================================================
     // Phase 7.5: Dynamic Module Management - NPC Module Functions
     // ============================================================
+
+    
     
     /**
      * Helper function to flash a module's border (visual feedback)
@@ -4772,24 +4971,36 @@ export function create_app_state(): AppState {
                 debug_log(`[ContainerOpener] Successfully loaded regular container: ${container.id} (${container.contents?.length || 0} items)`);
             }
             
-            // Generate unique module ID
-            const instance_id = `container_module_${Date.now()}`;
-            
-            // Calculate center-screen position with offset based on open count
-            const open_count = ui_state.container.open_containers.size;
-            const offset_x = open_count * 3;
-            const offset_y = open_count * 2;
-            
+            // Assign a stable window slot (1..5) so positions persist per "version".
+            const MAX_SLOTS = 5;
+            let slot_index = -1;
+            for (let i = 0; i < MAX_SLOTS; i++) {
+                if (!ui_state.container.container_slots[i]) { slot_index = i; break; }
+            }
+            if (slot_index === -1) {
+                flash_status([`Too many containers open (max ${MAX_SLOTS})`], 1500);
+                return;
+            }
+
+            ui_state.container.container_slots[slot_index] = container_id;
+            ui_state.container.container_slot_by_container_id.set(container_id, slot_index + 1);
+
+            const instance_id = `container_slot_${slot_index + 1}`;
+
             const grid_w = APP_CONFIG.grid_width;
             const grid_h = APP_CONFIG.grid_height;
             const module_w = 39;
             const module_h = 18;
-            
-            const container_rect = {
+
+            // Prefer persisted position for this slot.
+            const persisted = ui_state.modules.positions.get(instance_id);
+            const offset_x = slot_index * 4;
+            const offset_y = slot_index * 2;
+            const container_rect = persisted ?? {
                 x0: Math.floor((grid_w - module_w) / 2) + offset_x,
                 y0: Math.floor((grid_h - module_h) / 2) + offset_y,
                 x1: Math.floor((grid_w + module_w) / 2) + offset_x,
-                y1: Math.floor((grid_h + module_h) / 2) + offset_y
+                y1: Math.floor((grid_h + module_h) / 2) + offset_y,
             };
             
             // Create container module with callbacks that read from shared state
@@ -4930,27 +5141,23 @@ export function create_app_state(): AppState {
                         if (src === container_id && !String(drag_state.item_instance_id ?? '').startsWith('pile:')) {
                             try {
                                 const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                                const res = await fetch(`${base_url}/api/place/items/reorder_pile`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        actor_id: APP_CONFIG.input_actor_id,
-                                        place_id,
-                                        position_key,
-                                        item_id: drag_state.item_instance_id,
-                                        target_slot_index: slot_index,
-                                        action_cost: ui_state.controls.override_cost ?? undefined,
-                                    })
+                                const out = await api_reorder_pile({
+                                    base_url,
+                                    actor_id: APP_CONFIG.input_actor_id,
+                                    place_id,
+                                    position_key,
+                                    item_id: String(drag_state.item_instance_id ?? ''),
+                                    target_slot_index: slot_index,
+                                    action_cost: (ui_state.controls.override_cost ?? undefined) as any,
                                 });
-                                const out = await res.json().catch(() => null as any);
-                                if (res.ok && out?.ok) {
+                                if (out.ok) {
                                     flash_status(['Reordered'], 800);
                                     drag_state.end_drag();
                                     await update_current_place(place_id);
                                     void refresh_container_data();
                                     return true;
                                 }
-                                flash_status([`Reorder failed: ${out?.error || `HTTP ${res.status}`}`], 1500);
+                                flash_status([`Reorder failed: ${out.error}`], 1500);
                                 drag_state.reject_drag();
                                 return false;
                             } catch {
@@ -4974,29 +5181,25 @@ export function create_app_state(): AppState {
                             const from_y = parseInt(fys || '0', 10);
                             try {
                                 const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                                const res = await fetch(`${base_url}/api/place/items/drag`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        actor_id: APP_CONFIG.input_actor_id,
-                                        place_id,
-                                        from_x,
-                                        from_y,
-                                        to_x: x,
-                                        to_y: y,
-                                        item_id: drag_state.item_instance_id,
-                                        action_cost: ui_state.controls.override_cost ?? undefined,
-                                    })
+                                const mv = await api_place_drag({
+                                    base_url,
+                                    actor_id: APP_CONFIG.input_actor_id,
+                                    place_id,
+                                    from_x,
+                                    from_y,
+                                    to_x: x,
+                                    to_y: y,
+                                    item_id: String(drag_state.item_instance_id ?? ''),
+                                    action_cost: (ui_state.controls.override_cost ?? undefined) as any,
                                 });
-                                const mv = await res.json().catch(() => null as any);
-                                if (res.ok && mv?.ok) {
+                                if (mv.ok) {
                                     flash_status(['Moved'], 900);
                                     drag_state.end_drag();
                                     await update_current_place(place_id);
                                     void refresh_container_data();
                                     return true;
                                 }
-                                flash_status([`Move failed: ${mv?.error || `HTTP ${res.status}`}`], 1500);
+                                flash_status([`Move failed: ${mv.error}`], 1500);
                                 drag_state.reject_drag();
                                 return false;
                             } catch {
@@ -5049,27 +5252,23 @@ export function create_app_state(): AppState {
                                         return false;
                                     }
 
-                                    const res = await fetch(`${base_url}/api/place/items/transfer_between_container_items`, {
-                                        method: 'POST',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({
-                                            actor_id: APP_CONFIG.input_actor_id,
-                                            place_id,
-                                            from_container_item_id: src_container_item_id,
-                                            to_container_item_id: String(target_item_id),
-                                            item_id: drag_state.item_instance_id,
-                                            action_cost: ui_state.controls.override_cost ?? undefined,
-                                        })
+                                    const tx = await api_transfer_between_container_items({
+                                        base_url,
+                                        actor_id: APP_CONFIG.input_actor_id,
+                                        place_id,
+                                        from_container_item_id: String(src_container_item_id),
+                                        to_container_item_id: String(target_item_id),
+                                        item_id: String(drag_state.item_instance_id ?? ''),
+                                        action_cost: (ui_state.controls.override_cost ?? undefined) as any,
                                     });
-                                    const tx = await res.json().catch(() => null as any);
-                                    if (res.ok && tx?.ok) {
+                                    if (tx.ok) {
                                         flash_status([`Moved into ${meta?.name ?? 'container'}`], 1500);
                                         drag_state.end_drag();
                                         await update_current_place(place_id);
                                         void refresh_container_data();
                                         return true;
                                     }
-                                    flash_status([`Deposit failed: ${tx?.error || `HTTP ${res.status}`}`], 1500);
+                                    flash_status([`Deposit failed: ${tx.error}`], 1500);
                                     drag_state.reject_drag();
                                 return false;
                             }
@@ -5087,21 +5286,17 @@ export function create_app_state(): AppState {
                                 const from_x = parseInt(xs || '0', 10);
                                 const from_y = parseInt(ys || '0', 10);
 
-                                const res = await fetch(`${base_url}/api/place/items/deposit_ground_to_container_item`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        actor_id: APP_CONFIG.input_actor_id,
-                                        place_id,
-                                        from_x,
-                                        from_y,
-                                        item_id: drag_state.item_instance_id,
-                                        container_item_id: String(target_item_id),
-                                        action_cost: ui_state.controls.override_cost ?? undefined,
-                                    })
+                                const dep = await api_deposit_ground_to_container_item({
+                                    base_url,
+                                    actor_id: APP_CONFIG.input_actor_id,
+                                    place_id,
+                                    from_x,
+                                    from_y,
+                                    item_id: String(drag_state.item_instance_id ?? ''),
+                                    container_item_id: String(target_item_id),
+                                    action_cost: (ui_state.controls.override_cost ?? undefined) as any,
                                 });
-                                const dep = await res.json().catch(() => null as any);
-                                if (res.ok && dep?.ok) {
+                                if (dep.ok) {
                                     flash_status([`Moved into ${meta?.name ?? 'container'}`], 1500);
                                     drag_state.end_drag();
                                     await update_current_place(place_id);
@@ -5109,8 +5304,7 @@ export function create_app_state(): AppState {
                                     void refresh_character_data();
                                     return true;
                                 }
-                                const err = dep?.error ? String(dep.error) : `HTTP ${res.status}`;
-                                flash_status([`Cannot deposit: ${err}`], 2000);
+                                flash_status([`Cannot deposit: ${dep.error}`], 2000);
                                 drag_state.reject_drag();
                                 return false;
                             }
@@ -5122,19 +5316,16 @@ export function create_app_state(): AppState {
                                 return false;
                             }
 
-                                const res = await fetch(`${base_url}/api/place/items/deposit_to_container_item`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        actor_id: APP_CONFIG.input_actor_id,
-                                        place_id,
-                                        item_id: drag_state.item_instance_id,
-                                        container_item_id: String(target_item_id),
-                                        action_cost: ui_state.controls.override_cost ?? undefined,
-                                    })
+                                const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
+                                const dep = await api_deposit_to_container_item({
+                                    base_url,
+                                    actor_id: APP_CONFIG.input_actor_id,
+                                    place_id,
+                                    item_id: String(drag_state.item_instance_id ?? ''),
+                                    container_item_id: String(target_item_id),
+                                    action_cost,
                                 });
-                                const dep = await res.json().catch(() => null as any);
-                                if (res.ok && dep?.ok) {
+                                if (dep.ok) {
                                     flash_status([`Moved into ${meta?.name ?? 'container'}`], 1500);
                                     drag_state.end_drag();
                                     await update_current_place(place_id);
@@ -5142,7 +5333,8 @@ export function create_app_state(): AppState {
                                     void refresh_character_data();
                                     return true;
                                 }
-                                flash_status([`Deposit failed: ${dep?.error || `HTTP ${res.status}`}`], 1500);
+                                const detail = dep.detail ? ` (${JSON.stringify(dep.detail)})` : '';
+                                flash_status([`Deposit failed: ${dep.error || 'unknown error'}${detail}`], 1500);
                                 drag_state.reject_drag();
                                 return false;
                             }
@@ -5173,28 +5365,24 @@ export function create_app_state(): AppState {
 
                             try {
                                 const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                                const res = await fetch(`${base_url}/api/place/items/spill_from_container_item`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        actor_id: APP_CONFIG.input_actor_id,
-                                        place_id: src_place_id,
-                                        container_item_id: src_container_item_id,
-                                        item_id: drag_state.item_instance_id,
-                                        x,
-                                        y,
-                                        action_cost: ui_state.controls.override_cost ?? undefined,
-                                    })
+                                const sp = await api_spill_from_container_item({
+                                    base_url,
+                                    actor_id: APP_CONFIG.input_actor_id,
+                                    place_id: String(src_place_id),
+                                    container_item_id: String(src_container_item_id),
+                                    item_id: String(drag_state.item_instance_id ?? ''),
+                                    x,
+                                    y,
+                                    action_cost: (ui_state.controls.override_cost ?? undefined) as any,
                                 });
-                                const sp = await res.json().catch(() => null as any);
-                                if (res.ok && sp?.ok) {
+                                if (sp.ok) {
                                     flash_status(['Dropped to pile'], 1200);
                                     drag_state.end_drag();
                                     await update_current_place(src_place_id);
                                     void refresh_container_data();
                                     return true;
                                 }
-                                flash_status([`Drop failed: ${sp?.error || `HTTP ${res.status}`}`], 1500);
+                                flash_status([`Drop failed: ${sp.error}`], 1500);
                                 drag_state.reject_drag();
                                 return false;
                             } catch {
@@ -5206,18 +5394,14 @@ export function create_app_state(): AppState {
 
                         try {
                             const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                            const res = await fetch(`${base_url}/api/place/items/drop`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    actor_id: APP_CONFIG.input_actor_id,
-                                    place_id: place_id,
-                                    item_id: drag_state.item_instance_id,
-                                    x,
-                                    y,
-                                })
+                            const drop_data = await api_place_drop({
+                                base_url,
+                                actor_id: APP_CONFIG.input_actor_id,
+                                place_id,
+                                item_id: String(drag_state.item_instance_id ?? ''),
+                                x,
+                                y,
                             });
-                            const drop_data = await res.json();
                             if (drop_data.ok) {
                                 flash_status(['Dropped to pile'], 1200);
                                 drag_state.end_drag();
@@ -5258,27 +5442,23 @@ export function create_app_state(): AppState {
 
                             // Move within the same ground container-item.
                             if (src === container_id) {
-                                const res = await fetch(`${base_url}/api/place/items/move_within_container_item`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        actor_id: APP_CONFIG.input_actor_id,
-                                        place_id,
-                                        container_item_id,
-                                        item_id: drag_state.item_instance_id,
-                                        target_grid_x: grid_x,
-                                        target_grid_y: grid_y,
-                                    })
+                                const mv = await api_move_within_container_item({
+                                    base_url,
+                                    actor_id: APP_CONFIG.input_actor_id,
+                                    place_id,
+                                    container_item_id,
+                                    item_id: String(drag_state.item_instance_id ?? ''),
+                                    target_grid_x: grid_x,
+                                    target_grid_y: grid_y,
                                 });
-                                const mv = await res.json().catch(() => null as any);
-                                if (res.ok && mv?.ok) {
+                                if (mv.ok) {
                                     flash_status(['Moved'], 1200);
                                     drag_state.end_drag();
                                     await update_current_place(place_id);
                                     void refresh_container_data();
                                     return true;
                                 }
-                                flash_status([`Move failed: ${mv?.error || `HTTP ${res.status}`}`], 1500);
+                                flash_status([`Move failed: ${mv.error}`], 1500);
                                 drag_state.reject_drag();
                                 return false;
                             }
@@ -5293,29 +5473,25 @@ export function create_app_state(): AppState {
                                     return false;
                                 }
 
-                                const res = await fetch(`${base_url}/api/place/items/transfer_between_container_items`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        actor_id: APP_CONFIG.input_actor_id,
-                                        place_id,
-                                        from_container_item_id: src_container_item_id,
-                                        to_container_item_id: container_item_id,
-                                        item_id: drag_state.item_instance_id,
-                                        target_grid_x: grid_x,
-                                        target_grid_y: grid_y,
-                                        action_cost: ui_state.controls.override_cost ?? undefined,
-                                    })
+                                const tx = await api_transfer_between_container_items({
+                                    base_url,
+                                    actor_id: APP_CONFIG.input_actor_id,
+                                    place_id,
+                                    from_container_item_id: String(src_container_item_id),
+                                    to_container_item_id: String(container_item_id),
+                                    item_id: String(drag_state.item_instance_id ?? ''),
+                                    target_grid_x: grid_x,
+                                    target_grid_y: grid_y,
+                                    action_cost: (ui_state.controls.override_cost ?? undefined) as any,
                                 });
-                                const tx = await res.json().catch(() => null as any);
-                                if (res.ok && tx?.ok) {
+                                if (tx.ok) {
                                     flash_status(['Moved'], 1200);
                                     drag_state.end_drag();
                                     await update_current_place(place_id);
                                     void refresh_container_data();
                                     return true;
                                 }
-                                flash_status([`Move failed: ${tx?.error || `HTTP ${res.status}`}`], 1500);
+                                flash_status([`Move failed: ${tx.error}`], 1500);
                                 drag_state.reject_drag();
                                 return false;
                             }
@@ -5339,23 +5515,19 @@ export function create_app_state(): AppState {
                                 const from_x = parseInt(xs || '0', 10);
                                 const from_y = parseInt(ys || '0', 10);
 
-                                const res = await fetch(`${base_url}/api/place/items/deposit_ground_to_container_item`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        actor_id: APP_CONFIG.input_actor_id,
-                                        place_id,
-                                        from_x,
-                                        from_y,
-                                        item_id: drag_state.item_instance_id,
-                                        container_item_id,
-                                        target_grid_x: grid_x,
-                                        target_grid_y: grid_y,
-                                        action_cost: ui_state.controls.override_cost ?? undefined,
-                                    })
+                                const dep = await api_deposit_ground_to_container_item({
+                                    base_url,
+                                    actor_id: APP_CONFIG.input_actor_id,
+                                    place_id,
+                                    from_x,
+                                    from_y,
+                                    item_id: String(drag_state.item_instance_id ?? ''),
+                                    container_item_id,
+                                    target_grid_x: grid_x,
+                                    target_grid_y: grid_y,
+                                    action_cost: (ui_state.controls.override_cost ?? undefined) as any,
                                 });
-                                const dep = await res.json().catch(() => null as any);
-                                if (res.ok && dep?.ok) {
+                                if (dep.ok) {
                                     flash_status(['Deposited'], 1200);
                                     drag_state.end_drag();
                                     await update_current_place(place_id);
@@ -5363,27 +5535,24 @@ export function create_app_state(): AppState {
                                     void refresh_character_data();
                                     return true;
                                 }
-                                flash_status([`Deposit failed: ${dep?.error || `HTTP ${res.status}`}`], 1500);
+                                flash_status([`Deposit failed: ${dep.error}`], 1500);
                                 drag_state.reject_drag();
                                 return false;
                             }
 
                             // Actor item -> ground container-item deposit.
-                            const res = await fetch(`${base_url}/api/place/items/deposit_to_container_item`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    actor_id: APP_CONFIG.input_actor_id,
-                                    place_id,
-                                    item_id: drag_state.item_instance_id,
-                                    container_item_id,
-                                    target_grid_x: grid_x,
-                                    target_grid_y: grid_y,
-                                    action_cost: ui_state.controls.override_cost ?? undefined,
-                                })
+                            const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
+                            const dep = await api_deposit_to_container_item({
+                                base_url,
+                                actor_id: APP_CONFIG.input_actor_id,
+                                place_id,
+                                item_id: String(drag_state.item_instance_id ?? ''),
+                                container_item_id,
+                                target_grid_x: grid_x,
+                                target_grid_y: grid_y,
+                                action_cost,
                             });
-                            const dep = await res.json().catch(() => null as any);
-                            if (res.ok && dep?.ok) {
+                            if (dep.ok) {
                                 flash_status(['Deposited'], 1200);
                                 drag_state.end_drag();
                                 await update_current_place(place_id);
@@ -5391,7 +5560,8 @@ export function create_app_state(): AppState {
                                 void refresh_character_data();
                                 return true;
                             }
-                            flash_status([`Deposit failed: ${dep?.error || `HTTP ${res.status}`}`], 1500);
+                            const detail = dep.detail ? ` (${JSON.stringify(dep.detail)})` : '';
+                            flash_status([`Deposit failed: ${dep.error || 'unknown error'}${detail}`], 1500);
                             drag_state.reject_drag();
                             return false;
                         } catch {
@@ -5428,54 +5598,40 @@ export function create_app_state(): AppState {
                             // Ground container-item -> actor: withdraw nested item.
                             const src = src0;
                             if (src.startsWith('place.item.')) {
-                                const parts = src.split('.');
-                                const src_place_id = parts[2];
-                                const src_container_item_id = parts[3];
-                                if (!src_place_id || !src_container_item_id) {
-                                    drag_state.reject_drag();
-                                    return false;
-                                }
-
-                                const res = await fetch(`${base_url}/api/place/items/withdraw_from_container_item`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        actor_id: APP_CONFIG.input_actor_id,
-                                        place_id: src_place_id,
-                                        container_item_id: src_container_item_id,
-                                        item_id: drag_state.item_instance_id,
-                                        to_container: container_id,
-                                        target_grid_x: grid_x,
-                                        target_grid_y: grid_y,
-                                        action_cost: ui_state.controls.override_cost ?? undefined,
-                                    })
+                                const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
+                                const wd = await api_withdraw_from_ground_container_item({
+                                    base_url,
+                                    actor_id: APP_CONFIG.input_actor_id,
+                                    src_container_id: src,
+                                    item_id: String(drag_state.item_instance_id ?? ''),
+                                    to_container: container_id,
+                                    target_grid_x: grid_x,
+                                    target_grid_y: grid_y,
+                                    action_cost,
                                 });
-                                const wd = await res.json().catch(() => null as any);
-                                if (res.ok && wd?.ok) {
+                                if (wd.ok) {
                                     flash_status(['Picked up'], 1200);
                                     drag_state.end_drag();
-                                    await update_current_place(src_place_id);
+                                    await update_current_place(wd.place_id);
                                     void refresh_container_data();
                                     void refresh_character_data();
                                     return true;
                                 }
-                                flash_status([`Pickup failed: ${wd?.error || `HTTP ${res.status}`}`], 1500);
+                                const detail = wd.detail ? ` (${JSON.stringify(wd.detail)})` : '';
+                                flash_status([`Pickup failed: ${wd.error}${detail}`], 1500);
                                 drag_state.reject_drag();
                                 return false;
                             }
 
-                            const res = await fetch(`${base_url}/api/place/items/pickup_to`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    actor_id: APP_CONFIG.input_actor_id,
-                                    place_id: place.id,
-                                    item_id: drag_state.item_instance_id,
-                                    to_container: container_id,
-                                    action_cost: ui_state.controls.override_cost ?? undefined,
-                                })
+                            const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
+                            const pickup_data = await api_pickup_to({
+                                base_url,
+                                actor_id: APP_CONFIG.input_actor_id,
+                                place_id: place.id,
+                                item_id: String(drag_state.item_instance_id ?? ''),
+                                to_container: container_id,
+                                action_cost,
                             });
-                            const pickup_data = await res.json();
                             if (pickup_data.ok) {
                                 flash_status(['Picked up'], 1200);
                                 drag_state.end_drag();
@@ -5534,9 +5690,9 @@ export function create_app_state(): AppState {
                             }
                         }
 
-                        // Place-sourced item (ground / pile contents) -> actor container: use pickup_to (not /api/transfer).
+                        // Place-sourced item (ground / pile contents / ground container-item) -> actor container: use place endpoints.
                         const src = String(drag_state.source_container_id ?? '');
-                        if ((src.startsWith('place.ground.') || src.startsWith('place.pile.')) && (container_id.startsWith('body_slots.') || container_id.startsWith('actor.item.'))) {
+                        if ((src.startsWith('place.ground.') || src.startsWith('place.pile.') || src.startsWith('place.item.')) && (container_id.startsWith('body_slots.') || container_id.startsWith('actor.item.'))) {
                             if (String(drag_state.item_instance_id ?? '').startsWith('pile:')) {
                                 flash_status(['Open the pile and drag a specific item out'], 2000);
                                 drag_state.reject_drag();
@@ -5551,29 +5707,28 @@ export function create_app_state(): AppState {
 
                             try {
                                 const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                                const res = await fetch(`${base_url}/api/place/items/pickup_to`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        actor_id: APP_CONFIG.input_actor_id,
-                                        place_id: place.id,
-                                        item_id: drag_state.item_instance_id,
-                                        to_container: target_container_id,
-                                        target_grid_x: (target_container_id === container_id) ? grid_x : undefined,
-                                        target_grid_y: (target_container_id === container_id) ? grid_y : undefined,
-                                        action_cost: ui_state.controls.override_cost ?? undefined,
-                                    })
+                                const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
+                                const move_res = await api_move_place_sourced_item({
+                                    base_url,
+                                    actor_id: APP_CONFIG.input_actor_id,
+                                    source_container_id: src,
+                                    item_id: String(drag_state.item_instance_id ?? ''),
+                                    to_container: target_container_id,
+                                    target_grid_x: (target_container_id === container_id) ? grid_x : undefined,
+                                    target_grid_y: (target_container_id === container_id) ? grid_y : undefined,
+                                    action_cost,
                                 });
-                                const pickup_data = await res.json().catch(() => null as any);
-                                if (res.ok && pickup_data?.ok) {
+
+                                if (move_res.ok) {
                                     flash_status([`${drag_state.item_definition?.name} moved to ${target_name}`], 1500);
                                     drag_state.end_drag();
-                                    await update_current_place(place.id);
+                                    await update_current_place(move_res.place_id);
                                     void refresh_container_data();
                                     void refresh_character_data();
                                     return true;
                                 }
-                                flash_status([`Failed to pick up: ${pickup_data?.error || `HTTP ${res.status}`}`], 1500);
+                                const detail = move_res.detail ? ` (${JSON.stringify(move_res.detail)})` : '';
+                                flash_status([`Failed to pick up: ${move_res.error}${detail}`], 1500);
                                 drag_state.reject_drag();
                                 return false;
                             } catch {
@@ -5606,13 +5761,14 @@ export function create_app_state(): AppState {
                         
                         debug_log(`[DEBUG-GRID] Request body:`, JSON.stringify(transfer_body, null, 2));
                         
-                        const transfer_res = await fetch('http://localhost:8787/api/transfer', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(transfer_body),
+                        const transfer_data = await api_transfer_inline({
+                            actor_id: String(transfer_body.actor_id ?? APP_CONFIG.input_actor_id),
+                            item_instance_id: String(transfer_body.item_instance_id ?? ''),
+                            from_container: String(transfer_body.from_container ?? ''),
+                            to_container: String(transfer_body.to_container ?? ''),
+                            target_grid_x: transfer_body.target_grid_x,
+                            target_grid_y: transfer_body.target_grid_y,
                         });
-                        
-                        const transfer_data = await transfer_res.json();
                         
                         if (transfer_data.ok) {
                             flash_status([`${drag_state.item_definition?.name} moved to ${target_name}`], 1500);
@@ -5640,7 +5796,7 @@ export function create_app_state(): AppState {
                     }
                 },
                 gizmos: {
-                    enabled: ['close', 'move'],
+                    enabled: ['close', 'move', 'resize'],
                     can_close: true,
                     can_move: true,
                     can_save_position: false,
@@ -5648,8 +5804,21 @@ export function create_app_state(): AppState {
                         close_container_module(container_id);
                     },
                     on_move: (new_rect) => {
-                        // Position updated via gizmo system
-                    }
+                        ui_state.modules.positions.set(instance_id, new_rect);
+                        persist_module_layout_debounced();
+                    },
+                    on_move_end: (final_rect) => {
+                        ui_state.modules.positions.set(instance_id, final_rect);
+                        persist_module_layout_debounced();
+                    },
+                    on_resize: (new_rect) => {
+                        ui_state.modules.positions.set(instance_id, new_rect);
+                        persist_module_layout_debounced();
+                    },
+                    on_resize_end: (final_rect) => {
+                        ui_state.modules.positions.set(instance_id, final_rect);
+                        persist_module_layout_debounced();
+                    },
                 },
             });
             
@@ -5710,6 +5879,13 @@ export function create_app_state(): AppState {
         // Clean up tracking
         ui_state.container.open_containers.delete(container_id);
         ui_state.container.container_module_map.delete(container_id);
+
+        // Free the stable slot assignment.
+        const slot = ui_state.container.container_slot_by_container_id.get(container_id);
+        if (typeof slot === 'number' && slot >= 1 && slot <= ui_state.container.container_slots.length) {
+            ui_state.container.container_slots[slot - 1] = null;
+        }
+        ui_state.container.container_slot_by_container_id.delete(container_id);
         ui_state.container.container_data_map.delete(container_id);
         
         flash_status([`Container closed`], 800);
@@ -5746,12 +5922,14 @@ export function create_app_state(): AppState {
         }
         
         const open_count = ui_state.modules.open_npc_modules.size;
-        const npc_rect = {
+        const npc_rect_default = {
             x0: player_rect.x0 - 28 - (open_count * 3),
             y0: player_rect.y0 + (open_count * 2),
             x1: player_rect.x0 - 3 - (open_count * 3),
             y1: player_rect.y1 + (open_count * 2)
         };
+
+        const npc_rect = get_persisted_rect(module_id, npc_rect_default);
         
         debug_log(`[NPC Module] Calculated position for ${npc_name}: x0=${npc_rect.x0}, y0=${npc_rect.y0} (player at x0=${player_rect.x0})`);
         
@@ -5809,18 +5987,12 @@ export function create_app_state(): AppState {
                 }
                 
                 try {
-                    const transfer_res = await fetch('http://localhost:8787/api/transfer', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            actor_id: APP_CONFIG.input_actor_id,
-                            item_instance_id: drag_state.item_instance_id,
-                            from_container: drag_state.source_container_id,
-                            to_container: target_container_id,
-                        }),
+                    const transfer_data = await api_transfer_inline({
+                        actor_id: APP_CONFIG.input_actor_id,
+                        item_instance_id: String(drag_state.item_instance_id ?? ''),
+                        from_container: String(drag_state.source_container_id ?? ''),
+                        to_container: target_container_id,
                     });
-                    
-                    const transfer_data = await transfer_res.json();
                     
                     if (transfer_data.ok) {
                         flash_status([`${drag_state.item_definition?.name} given to ${npc_name}`], 1500);
@@ -5854,17 +6026,12 @@ export function create_app_state(): AppState {
                     }
                     
                     try {
-                        const transfer_res = await fetch('http://localhost:8787/api/transfer', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                item_instance_id: drag_state.item_instance_id,
-                                from_container: drag_state.source_container_id,
-                                to_container: container.id,
-                            }),
+                        const transfer_data = await api_transfer_inline({
+                            actor_id: APP_CONFIG.input_actor_id,
+                            item_instance_id: String(drag_state.item_instance_id ?? ''),
+                            from_container: String(drag_state.source_container_id ?? ''),
+                            to_container: container.id,
                         });
-                        
-                        const transfer_data = await transfer_res.json();
                         
                         if (transfer_data.ok) {
                             flash_status([`${drag_state.item_definition?.name} taken from ${npc_name}`], 1500);
@@ -5902,10 +6069,12 @@ export function create_app_state(): AppState {
                 on_move: (new_rect) => {
                     ui_state.modules.positions.set(module_id, new_rect);
                     debug_log(`[NPC Module] Moving ${npc_name} to (${new_rect.x0},${new_rect.y0})`);
+                    persist_module_layout_debounced();
                 },
                 on_move_end: (final_rect) => {
                     ui_state.modules.positions.set(module_id, final_rect);
                     flash_status([`${npc_name}'s panel moved`], 1000);
+                    persist_module_layout_debounced();
                 },
             },
             // Container sidebar: Show equipped containers only (NEW INLINE SYSTEM)
@@ -6014,7 +6183,8 @@ export function create_app_state(): AppState {
         
         module_registry.unregister(module_id);
         ui_state.modules.open_npc_modules.delete(npc_id);
-        ui_state.modules.positions.delete(module_id);
+        // Keep last rect persisted so reopening restores it.
+        persist_module_layout_debounced();
         
         debug_log(`[NPC Module] Closed ${module_id}`);
     }

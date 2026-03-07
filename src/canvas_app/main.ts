@@ -26,6 +26,7 @@ if (IS_PAINTER_MODE) {
     module_registry = painter_state.module_registry;
     start_window_feed_polling = () => {}; // No polling needed for painter
     on_drag_end_outside = undefined;
+    on_pointer_move_global = painter_state.on_pointer_move_global;
 
     // Initialize DOM renderer for voxel layers
     painter_state.init_dom_renderer();
@@ -55,6 +56,19 @@ if (IS_PAINTER_MODE) {
 
 const config = IS_PAINTER_MODE ? PAINTER_CONFIG : APP_CONFIG;
 
+function get_visible_modules(): readonly Module[] {
+    if (!module_registry?.get_all) return modules;
+    const all = module_registry.get_all() as readonly Module[];
+    if (!module_registry.is_visible) return all;
+    return all.filter((m: any) => {
+        try {
+            return module_registry.is_visible(m.id);
+        } catch {
+            return true;
+        }
+    });
+}
+
 const runtime = new CanvasRuntime({
     canvas: el,
     grid_width: config.grid_width,
@@ -64,7 +78,7 @@ const runtime = new CanvasRuntime({
     base_line_height_mult: config.base_line_height_mult,
     base_letter_spacing_mult: config.base_letter_spacing_mult,
     weight_index_to_css: config.weight_index_to_css,
-    modules,
+    modules: get_visible_modules(),
     on_drag_end_outside,
     on_pointer_move_global,
     on_after_compose,
@@ -73,7 +87,7 @@ const runtime = new CanvasRuntime({
 // Subscribe to module registry changes
 if (module_registry) {
     module_registry.subscribe(() => {
-        runtime.set_modules(module_registry.get_all());
+        runtime.set_modules(get_visible_modules());
     });
 }
 

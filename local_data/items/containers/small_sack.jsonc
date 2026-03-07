@@ -9,7 +9,7 @@
   "hardness_mag": 1,
   "conductivity_mag": 1,
   "max_stack_size": 1,
-  "display_char": "b",
+  "display_char": "s",
   "container": {
     "capacity_slots": 10,
     "capacity_weight": 5000

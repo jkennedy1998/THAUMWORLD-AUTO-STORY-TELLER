@@ -90,6 +90,9 @@ export type PainterAppState = {
   modules: readonly Module[];
   module_registry: ModuleRegistry;
 
+  // Global pointer move hook for screen-space parallax.
+  on_pointer_move_global?: (x: number, y: number, e: any) => void;
+
   // Grid operations (legacy - operates on current layer)
   export_grid: () => string;
   import_grid: (json: string) => void;
@@ -1548,6 +1551,21 @@ export function create_painter_app_state(): PainterAppState {
   return {
     modules: registry.get_all(),
     module_registry: registry,
+
+     // Screen-space parallax: centered on the canvas module, but responsive anywhere.
+     on_pointer_move_global: (x: number, y: number) => {
+       if (!domRenderer) return;
+       const r = canvas_rect;
+       const cx = (r.x0 + r.x1) / 2;
+       const cy = (r.y0 + r.y1) / 2;
+       const max_dx = (r.x1 - r.x0) / 2;
+       const max_dy = (r.y1 - r.y0) / 2;
+       const clamped_x = Math.max(r.x0, Math.min(r.x1, x));
+       const clamped_y = Math.max(r.y0, Math.min(r.y1, y));
+       const ox = max_dx > 0 ? (clamped_x - cx) / max_dx : 0;
+       const oy = max_dy > 0 ? (clamped_y - cy) / max_dy : 0;
+       domRenderer.setMouseParallax(ox, oy);
+     },
     
     export_grid: () => {
       const data = exportGrid(grid);

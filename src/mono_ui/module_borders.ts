@@ -73,13 +73,26 @@ export type ModuleBorderConfig = {
   border_rgb?: Rgb;
   bg_rgb?: Rgb;
   weight_index?: number;
+
+  // Optional scroll markers (used by text windows).
+  markers?: {
+    top?: string;
+    bottom?: string;
+  };
   
   // Optional header configuration
   header?: {
     text: string;
     text_rgb?: Rgb;
     align?: "left" | "center" | "right";
-    divider_at_col?: number; // Column index for vertical divider (e.g., after gizmos)
+    // Reserve N columns from the left edge (x0) before header text starts.
+    // This is intended for gizmo icons, padding, etc. It does not draw any divider.
+    reserve_left_cols?: number;
+
+    // Column index for a divider measured from x0 (e.g., 5 puts divider at x0+5).
+    // Back-compat: when set and divider_mode is omitted, defaults to "full_height".
+    divider_at_col?: number;
+    divider_mode?: 'none' | 'header_only' | 'full_height';
   };
 };
 
@@ -110,6 +123,7 @@ export function draw_module_border(
     bg_rgb,
     weight_index = 3,
     header,
+    markers,
   } = config;
 
   const { x0, y0, x1, y1 } = rect;
@@ -136,17 +150,33 @@ export function draw_module_border(
     } else if (x === x1) {
       char = style.corner_tr;
     } else if (header?.divider_at_col && x === x0 + header.divider_at_col) {
-      char = style.junction_t;
-      is_junction = true;
+      const mode = header.divider_mode ?? 'full_height';
+      if (mode !== 'none') {
+        char = style.junction_t;
+        is_junction = true;
+      }
     }
 
     c.set(x, y1, { char, rgb: border_rgb, style: "regular", weight_index });
   }
 
+  // Optional scroll marker overwrites top border.
+  if (markers?.top) {
+    const cx = Math.floor((x0 + x1) / 2);
+    c.set(cx, y1, {
+      char: String(markers.top).charAt(0) || style.horizontal,
+      rgb: border_rgb,
+      style: 'regular',
+      weight_index: Math.min(7, weight_index + 2),
+    });
+  }
+
   // Draw header text if provided
   if (header) {
     const header_y = y1 - 1; // Top row (inverted Y)
-    const text_start = header.divider_at_col ? x0 + header.divider_at_col + 2 : x0 + 2;
+    const text_start = typeof header.reserve_left_cols === 'number'
+      ? x0 + header.reserve_left_cols
+      : (header.divider_at_col ? x0 + header.divider_at_col + 2 : x0 + 2);
     const text_end = x1 - 1;
     const available_width = text_end - text_start + 1;
 
@@ -181,24 +211,27 @@ export function draw_module_border(
 
     // Draw vertical divider if specified
     if (header.divider_at_col) {
-      const divider_x = x0 + header.divider_at_col;
-      // Top junction already drawn above
-      // Draw vertical line down
-      for (let y = y1 - 2; y >= y0; y--) {
-        c.set(divider_x, y, {
-          char: style.vertical,
+      const mode = header.divider_mode ?? 'full_height';
+      if (mode === 'full_height') {
+        const divider_x = x0 + header.divider_at_col;
+        // Top junction already drawn above
+        // Draw vertical line down
+        for (let y = y1 - 2; y >= y0; y--) {
+          c.set(divider_x, y, {
+            char: style.vertical,
+            rgb: border_rgb,
+            style: "regular",
+            weight_index,
+          });
+        }
+        // Bottom junction
+        c.set(divider_x, y0, {
+          char: style.junction_b,
           rgb: border_rgb,
           style: "regular",
           weight_index,
         });
       }
-      // Bottom junction
-      c.set(divider_x, y0, {
-        char: style.junction_b,
-        rgb: border_rgb,
-        style: "regular",
-        weight_index,
-      });
     }
   }
 
@@ -210,9 +243,23 @@ export function draw_module_border(
     } else if (x === x1) {
       char = style.corner_br;
     } else if (header?.divider_at_col && x === x0 + header.divider_at_col) {
-      char = style.junction_b;
+      const mode = header.divider_mode ?? 'full_height';
+      if (mode === 'full_height') {
+        char = style.junction_b;
+      }
     }
     c.set(x, y0, { char, rgb: border_rgb, style: "regular", weight_index });
+  }
+
+  // Optional scroll marker overwrites bottom border.
+  if (markers?.bottom) {
+    const cx = Math.floor((x0 + x1) / 2);
+    c.set(cx, y0, {
+      char: String(markers.bottom).charAt(0) || style.horizontal,
+      rgb: border_rgb,
+      style: 'regular',
+      weight_index: Math.min(7, weight_index + 2),
+    });
   }
 
   // Draw left and right borders (excluding corners)

@@ -35,7 +35,7 @@ const sack = load_item_def(0, "small_sack");
 if (sack.ok) {
     console.log("✓ Small sack loaded successfully");
     console.log(`  - max_stack_size: ${sack.item.max_stack_size} (expected: 1)`);
-    console.log(`  - display_char: ${sack.item.display_char} (expected: b)`);
+    console.log(`  - display_char: ${sack.item.display_char} (expected: s)`);
     console.log(`  - fits_actor_kind: [${sack.item.fits_actor_kind.join(", ")}] (expected: [*])`);
 } else {
     console.log("✗ Failed to load sack:", sack.error);

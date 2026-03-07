@@ -6,8 +6,12 @@ import type { BodySlots, EquipmentSlots } from "../../types/body_slots.js";
 import { debug_log } from "../../shared/debug.js";
 import { draw_module_border, BORDER_STYLES, draw_horizontal_divider, draw_container_box } from "../module_borders.js";
 import { get_color_by_name } from "../colors.js";
+import { resolve_cell } from "../../render_shaders/resolver.js";
+import { make_item_payload, make_slot_payload } from "../../render_shaders/payload_builders.js";
+import { draw_render_queue, type RenderRequest } from "../../render_shaders/render_queue.js";
+import { ctx_character_slot, ctx_container_ui } from "../../render_shaders/context_builders.js";
 import type { ModuleGizmosConfig, GizmoState } from "../module_gizmos.js";
-import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area } from "../module_gizmos.js";
+import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area, get_resize_edge, handle_resize_drag, handle_global_pointer_down_for_gizmos } from "../module_gizmos.js";
 import {
   resolve_all_body_slots,
   find_slot_at_position,
@@ -232,13 +236,12 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
    * Draw a single equipment slot (simplified - just a character)
    */
   function draw_equipment_slot(
-    c: Canvas,
+    rq: RenderRequest[],
     slot: ResolvedSlot,
     equipped_item: { instance: ItemInstance; definition: ItemDefinition } | undefined,
     is_hovered: boolean,
     is_highlighted: boolean
   ): void {
-    const text = opts.text_rgb ?? { r: 200, g: 200, b: 200 };
     const bounds = get_content_bounds();
     
     const x = slot.screen_x;
@@ -249,63 +252,44 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       return;
     }
     
-    if (equipped_item) {
-      // Draw the equipped item character
-      const is_container = equipped_item.definition.tags?.some(tag => 
-        ['CONTAINER', 'BAG', 'SACK', 'POUCH', 'BACKPACK', 'WALLET', 'CHEST', 'BOX'].includes(tag.name.toUpperCase())
-      );
-      
-      const container_id = get_slot_container_id(opts.get_actor_id(), slot);
-      const is_open = opts.get_open_containers?.().has(container_id) ?? false;
+      if (equipped_item) {
+        // Draw the equipped item character
+        
+        const container_id = get_slot_container_id(opts.get_actor_id(), slot);
+        const is_open = opts.get_open_containers?.().has(container_id) ?? false;
       
       // Check if item is in tool slot but doesn't have TOOL tag
       const is_tool_slot = slot.slot_type === 'tool';
       const has_tool_tag = equipped_item.definition.tags?.some(tag => tag.name === 'TOOL');
       const is_non_tool_in_tool_slot = is_tool_slot && !has_tool_tag;
-      
-      // Item color priority
-      let char_rgb: Rgb;
-      if (is_non_tool_in_tool_slot) {
-        // Non-tool items in tool slots are shown in medium gray
-        char_rgb = get_color_by_name("medium_gray").rgb;
-      } else if (is_hovered) {
-        char_rgb = { r: 255, g: 255, b: 100 };
-      } else if (is_open) {
-        char_rgb = { r: 180, g: 100, b: 220 };
-      } else if (is_container) {
-        char_rgb = { r: 255, g: 165, b: 0 };
-      } else if (is_highlighted) {
-        char_rgb = { r: 0, g: 255, b: 100 };
-      } else {
-        char_rgb = text;
-      }
-      
-      const char = equipped_item.definition.display_char ||
-                   equipped_item.definition.name?.charAt(0).toLowerCase() ||
-                   "?";
-      
-      // Non-tool items in tool slots use light weight (3), tools use normal weight
-      const weight_index = is_non_tool_in_tool_slot ? 3 : (is_hovered || is_highlighted ? 6 : 5);
-      
-      c.set(x, y, {
-        char,
-        rgb: char_rgb,
-        style: "regular",
-        weight_index,
+
+      rq.push({
+        pass: 'item',
+        x,
+        y,
+        order: 0,
+        key: equipped_item.instance.id,
+        payload: make_item_payload(equipped_item.instance, equipped_item.definition) as any,
+        ctx: ctx_character_slot({
+          hovered: is_non_tool_in_tool_slot ? false : is_hovered,
+          highlighted: is_highlighted,
+          selected: is_non_tool_in_tool_slot ? false : is_open,
+          tool_mismatch: is_non_tool_in_tool_slot,
+        }),
       });
     } else {
-      // Empty slot - show colored dash based on slot type
-      const is_empty = true;
-      const base_color = get_slot_color(slot.slot_type, is_empty, is_highlighted);
-      
-      // Placeholder slots show faint dot, others show dash
-      const char = slot.is_placeholder ? "·" : "-";
-      
-      c.set(x, y, {
-        char,
-        rgb: is_highlighted ? { r: 0, g: 255, b: 100 } : base_color,
-        style: "regular",
-        weight_index: is_hovered ? 5 : 4,
+      rq.push({
+        pass: 'ui',
+        x,
+        y,
+        order: 0,
+        key: `slot:${slot.body_slot}:${slot.slot_type}:${slot.garb_index ?? 'x'}`,
+        payload: make_slot_payload({
+          id: `slot:${slot.body_slot}:${slot.slot_type}:${slot.garb_index ?? 'x'}`,
+          slot_type: slot.slot_type,
+          is_placeholder: slot.is_placeholder,
+        }) as any,
+        ctx: ctx_character_slot({ hovered: is_hovered, highlighted: is_highlighted }),
       });
     }
   }
@@ -324,6 +308,8 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       const body_slots = opts.get_body_slots();
       const equipped = opts.get_equipped_items();
       const weight = opts.get_weight_data();
+      const now_ms = Date.now();
+      const rq: RenderRequest[] = [];
       
       // Debug logging
       if (actor_name !== last_logged_actor) {
@@ -344,6 +330,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
           text: actor_name,
           text_rgb: opts.text_rgb ?? { r: 220, g: 220, b: 220 },
           divider_at_col: 5,
+          divider_mode: 'full_height',
         }
       });
       
@@ -366,14 +353,18 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
         for (let i = 0; i < equipped_containers.length && sidebar_y >= rect.y0 + 2; i++) {
           const container_info = equipped_containers[i];
           if (container_info?.container_id) {
-            const display_char = container_info.item_definition.display_char || "C";
             const is_open = opts.get_open_containers?.().has(container_info.container_id) || false;
             const is_default = default_container_id === container_info.container_id;
 
-            // Visual priority: default (yellow) > open (purple) > container (orange)
-            const container_color: Rgb = is_default
-              ? { r: 255, g: 255, b: 100 }
-              : (is_open ? { r: 180, g: 100, b: 220 } : { r: 255, g: 165, b: 0 });
+            const shaded = resolve_cell(
+              make_item_payload(container_info.item_instance, container_info.item_definition),
+              {
+                ...ctx_container_ui({ default_container: is_default, selected: is_open }),
+                x: sidebar_x + 1,
+                y: sidebar_y + 1,
+                time_ms: Date.now(),
+              },
+            );
 
             const border_color: Rgb = is_default
               ? { r: 255, g: 255, b: 100 }
@@ -382,11 +373,19 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
             draw_container_box(
               c,
               { x0: sidebar_x, y0: sidebar_y, x1: sidebar_x + box_width - 1, y1: sidebar_y + box_height - 1 },
-              display_char,
-              container_color,
+              shaded.char,
+              shaded.rgb,
               border_color,
               3
             );
+
+            // draw_container_box can't accept per-center weight/style yet; enforce shaded cell at center.
+            c.set(sidebar_x + 1, sidebar_y + 1, {
+              char: shaded.char,
+              rgb: shaded.rgb,
+              style: shaded.style,
+              weight_index: shaded.weight_index,
+            });
             
             sidebar_boxes.push({
               x0: sidebar_x,
@@ -502,7 +501,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
                             hover_slot?.garb_index === slot.garb_index;
           
           // Draw the slot
-          draw_equipment_slot(c, slot, equipped_item, is_hovered, is_highlighted);
+          draw_equipment_slot(rq, slot, equipped_item, is_hovered, is_highlighted);
         }
         
         // Draw body part label below the slot group
@@ -543,10 +542,18 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
         }
       });
 
+      // Flush equipment-slot glyphs (keeps ordering deterministic and voxel-friendly).
+      draw_render_queue(c, rq, { now_ms, pass_order: ['ui', 'item'] });
+
     },
 
     OnPointerMove(e: PointerEvent): void {
       if (!opts.get_is_visible()) return;
+
+      // Resize edge hover feedback.
+      if (gizmo_state.is_resize_mode && !gizmo_state.is_dragging_resize) {
+        gizmo_state.resize_edge = get_resize_edge(e.x, e.y, rect);
+      }
       
       const new_hover = get_resolved_slot_at_position(e.x, e.y);
       
@@ -586,6 +593,19 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
         const clicked_gizmo = handle_gizmo_click(e.x, e.y, rect, opts.gizmos, gizmo_state);
         if (clicked_gizmo) {
           debug_log(`[CharacterModule] Gizmo clicked: ${clicked_gizmo}`);
+          return;
+        }
+      }
+
+      // Resize mode edge clicking.
+      if (gizmo_state.is_resize_mode) {
+        const edge = get_resize_edge(e.x, e.y, rect);
+        if (edge) {
+          gizmo_state.resize_edge = edge;
+          gizmo_state.is_dragging_resize = true;
+          gizmo_state.move_start_x = e.x;
+          gizmo_state.move_start_y = e.y;
+          gizmo_state.original_rect = { ...rect };
           return;
         }
       }
@@ -637,6 +657,12 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
     OnPointerLeave(): void {
       hover_slot = null;
       opts.on_slot_hover?.(null, null, null, null);
+    },
+
+    OnGlobalPointerDown(e: PointerEvent): void {
+      if (opts.gizmos) {
+        handle_global_pointer_down_for_gizmos(e, rect, opts.gizmos, gizmo_state);
+      }
     },
 
     OnDragStart(e: DragEvent): void {
@@ -719,6 +745,33 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
         opts.gizmos?.on_move?.(new_rect);
         return;
       }
+
+      // Handle resize dragging
+      if (gizmo_state.is_resize_mode && gizmo_state.is_dragging_resize && gizmo_state.original_rect) {
+        const min_width = 30;
+        const min_height = 16;
+        const max_width = 160;
+        const max_height = 80;
+
+        const new_rect = handle_resize_drag(
+          e.x,
+          e.y,
+          gizmo_state,
+          gizmo_state.original_rect,
+          min_width,
+          min_height,
+          max_width,
+          max_height,
+          (newRect) => {
+            rect = newRect;
+            if (opts.gizmos?.on_resize) opts.gizmos.on_resize(rect);
+            else opts.gizmos?.on_move?.(rect);
+          },
+        );
+
+        if (new_rect) rect = new_rect;
+        return;
+      }
       
       // Handle panning
       if (is_panning) {
@@ -746,6 +799,15 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       debug_log(`[CharacterModule] OnDragEnd at (${e.x}, ${e.y})`);
       
       if (!opts.get_is_visible()) return;
+
+      // Handle resize end
+      if (gizmo_state.is_resize_mode && gizmo_state.is_dragging_resize) {
+        gizmo_state.is_dragging_resize = false;
+        gizmo_state.resize_edge = null;
+        if (opts.gizmos?.on_resize_end) opts.gizmos.on_resize_end(rect);
+        else opts.gizmos?.on_move_end?.(rect);
+        return;
+      }
 
       // Handle panning end
       if (is_panning) {
@@ -795,6 +857,17 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       
       // Drop outside module - let parent handle
       opts.on_cross_module_drop?.(e.x, e.y);
+    },
+
+    OnPointerUp(): void {
+      // If the user clicks an edge but doesn't exceed drag threshold,
+      // CanvasRuntime will not emit OnDragEnd. Ensure resize doesn't get stuck.
+      if (gizmo_state.is_resize_mode && gizmo_state.is_dragging_resize) {
+        gizmo_state.is_dragging_resize = false;
+        gizmo_state.resize_edge = null;
+        if (opts.gizmos?.on_resize_end) opts.gizmos.on_resize_end(rect);
+        else opts.gizmos?.on_move_end?.(rect);
+      }
     },
   };
 }

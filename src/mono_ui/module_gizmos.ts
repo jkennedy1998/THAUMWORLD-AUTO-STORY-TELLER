@@ -1,5 +1,10 @@
-import type { Canvas, Rect, Rgb } from "./types.js";
+import type { Canvas, PointerEvent, Rect, Rgb } from "./types.js";
+import { rect_contains } from "./types.js";
 import { debug_log } from "../shared/debug.js";
+import { resolve_cell } from "../render_shaders/resolver.js";
+import { make_widget_payload } from "../render_shaders/payload_builders.js";
+
+// NOTE: Date.now() used here to match other UI draw paths.
 
 export type GizmoType = 'close' | 'move' | 'save_position' | 'resize';
 
@@ -24,7 +29,57 @@ export type ModuleGizmosConfig = {
   on_move_start?: () => void;
   on_move?: (new_rect: Rect) => void;
   on_move_end?: (final_rect: Rect) => void;
+
+  // Resize callbacks (preferred).
+  // If omitted, modules may fall back to on_move/on_move_end.
+  on_resize_start?: () => void;
+  on_resize?: (new_rect: Rect) => void;
+  on_resize_end?: (final_rect: Rect) => void;
 };
+
+function call_resize(new_rect: Rect, config: ModuleGizmosConfig | undefined): void {
+  if (!config) return;
+  if (config.on_resize) config.on_resize(new_rect);
+  else if (config.on_move) config.on_move(new_rect);
+}
+
+function call_resize_end(final_rect: Rect, config: ModuleGizmosConfig | undefined): void {
+  if (!config) return;
+  if (config.on_resize_end) config.on_resize_end(final_rect);
+  else if (config.on_move_end) config.on_move_end(final_rect);
+}
+
+function call_move_end(final_rect: Rect, config: ModuleGizmosConfig | undefined): void {
+  if (!config) return;
+  config.on_move_end?.(final_rect);
+}
+
+export function cancel_gizmo_modes(rect: Rect, config: ModuleGizmosConfig | undefined, gizmo_state: GizmoState): void {
+  const was_move = gizmo_state.is_move_mode;
+  const was_resize = gizmo_state.is_resize_mode;
+  const was_drag_resize = gizmo_state.is_dragging_resize;
+
+  gizmo_state.is_move_mode = false;
+  gizmo_state.is_resize_mode = false;
+  gizmo_state.is_dragging_resize = false;
+  gizmo_state.resize_edge = null;
+  gizmo_state.original_rect = null;
+
+  if (was_drag_resize) {
+    call_resize_end(rect, config);
+  } else if (was_move) {
+    call_move_end(rect, config);
+  } else if (was_resize) {
+    // Resize mode toggled off without dragging: no-op.
+  }
+}
+
+export function handle_global_pointer_down_for_gizmos(e: PointerEvent, rect: Rect, config: ModuleGizmosConfig | undefined, gizmo_state: GizmoState): void {
+  // Clicking anywhere outside the module cancels move/resize modes.
+  if (!gizmo_state.is_move_mode && !gizmo_state.is_resize_mode) return;
+  if (rect_contains(rect, e.x, e.y)) return;
+  cancel_gizmo_modes(rect, config, gizmo_state);
+}
 
 // Default gizmo colors
 const GIZMO_COLORS = {
@@ -75,50 +130,91 @@ export function draw_module_gizmos(
   if (config.enabled.includes('move') && config.can_move) {
     const pos = get_gizmo_rect(rect, gizmo_index++);
     const color = gizmo_state.is_move_mode ? GIZMO_COLORS.active : GIZMO_COLORS.move;
-    
-    c.set(pos.x, pos.y, {
-      char: '#',
-      rgb: color,
-      style: 'regular',
-      weight_index: gizmo_state.is_move_mode ? 5 : 4,
-    });
+
+    const shaded = resolve_cell(
+      make_widget_payload({
+        id: `gizmo:move:${rect.x0}:${rect.y1}`,
+        widget: 'move',
+        widget_state: gizmo_state.is_move_mode ? 'active' : 'idle',
+        base_fg: color,
+      }),
+      {
+        where: 'debug',
+        space: 'ui',
+        x: pos.x,
+        y: pos.y,
+        time_ms: Date.now(),
+      },
+    );
+
+    c.set(pos.x, pos.y, shaded);
   }
 
   // Draw close gizmo (X) - Red
   if (config.enabled.includes('close') && config.can_close) {
     const pos = get_gizmo_rect(rect, gizmo_index++);
-    
-    c.set(pos.x, pos.y, {
-      char: 'X',
-      rgb: GIZMO_COLORS.close,
-      style: 'regular',
-      weight_index: 4,
-    });
+
+    const shaded = resolve_cell(
+      make_widget_payload({
+        id: `gizmo:close:${rect.x0}:${rect.y1}`,
+        widget: 'close',
+        widget_state: 'idle',
+        base_fg: GIZMO_COLORS.close,
+      }),
+      {
+        where: 'debug',
+        space: 'ui',
+        x: pos.x,
+        y: pos.y,
+        time_ms: Date.now(),
+      },
+    );
+    c.set(pos.x, pos.y, shaded);
   }
 
   // Draw save gizmo ($) - Green (future feature)
   if (config.enabled.includes('save_position') && config.can_save_position) {
     const pos = get_gizmo_rect(rect, gizmo_index++);
-    
-    c.set(pos.x, pos.y, {
-      char: '$',
-      rgb: GIZMO_COLORS.save,
-      style: 'regular',
-      weight_index: 4,
-    });
+
+    const shaded = resolve_cell(
+      make_widget_payload({
+        id: `gizmo:save:${rect.x0}:${rect.y1}`,
+        widget: 'save_position',
+        widget_state: 'idle',
+        base_fg: GIZMO_COLORS.save,
+      }),
+      {
+        where: 'debug',
+        space: 'ui',
+        x: pos.x,
+        y: pos.y,
+        time_ms: Date.now(),
+      },
+    );
+    c.set(pos.x, pos.y, shaded);
   }
 
   // Draw resize gizmo (╋) - Orange
   if (config.enabled.includes('resize')) {
     const pos = get_gizmo_rect(rect, gizmo_index++);
     const color = gizmo_state.is_resize_mode ? GIZMO_COLORS.active : GIZMO_COLORS.resize;
-    
-    c.set(pos.x, pos.y, {
-      char: '╋',
-      rgb: color,
-      style: 'regular',
-      weight_index: gizmo_state.is_resize_mode ? 5 : 4,
-    });
+
+    const shaded = resolve_cell(
+      make_widget_payload({
+        id: `gizmo:resize:${rect.x0}:${rect.y1}`,
+        widget: 'resize',
+        widget_state: gizmo_state.is_resize_mode ? 'active' : 'idle',
+        base_fg: color,
+      }),
+      {
+        where: 'debug',
+        space: 'ui',
+        x: pos.x,
+        y: pos.y,
+        time_ms: Date.now(),
+      },
+    );
+    c.set(pos.x, pos.y, shaded);
   }
 
   // Draw module name to the right of gizmos
@@ -137,71 +233,59 @@ export function draw_module_gizmos(
     }
   }
 
-  // If in move mode, draw yellow border
+  // If in move/resize mode, tint the existing border (do not redraw border glyphs).
   if (gizmo_state.is_move_mode) {
-    draw_move_mode_border(c, rect);
+    tint_border_all(c, rect, GIZMO_COLORS.move, 5);
   }
-  
-  // If in resize mode, draw colored borders
+
   if (gizmo_state.is_resize_mode) {
-    draw_resize_borders(c, rect, gizmo_state);
+    // Base color for resize mode.
+    const base_color = gizmo_state.is_dragging_resize
+      ? RESIZE_COLORS.dragging
+      : RESIZE_COLORS.idle;
+
+    tint_border_all(c, rect, base_color, 5);
+
+    // Hovered edge gets hover color when not actively dragging.
+    if (!gizmo_state.is_dragging_resize && gizmo_state.resize_edge) {
+      tint_border_edge(c, rect, gizmo_state.resize_edge, RESIZE_COLORS.hover, 6);
+    }
   }
 }
 
-/**
- * Draw a yellow border to indicate move mode
- */
-function draw_move_mode_border(c: Canvas, rect: Rect): void {
-  const border_color: Rgb = { r: 255, g: 255, b: 0 };
-  
-  // Draw border corners and edges
-  for (let x = rect.x0; x <= rect.x1; x++) {
-    // Top and bottom edges
-    c.set(x, rect.y1, { char: '-', rgb: border_color, style: 'regular', weight_index: 5 });
-    c.set(x, rect.y0, { char: '-', rgb: border_color, style: 'regular', weight_index: 5 });
-  }
-  
-  for (let y = rect.y0; y <= rect.y1; y++) {
-    // Left and right edges
-    c.set(rect.x0, y, { char: '|', rgb: border_color, style: 'regular', weight_index: 5 });
-    c.set(rect.x1, y, { char: '|', rgb: border_color, style: 'regular', weight_index: 5 });
-  }
-  
-  // Corners
-  c.set(rect.x0, rect.y1, { char: '+', rgb: border_color, style: 'regular', weight_index: 5 });
-  c.set(rect.x1, rect.y1, { char: '+', rgb: border_color, style: 'regular', weight_index: 5 });
-  c.set(rect.x0, rect.y0, { char: '+', rgb: border_color, style: 'regular', weight_index: 5 });
-  c.set(rect.x1, rect.y0, { char: '+', rgb: border_color, style: 'regular', weight_index: 5 });
+function tint_border_cell(c: Canvas, x: number, y: number, rgb: Rgb, weight_index: number): void {
+  const prev = c.get(x, y);
+  if (!prev) return;
+  c.set(x, y, {
+    char: prev.char,
+    rgb,
+    style: prev.style,
+    weight_index: Math.max(prev.weight_index ?? 0, weight_index),
+    render_index: prev.render_index,
+  });
 }
 
-/**
- * Draw resize borders with appropriate colors
- */
-function draw_resize_borders(c: Canvas, rect: Rect, gizmo_state: GizmoState): void {
-  // Determine color based on state
-  let border_color = RESIZE_COLORS.idle;
-  if (gizmo_state.is_dragging_resize) {
-    border_color = RESIZE_COLORS.dragging;
-  } else if (gizmo_state.resize_edge) {
-    border_color = RESIZE_COLORS.hover;
-  }
-  
-  // Draw all four edges with the current color
+function tint_border_all(c: Canvas, rect: Rect, rgb: Rgb, weight_index: number): void {
   for (let x = rect.x0; x <= rect.x1; x++) {
-    c.set(x, rect.y1, { char: '─', rgb: border_color, style: 'regular', weight_index: 5 });
-    c.set(x, rect.y0, { char: '─', rgb: border_color, style: 'regular', weight_index: 5 });
+    tint_border_cell(c, x, rect.y1, rgb, weight_index);
+    tint_border_cell(c, x, rect.y0, rgb, weight_index);
   }
-  
   for (let y = rect.y0; y <= rect.y1; y++) {
-    c.set(rect.x0, y, { char: '│', rgb: border_color, style: 'regular', weight_index: 5 });
-    c.set(rect.x1, y, { char: '│', rgb: border_color, style: 'regular', weight_index: 5 });
+    tint_border_cell(c, rect.x0, y, rgb, weight_index);
+    tint_border_cell(c, rect.x1, y, rgb, weight_index);
   }
-  
-  // Corners
-  c.set(rect.x0, rect.y1, { char: '┌', rgb: border_color, style: 'regular', weight_index: 5 });
-  c.set(rect.x1, rect.y1, { char: '┐', rgb: border_color, style: 'regular', weight_index: 5 });
-  c.set(rect.x0, rect.y0, { char: '└', rgb: border_color, style: 'regular', weight_index: 5 });
-  c.set(rect.x1, rect.y0, { char: '┘', rgb: border_color, style: 'regular', weight_index: 5 });
+}
+
+function tint_border_edge(c: Canvas, rect: Rect, edge: ResizeEdge, rgb: Rgb, weight_index: number): void {
+  if (edge === 'top') {
+    for (let x = rect.x0; x <= rect.x1; x++) tint_border_cell(c, x, rect.y1, rgb, weight_index);
+  } else if (edge === 'bottom') {
+    for (let x = rect.x0; x <= rect.x1; x++) tint_border_cell(c, x, rect.y0, rgb, weight_index);
+  } else if (edge === 'left') {
+    for (let y = rect.y0; y <= rect.y1; y++) tint_border_cell(c, rect.x0, y, rgb, weight_index);
+  } else if (edge === 'right') {
+    for (let y = rect.y0; y <= rect.y1; y++) tint_border_cell(c, rect.x1, y, rgb, weight_index);
+  }
 }
 
 /**
@@ -247,13 +331,13 @@ export function handle_gizmo_click(
       
       // Toggle move mode
       if (gizmo_state.is_move_mode) {
-        // End move mode
-        gizmo_state.is_move_mode = false;
-        if (gizmo_state.original_rect && config.on_move_end) {
-          config.on_move_end(rect);
-        }
+        cancel_gizmo_modes(rect, config, gizmo_state);
       } else {
         // Start move mode
+        // Cancel resize mode if active.
+        gizmo_state.is_resize_mode = false;
+        gizmo_state.is_dragging_resize = false;
+        gizmo_state.resize_edge = null;
         gizmo_state.is_move_mode = true;
         gizmo_state.original_rect = { ...rect };
         if (config.on_move_start) {
@@ -294,19 +378,16 @@ export function handle_gizmo_click(
       
       // Toggle resize mode
       if (gizmo_state.is_resize_mode) {
-        // End resize mode
-        gizmo_state.is_resize_mode = false;
-        gizmo_state.resize_edge = null;
-        if (gizmo_state.original_rect && config.on_move_end) {
-          config.on_move_end(rect);
-        }
+        // Clicking resize again cancels resize mode (and cancels any active drag).
+        cancel_gizmo_modes(rect, config, gizmo_state);
       } else {
-        // Start resize mode
+        // Start resize mode (arm edge dragging).
+        gizmo_state.is_move_mode = false;
         gizmo_state.is_resize_mode = true;
+        gizmo_state.is_dragging_resize = false;
+        gizmo_state.resize_edge = null;
         gizmo_state.original_rect = { ...rect };
-        if (config.on_move_start) {
-          config.on_move_start();
-        }
+        config.on_resize_start?.();
       }
       
       return 'resize';
@@ -415,9 +496,7 @@ export function handle_resize_drag(
   }
 
   // Call resize callback
-  if (on_resize) {
-    on_resize(new_rect);
-  }
+  if (on_resize) on_resize(new_rect);
 
   return new_rect;
 }

@@ -2102,6 +2102,58 @@ function start_http_server(log_path: string): void {
                     return;
                 }
 
+                // Best-effort: attach display_char to inline items in body_slots for consistent UI rendering.
+                // This is a response-only augmentation (we do not persist these fields here).
+                try {
+                    const display_char_by_def_id = new Map<string, string>();
+                    const get_display_char = (def_id: string, fallback_name: string): string => {
+                        const key = String(def_id || '');
+                        const cached = display_char_by_def_id.get(key);
+                        if (cached) return cached;
+                        const def_res = load_item_def(slot, key);
+                        if (def_res.ok) {
+                            const base = String((def_res.item as any)?.display_char ?? '');
+                            const out = base && base.length > 0
+                                ? base.charAt(0)
+                                : (fallback_name ? fallback_name.charAt(0).toLowerCase() : '·');
+                            display_char_by_def_id.set(key, out);
+                            return out;
+                        }
+                        const out = fallback_name ? fallback_name.charAt(0).toLowerCase() : '·';
+                        display_char_by_def_id.set(key, out);
+                        return out;
+                    };
+
+                    const patch_inline_item = (it: any): void => {
+                        if (!it || typeof it !== 'object') return;
+                        const def_id = typeof it.def_id === 'string' ? it.def_id : '';
+                        const name = typeof it.name === 'string' ? it.name : '';
+                        const cur = typeof it.display_char === 'string' ? it.display_char : '';
+                        if (!cur || cur === '·' || cur === ' ') {
+                            it.display_char = get_display_char(def_id, name);
+                        }
+                        if (Array.isArray(it.contents)) {
+                            for (const child of it.contents) patch_inline_item(child);
+                        }
+                    };
+
+                    const actor_any: any = actor_result.actor as any;
+                    const body_slots_any: any = actor_any?.body_slots;
+                    if (body_slots_any && typeof body_slots_any === 'object') {
+                        for (const v of Object.values(body_slots_any)) {
+                            const s: any = v as any;
+                            if (!s || typeof s !== 'object') continue;
+                            patch_inline_item(s.armor);
+                            patch_inline_item(s.tool);
+                            if (Array.isArray(s.garb)) {
+                                for (const g of s.garb) patch_inline_item(g);
+                            }
+                        }
+                    }
+                } catch {
+                    // Non-fatal: actor data still returns even if meta augmentation fails.
+                }
+
                 debug_log("API", `/api/actor: Loaded ${actor_id}`);
                 res.writeHead(200, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ 
@@ -5988,13 +6040,14 @@ function start_http_server(log_path: string): void {
                 const display_char_by_def_id = new Map<string, string>();
                 const get_display_char = (def_id: string, fallback_name: string): string => {
                     const key = String(def_id || '');
-                    if (display_char_by_def_id.has(key)) return display_char_by_def_id.get(key)!;
+                    const cached = display_char_by_def_id.get(key);
+                    if (cached) return cached;
                     const def_res = load_item_def(data_slot_number, key);
                     if (def_res.ok) {
-                        const ch = String((def_res.item as any)?.display_char ?? '');
-                        const out = ch && ch.length > 0 ? ch.charAt(0) : (fallback_name ? fallback_name.charAt(0).toLowerCase() : '·');
-                        display_char_by_def_id.set(key, out);
-                        return out;
+                        const base = String((def_res.item as any)?.display_char ?? '');
+                        const out_base = base && base.length > 0 ? base.charAt(0) : (fallback_name ? fallback_name.charAt(0).toLowerCase() : '·');
+                        display_char_by_def_id.set(key, out_base);
+                        return out_base;
                     }
                     const out = fallback_name ? fallback_name.charAt(0).toLowerCase() : '·';
                     display_char_by_def_id.set(key, out);
@@ -6005,18 +6058,21 @@ function start_http_server(log_path: string): void {
                     res.end(JSON.stringify({ 
                         ok: true, 
                         place_id,
-                        items: items.map(({ item, position, position_key }: { item: InlineItem; position?: { x: number; y: number }; position_key?: string }) => ({
-                            id: item.id,
-                            def_id: item.def_id,
-                            name: item.name,
-                            qty: item.qty,
-                            weight: item.weight,
-                            display_char: get_display_char(String(item.def_id ?? ''), String(item.name ?? '')),
-                            tags: (item as any).tags || [],
-                            position,
-                            position_key
-                        }))
-                    }));
+                        items: items.map(({ item, position, position_key }: { item: InlineItem; position?: { x: number; y: number }; position_key?: string }) => {
+                            const display_char = get_display_char(String(item.def_id ?? ''), String(item.name ?? ''));
+                            return ({
+                             id: item.id,
+                             def_id: item.def_id,
+                             name: item.name,
+                             qty: item.qty,
+                             weight: item.weight,
+                             display_char,
+                             tags: (item as any).tags || [],
+                             position,
+                             position_key
+                         });
+                         })
+                     }));
             } catch (err) {
                 debug_error("API", "/api/place/items error", err);
                 res.writeHead(500, { "Content-Type": "application/json" });
@@ -6070,6 +6126,23 @@ function start_http_server(log_path: string): void {
                 const max_slots = cap_res.max_slots;
                 const contents = normalize_inline_container_grid(contents_raw, max_slots, `place_container_item:${place_id}:${item_id}`);
 
+                const display_char_by_def_id = new Map<string, string>();
+                const get_display_char = (def_id: string, fallback_name: string): string => {
+                    const key = String(def_id || '');
+                    const cached = display_char_by_def_id.get(key);
+                    if (cached) return cached;
+                    const def_res = load_item_def(data_slot_number, key);
+                    if (def_res.ok) {
+                        const base = String((def_res.item as any)?.display_char ?? '');
+                        const out = base && base.length > 0 ? base.charAt(0) : (fallback_name ? fallback_name.charAt(0).toLowerCase() : '·');
+                        display_char_by_def_id.set(key, out);
+                        return out;
+                    }
+                    const out = fallback_name ? fallback_name.charAt(0).toLowerCase() : '·';
+                    display_char_by_def_id.set(key, out);
+                    return out;
+                };
+
                 // Repair coords + capacity in-place.
                 const coords_by_id = new Map<string, { x: number; y: number }>();
                 for (const e of contents) {
@@ -6105,7 +6178,7 @@ function start_http_server(log_path: string): void {
                         capacity: { max_slots },
                         contents: contents.map(({ item, grid_x, grid_y }: any) => ({
                             instance: { id: item.id, def_id: item.def_id, qty: item.qty, tags: item.tags },
-                            definition: { id: item.def_id, name: item.name, weight: item.weight, tags: item.tags },
+                            definition: { id: item.def_id, name: item.name, weight: item.weight, tags: item.tags, display_char: get_display_char(String(item.def_id ?? ''), String(item.name ?? '')) },
                             grid_x,
                             grid_y,
                         })),
@@ -6163,6 +6236,23 @@ function start_http_server(log_path: string): void {
                 const max_slots = cap_res.max_slots;
                 const contents = normalize_inline_container_grid(contents_raw, max_slots, `actor_container_item:${actor_id}:${item_id}`);
 
+                const display_char_by_def_id = new Map<string, string>();
+                const get_display_char = (def_id: string, fallback_name: string): string => {
+                    const key = String(def_id || '');
+                    const cached = display_char_by_def_id.get(key);
+                    if (cached) return cached;
+                    const def_res = load_item_def(data_slot_number, key);
+                    if (def_res.ok) {
+                        const base = String((def_res.item as any)?.display_char ?? '');
+                        const out = base && base.length > 0 ? base.charAt(0) : (fallback_name ? fallback_name.charAt(0).toLowerCase() : '·');
+                        display_char_by_def_id.set(key, out);
+                        return out;
+                    }
+                    const out = fallback_name ? fallback_name.charAt(0).toLowerCase() : '·';
+                    display_char_by_def_id.set(key, out);
+                    return out;
+                };
+
                 // Repair coords + capacity in-place and persist.
                 const coords_by_id = new Map<string, { x: number; y: number }>();
                 for (const e of contents) {
@@ -6198,7 +6288,7 @@ function start_http_server(log_path: string): void {
                         capacity: { max_slots },
                         contents: contents.map(({ item, grid_x, grid_y }: any) => ({
                             instance: { id: item.id, def_id: item.def_id, qty: item.qty, tags: item.tags },
-                            definition: { id: item.def_id, name: item.name, weight: item.weight, tags: item.tags },
+                            definition: { id: item.def_id, name: item.name, weight: item.weight, tags: item.tags, display_char: get_display_char(String(item.def_id ?? ''), String(item.name ?? '')) },
                             grid_x,
                             grid_y,
                         })),
@@ -6292,6 +6382,23 @@ function start_http_server(log_path: string): void {
                 const max_slots = cap_res.max_slots;
                 const contents = normalize_inline_container_grid(contents_raw, max_slots, `body_slot:${actor_id}:${container_path}`);
 
+                const display_char_by_def_id = new Map<string, string>();
+                const get_display_char = (def_id: string, fallback_name: string): string => {
+                    const key = String(def_id || '');
+                    const cached = display_char_by_def_id.get(key);
+                    if (cached) return cached;
+                    const def_res = load_item_def(data_slot_number, key);
+                    if (def_res.ok) {
+                        const base = String((def_res.item as any)?.display_char ?? '');
+                        const out = base && base.length > 0 ? base.charAt(0) : (fallback_name ? fallback_name.charAt(0).toLowerCase() : '·');
+                        display_char_by_def_id.set(key, out);
+                        return out;
+                    }
+                    const out = fallback_name ? fallback_name.charAt(0).toLowerCase() : '·';
+                    display_char_by_def_id.set(key, out);
+                    return out;
+                };
+
                 // Repair coords in-place so future operations are consistent.
                 const coords_by_id = new Map<string, { x: number; y: number }>();
                 for (const e of contents) {
@@ -6345,7 +6452,8 @@ function start_http_server(log_path: string): void {
                                 id: item.def_id,
                                 name: item.name,
                                 weight: item.weight,
-                                tags: item.tags
+                                tags: item.tags,
+                                display_char: get_display_char(String(item.def_id ?? ''), String(item.name ?? '')),
                             },
                             grid_x,
                             grid_y,
@@ -6417,6 +6525,23 @@ function start_http_server(log_path: string): void {
 
                 // Return container data with contents
                 const contents = container_item.contents || [];
+
+                const display_char_by_def_id = new Map<string, string>();
+                const get_display_char = (def_id: string, fallback_name: string): string => {
+                    const key = String(def_id || '');
+                    const cached = display_char_by_def_id.get(key);
+                    if (cached) return cached;
+                    const def_res = load_item_def(data_slot_number, key);
+                    if (def_res.ok) {
+                        const base = String((def_res.item as any)?.display_char ?? '');
+                        const out = base && base.length > 0 ? base.charAt(0) : (fallback_name ? fallback_name.charAt(0).toLowerCase() : '·');
+                        display_char_by_def_id.set(key, out);
+                        return out;
+                    }
+                    const out = fallback_name ? fallback_name.charAt(0).toLowerCase() : '·';
+                    display_char_by_def_id.set(key, out);
+                    return out;
+                };
                 
                 debug_log("API", `/api/place/ground_container: Found container with ${contents.length} items`);
 
@@ -6443,7 +6568,8 @@ function start_http_server(log_path: string): void {
                                 id: item.def_id,
                                 name: item.name,
                                 weight: item.weight,
-                                tags: item.tags
+                                tags: item.tags,
+                                display_char: get_display_char(String(item.def_id ?? ''), String(item.name ?? '')),
                             }
                         }))
                     }

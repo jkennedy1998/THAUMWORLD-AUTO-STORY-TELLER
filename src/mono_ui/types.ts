@@ -97,6 +97,10 @@ export type PointerEvent = {
     // Pointer Events metadata (optional; present for pen/touch)
     pointer_type?: string;
     pressure?: number;
+
+    // Keyboard state captured by CanvasRuntime at event time.
+    // Used for gestures like Space+Drag that shouldn't depend on module focus.
+    space?: boolean;
 };
 
 export type DragKind = 'drag_start' | 'drag_move' | 'drag_end';
@@ -123,6 +127,9 @@ export type DragEvent = {
     // Pointer Events metadata (optional)
     pointer_type?: string;
     pressure?: number;
+
+    // Keyboard state captured by CanvasRuntime at event time.
+    space?: boolean;
 };
 
 // this is the parent to anything that lives on the screen that can be interacted with. 
@@ -156,6 +163,9 @@ export type Module = {
     OnTextInput?(text: string): void;
     // optional global shortcut lane (UI calls first)
     OnGlobalKeyDown?(e: KeyboardEvent): void;
+
+    // optional global pointer lane (UI calls for all modules)
+    OnGlobalPointerDown?(e: PointerEvent): void;
 
 };
 

@@ -1,4 +1,6 @@
 import type { Canvas, Module, Rect, Rgb, PointerEvent } from '../types.js';
+import { get_color_by_name } from '../colors.js';
+import { draw_module_border, BORDER_STYLES } from '../module_borders.js';
 import { play_sfx } from '../sfx/sfx_player.js';
 
 export type ButtonOptions = {
@@ -8,6 +10,11 @@ export type ButtonOptions = {
     label: string;              // monospace text
     rgb: Rgb;                   // label color
     bg?: { char: string; rgb: Rgb }; // optional background fill
+
+    // Standard chrome
+    border_rgb?: Rgb;
+    hover_border_rgb?: Rgb;
+    press_border_rgb?: Rgb;
 
     // Optional dynamic styling
     get_rgb?: () => Rgb;
@@ -67,7 +74,7 @@ export function make_button_module(opts: ButtonOptions): Module {
 
 
 
-    function draw_label(c: Canvas) {
+    function draw_label(c: Canvas, rgb: Rgb) {
         const y = rect.y0 + Math.floor((rect.y1 - rect.y0) / 2);
         const label = opts.label;
         const start_x = rect.x0 + Math.max(0, Math.floor(((rect.x1 - rect.x0 + 1) - label.length) / 2));
@@ -79,11 +86,23 @@ export function make_button_module(opts: ButtonOptions): Module {
             const ch = label.charAt(i); // always a string ('' if out of range)
             if (!ch) continue;
 
-            const rgb = opts.get_rgb ? opts.get_rgb() : opts.rgb;
             c.set(x, y, { char: ch, rgb, style: 'regular', weight_index: current_label_weight_index() });
 
         }
 
+    }
+
+    function clamp_byte(n: number): number {
+        if (!Number.isFinite(n)) return 0;
+        return Math.max(0, Math.min(255, Math.round(n)));
+    }
+
+    function tweak_rgb(rgb: Rgb, delta: number): Rgb {
+        return {
+            r: clamp_byte(rgb.r + delta),
+            g: clamp_byte(rgb.g + delta),
+            b: clamp_byte(rgb.b + delta),
+        };
     }
 
     return {
@@ -94,17 +113,33 @@ export function make_button_module(opts: ButtonOptions): Module {
         Draw(c: Canvas): void {
             if (click_boost_frames > 0) click_boost_frames--;
 
+            const base_label_rgb = opts.get_rgb ? opts.get_rgb() : opts.rgb;
+
+            const border_idle = opts.border_rgb ?? get_color_by_name('medium_gray').rgb;
+            const border_hover = opts.hover_border_rgb ?? get_color_by_name('pale_yellow').rgb;
+            const border_press = opts.press_border_rgb ?? get_color_by_name('vivid_cyan').rgb;
+            const border_rgb = pressed ? border_press : (hovered ? border_hover : border_idle);
+
             const bg = opts.get_bg ? opts.get_bg() : opts.bg;
-            if (bg) c.fill_rect(rect, { char: bg.char, rgb: bg.rgb, style: 'regular' });
+            if (bg) {
+                const rgb = pressed ? tweak_rgb(bg.rgb, -20) : (hovered ? tweak_rgb(bg.rgb, 18) : bg.rgb);
+                c.fill_rect(rect, { char: bg.char, rgb, style: 'regular', weight_index: 3 });
+            }
 
-            // minimal state visibility (no real decor yet):
-            // top-left marker: H = hovered, P = pressed
-            const rgb = opts.get_rgb ? opts.get_rgb() : opts.rgb;
-            if (hovered) c.set(rect.x0, rect.y1, { char: 'H', rgb, style: 'regular', weight_index: 5 });
-            if (pressed) c.set(rect.x0 + 1, rect.y1, { char: 'P', rgb, style: 'regular', weight_index: 7 });
+            // Standard double-border chrome for all buttons.
+            draw_module_border(c, {
+                rect,
+                style: BORDER_STYLES.double,
+                border_rgb,
+                weight_index: 3,
+            });
 
+            // Click feedback: temporarily tint label brighter.
+            const label_rgb = click_boost_frames > 0
+                ? get_color_by_name('off_white').rgb
+                : base_label_rgb;
 
-            draw_label(c);
+            draw_label(c, label_rgb);
         },
 
         OnPointerEnter(): void {

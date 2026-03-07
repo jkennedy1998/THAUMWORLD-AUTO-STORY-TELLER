@@ -1,7 +1,9 @@
 import type { Canvas, Module, Rect, Rgb, WheelEvent, DragEvent } from "../types.js";
 import { rect_width, rect_height } from "../types.js";
-import { draw_border } from "../padding.js";
 import { get_color_by_name } from "../colors.js";
+import { draw_module_border, BORDER_STYLES } from "../module_borders.js";
+import type { ModuleGizmosConfig, GizmoState } from "../module_gizmos.js";
+import { create_gizmo_state, draw_module_gizmos, get_resize_edge, handle_gizmo_click, handle_resize_drag, is_in_gizmo_area, handle_global_pointer_down_for_gizmos } from "../module_gizmos.js";
 
 export type TextWindowMessage = {
     content: string;
@@ -30,6 +32,10 @@ export type TextWindowOptions = {
     hint_rgb?: Rgb; // color for 'hint' sender messages
     npc_rgb?: Rgb; // color for NPC messages
     state_rgb?: Rgb; // color for state applier messages
+
+    // Standard widgets (move/resize/close)
+    gizmos?: ModuleGizmosConfig;
+    title?: string;
 };
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -180,6 +186,11 @@ function wrap_messages(messages: (string | TextWindowMessage)[], width: number):
 
 
 export function make_text_window_module(opts: TextWindowOptions): Module {
+    // Mutable rect for move/resize.
+    let rect = opts.rect;
+
+    const gizmo_config: ModuleGizmosConfig | undefined = opts.gizmos;
+    const gizmo_state: GizmoState = create_gizmo_state();
 
     let scroll_y = 0;
 
@@ -215,8 +226,8 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
     }
 
     function inner_text_rect(): Rect {
-        // 1-char border/padding on all sides
-        return { x0: opts.rect.x0 + 1, y0: opts.rect.y0 + 1, x1: opts.rect.x1 - 1, y1: opts.rect.y1 - 1 };
+        // 1-char border/padding; reserve one extra row for header widgets/title.
+        return { x0: rect.x0 + 1, y0: rect.y0 + 1, x1: rect.x1 - 1, y1: rect.y1 - 2 };
     }
 
     function scroll_by(dy_lines: number) {
@@ -228,7 +239,7 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
 
     return {
         id: opts.id,
-        rect: opts.rect,
+        get rect() { return rect; },
         Focusable: true,
 
         Draw(c: Canvas): void {
@@ -239,7 +250,7 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
 
             // optional bg fill behind everything
             if (opts.bg) {
-                c.fill_rect(opts.rect, { char: opts.bg.char, rgb: opts.bg.rgb, style: "regular", weight_index: w_base });
+                c.fill_rect(rect, { char: opts.bg.char, rgb: opts.bg.rgb, style: "regular", weight_index: w_base });
             }
 
             const text_r = inner_text_rect();
@@ -248,7 +259,12 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
 
             // Degenerate: rect too small to display text area
             if (text_w <= 0 || text_h <= 0) {
-                draw_border(c, opts.rect, border_rgb, w_base, { corner: "+", h: "-", v: "|" });
+                draw_module_border(c, {
+                    rect,
+                    style: BORDER_STYLES.double,
+                    border_rgb,
+                    weight_index: w_base,
+                });
                 return;
             }
 
@@ -260,18 +276,20 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
 
             // draw border with scroll markers
             const markers: BorderMarkers = {};
-
             if (has_up) markers.top = "^";
             if (has_down) markers.bottom = "v";
 
-            draw_border(
-                c,
-                opts.rect,
+            draw_module_border(c, {
+                rect,
+                style: BORDER_STYLES.double,
                 border_rgb,
-                w_base,
-                { corner: "+", h: "-", v: "|" },
-                markers,
-            );
+                weight_index: w_base,
+                markers: { top: markers.top, bottom: markers.bottom },
+                header: {
+                    text: (opts.title ?? opts.id).toUpperCase(),
+                    reserve_left_cols: 2 + ((gizmo_config?.enabled?.length ?? 0) * 2),
+                },
+            });
 
 
             // clear text area so old chars don't linger
@@ -315,6 +333,122 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
             if (npcLinesRendered > 0) {
                 console.log(`[window_module:${opts.id}] Rendered ${text_h} lines, ${npcLinesRendered} NPC lines visible (scroll: ${scroll_y}/${cached_lines.length})`);
             }
+
+            // Draw widgets last.
+            if (gizmo_config) {
+                draw_module_gizmos(c, rect, gizmo_config, gizmo_state);
+            }
+        },
+
+        OnGlobalPointerDown(e: any): void {
+            if (gizmo_config) {
+                handle_global_pointer_down_for_gizmos(e, rect, gizmo_config, gizmo_state);
+            }
+        },
+
+        OnPointerMove(e: any): void {
+            if (gizmo_state.is_resize_mode && !gizmo_state.is_dragging_resize) {
+                gizmo_state.resize_edge = get_resize_edge(e.x, e.y, rect);
+            }
+        },
+
+        OnPointerDown(e: any): void {
+            if (gizmo_config && is_in_gizmo_area(e.x, e.y, rect)) {
+                const gizmo = handle_gizmo_click(e.x, e.y, rect, gizmo_config, gizmo_state);
+                if (gizmo === 'move' || gizmo === 'resize') {
+                    gizmo_state.move_start_x = e.x;
+                    gizmo_state.move_start_y = e.y;
+                    gizmo_state.original_rect = { ...rect };
+                }
+                return;
+            }
+
+            if (gizmo_state.is_resize_mode) {
+                const edge = get_resize_edge(e.x, e.y, rect);
+                if (edge) {
+                    gizmo_state.resize_edge = edge;
+                    gizmo_state.is_dragging_resize = true;
+                    gizmo_state.move_start_x = e.x;
+                    gizmo_state.move_start_y = e.y;
+                    gizmo_state.original_rect = { ...rect };
+                }
+            }
+        },
+
+        OnDragStart(e: DragEvent): void {
+            if (gizmo_state.is_move_mode || gizmo_state.is_resize_mode) {
+                gizmo_state.move_start_x = e.start_x;
+                gizmo_state.move_start_y = e.start_y;
+                if (!gizmo_state.original_rect) gizmo_state.original_rect = { ...rect };
+                return;
+            }
+
+            // Drag-to-scroll (when not in widget modes)
+            if (e.buttons & 1) {
+                is_drag_panning = true;
+            }
+        },
+
+        OnDragMove(e: DragEvent): void {
+            if (gizmo_state.is_move_mode && gizmo_state.original_rect) {
+                const dx = e.x - gizmo_state.move_start_x;
+                const dy = e.y - gizmo_state.move_start_y;
+                const next: Rect = {
+                    x0: gizmo_state.original_rect.x0 + dx,
+                    y0: gizmo_state.original_rect.y0 + dy,
+                    x1: gizmo_state.original_rect.x1 + dx,
+                    y1: gizmo_state.original_rect.y1 + dy,
+                };
+                rect = next;
+                if (gizmo_config?.on_resize) gizmo_config.on_resize(rect);
+                else gizmo_config?.on_move?.(rect);
+                return;
+            }
+
+            if (gizmo_state.is_resize_mode && gizmo_state.is_dragging_resize && gizmo_state.original_rect) {
+                const min_width = 20;
+                const min_height = 6;
+                const max_width = 200;
+                const max_height = 80;
+                const next = handle_resize_drag(
+                    e.x,
+                    e.y,
+                    gizmo_state,
+                    gizmo_state.original_rect,
+                    min_width,
+                    min_height,
+                    max_width,
+                    max_height,
+                    (r) => {
+                        rect = r;
+                        if (gizmo_config?.on_resize) gizmo_config.on_resize(rect);
+                        else gizmo_config?.on_move?.(rect);
+                    },
+                );
+                if (next) rect = next;
+                return;
+            }
+
+            // Drag-to-scroll (when not in widget modes)
+            if (!is_drag_panning) return;
+            if (!(e.buttons & 1)) return;
+            // Drag up (positive step_dy) scrolls down to newer lines.
+            scroll_by(e.step_dy);
+        },
+
+        OnDragEnd(_e: DragEvent): void {
+            if (gizmo_state.is_resize_mode && gizmo_state.is_dragging_resize) {
+                gizmo_state.is_dragging_resize = false;
+                gizmo_state.resize_edge = null;
+                if (gizmo_config?.on_resize_end) gizmo_config.on_resize_end(rect);
+                else gizmo_config?.on_move_end?.(rect);
+            }
+
+            if (gizmo_state.is_move_mode && gizmo_state.original_rect) {
+                gizmo_config?.on_move_end?.(rect);
+            }
+
+            is_drag_panning = false;
         },
 
         OnWheel(e: WheelEvent): void {
@@ -327,20 +461,5 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
             scroll_by(step);
         },
 
-        OnDragStart(e: DragEvent): void {
-            if (e.buttons & 1) {
-                is_drag_panning = true;
-            }
-        },
-        OnDragMove(e: DragEvent): void {
-            if (!is_drag_panning) return;
-            if (!(e.buttons & 1)) return;
-
-            // Drag up (positive step_dy) scrolls down to newer lines.
-            scroll_by(e.step_dy);
-        },
-        OnDragEnd(_e: DragEvent): void {
-            is_drag_panning = false;
-        },
     };
 }

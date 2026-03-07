@@ -6,6 +6,7 @@
 
 import type { Canvas, Module, Rect, PointerEvent, Rgb } from '../types.js';
 import { get_color_by_name } from '../colors.js';
+import { draw_module_border, BORDER_STYLES } from '../module_borders.js';
 import type { ToolType } from '../../ascii_painter/types.js';
 
 export type PainterToolbarOptions = {
@@ -67,20 +68,14 @@ export function make_painter_toolbar_module(opts: PainterToolbarOptions): Module
       
       // Fill background
       c.fill_rect(rect, { char: ' ', rgb: bg_color, style: 'regular' });
-      
-      // Draw border
-      for (let x = rect.x0; x <= rect.x1; x++) {
-        c.set(x, rect.y0, { char: '─', rgb: border_color, style: 'regular', weight_index: 3 });
-        c.set(x, rect.y1, { char: '─', rgb: border_color, style: 'regular', weight_index: 3 });
-      }
-      for (let y = rect.y0; y <= rect.y1; y++) {
-        c.set(rect.x0, y, { char: '│', rgb: border_color, style: 'regular', weight_index: 3 });
-        c.set(rect.x1, y, { char: '│', rgb: border_color, style: 'regular', weight_index: 3 });
-      }
-      c.set(rect.x0, rect.y0, { char: '┌', rgb: border_color, style: 'regular', weight_index: 3 });
-      c.set(rect.x1, rect.y0, { char: '┐', rgb: border_color, style: 'regular', weight_index: 3 });
-      c.set(rect.x0, rect.y1, { char: '└', rgb: border_color, style: 'regular', weight_index: 3 });
-      c.set(rect.x1, rect.y1, { char: '┘', rgb: border_color, style: 'regular', weight_index: 3 });
+
+      draw_module_border(c, {
+        rect,
+        style: BORDER_STYLES.double,
+        border_rgb: border_color,
+        weight_index: 3,
+        header: { text: 'TOOLS' },
+      });
       
       // Draw buttons
       for (const btn of buttons) {

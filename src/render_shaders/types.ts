@@ -1,0 +1,117 @@
+import type { Rgb, StyleName } from "../mono_ui/types.js";
+import type { TagInstance } from "../tag_system/registry.js";
+
+export type RenderKind = 'tile' | 'item' | 'pile' | 'actor' | 'npc' | 'particle' | 'ui';
+
+export type RenderWhere =
+    | 'place_tile'
+    | 'pile_ui'
+    | 'container_ui'
+    | 'character_slot'
+    | 'drag_ghost'
+    | 'tooltip'
+    | 'debug';
+
+export type RenderSpace = 'screen' | 'place' | 'ui';
+
+export type RenderPayloadBase = {
+    kind: RenderKind;
+    id?: string;
+    name?: string;
+    tags?: TagInstance[];
+    // Optional base style inputs supplied by the compositor/module.
+    base_fg?: Rgb;
+};
+
+export type ItemPayload = RenderPayloadBase & {
+    kind: 'item';
+    def_id?: string;
+    qty?: number;
+    display_char?: string;
+};
+
+export type PilePayload = RenderPayloadBase & {
+    kind: 'pile';
+    pile_count: number;
+    single_qty?: number;
+    def_id?: string;
+    qty?: number;
+    display_char?: string;
+};
+
+export type TilePayload = RenderPayloadBase & {
+    kind: 'tile';
+    tile_kind?: 'ground_items' | 'simple';
+    pile_count?: number;
+    single_qty?: number;
+    // For simple tiles (walls/doors/ui grid lines).
+    char?: string;
+    weight_index?: number;
+    style?: StyleName;
+};
+
+export type UiPayload = RenderPayloadBase & {
+    kind: 'ui';
+    ui_kind: 'slot' | 'widget';
+};
+
+export type UiSlotPayload = UiPayload & {
+    ui_kind: 'slot';
+    slot_type?: 'tool' | 'armor' | 'garb' | 'neutral';
+    is_placeholder?: boolean;
+};
+
+export type UiWidgetPayload = UiPayload & {
+    ui_kind: 'widget';
+    widget: 'close' | 'move' | 'save_position' | 'resize';
+    widget_state?: 'idle' | 'active' | 'disabled';
+};
+
+export type RenderPayload = ItemPayload | PilePayload | TilePayload | UiPayload | RenderPayloadBase;
+
+// NOTE: RenderPayloadBase.kind is a wide union, so it cannot act as a discriminator.
+// Use this discriminated form when adding non-item kinds.
+export type DiscriminatedRenderPayload =
+    | ItemPayload
+    | PilePayload
+    | TilePayload
+    | UiSlotPayload
+    | UiWidgetPayload
+    | (RenderPayloadBase & { kind: Exclude<RenderKind, 'item' | 'pile' | 'tile'> });
+
+export type RenderUiState = {
+    hovered?: boolean;
+    highlighted?: boolean;
+    selected?: boolean;
+    targeted?: boolean;
+    dragging?: boolean;
+    default_container?: boolean;
+    tool_mismatch?: boolean;
+};
+
+export type RenderContext = {
+    where: RenderWhere;
+    space?: RenderSpace;
+    // Grid-space coordinates in the chosen space.
+    x?: number;
+    y?: number;
+    time_ms?: number;
+    ui?: RenderUiState;
+};
+
+export type RenderBlendMode = 'normal' | 'add' | 'multiply';
+
+export type RenderLayer = {
+    char: string;
+    fg?: Rgb;
+    bg?: Rgb;
+    z: number;
+    blend?: RenderBlendMode;
+    style?: StyleName;
+    weight_index?: number;
+    flags?: string[];
+};
+
+export type RenderOutput = {
+    layers: RenderLayer[];
+};

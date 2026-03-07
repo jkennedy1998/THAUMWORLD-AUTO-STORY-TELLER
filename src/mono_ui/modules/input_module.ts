@@ -1,6 +1,6 @@
 import type { Canvas, Module, Rect, Rgb, PointerEvent } from "../types.js";
 import { rect_width, rect_height } from "../types.js";
-import { draw_border } from "../padding.js";
+import { draw_module_border, BORDER_STYLES } from "../module_borders.js";
 import { get_color_by_name } from "../colors.js";
 
 export type InputModuleOptions = {
@@ -187,7 +187,7 @@ export function make_input_module(opts: InputModuleOptions): Module {
             }
 
             // border
-            draw_border(c, r, border_rgb);
+            draw_module_border(c, { rect: r, style: BORDER_STYLES.double, border_rgb, weight_index: w_base });
 
             const w = rect_width(inner);
             const h = rect_height(inner);

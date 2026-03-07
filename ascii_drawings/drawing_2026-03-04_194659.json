@@ -1199,22 +1199,22 @@
             "weight_index": 0
           },
           {
-            "char": " ",
+            "char": "█",
             "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
+              "r": 254,
+              "g": 255,
+              "b": 229
             },
-            "weight_index": 0
+            "weight_index": 4
           },
           {
-            "char": " ",
+            "char": "█",
             "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
+              "r": 254,
+              "g": 255,
+              "b": 229
             },
-            "weight_index": 0
+            "weight_index": 4
           },
           {
             "char": " ",
@@ -1903,22 +1903,22 @@
             "weight_index": 0
           },
           {
-            "char": " ",
+            "char": "█",
             "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
+              "r": 254,
+              "g": 255,
+              "b": 229
             },
-            "weight_index": 0
+            "weight_index": 4
           },
           {
-            "char": " ",
+            "char": "█",
             "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
+              "r": 254,
+              "g": 255,
+              "b": 229
             },
-            "weight_index": 0
+            "weight_index": 4
           },
           {
             "char": " ",
@@ -2607,22 +2607,22 @@
             "weight_index": 0
           },
           {
-            "char": " ",
+            "char": "█",
             "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
+              "r": 254,
+              "g": 255,
+              "b": 229
             },
-            "weight_index": 0
+            "weight_index": 4
           },
           {
-            "char": " ",
+            "char": "█",
             "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
+              "r": 254,
+              "g": 255,
+              "b": 229
             },
-            "weight_index": 0
+            "weight_index": 4
           },
           {
             "char": " ",
@@ -3311,744 +3311,22 @@
             "weight_index": 0
           },
           {
-            "char": " ",
+            "char": "█",
             "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
+              "r": 254,
+              "g": 255,
+              "b": 229
             },
-            "weight_index": 0
+            "weight_index": 4
           },
           {
-            "char": " ",
+            "char": "█",
             "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
+              "r": 254,
+              "g": 255,
+              "b": 229
             },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          }
-        ],
-        [
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
-          },
-          {
-            "char": " ",
-            "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
-            },
-            "weight_index": 0
+            "weight_index": 4
           },
           {
             "char": " ",
@@ -4746,13 +4024,13 @@
             "weight_index": 0
           },
           {
-            "char": " ",
+            "char": "█",
             "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
+              "r": 254,
+              "g": 255,
+              "b": 229
             },
-            "weight_index": 0
+            "weight_index": 4
           },
           {
             "char": " ",
@@ -5459,6 +4737,728 @@
             "weight_index": 0
           },
           {
+            "char": "█",
+            "rgb": {
+              "r": 254,
+              "g": 255,
+              "b": 229
+            },
+            "weight_index": 4
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          }
+        ],
+        [
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": " ",
+            "rgb": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            },
+            "weight_index": 0
+          },
+          {
+            "char": "█",
+            "rgb": {
+              "r": 254,
+              "g": 255,
+              "b": 229
+            },
+            "weight_index": 4
+          },
+          {
+            "char": "█",
+            "rgb": {
+              "r": 254,
+              "g": 255,
+              "b": 229
+            },
+            "weight_index": 4
+          },
+          {
             "char": " ",
             "rgb": {
               "r": 0,
@@ -6163,13 +6163,13 @@
             "weight_index": 0
           },
           {
-            "char": " ",
+            "char": "█",
             "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
+              "r": 254,
+              "g": 255,
+              "b": 229
             },
-            "weight_index": 0
+            "weight_index": 4
           },
           {
             "char": " ",
@@ -6885,13 +6885,13 @@
             "weight_index": 0
           },
           {
-            "char": " ",
+            "char": "█",
             "rgb": {
-              "r": 0,
-              "g": 0,
-              "b": 0
+              "r": 254,
+              "g": 255,
+              "b": 229
             },
-            "weight_index": 0
+            "weight_index": 4
           },
           {
             "char": " ",

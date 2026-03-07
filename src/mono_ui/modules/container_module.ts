@@ -4,9 +4,22 @@ import type { ItemInstance } from "../../item_instances/store.js";
 import type { ItemDefinition } from "../../item_storage/store.js";
 import { debug_log, debug_warn } from "../../shared/debug.js";
 import type { ModuleGizmosConfig, GizmoState } from "../module_gizmos.js";
-import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area } from "../module_gizmos.js";
+import {
+  draw_module_gizmos,
+  handle_gizmo_click,
+  create_gizmo_state,
+  is_in_gizmo_area,
+  get_resize_edge,
+  handle_resize_drag,
+  handle_global_pointer_down_for_gizmos,
+} from "../module_gizmos.js";
+import { draw_module_border, BORDER_STYLES } from "../module_borders.js";
 import { get_container_grid } from "../../container_storage/grid_calculator.js";
 import { get_color_by_name } from "../colors.js";
+import { resolve_cell } from "../../render_shaders/resolver.js";
+import { make_item_payload, make_slot_payload } from "../../render_shaders/payload_builders.js";
+import { draw_render_queue, type RenderRequest } from "../../render_shaders/render_queue.js";
+import { ctx_container_ui } from "../../render_shaders/context_builders.js";
 
 // Simple slot item type
 export type SlotItem = {
@@ -44,6 +57,12 @@ export type ContainerModuleConfig = {
   // Bidirectional highlighting: items highlighted when hovering body slots
   get_highlighted_items?: () => Array<{ container_id: string; slot_index: number }>;
   on_drag_rejected?: () => void;
+
+  // Optional open container ids, used to show "open" state on container-items.
+  get_open_containers?: () => Set<string>;
+  // Map an item instance id to its canonical container_id used in open_containers.
+  // Example: actor.item.<actor_id>.<item_id> or place.item.<place_id>.<item_id>
+  get_open_container_id_for_item?: (item_instance_id: string) => string | null;
   border_rgb?: Rgb;
   bg_rgb?: Rgb;
   text_rgb?: Rgb;
@@ -104,15 +123,15 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
     return slot_index >= 0 && slot_index < max_slots ? slot_index : -1;
   }
 
-  function draw_slot(c: Canvas, slot_x: number, slot_y: number, slot_item: SlotItem | undefined, is_hovered: boolean, slot_index: number): void {
+  function enqueue_slot(rq: RenderRequest[], slot_x: number, slot_y: number, slot_item: SlotItem | undefined, is_hovered: boolean, slot_index: number): void {
     const text = opts.text_rgb ?? { r: 200, g: 200, b: 200 };
     
     // Check if this slot should be highlighted (bidirectional highlighting)
     const highlighted_items = opts.get_highlighted_items?.() ?? [];
     const container = opts.get_container();
-    const is_highlighted = container && highlighted_items.some(
+    const is_highlighted = Boolean(container && highlighted_items.some(
       h => h.container_id === container.id && h.slot_index === slot_index
-    );
+    ));
     
     // Debug: log what we have
     if (slot_item?.instance && is_hovered) {
@@ -122,60 +141,56 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
       }
     }
     
-    // Determine color based on state: highlighted (green) > hovered (yellow) > normal
-    let item_rgb: Rgb;
-    if (is_highlighted) {
-      item_rgb = { r: 0, g: 255, b: 100 };  // Bright green for highlighted
-    } else if (is_hovered) {
-      item_rgb = { r: 255, g: 255, b: 100 };  // Yellow for hover
-    } else {
-      item_rgb = text;  // Normal text color
-    }
-    
-    // Simple slot background - just the character position
+    const open_containers = opts.get_open_containers?.();
+    const open_id = slot_item?.instance?.id ? opts.get_open_container_id_for_item?.(slot_item.instance.id) : null;
+    const is_open = Boolean(open_containers && open_id && open_containers.has(open_id));
+
     if (slot_item?.instance && slot_item.definition) {
-      // Has item - determine display character
       const qty = slot_item.instance.qty;
-      let char: string;
-      
-      // Priority: display_char > first letter of name > "?"
-      if (slot_item.definition.display_char && slot_item.definition.display_char !== "·") {
-        char = slot_item.definition.display_char;
-      } else if (slot_item.definition.name) {
-        char = slot_item.definition.name.charAt(0).toLowerCase();
-      } else {
-        char = "?";
-      }
-      
-      // If quantity > 1, show number instead
-      const display_char = qty > 1 ? (qty > 9 ? "+" : String(qty)) : char;
-      
-      c.set(slot_x, slot_y, { 
-        char: display_char, 
-        rgb: item_rgb, 
-        style: "regular", 
-        weight_index: is_hovered || is_highlighted ? 6 : 4 
+
+      rq.push({
+        pass: 'item',
+        x: slot_x,
+        y: slot_y,
+        order: 0,
+        key: slot_item.instance.id,
+        payload: make_item_payload(slot_item.instance, slot_item.definition) as any,
+        ctx: ctx_container_ui({ hovered: is_hovered, highlighted: is_highlighted, selected: is_open }),
       });
       
       if (is_hovered) {
         const item_name = slot_item.definition.name || "unnamed";
-        debug_log(`[ContainerModule] Hovered slot: ${item_name} x${qty} (char: ${char})`);
+        debug_log(`[ContainerModule] Hovered slot: ${item_name} x${qty}`);
       }
     } else if (slot_item?.instance && !slot_item.definition) {
       // Has instance but no definition - show "?"
-      c.set(slot_x, slot_y, { 
-        char: "?", 
-        rgb: is_highlighted ? { r: 0, g: 255, b: 100 } : { r: 255, g: 100, b: 100 }, 
-        style: "regular", 
-        weight_index: 4 
+      rq.push({
+        pass: 'ui',
+        x: slot_x,
+        y: slot_y,
+        order: 0,
+        key: `missing_def:${slot_item.instance.id}`,
+        cell: {
+          char: '?',
+          rgb: is_highlighted ? { r: 0, g: 255, b: 100 } : { r: 255, g: 100, b: 100 },
+          style: 'regular',
+          weight_index: 4,
+          render_index: 0,
+        },
       });
     } else {
-      // Empty slot - use medium gray from indexed color system for better visibility
-      c.set(slot_x, slot_y, { 
-        char: ".", 
-        rgb: is_highlighted ? { r: 0, g: 200, b: 0 } : get_color_by_name("medium_gray").rgb, 
-        style: "regular", 
-        weight_index: 2 
+      rq.push({
+        pass: 'ui',
+        x: slot_x,
+        y: slot_y,
+        order: 0,
+        key: `slot:${container?.id ?? 'container'}:${slot_index}`,
+        payload: make_slot_payload({
+          id: `slot:${container?.id ?? 'container'}:${slot_index}`,
+          slot_type: 'neutral',
+          is_placeholder: false,
+        }) as any,
+        ctx: ctx_container_ui({ hovered: is_hovered, highlighted: false }),
       });
     }
   }
@@ -203,40 +218,26 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
         last_logged_container_id = container.id;
       }
       
-      const bg = opts.bg_rgb ?? { r: 20, g: 20, b: 20 };
-      const border = opts.border_rgb ?? { r: 100, g: 100, b: 100 };
-      
-      // Fill background
-      for (let x = rect.x0; x <= rect.x1; x++) {
-        for (let y = rect.y0; y <= rect.y1; y++) {
-          c.set(x, y, { char: " ", rgb: bg, style: "regular", weight_index: 3 });
-        }
-      }
-      
-      // Draw border (simple box)
-      for (let x = rect.x0; x <= rect.x1; x++) {
-        c.set(x, rect.y1, { char: "-", rgb: border, style: "regular", weight_index: 3 });
-        c.set(x, rect.y0, { char: "-", rgb: border, style: "regular", weight_index: 3 });
-      }
-      for (let y = rect.y0; y <= rect.y1; y++) {
-        c.set(rect.x0, y, { char: "|", rgb: border, style: "regular", weight_index: 3 });
-        c.set(rect.x1, y, { char: "|", rgb: border, style: "regular", weight_index: 3 });
-      }
-      
-      // Draw corners
-      c.set(rect.x0, rect.y1, { char: "+", rgb: border, style: "regular", weight_index: 3 });
-      c.set(rect.x1, rect.y1, { char: "+", rgb: border, style: "regular", weight_index: 3 });
-      c.set(rect.x0, rect.y0, { char: "+", rgb: border, style: "regular", weight_index: 3 });
-      c.set(rect.x1, rect.y0, { char: "+", rgb: border, style: "regular", weight_index: 3 });
-      
-      // Phase 8: Draw gizmos (close X, move #) with title
-      if (opts.gizmos) {
-        const title = container ? (container.id.split(".").pop() || "container").toUpperCase().slice(0, 10) : undefined;
-        draw_module_gizmos(c, rect, opts.gizmos, gizmo_state, title);
-      }
+      const title = container ? (container.id.split(".").pop() || "container").toUpperCase().slice(0, 10) : "CONTAINER";
+
+      draw_module_border(c, {
+        rect,
+        style: BORDER_STYLES.double,
+        border_rgb: opts.border_rgb ?? { r: 100, g: 100, b: 100 },
+        bg_rgb: opts.bg_rgb ?? { r: 20, g: 20, b: 20 },
+        weight_index: 3,
+        header: {
+          text: title,
+          text_rgb: opts.text_rgb ?? { r: 200, g: 200, b: 200 },
+          // Reserve header space for gizmos without adding an interior divider.
+          reserve_left_cols: 2 + ((opts.gizmos?.enabled?.length ?? 0) * 2),
+        },
+      });
       
       // Draw grid of slots
       if (container) {
+        const rq: RenderRequest[] = [];
+        const now_ms = Date.now();
         const { cols, rows } = get_container_grid(container);
         const max_slots = container.capacity?.max_slots ?? (cols * rows);
         
@@ -272,10 +273,13 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
               const slot_item = slots.find(s => s.slot_index === slot_index);
               const is_hovered = slot_index === hover_slot_index;
               
-              draw_slot(c, slot_x, slot_y, slot_item, is_hovered, slot_index);
+              enqueue_slot(rq, slot_x, slot_y, slot_item, is_hovered, slot_index);
             }
           }
         }
+
+        // Flush slot glyphs after layout pass.
+        draw_render_queue(c, rq, { now_ms, pass_order: ['ui', 'item'] });
       } else {
         // No container - show message
         const msg = "NO CONTAINER";
@@ -287,6 +291,11 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
           c.set(msg_x + i, msg_y, { char, rgb: { r: 150, g: 0, b: 0 }, style: "regular", weight_index: 5 });
         }
       }
+
+      // Draw gizmos LAST so they appear on top (including resize borders)
+      if (opts.gizmos) {
+        draw_module_gizmos(c, rect, opts.gizmos, gizmo_state);
+      }
       
     },
 
@@ -295,8 +304,19 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
       // This handler can be used for other global shortcuts if needed
     },
 
+    OnGlobalPointerDown(e: PointerEvent): void {
+      if (opts.gizmos) {
+        handle_global_pointer_down_for_gizmos(e, rect, opts.gizmos, gizmo_state);
+      }
+    },
+
     OnPointerMove(e: PointerEvent): void {
       if (!opts.get_is_visible()) return;
+
+      // Resize edge hover feedback.
+      if (gizmo_state.is_resize_mode && !gizmo_state.is_dragging_resize) {
+        gizmo_state.resize_edge = get_resize_edge(e.x, e.y, rect);
+      }
 
       const new_hover = get_slot_at_position(e.x, e.y);
       if (new_hover !== hover_slot_index) {
@@ -336,6 +356,19 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
           return;  // Don't process slot clicks if gizmo was clicked
         }
       }
+
+      // Resize mode: clicking on a border edge starts resize drag.
+      if (gizmo_state.is_resize_mode) {
+        const edge = get_resize_edge(e.x, e.y, rect);
+        if (edge) {
+          gizmo_state.resize_edge = edge;
+          gizmo_state.is_dragging_resize = true;
+          gizmo_state.move_start_x = e.x;
+          gizmo_state.move_start_y = e.y;
+          gizmo_state.original_rect = { ...rect };
+          return;
+        }
+      }
       
       const slot_index = get_slot_at_position(e.x, e.y);
       if (slot_index >= 0) {
@@ -366,6 +399,11 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
       
       if (!opts.get_is_visible()) {
         debug_log(`[ContainerModule] Drag rejected - container not visible`);
+        return;
+      }
+
+      // Resize drag is handled in OnDragMove; don't start item drags.
+      if (gizmo_state.is_resize_mode && gizmo_state.is_dragging_resize) {
         return;
       }
 
@@ -414,6 +452,16 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
     OnDragEnd(e: DragEvent): void {
       debug_log(`[ContainerModule] OnDragEnd called at (${e.x}, ${e.y})`);
       debug_log(`[ContainerModule] Container rect: (${rect.x0},${rect.y0}) to (${rect.x1},${rect.y1})`);
+
+      // Finish resize drag (don't treat as item drop).
+      if (gizmo_state.is_resize_mode && gizmo_state.is_dragging_resize) {
+        gizmo_state.is_dragging_resize = false;
+        gizmo_state.resize_edge = null;
+        if (opts.gizmos?.on_move_end) {
+          opts.gizmos.on_move_end(rect);
+        }
+        return;
+      }
       
       // Phase 8: Handle move mode drag end
       if (gizmo_state.is_move_mode && gizmo_state.original_rect) {
@@ -519,8 +567,48 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
         }
         return;
       }
+
+      // Handle resize dragging
+      if (gizmo_state.is_resize_mode && gizmo_state.is_dragging_resize && gizmo_state.original_rect) {
+        const container = opts.get_container();
+        const { cols, rows } = container ? get_container_grid(container) : { cols: 5, rows: 2 };
+        const min_width = Math.max(14, (cols * 2) + 2);
+        const min_height = Math.max(10, rows + 6);
+        const max_width = 120;
+        const max_height = 60;
+
+        const new_rect = handle_resize_drag(
+          e.x,
+          e.y,
+          gizmo_state,
+          gizmo_state.original_rect,
+          min_width,
+          min_height,
+          max_width,
+          max_height,
+          (newRect) => {
+            rect = newRect;
+            if (opts.gizmos?.on_resize) opts.gizmos.on_resize(rect);
+            else if (opts.gizmos?.on_move) opts.gizmos.on_move(rect);
+          }
+        );
+
+        if (new_rect) {
+          rect = new_rect;
+        }
+        return;
+      }
       
       debug_log(`[ContainerModule] OnDragMove at (${e.x}, ${e.y})`);
+    },
+
+    OnPointerUp(): void {
+      if (gizmo_state.is_dragging_resize) {
+        gizmo_state.is_dragging_resize = false;
+        gizmo_state.resize_edge = null;
+        if (opts.gizmos?.on_resize_end) opts.gizmos.on_resize_end(rect);
+        else if (opts.gizmos?.on_move_end) opts.gizmos.on_move_end(rect);
+      }
     },
   };
 }

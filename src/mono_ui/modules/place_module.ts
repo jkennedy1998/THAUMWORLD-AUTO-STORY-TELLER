@@ -1,10 +1,10 @@
 import type { Canvas, Module, Rect, Rgb, PointerEvent, WheelEvent, DragEvent } from "../types.js";
 import { rect_width, rect_height } from "../types.js";
-import { draw_border } from "../padding.js";
+import { draw_module_border, BORDER_STYLES } from "../module_borders.js";
 import { get_color_by_name } from "../colors.js";
 import type { Place, PlaceNPC, PlaceActor, PlaceConnection, TilePosition } from "../../types/place.js";
 import { get_entity_path, start_entity_movement, register_place, unregister_place } from "../../shared/movement_engine.js";
-import { type TagChangeEvent, parseEntityRef } from "../../shared/event_emitter.js";
+import { type TagChangeEvent } from "../../shared/event_emitter.js";
 import { initWebSocketClient, type WebSocketClient } from "../websocket_client.js";
 import type { TagInstance } from "../../tag_system/registry.js";
 import {
@@ -20,6 +20,9 @@ import { get_sense_profile } from "../../action_system/sense_broadcast.js";
 import { get_facing } from "../../npc_ai/facing_system.js";
 import { update_actor_position_in_place, set_npc_tracked_position, get_npc_visual_status } from "./movement_command_handler.js";
 import { play_sfx } from "../sfx/sfx_player.js";
+import { make_entity_payload, make_ground_items_tile_payload, make_item_like_payload, make_pile_payload, make_simple_tile_payload } from "../../render_shaders/payload_builders.js";
+import { draw_render_queue, type RenderRequest } from "../../render_shaders/render_queue.js";
+import { ctx_place_tile } from "../../render_shaders/context_builders.js";
 
 function footstep_cooldown_ms(speed_tpm: number): number {
   const tpm = Number.isFinite(speed_tpm) && speed_tpm > 0 ? speed_tpm : 300;
@@ -78,39 +81,7 @@ function populateTagCacheFromPlace(place: Place): void {
   }
 }
 
-/**
- * Get entity color based on tags
- * Checks for FIRE! tag and applies appropriate color
- * - Vivid red when FIRE! MAG > 3 (intense fire)
- * - Pumpkin orange when FIRE! MAG <= 3 (moderate fire)
- * - Default color when no FIRE! tag
- * 
- * Note: Using pumpkin instead of yellow since NPCs are already pale_yellow by default
- */
-function get_entity_color_with_tags(entityRef: string, defaultRgb: Rgb): Rgb {
-  const parsed = parseEntityRef(entityRef);
-
-  // Read tags from cache
-  const tags = entityTagCache.get(entityRef);
-
-  if (!tags || !Array.isArray(tags)) {
-    return defaultRgb;
-  }
-
-  // Find FIRE! tag
-  const fireTag = tags.find((tag: TagInstance) => tag.name === 'FIRE!');
-  if (!fireTag) {
-    return defaultRgb;
-  }
-
-  // Apply color based on MAG
-  // Using vivid_red and pumpkin for clear distinction from default NPC pale_yellow
-  if (fireTag.mag > 3) {
-    return get_color_by_name('vivid_red').rgb; // Bright red for intense fire (MAG > 3)
-  } else {
-    return get_color_by_name('pumpkin').rgb; // Orange for moderate fire (MAG <= 3)
-  }
-}
+// NOTE: Tag-driven color is handled by the shader resolver.
 
 export type PlaceModuleConfig = {
   id: string;
@@ -144,8 +115,6 @@ export type PlaceModuleConfig = {
   // Styling
   border_rgb?: Rgb;
   bg_rgb?: Rgb;
-  floor_char?: string;
-  floor_rgb?: Rgb;
   npc_rgb?: Rgb;
   actor_rgb?: Rgb;
   wall_rgb?: Rgb;
@@ -167,6 +136,13 @@ export type PlaceModuleConfig = {
   on_drag_start_ground_item?: (tile_x: number, tile_y: number) => void;
   // Hover signal for compatible-slot highlighting (item_id is PlaceItem.item_ref)
   on_hover_ground_item?: (tile_x: number, tile_y: number, item_id: string | null) => void;
+
+  // Optional ground item metadata (instance ids, tags, display_char). If provided, prefer this over place.contents.items_on_ground.
+  get_ground_item_ids_at?: (tile_x: number, tile_y: number) => string[];
+  get_ground_item_meta?: (item_instance_id: string) => any | null;
+
+  // Optional open container ids, used to show "open" state on ground container-items.
+  get_open_containers?: () => Set<string>;
 
   // Drag and drop callbacks
   on_drop?: (tile_x: number, tile_y: number) => Promise<boolean>;  // Drop item onto ground tile (adjacent)
@@ -236,8 +212,6 @@ const PADDING_TILES = 25;
 export function make_place_module(config: PlaceModuleConfig): Module {
   const border_rgb = config.border_rgb ?? get_color_by_name("light_gray").rgb;
   const bg_rgb = config.bg_rgb ?? get_color_by_name("off_black").rgb;
-  const floor_char = config.floor_char ?? ".";
-  const floor_rgb = config.floor_rgb ?? get_color_by_name("dark_gray").rgb;
   const npc_rgb = config.npc_rgb ?? get_color_by_name("pale_yellow").rgb;
   const actor_rgb = config.actor_rgb ?? get_color_by_name("vivid_green").rgb;
   const grid_rgb = config.grid_rgb ?? get_color_by_name("medium_gray").rgb;
@@ -538,33 +512,6 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     return entities[cycle.current_index] ?? null;
   }
 
-  // Get display character for a tile
-  function get_tile_char(
-    tile_x: number,
-    tile_y: number,
-    place: Place
-  ): { char: string; rgb: Rgb } {
-    // Check for entities (NPCs take precedence over actors if both on same tile)
-    const npc = place.contents.npcs_present.find(
-      (n) =>
-        n.tile_position.x === tile_x && n.tile_position.y === tile_y
-    );
-    if (npc) {
-      return { char: get_initial(npc.npc_ref.split(".").pop() ?? "N"), rgb: npc_rgb };
-    }
-
-    const actor = place.contents.actors_present.find(
-      (a) =>
-        a.tile_position.x === tile_x && a.tile_position.y === tile_y
-    );
-    if (actor) {
-      return { char: get_initial(actor.actor_ref.split(".").pop() ?? "A"), rgb: actor_rgb };
-    }
-
-    // Default floor
-    return { char: floor_char, rgb: floor_rgb };
-  }
-
   // Check if a tile is walkable (not occupied, in bounds)
   function is_tile_walkable(tile_x: number, tile_y: number, place: Place): boolean {
     // Check bounds
@@ -786,6 +733,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const inner = inner_rect();
       const { width, height } = inner_size();
 
+      // Module-local render queue: flushed once per frame in pass order.
+      const rq: RenderRequest[] = [];
+
       // Calculate visible tile range
       const visible_tile_start_x = view.offset_x;
       const visible_tile_start_y = view.offset_y;
@@ -795,8 +745,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       // Clear background
       canvas.fill_rect(inner, { char: " ", rgb: bg_rgb });
 
-      // CRITICAL FIX: Check entity movement FIRST (spawns particles)
-      // Must happen before drawing, so particles draw below entities
+      // Spawn/update particles based on movement (used by later particle render pass).
       check_entity_movement(place);
     // This places walls at x=-1, x=width, y=-1, y=height so entities at 0..width-1 render clearly inside
     
@@ -807,7 +756,15 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         const tile_y = view.offset_y + (y - inner.y0) * view.scale;
         // Draw on the left edge if the row has any place tiles visible
         if (tile_y >= -1 && tile_y <= place.tile_grid.height) {
-          canvas.set(left_screen_x, y, { char: "│", rgb: grid_rgb });
+          rq.push({
+            pass: 'tile',
+            x: left_screen_x,
+            y,
+            order: 0,
+            key: `wall:left:${y}`,
+            payload: make_simple_tile_payload({ id: `wall:left:${y}`, char: '│', base_fg: grid_rgb, weight_index: 3 }) as any,
+            ctx: ctx_place_tile(),
+          });
         }
       }
     }
@@ -819,7 +776,15 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         const tile_x = view.offset_x + (x - inner.x0) * view.scale;
         // Draw on the bottom edge if the column has any place tiles visible
         if (tile_x >= -1 && tile_x <= place.tile_grid.width) {
-          canvas.set(x, bottom_screen_y, { char: "─", rgb: grid_rgb });
+          rq.push({
+            pass: 'tile',
+            x,
+            y: bottom_screen_y,
+            order: 0,
+            key: `wall:bottom:${x}`,
+            payload: make_simple_tile_payload({ id: `wall:bottom:${x}`, char: '─', base_fg: grid_rgb, weight_index: 3 }) as any,
+            ctx: ctx_place_tile(),
+          });
         }
       }
     }
@@ -831,13 +796,20 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         const tile_y = view.offset_y + (y - inner.y0) * view.scale;
         // Draw on the right edge if the row has any place tiles visible
         if (tile_y >= -1 && tile_y <= place.tile_grid.height) {
-          canvas.set(right_screen_x, y, { char: "│", rgb: grid_rgb });
+          rq.push({
+            pass: 'tile',
+            x: right_screen_x,
+            y,
+            order: 0,
+            key: `wall:right:${y}`,
+            payload: make_simple_tile_payload({ id: `wall:right:${y}`, char: '│', base_fg: grid_rgb, weight_index: 3 }) as any,
+            ctx: ctx_place_tile(),
+          });
         }
       }
     }
 
-    // CRITICAL FIX STEP 2: After drawing floor and BEFORE particles/entities,
-    // we need to collect entity positions for the entity rendering pass
+    // Collect entity positions in the view for the character render pass.
     const entity_positions = new Map<string, {x: number, y: number, entity: PlaceNPC | PlaceActor}>();
     
     // Record all entity positions in the view
@@ -865,7 +837,15 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         const tile_x = view.offset_x + (x - inner.x0) * view.scale;
         // Draw on the top edge if the column has any place tiles visible
         if (tile_x >= -1 && tile_x <= place.tile_grid.width) {
-          canvas.set(x, top_screen_y, { char: "─", rgb: grid_rgb });
+          rq.push({
+            pass: 'tile',
+            x,
+            y: top_screen_y,
+            order: 0,
+            key: `wall:top:${x}`,
+            payload: make_simple_tile_payload({ id: `wall:top:${x}`, char: '─', base_fg: grid_rgb, weight_index: 3 }) as any,
+            ctx: ctx_place_tile(),
+          });
         }
       }
     }
@@ -918,17 +898,19 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       // Draw door if visible
       if (door_screen_x >= inner.x0 && door_screen_x <= inner.x1 &&
           door_screen_y >= inner.y0 && door_screen_y <= inner.y1) {
-        canvas.set(door_screen_x, door_screen_y, { 
-          char: door_char, 
-          rgb: door_rgb,
-          weight_index: 5 
+        rq.push({
+          pass: 'tile',
+          x: door_screen_x,
+          y: door_screen_y,
+          order: 10,
+          key: `door:${conn.target_place_id}:${conn.direction}`,
+          payload: make_simple_tile_payload({ id: `door:${conn.target_place_id}:${conn.direction}`, char: door_char, base_fg: door_rgb, weight_index: 5 }) as any,
+          ctx: ctx_place_tile(),
         });
       }
     }
 
-    // CRITICAL FIX STEP 3: Draw particles BEFORE entities
-    // This ensures particles don't overwrite entities (last write wins)
-    check_entity_movement(place);  // Spawns new particles based on movement
+    // (Movement already checked above; avoid double-spawning.)
     
     // Update debug visuals for all NPCs (vision cones, facing, etc.)
     // For LOS-occlusion debug, treat characters as blockers.
@@ -953,54 +935,51 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       
     }
     
-    // Draw particles (path visualization and effects)
+    // Update particles (path visualization and effects), but enqueue them to draw later.
     update_particles();
     for (const p of particles) {
       const screen_x = inner.x0 + Math.floor((p.x - view.offset_x) / view.scale);
       const screen_y = inner.y0 + Math.floor((p.y - view.offset_y) / view.scale);
-      
+
       if (screen_x >= inner.x0 && screen_x <= inner.x1 &&
           screen_y >= inner.y0 && screen_y <= inner.y1) {
-        // Draw particle with render_index (higher = drawn later = on top)
-        // Use particle's render_index if specified, otherwise default to 3 (below entities at 4)
         const weight = p.weight ?? 4;
-        const render_index = p.render_index ?? 3;  // Particles layer (below entities)
-        canvas.set(screen_x, screen_y, {
-          char: p.char,
-          rgb: p.rgb,
-          weight_index: weight,
-          render_index: render_index
+        const render_index = p.render_index ?? 3;
+        rq.push({
+          pass: 'particle',
+          x: screen_x,
+          y: screen_y,
+          order: 0,
+          key: `particle:${p.char}:${p.x},${p.y}`,
+          cell: {
+            char: p.char,
+            rgb: p.rgb,
+            weight_index: weight,
+            style: 'regular',
+            render_index,
+          },
         });
       }
     }
 
-    // CRITICAL FIX STEP 4: Draw entities LAST (after particles)
-    // This ensures entities are on top since last write wins
-    for (const [ref, pos] of entity_positions) {
+    // Enqueue characters; if multiple share a tile, the queue executor flashes between them.
+    for (const [, pos] of entity_positions) {
       const is_npc = "npc_ref" in pos.entity;
-      const entityRef = is_npc 
+      const entityRef = is_npc
         ? (pos.entity as PlaceNPC).npc_ref
         : (pos.entity as PlaceActor).actor_ref;
       const name = entityRef.split(".").pop() ?? (is_npc ? "N" : "A");
       const defaultRgb = is_npc ? npc_rgb : actor_rgb;
-      
-      // Get color based on tags (e.g., FIRE! tag changes color)
-      const rgb = get_entity_color_with_tags(entityRef, defaultRgb);
-      
-      // Debug: ALWAYS log entity rendering with cache state
-      const cachedTags = entityTagCache.get(entityRef);
-      const fireTag = cachedTags?.find(t => t.name === 'FIRE!');
-      if (fireTag && cachedTags) {
-        const colorName = rgb === get_color_by_name('vivid_red').rgb ? 'RED' : 
-                         rgb === get_color_by_name('pumpkin').rgb ? 'ORANGE' : 'UNKNOWN';
-        debug_log_place('RENDER:', entityRef, 'FIRE! mag:', fireTag.mag, '-> color:', colorName, 'cache:', cachedTags.map(t => `${t.name}:${t.mag}`).join(', '));
-      }
-      
-      canvas.set(pos.x, pos.y, {
-        char: get_initial(name),
-        rgb,
-        weight_index: 6,
-        render_index: 4,  // Not used in single-layer mode but kept for consistency
+
+      const cachedTags = entityTagCache.get(entityRef) ?? [];
+      rq.push({
+        pass: 'character',
+        x: pos.x,
+        y: pos.y,
+        order: is_npc ? 1 : 0,
+        key: entityRef,
+        payload: make_entity_payload(is_npc ? 'npc' : 'actor', entityRef, name, cachedTags, { base_fg: defaultRgb }) as any,
+        ctx: ctx_place_tile(),
       });
     }
 
@@ -1038,118 +1017,193 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
       if (entity_present) continue;
 
-      let char = '·';
-      if (items.length >= 2) {
-        // pile
-        char = items.length > 10 ? '#' : '*';
-      } else {
-        // single item glyph uses quantity
-        const single = items[0];
-        const qty = single ? single.quantity : 1;
-        char = qty > 10 ? '$' : qty > 1 ? '*' : '·';
+      const item_ids = config.get_ground_item_ids_at?.(tile_x, tile_y) ?? [];
+      const open_containers = config.get_open_containers?.();
+      const pile_container_id = `place.pile.${place.id}.${key}`;
+      const pile_open = Boolean(open_containers && open_containers.has(pile_container_id));
+      const tile_hovered = Boolean(hovered && hovered.x === tile_x && hovered.y === tile_y);
+
+      // Prefer rich metadata path when available and exactly one item exists.
+      if (item_ids.length === 1) {
+        const meta: any = config.get_ground_item_meta?.(item_ids[0]!) ?? null;
+        if (meta) {
+          const item_container_id = `place.item.${place.id}.${String(meta.id ?? item_ids[0])}`;
+          const item_open = Boolean(open_containers && open_containers.has(item_container_id));
+          const is_hovered = tile_hovered;
+
+          rq.push({
+            pass: 'item',
+            x: screen_x,
+            y: screen_y,
+            order: 0,
+            key: item_container_id,
+            payload: make_item_like_payload({
+              id: String(meta.id ?? item_ids[0]),
+              def_id: meta.def_id ? String(meta.def_id) : undefined,
+              name: meta.name ? String(meta.name) : undefined,
+              qty: typeof meta.qty === 'number' ? meta.qty : undefined,
+              display_char: typeof meta.display_char === 'string' ? meta.display_char : undefined,
+              tags: Array.isArray(meta.tags) ? meta.tags : [],
+            }) as any,
+            ctx: ctx_place_tile({ hovered: is_hovered, selected: item_open }),
+          });
+          continue;
+        }
       }
 
-      canvas.set(screen_x, screen_y, {
-        char,
-        rgb: get_color_by_name("vivid_yellow").rgb,
-        weight_index: 5,
-        render_index: 3,
+      // Prefer rich metadata path for piles too (styling via representative item).
+      if (item_ids.length >= 2) {
+        const meta0: any = config.get_ground_item_meta?.(item_ids[0]!) ?? null;
+        if (meta0) {
+          rq.push({
+            pass: 'item',
+            x: screen_x,
+            y: screen_y,
+            order: 0,
+            key: pile_container_id,
+            payload: make_pile_payload({
+              id: `pile:${place.id}:${key}`,
+              pile_count: item_ids.length,
+              rep: {
+                def_id: meta0.def_id ? String(meta0.def_id) : undefined,
+                name: meta0.name ? String(meta0.name) : undefined,
+                qty: typeof meta0.qty === 'number' ? meta0.qty : undefined,
+                display_char: typeof meta0.display_char === 'string' ? meta0.display_char : undefined,
+                tags: Array.isArray(meta0.tags) ? meta0.tags : [],
+              },
+            }) as any,
+            ctx: ctx_place_tile({ hovered: tile_hovered, selected: pile_open }),
+          });
+          continue;
+        }
+      }
+
+      const single = items.length === 1 ? items[0] : null;
+      rq.push({
+        pass: 'item',
+        x: screen_x,
+        y: screen_y,
+        order: 0,
+        key: pile_container_id,
+        payload: make_ground_items_tile_payload(
+          `ground:${place.id}:${key}`,
+          items.length,
+          single ? single.quantity : undefined,
+          undefined,
+        ) as any,
+        ctx: ctx_place_tile({ hovered: tile_hovered, selected: pile_open }),
       });
     }
 
-    // Draw target highlight (follows entity movement) - draw AFTER entities
-    // So highlights appear on top of entities
+    // System/UI overlays are queued as the final pass.
+
+    // Target highlight (follows entity movement).
     const target_pos = get_target_current_position(place);
     if (target_pos && targeted) {
       const screen_x = inner.x0 + Math.floor((target_pos.x - view.offset_x) / view.scale);
       const screen_y = inner.y0 + Math.floor((target_pos.y - view.offset_y) / view.scale);
-
-      if (screen_x >= inner.x0 && screen_x <= inner.x1 &&
-          screen_y >= inner.y0 && screen_y <= inner.y1) {
-        // Draw bright cyan highlight around target (clearly different from NPCs)
-        const cell = canvas.get(screen_x, screen_y);
-        if (cell) {
-          canvas.set(screen_x, screen_y, {
-            char: cell.char,
-            rgb: get_color_by_name("vivid_cyan").rgb, // Bright cyan - clearly visible
-            weight_index: 9, // Highest weight
-            style: "bold",
-          });
-        }
+      if (screen_x >= inner.x0 && screen_x <= inner.x1 && screen_y >= inner.y0 && screen_y <= inner.y1) {
+        rq.push({
+          pass: 'ui',
+          x: screen_x,
+          y: screen_y,
+          order: 0,
+          key: `ui:target:${targeted.ref}`,
+          op: 'tint_fg',
+          cell: { char: ' ', rgb: get_color_by_name('vivid_cyan').rgb, style: 'bold', weight_index: 7, render_index: 5 },
+        });
       }
     } else if (targeted) {
       // Target no longer valid (entity left place or doesn't exist)
       clear_target();
     }
 
-    // Draw hover highlight (on top of target if different)
+    // Hover highlight (on top of target if different).
     const target_current_pos = get_target_current_position(place);
     if (hovered && (!target_current_pos || hovered.x !== target_current_pos.x || hovered.y !== target_current_pos.y)) {
-      const tile_x = hovered.x;
-      const tile_y = hovered.y;
-      const screen_x =
-        inner.x0 + Math.floor((tile_x - view.offset_x) / view.scale);
-      const screen_y =
-        inner.y0 + Math.floor((tile_y - view.offset_y) / view.scale);
-
-      if (
-        screen_x >= inner.x0 &&
-        screen_x <= inner.x1 &&
-        screen_y >= inner.y0 &&
-        screen_y <= inner.y1
-      ) {
-        // Invert colors or use highlight
-        const cell = canvas.get(screen_x, screen_y);
-        if (cell) {
-          canvas.set(screen_x, screen_y, {
-            char: cell.char,
-            rgb: get_color_by_name("pale_orange").rgb,
-            weight_index: 6,
-          });
-        }
+      const screen_x = inner.x0 + Math.floor((hovered.x - view.offset_x) / view.scale);
+      const screen_y = inner.y0 + Math.floor((hovered.y - view.offset_y) / view.scale);
+      if (screen_x >= inner.x0 && screen_x <= inner.x1 && screen_y >= inner.y0 && screen_y <= inner.y1) {
+        rq.push({
+          pass: 'ui',
+          x: screen_x,
+          y: screen_y,
+          order: 1,
+          key: `ui:hover:${hovered.x},${hovered.y}`,
+          op: 'tint_fg',
+          cell: { char: ' ', rgb: get_color_by_name('pale_orange').rgb, style: 'regular', weight_index: 6, render_index: 5 },
+        });
       }
     }
 
-    // Draw info overlay at top
-    const info_text = `[${place.name}] ${place.tile_grid.width}x${place.tile_grid.height} | View: ${Math.floor(view.offset_x)},${Math.floor(view.offset_y)} | Scale: 1:${view.scale}`;
-    const info_y = inner.y1;
-    let info_x = inner.x0;
-    for (const char of info_text) {
-      if (info_x > inner.x1) break;
-      canvas.set(info_x, info_y, { char, rgb: get_color_by_name("off_white").rgb });
-      info_x++;
+    // Info overlay at top.
+    {
+      const info_text = `[${place.name}] ${place.tile_grid.width}x${place.tile_grid.height} | View: ${Math.floor(view.offset_x)},${Math.floor(view.offset_y)} | Scale: 1:${view.scale}`;
+      const info_y = inner.y1;
+      let info_x = inner.x0;
+      for (const ch of info_text) {
+        if (info_x > inner.x1) break;
+        rq.push({
+          pass: 'ui',
+          x: info_x,
+          y: info_y,
+          order: 2,
+          key: `ui:info:${info_x}`,
+          cell: { char: ch, rgb: get_color_by_name('off_white').rgb, style: 'regular', weight_index: 3, render_index: 6 },
+        });
+        info_x++;
+      }
     }
 
-    // Draw target info at bottom (persistent, follows entity)
+    // Target/hover info at bottom.
     if (targeted) {
-      // Extract display name from ref (e.g., "npc.grenda" -> "grenda")
       const display_name = targeted.ref.split('.').pop() || targeted.ref;
       const target_text = `Talking to: ${display_name}`;
-      let target_x = inner.x0;
-      const target_y = inner.y0;
-      for (const char of target_text) {
-        if (target_x > inner.x1) break;
-        canvas.set(target_x, target_y, { char, rgb: get_color_by_name("pale_yellow").rgb, style: "bold" });
-        target_x++;
+      const y = inner.y0;
+      let x = inner.x0;
+      for (const ch of target_text) {
+        if (x > inner.x1) break;
+        rq.push({
+          pass: 'ui',
+          x,
+          y,
+          order: 2,
+          key: `ui:talk:${x}`,
+          cell: { char: ch, rgb: get_color_by_name('pale_yellow').rgb, style: 'bold', weight_index: 4, render_index: 6 },
+        });
+        x++;
       }
     } else if (hovered && hovered.entity) {
-      // Draw hover info at bottom (only if no target)
-      const is_npc = "npc_ref" in hovered.entity;
-      const ref = is_npc
-        ? (hovered.entity as PlaceNPC).npc_ref
-        : (hovered.entity as PlaceActor).actor_ref;
-      const status = is_npc
-        ? (hovered.entity as PlaceNPC).status
-        : (hovered.entity as PlaceActor).status;
+      const is_npc = 'npc_ref' in hovered.entity;
+      const ref = is_npc ? (hovered.entity as PlaceNPC).npc_ref : (hovered.entity as PlaceActor).actor_ref;
+      const status = is_npc ? (hovered.entity as PlaceNPC).status : (hovered.entity as PlaceActor).status;
       const hover_text = `[${ref}] ${status}`;
-      let hover_x = inner.x0;
-      const hover_y = inner.y0;
-      for (const char of hover_text) {
-        if (hover_x > inner.x1) break;
-        canvas.set(hover_x, hover_y, { char, rgb: get_color_by_name("pale_yellow").rgb });
-        hover_x++;
+      const y = inner.y0;
+      let x = inner.x0;
+      for (const ch of hover_text) {
+        if (x > inner.x1) break;
+        rq.push({
+          pass: 'ui',
+          x,
+          y,
+          order: 2,
+          key: `ui:hoverinfo:${x}`,
+          cell: { char: ch, rgb: get_color_by_name('pale_yellow').rgb, style: 'regular', weight_index: 3, render_index: 6 },
+        });
+        x++;
       }
     }
+
+    // Flush the whole queue in pass order.
+    draw_render_queue(
+      canvas,
+      rq,
+      {
+        now_ms: Date.now(),
+        pass_order: ['tile', 'item', 'character', 'particle', 'ui'],
+        character_flash_period_ms: 240,
+      },
+    );
   }
 
   // Subscribe to tag change events via WebSocket (replaces broken EventEmitter)
@@ -1223,7 +1277,12 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const place = config.get_place();
 
       // Draw border
-      draw_border(canvas, config.rect, border_rgb);
+      draw_module_border(canvas, {
+        rect: config.rect,
+        style: BORDER_STYLES.double,
+        border_rgb,
+        weight_index: 3,
+      });
 
       if (!place) {
         // No place loaded - show placeholder
@@ -1286,17 +1345,20 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         const entity = get_entity_at(tile.x, tile.y, place);
         hovered = { x: tile.x, y: tile.y, entity: entity ?? undefined };
 
-        // Ground hover callback for highlighting (single item only)
-        if (config.on_hover_ground_item) {
-          const items_on_ground = place.contents.items_on_ground.filter(
-            item => item.tile_position.x === tile.x && item.tile_position.y === tile.y
-          );
-          if (items_on_ground.length === 1) {
-            config.on_hover_ground_item(tile.x, tile.y, items_on_ground[0]!.item_ref);
-          } else {
-            config.on_hover_ground_item(tile.x, tile.y, null);
-          }
+      // Ground hover callback for highlighting (single item only)
+      if (config.on_hover_ground_item) {
+        const ids = config.get_ground_item_ids_at
+          ? config.get_ground_item_ids_at(tile.x, tile.y)
+          : place.contents.items_on_ground
+              .filter(item => item.tile_position.x === tile.x && item.tile_position.y === tile.y)
+              .map(item => item.item_ref);
+
+        if (ids.length === 1) {
+          config.on_hover_ground_item(tile.x, tile.y, ids[0]!);
+        } else {
+          config.on_hover_ground_item(tile.x, tile.y, null);
         }
+      }
       } else {
         hovered = null;
         config.on_hover_ground_item?.(-1, -1, null);
@@ -1326,13 +1388,15 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         if (distance > 1.5) return;
       }
 
-      const items_on_ground = place.contents.items_on_ground.filter(
-        item => item.tile_position.x === tile.x && item.tile_position.y === tile.y
-      );
+      const items_on_ground = config.get_ground_item_ids_at
+        ? config.get_ground_item_ids_at(tile.x, tile.y)
+        : place.contents.items_on_ground.filter(
+            item => item.tile_position.x === tile.x && item.tile_position.y === tile.y
+          );
 
       // Allow direct dragging when at least one item exists.
       // Single item = drag that item; 2+ items = drag the whole pile (sweep).
-      if (items_on_ground.length < 1) return;
+      if ((items_on_ground as any[]).length < 1) return;
 
       config.on_drag_start_ground_item?.(tile.x, tile.y);
     },
@@ -1482,11 +1546,13 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
       // PRIORITY 1: Handle double-click on ground items (takes precedence over doors)
       if (e.click_count === 2 && config.on_double_click_ground) {
-        const items_on_ground = place.contents.items_on_ground.filter(
-          item => item.tile_position.x === tile.x && item.tile_position.y === tile.y
-        );
+        const items_on_ground = config.get_ground_item_ids_at
+          ? config.get_ground_item_ids_at(tile.x, tile.y)
+          : place.contents.items_on_ground.filter(
+              item => item.tile_position.x === tile.x && item.tile_position.y === tile.y
+            );
         
-        if (items_on_ground.length > 0) {
+        if ((items_on_ground as any[]).length > 0) {
           // Check distance (touch range)
           const actor_pos = config.get_actor_position?.();
           if (actor_pos) {
@@ -1495,7 +1561,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
               Math.pow(actor_pos.y - tile.y, 2)
             );
             if (distance <= 1.5) {
-              debug_log_place(`Double-click on ground items at (${tile.x},${tile.y}), count: ${items_on_ground.length}`);
+              debug_log_place(`Double-click on ground items at (${tile.x},${tile.y}), count: ${(items_on_ground as any[]).length}`);
               config.on_double_click_ground(tile.x, tile.y);
             } else {
               debug_log_place(`Double-click on ground items too far: (${tile.x},${tile.y}), distance: ${distance.toFixed(1)})`);

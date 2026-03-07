@@ -236,6 +236,9 @@ export class CanvasRuntime {
             meta: ev.metaKey,
         };
 
+        // Capture keyboard state for gesture routing.
+        e.space = this.space_down;
+
         if (typeof ev?.pointerType === 'string') e.pointer_type = ev.pointerType;
         if (typeof ev?.pressure === 'number') e.pressure = ev.pressure;
 
@@ -274,6 +277,9 @@ export class CanvasRuntime {
             step_dy: y - prev.y,
             buttons,
         };
+
+        // Capture keyboard state for gesture routing.
+        e.space = this.space_down;
 
         // caller may attach pointer metadata later
 
@@ -804,6 +810,15 @@ export class CanvasRuntime {
 
             const pe: any = this.make_pointer_event('down', t.x, t.y, { ...ev, buttons: nb.buttons, button: nb.button }, this.engine_canvas.get(t.x, t.y));
             attach_pointer_meta(pe, ev);
+
+            // Global pointer-down lane: lets modules cancel modes (e.g. resize) on outside clicks.
+            for (const m of this.modules) {
+                try {
+                    m?.OnGlobalPointerDown?.(pe as PointerEvent);
+                } catch {
+                    // ignore
+                }
+            }
             top?.OnPointerDown?.(pe);
         };
 

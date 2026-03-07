@@ -8,8 +8,9 @@
 
 import type { Canvas, Module, Rect, PointerEvent, DragEvent, WheelEvent } from '../types.js';
 import { get_color_by_name } from '../colors.js';
+import { draw_module_border, BORDER_STYLES } from '../module_borders.js';
 import type { ModuleGizmosConfig, GizmoState } from '../module_gizmos.js';
-import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area, handle_move_drag, get_resize_edge, handle_resize_drag } from '../module_gizmos.js';
+import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area, handle_move_drag, get_resize_edge, handle_resize_drag, handle_global_pointer_down_for_gizmos } from '../module_gizmos.js';
 
 export type CharacterSelectorOptions = {
   id: string;
@@ -192,20 +193,17 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
       
       // Fill background
       c.fill_rect(rect, { char: ' ', rgb: bg_color, style: 'regular' });
-      
-      // Draw border
-      for (let x = rect.x0; x <= rect.x1; x++) {
-        c.set(x, rect.y1, { char: '─', rgb: border_color, style: 'regular', weight_index: 3 });
-        c.set(x, rect.y0, { char: '─', rgb: border_color, style: 'regular', weight_index: 3 });
-      }
-      for (let y = rect.y0; y <= rect.y1; y++) {
-        c.set(rect.x0, y, { char: '│', rgb: border_color, style: 'regular', weight_index: 3 });
-        c.set(rect.x1, y, { char: '│', rgb: border_color, style: 'regular', weight_index: 3 });
-      }
-      c.set(rect.x0, rect.y1, { char: '┌', rgb: border_color, style: 'regular', weight_index: 3 });
-      c.set(rect.x1, rect.y1, { char: '┐', rgb: border_color, style: 'regular', weight_index: 3 });
-      c.set(rect.x0, rect.y0, { char: '└', rgb: border_color, style: 'regular', weight_index: 3 });
-      c.set(rect.x1, rect.y0, { char: '┘', rgb: border_color, style: 'regular', weight_index: 3 });
+
+      draw_module_border(c, {
+        rect,
+        style: BORDER_STYLES.double,
+        border_rgb: border_color,
+        weight_index: 3,
+        header: {
+          text: 'CHARS',
+          reserve_left_cols: 2 + ((gizmo_config.enabled?.length ?? 0) * 2),
+        },
+      });
       
       // Draw characters in a grid (responsive to width)
       const visible_rows = get_visible_rows();
@@ -261,6 +259,10 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
           });
         }
       }
+    },
+
+    OnGlobalPointerDown(e: PointerEvent): void {
+      handle_global_pointer_down_for_gizmos(e, rect, gizmo_config, gizmo_state);
     },
 
     OnPointerDown(e: PointerEvent): void {

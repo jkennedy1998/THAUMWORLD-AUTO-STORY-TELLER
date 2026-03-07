@@ -20,6 +20,8 @@
     "typecheck:core": "tsc --noEmit",
     "eval:conversation": "tsx scripts/evals/conversation_lifecycle.ts",
     "eval:action_system": "tsx src/tests/action_system_integration.test.ts",
+    "eval:shader_golden": "tsx scripts/evals/shader_golden.ts",
+    "eval:render_queue_contract": "tsx scripts/evals/render_queue_contract.ts",
     "eval": "npm run eval:conversation && npm run eval:action_system",
     "start": "node dist/interface_program/main.js",
     "format": "prettier . --write",
