@@ -8,6 +8,7 @@
 import type { BodySlots } from "./body_slots.js";
 import type { Container } from "./container.js";
 import type { InlineItem } from "./inline_item.js";
+import type { TagInstance } from "../tag_system/registry.js";
 
 /**
  * A place represents a bounded area within a region where interactions are local.
@@ -24,6 +25,10 @@ export type Place = {
   
   // Tile grid dimensions and entry point
   tile_grid: TileGrid;
+
+  // Tile data (Phase 0.7+): server-owned tiles rendered by Place.
+  // y=0 is the bottom row; cells are indexed as cells[y][x].
+  tiles?: PlaceTiles;
   
   // Connections to other places (graph structure)
   connections: PlaceConnection[];
@@ -48,6 +53,44 @@ export type Place = {
   is_default: boolean;           // Is this the region's default entry place?
   max_occupancy?: number;        // Soft limit for realism
   description: PlaceDescription;
+};
+
+export type PlaceTileKind = 'floor' | 'wall' | 'door';
+
+export type PlaceDoorMeta = {
+  target_place_id: string;
+  direction: string;
+};
+
+export type PlaceTile = {
+  kind: PlaceTileKind;
+  // True means blocked for movement/pathing.
+  // If omitted, derived from kind (wall=true, others=false).
+  collidable?: boolean;
+  door?: PlaceDoorMeta;
+
+  // Tags on tiles (same tag system as items/characters).
+  tags?: TagInstance[];
+
+  // Inline container-like storage for tile contents (e.g., harvestables, planters).
+  // Items may carry grid_x/grid_y fields (same as container-items) for organization.
+  contents?: InlineItem[];
+  container_capacity?: {
+    max_slots?: number;
+    max_weight?: number;
+  };
+
+  // Time-skip support (bulk tick processing).
+  last_tick_processed?: number;
+
+  // Multitile grouping (architecture; not implemented yet).
+  multitile_id?: string;
+};
+
+export type PlaceTiles = {
+  width: number;
+  height: number;
+  cells: PlaceTile[][];
 };
 
 /**

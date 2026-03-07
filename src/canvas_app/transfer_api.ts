@@ -25,6 +25,57 @@ export function parse_place_item_container_id(src: string): { place_id: string; 
     return { place_id, container_item_id };
 }
 
+export function parse_place_tile_container_id(src: string): { place_id: string; x: number; y: number } | null {
+    // place.tile.<place_id>.<x>_<y>
+    const parts = String(src || '').split('.');
+    if (parts[0] !== 'place' || parts[1] !== 'tile') return null;
+    const place_id = parts[2];
+    const pos_key = parts[3];
+    if (!place_id || !pos_key) return null;
+    const [xs, ys] = pos_key.split('_');
+    const x = Number(xs);
+    const y = Number(ys);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    return { place_id, x: Math.floor(x), y: Math.floor(y) };
+}
+
+export type WithdrawFromTileContainerArgs = {
+    base_url: string;
+    actor_id: string;
+    src_container_id: string;
+    item_id: string;
+    to_container: string;
+    target_grid_x?: number;
+    target_grid_y?: number;
+    action_cost?: number;
+};
+
+export async function api_withdraw_from_tile_container(
+    args: WithdrawFromTileContainerArgs,
+): Promise<ApiResult<{ place_id: string }>> {
+    const parsed = parse_place_tile_container_id(args.src_container_id);
+    if (!parsed) return { ok: false, error: 'invalid_from_container' };
+
+    const res = await fetch(`${args.base_url}/api/place/items/withdraw_from_tile_container`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            actor_id: args.actor_id,
+            place_id: parsed.place_id,
+            x: parsed.x,
+            y: parsed.y,
+            item_id: args.item_id,
+            to_container: args.to_container,
+            target_grid_x: args.target_grid_x,
+            target_grid_y: args.target_grid_y,
+            action_cost: args.action_cost,
+        }),
+    });
+    const out = await res.json().catch(() => null as any);
+    if (res.ok && out?.ok) return { ok: true, place_id: parsed.place_id };
+    return { ok: false, error: out?.error || `HTTP ${res.status}`, http_status: res.status, detail: out?.detail };
+}
+
 export type WithdrawFromGroundContainerItemArgs = {
     base_url: string;
     actor_id: string;
@@ -169,6 +220,19 @@ export async function api_move_place_sourced_item(args: MovePlaceSourcedArgs): P
     const src = String(args.source_container_id ?? '');
     if (src.startsWith('place.item.')) {
         return api_withdraw_from_ground_container_item({
+            base_url: args.base_url,
+            actor_id: args.actor_id,
+            src_container_id: src,
+            item_id: args.item_id,
+            to_container: args.to_container,
+            target_grid_x: args.target_grid_x,
+            target_grid_y: args.target_grid_y,
+            action_cost: args.action_cost,
+        });
+    }
+
+    if (src.startsWith('place.tile.')) {
+        return api_withdraw_from_tile_container({
             base_url: args.base_url,
             actor_id: args.actor_id,
             src_container_id: src,

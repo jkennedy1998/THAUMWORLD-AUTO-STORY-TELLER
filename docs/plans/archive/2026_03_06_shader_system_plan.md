@@ -1,5 +1,8 @@
 # Shader System Plan (Tag-Driven Glyph + Layers)
 
+ARCHIVED (2026-03-07): Superseded by `docs/plans/2026_03_07_advanced_rendering_plan.md`.
+This file keeps the original detailed narrative and checklist history.
+
 Date: 2026-03-06
 
 ## Intent
@@ -52,10 +55,10 @@ Legend:
 
 Plan-only changes (no implementation in this phase):
 
-- [~] Define shader system as a single resolver (design)
-- [~] Define layered output model compatible with 3Dification (design)
+- [x] Define shader system as a single resolver (design)
+- [x] Define layered output model compatible with 3Dification (design)
 - [~] Define global textures/fields supporting screen-space + place-space (design)
-- [ ] Implement resolver + migrate modules (future work)
+- [x] Implement resolver + migrate modules (future work)
 
 ## Glossary
 
@@ -89,8 +92,8 @@ Today (mono_ui runtime) each (x,y) resolves to a single `Cell`. The shader resol
 
 TODO:
 
-- [ ] Define `reduce_layers_to_cell` rules (z priority, blend policy, clamping)
-- [ ] Keep the reducer shared and module-agnostic
+- [x] Define `reduce_layers_to_cell` rules (z priority, blend policy, clamping)
+- [x] Keep the reducer shared and module-agnostic
 
 Reducer MVP rules (plan-level, to prevent drift):
 
@@ -118,9 +121,9 @@ This avoids per-module ad-hoc glyph logic while keeping performance predictable.
 
 TODO:
 
-- [ ] Define a shared "render queue" shape (`RenderRequest`) that modules can emit
-- [ ] Define composition rules per module context (place tile, pile UI, container UI, character slots)
-- [ ] Keep composition rules and shader resolver in separate files
+- [x] Define a shared "render queue" shape (`RenderRequest`) that modules can emit
+- [~] Define composition rules per module context (place tile, pile UI, container UI, character slots)
+- [x] Keep composition rules and shader resolver in separate files
 
 ### 1) Single Entry Point
 
@@ -132,8 +135,8 @@ Every UI module calls this instead of deciding glyphs/colors locally.
 
 TODO:
 
-- [ ] Add `src/render_shaders/resolver.ts` and route all glyph decisions through it
-- [ ] Ensure drag ghost also calls the resolver (context `where=drag_ghost`)
+- [x] Add `src/render_shaders/resolver.ts` and route all glyph decisions through it
+- [x] Ensure drag ghost also calls the resolver (context `where=drag_ghost`)
 
 Integration note:
 
@@ -162,9 +165,9 @@ Context (where/how it is being drawn):
 
 TODO:
 
-- [ ] Add payload builders (single place to create payload/context so modules do not drift)
-- [ ] Standardize `where` contexts and keep them minimal
-- [ ] Add explicit coordinate spaces for texture sampling (see Global Textures)
+- [~] Add payload builders (single place to create payload/context so modules do not drift)
+- [x] Standardize `where` contexts and keep them minimal
+- [x] Add explicit coordinate spaces for texture sampling (see Global Textures)
 
 Payload builder note:
 
@@ -187,7 +190,7 @@ Initial renderer may ignore `blend` and `flags`.
 
 TODO:
 
-- [ ] Keep output layer list even when only 1 layer is returned
+- [x] Keep output layer list even when only 1 layer is returned
 - [ ] Define optional multi-cell outputs for future (not implemented now)
 
 Mapping note:
@@ -210,7 +213,7 @@ Determinism:
 
 TODO:
 
-- [ ] Define tag modifier order as program order (registry list), not per-item metadata
+- [x] Define tag modifier order as program order (registry list), not per-item metadata
 - [ ] Define a stable rule for ties: registry order then original tag order
 - [ ] Document how unknown tags behave (default: ignored)
 
@@ -282,8 +285,8 @@ Implementation approach:
 
 TODO:
 
-- [ ] Define `ShaderGlobals` sampling API that accepts `space` (`screen`/`place`/`ui`)
-- [ ] Add first built-in field: diagonal sine across screen
+- [~] Define `ShaderGlobals` sampling API that accepts `space` (`screen`/`place`/`ui`)
+- [x] Add first built-in field: diagonal sine across screen
 - [ ] Document deterministic PRNG usage (seeded by stable ids)
 - [ ] Add per-frame caching hooks (optional)
 
@@ -303,7 +306,7 @@ Modules that draw (place/container/character) should import the resolver and sto
 
 TODO:
 
-- [ ] Update modules to stop using ad-hoc display_char rules
+- [~] Update modules to stop using ad-hoc display_char rules
 - [ ] Ensure server APIs do not need to inject display chars (unless we want server-authoritative visuals later)
 
 ## Initial Shaders (MVP)
@@ -325,20 +328,20 @@ TODO:
 
 TODO:
 
-- [ ] Add `FIRE!` modifier as first tag effect
+- [x] Add `FIRE!` modifier as first tag effect
 - [ ] Add 1-2 more simple modifiers (e.g. FROSTBITE, POISONED) only after FIRE! is stable
 
 ## Migration Plan
 
 Migration TODO (tracked statuses):
 
-- [ ] Add shader resolver + types + `item_default` shader
-- [ ] ContainerModule uses resolver
-- [ ] CharacterModule uses resolver
-- [ ] PlaceModule uses resolver
-- [ ] Pile glyph logic uses shader context (not module logic)
-- [ ] FIRE! color logic moved into tag modifier
-- [ ] Remove ad-hoc glyph logic from modules
+- [x] Add shader resolver + types + `item_default` shader
+- [x] ContainerModule uses resolver
+- [x] CharacterModule uses resolver
+- [x] PlaceModule uses resolver
+- [x] Pile glyph logic uses shader context (not module logic)
+- [x] FIRE! color logic moved into tag modifier
+- [~] Remove ad-hoc glyph logic from modules
 - [x] (Future) Verify through `npm run dev:logs` after each migration step
 
 ## Deprecation / No Migration Artifacts Left Behind
@@ -347,12 +350,12 @@ This renderer refactor must not leave long-lived "temporary" systems.
 
 TODO:
 
-- [ ] Remove ad-hoc glyph selection logic from modules once they call the resolver:
-  - [ ] `src/mono_ui/modules/container_module.ts`
-  - [ ] `src/mono_ui/modules/character_module.ts`
-  - [ ] `src/mono_ui/modules/place_module.ts`
-- [ ] Migrate FIRE! tag visuals out of `src/mono_ui/modules/place_module.ts` into tag modifiers, then delete the old path
-- [ ] Avoid shipping one-off migration scripts for renderer data.
+- [x] Remove ad-hoc glyph selection logic from modules once they call the resolver:
+  - [x] `src/mono_ui/modules/container_module.ts`
+  - [x] `src/mono_ui/modules/character_module.ts`
+  - [x] `src/mono_ui/modules/place_module.ts`
+- [x] Migrate FIRE! tag visuals out of `src/mono_ui/modules/place_module.ts` into tag modifiers, then delete the old path
+- [x] Avoid shipping one-off migration scripts for renderer data.
   - If any migration script is created for development, it must be removed once data is migrated.
   - Prefer runtime repair/sanitization (idempotent) over permanent migrations.
 - [ ] Avoid server-side "display char injection" once the resolver is authoritative for glyph choice
@@ -382,5 +385,5 @@ Non-goal in this phase:
 
 TODO:
 
-- [ ] Add a small "golden render" test harness (snapshot expected glyphs/colors for a few scenes)
+- [x] Add a small "golden render" test harness (snapshot expected glyphs/colors for a few scenes)
 - [ ] Add guidelines for subtle animations (global fields, low frequency)

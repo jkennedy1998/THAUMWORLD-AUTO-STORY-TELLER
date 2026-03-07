@@ -10,6 +10,7 @@ import * as path from "node:path";
 import { parse } from "jsonc-parser";
 import type { Place, PlaceResult, PlaceListResult } from "../types/place.js";
 import { get_data_slot_dir } from "../engine/paths.js";
+import { ensure_place_tiles, ensure_place_entities_not_on_walls } from "./tiles.js";
 
 const PLACES_DIR = "places";
 
@@ -80,6 +81,18 @@ export function load_place(slot: number, place_id: string): PlaceResult {
         main: [],
         scattered: {}
       };
+    }
+
+    // Ensure tiles exist and are consistent with connections (Phase 0.7+).
+    // Also keep default_entry/entities off the wall ring.
+    let dirty = false;
+    const t = ensure_place_tiles(place);
+    if (t.changed) dirty = true;
+    const e = ensure_place_entities_not_on_walls(place);
+    if (e.changed) dirty = true;
+    if (dirty) {
+      // Persist once so subsequent loads are stable.
+      save_place(slot, place);
     }
     
     return {

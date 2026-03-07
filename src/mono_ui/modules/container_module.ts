@@ -58,6 +58,10 @@ export type ContainerModuleConfig = {
   get_highlighted_items?: () => Array<{ container_id: string; slot_index: number }>;
   on_drag_rejected?: () => void;
 
+  // Disable dragging items out of this container.
+  // Useful for tile containers / harvestables where interactions are click-based.
+  allow_drag?: boolean;
+
   // Optional open container ids, used to show "open" state on container-items.
   get_open_containers?: () => Set<string>;
   // Map an item instance id to its canonical container_id used in open_containers.
@@ -399,6 +403,11 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
       
       if (!opts.get_is_visible()) {
         debug_log(`[ContainerModule] Drag rejected - container not visible`);
+        return;
+      }
+
+      if (opts.allow_drag === false) {
+        debug_log(`[ContainerModule] Drag rejected - allow_drag=false (container=${opts.get_container()?.id ?? 'unknown'})`);
         return;
       }
 

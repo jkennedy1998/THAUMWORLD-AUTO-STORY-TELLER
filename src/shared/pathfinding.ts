@@ -35,6 +35,18 @@ export function is_tile_walkable(
       tile.y < 0 || tile.y >= place.tile_grid.height) {
     return false;
   }
+
+  // Check for collidable tiles (Phase 0.7+ place.tiles).
+  try {
+    const t = (place as any)?.tiles?.cells?.[tile.y]?.[tile.x];
+    const kind = t?.kind;
+    const collidable = typeof t?.collidable === 'boolean'
+      ? t.collidable
+      : (kind === 'wall');
+    if (collidable) return false;
+  } catch {
+    // ignore
+  }
   
   // Check for obstacle features
   for (const feature of place.contents.features) {

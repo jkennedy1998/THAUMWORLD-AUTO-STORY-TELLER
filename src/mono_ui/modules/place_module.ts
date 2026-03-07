@@ -1,8 +1,8 @@
-import type { Canvas, Module, Rect, Rgb, PointerEvent, WheelEvent, DragEvent } from "../types.js";
+import type { Canvas, Module, Rect, Rgb, PointerEvent, WheelEvent, DragEvent, Cell } from "../types.js";
 import { rect_width, rect_height } from "../types.js";
 import { draw_module_border, BORDER_STYLES } from "../module_borders.js";
 import { get_color_by_name } from "../colors.js";
-import type { Place, PlaceNPC, PlaceActor, PlaceConnection, TilePosition } from "../../types/place.js";
+import type { Place, PlaceNPC, PlaceActor, PlaceConnection, TilePosition, PlaceTile } from "../../types/place.js";
 import { get_entity_path, start_entity_movement, register_place, unregister_place } from "../../shared/movement_engine.js";
 import { type TagChangeEvent } from "../../shared/event_emitter.js";
 import { initWebSocketClient, type WebSocketClient } from "../websocket_client.js";
@@ -23,6 +23,10 @@ import { play_sfx } from "../sfx/sfx_player.js";
 import { make_entity_payload, make_ground_items_tile_payload, make_item_like_payload, make_pile_payload, make_simple_tile_payload } from "../../render_shaders/payload_builders.js";
 import { draw_render_queue, type RenderRequest } from "../../render_shaders/render_queue.js";
 import { ctx_place_tile } from "../../render_shaders/context_builders.js";
+import { PlaceDomLayers } from "../place_dom_layers.js";
+import type { GridCell } from "../../ascii_painter/types.js";
+import { loadCameraConfig } from "../../ascii_painter/save_system.js";
+import { create_canvas } from "../canvas.js";
 
 function footstep_cooldown_ms(speed_tpm: number): number {
   const tpm = Number.isFinite(speed_tpm) && speed_tpm > 0 ? speed_tpm : 300;
@@ -123,6 +127,18 @@ export type PlaceModuleConfig = {
   // Initial view state
   initial_scale?: number; // tiles per character (1 = 1:1, 2 = 2 tiles per char)
 
+  // Runtime metrics needed for DOM world layer viewport mapping.
+  grid_height: number;
+  font_family: string;
+  base_font_size_px: number;
+
+  // World focus layer (0/1/2) selection.
+  get_focus_z?: () => 0 | 1 | 2;
+  set_focus_z?: (z: 0 | 1 | 2) => void;
+
+  // Mouse parallax normalized (-1..+1), centered on place viewport.
+  get_mouse_parallax?: () => { x: number; y: number };
+
   // Player movement mode (affects speed + movement sound debug broadcast)
   get_move_mode?: () => "WALK" | "SNEAK" | "SPRINT";
   set_move_mode?: (mode: "WALK" | "SNEAK" | "SPRINT") => void;
@@ -130,6 +146,7 @@ export type PlaceModuleConfig = {
   // Phase 2: Double-click callbacks for opening containers
   on_double_click_npc?: (npc_ref: string) => void;  // Open NPC character module
   on_double_click_ground?: (tile_x: number, tile_y: number) => void;  // Open scattered container
+  on_open_tile_container?: (tile_x: number, tile_y: number) => void;  // Open a tile container (harvestable, planter, etc.)
   get_actor_position?: () => { x: number; y: number } | null;  // For distance checking
 
   // Ground item UX (tabletop): direct drag only when exactly one item exists on the tile.
@@ -176,6 +193,8 @@ type TargetedEntity = {
 type Particle = {
   x: number;           // Tile x position
   y: number;           // Tile y position  
+  // World Z layer for DOM world rendering (0..2). Defaults to z=1.
+  world_z?: 0 | 1 | 2;
   char: string;        // Visual character
   rgb: Rgb;           // Color
   created_at: number;  // Timestamp (Date.now())
@@ -240,6 +259,19 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   const inspect_cycle_state = new Map<string, number>();  // "x,y" -> current index
 
   function get_door_at_tile(place: Place, tile_x: number, tile_y: number): { conn: PlaceConnection; door_x: number; door_y: number } | null {
+    // Preferred: explicit door tile metadata.
+    try {
+      const t: PlaceTile | undefined = (place as any)?.tiles?.cells?.[tile_y]?.[tile_x];
+      if (t && t.kind === 'door' && (t as any).door?.target_place_id) {
+        const target_place_id = String((t as any).door.target_place_id);
+        const conn = place.connections.find(c => c.target_place_id === target_place_id);
+        if (conn) return { conn, door_x: tile_x, door_y: tile_y };
+      }
+    } catch {
+      // ignore
+    }
+
+    // Fallback: heuristic edge doors.
     for (const conn of place.connections) {
       const dir = conn.direction.toLowerCase();
       let door_tile_x: number;
@@ -278,6 +310,46 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     return get_door_at_tile(place, tile_x, tile_y);
   }
 
+  function get_place_tile(place: Place, tile_x: number, tile_y: number): PlaceTile | null {
+    try {
+      const t: PlaceTile | undefined = (place as any)?.tiles?.cells?.[tile_y]?.[tile_x];
+      return t ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  function tile_is_collidable(t: PlaceTile | null): boolean {
+    if (!t) return false;
+    if (typeof (t as any).collidable === 'boolean') return Boolean((t as any).collidable);
+    return t.kind === 'wall';
+  }
+
+  function is_edge_kind(t: PlaceTile | null): boolean {
+    if (!t) return false;
+    return t.kind === 'wall' || t.kind === 'door';
+  }
+
+  function wall_glyph(place: Place, x: number, y: number): string {
+    const up = is_edge_kind(get_place_tile(place, x, y + 1));
+    const down = is_edge_kind(get_place_tile(place, x, y - 1));
+    const left = is_edge_kind(get_place_tile(place, x - 1, y));
+    const right = is_edge_kind(get_place_tile(place, x + 1, y));
+
+    if (up && down && left && right) return '┼';
+    if (up && down && left) return '┤';
+    if (up && down && right) return '├';
+    if (left && right && up) return '┴';
+    if (left && right && down) return '┬';
+    if (down && right) return '┌';
+    if (down && left) return '┐';
+    if (up && right) return '└';
+    if (up && left) return '┘';
+    if (up || down) return '│';
+    if (left || right) return '─';
+    return '█';
+  }
+
   // Particle system
   let particles: Particle[] = [];
   const PARTICLE_LIFESPAN_MS = 500;  // Particles live for 500ms per plan
@@ -296,6 +368,79 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   const previous_moving_state = new Map<string, boolean>();
   // Throttle movement sound/broadcasts per entity
   const movement_sound_step = new Map<string, number>();
+
+  // DOM world layers (z=0/1/2) renderer
+  const dom_layers = new PlaceDomLayers({
+    font_family: config.font_family,
+    base_font_size_px: config.base_font_size_px,
+  });
+  let dom_pan_px = { x: 0, y: 0, tileW: 0, tileH: 0, scale: 1 };
+  let dom_last_place_id: string | null = null;
+
+  try {
+    window.addEventListener('thaumworld_ui_pan', (ev: any) => {
+      dom_pan_px.x = Number(ev?.detail?.pan_x_px) || dom_pan_px.x;
+      dom_pan_px.y = Number(ev?.detail?.pan_y_px) || dom_pan_px.y;
+      dom_pan_px.tileW = Number(ev?.detail?.tile_w_px) || dom_pan_px.tileW;
+      dom_pan_px.tileH = Number(ev?.detail?.tile_h_px) || dom_pan_px.tileH;
+      dom_pan_px.scale = Number(ev?.detail?.scale) || dom_pan_px.scale;
+    });
+  } catch {
+    // ignore
+  }
+
+  function maybe_mount_dom(place_id: string): void {
+    const container = document.getElementById('voxel_layers_container');
+    if (!container) return;
+    dom_layers.mount(container, place_id);
+  }
+
+  function clamp_int(n: number, lo: number, hi: number): number {
+    return Math.max(lo, Math.min(hi, Math.trunc(n)));
+  }
+
+  function compute_mouse_parallax_for_place(opts: {
+    inner: Rect;
+    anchor_screen_x: number;
+    anchor_screen_y: number;
+    pointer_x: number;
+    pointer_y: number;
+  }): { x: number; y: number } {
+    const inner = opts.inner;
+    const max_dx = (inner.x1 - inner.x0) / 2;
+    const max_dy = (inner.y1 - inner.y0) / 2;
+
+    const px = clamp(opts.pointer_x, inner.x0, inner.x1);
+    const py = clamp(opts.pointer_y, inner.y0, inner.y1);
+
+    // Neutral point is the anchor (Henry / later: highlighted target).
+    // Clamp to -1..+1 so camera tuning stays stable.
+    const ox = max_dx > 0 ? (px - opts.anchor_screen_x) / max_dx : 0;
+    const oy = max_dy > 0 ? (py - opts.anchor_screen_y) / max_dy : 0;
+    return {
+      x: Math.max(-1, Math.min(1, ox)),
+      y: Math.max(-1, Math.min(1, oy)),
+    };
+  }
+
+  function export_grid_cells_from_canvas(local: any): GridCell[][] {
+    const rows: GridCell[][] = [];
+    for (let y = 0; y < local.height; y++) {
+      const row: GridCell[] = [];
+      for (let x = 0; x < local.width; x++) {
+        const c = local.get(x, y);
+        // VoxelDOMRenderer skips spaces, so this keeps the DOM layers transparent where needed.
+        row.push({
+          char: c?.char ?? ' ',
+          rgb: c?.rgb ?? { r: 0, g: 0, b: 0 },
+          weight_index: (c as any)?.weight_index ?? 3,
+          render_index: (c as any)?.render_index,
+        });
+      }
+      rows.push(row);
+    }
+    return rows;
+  }
 
   // Derived dimensions (excluding border)
   function inner_rect(): Rect {
@@ -318,7 +463,14 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
   // Target management for communication system
   function set_target(entity_info: HoveredTile): void {
+    const focus_z = config.get_focus_z ? config.get_focus_z() : 1;
     if (entity_info?.entity) {
+      // No implicit pick-topmost: entities live on z=1 and are only targetable when focused.
+      if (focus_z !== 1) {
+        targeted = { ref: `tile.${entity_info.x}.${entity_info.y}`, type: "item" };
+        console.log(`[PlaceModule] Target set (focus_z=${focus_z}): tile at (${entity_info.x}, ${entity_info.y})`);
+        return;
+      }
       const is_npc = 'npc_ref' in entity_info.entity;
       const ref = is_npc ? (entity_info.entity as PlaceNPC).npc_ref : (entity_info.entity as PlaceActor).actor_ref;
       const type = is_npc ? "npc" : "actor";
@@ -519,6 +671,11 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         tile_y < 0 || tile_y >= place.tile_grid.height) {
       return false;
     }
+
+    // Check for collidable tiles (walls)
+    if (tile_is_collidable(get_place_tile(place, tile_x, tile_y))) {
+      return false;
+    }
     
     // Check for entities
     const entities = get_all_entities_at(tile_x, tile_y, place);
@@ -617,6 +774,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       particles.push({
         x: pos.x,
         y: pos.y,
+        world_z: 0,
         char: "·",
         rgb: path_rgb,
         created_at: now,
@@ -634,6 +792,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     particles.push({
       x: pos.x,
       y: pos.y,
+      world_z: 0,
       char: "·",
       rgb: move_rgb,
       created_at: now,
@@ -733,8 +892,17 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const inner = inner_rect();
       const { width, height } = inner_size();
 
-      // Module-local render queue: flushed once per frame in pass order.
-      const rq: RenderRequest[] = [];
+      const open_containers = config.get_open_containers ? config.get_open_containers() : null;
+      const is_tile_container_open = (tile_x: number, tile_y: number): boolean => {
+        const id = `place.tile.${place.id}.${tile_x}_${tile_y}`;
+        return Boolean(open_containers && open_containers.has(id));
+      };
+
+      // Render requests split by world-z target.
+      const rq_ui: RenderRequest[] = [];
+      const rq_z0: RenderRequest[] = [];
+      const rq_z1: RenderRequest[] = [];
+      const rq_z2: RenderRequest[] = [];
 
       // Calculate visible tile range
       const visible_tile_start_x = view.offset_x;
@@ -747,67 +915,108 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
       // Spawn/update particles based on movement (used by later particle render pass).
       check_entity_movement(place);
-    // This places walls at x=-1, x=width, y=-1, y=height so entities at 0..width-1 render clearly inside
-    
-    // Left edge: at x = -1 (one tile left of 0)
-    const left_screen_x = Math.floor((-1 - view.offset_x) / view.scale) + inner.x0;
-    if (left_screen_x >= inner.x0 && left_screen_x <= inner.x1) {
-      for (let y = inner.y0; y <= inner.y1; y++) {
-        const tile_y = view.offset_y + (y - inner.y0) * view.scale;
-        // Draw on the left edge if the row has any place tiles visible
-        if (tile_y >= -1 && tile_y <= place.tile_grid.height) {
-          rq.push({
-            pass: 'tile',
-            x: left_screen_x,
-            y,
-            order: 0,
-            key: `wall:left:${y}`,
-            payload: make_simple_tile_payload({ id: `wall:left:${y}`, char: '│', base_fg: grid_rgb, weight_index: 3 }) as any,
-            ctx: ctx_place_tile(),
-          });
-        }
-      }
-    }
 
-    // Bottom edge: at y = -1 (one tile below 0)
-    const bottom_screen_y = Math.floor((-1 - view.offset_y) / view.scale) + inner.y0;
-    if (bottom_screen_y >= inner.y0 && bottom_screen_y <= inner.y1) {
-      for (let x = inner.x0; x <= inner.x1; x++) {
-        const tile_x = view.offset_x + (x - inner.x0) * view.scale;
-        // Draw on the bottom edge if the column has any place tiles visible
-        if (tile_x >= -1 && tile_x <= place.tile_grid.width) {
-          rq.push({
-            pass: 'tile',
-            x,
-            y: bottom_screen_y,
-            order: 0,
-            key: `wall:bottom:${x}`,
-            payload: make_simple_tile_payload({ id: `wall:bottom:${x}`, char: '─', base_fg: grid_rgb, weight_index: 3 }) as any,
-            ctx: ctx_place_tile(),
-          });
+      // Base floor fill (z=0).
+      // Fill all in-bounds tiles in the visible rect.
+      {
+        const floor_rgb = get_color_by_name('dark_gray').rgb;
+        for (let sy = inner.y0; sy <= inner.y1; sy++) {
+          for (let sx = inner.x0; sx <= inner.x1; sx++) {
+            const tile_x = Math.floor(view.offset_x + (sx - inner.x0) * view.scale);
+            const tile_y = Math.floor(view.offset_y + (sy - inner.y0) * view.scale);
+            if (tile_x < 0 || tile_x >= place.tile_grid.width || tile_y < 0 || tile_y >= place.tile_grid.height) continue;
+            const open = is_tile_container_open(tile_x, tile_y);
+            rq_z0.push({
+              pass: 'tile',
+              x: sx,
+              y: sy,
+              order: -10,
+              key: `floor:${tile_x},${tile_y}`,
+              payload: make_simple_tile_payload({
+                id: `floor:${place.id}:${tile_x},${tile_y}`,
+                char: '·',
+                base_fg: floor_rgb,
+                weight_index: 2,
+              }) as any,
+              ctx: ctx_place_tile({ selected: open }),
+            });
+          }
         }
       }
-    }
+      // Walls/doors are drawn as tiles on z=1 (from place.tiles).
+      {
+        const door_rgb = get_color_by_name("vivid_cyan").rgb;
+        const tile_container_rgb = get_color_by_name("pale_yellow").rgb;
+        for (let sy = inner.y0; sy <= inner.y1; sy++) {
+          for (let sx = inner.x0; sx <= inner.x1; sx++) {
+            const tile_x = Math.floor(view.offset_x + (sx - inner.x0) * view.scale);
+            const tile_y = Math.floor(view.offset_y + (sy - inner.y0) * view.scale);
+            if (tile_x < 0 || tile_x >= place.tile_grid.width || tile_y < 0 || tile_y >= place.tile_grid.height) continue;
+            const t = get_place_tile(place, tile_x, tile_y);
+            if (!t) continue;
 
-    // Right edge: at x = width (one tile right of width-1)
-    const right_screen_x = Math.floor((place.tile_grid.width - view.offset_x) / view.scale) + inner.x0;
-    if (right_screen_x >= inner.x0 && right_screen_x <= inner.x1) {
-      for (let y = inner.y0; y <= inner.y1; y++) {
-        const tile_y = view.offset_y + (y - inner.y0) * view.scale;
-        // Draw on the right edge if the row has any place tiles visible
-        if (tile_y >= -1 && tile_y <= place.tile_grid.height) {
-          rq.push({
-            pass: 'tile',
-            x: right_screen_x,
-            y,
-            order: 0,
-            key: `wall:right:${y}`,
-            payload: make_simple_tile_payload({ id: `wall:right:${y}`, char: '│', base_fg: grid_rgb, weight_index: 3 }) as any,
-            ctx: ctx_place_tile(),
-          });
+            const open = is_tile_container_open(tile_x, tile_y);
+
+            if (t.kind === 'door') {
+              rq_z1.push({
+                pass: 'tile',
+                x: sx,
+                y: sy,
+                order: 10,
+                key: `door:${(t as any).door?.target_place_id ?? 'unknown'}:${(t as any).door?.direction ?? ''}:${tile_x},${tile_y}`,
+                payload: make_simple_tile_payload({
+                  id: `door:${place.id}:${tile_x},${tile_y}`,
+                  char: '=',
+                  base_fg: door_rgb,
+                  weight_index: 5,
+                }) as any,
+                ctx: ctx_place_tile({ selected: open }),
+              });
+              continue;
+            }
+
+            if (t.kind === 'wall') {
+              rq_z1.push({
+                pass: 'tile',
+                x: sx,
+                y: sy,
+                order: 0,
+                key: `wall:${tile_x},${tile_y}`,
+                payload: make_simple_tile_payload({
+                  id: `wall:${place.id}:${tile_x},${tile_y}`,
+                  char: wall_glyph(place, tile_x, tile_y),
+                  base_fg: grid_rgb,
+                  weight_index: 3,
+                }) as any,
+                ctx: ctx_place_tile({ selected: open }),
+              });
+              continue;
+            }
+
+            // Floor overlays on z=1: show interactive tile containers.
+            if (t.kind === 'floor') {
+              const tags: any[] = (t as any)?.tags ?? [];
+              const is_container = Array.isArray((t as any)?.contents) || (Array.isArray(tags) && tags.some((tg: any) => String(tg?.name ?? '').toUpperCase() === 'CONTAINER'));
+              if (is_container) {
+                rq_z1.push({
+                  pass: 'tile',
+                  x: sx,
+                  y: sy,
+                  order: 5,
+                  key: `tile_container:${tile_x},${tile_y}`,
+                  payload: make_simple_tile_payload({
+                    id: `tile_container:${place.id}:${tile_x},${tile_y}`,
+                    char: 'o',
+                    base_fg: tile_container_rgb,
+                    weight_index: 4,
+                  }) as any,
+                  ctx: ctx_place_tile({ selected: open }),
+                });
+              }
+            }
+          }
         }
       }
-    }
 
     // Collect entity positions in the view for the character render pass.
     const entity_positions = new Map<string, {x: number, y: number, entity: PlaceNPC | PlaceActor}>();
@@ -830,85 +1039,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
     }
 
-    // Top edge: at y = height (one tile above height-1)
-    const top_screen_y = Math.floor((place.tile_grid.height - view.offset_y) / view.scale) + inner.y0;
-    if (top_screen_y >= inner.y0 && top_screen_y <= inner.y1) {
-      for (let x = inner.x0; x <= inner.x1; x++) {
-        const tile_x = view.offset_x + (x - inner.x0) * view.scale;
-        // Draw on the top edge if the column has any place tiles visible
-        if (tile_x >= -1 && tile_x <= place.tile_grid.width) {
-          rq.push({
-            pass: 'tile',
-            x,
-            y: top_screen_y,
-            order: 0,
-            key: `wall:top:${x}`,
-            payload: make_simple_tile_payload({ id: `wall:top:${x}`, char: '─', base_fg: grid_rgb, weight_index: 3 }) as any,
-            ctx: ctx_place_tile(),
-          });
-        }
-      }
-    }
-
-    // Draw doors at connection points
-    const door_rgb = get_color_by_name("vivid_cyan").rgb;
-    const door_char = "=";
-    
-    for (const conn of place.connections) {
-      // Determine door position based on direction
-      let door_tile_x: number;
-      let door_tile_y: number;
-      let door_screen_x: number;
-      let door_screen_y: number;
-      
-      const dir = conn.direction.toLowerCase();
-      
-      if (dir.includes("north") || dir.includes("up") || dir.includes("forward")) {
-        // Door on top edge
-        door_tile_x = Math.floor(place.tile_grid.width / 2);
-        door_tile_y = place.tile_grid.height;
-        door_screen_x = inner.x0 + Math.floor((door_tile_x - view.offset_x) / view.scale);
-        door_screen_y = top_screen_y;
-      } else if (dir.includes("south") || dir.includes("down") || dir.includes("backward")) {
-        // Door on bottom edge
-        door_tile_x = Math.floor(place.tile_grid.width / 2);
-        door_tile_y = -1;
-        door_screen_x = inner.x0 + Math.floor((door_tile_x - view.offset_x) / view.scale);
-        door_screen_y = bottom_screen_y;
-      } else if (dir.includes("east") || dir.includes("right")) {
-        // Door on right edge
-        door_tile_x = place.tile_grid.width;
-        door_tile_y = Math.floor(place.tile_grid.height / 2);
-        door_screen_x = right_screen_x;
-        door_screen_y = inner.y0 + Math.floor((door_tile_y - view.offset_y) / view.scale);
-      } else if (dir.includes("west") || dir.includes("left")) {
-        // Door on left edge
-        door_tile_x = -1;
-        door_tile_y = Math.floor(place.tile_grid.height / 2);
-        door_screen_x = left_screen_x;
-        door_screen_y = inner.y0 + Math.floor((door_tile_y - view.offset_y) / view.scale);
-      } else {
-        // Default: place at entry point
-        door_tile_x = place.tile_grid.default_entry.x;
-        door_tile_y = place.tile_grid.default_entry.y;
-        door_screen_x = inner.x0 + Math.floor((door_tile_x - view.offset_x) / view.scale);
-        door_screen_y = inner.y0 + Math.floor((door_tile_y - view.offset_y) / view.scale);
-      }
-      
-      // Draw door if visible
-      if (door_screen_x >= inner.x0 && door_screen_x <= inner.x1 &&
-          door_screen_y >= inner.y0 && door_screen_y <= inner.y1) {
-        rq.push({
-          pass: 'tile',
-          x: door_screen_x,
-          y: door_screen_y,
-          order: 10,
-          key: `door:${conn.target_place_id}:${conn.direction}`,
-          payload: make_simple_tile_payload({ id: `door:${conn.target_place_id}:${conn.direction}`, char: door_char, base_fg: door_rgb, weight_index: 5 }) as any,
-          ctx: ctx_place_tile(),
-        });
-      }
-    }
+    // Walls/doors come from place.tiles; no extra border drawing here.
 
     // (Movement already checked above; avoid double-spawning.)
     
@@ -945,7 +1076,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           screen_y >= inner.y0 && screen_y <= inner.y1) {
         const weight = p.weight ?? 4;
         const render_index = p.render_index ?? 3;
-        rq.push({
+        const wz = (p.world_z ?? 1) as 0 | 1 | 2;
+        const target_q = wz === 0 ? rq_z0 : (wz === 2 ? rq_z2 : rq_z1);
+        target_q.push({
           pass: 'particle',
           x: screen_x,
           y: screen_y,
@@ -972,7 +1105,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const defaultRgb = is_npc ? npc_rgb : actor_rgb;
 
       const cachedTags = entityTagCache.get(entityRef) ?? [];
-      rq.push({
+      rq_z1.push({
         pass: 'character',
         x: pos.x,
         y: pos.y,
@@ -1031,7 +1164,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           const item_open = Boolean(open_containers && open_containers.has(item_container_id));
           const is_hovered = tile_hovered;
 
-          rq.push({
+          rq_z1.push({
             pass: 'item',
             x: screen_x,
             y: screen_y,
@@ -1055,7 +1188,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       if (item_ids.length >= 2) {
         const meta0: any = config.get_ground_item_meta?.(item_ids[0]!) ?? null;
         if (meta0) {
-          rq.push({
+          rq_z1.push({
             pass: 'item',
             x: screen_x,
             y: screen_y,
@@ -1079,7 +1212,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
 
       const single = items.length === 1 ? items[0] : null;
-      rq.push({
+      rq_z1.push({
         pass: 'item',
         x: screen_x,
         y: screen_y,
@@ -1103,7 +1236,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const screen_x = inner.x0 + Math.floor((target_pos.x - view.offset_x) / view.scale);
       const screen_y = inner.y0 + Math.floor((target_pos.y - view.offset_y) / view.scale);
       if (screen_x >= inner.x0 && screen_x <= inner.x1 && screen_y >= inner.y0 && screen_y <= inner.y1) {
-        rq.push({
+        rq_ui.push({
           pass: 'ui',
           x: screen_x,
           y: screen_y,
@@ -1124,7 +1257,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const screen_x = inner.x0 + Math.floor((hovered.x - view.offset_x) / view.scale);
       const screen_y = inner.y0 + Math.floor((hovered.y - view.offset_y) / view.scale);
       if (screen_x >= inner.x0 && screen_x <= inner.x1 && screen_y >= inner.y0 && screen_y <= inner.y1) {
-        rq.push({
+        rq_ui.push({
           pass: 'ui',
           x: screen_x,
           y: screen_y,
@@ -1138,12 +1271,13 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
     // Info overlay at top.
     {
-      const info_text = `[${place.name}] ${place.tile_grid.width}x${place.tile_grid.height} | View: ${Math.floor(view.offset_x)},${Math.floor(view.offset_y)} | Scale: 1:${view.scale}`;
+      const fz = config.get_focus_z ? config.get_focus_z() : 1;
+      const info_text = `[${place.name}] ${place.tile_grid.width}x${place.tile_grid.height} | z:${fz} | View: ${Math.floor(view.offset_x)},${Math.floor(view.offset_y)} | Scale: 1:${view.scale}`;
       const info_y = inner.y1;
       let info_x = inner.x0;
       for (const ch of info_text) {
         if (info_x > inner.x1) break;
-        rq.push({
+        rq_ui.push({
           pass: 'ui',
           x: info_x,
           y: info_y,
@@ -1163,7 +1297,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       let x = inner.x0;
       for (const ch of target_text) {
         if (x > inner.x1) break;
-        rq.push({
+        rq_ui.push({
           pass: 'ui',
           x,
           y,
@@ -1182,7 +1316,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       let x = inner.x0;
       for (const ch of hover_text) {
         if (x > inner.x1) break;
-        rq.push({
+        rq_ui.push({
           pass: 'ui',
           x,
           y,
@@ -1194,16 +1328,116 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
     }
 
-    // Flush the whole queue in pass order.
-    draw_render_queue(
-      canvas,
-      rq,
-      {
-        now_ms: Date.now(),
-        pass_order: ['tile', 'item', 'character', 'particle', 'ui'],
-        character_flash_period_ms: 240,
-      },
-    );
+
+    // UI overlays remain in mono-canvas.
+    draw_render_queue(canvas, rq_ui, { now_ms: Date.now(), pass_order: ['ui'], character_flash_period_ms: 240 });
+
+    // World layers render into DOM canvases (z=0/1/2) clipped to the place inner rect.
+    const focus_z = config.get_focus_z ? config.get_focus_z() : 1;
+
+    maybe_mount_dom(place.id);
+    dom_layers.ensure_space(width, height);
+
+    // Apply shared camera tuning from painter, but keep focus/pan per Place.
+    const cam = loadCameraConfig();
+    dom_layers.apply_shared_camera_tuning({
+      calibration: cam.calibration,
+      char_spacing_x: cam.char_spacing_x,
+      char_spacing_y: cam.char_spacing_y,
+      parallax_intensity: cam.parallax_intensity,
+      parallax_move_enabled: cam.parallax_move_enabled,
+      parallax_size_enabled: cam.parallax_size_enabled,
+      scale_per_layer: cam.scale_per_layer,
+      movement_per_layer: cam.movement_per_layer,
+      base_layer_scale: cam.base_layer_scale,
+    });
+    dom_layers.set_focus_z(focus_z);
+
+    // Parallax neutral point is Henry (or later: highlighted target).
+    // This makes the perspective effect much easier to read around the player.
+    {
+      const inner = inner_rect();
+
+      // Anchor: targeted entity (if it's on-screen), else Henry, else fallback to viewport center.
+      let anchor_tile = get_target_current_position(place);
+      if (!anchor_tile) anchor_tile = config.get_actor_position?.() ?? null;
+      if (!anchor_tile) {
+        const a0 = place.contents.actors_present?.[0];
+        anchor_tile = a0?.tile_position ?? null;
+      }
+
+      const cx = (inner.x0 + inner.x1) / 2;
+      const cy = (inner.y0 + inner.y1) / 2;
+
+      let anchor_screen_x = cx;
+      let anchor_screen_y = cy;
+
+      if (anchor_tile) {
+        const sx = inner.x0 + Math.floor((anchor_tile.x - view.offset_x) / view.scale);
+        const sy = inner.y0 + Math.floor((anchor_tile.y - view.offset_y) / view.scale);
+        if (sx >= inner.x0 && sx <= inner.x1 && sy >= inner.y0 && sy <= inner.y1) {
+          anchor_screen_x = sx;
+          anchor_screen_y = sy;
+        }
+      }
+
+      // Use last pointer position captured by OnPointerMove.
+      // If pointer hasn't moved yet (or is outside Place), default to neutral at the anchor.
+      const pointer_in_inner =
+        last_pointer_x >= inner.x0 && last_pointer_x <= inner.x1 &&
+        last_pointer_y >= inner.y0 && last_pointer_y <= inner.y1;
+      const px = pointer_in_inner ? last_pointer_x : anchor_screen_x;
+      const py = pointer_in_inner ? last_pointer_y : anchor_screen_y;
+      const mp = compute_mouse_parallax_for_place({
+        inner,
+        anchor_screen_x,
+        anchor_screen_y,
+        pointer_x: px,
+        pointer_y: py,
+      });
+      dom_layers.set_mouse_parallax(mp.x, mp.y);
+    }
+
+    if (dom_pan_px.tileW > 0 && dom_pan_px.tileH > 0) {
+      const viewportX = dom_pan_px.x + inner.x0 * dom_pan_px.tileW;
+      const viewportY = dom_pan_px.y + (config.grid_height - 1 - inner.y1) * dom_pan_px.tileH;
+      const viewportW = (inner.x1 - inner.x0 + 1) * dom_pan_px.tileW;
+      const viewportH = (inner.y1 - inner.y0 + 1) * dom_pan_px.tileH;
+      const fontSizePx = config.base_font_size_px * (Number.isFinite(dom_pan_px.scale) ? dom_pan_px.scale : 1.0);
+
+      dom_layers.set_viewport({
+        x: viewportX,
+        y: viewportY,
+        width: viewportW,
+        height: viewportH,
+        tileW: dom_pan_px.tileW,
+        tileH: dom_pan_px.tileH,
+        fontSizePx,
+      });
+
+      // z=0: floor is now emitted via rq_z0 (inside bounds only).
+      const off0 = create_canvas(width, height, { char: ' ', rgb: { r: 0, g: 0, b: 0 } });
+      const off1 = create_canvas(width, height, { char: ' ', rgb: { r: 0, g: 0, b: 0 } });
+      const off2 = create_canvas(width, height, { char: ' ', rgb: { r: 0, g: 0, b: 0 } });
+
+      const wrap = (local: any) => ({
+        set: (x: number, y: number, cell: Cell) => local.set(x - inner.x0, y - inner.y0, cell),
+        get: (x: number, y: number) => local.get(x - inner.x0, y - inner.y0),
+      });
+
+      // Partition particles by world_z.
+      // (Other passes are already split at enqueue time.)
+      draw_render_queue(wrap(off0) as any, rq_z0, { now_ms: Date.now(), pass_order: ['tile', 'item', 'character', 'particle'], character_flash_period_ms: 240 });
+      draw_render_queue(wrap(off1) as any, rq_z1, { now_ms: Date.now(), pass_order: ['tile', 'item', 'character', 'particle'], character_flash_period_ms: 240 });
+      draw_render_queue(wrap(off2) as any, rq_z2, { now_ms: Date.now(), pass_order: ['tile', 'item', 'character', 'particle'], character_flash_period_ms: 240 });
+
+      dom_layers.set_layer_cells(0, export_grid_cells_from_canvas(off0));
+      dom_layers.set_layer_cells(1, export_grid_cells_from_canvas(off1));
+      dom_layers.set_layer_cells(2, export_grid_cells_from_canvas(off2));
+      dom_layers.render();
+
+      dom_last_place_id = place.id;
+    }
   }
 
   // Subscribe to tag change events via WebSocket (replaces broken EventEmitter)
@@ -1285,6 +1519,10 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       });
 
       if (!place) {
+        // Ensure DOM world layers are not left mounted on an empty session.
+        dom_layers.destroy();
+        dom_last_place_id = null;
+
         // No place loaded - show placeholder
         const inner = inner_rect();
         canvas.fill_rect(inner, { char: " ", rgb: bg_rgb });
@@ -1540,12 +1778,17 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const place = config.get_place();
       if (!place) return;
 
+      const focus_z = config.get_focus_z ? config.get_focus_z() : 1;
+
       // Convert screen to tile coordinates
       const tile = screen_to_tile(e.x, e.y);
       if (!tile) return;
 
-      // PRIORITY 1: Handle double-click on ground items (takes precedence over doors)
-      if (e.click_count === 2 && config.on_double_click_ground) {
+      // Focus gating: clicks target only the focused world layer.
+      // For now, entities/items/movement live on z=1; doors live on z=0.
+
+      // PRIORITY 1: Handle double-click on ground items (z=1)
+      if (focus_z === 1 && e.click_count === 2 && config.on_double_click_ground) {
         const items_on_ground = config.get_ground_item_ids_at
           ? config.get_ground_item_ids_at(tile.x, tile.y)
           : place.contents.items_on_ground.filter(
@@ -1571,9 +1814,22 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         }
       }
 
-      // PRIORITY 2: Check for door/travel (only if no items on ground)
-      const door_hit = get_door_at_tile(place, tile.x, tile.y);
+      // PRIORITY 1.5: Double-click tile container (z=1)
+      if (focus_z === 1 && e.click_count === 2 && config.on_open_tile_container) {
+        const t = get_place_tile(place, tile.x, tile.y);
+        const tags: any[] = (t as any)?.tags ?? [];
+        const is_container =
+          Array.isArray((t as any)?.contents) ||
+          (Array.isArray(tags) && tags.some((tg: any) => String(tg?.name ?? '').toUpperCase() === 'CONTAINER'));
+        if (is_container) {
+          config.on_open_tile_container(tile.x, tile.y);
+          return;
+        }
+      }
 
+      // PRIORITY 2: Door/travel
+      // Doors currently render as wall-tiles (z=1), but we keep them clickable from z=0 and z=1.
+      const door_hit = (focus_z === 0 || focus_z === 1) ? get_door_at_tile(place, tile.x, tile.y) : null;
       if (door_hit) {
         const player = place.contents.actors_present[0];
         if (!player) return;
@@ -1623,8 +1879,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         return;
       }
 
-      // Check if clicked on an entity (NPC or actor)
-      const entity = get_entity_at(tile.x, tile.y, place);
+      // Entity selection (z=1 only)
+      const entity = focus_z === 1 ? get_entity_at(tile.x, tile.y, place) : null;
       if (entity) {
         const is_npc = "npc_ref" in entity;
         const ref = is_npc
@@ -1659,6 +1915,12 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         }
         
         console.log(`[PlaceModule] Target selected: ${ref}`);
+        return;
+      }
+
+      // Tile targeting (z!=1) - no movement or entity selection.
+      if (focus_z !== 1) {
+        set_target({ x: tile.x, y: tile.y });
         return;
       }
 
@@ -1762,6 +2024,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const place = config.get_place();
       if (!place) return;
 
+      const focus_z = config.get_focus_z ? config.get_focus_z() : 1;
+
       // Convert screen to tile coordinates
       const tile = screen_to_tile(e.x, e.y);
       if (!tile) {
@@ -1777,10 +2041,6 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         return;
       }
 
-      // Get what's at this tile (use get_all to show cycling indicator)
-      const all_entities = get_all_entities_at(tile.x, tile.y, place);
-      const entity = get_entity_at(tile.x, tile.y, place);
-      
       // Handle inspection if callback configured
       if (config.on_inspect) {
         const tile_key = `${tile.x},${tile.y}`;
@@ -1798,29 +2058,34 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         // Normal right-click: cycle through inspectable targets
         // Order: Characters -> Items -> Tile
         const inspectable_targets: Array<{ type: "npc" | "actor" | "item" | "tile"; ref?: string }> = [];
-        
-        // 1. Add characters (NPCs/Actors)
-        for (const ent of all_entities) {
-          const is_npc = "npc_ref" in ent;
-          inspectable_targets.push({
-            type: is_npc ? "npc" : "actor",
-            ref: is_npc 
-              ? (ent as PlaceNPC).npc_ref 
-              : (ent as PlaceActor).actor_ref
-          });
+
+        // No pick-topmost: inspection targets come only from the focused world layer.
+        // For now, entities/items live on z=1, so other focus layers inspect the tile only.
+        if (focus_z === 1) {
+          // 1. Add characters (NPCs/Actors)
+          const all_entities = get_all_entities_at(tile.x, tile.y, place);
+          for (const ent of all_entities) {
+            const is_npc = "npc_ref" in ent;
+            inspectable_targets.push({
+              type: is_npc ? "npc" : "actor",
+              ref: is_npc
+                ? (ent as PlaceNPC).npc_ref
+                : (ent as PlaceActor).actor_ref
+            });
+          }
+
+          // 2. Add items on ground
+          const items_on_ground = place.contents.items_on_ground.filter(
+            item => item.tile_position.x === tile.x && item.tile_position.y === tile.y
+          );
+          for (const item of items_on_ground) {
+            inspectable_targets.push({
+              type: "item",
+              ref: item.item_ref
+            });
+          }
         }
-        
-        // 2. Add items on ground (visible only)
-        const items_on_ground = place.contents.items_on_ground.filter(
-          item => item.tile_position.x === tile.x && item.tile_position.y === tile.y
-        );
-        for (const item of items_on_ground) {
-          inspectable_targets.push({
-            type: "item",
-            ref: item.item_ref
-          });
-        }
-        
+
         // 3. Add tile itself
         inspectable_targets.push({
           type: "tile"
@@ -1854,29 +2119,14 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     },
 
     OnWheel(e: WheelEvent): void {
-      const place = config.get_place();
-      if (!place) return;
-
-      const bounds = get_view_bounds(place);
-
-      // Note: zoom is not supported in the current UI.
-      // Pan with shift, else scroll vertically.
-      if (e.shift) {
-        // Horizontal scroll
-        const scroll_amount = e.delta_y > 0 ? 1 : -1;
-        view.offset_x = clamp(
-          view.offset_x + scroll_amount * view.scale * 2,
-          bounds.min_x,
-          bounds.max_x
-        );
-      } else {
-        // Vertical scroll
-        const scroll_amount = e.delta_y > 0 ? -1 : 1;
-        view.offset_y = clamp(
-          view.offset_y + scroll_amount * view.scale * 2,
-          bounds.min_y,
-          bounds.max_y
-        );
+      // Mouse wheel is reserved for world layer selection (focus_z).
+      // No wrap/cycle: clamp to 0..2.
+      if (!config.set_focus_z) return;
+      const cur = config.get_focus_z ? config.get_focus_z() : 1;
+      const dir = e.delta_y < 0 ? 1 : (e.delta_y > 0 ? -1 : 0);
+      const next = clamp_int(cur + dir, 0, 2) as 0 | 1 | 2;
+      if (next !== cur) {
+        config.set_focus_z(next);
       }
     },
 

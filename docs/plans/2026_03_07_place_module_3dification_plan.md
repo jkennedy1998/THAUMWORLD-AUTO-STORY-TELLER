@@ -147,6 +147,11 @@ Stacked character flash policy:
 
 `place_module.ts` remains responsible for input + UI overlays (cursor, borders, debug), but the world visuals move to the layered renderer.
 
+Input routing note:
+
+- DOM world layers should remain `pointer-events: none`.
+  - All input continues to be handled by PlaceModule through the mono canvas.
+
 ### E) Selection & Editing
 
 Selection behavior matches ASCII painter:
@@ -223,6 +228,11 @@ Legend:
   - It drives Place module view (pan offsets) + layered DOM transforms.
   - Reuse the same helper logic as painter where possible so changes apply to both.
 
+Panning/interaction parity:
+
+- Place panning should behave like the ASCII painter (space+drag / drag gestures), and should reuse the same helper code paths.
+  - Goal: one sustainable implementation so future camera changes apply to both.
+
 Persistence policy:
 
 - Shared (global) across both programs (game + painter):
@@ -239,6 +249,20 @@ Implementation note (storage):
 
 - Use shared storage keys for global tuning so painter and game stay in sync.
 - Keep module layout/pan stored per module id (game modules vs painter modules).
+
+Suggested implementation (align with existing code):
+
+- Reuse the existing ASCII painter camera persistence key and helpers:
+  - `src/ascii_painter/save_system.ts`
+  - localStorage key: `thaumworld_ascii_painter_camera_config`
+- Treat only the following fields as "shared global tuning" between painter and game:
+  - `char_spacing_x`, `char_spacing_y`
+  - `parallax_intensity`, `parallax_move_enabled`, `parallax_size_enabled`
+  - `calibration` (positional offsets)
+- Treat these as per-module/per-program (do not share across programs):
+  - `pan_x`, `pan_y`
+  - `focus_plane` / `focus_z`
+  - module rect (position/size)
 
 ### Phase 1: Authoritative Tiles (z=0)
 
@@ -296,6 +320,7 @@ Ownership note:
 - Introducing tiles without a clear storage format can lock in a poor schema; keep it minimal but extensible.
 - Avoid mixing "world z" with "shader render z".
 - Ensure all per-place caches are invalidated deterministically when place contents change.
+- Ensure DOM layer mounts are tied to `place_id` changes (no stale layers when refreshing/switching places).
 - Keep input selection deterministic (always focus plane).
 
 ## Acceptance Criteria (Milestone)
