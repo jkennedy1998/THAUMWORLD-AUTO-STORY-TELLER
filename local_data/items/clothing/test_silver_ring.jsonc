@@ -10,6 +10,7 @@
   "conductivity_mag": 2,
   "max_stack_size": 1,
   "display_char": "s",
+  "display_color": "#9da5ae",
   "tags": [
     {
       "name": "GARB",

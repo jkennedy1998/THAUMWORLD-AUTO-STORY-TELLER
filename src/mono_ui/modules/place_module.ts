@@ -28,6 +28,27 @@ import type { GridCell } from "../../ascii_painter/types.js";
 import { loadCameraConfig } from "../../ascii_painter/save_system.js";
 import { create_canvas } from "../canvas.js";
 
+/**
+ * Convert hex color string to RGB object
+ * Supports #RRGGBB format
+ */
+function hex_to_rgb(hex: string): { r: number; g: number; b: number } {
+  const clean = hex.trim().replace(/^#/, "");
+  if (clean.length !== 6) {
+    return { r: 128, g: 128, b: 128 }; // Fallback gray
+  }
+  
+  const r = Number.parseInt(clean.slice(0, 2), 16);
+  const g = Number.parseInt(clean.slice(2, 4), 16);
+  const b = Number.parseInt(clean.slice(4, 6), 16);
+  
+  if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) {
+    return { r: 128, g: 128, b: 128 }; // Fallback gray
+  }
+  
+  return { r, g, b };
+}
+
 function footstep_cooldown_ms(speed_tpm: number): number {
   const tpm = Number.isFinite(speed_tpm) && speed_tpm > 0 ? speed_tpm : 300;
   const ms_per_tile = (60 * 1000) / tpm;
@@ -319,15 +340,59 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     }
   }
 
+  function get_place_tile_z0(place: Place, tile_x: number, tile_y: number): PlaceTile | null {
+    try {
+      const t: PlaceTile | undefined = (place as any)?.tiles_z0?.cells?.[tile_y]?.[tile_x];
+      return t ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   function tile_is_collidable(t: PlaceTile | null): boolean {
     if (!t) return false;
-    if (typeof (t as any).collidable === 'boolean') return Boolean((t as any).collidable);
-    return t.kind === 'wall';
+    // Check for OCCUPIES tag (new tile system)
+    const tags = t.tags ?? [];
+    return tags.some(tag => tag.name === 'OCCUPIES');
   }
 
   function is_edge_kind(t: PlaceTile | null): boolean {
     if (!t) return false;
-    return t.kind === 'wall' || t.kind === 'door';
+    // Check for OCCUPIES tag or DOOR tag (visual edge tiles)
+    const tags = t.tags ?? [];
+    return tags.some(tag => tag.name === 'OCCUPIES' || tag.name === 'DOOR');
+  }
+
+  /**
+   * Get display character and color for a tile.
+   * Uses display properties embedded by server, falls back to defaults.
+   */
+  function get_tile_display(t: PlaceTile, tile_x: number, tile_y: number): { char: string; color: string } {
+    // Server embeds display_char and display_color in each tile
+    const display_char = (t as any).display_char;
+    const display_color = (t as any).display_color;
+    
+    if (typeof display_char === 'string' && typeof display_color === 'string') {
+      return { char: display_char, color: display_color };
+    }
+    
+    // Debug: log missing display properties
+    console.warn(`[TILE_RENDER] Missing display properties at (${tile_x},${tile_y}):`, {
+      kind: t.kind,
+      has_display_char: typeof display_char === 'string',
+      has_display_color: typeof display_color === 'string'
+    });
+    
+    // Fallback defaults
+    return { char: '?', color: '#888888' };
+  }
+
+  /**
+   * Check if tile has a specific tag
+   */
+  function tile_has_tag(t: PlaceTile, tag_name: string): boolean {
+    const tags = t.tags ?? [];
+    return tags.some(tag => tag.name === tag_name);
   }
 
   function wall_glyph(place: Place, x: number, y: number): string {
@@ -916,58 +981,60 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       // Spawn/update particles based on movement (used by later particle render pass).
       check_entity_movement(place);
 
-      // Base floor fill (z=0).
-      // Fill all in-bounds tiles in the visible rect.
+      // Render z=0 support blocks.
       {
-        const floor_rgb = get_color_by_name('dark_gray').rgb;
         for (let sy = inner.y0; sy <= inner.y1; sy++) {
           for (let sx = inner.x0; sx <= inner.x1; sx++) {
             const tile_x = Math.floor(view.offset_x + (sx - inner.x0) * view.scale);
             const tile_y = Math.floor(view.offset_y + (sy - inner.y0) * view.scale);
             if (tile_x < 0 || tile_x >= place.tile_grid.width || tile_y < 0 || tile_y >= place.tile_grid.height) continue;
-            const open = is_tile_container_open(tile_x, tile_y);
+            const t0 = get_place_tile_z0(place, tile_x, tile_y);
+            if (!t0) continue;
+            const display0 = get_tile_display(t0, tile_x, tile_y);
             rq_z0.push({
               pass: 'tile',
               x: sx,
               y: sy,
-              order: -10,
-              key: `floor:${tile_x},${tile_y}`,
+              order: 0,
+              key: `tile_z0:${tile_x},${tile_y}`,
               payload: make_simple_tile_payload({
-                id: `floor:${place.id}:${tile_x},${tile_y}`,
-                char: '·',
-                base_fg: floor_rgb,
-                weight_index: 2,
+                id: `tile_z0:${place.id}:${tile_x},${tile_y}`,
+                char: display0.char,
+                base_fg: hex_to_rgb(display0.color),
+                weight_index: 1,
               }) as any,
-              ctx: ctx_place_tile({ selected: open }),
+              ctx: ctx_place_tile(),
             });
           }
         }
       }
-      // Walls/doors are drawn as tiles on z=1 (from place.tiles).
+
+      // Render z=1 tiles (walls/doors/features).
       {
-        const door_rgb = get_color_by_name("vivid_cyan").rgb;
-        const tile_container_rgb = get_color_by_name("pale_yellow").rgb;
         for (let sy = inner.y0; sy <= inner.y1; sy++) {
           for (let sx = inner.x0; sx <= inner.x1; sx++) {
             const tile_x = Math.floor(view.offset_x + (sx - inner.x0) * view.scale);
             const tile_y = Math.floor(view.offset_y + (sy - inner.y0) * view.scale);
             if (tile_x < 0 || tile_x >= place.tile_grid.width || tile_y < 0 || tile_y >= place.tile_grid.height) continue;
-            const t = get_place_tile(place, tile_x, tile_y);
-            if (!t) continue;
+            const t1 = get_place_tile(place, tile_x, tile_y);
+            if (!t1) continue;
 
             const open = is_tile_container_open(tile_x, tile_y);
+            const display1 = get_tile_display(t1, tile_x, tile_y);
+            const has_door_tag = tile_has_tag(t1, 'DOOR');
+            const has_container_tag = tile_has_tag(t1, 'CONTAINER');
 
-            if (t.kind === 'door') {
+            if (has_door_tag) {
               rq_z1.push({
                 pass: 'tile',
                 x: sx,
                 y: sy,
                 order: 10,
-                key: `door:${(t as any).door?.target_place_id ?? 'unknown'}:${(t as any).door?.direction ?? ''}:${tile_x},${tile_y}`,
+                key: `door:${(t1 as any).door?.target_place_id ?? 'unknown'}:${(t1 as any).door?.direction ?? ''}:${tile_x},${tile_y}`,
                 payload: make_simple_tile_payload({
                   id: `door:${place.id}:${tile_x},${tile_y}`,
-                  char: '=',
-                  base_fg: door_rgb,
+                  char: display1.char,
+                  base_fg: hex_to_rgb(display1.color),
                   weight_index: 5,
                 }) as any,
                 ctx: ctx_place_tile({ selected: open }),
@@ -975,44 +1042,41 @@ export function make_place_module(config: PlaceModuleConfig): Module {
               continue;
             }
 
-            if (t.kind === 'wall') {
+            rq_z1.push({
+              pass: 'tile',
+              x: sx,
+              y: sy,
+              order: 0,
+              key: `tile:${tile_x},${tile_y}`,
+              payload: make_simple_tile_payload({
+                id: `tile:${place.id}:${tile_x},${tile_y}`,
+                char: display1.char,
+                base_fg: hex_to_rgb(display1.color),
+                weight_index: 2,
+              }) as any,
+              ctx: ctx_place_tile({ selected: open }),
+            });
+
+            if (has_container_tag) {
+              const container_glyphs = (t1 as any).container_glyphs;
+              let container_char = display1.char;
+              if (container_glyphs && typeof container_glyphs === 'object') {
+                container_char = open ? container_glyphs.open : container_glyphs.closed;
+              }
               rq_z1.push({
                 pass: 'tile',
                 x: sx,
                 y: sy,
-                order: 0,
-                key: `wall:${tile_x},${tile_y}`,
+                order: 5,
+                key: `tile_container:${tile_x},${tile_y}`,
                 payload: make_simple_tile_payload({
-                  id: `wall:${place.id}:${tile_x},${tile_y}`,
-                  char: wall_glyph(place, tile_x, tile_y),
-                  base_fg: grid_rgb,
-                  weight_index: 3,
+                  id: `tile_container:${place.id}:${tile_x},${tile_y}`,
+                  char: container_char,
+                  base_fg: hex_to_rgb(display1.color),
+                  weight_index: 4,
                 }) as any,
                 ctx: ctx_place_tile({ selected: open }),
               });
-              continue;
-            }
-
-            // Floor overlays on z=1: show interactive tile containers.
-            if (t.kind === 'floor') {
-              const tags: any[] = (t as any)?.tags ?? [];
-              const is_container = Array.isArray((t as any)?.contents) || (Array.isArray(tags) && tags.some((tg: any) => String(tg?.name ?? '').toUpperCase() === 'CONTAINER'));
-              if (is_container) {
-                rq_z1.push({
-                  pass: 'tile',
-                  x: sx,
-                  y: sy,
-                  order: 5,
-                  key: `tile_container:${tile_x},${tile_y}`,
-                  payload: make_simple_tile_payload({
-                    id: `tile_container:${place.id}:${tile_x},${tile_y}`,
-                    char: 'o',
-                    base_fg: tile_container_rgb,
-                    weight_index: 4,
-                  }) as any,
-                  ctx: ctx_place_tile({ selected: open }),
-                });
-              }
             }
           }
         }
@@ -1177,6 +1241,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
               qty: typeof meta.qty === 'number' ? meta.qty : undefined,
               display_char: typeof meta.display_char === 'string' ? meta.display_char : undefined,
               tags: Array.isArray(meta.tags) ? meta.tags : [],
+              base_fg: typeof meta.display_color === 'string' ? hex_to_rgb(meta.display_color) : undefined,
             }) as any,
             ctx: ctx_place_tile({ hovered: is_hovered, selected: item_open }),
           });
@@ -1204,6 +1269,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
                 display_char: typeof meta0.display_char === 'string' ? meta0.display_char : undefined,
                 tags: Array.isArray(meta0.tags) ? meta0.tags : [],
               },
+              base_fg: typeof meta0.display_color === 'string' ? hex_to_rgb(meta0.display_color) : undefined,
             }) as any,
             ctx: ctx_place_tile({ hovered: tile_hovered, selected: pile_open }),
           });

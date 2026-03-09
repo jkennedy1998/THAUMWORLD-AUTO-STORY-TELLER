@@ -19,6 +19,7 @@ export interface InlineItem {
         max_slots?: number;
         max_weight?: number;
     };
+    display_color?: string;        // Runtime color override (hex code)
 }
 
 /**

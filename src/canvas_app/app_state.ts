@@ -1222,12 +1222,45 @@ export function create_app_state(): AppState {
                 
                 ui_state.place.current_place = data.place;
                 
+                // DEBUG: Log tile information when place is loaded
+                if (data.place?.tiles?.cells) {
+                    const tiles = data.place.tiles;
+                    const rows = tiles.cells.length;
+                    const cols = rows > 0 && tiles.cells[0] ? tiles.cells[0].length : 0;
+                    let nullTiles = 0;
+                    let tilesWithDisplayChar = 0;
+                    let tilesWithoutDisplayChar = 0;
+                    const tileKinds = new Set<string>();
+                    
+                    for (const row of tiles.cells) {
+                        if (!row) continue;
+                        for (const tile of row) {
+                            if (!tile) {
+                                nullTiles++;
+                            } else {
+                                tileKinds.add(tile.kind);
+                                if ((tile as any).display_char) {
+                                    tilesWithDisplayChar++;
+                                } else {
+                                    tilesWithoutDisplayChar++;
+                                }
+                            }
+                        }
+                    }
+                    
+                    console.log('[PLACE_LOAD_DEBUG]', {
+                        place_id: data.place.id,
+                        dimensions: `${cols}x${rows}`,
+                        null_tiles: nullTiles,
+                        with_display_char: tilesWithDisplayChar,
+                        without_display_char: tilesWithoutDisplayChar,
+                        tile_kinds: Array.from(tileKinds)
+                    });
+                }
+                
                 // IMPORTANT: Re-register place with movement engine to ensure it uses updated data
                 // This prevents stale cached place data from affecting rendering
                 // (e.g., items that were picked up still appearing due to old cache)
-                const { register_place } = await import("../shared/movement_engine.js");
-                register_place(data.place.id, data.place);
-                
                 // Phase 8: Unified Movement Authority
                 // Frontend NO LONGER initializes place movement
                 // NPC_AI backend is the sole authority for movement decisions
@@ -1254,6 +1287,7 @@ export function create_app_state(): AppState {
                                     qty: Number(it.qty ?? 1),
                                     weight: Number(it.weight ?? 0),
                                     display_char: typeof it.display_char === 'string' ? String(it.display_char).charAt(0) : undefined,
+                                    display_color: typeof it.display_color === 'string' ? it.display_color : undefined,
                                     tags: Array.isArray(it.tags) ? it.tags : [],
                                     position_key: typeof it.position_key === 'string' ? it.position_key : undefined,
                                     position: it.position && typeof it.position.x === 'number' && typeof it.position.y === 'number'

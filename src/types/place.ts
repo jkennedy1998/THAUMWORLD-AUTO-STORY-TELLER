@@ -26,8 +26,11 @@ export type Place = {
   // Tile grid dimensions and entry point
   tile_grid: TileGrid;
 
-  // Tile data (Phase 0.7+): server-owned tiles rendered by Place.
+  // Tile data:
+  // - tiles_z0: ground/support layer (blocks beneath actors)
+  // - tiles: default layer (z=1 in current 3dification test room)
   // y=0 is the bottom row; cells are indexed as cells[y][x].
+  tiles_z0?: PlaceTiles;
   tiles?: PlaceTiles;
   
   // Connections to other places (graph structure)
@@ -55,7 +58,8 @@ export type Place = {
   description: PlaceDescription;
 };
 
-export type PlaceTileKind = 'floor' | 'wall' | 'door';
+// Tile definition reference - references local_data/tiles/{category}/{kind}.jsonc
+export type PlaceTileKind = string;
 
 export type PlaceDoorMeta = {
   target_place_id: string;
@@ -63,34 +67,42 @@ export type PlaceDoorMeta = {
 };
 
 export type PlaceTile = {
-  kind: PlaceTileKind;
-  // True means blocked for movement/pathing.
-  // If omitted, derived from kind (wall=true, others=false).
-  collidable?: boolean;
+  kind: PlaceTileKind;  // References tile definition ID (e.g., "tile_stone_brick", "chest")
+  
+  // Door metadata (only present if tile has DOOR tag)
   door?: PlaceDoorMeta;
 
   // Tags on tiles (same tag system as items/characters).
+  // Start with base_tags from tile definition, can gain/lose over time.
   tags?: TagInstance[];
 
   // Inline container-like storage for tile contents (e.g., harvestables, planters).
   // Items may carry grid_x/grid_y fields (same as container-items) for organization.
+  // Only used if tile has CONTAINER tag.
   contents?: InlineItem[];
+  
+  // Container capacity - overrides tile definition if specified
+  // Used for tiles with CONTAINER tag
   container_capacity?: {
     max_slots?: number;
     max_weight?: number;
   };
 
   // Time-skip support (bulk tick processing).
+  // Last GameTime.total_minutes when this tile was processed.
   last_tick_processed?: number;
 
   // Multitile grouping (architecture; not implemented yet).
   multitile_id?: string;
+  
+  // Deprecated: collidable removed - use OCCUPIES tag instead
 };
 
 export type PlaceTiles = {
   width: number;
   height: number;
-  cells: PlaceTile[][];
+  // null means empty space on that layer
+  cells: Array<Array<PlaceTile | null>>;
 };
 
 /**

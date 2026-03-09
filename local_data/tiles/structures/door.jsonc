@@ -1,0 +1,27 @@
+{
+  "id": "door",
+  "name": "Door",
+  "description": "A wooden door that can be opened or closed.",
+  "display_char": "+",
+  "display_color": "#a8561a",
+  "tags": [
+    {
+      "name": "STRUCTURE",
+      "mag": 1,
+      "meta": [],
+      "scope": ["TILE"]
+    },
+    {
+      "name": "DOOR",
+      "mag": 1,
+      "meta": [],
+      "scope": ["TILE"]
+    },
+    {
+      "name": "OCCUPIES",
+      "mag": 1,
+      "meta": [],
+      "scope": ["TILE"]
+    }
+  ]
+}

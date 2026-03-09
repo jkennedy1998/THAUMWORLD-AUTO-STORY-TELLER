@@ -36,14 +36,20 @@ export function is_tile_walkable(
     return false;
   }
 
-  // Check for collidable tiles (Phase 0.7+ place.tiles).
+  // Walking pathing rule (3dification test room):
+  // - z=1 must be empty or non-occupying
+  // - z=0 beneath must exist and be OCCUPIES (support)
   try {
-    const t = (place as any)?.tiles?.cells?.[tile.y]?.[tile.x];
-    const kind = t?.kind;
-    const collidable = typeof t?.collidable === 'boolean'
-      ? t.collidable
-      : (kind === 'wall');
-    if (collidable) return false;
+    const t1 = (place as any)?.tiles?.cells?.[tile.y]?.[tile.x];
+    if (t1?.tags) {
+      const blocks = t1.tags.some((tag: any) => tag.name === 'OCCUPIES');
+      if (blocks) return false;
+    }
+    const t0 = (place as any)?.tiles_z0?.cells?.[tile.y]?.[tile.x];
+    if ((place as any)?.tiles_z0) {
+      const supports = t0?.tags ? t0.tags.some((tag: any) => tag.name === 'OCCUPIES') : false;
+      if (!supports) return false;
+    }
   } catch {
     // ignore
   }

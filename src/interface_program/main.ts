@@ -29,6 +29,7 @@ import { find_empty_grid_position } from "../shared/migration.js";
 import { calculate_grid_dimensions } from "../types/container.js";
 import { load_item_def, load_master_item } from "../item_storage/store.js";
 import { create_inline_item } from "../item_instances/store.js";
+import { load_master_tile } from "../tile_storage/store.js";
 import {
     load_actor_with_items,
     save_actor_with_items,
@@ -1995,6 +1996,53 @@ function start_http_server(log_path: string): void {
                     populated_actors: place.contents.actors_present.length
                 });
 
+                // Augment tiles with display properties from definitions.
+                // Client needs display_char, display_color, and container_glyphs for rendering.
+                try {
+                    const augment_grid = (tiles_obj: any, label: string) => {
+                        const tiles = tiles_obj;
+                        if (!tiles?.cells) return;
+                        let totalTiles = 0;
+                        let augmentedTiles = 0;
+                        let failedTiles = 0;
+                        const failedKinds = new Set<string>();
+
+                        for (const row of tiles.cells) {
+                            if (!Array.isArray(row)) continue;
+                            for (const tile of row) {
+                                if (!tile?.kind) continue;
+                                totalTiles++;
+                                const def_result = load_master_tile(tile.kind);
+                                if (def_result.ok) {
+                                    tile.display_char = def_result.tile.display_char;
+                                    tile.display_color = def_result.tile.display_color;
+                                    augmentedTiles++;
+                                    if (def_result.tile.container_glyphs) {
+                                        tile.container_glyphs = def_result.tile.container_glyphs;
+                                    }
+                                } else {
+                                    failedTiles++;
+                                    failedKinds.add(tile.kind);
+                                }
+                            }
+                        }
+
+                        if (failedTiles > 0) {
+                            debug_warn("TILE_DEBUG", `Augmented ${augmentedTiles}/${totalTiles} ${label} tiles for ${place_id}`, {
+                                failed: failedTiles,
+                                failedKinds: Array.from(failedKinds),
+                            });
+                        } else {
+                            debug_log("TILE_DEBUG", `Augmented ${augmentedTiles}/${totalTiles} ${label} tiles for ${place_id}`);
+                        }
+                    };
+
+                    augment_grid((place as any)?.tiles_z0, "z0");
+                    augment_grid((place as any)?.tiles, "z1");
+                } catch (err) {
+                    debug_warn("API", `Failed to augment tile display properties for ${place_id}`, err);
+                }
+
                 // Add timed event status to response
                 const timed_event = get_timed_event_state(slot);
                 
@@ -2003,7 +2051,7 @@ function start_http_server(log_path: string): void {
                     ok: true, 
                     place,
                     timed_event_active: timed_event?.timed_event_active || false,
-                    timed_event_id: timed_event?.event_id || null
+                    timed_event_id: timed_event?.timed_event_id || null
                 }));
             } catch (err: any) {
                 debug_error("API", `/api/place failed for ${place_id}`, err);
@@ -7313,22 +7361,25 @@ function start_http_server(log_path: string): void {
 
                 const items: Array<{ item: InlineItem; position?: { x: number; y: number }; position_key?: string }> = get_all_ground_items(result.place);
 
-                // Best-effort display_char lookup from item defs (for UI drag ghosts).
-                const display_char_by_def_id = new Map<string, string>();
-                const get_display_char = (def_id: string, fallback_name: string): string => {
+                // Best-effort display_char and display_color lookup from item defs (for UI rendering).
+                const display_props_by_def_id = new Map<string, { char: string; color: string }>();
+                const get_display_props = (def_id: string, fallback_name: string): { char: string; color: string } => {
                     const key = String(def_id || '');
-                    const cached = display_char_by_def_id.get(key);
+                    const cached = display_props_by_def_id.get(key);
                     if (cached) return cached;
                     const def_res = load_item_def(data_slot_number, key);
                     if (def_res.ok) {
-                        const base = String((def_res.item as any)?.display_char ?? '');
-                        const out_base = base && base.length > 0 ? base.charAt(0) : (fallback_name ? fallback_name.charAt(0).toLowerCase() : '·');
-                        display_char_by_def_id.set(key, out_base);
-                        return out_base;
+                        const base_char = String((def_res.item as any)?.display_char ?? '');
+                        const char = base_char && base_char.length > 0 ? base_char.charAt(0) : (fallback_name ? fallback_name.charAt(0).toLowerCase() : '·');
+                        const color = String((def_res.item as any)?.display_color ?? '#9da5ae');
+                        const props = { char, color };
+                        display_props_by_def_id.set(key, props);
+                        return props;
                     }
-                    const out = fallback_name ? fallback_name.charAt(0).toLowerCase() : '·';
-                    display_char_by_def_id.set(key, out);
-                    return out;
+                    const char = fallback_name ? fallback_name.charAt(0).toLowerCase() : '·';
+                    const props = { char, color: '#9da5ae' };
+                    display_props_by_def_id.set(key, props);
+                    return props;
                 };
                 
                 res.writeHead(200, { "Content-Type": "application/json" });
@@ -7336,14 +7387,15 @@ function start_http_server(log_path: string): void {
                         ok: true, 
                         place_id,
                         items: items.map(({ item, position, position_key }: { item: InlineItem; position?: { x: number; y: number }; position_key?: string }) => {
-                            const display_char = get_display_char(String(item.def_id ?? ''), String(item.name ?? ''));
+                            const props = get_display_props(String(item.def_id ?? ''), String(item.name ?? ''));
                             return ({
                              id: item.id,
                              def_id: item.def_id,
                              name: item.name,
                              qty: item.qty,
                              weight: item.weight,
-                             display_char,
+                             display_char: props.char,
+                             display_color: props.color,
                              tags: (item as any).tags || [],
                              position,
                              position_key

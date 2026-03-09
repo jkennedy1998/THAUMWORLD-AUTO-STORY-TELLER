@@ -23,6 +23,7 @@ export interface ItemDefinition {
     // New fields for inventory system
     max_stack_size: number;           // Max quantity per stack (default: 1)
     display_char: string;             // Single char for UI representation (default: "·")
+    display_color?: string;           // Hex color code (e.g., "#FF6B00") for rendering
     occupies_slots: string[];         // ["leg_left", "leg_right"] for multi-slot items
     slot_shape: number[][];           // [[1]] for 1x1, future tetris shapes
     fits_actor_kind: string[];        // ["naked_ape"] for race restrictions (default: ["*"])
@@ -31,6 +32,10 @@ export interface ItemDefinition {
     container?: {
         capacity_weight?: number;
         capacity_slots?: number;
+    };
+    container_glyphs?: {              // Open/closed glyphs for container items
+        closed: string;
+        open: string;
     };
     notes?: string;
 }

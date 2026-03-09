@@ -1,0 +1,35 @@
+{
+  "id": "chest",
+  "name": "Chest",
+  "description": "A wooden storage chest. Sturdy and spacious.",
+  "display_char": "⍞",
+  "display_color": "#8B4513",
+  "tags": [
+    {
+      "name": "STRUCTURE",
+      "mag": 1,
+      "meta": [],
+      "scope": ["TILE"]
+    },
+    {
+      "name": "OCCUPIES",
+      "mag": 1,
+      "meta": [],
+      "scope": ["TILE"]
+    },
+    {
+      "name": "CONTAINER",
+      "mag": 1,
+      "meta": [],
+      "scope": ["TILE"]
+    }
+  ],
+  "container_capacity": {
+    "max_slots": 20,
+    "max_weight": 50000
+  },
+  "container_glyphs": {
+    "closed": "⍞",
+    "open": "⌸"
+  }
+}

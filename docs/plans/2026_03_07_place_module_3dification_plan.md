@@ -8,8 +8,8 @@ Evolve the current 2D top-down Place module into a 3D voxel-aware system while k
 
 We start with a constrained, fixed vertical extent:
 
-- `z=0` "floor" layer (tiles)
-- `z=1` "entity" layer (actors/NPCs/items that live on the walk plane)
+- `z=0` "floor" layer (tiles only for now)
+- `z=1` "entity" layer (tiles,actors/NPCs/items that live on the walk plane for testing)
 - `z=2` "headspace" layer (overhead/air/experiments: projectiles, effects, hanging objects)
 
 This is not a perspective renderer. World Z is treated as "height" for simulation + rendering layers. The camera remains orthographic top-down.

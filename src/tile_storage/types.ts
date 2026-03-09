@@ -1,18 +1,13 @@
 // Tile Storage Types
-// Type definitions for tile databank system
+// Type definitions for tile database (mirrors item_storage pattern)
 
-export type TileCategory = "floor" | "wall" | "obstacle" | "terrain" | "water" | "decoration";
+import type { TagInstance } from "../tag_system/registry.js";
+
+export type TileCategory = "structures" | "foliage" | "terrain" | "water" | "features" | "special";
 
 export type TileSenseType = "light" | "pressure" | "aroma" | "thaumic";
 
 export type ClarityLevel = "clear" | "vague" | "obscured";
-
-export interface TileDisplay {
-  char: string;
-  color: string;
-  variant_chars?: string[];
-  animation?: string | null;
-}
 
 export interface TileFeature {
   id: string;
@@ -31,7 +26,7 @@ export interface TileInspection {
   short: string;
   full: string;
   features: TileFeature[];
-  sensory: {
+  sensory?: {
     light?: string[];
     pressure?: string[];
     aroma?: string[];
@@ -40,28 +35,34 @@ export interface TileInspection {
   };
 }
 
-export interface TileInteraction {
-  verb: string;
-  description: string;
-  yields?: string[];
-  time_seconds?: number;
-  requires_tool?: string;
-}
-
 export interface TileDefinition {
-  id: string;
-  name: string;
-  category: TileCategory;
-  display: TileDisplay;
-  walkable: boolean;
-  blocks_sight: boolean;
-  blocks_sound: boolean;
-  inspection: TileInspection;
-  interactions?: TileInteraction[];
-  tags: string[];
+    id: string;                    // Unique identifier
+    name: string;                  // Display name
+    description: string;           // Flavor text
+    
+    // Visual properties
+    display_char: string;          // Single char for UI
+    display_color: string;         // Hex color or named color
+    
+    // Tags drive all behavior
+    tags: TagInstance[];           // System tags (OCCUPIES, CONTAINER, GROW, etc.)
+    
+    // Optional container capacity (for tiles with CONTAINER tag)
+    container_capacity?: {
+        max_slots?: number;
+        max_weight?: number;
+    };
+    
+    // Optional container glyphs (for tiles with CONTAINER tag)
+    container_glyphs?: {
+        closed: string;
+        open: string;
+    };
+    
+    // Optional inspection data (for rich inspectable tiles)
+    inspection?: TileInspection;
 }
 
-export interface TileDatabank {
-  schema_version: number;
-  tiles: TileDefinition[];
-}
+export type TileDefLookupResult =
+    | { ok: true; tile: TileDefinition; path: string }
+    | { ok: false; error: string; todo: string };

@@ -1,114 +1,170 @@
 // Tile Storage Module
-// Loads and manages tile definitions from databank
+// Loads and manages tile definitions from categorized database
+// Mirrors the item_storage/store.ts pattern
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { parse } from "jsonc-parser";
-import type { TileDefinition, TileDatabank } from "./types.js";
+import { get_master_tiles_dir } from "../engine/paths.js";
+import type { TileDefinition, TileDefLookupResult } from "./types.js";
 
-const DEFAULT_TILES_PATH = "local_data/shared/tiles/default_tiles.jsonc";
-
-let tileCache: Map<string, TileDefinition> | null = null;
+function read_jsonc(pathname: string): Record<string, unknown> {
+    const raw = fs.readFileSync(pathname, "utf-8");
+    return (parse(raw) as Record<string, unknown>) ?? {};
+}
 
 /**
- * Load the tile databank from disk
+ * Normalize tile reference to unified format (tile.<id>)
+ * Accepts: tile.<id>, tile_<id>, <id>
+ * Returns: tile.<id>
  */
-export function load_tile_databank(): TileDatabank | null {
-  try {
-    const fullPath = path.resolve(DEFAULT_TILES_PATH);
+export function normalize_tile_ref(ref: string): string {
+    if (!ref) return "";
     
-    if (!fs.existsSync(fullPath)) {
-      console.warn(`[TileStorage] Tile databank not found: ${fullPath}`);
-      return null;
-    }
-
-    const raw = fs.readFileSync(fullPath, "utf-8");
-    const databank = parse(raw) as TileDatabank;
+    // Already in unified format
+    if (ref.startsWith("tile.")) return ref;
     
-    if (!databank || !Array.isArray(databank.tiles)) {
-      console.error("[TileStorage] Invalid tile databank format");
-      return null;
+    // Legacy format with underscore
+    if (ref.startsWith("tile_")) {
+        return `tile.${ref.slice(5)}`;
     }
-
-    return databank;
-  } catch (error) {
-    console.error("[TileStorage] Error loading tile databank:", error);
-    return null;
-  }
+    
+    // Bare ID - assume it's a tile
+    return `tile.${ref}`;
 }
 
 /**
- * Load all tiles into cache
+ * Extract just the ID part from a reference
  */
-export function load_tile_cache(): Map<string, TileDefinition> {
-  if (tileCache) {
-    return tileCache;
-  }
+export function extract_tile_id(ref: string): string {
+    const normalized = normalize_tile_ref(ref);
+    return normalized.replace(/^tile\./, "");
+}
 
-  tileCache = new Map();
-  const databank = load_tile_databank();
-  
-  if (databank) {
-    for (const tile of databank.tiles) {
-      tileCache.set(tile.id, tile);
+/**
+ * Load master tile definition from categorized database
+ * EXACT MIRROR of load_master_item() from item_storage/store.ts
+ */
+export function load_master_tile(def_id: string): TileDefLookupResult {
+    const master_dir = get_master_tiles_dir();
+    // Categories are loose - just for programmer organization
+    const categories = ['structures', 'foliage', 'terrain', 'water', 'features', 'special'];
+    
+    // Search all category directories
+    for (const category of categories) {
+        const tile_path = path.join(master_dir, category, `${def_id}.jsonc`);
+        if (fs.existsSync(tile_path)) {
+            const raw = read_jsonc(tile_path);
+            
+            // Debug: log if display_char is missing
+            if (!raw.display_char) {
+                console.warn(`[TILE_STORAGE] Tile ${def_id} missing display_char, defaulting to "?"`);
+            }
+            
+            // Apply defaults (CRITICAL PATTERN - mirrors items)
+            const tile: TileDefinition = {
+                ...raw,
+                id: String(raw.id ?? def_id),
+                name: String(raw.name ?? def_id),
+                description: String(raw.description ?? ""),
+                display_char: String(raw.display_char ?? "?"),
+                display_color: String(raw.display_color ?? "#888888"),
+                tags: (raw.tags as TileDefinition["tags"]) ?? [],
+            };
+            
+            // Apply container_capacity defaults if present
+            if (raw.container_capacity) {
+                tile.container_capacity = {
+                    max_slots: Number((raw.container_capacity as Record<string, unknown>).max_slots ?? 10),
+                    max_weight: Number((raw.container_capacity as Record<string, unknown>).max_weight ?? 5000),
+                };
+            }
+            
+            return { ok: true, tile, path: tile_path };
+        }
     }
-  }
-
-  return tileCache;
+    
+    console.warn(`[TILE_STORAGE] Tile definition not found: ${def_id}`);
+    return { 
+        ok: false, 
+        error: "master_tile_not_found", 
+        todo: `Master tile definition not found: ${def_id}. Create in local_data/tiles/{category}/${def_id}.jsonc` 
+    };
 }
 
 /**
- * Get a tile definition by ID
+ * Check if a tile definition exists
  */
-export function get_tile_definition(tile_id: string): TileDefinition | null {
-  const cache = load_tile_cache();
-  return cache.get(tile_id) || null;
+export function has_master_tile(def_id: string): boolean {
+    const result = load_master_tile(def_id);
+    return result.ok;
 }
 
 /**
- * Get a deterministic variant character for a tile based on position
- * This ensures the same tile at the same position always looks the same
- */
-export function get_tile_variant(tile_id: string, x: number, y: number): string {
-  const tile = get_tile_definition(tile_id);
-  if (!tile) return "?";
-
-  // Use position to deterministically select variant
-  if (tile.display.variant_chars && tile.display.variant_chars.length > 0) {
-    const variantIndex = Math.abs((x * 31 + y * 17) % tile.display.variant_chars.length);
-    return tile.display.variant_chars[variantIndex]!;
-  }
-
-  return tile.display.char;
-}
-
-/**
- * Get all tiles by category
- */
-export function get_tiles_by_category(category: string): TileDefinition[] {
-  const cache = load_tile_cache();
-  return Array.from(cache.values()).filter(tile => tile.category === category);
-}
-
-/**
- * Search tiles by tag
- */
-export function get_tiles_by_tag(tag: string): TileDefinition[] {
-  const cache = load_tile_cache();
-  return Array.from(cache.values()).filter(tile => tile.tags.includes(tag));
-}
-
-/**
- * Clear the tile cache (useful for reloading)
- */
-export function clear_tile_cache(): void {
-  tileCache = null;
-}
-
-/**
- * Get all available tile IDs
+ * Get all available tile IDs from the database
  */
 export function get_all_tile_ids(): string[] {
-  const cache = load_tile_cache();
-  return Array.from(cache.keys());
+    const master_dir = get_master_tiles_dir();
+    const categories = ['structures', 'foliage', 'terrain', 'water', 'features', 'special'];
+    const ids: string[] = [];
+    
+    for (const category of categories) {
+        const category_dir = path.join(master_dir, category);
+        if (!fs.existsSync(category_dir)) continue;
+        
+        const files = fs.readdirSync(category_dir);
+        for (const file of files) {
+            if (file.endsWith('.jsonc')) {
+                ids.push(file.replace('.jsonc', ''));
+            }
+        }
+    }
+    
+    return ids;
+}
+
+/**
+ * Alias for load_master_tile for backward compatibility with inspection system
+ */
+export const get_tile_definition = load_master_tile;
+
+/**
+ * Get tiles by category (loose organization)
+ */
+export function get_tiles_by_category(category: string): TileDefinition[] {
+    const master_dir = get_master_tiles_dir();
+    const category_dir = path.join(master_dir, category);
+    const tiles: TileDefinition[] = [];
+    
+    if (!fs.existsSync(category_dir)) return tiles;
+    
+    const files = fs.readdirSync(category_dir);
+    for (const file of files) {
+        if (file.endsWith('.jsonc')) {
+            const def_id = file.replace('.jsonc', '');
+            const result = load_master_tile(def_id);
+            if (result.ok) {
+                tiles.push(result.tile);
+            }
+        }
+    }
+    
+    return tiles;
+}
+
+/**
+ * Find tiles by tag
+ */
+export function get_tiles_by_tag(tag_name: string): TileDefinition[] {
+    const all_ids = get_all_tile_ids();
+    const tiles: TileDefinition[] = [];
+    
+    for (const def_id of all_ids) {
+        const result = load_master_tile(def_id);
+        if (result.ok && result.tile.tags.some(t => t.name === tag_name)) {
+            tiles.push(result.tile);
+        }
+    }
+    
+    return tiles;
 }

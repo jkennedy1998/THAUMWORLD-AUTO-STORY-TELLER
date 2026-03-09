@@ -157,10 +157,10 @@ async function inspect_tile(
 ): Promise<InspectionResult> {
   // Get tile definition
   const tile_id = target.ref;
-  let tile_def = get_tile_definition(tile_id);
+  let tile_result = get_tile_definition(tile_id);
 
   // Back-compat: some places store terrain as a shorthand ("dirt" vs "dirt_terrain").
-  if (!tile_def) {
+  if (!tile_result.ok) {
     const base = tile_id.startsWith("tile.") ? tile_id.slice("tile.".length) : tile_id;
     const candidates: string[] = [];
     if (base !== tile_id) candidates.push(base);
@@ -173,8 +173,8 @@ async function inspect_tile(
     candidates.push(`${base}_floor`);
 
     for (const c of candidates) {
-      tile_def = get_tile_definition(c);
-      if (tile_def) {
+      tile_result = get_tile_definition(c);
+      if (tile_result.ok) {
         // mutate target.ref for downstream formatting
         (target as any).ref = c;
         break;
@@ -182,7 +182,7 @@ async function inspect_tile(
     }
   }
 
-  if (!tile_def) {
+  if (!tile_result.ok) {
     return {
       target,
       success: false,
@@ -200,10 +200,13 @@ async function inspect_tile(
     };
   }
 
-  debug_log("Inspection", `Found tile definition: ${tile_def.name} (${tile_def.inspection.features.length} features)`);
+  const tile_def = tile_result.tile;
+  const inspection = tile_def.inspection ?? { short: tile_def.name, full: tile_def.description, features: [] };
+
+  debug_log("Inspection", `Found tile definition: ${tile_def.name} (${inspection.features.length} features)`);
 
   // Filter features based on clarity and sense
-  const visible_features = tile_def.inspection.features.filter(f => {
+  const visible_features = inspection.features.filter((f: TileFeature) => {
     if (f.requires_sense !== sense_used) return false;
     if (clarity === "vague" && f.min_clarity === "clear") return false;
     if (clarity === "obscured" && f.min_clarity !== "obscured") return false;
@@ -256,8 +259,8 @@ async function inspect_tile(
   if (options.requested_keywords && options.requested_keywords.length > 0) {
     // Prioritize requested features
     for (const feature of processed_features) {
-      const matches_request = tile_def.inspection.features.find(
-        f => f.id === feature.id && f.keywords.some(kw => 
+      const matches_request = inspection.features.find(
+        (f: TileFeature) => f.id === feature.id && f.keywords.some((kw: string) => 
           options.requested_keywords?.some(rk => rk.includes(kw) || kw.includes(rk))
         )
       );
@@ -278,18 +281,19 @@ async function inspect_tile(
 
   // Build sensory details based on clarity
   const sensory_details: Record<string, string[]> = {};
+  const sensory = inspection.sensory ?? {};
   if (clarity === "clear") {
-    sensory_details.light = tile_def.inspection.sensory.light ?? [];
-    sensory_details.pressure = tile_def.inspection.sensory.pressure ?? [];
-    sensory_details.aroma = tile_def.inspection.sensory.aroma ?? [];
-    sensory_details.touch = tile_def.inspection.sensory.touch ?? [];
+    sensory_details.light = sensory.light ?? [];
+    sensory_details.pressure = sensory.pressure ?? [];
+    sensory_details.aroma = sensory.aroma ?? [];
+    sensory_details.touch = sensory.touch ?? [];
   } else if (clarity === "vague") {
     // Only primary sense details
     const sense_key = sense_used === "light" ? "light" : 
                      sense_used === "pressure" ? "pressure" :
                      sense_used === "aroma" ? "aroma" : undefined;
-    if (sense_key && tile_def.inspection.sensory[sense_key]) {
-      sensory_details[sense_key] = tile_def.inspection.sensory[sense_key] ?? [];
+    if (sense_key && sensory[sense_key]) {
+      sensory_details[sense_key] = sensory[sense_key] ?? [];
     }
   }
 
@@ -302,8 +306,8 @@ async function inspect_tile(
     requested_features: options.requested_keywords ?? [],
     random_features: limited_random.map(f => f.id),
     content: {
-      short_description: tile_def.inspection.short,
-      full_description: clarity === "clear" ? tile_def.inspection.full : "",
+      short_description: inspection.short,
+      full_description: clarity === "clear" ? inspection.full : "",
       features: [...requested, ...limited_random],
       sensory_details
     },

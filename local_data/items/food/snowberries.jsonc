@@ -1,0 +1,21 @@
+{
+  "id": "snowberries",
+  "name": "Snowberries",
+  "description": "Small white berries with a faintly sweet taste. Common in colder regions.",
+  "weight": 10,
+  "weight_mag": 1,
+  "mag": 1,
+  "size_mag": 1,
+  "hardness_mag": 1,
+  "conductivity_mag": 1,
+  "max_stack_size": 20,
+  "display_char": "*",
+  "tags": [
+    {
+      "name": "FOOD",
+      "mag": 1,
+      "meta": [],
+      "scope": ["ITEM"]
+    }
+  ]
+}
