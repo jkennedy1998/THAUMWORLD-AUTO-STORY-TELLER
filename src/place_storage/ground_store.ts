@@ -16,6 +16,76 @@ function get_place_path(slot: number, place_id: string): string {
     return path.join(get_data_slot_dir(slot), "places", `${place_id}.jsonc`);
 }
 
+function get_place_base_z(place_any: any): number {
+    const z = Number(place_any?.coordinates?.elevation);
+    return (typeof z === 'number' && Number.isFinite(z)) ? Math.floor(z) : 0;
+}
+
+function parse_scattered_key(key: string): { x: number; y: number; z: number | null } | null {
+    const parts = String(key ?? '').split('_');
+    if (parts.length < 2) return null;
+    const x = parseInt(parts[0] ?? '', 10);
+    const y = parseInt(parts[1] ?? '', 10);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    const z = parts.length >= 3 ? parseInt(parts[2] ?? '', 10) : NaN;
+    return { x, y, z: Number.isFinite(z) ? z : null };
+}
+
+function make_scattered_key(x: number, y: number, z: number): string {
+    return `${Math.floor(x)}_${Math.floor(y)}_${Math.floor(z)}`;
+}
+
+// Migration: upgrade legacy scattered keys (x_y) into voxel keys (x_y_z).
+// Also enforces item.elevation to match key z when present.
+export function normalize_ground_scattered(place_any: any): boolean {
+    try {
+        if (!place_any || typeof place_any !== 'object') return false;
+        if (!place_any.ground) place_any.ground = { main: [], scattered: {} };
+        if (!place_any.ground.scattered || typeof place_any.ground.scattered !== 'object') place_any.ground.scattered = {};
+
+        const base_z = get_place_base_z(place_any);
+        const scattered = place_any.ground.scattered as Record<string, InlineItem[]>;
+        const next: Record<string, InlineItem[]> = {};
+        let changed = false;
+
+        for (const [k, items] of Object.entries(scattered)) {
+            const p = parse_scattered_key(k);
+            if (!p) {
+                // Keep unknown keys as-is.
+                next[k] = items as any;
+                continue;
+            }
+            const x = p.x;
+            const y = p.y;
+
+            for (const item of (items as any[])) {
+                if (!item) continue;
+                const key_z = p.z;
+                const iz_raw = (item as any).elevation;
+                const iz = (key_z !== null)
+                    ? key_z
+                    : (typeof iz_raw === 'number' && Number.isFinite(iz_raw) ? Math.floor(iz_raw) : base_z);
+
+                if ((item as any).elevation !== iz) {
+                    (item as any).elevation = iz;
+                    changed = true;
+                }
+
+                const nk = make_scattered_key(x, y, iz);
+                if (nk !== k) changed = true;
+                if (!Array.isArray(next[nk])) next[nk] = [];
+                next[nk]!.push(item);
+            }
+        }
+
+        // Preserve stable ordering by iterating in input key order.
+        place_any.ground.scattered = next;
+        return changed;
+    } catch {
+        return false;
+    }
+}
+
 function read_jsonc(pathname: string): Record<string, unknown> {
     const raw = fs.readFileSync(pathname, "utf-8");
     return (parse(raw) as Record<string, unknown>) ?? {};
@@ -52,6 +122,17 @@ export function load_place_with_ground(
         if (!ground.scattered) ground.scattered = {};
         
         debug_log("ground_items", `Loaded place ${place_id} with ground items`);
+
+        // Migrate scattered keys to voxel keys.
+        try {
+            const changed = normalize_ground_scattered(place as any);
+            if (changed) {
+                write_jsonc(place_path, place);
+                debug_log('ground_items', `Migrated scattered ground keys to x_y_z for ${place_id}`);
+            }
+        } catch {
+            // ignore
+        }
         
         return { ok: true, place };
     } catch (err) {
@@ -96,8 +177,13 @@ export function add_item_to_ground(
     if (!ground) {
         return { ok: false, error: 'ground_not_initialized' };
     }
-    
-    const position_key = `${x}_${y}`;
+
+    const base_z = get_place_base_z(place as any);
+    const iz_raw = (item as any).elevation;
+    const iz = (typeof iz_raw === 'number' && Number.isFinite(iz_raw)) ? Math.floor(iz_raw) : base_z;
+    (item as any).elevation = iz;
+
+    const position_key = make_scattered_key(x, y, iz);
     
     if (!ground.scattered[position_key]) {
         ground.scattered[position_key] = [];
@@ -136,7 +222,7 @@ export function add_item_to_main_ground(
 export function remove_item_from_ground(
     place: Record<string, unknown>,
     item_id: string
-): { ok: true; item: InlineItem; from_position?: { x: number; y: number } } | { ok: false; error: string } {
+): { ok: true; item: InlineItem; from_position?: { x: number; y: number; z?: number } } | { ok: false; error: string } {
     const ground = place.ground as InlineGround;
     if (!ground) {
         return { ok: false, error: 'ground_not_initialized' };
@@ -163,9 +249,9 @@ export function remove_item_from_ground(
                 if (items.length === 0) {
                     delete ground.scattered[position_key];
                 }
-                
-                const [x_str, y_str] = position_key.split('_');
-                const position = { x: parseInt(x_str!, 10), y: parseInt(y_str!, 10) };
+
+                const p = parse_scattered_key(position_key);
+                const position = p ? ({ x: p.x, y: p.y, z: p.z ?? (item as any)?.elevation } as any) : undefined;
 
                 const name = (resolve_inline_item(String(item.def_id ?? ''), item) ?? null)?.name ?? String(item.def_id ?? 'item');
                 debug_log("ground_items", `Removed ${name} from ground at ${position_key}`);
@@ -187,9 +273,16 @@ export function get_items_at_position(
 ): InlineItem[] {
     const ground = place.ground as InlineGround;
     if (!ground) return [];
-    
-    const position_key = `${x}_${y}`;
-    return ground.scattered[position_key] ?? [];
+
+    const out: InlineItem[] = [];
+    for (const [k, items] of Object.entries(ground.scattered)) {
+        const p = parse_scattered_key(k);
+        if (!p) continue;
+        if (p.x === x && p.y === y) {
+            for (const it of (items as any[])) out.push(it);
+        }
+    }
+    return out;
 }
 
 /**
@@ -200,12 +293,12 @@ export function get_all_ground_items(
     place: Record<string, unknown>
 ): Array<{
     item: InlineItem;
-    position?: { x: number; y: number };
+    position?: { x: number; y: number; z: number };
     position_key?: string;
 }> {
     const result: Array<{
         item: InlineItem;
-        position?: { x: number; y: number };
+        position?: { x: number; y: number; z: number };
         position_key?: string;
     }> = [];
     
@@ -219,10 +312,16 @@ export function get_all_ground_items(
     
     // Scattered items
     for (const [position_key, items] of Object.entries(ground.scattered)) {
-        const [x_str, y_str] = position_key.split('_');
-        const position = { x: parseInt(x_str!, 10), y: parseInt(y_str!, 10) };
+        const p = parse_scattered_key(position_key);
+        if (!p) continue;
+        const base_z = get_place_base_z(place as any);
+        const z = p.z !== null ? p.z : base_z;
+        const position = { x: p.x, y: p.y, z };
         
         for (const item of items) {
+            if (typeof (item as any).elevation !== 'number' || !Number.isFinite((item as any).elevation)) {
+                (item as any).elevation = z;
+            }
             result.push({ item, position, position_key });
         }
     }
@@ -242,13 +341,13 @@ export function find_nearby_items(
 ): Array<{
     item: InlineItem;
     distance: number;
-    position?: { x: number; y: number };
+    position?: { x: number; y: number; z: number };
 }> {
     const all_items = get_all_ground_items(place);
     const nearby: Array<{
         item: InlineItem;
         distance: number;
-        position?: { x: number; y: number };
+        position?: { x: number; y: number; z: number };
     }> = [];
     
     for (const { item, position } of all_items) {

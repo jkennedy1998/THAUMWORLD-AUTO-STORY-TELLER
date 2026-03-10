@@ -85,6 +85,20 @@ Marks a DAMAGE type. Procs rules about this DAMAGE TAG when the item is used to 
 
 ## Standard TAGs
 
+### Tile/World TAGs (Repo-Specific)
+
+These are the tags currently used by the engine to implement place movement + vision semantics.
+
+**[OCCUPIES]**
+- **Applies to:** TILE
+- **Meaning:** Blocks movement at the tile (used for walls/solid features)
+
+**[COVER]**
+- **Applies to:** TILE
+- **Meaning:** Blocks line-of-sight (LOS) for vision debug/raycasting
+
+Note: `COVER` is intentionally separate from movement blocking so foliage/curtains can block sight without being solid.
+
 ### Status TAGs
 
 **[OVERENCUMBERED]**

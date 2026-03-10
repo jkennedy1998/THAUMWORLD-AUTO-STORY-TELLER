@@ -293,8 +293,10 @@ export type PlaceDragArgs = {
     place_id: string;
     from_x: number;
     from_y: number;
+    from_elevation?: number;
     to_x: number;
     to_y: number;
+    to_elevation?: number;
     mode?: 'pile';
     item_id?: string;
     action_cost?: number;
@@ -306,8 +308,10 @@ export async function api_place_drag(args: PlaceDragArgs): Promise<ApiResult> {
         place_id: args.place_id,
         from_x: args.from_x,
         from_y: args.from_y,
+        from_elevation: args.from_elevation,
         to_x: args.to_x,
         to_y: args.to_y,
+        to_elevation: args.to_elevation,
         mode: args.mode,
         item_id: args.item_id,
         action_cost: args.action_cost,
@@ -321,6 +325,7 @@ export type PlaceDropArgs = {
     item_id: string;
     x: number;
     y: number;
+    elevation?: number;
 };
 
 export async function api_place_drop(args: PlaceDropArgs): Promise<ApiResult> {
@@ -330,6 +335,7 @@ export async function api_place_drop(args: PlaceDropArgs): Promise<ApiResult> {
         item_id: args.item_id,
         x: args.x,
         y: args.y,
+        elevation: args.elevation,
     });
 }
 
@@ -341,6 +347,7 @@ export type SpillFromContainerItemArgs = {
     item_id: string;
     x: number;
     y: number;
+    to_elevation?: number;
     action_cost?: number;
 };
 
@@ -352,6 +359,7 @@ export async function api_spill_from_container_item(args: SpillFromContainerItem
         item_id: args.item_id,
         x: args.x,
         y: args.y,
+        to_elevation: args.to_elevation,
         action_cost: args.action_cost,
     });
 }
@@ -387,6 +395,7 @@ export type DepositGroundToContainerItemArgs = {
     place_id: string;
     from_x: number;
     from_y: number;
+    from_elevation?: number;
     item_id: string;
     container_item_id: string;
     target_grid_x?: number;
@@ -400,6 +409,7 @@ export async function api_deposit_ground_to_container_item(args: DepositGroundTo
         place_id: args.place_id,
         from_x: args.from_x,
         from_y: args.from_y,
+        from_elevation: args.from_elevation,
         item_id: args.item_id,
         container_item_id: args.container_item_id,
         target_grid_x: args.target_grid_x,

@@ -128,9 +128,12 @@ export function ensure_place_tiles(place: Place): { changed: boolean } {
   const h = Math.max(1, Math.floor(place.tile_grid.height));
   let changed = false;
 
+  // Dev fixture is only for the 3dification test room.
+  const is_test_room = place.id === "eden_crossroads_tavern";
+
   // Ensure z=0 support layer exists and is fully filled with base blocks.
-  // This is a temporary 3dification test-room setup: z=1 is air/contents.
-  {
+  // Only enabled for the test room.
+  if (is_test_room) {
     const z0 = (place as any).tiles_z0 as PlaceTiles | undefined;
     const needs_new_z0 =
       !z0 ||
@@ -190,24 +193,26 @@ export function ensure_place_tiles(place: Place): { changed: boolean } {
     }
   }
 
-  // Perimeter wall ring uses the base block tile.
-  for (let x = 0; x < w; x++) {
-    for (const y of [0, h - 1]) {
-      const cur = get_tile(tiles, x, y);
-      if (!cur || !tile_is_door(cur) || cur.kind !== "door") {
-        const want = create_tile_from_definition("tile_stone_brick");
-        if (!cur || cur.kind !== want.kind) changed = true;
-        set_tile(tiles, x, y, want);
+  // Perimeter wall ring uses the base block tile (test room only).
+  if (is_test_room) {
+    for (let x = 0; x < w; x++) {
+      for (const y of [0, h - 1]) {
+        const cur = get_tile(tiles, x, y);
+        if (!cur || !tile_is_door(cur) || cur.kind !== "door") {
+          const want = create_tile_from_definition("tile_stone_brick");
+          if (!cur || cur.kind !== want.kind) changed = true;
+          set_tile(tiles, x, y, want);
+        }
       }
     }
-  }
-  for (let y = 0; y < h; y++) {
-    for (const x of [0, w - 1]) {
-      const cur = get_tile(tiles, x, y);
-      if (!cur || !tile_is_door(cur) || cur.kind !== "door") {
-        const want = create_tile_from_definition("tile_stone_brick");
-        if (!cur || cur.kind !== want.kind) changed = true;
-        set_tile(tiles, x, y, want);
+    for (let y = 0; y < h; y++) {
+      for (const x of [0, w - 1]) {
+        const cur = get_tile(tiles, x, y);
+        if (!cur || !tile_is_door(cur) || cur.kind !== "door") {
+          const want = create_tile_from_definition("tile_stone_brick");
+          if (!cur || cur.kind !== want.kind) changed = true;
+          set_tile(tiles, x, y, want);
+        }
       }
     }
   }
@@ -228,40 +233,41 @@ export function ensure_place_tiles(place: Place): { changed: boolean } {
     }
   }
 
-  // Dev fixture: place a chest + bush onto empty interior cells if available.
-  try {
-    const b = interior_bounds(place);
-    const chest_x = clamp_int(b.min_x + 1, b.min_x, b.max_x);
-    const chest_y = clamp_int(b.min_y + 1, b.min_y, b.max_y);
-    if (!get_tile(tiles, chest_x, chest_y)) {
-      set_tile(tiles, chest_x, chest_y, create_tile_from_definition("chest", { contents: [] }));
-      changed = true;
-    }
-
-    const bush_x = clamp_int(b.min_x + 2, b.min_x, b.max_x);
-    const bush_y = clamp_int(b.min_y + 1, b.min_y, b.max_y);
-    if (!get_tile(tiles, bush_x, bush_y)) {
-      set_tile(tiles, bush_x, bush_y, create_tile_from_definition("foliage_snowberry_bush", { last_tick_processed: 0 }));
-      changed = true;
-    }
-
-    // Dev fixture: small interior stone segment for LOS testing.
-    // Only fill empty cells so real authored places can override.
-    const wall_x = clamp_int(b.min_x + 6, b.min_x, b.max_x);
-    const wall_y0 = clamp_int(b.min_y + 3, b.min_y, b.max_y);
-    const wall_y1 = clamp_int(b.min_y + 6, b.min_y, b.max_y);
-    for (let y = wall_y0; y <= wall_y1; y++) {
-      if (!get_tile(tiles, wall_x, y)) {
-        set_tile(tiles, wall_x, y, create_tile_from_definition("tile_stone_brick"));
+  // Dev fixture: place a chest + bush + small interior stone segment for LOS testing.
+  // Test room only.
+  if (is_test_room) {
+    try {
+      const b = interior_bounds(place);
+      const chest_x = clamp_int(b.min_x + 1, b.min_x, b.max_x);
+      const chest_y = clamp_int(b.min_y + 1, b.min_y, b.max_y);
+      if (!get_tile(tiles, chest_x, chest_y)) {
+        set_tile(tiles, chest_x, chest_y, create_tile_from_definition("chest", { contents: [] }));
         changed = true;
       }
+
+      const bush_x = clamp_int(b.min_x + 2, b.min_x, b.max_x);
+      const bush_y = clamp_int(b.min_y + 1, b.min_y, b.max_y);
+      if (!get_tile(tiles, bush_x, bush_y)) {
+        set_tile(tiles, bush_x, bush_y, create_tile_from_definition("foliage_snowberry_bush", { last_tick_processed: 0 }));
+        changed = true;
+      }
+
+      const wall_x = clamp_int(b.min_x + 6, b.min_x, b.max_x);
+      const wall_y0 = clamp_int(b.min_y + 3, b.min_y, b.max_y);
+      const wall_y1 = clamp_int(b.min_y + 6, b.min_y, b.max_y);
+      for (let y = wall_y0; y <= wall_y1; y++) {
+        if (!get_tile(tiles, wall_x, y)) {
+          set_tile(tiles, wall_x, y, create_tile_from_definition("tile_stone_brick"));
+          changed = true;
+        }
+      }
+    } catch {
+      // ignore
     }
-  } catch {
-    // ignore
   }
 
-  // Keep default entry inside interior bounds when possible.
-  const b = interior_bounds(place);
+  // Keep default entry in-bounds; for test room, keep it inside the interior.
+  const b = is_test_room ? interior_bounds(place) : { min_x: 0, max_x: Math.max(0, w - 1), min_y: 0, max_y: Math.max(0, h - 1) };
   const ex = clamp_int(place.tile_grid.default_entry.x, b.min_x, b.max_x);
   const ey = clamp_int(place.tile_grid.default_entry.y, b.min_y, b.max_y);
   if (ex !== place.tile_grid.default_entry.x || ey !== place.tile_grid.default_entry.y) {
@@ -273,6 +279,8 @@ export function ensure_place_tiles(place: Place): { changed: boolean } {
 }
 
 export function ensure_place_entities_not_on_walls(place: Place): { changed: boolean } {
+  // Only relevant for the test room which has a perimeter wall ring.
+  if (place.id !== "eden_crossroads_tavern") return { changed: false };
   const b = interior_bounds(place);
   let changed = false;
   if (place.tile_grid.width <= 2 || place.tile_grid.height <= 2) return { changed: false };

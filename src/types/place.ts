@@ -177,6 +177,9 @@ export type PlaceContents = {
 export type PlaceNPC = {
   npc_ref: string;               // "npc.gunther"
   tile_position: TilePosition;
+  // 3Dification: vertical position in place/world space.
+  // For now this is sourced from npc.location.elevation when available.
+  elevation?: number;
   status: "present" | "moving" | "busy" | "sleeping";
   activity: string;              // "sitting at the bar", "whittling by the fire"
   tags?: Array<{ name: string; mag: number; meta: string[] }>;  // Optional tags for visual effects
@@ -189,6 +192,9 @@ export type PlaceNPC = {
 export type PlaceActor = {
   actor_ref: string;             // "actor.henry_actor"
   tile_position: TilePosition;
+  // 3Dification: vertical position in place/world space.
+  // For now this is sourced from actor.location.elevation when available.
+  elevation?: number;
   status: "present" | "moving" | "busy";
   tags?: Array<{ name: string; mag: number; meta: string[] }>;  // Optional tags for visual effects
 };
@@ -199,6 +205,8 @@ export type PlaceActor = {
 export type PlaceItem = {
   item_ref: string;              // "item.iron_sword"
   tile_position: TilePosition;
+  // Optional absolute world-z for 3dification rendering.
+  elevation?: number;
   quantity: number;
 };
 

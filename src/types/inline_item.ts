@@ -11,6 +11,9 @@ export interface InlineItem {
     id: string;                    // Unique instance ID (UUID)
     def_id: string;                // Reference to item definition
     qty: number;                   // Stack quantity (default: 1)
+    // Optional absolute world-z for inline ground rendering.
+    // If omitted, callers should treat it as the place's structure plane.
+    elevation?: number;
     // Tags and all other properties are resolved from the item database.
     // Instance stores only deltas (remove+add) for tag mutations.
     tag_add?: TagInstance[];

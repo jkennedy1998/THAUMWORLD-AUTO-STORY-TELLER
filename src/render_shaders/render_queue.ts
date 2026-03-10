@@ -135,8 +135,14 @@ export function draw_render_queue(canvas: CanvasLike, queue: readonly RenderRequ
                     const tint = (r as any).cell as Cell;
                     const existing = canvas.get?.(r.x, r.y);
                     if (existing) {
+                        // Do not tint characters (keeps entities readable).
+                        if (typeof existing.render_index === 'number' && existing.render_index >= 4) {
+                            continue;
+                        }
+                        const fallback_char = (typeof tint.char === 'string' && tint.char.length > 0) ? tint.char : existing.char;
+                        const next_char = (existing.char === ' ' || existing.char === '') ? fallback_char : existing.char;
                         canvas.set(r.x, r.y, {
-                            char: existing.char,
+                            char: next_char,
                             rgb: tint.rgb ?? existing.rgb,
                             style: tint.style ?? existing.style,
                             weight_index: typeof tint.weight_index === 'number' ? tint.weight_index : existing.weight_index,

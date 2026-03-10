@@ -500,16 +500,20 @@ export function log_sense_broadcast(
 
   // Renderer-only ASCII visualization (safe no-op in Node/tests).
   if (typeof window !== "undefined") {
-    void import("../mono_ui/vision_debugger.js")
-      .then(mod => {
-        const origin = { x: location.x, y: location.y };
-        for (const b of profile.broadcasts) {
-          mod.spawn_sense_broadcast_particles(origin, b.sense as SenseType, b.range_tiles);
-        }
-      })
-      .catch(() => {
-        // Ignore - mono_ui may not be available in this runtime.
-      });
+    try {
+      for (const b of profile.broadcasts) {
+        window.dispatchEvent(new CustomEvent('thaumworld_ui_sense_broadcast', {
+          detail: {
+            source_ref: entity_ref,
+            origin: { x: location.x, y: location.y, z: NaN },
+            sense: b.sense,
+            range: b.range_tiles,
+          }
+        }));
+      }
+    } catch {
+      // Ignore - UI may not be present in this runtime.
+    }
   }
 }
 

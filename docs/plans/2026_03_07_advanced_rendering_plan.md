@@ -60,3 +60,9 @@ Legend:
 ### 7) UX / Animation Guidelines
 
 - [ ] Write compact guidelines for subtle animations (global fields, low frequency, readability-first)
+
+### 8) Place DOM Layer Renderer Upgrades (Deprioritized From 3Dification)
+
+- [ ] Incremental world draw into offscreen canvases (avoid rebuilding full render queues each frame when unchanged)
+- [ ] Dirty-region tracking for place updates (tiles/items/entities/particles) with deterministic invalidation
+- [ ] Performance harness for place rendering (frame-time logs + simple stress scenes)

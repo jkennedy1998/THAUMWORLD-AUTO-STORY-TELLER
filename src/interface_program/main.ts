@@ -226,6 +226,185 @@ function resolve_inline_item_payload_for_api(item_any: any): {
     return { id, def_id, qty, name, unit_weight, display_char, display_color, tags };
 }
 
+function get_place_base_z(place_any: any): number {
+    const z = Number(place_any?.coordinates?.elevation);
+    return (typeof z === 'number' && Number.isFinite(z)) ? Math.floor(z) : 0;
+}
+
+function get_place_tile_at_world_z(place_any: any, tx: number, ty: number, wz: number): any | null {
+    const base_z = get_place_base_z(place_any);
+    const z = Math.floor(Number(wz));
+    if (!Number.isFinite(z)) return null;
+    if (z === base_z) {
+        return place_any?.tiles?.cells?.[ty]?.[tx] ?? null;
+    }
+    if (z === base_z - 1) {
+        return place_any?.tiles_z0?.cells?.[ty]?.[tx] ?? null;
+    }
+    return null;
+}
+
+function place_tile_has_effective_tag(place_any: any, tx: number, ty: number, wz: number, tag: string): boolean {
+    const tile = get_place_tile_at_world_z(place_any, tx, ty, wz);
+    if (!tile) return false;
+    const r = resolve_place_tile(String(tile.kind ?? ''), tile);
+    const tags = r?.effective_tags ?? (Array.isArray(tile.tags) ? tile.tags : []);
+    return Array.isArray(tags) && tags.some((t: any) => String(t?.name ?? '').toUpperCase() === String(tag ?? '').toUpperCase());
+}
+
+function normalize_voxel_position_key(place_any: any, position_key: string): { key: string; x: number; y: number; z: number } | null {
+    const parts = String(position_key ?? '').split('_');
+    if (parts.length < 2) return null;
+    const x = parseInt(parts[0] ?? '', 10);
+    const y = parseInt(parts[1] ?? '', 10);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    const base_z = get_place_base_z(place_any);
+    const z_raw = parts.length >= 3 ? parseInt(parts[2] ?? '', 10) : NaN;
+    const z = Number.isFinite(z_raw) ? Math.floor(z_raw) : base_z;
+    return { key: `${x}_${y}_${z}`, x, y, z };
+}
+
+function get_actor_world_z(actor_any: any, fallback_z: number): number {
+    const z = Number(actor_any?.location?.elevation);
+    return (typeof z === 'number' && Number.isFinite(z)) ? Math.floor(z) : fallback_z;
+}
+
+function within_range_xy_z(
+    actor_pos: { x: number; y: number },
+    actor_z: number,
+    target_x: number,
+    target_y: number,
+    target_z: number,
+    max_range_xy: number,
+    max_range_z: number,
+): boolean {
+    const dx = Math.floor(target_x) - Math.floor(actor_pos.x);
+    const dy = Math.floor(target_y) - Math.floor(actor_pos.y);
+    const dist_xy = Math.sqrt(dx * dx + dy * dy);
+    const dz = Math.abs(Math.floor(Number(target_z)) - Math.floor(Number(actor_z)));
+    return dist_xy <= max_range_xy && dz <= max_range_z;
+}
+
+function try_deposit_into_tile_container(place_any: any, place_id: string, tx: number, ty: number, item: any): { ok: true } | { ok: false; error: string } {
+    const tile = place_any?.tiles?.cells?.[ty]?.[tx];
+    if (!tile) return { ok: false, error: 'tile_not_found' };
+
+    const tags = (resolve_place_tile(String(tile.kind ?? ''), tile) ?? null)?.effective_tags ?? (Array.isArray(tile.tags) ? tile.tags : []);
+    const is_container = Array.isArray(tags) && tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER') || Array.isArray(tile.contents);
+    if (!is_container) return { ok: false, error: 'not_a_container' };
+
+    if (!Array.isArray(tile.contents)) tile.contents = [];
+    if (!tile.container_capacity || typeof tile.container_capacity.max_slots !== 'number' || tile.container_capacity.max_slots < 1) {
+        tile.container_capacity = { max_slots: Math.max(12, tile.contents.length + 1) };
+    }
+    const max_slots = Math.floor(tile.container_capacity.max_slots);
+    if (tile.contents.length >= max_slots) return { ok: false, error: 'container_full' };
+
+    // Ensure top-level entry and let normalizer assign grid.
+    delete (item as any).grid_x;
+    delete (item as any).grid_y;
+    delete (item as any).elevation;
+    tile.contents.push(item);
+
+    const normalized = normalize_inline_container_grid(tile.contents, max_slots, `place_tile_container:${place_id}:${tx},${ty}`);
+    const coords_by_id = new Map<string, { x: number; y: number }>();
+    for (const e of normalized) {
+        coords_by_id.set(String(e.item?.id ?? ''), { x: e.grid_x, y: e.grid_y });
+    }
+    for (const it of tile.contents) {
+        const id = String(it?.id ?? '');
+        const c = coords_by_id.get(id);
+        if (!c) continue;
+        (it as any).grid_x = c.x;
+        (it as any).grid_y = c.y;
+    }
+    return { ok: true };
+}
+
+function try_deposit_into_ground_container_item(place_any: any, place_id: string, tx: number, ty: number, wz: number, item: any): { ok: true } | { ok: false; error: string } {
+    const key = `${tx}_${ty}_${Math.floor(Number(wz))}`;
+    const list: any[] = Array.isArray(place_any?.ground?.scattered?.[key]) ? place_any.ground.scattered[key] : [];
+    if (list.length < 1) return { ok: false, error: 'no_ground_items' };
+
+    const base_z = get_place_base_z(place_any);
+    const target_z = Math.floor(Number(wz));
+
+    // Find the first container-item at the same world-z.
+    for (const it of list) {
+        const iz = (typeof (it as any)?.elevation === 'number' && Number.isFinite((it as any).elevation)) ? Math.floor((it as any).elevation) : base_z;
+        if (!Number.isFinite(target_z) || iz !== target_z) continue;
+
+        const payload = resolve_inline_item_payload_for_api(it);
+        const is_container = Array.isArray(payload.tags) && payload.tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER');
+        if (!is_container) continue;
+
+        if (!Array.isArray((it as any).contents)) (it as any).contents = [];
+        const cap_res = resolve_inline_container_capacity(it, (it as any).contents.length, `ground_container_item:${place_id}:${String(it?.id ?? '')}`);
+        if ((it as any).contents.length >= cap_res.max_slots) return { ok: false, error: 'container_full' };
+
+        delete (item as any).grid_x;
+        delete (item as any).grid_y;
+        delete (item as any).elevation;
+        (it as any).contents.push(item);
+
+        const normalized = normalize_inline_container_grid((it as any).contents, cap_res.max_slots, `ground_container_item:${place_id}:${String(it?.id ?? '')}`);
+        const coords_by_id = new Map<string, { x: number; y: number }>();
+        for (const e of normalized) coords_by_id.set(String(e.item?.id ?? ''), { x: e.grid_x, y: e.grid_y });
+        for (const child of (it as any).contents) {
+            const id = String(child?.id ?? '');
+            const c = coords_by_id.get(id);
+            if (!c) continue;
+            (child as any).grid_x = c.x;
+            (child as any).grid_y = c.y;
+        }
+
+        return { ok: true };
+    }
+
+    return { ok: false, error: 'no_container_item' };
+}
+
+function place_item_into_place_legal(place_any: any, place_id: string, tx: number, ty: number, target_wz: number, item: any): { ok: true; placed: 'tile_container' | 'container_item' | 'ground' } | { ok: false; error: string } {
+    const base_z = get_place_base_z(place_any);
+    const z = Number.isFinite(Number(target_wz)) ? Math.floor(Number(target_wz)) : base_z;
+
+    // 1) Tile container present on this tile: always prefer depositing into it.
+    // (Independent of target z; "container on this tile" wins over world placement.)
+    {
+        const tile = place_any?.tiles?.cells?.[ty]?.[tx];
+        if (tile) {
+            const tags = (resolve_place_tile(String(tile.kind ?? ''), tile) ?? null)?.effective_tags ?? (Array.isArray(tile.tags) ? tile.tags : []);
+            const is_container = Array.isArray(tags) && tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER') || Array.isArray(tile.contents);
+            if (is_container) {
+                const dep = try_deposit_into_tile_container(place_any, place_id, tx, ty, item);
+                if (!dep.ok) return { ok: false, error: dep.error };
+                return { ok: true, placed: 'tile_container' };
+            }
+        }
+    }
+
+    // 1b) Ground container-item at this voxel.
+    {
+        const dep = try_deposit_into_ground_container_item(place_any, place_id, tx, ty, z, item);
+        if (dep.ok) return { ok: true, placed: 'container_item' };
+        // Ignore "no container" errors and fall through; only full should fail hard.
+        if (dep.error === 'container_full') return { ok: false, error: dep.error };
+    }
+
+    // 2) If occupied, reject placement.
+    if (place_tile_has_effective_tag(place_any, tx, ty, z, 'OCCUPIES')) {
+        return { ok: false, error: 'target_occupied' };
+    }
+
+    // 3) Place into ground at this voxel.
+    delete (item as any).grid_x;
+    delete (item as any).grid_y;
+    (item as any).elevation = z;
+    const add_res = add_item_to_ground(place_any, tx, ty, item);
+    if (!add_res.ok) return { ok: false, error: add_res.error };
+    return { ok: true, placed: 'ground' };
+}
+
 function expand_body_slot_meta(meta: unknown): string[] {
     const m = String(meta ?? '').trim();
     if (!m) return [];
@@ -1902,6 +2081,9 @@ function start_http_server(log_path: string): void {
                     place.contents.npcs_present.push({
                         npc_ref,
                         tile_position: clamped_location,
+                        elevation: typeof location?.elevation === 'number' && Number.isFinite(location.elevation)
+                            ? location.elevation
+                            : 0,
                         status: npc_status,
                         activity: "standing here",
                         tags: (npc_res.npc as any).tags || [],
@@ -1919,7 +2101,8 @@ function start_http_server(log_path: string): void {
                     }
 
                     const actor = actor_res.actor;
-                    const location = (actor.location as { tile?: { x: number; y: number } })?.tile;
+                    const actor_loc_any = (actor.location as any) || {};
+                    const location = (actor_loc_any as { tile?: { x: number; y: number } })?.tile;
                     if (!location) {
                         debug_warn("API", `Actor ${actor_id} has no tile position`, { actor_ref });
                         continue;
@@ -1947,6 +2130,9 @@ function start_http_server(log_path: string): void {
                     place.contents.actors_present.push({
                         actor_ref,
                         tile_position: clamped_location,
+                        elevation: (typeof actor_loc_any?.elevation === 'number' && Number.isFinite(actor_loc_any.elevation))
+                            ? actor_loc_any.elevation
+                            : 0,
                         status: "present",
                         tags: (actor as any).tags || []
                     });
@@ -1965,15 +2151,21 @@ function start_http_server(log_path: string): void {
                 // Sync from scattered items (position-specific)
                 if (place.ground.scattered) {
                     for (const [position_key, items] of Object.entries(place.ground.scattered)) {
-                        const [x_str, y_str] = position_key.split('_');
+                        const [x_str, y_str, z_str] = String(position_key).split('_');
                         const x = parseInt(x_str!, 10);
                         const y = parseInt(y_str!, 10);
+                        const key_z = parseInt(z_str ?? '', 10);
+                        const base_z = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
+                        const fallback_z = Number.isFinite(key_z) ? Math.floor(key_z) : base_z;
                         
                         for (const item of items) {
                             const place_item: PlaceItem = {
                                 item_ref: item.id,
                                 quantity: item.qty,
-                                tile_position: { x, y }
+                                tile_position: { x, y },
+                                elevation: (typeof (item as any)?.elevation === 'number' && Number.isFinite((item as any).elevation))
+                                    ? Math.floor((item as any).elevation)
+                                        : fallback_z
                             };
                             place.contents.items_on_ground.push(place_item);
                             synced_count++;
@@ -1982,18 +2174,37 @@ function start_http_server(log_path: string): void {
                 }
                 
                 // Sync from main ground (items without specific position)
-                if (place.ground.main) {
-                    const default_entry = place.tile_grid?.default_entry || { x: 20, y: 20 };
-                    for (const item of place.ground.main) {
-                        const place_item: PlaceItem = {
-                            item_ref: item.id,
-                            quantity: item.qty,
-                            tile_position: { ...default_entry }
-                        };
-                        place.contents.items_on_ground.push(place_item);
-                        synced_count++;
+                    if (place.ground.main) {
+                        const default_entry = place.tile_grid?.default_entry || { x: 20, y: 20 };
+                        for (const item of place.ground.main) {
+                            const place_item: PlaceItem = {
+                                item_ref: item.id,
+                                quantity: item.qty,
+                                tile_position: { ...default_entry },
+                                elevation: (typeof (item as any)?.elevation === 'number' && Number.isFinite((item as any).elevation))
+                                    ? Math.floor((item as any).elevation)
+                                    : Math.floor(Number((place as any)?.coordinates?.elevation ?? 0))
+                            };
+                            place.contents.items_on_ground.push(place_item);
+                            synced_count++;
+                        }
                     }
-                }
+
+                    // Devlog test: 3dification wall-top item exists in tavern.
+                    try {
+                        if (place_id === 'eden_crossroads_tavern') {
+                            const base_z = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
+                            const want_z = base_z + 1;
+                            const any_wall_top = (place.contents.items_on_ground ?? []).some((it: any) => Math.floor(Number(it?.elevation)) === want_z);
+                            if (any_wall_top) {
+                                debug_log('3DIFICATION_TEST', `PASS wall-top ground item present (place=${place_id} z=${want_z})`);
+                            } else {
+                                debug_warn('3DIFICATION_TEST', `FAIL no wall-top ground item present (place=${place_id} z=${want_z})`);
+                            }
+                        }
+                    } catch {
+                        // ignore
+                    }
                 
                 if (synced_count > 0) {
                     debug_log("API", `/api/place: Synced ${synced_count} ground items from inline ground storage`, {
@@ -3940,6 +4151,9 @@ function start_http_server(log_path: string): void {
 
                     const actor_any = actor_result.actor as any;
                     const actor_pos = actor_any.location?.tile;
+                    const actor_z = (typeof actor_any.location?.elevation === 'number' && Number.isFinite(actor_any.location.elevation))
+                        ? Math.floor(actor_any.location.elevation)
+                        : 0;
 
                     const all_items: Array<{ item: InlineItem; position?: { x: number; y: number }; position_key?: string }> = get_all_ground_items(place_result.place);
                     const found = all_items.find(({ item }: { item: InlineItem }) => item.id === item_id);
@@ -3949,14 +4163,32 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    // Distance validation (touch range)
+                    // Distance validation.
+                    // - XY uses the same "throw" radius as PlaceModule (lets you drag a ground item into your inventory
+                    //   without requiring strict touch adjacency).
+                    // - Z is still limited to 1 for now ("level above/below").
                     if (actor_pos && found.position) {
-                        const dx = found.position.x - actor_pos.x;
-                        const dy = found.position.y - actor_pos.y;
-                        const dist = Math.sqrt(dx * dx + dy * dy);
-                        if (dist > 1.5) {
+                        const place_any = place_result.place as any;
+                        const base_z = get_place_base_z(place_any);
+                        const item_z = (typeof (found.item as any)?.elevation === 'number' && Number.isFinite((found.item as any).elevation))
+                            ? Math.floor((found.item as any).elevation)
+                            : base_z;
+
+                        const raw_dx = found.position.x - actor_pos.x;
+                        const raw_dy = found.position.y - actor_pos.y;
+                        const dist_xy = Math.sqrt(raw_dx * raw_dx + raw_dy * raw_dy);
+                        const dz = Math.abs(item_z - actor_z);
+
+                        const max_range_xy = 5;
+                        const max_range_z = 1;
+                        if (dist_xy > max_range_xy || dz > max_range_z) {
+                            debug_log('API', `[RANGE] pickup_to too_far actor=${actor_id} actor_pos=(${actor_pos.x},${actor_pos.y},${actor_z}) item=${item_id} item_pos=(${found.position.x},${found.position.y},${item_z}) dist_xy=${dist_xy.toFixed(2)} dxy=(${raw_dx},${raw_dy}) dz=${dz} max_xy=${max_range_xy} max_z=${max_range_z}`);
                             res.writeHead(400, { "Content-Type": "application/json" });
-                            res.end(JSON.stringify({ ok: false, error: "too_far" }));
+                            res.end(JSON.stringify({
+                                ok: false,
+                                error: "too_far",
+                                detail: { max_range_xy, max_range_z, dist_xy, dx: raw_dx, dy: raw_dy, dz, actor_z, item_z },
+                            }));
                             return;
                         }
                     }
@@ -4169,7 +4401,7 @@ function start_http_server(log_path: string): void {
             req.on("end", async () => {
                 try {
                     const data = JSON.parse(body);
-                    const { actor_id, place_id, item_id, x, y } = data;
+                    const { actor_id, place_id, item_id, x, y, elevation } = data;
 
                     if (!actor_id || !place_id || !item_id) {
                         res.writeHead(400, { "Content-Type": "application/json" });
@@ -4212,14 +4444,23 @@ function start_http_server(log_path: string): void {
                     const drop_x = x ?? actor.location?.tile?.x ?? 0;
                     const drop_y = y ?? actor.location?.tile?.y ?? 0;
 
-                    // Add to ground
-                    const add_result = add_item_to_ground(place_result.place, drop_x, drop_y, removed.item);
-                    if (!add_result.ok) {
+                    const place_any = place_result.place as any;
+                    const base_z = get_place_base_z(place_any);
+                    const actor_z = (typeof actor?.location?.elevation === 'number' && Number.isFinite(actor.location.elevation))
+                        ? Math.floor(actor.location.elevation)
+                        : base_z;
+                    const target_wz = (typeof elevation === 'number' && Number.isFinite(elevation))
+                        ? Math.floor(elevation)
+                        : actor_z;
+
+                    // Place into world with shared legality: container -> occupied -> ground.
+                    const placed = place_item_into_place_legal(place_any, place_id, Math.floor(drop_x), Math.floor(drop_y), target_wz, removed.item);
+                    if (!placed.ok) {
                         // Put item back on actor (best-effort)
                         add_item_to_body_slot(actor_result.actor, 'hand_right', 'tool', removed.item);
                         save_actor_with_items(data_slot_number, actor_id, actor_result.actor);
                         res.writeHead(500, { "Content-Type": "application/json" });
-                        res.end(JSON.stringify({ ok: false, error: add_result.error }));
+                        res.end(JSON.stringify({ ok: false, error: placed.error }));
                         return;
                     }
 
@@ -4243,12 +4484,14 @@ function start_http_server(log_path: string): void {
                     }
 
                     const dropped_name = (resolve_inline_item(String(removed.item.def_id ?? ''), removed.item) ?? null)?.name ?? String(removed.item.def_id ?? 'item');
-                    debug_log("API", `Dropped ${dropped_name} to ground at (${drop_x}, ${drop_y})`);
+                    debug_log("API", `Dropped ${dropped_name} at (${drop_x}, ${drop_y}, z=${target_wz}) placed=${placed.placed}`);
                     res.writeHead(200, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ 
                         ok: true, 
                         item: removed.item,
-                        position: { x: drop_x, y: drop_y }
+                        position: { x: drop_x, y: drop_y },
+                        elevation: target_wz,
+                        placed: placed.placed,
                     }));
                 } catch (err) {
                     debug_error("API", "/api/place/items/drop error", err);
@@ -4344,14 +4587,16 @@ function start_http_server(log_path: string): void {
                     const max = typeof max_slots === 'number' && max_slots > 0 ? max_slots : Math.max(1, container_item.contents.length + 1);
                     const { cols } = calculate_grid_dimensions(max);
 
-                    // Distance validation (touch range)
+                    // Distance validation (touch range) - 3D.
                     const actor_any = actor_result.actor as any;
                     const actor_pos = actor_any.location?.tile;
                     if (actor_pos && found.position) {
-                        const dx = found.position.x - actor_pos.x;
-                        const dy = found.position.y - actor_pos.y;
-                        const dist = Math.sqrt(dx * dx + dy * dy);
-                        if (dist > 1.5) {
+                        const base_z = get_place_base_z(place_result.place as any);
+                        const actor_z = get_actor_world_z(actor_any, base_z);
+                        const container_z = (typeof (found.item as any)?.elevation === 'number' && Number.isFinite((found.item as any).elevation))
+                            ? Math.floor((found.item as any).elevation)
+                            : base_z;
+                        if (!within_range_xy_z(actor_pos, actor_z, found.position.x, found.position.y, container_z, 1.5, 1)) {
                             res.writeHead(400, { "Content-Type": "application/json" });
                             res.end(JSON.stringify({ ok: false, error: "too_far" }));
                             return;
@@ -4644,14 +4889,14 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    // Distance validation (touch range)
+                    // Distance validation (touch range) - 3D.
                     const actor_any = actor_result.actor as any;
                     const actor_pos = actor_any.location?.tile;
                     if (actor_pos) {
-                        const dx = tx - actor_pos.x;
-                        const dy = ty - actor_pos.y;
-                        const dist = Math.sqrt(dx * dx + dy * dy);
-                        if (dist > 1.5) {
+                        const base_z = get_place_base_z(place_any);
+                        const actor_z = get_actor_world_z(actor_any, base_z);
+                        const tile_z = base_z;
+                        if (!within_range_xy_z(actor_pos, actor_z, tx, ty, tile_z, 1.5, 1)) {
                             res.writeHead(400, { "Content-Type": "application/json" });
                             res.end(JSON.stringify({ ok: false, error: "too_far" }));
                             return;
@@ -4761,14 +5006,14 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    // Distance validation (touch range)
+                    // Distance validation (touch range) - 3D.
                     const actor_any = actor_result.actor as any;
                     const actor_pos = actor_any.location?.tile;
                     if (actor_pos) {
-                        const dx = tx - actor_pos.x;
-                        const dy = ty - actor_pos.y;
-                        const dist = Math.sqrt(dx * dx + dy * dy);
-                        if (dist > 1.5) {
+                        const base_z = get_place_base_z(place_any);
+                        const actor_z = get_actor_world_z(actor_any, base_z);
+                        const tile_z = base_z;
+                        if (!within_range_xy_z(actor_pos, actor_z, tx, ty, tile_z, 1.5, 1)) {
                             res.writeHead(400, { "Content-Type": "application/json" });
                             res.end(JSON.stringify({ ok: false, error: "too_far" }));
                             return;
@@ -4971,7 +5216,7 @@ function start_http_server(log_path: string): void {
             req.on("end", async () => {
                 try {
                     const data = JSON.parse(body);
-                    const { actor_id, place_id, x, y, item_id, to_x, to_y } = data;
+                    const { actor_id, place_id, x, y, item_id, to_x, to_y, to_elevation } = data;
                     if (!actor_id || !place_id || typeof x !== 'number' || typeof y !== 'number' || !item_id || typeof to_x !== 'number' || typeof to_y !== 'number') {
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
@@ -5006,14 +5251,14 @@ function start_http_server(log_path: string): void {
                     }
                     if (!Array.isArray(tile.contents)) tile.contents = [];
 
-                    // Distance validation (touch range)
+                    // Distance validation (touch range) - 3D.
                     const actor_any = actor_result.actor as any;
                     const actor_pos = actor_any.location?.tile;
                     if (actor_pos) {
-                        const dx = tx - actor_pos.x;
-                        const dy = ty - actor_pos.y;
-                        const dist = Math.sqrt(dx * dx + dy * dy);
-                        if (dist > 1.5) {
+                        const base_z = get_place_base_z(place_any);
+                        const actor_z = get_actor_world_z(actor_any, base_z);
+                        const tile_z = base_z;
+                        if (!within_range_xy_z(actor_pos, actor_z, tx, ty, tile_z, 1.5, 1)) {
                             res.writeHead(400, { "Content-Type": "application/json" });
                             res.end(JSON.stringify({ ok: false, error: "too_far" }));
                             return;
@@ -5033,11 +5278,24 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    // Drop to ground
-                    add_item_to_ground(place_any, Math.floor(to_x), Math.floor(to_y), removed);
+                    const base_z = get_place_base_z(place_any);
+                    const target_wz = (typeof to_elevation === 'number' && Number.isFinite(to_elevation))
+                        ? Math.floor(to_elevation)
+                        : base_z;
+
+                    // Place into world with shared legality.
+                    const placed = place_item_into_place_legal(place_any, place_id, Math.floor(to_x), Math.floor(to_y), target_wz, removed);
+                    if (!placed.ok) {
+                        // Roll back into the container best-effort.
+                        tile.contents.push(removed);
+                        save_place(data_slot_number, place_any);
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: placed.error }));
+                        return;
+                    }
                     save_place(data_slot_number, place_any);
                     res.writeHead(200, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ ok: true }));
+                    res.end(JSON.stringify({ ok: true, placed: placed.placed }));
                 } catch (err) {
                     debug_error("API", "/api/place/items/spill_from_tile_container error", err);
                     res.writeHead(500, { "Content-Type": "application/json" });
@@ -5060,7 +5318,7 @@ function start_http_server(log_path: string): void {
             req.on("end", async () => {
                 try {
                     const data = JSON.parse(body);
-                    const { actor_id, place_id, from_x, from_y, item_id, x, y, target_grid_x, target_grid_y } = data;
+                    const { actor_id, place_id, from_x, from_y, from_elevation, item_id, x, y, target_grid_x, target_grid_y } = data;
                     if (!actor_id || !place_id || typeof from_x !== 'number' || typeof from_y !== 'number' || !item_id || typeof x !== 'number' || typeof y !== 'number') {
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
@@ -5094,14 +5352,14 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    // Distance validation (touch range)
+                    // Distance validation (touch range) - 3D.
                     const actor_any = actor_result.actor as any;
                     const actor_pos = actor_any.location?.tile;
                     if (actor_pos) {
-                        const dx = tx - actor_pos.x;
-                        const dy = ty - actor_pos.y;
-                        const dist = Math.sqrt(dx * dx + dy * dy);
-                        if (dist > 1.5) {
+                        const base_z = get_place_base_z(place_any);
+                        const actor_z = get_actor_world_z(actor_any, base_z);
+                        const tile_z = base_z;
+                        if (!within_range_xy_z(actor_pos, actor_z, tx, ty, tile_z, 1.5, 1)) {
                             res.writeHead(400, { "Content-Type": "application/json" });
                             res.end(JSON.stringify({ ok: false, error: "too_far" }));
                             return;
@@ -5134,6 +5392,17 @@ function start_http_server(log_path: string): void {
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: "not_at_source_position" }));
                         return;
+                    }
+
+                    if (typeof from_elevation === 'number' && Number.isFinite(from_elevation)) {
+                        const want = Math.floor(from_elevation);
+                        const got = Math.floor(Number((removed.from_position as any).z));
+                        if (Number.isFinite(got) && got !== want) {
+                            add_item_to_ground(place_any, removed.from_position.x, removed.from_position.y, removed.item);
+                            res.writeHead(400, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: false, error: "not_at_source_elevation" }));
+                            return;
+                        }
                     }
 
                     // Deposit with legality helper
@@ -5335,14 +5604,14 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    // Distance validation (touch range)
+                    // Distance validation (touch range) - 3D.
                     const actor_any = actor_result.actor as any;
                     const actor_pos = actor_any.location?.tile;
                     if (actor_pos) {
-                        const dx = tx - actor_pos.x;
-                        const dy = ty - actor_pos.y;
-                        const dist = Math.sqrt(dx * dx + dy * dy);
-                        if (dist > 1.5) {
+                        const base_z = get_place_base_z(place_any);
+                        const actor_z = get_actor_world_z(actor_any, base_z);
+                        const tile_z = base_z;
+                        if (!within_range_xy_z(actor_pos, actor_z, tx, ty, tile_z, 1.5, 1)) {
                             res.writeHead(400, { "Content-Type": "application/json" });
                             res.end(JSON.stringify({ ok: false, error: "too_far" }));
                             return;
@@ -5480,14 +5749,14 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    // Distance validation (touch range)
+                    // Distance validation (touch range) - 3D.
                     const actor_any = actor_result.actor as any;
                     const actor_pos = actor_any.location?.tile;
                     if (actor_pos) {
-                        const dx = sx - actor_pos.x;
-                        const dy = sy - actor_pos.y;
-                        const dist = Math.sqrt(dx * dx + dy * dy);
-                        if (dist > 1.5) {
+                        const base_z = get_place_base_z(place_any);
+                        const actor_z = get_actor_world_z(actor_any, base_z);
+                        const tile_z = base_z;
+                        if (!within_range_xy_z(actor_pos, actor_z, sx, sy, tile_z, 1.5, 1)) {
                             res.writeHead(400, { "Content-Type": "application/json" });
                             res.end(JSON.stringify({ ok: false, error: "too_far" }));
                             return;
@@ -5622,14 +5891,16 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    // Distance validation (touch range)
+                    // Distance validation (touch range) - 3D.
                     const actor_any = actor_result.actor as any;
                     const actor_pos = actor_any.location?.tile;
                     if (actor_pos && found.position) {
-                        const dx = found.position.x - actor_pos.x;
-                        const dy = found.position.y - actor_pos.y;
-                        const dist = Math.sqrt(dx * dx + dy * dy);
-                        if (dist > 1.5) {
+                        const base_z = get_place_base_z(place_result.place as any);
+                        const actor_z = get_actor_world_z(actor_any, base_z);
+                        const container_z = (typeof (found.item as any)?.elevation === 'number' && Number.isFinite((found.item as any).elevation))
+                            ? Math.floor((found.item as any).elevation)
+                            : base_z;
+                        if (!within_range_xy_z(actor_pos, actor_z, found.position.x, found.position.y, container_z, 1.5, 1)) {
                             res.writeHead(400, { "Content-Type": "application/json" });
                             res.end(JSON.stringify({ ok: false, error: "too_far" }));
                             return;
@@ -5749,14 +6020,16 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    // Distance validation (touch range)
+                    // Distance validation (touch range) - 3D.
                     const actor_any = actor_result.actor as any;
                     const actor_pos = actor_any.location?.tile;
                     if (actor_pos && found.position) {
-                        const dx = found.position.x - actor_pos.x;
-                        const dy = found.position.y - actor_pos.y;
-                        const dist = Math.sqrt(dx * dx + dy * dy);
-                        if (dist > 1.5) {
+                        const base_z = get_place_base_z(place_result.place as any);
+                        const actor_z = get_actor_world_z(actor_any, base_z);
+                        const container_z = (typeof (found.item as any)?.elevation === 'number' && Number.isFinite((found.item as any).elevation))
+                            ? Math.floor((found.item as any).elevation)
+                            : base_z;
+                        if (!within_range_xy_z(actor_pos, actor_z, found.position.x, found.position.y, container_z, 1.5, 1)) {
                             res.writeHead(400, { "Content-Type": "application/json" });
                             res.end(JSON.stringify({ ok: false, error: "too_far" }));
                             return;
@@ -5982,7 +6255,7 @@ function start_http_server(log_path: string): void {
             req.on("end", () => {
                 try {
                     const data = JSON.parse(body);
-                    const { actor_id, place_id, container_item_id, item_id, x, y, action_cost } = data;
+                    const { actor_id, place_id, container_item_id, item_id, x, y, to_elevation, action_cost } = data;
 
                     if (!actor_id || !place_id || !container_item_id || !item_id || typeof x !== 'number' || typeof y !== 'number') {
                         res.writeHead(400, { "Content-Type": "application/json" });
@@ -6014,24 +6287,27 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    // Range check: must be near BOTH the container-item and the drop tile.
+                    // Range check: must be near BOTH the container-item and the drop voxel (3D).
                     const actor_any = actor_result.actor as any;
                     const actor_pos = actor_any.location?.tile;
-                    if (actor_pos && found.position) {
-                        const dx = found.position.x - actor_pos.x;
-                        const dy = found.position.y - actor_pos.y;
-                        const dist = Math.sqrt(dx * dx + dy * dy);
-                        if (dist > 1.5) {
-                            res.writeHead(400, { "Content-Type": "application/json" });
-                            res.end(JSON.stringify({ ok: false, error: "too_far" }));
-                            return;
-                        }
-                    }
                     if (actor_pos) {
-                        const dx = x - actor_pos.x;
-                        const dy = y - actor_pos.y;
-                        const dist = Math.sqrt(dx * dx + dy * dy);
-                        if (dist > 1.5) {
+                        const place_any = place_result.place as any;
+                        const base_z = get_place_base_z(place_any);
+                        const actor_z = get_actor_world_z(actor_any, base_z);
+
+                        if (found.position) {
+                            const container_z = (typeof (found.item as any)?.elevation === 'number' && Number.isFinite((found.item as any).elevation))
+                                ? Math.floor((found.item as any).elevation)
+                                : base_z;
+                            if (!within_range_xy_z(actor_pos, actor_z, found.position.x, found.position.y, container_z, 1.5, 1)) {
+                                res.writeHead(400, { "Content-Type": "application/json" });
+                                res.end(JSON.stringify({ ok: false, error: "too_far" }));
+                                return;
+                            }
+                        }
+
+                        const drop_z = (typeof to_elevation === 'number' && Number.isFinite(to_elevation)) ? Math.floor(to_elevation) : base_z;
+                        if (!within_range_xy_z(actor_pos, actor_z, x, y, drop_z, 1.5, 1)) {
                             res.writeHead(400, { "Content-Type": "application/json" });
                             res.end(JSON.stringify({ ok: false, error: "too_far" }));
                             return;
@@ -6065,12 +6341,18 @@ function start_http_server(log_path: string): void {
                     delete removed.grid_x;
                     delete removed.grid_y;
 
-                    const add_res = add_item_to_ground(place_result.place, x, y, removed);
-                    if (!add_res.ok) {
+                    const place_any = place_result.place as any;
+                    const base_z = get_place_base_z(place_any);
+                    const target_wz = (typeof to_elevation === 'number' && Number.isFinite(to_elevation))
+                        ? Math.floor(to_elevation)
+                        : base_z;
+
+                    const placed = place_item_into_place_legal(place_any, place_id, Math.floor(x), Math.floor(y), target_wz, removed);
+                    if (!placed.ok) {
                         // Best-effort rollback
                         container_item.contents.splice(idx, 0, removed);
                         res.writeHead(500, { "Content-Type": "application/json" });
-                        res.end(JSON.stringify({ ok: false, error: add_res.error }));
+                        res.end(JSON.stringify({ ok: false, error: placed.error }));
                         return;
                     }
 
@@ -6088,7 +6370,7 @@ function start_http_server(log_path: string): void {
                     }
 
                     res.writeHead(200, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ ok: true }));
+                    res.end(JSON.stringify({ ok: true, placed: placed.placed }));
                 } catch (err) {
                     debug_error("API", "/api/place/items/spill_from_container_item error", err);
                     res.writeHead(500, { "Content-Type": "application/json" });
@@ -6154,27 +6436,34 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    // Range check (B): must be near BOTH containers.
+                    // Range check (B): must be near BOTH containers (3D).
                     const actor_any = actor_result.actor as any;
                     const actor_pos = actor_any.location?.tile;
-                    if (actor_pos && from_found.position) {
-                        const dx = from_found.position.x - actor_pos.x;
-                        const dy = from_found.position.y - actor_pos.y;
-                        const dist = Math.sqrt(dx * dx + dy * dy);
-                        if (dist > 1.5) {
-                            res.writeHead(400, { "Content-Type": "application/json" });
-                            res.end(JSON.stringify({ ok: false, error: "too_far" }));
-                            return;
+                    if (actor_pos) {
+                        const place_any = place_result.place as any;
+                        const base_z = get_place_base_z(place_any);
+                        const actor_z = get_actor_world_z(actor_any, base_z);
+
+                        if (from_found.position) {
+                            const from_z = (typeof (from_found.item as any)?.elevation === 'number' && Number.isFinite((from_found.item as any).elevation))
+                                ? Math.floor((from_found.item as any).elevation)
+                                : base_z;
+                            if (!within_range_xy_z(actor_pos, actor_z, from_found.position.x, from_found.position.y, from_z, 1.5, 1)) {
+                                res.writeHead(400, { "Content-Type": "application/json" });
+                                res.end(JSON.stringify({ ok: false, error: "too_far" }));
+                                return;
+                            }
                         }
-                    }
-                    if (actor_pos && to_found.position) {
-                        const dx = to_found.position.x - actor_pos.x;
-                        const dy = to_found.position.y - actor_pos.y;
-                        const dist = Math.sqrt(dx * dx + dy * dy);
-                        if (dist > 1.5) {
-                            res.writeHead(400, { "Content-Type": "application/json" });
-                            res.end(JSON.stringify({ ok: false, error: "too_far" }));
-                            return;
+
+                        if (to_found.position) {
+                            const to_z = (typeof (to_found.item as any)?.elevation === 'number' && Number.isFinite((to_found.item as any).elevation))
+                                ? Math.floor((to_found.item as any).elevation)
+                                : base_z;
+                            if (!within_range_xy_z(actor_pos, actor_z, to_found.position.x, to_found.position.y, to_z, 1.5, 1)) {
+                                res.writeHead(400, { "Content-Type": "application/json" });
+                                res.end(JSON.stringify({ ok: false, error: "too_far" }));
+                                return;
+                            }
                         }
                     }
 
@@ -6324,6 +6613,7 @@ function start_http_server(log_path: string): void {
                         place_id,
                         from_x,
                         from_y,
+                        from_elevation,
                         item_id,
                         container_item_id,
                         target_grid_x,
@@ -6351,7 +6641,7 @@ function start_http_server(log_path: string): void {
                         ? { x: target_grid_x as number, y: target_grid_y as number }
                         : null;
 
-                    debug_log('API', `[INLINE] deposit_ground_to_container_item actor=${actor_id} place=${place_id} from=(${from_x},${from_y}) item=${item_id} to_container_item=${container_item_id} grid=${grid_target ? `${grid_target.x},${grid_target.y}` : '-'} cost=${typeof action_cost === 'string' ? action_cost : '-'}`);
+                    debug_log('API', `[INLINE] deposit_ground_to_container_item actor=${actor_id} place=${place_id} from=(${from_x},${from_y},${typeof from_elevation === 'number' ? Math.floor(from_elevation) : '?'}) item=${item_id} to_container_item=${container_item_id} grid=${grid_target ? `${grid_target.x},${grid_target.y}` : '-'} cost=${typeof action_cost === 'string' ? action_cost : '-'}`);
 
                     const actor_result = load_actor(data_slot_number, actor_id);
                     if (!actor_result.ok) {
@@ -6413,7 +6703,9 @@ function start_http_server(log_path: string): void {
 
                     // Source item must exist on that source tile.
                     const place_any = place_result.place as any;
-                    const from_key = `${from_x}_${from_y}`;
+                    const base_z = get_place_base_z(place_any);
+                    const from_wz = (typeof from_elevation === 'number' && Number.isFinite(from_elevation)) ? Math.floor(from_elevation) : base_z;
+                    const from_key = `${from_x}_${from_y}_${from_wz}`;
                     const from_items: any[] = Array.isArray(place_any.ground?.scattered?.[from_key]) ? place_any.ground.scattered[from_key] : [];
                     const src_idx = from_items.findIndex((it: any) => String(it?.id ?? '') === String(item_id));
                     if (src_idx < 0) {
@@ -6584,15 +6876,18 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    const [xs, ys] = String(position_key).split('_');
-                    const pile_x = parseInt(xs || '0', 10);
-                    const pile_y = parseInt(ys || '0', 10);
+                    const place_any0 = place_result.place as any;
+                    const norm0 = normalize_voxel_position_key(place_any0, String(position_key));
+                    const pile_x = norm0 ? norm0.x : parseInt(String(position_key).split('_')[0] || '0', 10);
+                    const pile_y = norm0 ? norm0.y : parseInt(String(position_key).split('_')[1] || '0', 10);
 
-                    // Range check: cardinal touch range to the pile tile.
+                    // Range check (touch) - 3D.
                     const actor_pos = actor_any.location?.tile;
                     if (actor_pos && typeof actor_pos.x === 'number' && typeof actor_pos.y === 'number') {
-                        const dist = Math.abs(actor_pos.x - pile_x) + Math.abs(actor_pos.y - pile_y);
-                        if (dist > 1) {
+                        const base_z = get_place_base_z(place_any0);
+                        const actor_z = get_actor_world_z(actor_any, base_z);
+                        const pile_z = norm0 ? norm0.z : base_z;
+                        if (!within_range_xy_z(actor_pos, actor_z, pile_x, pile_y, pile_z, 1.5, 1)) {
                             res.writeHead(400, { "Content-Type": "application/json" });
                             res.end(JSON.stringify({ ok: false, error: "too_far" }));
                             return;
@@ -6600,7 +6895,14 @@ function start_http_server(log_path: string): void {
                     }
 
                     const place_any = place_result.place as any;
-                    const list: any[] = Array.isArray(place_any.ground?.scattered?.[position_key]) ? place_any.ground.scattered[position_key] : [];
+                    const norm = normalize_voxel_position_key(place_any, String(position_key));
+                    if (!norm) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "invalid_position_key" }));
+                        return;
+                    }
+
+                    const list: any[] = Array.isArray(place_any.ground?.scattered?.[norm.key]) ? place_any.ground.scattered[norm.key] : [];
                     if (list.length < 2) {
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: "not_a_pile" }));
@@ -6626,7 +6928,7 @@ function start_http_server(log_path: string): void {
                     }
 
                     list.splice(to_index, 0, removed);
-                    place_any.ground.scattered[position_key] = list;
+                    place_any.ground.scattered[norm.key] = list;
 
                     const save_place_result = save_place_with_ground(data_slot_number, actual_place_id, place_result.place);
                     if (!save_place_result.ok) {
@@ -6700,15 +7002,18 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    const [xs, ys] = String(position_key).split('_');
-                    const pile_x = parseInt(xs || '0', 10);
-                    const pile_y = parseInt(ys || '0', 10);
+                    const place_any0 = place_result.place as any;
+                    const norm0 = normalize_voxel_position_key(place_any0, String(position_key));
+                    const pile_x = norm0 ? norm0.x : parseInt(String(position_key).split('_')[0] || '0', 10);
+                    const pile_y = norm0 ? norm0.y : parseInt(String(position_key).split('_')[1] || '0', 10);
 
-                    // Range check: cardinal touch range to the pile tile.
+                    // Range check (touch) - 3D.
                     const actor_pos = actor_any.location?.tile;
                     if (actor_pos && typeof actor_pos.x === 'number' && typeof actor_pos.y === 'number') {
-                        const dist = Math.abs(actor_pos.x - pile_x) + Math.abs(actor_pos.y - pile_y);
-                        if (dist > 1) {
+                        const base_z = get_place_base_z(place_any0);
+                        const actor_z = get_actor_world_z(actor_any, base_z);
+                        const pile_z = norm0 ? norm0.z : base_z;
+                        if (!within_range_xy_z(actor_pos, actor_z, pile_x, pile_y, pile_z, 1.5, 1)) {
                             res.writeHead(400, { "Content-Type": "application/json" });
                             res.end(JSON.stringify({ ok: false, error: "too_far" }));
                             return;
@@ -6716,7 +7021,13 @@ function start_http_server(log_path: string): void {
                     }
 
                     const place_any = place_result.place as any;
-                    const list: any[] = Array.isArray(place_any.ground?.scattered?.[position_key]) ? place_any.ground.scattered[position_key] : [];
+                    const norm = normalize_voxel_position_key(place_any, String(position_key));
+                    if (!norm) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "invalid_position_key" }));
+                        return;
+                    }
+                    const list: any[] = Array.isArray(place_any.ground?.scattered?.[norm.key]) ? place_any.ground.scattered[norm.key] : [];
                     if (list.length < 2) {
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: "not_a_pile" }));
@@ -6725,7 +7036,7 @@ function start_http_server(log_path: string): void {
 
                     // Ensure stable sparse layout for ground piles.
                     const max_slots = Math.max(10, list.length);
-                    const normalized = normalize_inline_container_grid(list, max_slots, `ground_pile:${actual_place_id}:${position_key}`);
+                    const normalized = normalize_inline_container_grid(list, max_slots, `ground_pile:${actual_place_id}:${norm.key}`);
                     const coords_by_id = new Map<string, { x: number; y: number }>();
                     for (const e of normalized) {
                         const id = String(e.item?.id ?? '');
@@ -6802,8 +7113,10 @@ function start_http_server(log_path: string): void {
                         place_id,
                         from_x,
                         from_y,
+                        from_elevation,
                         to_x,
                         to_y,
+                        to_elevation,
                         item_id,
                         mode,
                         action_cost,
@@ -6894,9 +7207,11 @@ function start_http_server(log_path: string): void {
                     if (!place_any.ground) place_any.ground = { main: [], scattered: {} };
                     if (!place_any.ground.scattered) place_any.ground.scattered = {};
 
-                    const from_key = `${from_x}_${from_y}`;
-                    const to_key = `${to_x}_${to_y}`;
+                    const base_z = get_place_base_z(place_any);
+                    const from_wz = (typeof from_elevation === 'number' && Number.isFinite(from_elevation)) ? Math.floor(from_elevation) : base_z;
 
+                    const from_key = `${from_x}_${from_y}_${from_wz}`;
+                    
                     const from_items: any[] = Array.isArray(place_any.ground.scattered[from_key]) ? place_any.ground.scattered[from_key] : [];
                     if (from_items.length === 0) {
                         res.writeHead(404, { "Content-Type": "application/json" });
@@ -6928,14 +7243,28 @@ function start_http_server(log_path: string): void {
                         delete place_any.ground.scattered[from_key];
                     }
 
-                    if (!Array.isArray(place_any.ground.scattered[to_key])) {
-                        place_any.ground.scattered[to_key] = [];
-                    }
+                    // Place into world with shared legality (container -> occupied -> ground).
+                    // If to_elevation is not provided, preserve each item's elevation.
+                    const fixed_wz = (typeof to_elevation === 'number' && Number.isFinite(to_elevation)) ? Math.floor(to_elevation) : null;
+
+                    const placed_items: any[] = [];
                     for (const it of moved) {
-                        // Ensure spilled items are top-level ground entries.
+                        const prev_z = (typeof (it as any)?.elevation === 'number' && Number.isFinite((it as any).elevation)) ? Math.floor((it as any).elevation) : base_z;
+                        const target_wz = fixed_wz !== null ? fixed_wz : prev_z;
                         delete (it as any).grid_x;
                         delete (it as any).grid_y;
-                        (place_any.ground.scattered[to_key] as any[]).push(it);
+                        const placed = place_item_into_place_legal(place_any, actual_place_id, Math.floor(to_x), Math.floor(to_y), target_wz, it);
+                        if (!placed.ok) {
+                            // Roll back: put all moved items back to origin.
+                            if (!Array.isArray(place_any.ground.scattered[from_key])) place_any.ground.scattered[from_key] = [];
+                            for (const r of moved) {
+                                (place_any.ground.scattered[from_key] as any[]).push(r);
+                            }
+                            res.writeHead(400, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: false, error: placed.error }));
+                            return;
+                        }
+                        placed_items.push({ id: String(it?.id ?? ''), placed: placed.placed });
                     }
 
                     const save_place_result = save_place_with_ground(data_slot_number, actual_place_id, place_result.place);
@@ -6946,7 +7275,7 @@ function start_http_server(log_path: string): void {
                     }
 
                     res.writeHead(200, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ ok: true }));
+                    res.end(JSON.stringify({ ok: true, placed: placed_items }));
                 } catch (err) {
                     debug_error('API', '/api/place/items/drag error', err);
                     res.writeHead(500, { "Content-Type": "application/json" });
@@ -7513,6 +7842,10 @@ function start_http_server(log_path: string): void {
                             const name = resolved?.name ?? String(item.def_id ?? '');
                             const weight = resolved?.unit_weight ?? 0;
                             const tags = resolved?.effective_tags ?? [];
+                             const base_z = Math.floor(Number((result.place as any)?.coordinates?.elevation ?? 0)) || 0;
+                             const elevation = (typeof (item as any)?.elevation === 'number' && Number.isFinite((item as any).elevation))
+                                 ? Math.floor((item as any).elevation)
+                                 : base_z;
                             return ({
                              id: item.id,
                              def_id: item.def_id,
@@ -7522,11 +7855,79 @@ function start_http_server(log_path: string): void {
                              display_char,
                              display_color,
                              tags,
+                             elevation,
                              position,
                              position_key
                          });
                          })
                      }));
+
+                 // Devlog test: ensure elevated ground item can be surfaced by the items endpoint.
+                 try {
+                     if (place_id === 'eden_crossroads_tavern') {
+                         const base_z = Math.floor(Number((result.place as any)?.coordinates?.elevation ?? 0)) || 0;
+                         const want_z = base_z + 1;
+                         const any_wall_top = items.some(({ item }: any) => Math.floor(Number((item as any)?.elevation ?? base_z)) === want_z);
+                         if (any_wall_top) {
+                             debug_log('3DIFICATION_TEST', `PASS /api/place/items includes elevated ground item (place=${place_id} z=${want_z})`);
+                         } else {
+                             debug_warn('3DIFICATION_TEST', `FAIL /api/place/items missing elevated ground item (place=${place_id} z=${want_z})`);
+                         }
+
+                         // Verify voxelized piles: same (x,y) can hold items at multiple z.
+                         const by_xy = new Map<string, Set<number>>();
+                         for (const rec of (items as any[])) {
+                             const item = (rec as any)?.item;
+                             const position = (rec as any)?.position;
+                             if (!position) continue;
+                             const x = Number(position.x);
+                             const y = Number(position.y);
+                             if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+                             const iz = Math.floor(Number((item as any)?.elevation ?? base_z));
+                             const k = `${x}_${y}`;
+                             const s = by_xy.get(k) ?? new Set<number>();
+                             s.add(iz);
+                             by_xy.set(k, s);
+                         }
+                          const multi = Array.from(by_xy.values()).some((s) => s.size >= 2);
+                          if (multi) {
+                              debug_log('3DIFICATION_TEST', `PASS /api/place/items supports multi-z piles (place=${place_id})`);
+                          } else {
+                              debug_warn('3DIFICATION_TEST', `FAIL /api/place/items missing multi-z pile scenario (place=${place_id})`);
+                          }
+
+                          // Verify stacked piles: two distinct z at the same (x,y) each with 2+ items.
+                          const by_xy_z_count = new Map<string, Map<number, number>>();
+                          for (const rec of (items as any[])) {
+                              const item = (rec as any)?.item;
+                              const position = (rec as any)?.position;
+                              if (!position) continue;
+                              const x = Number(position.x);
+                              const y = Number(position.y);
+                              if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+                              const iz = Math.floor(Number((item as any)?.elevation ?? base_z));
+                              const xy = `${x}_${y}`;
+                              const mz = by_xy_z_count.get(xy) ?? new Map<number, number>();
+                              mz.set(iz, (mz.get(iz) ?? 0) + 1);
+                              by_xy_z_count.set(xy, mz);
+                          }
+                          const stacked_piles = Array.from(by_xy_z_count.values()).some((mz) => {
+                              let pile_layers = 0;
+                              for (const c of mz.values()) {
+                                  if (c >= 2) pile_layers++;
+                                  if (pile_layers >= 2) return true;
+                              }
+                              return false;
+                          });
+                          if (stacked_piles) {
+                              debug_log('3DIFICATION_TEST', `PASS /api/place/items supports stacked piles (place=${place_id})`);
+                          } else {
+                              debug_warn('3DIFICATION_TEST', `FAIL /api/place/items missing stacked piles (place=${place_id})`);
+                          }
+                      }
+                  } catch {
+                      // ignore
+                  }
             } catch (err) {
                 debug_error("API", "/api/place/items error", err);
                 res.writeHead(500, { "Content-Type": "application/json" });
@@ -7535,7 +7936,7 @@ function start_http_server(log_path: string): void {
             return;
         }
 
-        // GET /api/place/pile_container?place_id=xxx&position_key=x_y - Open a ground pile as a virtual container
+        // GET /api/place/pile_container?place_id=xxx&position_key=x_y_z - Open a ground pile (voxel) as a virtual container
         if (url.pathname === "/api/place/pile_container") {
             if (req.method !== "GET") {
                 res.writeHead(405, { "Content-Type": "application/json" });
@@ -7559,17 +7960,19 @@ function start_http_server(log_path: string): void {
                     return;
                 }
 
-                const [xs, ys] = String(position_key).split('_');
-                const pile_x = parseInt(xs || '0', 10);
-                const pile_y = parseInt(ys || '0', 10);
-                if (!Number.isFinite(pile_x) || !Number.isFinite(pile_y)) {
+                const place_any = place_result.place as any;
+
+                const norm = normalize_voxel_position_key(place_any, String(position_key));
+                if (!norm) {
                     res.writeHead(400, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: "invalid_position_key" }));
                     return;
                 }
 
-                const place_any = place_result.place as any;
-                const list: any[] = Array.isArray(place_any.ground?.scattered?.[position_key]) ? place_any.ground.scattered[position_key] : [];
+                const pile_x = norm.x;
+                const pile_y = norm.y;
+
+                const list: any[] = Array.isArray(place_any.ground?.scattered?.[norm.key]) ? place_any.ground.scattered[norm.key] : [];
                 if (list.length < 2) {
                     res.writeHead(400, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: "not_a_pile" }));
@@ -7578,7 +7981,7 @@ function start_http_server(log_path: string): void {
 
                 // Canonical container-like layout for piles.
                 const max_slots = Math.max(10, list.length);
-                const normalized = normalize_inline_container_grid(list, max_slots, `ground_pile:${place_id}:${position_key}`);
+                const normalized = normalize_inline_container_grid(list, max_slots, `ground_pile:${place_id}:${norm.key}`);
                 const coords_by_id = new Map<string, { x: number; y: number }>();
                 for (const e of normalized) {
                     const id = String(e.item?.id ?? '');
@@ -7597,19 +8000,19 @@ function start_http_server(log_path: string): void {
                 if (repaired > 0) {
                     const save_res = save_place_with_ground(data_slot_number, place_id, place_result.place);
                     if (!save_res.ok) {
-                        debug_error('API', `[GRID_SANITY] failed to save pile repair ${place_id}:${position_key}`, save_res.error);
+                        debug_error('API', `[GRID_SANITY] failed to save pile repair ${place_id}:${norm.key}`, save_res.error);
                     }
-                    debug_log('API', `[GRID_SANITY] ground_pile:${place_id}:${position_key} repaired=${repaired}`);
+                    debug_log('API', `[GRID_SANITY] ground_pile:${place_id}:${norm.key} repaired=${repaired}`);
                 }
 
-                const container_id = `place.pile.${place_id}.${position_key}`;
+                const container_id = `place.pile.${place_id}.${norm.key}`;
                 res.writeHead(200, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({
                     ok: true,
                     container: {
                         id: container_id,
-                        name: `Pile (${position_key})`,
-                        def_id: `place_pile.${place_id}.${position_key}`,
+                        name: `Pile (${norm.key})`,
+                        def_id: `place_pile.${place_id}.${norm.key}`,
                         capacity: { max_slots },
                         contents: normalized.map(({ item, grid_x, grid_y }: any) => {
                             const p = resolve_inline_item_payload_for_api(item);
@@ -7620,7 +8023,7 @@ function start_http_server(log_path: string): void {
                                 grid_y,
                             };
                         }),
-                        position_key,
+                        position_key: norm.key,
                         position: { x: pile_x, y: pile_y },
                     }
                 }));
@@ -8094,7 +8497,7 @@ function start_http_server(log_path: string): void {
             }
 
             const place_id = url.searchParams.get("place_id");
-            const position_key = url.searchParams.get("position_key"); // e.g., "4_5"
+            const position_key = url.searchParams.get("position_key"); // e.g., "4_5_0"
             const item_index = url.searchParams.get("index");
 
             if (!place_id || !position_key || item_index === null) {
@@ -8114,14 +8517,22 @@ function start_http_server(log_path: string): void {
                     return;
                 }
 
-                const ground = place_result.place.ground as any;
-                if (!ground?.scattered?.[position_key]) {
+                const place_any = place_result.place as any;
+                const norm = normalize_voxel_position_key(place_any, String(position_key));
+                if (!norm) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "invalid_position_key" }));
+                    return;
+                }
+
+                const ground = place_any.ground as any;
+                if (!ground?.scattered?.[norm.key]) {
                     res.writeHead(404, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: "ground_items_not_found" }));
                     return;
                 }
 
-                const items_at_position = ground.scattered[position_key];
+                const items_at_position = ground.scattered[norm.key];
                 const index = parseInt(item_index, 10);
 
                 if (isNaN(index) || index < 0 || index >= items_at_position.length) {
@@ -8141,9 +8552,9 @@ function start_http_server(log_path: string): void {
                 }
 
                 const contents_raw = Array.isArray((container_item as any)?.contents) ? (container_item as any).contents : [];
-                const cap_res = resolve_inline_container_capacity(container_item, contents_raw.length, `ground_container:${place_id}:${position_key}[${index}]`);
+                const cap_res = resolve_inline_container_capacity(container_item, contents_raw.length, `ground_container:${place_id}:${norm.key}[${index}]`);
                 const max_slots = cap_res.max_slots;
-                const contents = normalize_inline_container_grid(contents_raw, max_slots, `ground_container:${place_id}:${position_key}[${index}]`);
+                const contents = normalize_inline_container_grid(contents_raw, max_slots, `ground_container:${place_id}:${norm.key}[${index}]`);
 
                 // Repair coords in-place and persist (same as other container endpoints).
                 const coords_by_id = new Map<string, { x: number; y: number }>();
@@ -8167,7 +8578,7 @@ function start_http_server(log_path: string): void {
                         debug_error('API', `[CAPACITY_SANITY] failed to save place after patch ${place_id}`, save_place_res.error);
                     }
                     if (repaired > 0) {
-                        debug_log('API', `[GRID_SANITY] ground_container:${place_id}:${position_key}[${index}] repaired=${repaired}`);
+                        debug_log('API', `[GRID_SANITY] ground_container:${place_id}:${norm.key}[${index}] repaired=${repaired}`);
                     }
                 }
                 
@@ -8180,7 +8591,7 @@ function start_http_server(log_path: string): void {
                         id: container_payload.id,
                         name: container_payload.name,
                         def_id: container_payload.def_id,
-                        position_key: position_key,
+                        position_key: norm.key,
                         index: index,
                         capacity: {
                             max_slots,

@@ -12,6 +12,7 @@ import type { Place, PlaceResult, PlaceListResult } from "../types/place.js";
 import { get_data_slot_dir } from "../engine/paths.js";
 import { ensure_place_tiles, ensure_place_entities_not_on_walls } from "./tiles.js";
 import { sanitize_place_for_save } from "../shared/defs_deltas_sanitize.js";
+import { normalize_ground_scattered } from "./ground_store.js";
 
 const PLACES_DIR = "places";
 
@@ -84,9 +85,26 @@ export function load_place(slot: number, place_id: string): PlaceResult {
       };
     }
 
+    // defs+deltas migration: scrub any persisted derived/legacy inline fields on load.
+    // This keeps places authoritative and stable even if older files had embedded display/tags.
+    let dirty = false;
+    try {
+      const scrubbed = sanitize_place_for_save(place as any);
+      if (scrubbed) dirty = true;
+    } catch {
+      // ignore
+    }
+
+    // 3dification: migrate ground scattered keys to voxel keys (x_y_z).
+    try {
+      const migrated = normalize_ground_scattered(place as any);
+      if (migrated) dirty = true;
+    } catch {
+      // ignore
+    }
+
     // Ensure tiles exist and are consistent with connections (Phase 0.7+).
     // Also keep default_entry/entities off the wall ring.
-    let dirty = false;
     const t = ensure_place_tiles(place);
     if (t.changed) dirty = true;
     const e = ensure_place_entities_not_on_walls(place);

@@ -17,9 +17,9 @@ import { init_npc_movement, stop_place_movement, is_npc_moving } from '../npc_ai
 import { start_movement_command_handler, set_command_handler_place } from '../mono_ui/modules/movement_command_handler.js';
 import { get_color_by_name } from '../mono_ui/colors.js';
 import { infer_action_verb_hint } from '../shared/intent_hint.js';
-// NOTE: Do NOT import Node.js modules (load_actor, find_kind, etc.) here
-// This code runs in browser context and must use HTTP APIs instead
-import { load_container, type Container } from '../container_storage/store.js';
+// NOTE: Do NOT import Node.js modules (load_actor, find_kind, etc.) here.
+// This code runs in browser context and must use HTTP APIs instead.
+import type { Container } from '../types/container.js';
 import { calculate_grid_dimensions, get_container_grid } from '../container_storage/grid_calculator.js';
 import { type ItemInstance } from '../item_instances/store.js';
 import { type ItemDefinition } from '../item_storage/store.js';
@@ -142,6 +142,9 @@ export function create_app_state(): AppState {
             npc_movement_active: false,
             // World focus layer for Place DOM renderer (0/1/2)
             focus_z: 1 as 0 | 1 | 2,
+            // World-Z center for the 3-layer viewport window.
+            // Interpreted as an absolute elevation value; layers represent [center-1, center, center+1].
+            world_z_center: 0,
             // Mouse parallax normalized (-1..+1) centered on Place viewport
             mouse_parallax: { x: 0, y: 0 },
             // Ground item cache (inline ground_store) for richer interactions (pile/single/container detection)
@@ -152,9 +155,13 @@ export function create_app_state(): AppState {
                 qty: number;
                 weight: number;
                 tags: any[];
+                elevation?: number;
                 position_key?: string;
                 position?: { x: number; y: number };
             }>(),
+            // Map of voxel position keys: "x_y_z" -> [item ids]
+            ground_items_by_voxel: new Map<string, string[]>(),
+            // Convenience map: "x_y" -> [item ids across all z]
             ground_items_by_position: new Map<string, string[]>(),
         },
         container: {
@@ -641,6 +648,17 @@ export function create_app_state(): AppState {
             
             const actor = actor_data.actor;
 
+            // Track current world-Z center from actor location (3dification viewport window).
+            try {
+                const z = Number((actor as any)?.location?.elevation);
+                if (Number.isFinite(z)) {
+                    ui_state.place.world_z_center = Math.floor(z);
+                    debug_log(`[PlaceZ] world_z_center=${ui_state.place.world_z_center} (from actor.location.elevation)`);
+                }
+            } catch {
+                // ignore
+            }
+
             // Phase 5: Inline body_slots are authoritative
             const body_slots = (actor.body_slots as any) || {};
             ui_state.character.body_slots = body_slots;
@@ -954,7 +972,7 @@ export function create_app_state(): AppState {
                     const parts = container_id.split('.');
                     const place_id = parts[2];
                     const position_key = parts[3];
-                    const item_ids = position_key ? (ui_state.place.ground_items_by_position.get(position_key) ?? []) : [];
+                    const item_ids = position_key ? (ui_state.place.ground_items_by_voxel.get(position_key) ?? []) : [];
                     if (item_ids.length <= 1) {
                         close_container_module(container_id);
                         continue;
@@ -1254,6 +1272,19 @@ export function create_app_state(): AppState {
                 }
                 
                 const next_place = data.place;
+
+                // Update world-Z center from the player actor when available.
+                try {
+                    const want_ref = `actor.${APP_CONFIG.input_actor_id}`;
+                    const a = next_place.contents?.actors_present?.find((x: any) => x?.actor_ref === want_ref) ?? null;
+                    const z = Number((a as any)?.elevation);
+                    if (Number.isFinite(z)) {
+                        ui_state.place.world_z_center = Math.floor(z);
+                        debug_log(`[PlaceZ] world_z_center=${ui_state.place.world_z_center} (from /api/place contents)`);
+                    }
+                } catch {
+                    // ignore
+                }
                 
                 // DEBUG: Log tile information when place is loaded
                 if (data.place?.tiles?.cells) {
@@ -1311,6 +1342,7 @@ export function create_app_state(): AppState {
                         const items_data = await items_res.json();
                         if (items_data.ok && Array.isArray(items_data.items)) {
                             ui_state.place.ground_items_by_id.clear();
+                            ui_state.place.ground_items_by_voxel.clear();
                             ui_state.place.ground_items_by_position.clear();
                             for (const it of items_data.items) {
                                 const rec = {
@@ -1322,6 +1354,7 @@ export function create_app_state(): AppState {
                                     display_char: typeof it.display_char === 'string' ? String(it.display_char).charAt(0) : undefined,
                                     display_color: typeof it.display_color === 'string' ? it.display_color : undefined,
                                     tags: Array.isArray(it.tags) ? it.tags : [],
+                                    elevation: (typeof it.elevation === 'number' && Number.isFinite(it.elevation)) ? Math.floor(it.elevation) : undefined,
                                     position_key: typeof it.position_key === 'string' ? it.position_key : undefined,
                                     position: it.position && typeof it.position.x === 'number' && typeof it.position.y === 'number'
                                         ? { x: it.position.x, y: it.position.y }
@@ -1333,12 +1366,87 @@ export function create_app_state(): AppState {
                                     rec.position_key = key;
                                 }
 
+                                // xy+z voxel key for 3D piles
+                                const voxel_key = (rec.position && typeof rec.elevation === 'number' && Number.isFinite(rec.elevation))
+                                    ? `${rec.position.x}_${rec.position.y}_${Math.floor(rec.elevation)}`
+                                    : null;
+
                                 ui_state.place.ground_items_by_id.set(rec.id, rec);
-                                if (rec.position_key) {
-                                    const arr = ui_state.place.ground_items_by_position.get(rec.position_key) ?? [];
+                                // By-voxel
+                                if (voxel_key) {
+                                    const arr = ui_state.place.ground_items_by_voxel.get(voxel_key) ?? [];
                                     arr.push(rec.id);
-                                    ui_state.place.ground_items_by_position.set(rec.position_key, arr);
+                                    ui_state.place.ground_items_by_voxel.set(voxel_key, arr);
                                 }
+                                // By-xy (legacy convenience)
+                                if (rec.position) {
+                                    const xy_key = `${rec.position.x}_${rec.position.y}`;
+                                    const arr = ui_state.place.ground_items_by_position.get(xy_key) ?? [];
+                                    arr.push(rec.id);
+                                    ui_state.place.ground_items_by_position.set(xy_key, arr);
+                                }
+                            }
+
+                            // Devlog test: elevated ground items are present in cache for tavern.
+                            try {
+                                if (next_place.id === 'eden_crossroads_tavern') {
+                                    const base_z = Math.floor(Number((next_place as any)?.coordinates?.elevation ?? 0)) || 0;
+                                    const want_z = base_z + 1;
+                                    const elevated = Array.from(ui_state.place.ground_items_by_id.values()).filter((r: any) => Math.floor(Number(r?.elevation ?? base_z)) === want_z);
+                                    if (elevated.length > 0) {
+                                        debug_log('3DIFICATION_TEST', `PASS ground item cache includes elevated item(s) (place=${next_place.id} z=${want_z} count=${elevated.length})`);
+                                    } else {
+                                        debug_warn('3DIFICATION_TEST', `FAIL ground item cache missing elevated items (place=${next_place.id} z=${want_z})`);
+                                    }
+
+                                    // Verify voxelized piles: same (x,y) can hold items at multiple z.
+                                    const by_xy = new Map<string, Set<number>>();
+                                    for (const [xy, ids] of ui_state.place.ground_items_by_position.entries()) {
+                                        const s = by_xy.get(xy) ?? new Set<number>();
+                                        for (const id of ids) {
+                                            const meta: any = ui_state.place.ground_items_by_id.get(id) ?? null;
+                                            const iz = (typeof meta?.elevation === 'number' && Number.isFinite(meta.elevation)) ? Math.floor(meta.elevation) : base_z;
+                                            s.add(iz);
+                                        }
+                                        by_xy.set(xy, s);
+                                    }
+                                    const multi = Array.from(by_xy.values()).some((s) => s.size >= 2);
+                                    if (multi) {
+                                        debug_log('3DIFICATION_TEST', `PASS ground item cache supports multi-z piles (place=${next_place.id})`);
+                                    } else {
+                                        debug_warn('3DIFICATION_TEST', `FAIL ground item cache missing multi-z pile scenario (place=${next_place.id})`);
+                                    }
+
+                                    // Verify stacked piles: same (x,y) has 2+ items at two distinct z.
+                                    const by_xy_z_count = new Map<string, Map<number, number>>();
+                                    for (const [voxel_key, ids] of ui_state.place.ground_items_by_voxel.entries()) {
+                                        const parts = String(voxel_key).split('_');
+                                        if (parts.length !== 3) continue;
+                                        const x = Number(parts[0]);
+                                        const y = Number(parts[1]);
+                                        const z = Number(parts[2]);
+                                        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+                                        const xy = `${x}_${y}`;
+                                        const mz = by_xy_z_count.get(xy) ?? new Map<number, number>();
+                                        mz.set(Math.floor(z), (mz.get(Math.floor(z)) ?? 0) + ids.length);
+                                        by_xy_z_count.set(xy, mz);
+                                    }
+                                    const stacked_piles = Array.from(by_xy_z_count.values()).some((mz) => {
+                                        let pile_layers = 0;
+                                        for (const c of mz.values()) {
+                                            if (c >= 2) pile_layers++;
+                                            if (pile_layers >= 2) return true;
+                                        }
+                                        return false;
+                                    });
+                                    if (stacked_piles) {
+                                        debug_log('3DIFICATION_TEST', `PASS ground item cache supports stacked piles (place=${next_place.id})`);
+                                    } else {
+                                        debug_warn('3DIFICATION_TEST', `FAIL ground item cache missing stacked piles (place=${next_place.id})`);
+                                    }
+                                }
+                            } catch {
+                                // ignore
                             }
 
                             // Auto-close pile UIs that no longer exist (or revert to single-item state)
@@ -1348,7 +1456,7 @@ export function create_app_state(): AppState {
                                     const parts = cid.split('.');
                                     const position_key = parts[3];
                                     if (!position_key) continue;
-                                    const ids = ui_state.place.ground_items_by_position.get(position_key) ?? [];
+                                    const ids = ui_state.place.ground_items_by_voxel.get(position_key) ?? [];
                                     if (ids.length <= 1) {
                                         close_container_module(cid);
                                     }
@@ -1388,9 +1496,13 @@ export function create_app_state(): AppState {
     function flash_status(lines: string[], ms: number): void {
         ui_state.status_override.until_ms = Date.now() + ms;
         ui_state.status_override.lines = [...lines];
-        // bump rev so window refreshes immediately
-        const cur = ui_state.text_windows.get('status');
-        if (cur) cur.rev++;
+        // Update the status window immediately (window feeds are polled separately).
+        // Status window is 1-line tall; collapse into a single line.
+        try {
+            set_text_window_messages('status', [ui_state.status_override.lines.join(' | ')]);
+        } catch {
+            // ignore
+        }
     }
 
     function register_window_feed(feed: WindowFeed): void {
@@ -1650,7 +1762,17 @@ export function create_app_state(): AppState {
                         const subtype = verb === 'COMMUNICATE' ? 'NORMAL' : (verb === 'MOVE' ? 'WALK' : undefined);
                         const broadcasts = get_senses_for_action(verb, subtype);
                         for (const b of broadcasts) {
-                            spawn_sense_broadcast_particles(pos, b.sense, b.range_tiles);
+                            const actor_z = Number((actor as any)?.elevation);
+                            const origin_z = Number.isFinite(actor_z) ? Math.floor(actor_z) : ui_state.place.world_z_center;
+                            const c = ui_state.place.world_z_center;
+                            const visible_planes_z = [c - 1, c, c + 1] as const;
+                            spawn_sense_broadcast_particles({
+                                origin: { x: pos.x, y: pos.y, z: origin_z },
+                                sense: b.sense,
+                                range: b.range_tiles,
+                                visible_planes_z,
+                                source_ref: actor_ref,
+                            });
                         }
                     }
                 }
@@ -2000,6 +2122,17 @@ export function create_app_state(): AppState {
         if (typeof v_char === 'boolean') ui_state.character.is_visible = v_char;
     }
 
+    function get_focus_world_z_for_current_place(): number {
+        const place = get_current_place();
+        if (!place) return ui_state.place.world_z_center;
+        const base_z = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
+        const center = ui_state.place.world_z_center;
+        const planes = [center - 1, center, center + 1] as const;
+        const slot = ui_state.place.focus_z;
+        const wz = Math.floor(Number(planes[slot]));
+        return Number.isFinite(wz) ? wz : base_z;
+    }
+
     const modules: Module[] = [
         make_fill_module({
             id: 'bg',
@@ -2018,6 +2151,7 @@ export function create_app_state(): AppState {
             base_font_size_px: APP_CONFIG.base_font_size_px,
             get_focus_z: () => ui_state.place.focus_z,
             set_focus_z: (z) => { ui_state.place.focus_z = z; save_place_focus_z(); },
+            get_world_z_center: () => ui_state.place.world_z_center,
             get_mouse_parallax: () => ui_state.place.mouse_parallax,
             get_move_mode: () => ui_state.controls.move_mode,
             set_move_mode: (mode) => { ui_state.controls.move_mode = mode; },
@@ -2238,12 +2372,15 @@ export function create_app_state(): AppState {
                 const place = get_current_place();
                 if (!place) return;
 
-                const position_key = `${tile_x}_${tile_y}`;
-                const item_ids = ui_state.place.ground_items_by_position.get(position_key) ?? [];
+                 const focus_wz = get_focus_world_z_for_current_place();
+                 const base_z = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
+
+                 const voxel_key = `${tile_x}_${tile_y}_${focus_wz}`;
+                 const item_ids = ui_state.place.ground_items_by_voxel.get(voxel_key) ?? [];
 
                 // Multiple items => open pile UI
                 if (item_ids.length >= 2) {
-                    const pile_id = `place.pile.${place.id}.${position_key}`;
+                    const pile_id = `place.pile.${place.id}.${voxel_key}`;
                     void open_container_module(pile_id, 'pile');
                     return;
                 }
@@ -2312,8 +2449,9 @@ export function create_app_state(): AppState {
             on_drag_start_ground_item: (tile_x: number, tile_y: number) => {
                 const place = get_current_place();
                 if (!place) return;
-                const position_key = `${tile_x}_${tile_y}`;
-                const item_ids = ui_state.place.ground_items_by_position.get(position_key) ?? [];
+                const focus_wz = get_focus_world_z_for_current_place();
+                const voxel_key = `${tile_x}_${tile_y}_${focus_wz}`;
+                const item_ids = ui_state.place.ground_items_by_voxel.get(voxel_key) ?? [];
                 if (item_ids.length < 1) return;
 
                 // 2+ items on a tile: drag the whole pile (sweep).
@@ -2335,7 +2473,7 @@ export function create_app_state(): AppState {
                         slot_shape: [[1]],
                         fits_actor_kind: ['*'],
                     };
-                    drag_state.start_drag('ground', `pile:${place.id}:${position_key}`, `place.pile.${place.id}.${position_key}`, pile_def);
+                    drag_state.start_drag('ground', `pile:${place.id}:${voxel_key}`, `place.pile.${place.id}.${voxel_key}`, pile_def);
                     ui_state.character.highlighted_slots = [];
                     return;
                 }
@@ -2363,9 +2501,9 @@ export function create_app_state(): AppState {
                     fits_actor_kind: ['*'],
                 };
 
-                drag_state.start_drag('ground', item_id, `place.ground.${place.id}.${position_key}`, def);
+                drag_state.start_drag('ground', item_id, `place.ground.${place.id}.${voxel_key}`, def);
                 void (async () => {
-                    const compatible = await get_compatible_slots_for_instance(item_id, `place.ground.${place.id}.${position_key}`, def);
+                    const compatible = await get_compatible_slots_for_instance(item_id, `place.ground.${place.id}.${voxel_key}`, def);
                     ui_state.character.highlighted_slots = compatible;
                 })();
             },
@@ -2410,7 +2548,7 @@ export function create_app_state(): AppState {
             // Single source of truth for ground items in the PlaceModule.
             // Rendering + interaction should use the same cache (ui_state.place.ground_items_by_*).
             get_ground_item_position_keys: (): string[] => {
-                return Array.from(ui_state.place.ground_items_by_position.keys());
+                return Array.from(ui_state.place.ground_items_by_voxel.keys());
             },
 
             get_ground_item_ids_at: (tile_x: number, tile_y: number): string[] => {
@@ -2469,14 +2607,16 @@ export function create_app_state(): AppState {
                         drag_state.reject_drag();
                         return false;
                     }
-                    if (position_key === `${tile_x}_${tile_y}`) {
+                    const dest_key = `${tile_x}_${tile_y}_${get_focus_world_z_for_current_place()}`;
+                    if (position_key === dest_key) {
                         drag_state.end_drag();
                         return true;
                     }
                     try {
-                        const [xs, ys] = (position_key || '').split('_');
+                        const [xs, ys, zs] = (position_key || '').split('_');
                         const from_x = parseInt(xs || '0', 10);
                         const from_y = parseInt(ys || '0', 10);
+                        const from_z = parseInt(zs || '', 10);
                         const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
                         const mv = await api_place_drag({
                             base_url,
@@ -2484,8 +2624,10 @@ export function create_app_state(): AppState {
                             place_id,
                             from_x,
                             from_y,
+                            from_elevation: Number.isFinite(from_z) ? Math.floor(from_z) : undefined,
                             to_x: tile_x,
                             to_y: tile_y,
+                            to_elevation: get_focus_world_z_for_current_place(),
                             item_id: String(drag_state.item_instance_id ?? ''),
                             action_cost: (ui_state.controls.override_cost ?? undefined) as any,
                         });
@@ -2519,16 +2661,18 @@ export function create_app_state(): AppState {
                         return false;
                     }
 
-                    if (position_key === `${tile_x}_${tile_y}`) {
+                    const dest_key = `${tile_x}_${tile_y}_${get_focus_world_z_for_current_place()}`;
+                    if (position_key === dest_key) {
                         drag_state.end_drag();
                         return true;
                     }
 
                     // Dragging a pile/item within the place: call ground drag API.
                     try {
-                        const [xs, ys] = (position_key || '').split('_');
+                        const [xs, ys, zs] = (position_key || '').split('_');
                         const from_x = parseInt(xs || '0', 10);
                         const from_y = parseInt(ys || '0', 10);
+                        const from_z = parseInt(zs || '', 10);
                         const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
                         const mv = await api_place_drag({
                             base_url,
@@ -2536,8 +2680,10 @@ export function create_app_state(): AppState {
                             place_id,
                             from_x,
                             from_y,
+                            from_elevation: Number.isFinite(from_z) ? Math.floor(from_z) : undefined,
                             to_x: tile_x,
                             to_y: tile_y,
+                            to_elevation: get_focus_world_z_for_current_place(),
                             mode: kind === 'pile' ? 'pile' : undefined,
                             item_id: kind === 'ground' ? String(drag_state.item_instance_id ?? '') : undefined,
                             action_cost: (ui_state.controls.override_cost ?? undefined) as any,
@@ -2568,8 +2714,9 @@ export function create_app_state(): AppState {
 
                 // Shortcut: dropping an item onto a ground container-item deposits into it.
                 // Only when exactly one ground item exists on that tile and it is a container.
-                const position_key = `${tile_x}_${tile_y}`;
-                    const ground_ids = ui_state.place.ground_items_by_position.get(position_key) ?? [];
+                const focus_wz = get_focus_world_z_for_current_place();
+                const position_key = `${tile_x}_${tile_y}_${focus_wz}`;
+                    const ground_ids = ui_state.place.ground_items_by_voxel.get(position_key) ?? [];
                     if (ground_ids.length === 1) {
                         const ground_item_id = ground_ids[0]!;
                         const meta = ui_state.place.ground_items_by_id.get(ground_item_id);
@@ -2632,9 +2779,10 @@ export function create_app_state(): AppState {
                                     drag_state.reject_drag();
                                     return false;
                                 }
-                                const [xs, ys] = (src_position_key || '').split('_');
+                                const [xs, ys, zs] = (src_position_key || '').split('_');
                                 const from_x = parseInt(xs || '0', 10);
                                 const from_y = parseInt(ys || '0', 10);
+                                const from_z = parseInt(zs || '', 10);
 
                                 const dep = await api_deposit_ground_to_container_item({
                                     base_url,
@@ -2642,6 +2790,7 @@ export function create_app_state(): AppState {
                                     place_id: place.id,
                                     from_x,
                                     from_y,
+                                    from_elevation: Number.isFinite(from_z) ? Math.floor(from_z) : undefined,
                                     item_id: String(drag_state.item_instance_id ?? ''),
                                     container_item_id: String(ground_item_id),
                                     action_cost: (ui_state.controls.override_cost ?? undefined) as any,
@@ -2717,6 +2866,7 @@ export function create_app_state(): AppState {
                             item_id: String(drag_state.item_instance_id ?? ''),
                             x: tile_x,
                             y: tile_y,
+                            to_elevation: get_focus_world_z_for_current_place(),
                             action_cost: (ui_state.controls.override_cost ?? undefined) as any,
                         });
                         if (sp.ok) {
@@ -2750,20 +2900,21 @@ export function create_app_state(): AppState {
 
                     try {
                         const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                        const sp = await fetch(`${base_url}/api/place/items/spill_from_tile_container`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                actor_id: APP_CONFIG.input_actor_id,
-                                place_id: place.id,
-                                x: sx,
-                                y: sy,
-                                item_id: String(drag_state.item_instance_id ?? ''),
-                                to_x: tile_x,
-                                to_y: tile_y,
-                                action_cost: (ui_state.controls.override_cost ?? undefined) as any,
-                            }),
-                        }).then(r => r.json().catch(() => ({ ok: false, error: `HTTP ${r.status}` } as any)));
+                                const sp = await fetch(`${base_url}/api/place/items/spill_from_tile_container`, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({
+                                        actor_id: APP_CONFIG.input_actor_id,
+                                        place_id: place.id,
+                                        x: sx,
+                                        y: sy,
+                                        item_id: String(drag_state.item_instance_id ?? ''),
+                                        to_x: tile_x,
+                                        to_y: tile_y,
+                                        to_elevation: get_focus_world_z_for_current_place(),
+                                        action_cost: (ui_state.controls.override_cost ?? undefined) as any,
+                                    }),
+                                }).then(r => r.json().catch(() => ({ ok: false, error: `HTTP ${r.status}` } as any)));
 
                         if (sp.ok) {
                             flash_status(['Dropped'], 1200);
@@ -2816,6 +2967,7 @@ export function create_app_state(): AppState {
                         item_id: String(drag_state.item_instance_id ?? ''),
                         x: tile_x,
                         y: tile_y,
+                        elevation: get_focus_world_z_for_current_place(),
                     });
 
                     debug_log(`[PlaceModule] on_drop: Response data: ${JSON.stringify(drop_res)}`);
@@ -4752,6 +4904,10 @@ export function create_app_state(): AppState {
         fetch_messages: () => fetch_status_line(APP_CONFIG.selected_data_slot),
     });
 
+    // Keep transcript + status fresh, and ensure flash_status is visible even when
+    // the player isn't sending interpreter messages.
+    start_window_feed_polling(800);
+
     // Seed debug window
     set_text_window_messages('debug', ['[debug] off | overlays:off', '[volume] NORMAL', '[move] WALK', '', '[region] (loading...)', 'Targets will appear here.']);
 
@@ -4931,7 +5087,7 @@ export function create_app_state(): AppState {
                     return;
                 }
 
-                const item_ids = ui_state.place.ground_items_by_position.get(position_key) ?? [];
+                const item_ids = ui_state.place.ground_items_by_voxel.get(position_key) ?? [];
                 if (item_ids.length <= 1) {
                     // Auto-revert: no pile.
                     return;
@@ -5434,9 +5590,10 @@ export function create_app_state(): AppState {
                                     drag_state.reject_drag();
                                     return false;
                                 }
-                                const [fxs, fys] = (src_position_key || '').split('_');
+                                const [fxs, fys, fzs] = (src_position_key || '').split('_');
                                 const from_x = parseInt(fxs || '0', 10);
                                 const from_y = parseInt(fys || '0', 10);
+                                const from_z = parseInt(fzs || '', 10);
 
                                 const dep = await fetch(`${base_url}/api/place/items/deposit_ground_to_tile_container`, {
                                     method: 'POST',
@@ -5446,6 +5603,7 @@ export function create_app_state(): AppState {
                                         place_id,
                                         from_x,
                                         from_y,
+                                        from_elevation: Number.isFinite(from_z) ? Math.floor(from_z) : undefined,
                                         item_id: String(drag_state.item_instance_id ?? ''),
                                         x,
                                         y,
@@ -5590,9 +5748,11 @@ export function create_app_state(): AppState {
                             drag_state.reject_drag();
                             return false;
                         }
-                        const [xs, ys] = (position_key || '').split('_');
+                        const [xs, ys, zs] = (position_key || '').split('_');
                         const x = parseInt(xs || '0', 10);
                         const y = parseInt(ys || '0', 10);
+                        const pile_z = parseInt(zs || '', 10);
+                        const to_elevation = Number.isFinite(pile_z) ? Math.floor(pile_z) : get_focus_world_z_for_current_place();
 
                         // Reorder within the same pile (acts like container reordering).
                         if (src === container_id && !String(drag_state.item_instance_id ?? '').startsWith('pile:')) {
@@ -5652,9 +5812,10 @@ export function create_app_state(): AppState {
                                 drag_state.reject_drag();
                                 return false;
                             }
-                            const [fxs, fys] = (src_position_key || '').split('_');
+                            const [fxs, fys, fzs] = (src_position_key || '').split('_');
                             const from_x = parseInt(fxs || '0', 10);
                             const from_y = parseInt(fys || '0', 10);
+                            const from_z = parseInt(fzs || '', 10);
                             try {
                                 const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
                                 const mv = await api_place_drag({
@@ -5663,8 +5824,10 @@ export function create_app_state(): AppState {
                                     place_id,
                                     from_x,
                                     from_y,
+                                    from_elevation: Number.isFinite(from_z) ? Math.floor(from_z) : undefined,
                                     to_x: x,
                                     to_y: y,
+                                    to_elevation,
                                     item_id: String(drag_state.item_instance_id ?? ''),
                                     action_cost: (ui_state.controls.override_cost ?? undefined) as any,
                                 });
@@ -5758,9 +5921,10 @@ export function create_app_state(): AppState {
                                     drag_state.reject_drag();
                                     return false;
                                 }
-                                const [xs, ys] = (position_key || '').split('_');
+                                const [xs, ys, zs] = (position_key || '').split('_');
                                 const from_x = parseInt(xs || '0', 10);
                                 const from_y = parseInt(ys || '0', 10);
+                                const from_z = parseInt(zs || '', 10);
 
                                 const dep = await api_deposit_ground_to_container_item({
                                     base_url,
@@ -5768,6 +5932,7 @@ export function create_app_state(): AppState {
                                     place_id,
                                     from_x,
                                     from_y,
+                                    from_elevation: Number.isFinite(from_z) ? Math.floor(from_z) : undefined,
                                     item_id: String(drag_state.item_instance_id ?? ''),
                                     container_item_id: String(target_item_id),
                                     action_cost: (ui_state.controls.override_cost ?? undefined) as any,
@@ -5849,6 +6014,7 @@ export function create_app_state(): AppState {
                                     item_id: String(drag_state.item_instance_id ?? ''),
                                     x,
                                     y,
+                                    to_elevation,
                                     action_cost: (ui_state.controls.override_cost ?? undefined) as any,
                                 });
                                 if (sp.ok) {
@@ -5894,6 +6060,7 @@ export function create_app_state(): AppState {
                                         item_id: String(drag_state.item_instance_id ?? ''),
                                         to_x: x,
                                         to_y: y,
+                                        to_elevation,
                                         action_cost: (ui_state.controls.override_cost ?? undefined) as any,
                                     }),
                                 }).then(r => r.json().catch(() => ({ ok: false, error: `HTTP ${r.status}` } as any)));
@@ -5923,6 +6090,7 @@ export function create_app_state(): AppState {
                                 item_id: String(drag_state.item_instance_id ?? ''),
                                 x,
                                 y,
+                                elevation: to_elevation,
                             });
                             if (drop_data.ok) {
                                 flash_status(['Dropped to pile'], 1200);
@@ -6074,9 +6242,10 @@ export function create_app_state(): AppState {
                                     drag_state.reject_drag();
                                     return false;
                                 }
-                                const [xs, ys] = (src_position_key || '').split('_');
+                                const [xs, ys, zs] = (src_position_key || '').split('_');
                                 const from_x = parseInt(xs || '0', 10);
                                 const from_y = parseInt(ys || '0', 10);
+                                const from_z = parseInt(zs || '', 10);
 
                                 const dep = await api_deposit_ground_to_container_item({
                                     base_url,
@@ -6084,6 +6253,7 @@ export function create_app_state(): AppState {
                                     place_id,
                                     from_x,
                                     from_y,
+                                    from_elevation: Number.isFinite(from_z) ? Math.floor(from_z) : undefined,
                                     item_id: String(drag_state.item_instance_id ?? ''),
                                     container_item_id,
                                     target_grid_x: grid_x,

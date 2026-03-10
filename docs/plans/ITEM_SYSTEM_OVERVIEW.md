@@ -3,6 +3,13 @@
 **Last Updated:** 2026-02-27  
 **Status:** Active Development
 
+## 2026-03-10 Update (Defs + Deltas)
+
+- Item/Tile instances are persisted as lean "deltas" (no derived `name`, `display_*`, or fully-expanded `tags` in saves).
+- Container-items are identified by the `CONTAINER` tag (defs+deltas-resolved); do not rely on legacy `container_data`.
+- Equip/open/compatibility checks should use effective tags from resolution (`resolve_inline_item(...).effective_tags`).
+- Data layout reference: `docs/guides/DATA_MODEL_AND_DATABASES.md`.
+
 ---
 
 ## Quick Navigation

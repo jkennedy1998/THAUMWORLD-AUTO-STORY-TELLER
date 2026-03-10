@@ -140,6 +140,7 @@ export function make_ground_items_tile_payload(
 export function make_simple_tile_payload(opts: {
     id: string;
     char: string;
+    tags?: any[];
     base_fg?: Rgb;
     weight_index?: number;
     style?: any;
@@ -148,6 +149,7 @@ export function make_simple_tile_payload(opts: {
         kind: 'tile',
         tile_kind: 'simple',
         id: opts.id,
+        tags: Array.isArray(opts.tags) ? opts.tags : [],
         char: String(opts.char ?? ' ').charAt(0) || ' ',
         base_fg: opts.base_fg,
         weight_index: typeof opts.weight_index === 'number' ? opts.weight_index : undefined,

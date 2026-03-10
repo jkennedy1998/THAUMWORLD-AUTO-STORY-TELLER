@@ -18,7 +18,6 @@ import type { Place, TilePosition } from "../../types/place.js";
 import { set_facing, face_target } from "../../npc_ai/facing_system.js";
 import { debug_event } from "../../shared/debug_event.js";
 import { get_sense_profile } from "../../action_system/sense_broadcast.js";
-import { spawn_sense_broadcast_particles } from "../vision_debugger.js";
 import { play_sfx } from "../sfx/sfx_player.js";
 
 function footstep_cooldown_ms(speed_tpm: number): number {
@@ -38,6 +37,8 @@ let current_place: Place | null = null;
 // This is needed because place data gets refreshed from storage which may have stale positions
 const npc_actual_positions = new Map<string, TilePosition>();
 
+type WorldPos = { x: number; y: number; z: number };
+
 // Renderer-authoritative visual status (synced by NPC_STATUS commands)
 const npc_visual_status_by_ref = new Map<string, string>();
 
@@ -50,6 +51,21 @@ export function get_npc_visual_status(npc_ref: string): string | undefined {
 // conversation partner as the partner moves.
 const conversation_target_by_npc = new Map<string, string>(); // npc_ref -> entity_ref
 const last_face_target_by_npc = new Map<string, string>(); // npc_ref -> entity_ref
+
+function get_entity_world_z(entity_ref: string): number {
+  if (!current_place) return 0;
+  if (entity_ref.startsWith("npc.")) {
+    const npc: any = current_place.contents.npcs_present.find((n: any) => n.npc_ref === entity_ref);
+    const z = Number(npc?.elevation);
+    return Number.isFinite(z) ? Math.floor(z) : 0;
+  }
+  if (entity_ref.startsWith("actor.")) {
+    const actor: any = current_place.contents.actors_present.find((a: any) => a.actor_ref === entity_ref);
+    const z = Number(actor?.elevation);
+    return Number.isFinite(z) ? Math.floor(z) : 0;
+  }
+  return 0;
+}
 
 function get_entity_position(entity_ref: string): TilePosition | null {
   if (!current_place) return null;
@@ -71,11 +87,17 @@ function get_entity_position(entity_ref: string): TilePosition | null {
   return null;
 }
 
+function get_entity_world_pos(entity_ref: string): WorldPos | null {
+  const pos = get_entity_position(entity_ref);
+  if (!pos) return null;
+  return { x: pos.x, y: pos.y, z: get_entity_world_z(entity_ref) };
+}
+
 function execute_ui_sense_broadcast_command(cmd: any): void {
   if (!current_place) return;
   const origin_ref = cmd?.npc_ref;
   if (typeof origin_ref !== "string" || origin_ref.length === 0) return;
-  const pos = get_entity_position(origin_ref);
+  const pos = get_entity_world_pos(origin_ref);
   if (!pos) return;
 
   const verb = typeof cmd?.verb === "string" ? cmd.verb : "";
@@ -84,7 +106,18 @@ function execute_ui_sense_broadcast_command(cmd: any): void {
   if (!profile) return;
 
   for (const b of profile.broadcasts) {
-    spawn_sense_broadcast_particles(pos, b.sense as any, b.range_tiles);
+    try {
+      window.dispatchEvent(new CustomEvent('thaumworld_ui_sense_broadcast', {
+        detail: {
+          source_ref: origin_ref,
+          origin: pos,
+          sense: b.sense,
+          range: b.range_tiles,
+        }
+      }));
+    } catch {
+      // ignore
+    }
   }
 }
 
