@@ -11,6 +11,7 @@ import { parse } from "jsonc-parser";
 import type { Place, PlaceResult, PlaceListResult } from "../types/place.js";
 import { get_data_slot_dir } from "../engine/paths.js";
 import { ensure_place_tiles, ensure_place_entities_not_on_walls } from "./tiles.js";
+import { sanitize_place_for_save } from "../shared/defs_deltas_sanitize.js";
 
 const PLACES_DIR = "places";
 
@@ -115,6 +116,10 @@ export function load_place(slot: number, place_id: string): PlaceResult {
 export function save_place(slot: number, place: Place): string {
   ensure_places_dir(slot);
   const place_path = get_place_path(slot, place.id);
+
+  // defs+deltas migration: strip derived/legacy inline fields before persisting.
+  // (Important because some API paths augment tiles/items for UI and may later save.)
+  sanitize_place_for_save(place as any);
   
   fs.writeFileSync(
     place_path,

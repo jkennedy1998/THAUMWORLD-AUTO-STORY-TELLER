@@ -51,6 +51,21 @@ export class PlaceDomLayers {
     if (this.renderer && this.place_id === place_id) return;
     this.destroy();
 
+    // Phase 0.5: single-owner lifecycle for #voxel_layers_container.
+    // If the ASCII painter is mounted, release it before mounting place layers.
+    try {
+      const other = container.querySelectorAll('[data-painter-world-layers]');
+      for (const el of Array.from(other)) {
+        try {
+          el.remove();
+        } catch {
+          // ignore
+        }
+      }
+    } catch {
+      // ignore
+    }
+
     this.place_id = place_id;
     this.root = document.createElement('div');
     this.root.style.position = 'absolute';
@@ -59,6 +74,7 @@ export class PlaceDomLayers {
     this.root.style.width = '100%';
     this.root.style.height = '100%';
     this.root.style.pointerEvents = 'none';
+    this.root.setAttribute('data-world-layers-owner', 'place');
     this.root.setAttribute('data-place-world-layers', place_id);
     container.appendChild(this.root);
 
@@ -174,11 +190,14 @@ export class PlaceDomLayers {
     }
   }
 
-  set_layer_cells(z: 0 | 1 | 2, cells: GridCell[][]): void {
+  set_layer_cells(z: 0 | 1 | 2, cells: GridCell[][], content_version?: number): void {
     if (!this.space) return;
     const layer = this.space.layers.get(z);
     if (!layer) return;
     layer.cells = cells;
+    if (this.renderer && typeof content_version === 'number' && Number.isFinite(content_version)) {
+      this.renderer.setLayerContentVersion(z, Math.trunc(content_version));
+    }
   }
 
   render(): void {

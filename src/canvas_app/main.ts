@@ -1,5 +1,6 @@
 import { CanvasRuntime } from '../mono_ui/runtime/canvas_runtime.js';
 import type { Module } from '../mono_ui/types.js';
+import { compute_dom_viewport_for_rect } from '../mono_ui/runtime/dom_viewport.js';
 import { APP_CONFIG, create_app_state } from './app_state.js';
 import { PAINTER_CONFIG, create_painter_app_state } from './painter_app_state.js';
 
@@ -176,30 +177,35 @@ if (IS_PAINTER_MODE && painter_state) {
         const canvasModule = currentModules.find(m => m.id === 'painter_canvas');
         if (canvasModule && tileSize.w > 0 && tileSize.h > 0) {
             const rect = canvasModule.rect;
-            
+
             // Viewport in screen CSS pixels.
-            // - Include global CSS pan (mono_canvas transform) so the mask tracks the UI.
-            // - Flip Y because module rects are bottom-left origin, but DOM is top-left.
-            const viewportX = globalPan.x + rect.x0 * tileSize.w;
-            const viewportY = globalPan.y + (config.grid_height - 1 - rect.y1) * tileSize.h;
-            const viewportW = (rect.x1 - rect.x0 + 1) * tileSize.w;
-            const viewportH = (rect.y1 - rect.y0 + 1) * tileSize.h;
-            const fontSizePx = config.base_font_size_px * (Number.isFinite(uiScale) ? uiScale : 1.0);
-            
-            const logKey = `${viewportX.toFixed(2)},${viewportY.toFixed(2)},${viewportW.toFixed(2)},${viewportH.toFixed(2)}|${tileSize.w.toFixed(3)},${tileSize.h.toFixed(3)}|${fontSizePx.toFixed(2)}`;
-            lastViewportLogKey = logKey;
-            
-            painterRef.set_dom_viewport({
-                x: viewportX,
-                y: viewportY,
-                width: viewportW,
-                height: viewportH,
-                tileW: tileSize.w,
-                tileH: tileSize.h,
-                fontSizePx,
-                offsetX: 0,
-                offsetY: 0
+            // Keep painter + game-place aligned by reusing the shared helper.
+            const vp = compute_dom_viewport_for_rect({
+                pan_x_px: globalPan.x,
+                pan_y_px: globalPan.y,
+                tile_w_px: tileSize.w,
+                tile_h_px: tileSize.h,
+                grid_height: config.grid_height,
+                rect,
+                base_font_size_px: config.base_font_size_px,
+                ui_scale: uiScale,
             });
+            if (vp) {
+                const logKey = `${vp.x.toFixed(2)},${vp.y.toFixed(2)},${vp.width.toFixed(2)},${vp.height.toFixed(2)}|${vp.tileW.toFixed(3)},${vp.tileH.toFixed(3)}|${vp.fontSizePx.toFixed(2)}`;
+                lastViewportLogKey = logKey;
+
+                painterRef.set_dom_viewport({
+                    x: vp.x,
+                    y: vp.y,
+                    width: vp.width,
+                    height: vp.height,
+                    tileW: vp.tileW,
+                    tileH: vp.tileH,
+                    fontSizePx: vp.fontSizePx,
+                    offsetX: 0,
+                    offsetY: 0
+                });
+            }
         }
 
         if (boot_frames_left > 0) boot_frames_left -= 1;

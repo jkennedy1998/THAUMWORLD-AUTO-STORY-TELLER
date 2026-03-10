@@ -10,10 +10,11 @@ import type { TagInstance } from "../tag_system/registry.js";
 export interface InlineItem {
     id: string;                    // Unique instance ID (UUID)
     def_id: string;                // Reference to item definition
-    name: string;                  // Display name (copied from def for quick access)
     qty: number;                   // Stack quantity (default: 1)
-    weight: number;                // Individual item weight (total = qty * weight)
-    tags: TagInstance[];           // Item tags (including CONTAINER tag)
+    // Tags and all other properties are resolved from the item database.
+    // Instance stores only deltas (remove+add) for tag mutations.
+    tag_add?: TagInstance[];
+    tag_remove?: Array<{ key: string; mag: number }>;
     contents?: InlineItem[];       // Nested items (only present if CONTAINER tag exists)
     container_capacity?: {         // Capacity limits (only for containers)
         max_slots?: number;
@@ -72,7 +73,10 @@ export function build_item_path(...components: string[]): string {
  * Check if an item is a container (has CONTAINER tag)
  */
 export function is_container_item(item: InlineItem): boolean {
-    return item.tags.some(tag => tag.name === 'CONTAINER');
+    // Container-ness is resolved from database tags; callers should use resolver helpers.
+    // This function is kept for backward compatibility but is no longer authoritative.
+    const tags = (item as any).tags;
+    return Array.isArray(tags) ? tags.some((tag: any) => tag.name === 'CONTAINER') : false;
 }
 
 /**
@@ -88,15 +92,15 @@ export function get_container_capacity(item: InlineItem): { max_slots?: number; 
  * Calculate total weight of an item (including contents if container)
  */
 export function calculate_item_weight(item: InlineItem): number {
-    const base_weight = item.weight * item.qty;
-    
+    // Weight is resolved from database; this legacy helper is not authoritative.
+    // Prefer server-side resolvers for accurate weight.
+    const qty = item.qty || 1;
+    const w = (item as any).weight;
+    const base_weight = (typeof w === 'number' && Number.isFinite(w) ? w : 0) * qty;
     if (item.contents && item.contents.length > 0) {
-        const contents_weight = item.contents.reduce((sum, child) => 
-            sum + calculate_item_weight(child), 0
-        );
+        const contents_weight = item.contents.reduce((sum, child) => sum + calculate_item_weight(child), 0);
         return base_weight + contents_weight;
     }
-    
     return base_weight;
 }
 

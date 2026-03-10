@@ -5,7 +5,7 @@
  * Paths around occupied tiles (entities, features, items).
  */
 
-import type { Place, TilePosition } from "../types/place.js";
+import type { Place, TilePosition, PlaceTile } from "../types/place.js";
 
 export type PathfindingOptions = {
   exclude_entity?: string;  // Entity ref to exclude from blocking (the moving entity)
@@ -19,6 +19,13 @@ export type PathResult = {
   blocked: boolean;
   blocked_at?: TilePosition;
 };
+
+function tile_has_tag(tile: PlaceTile | null, name: string): boolean {
+  if (!tile) return false;
+  const tags: any[] = (tile as any)?.tags ?? [];
+  const up = String(name ?? '').toUpperCase();
+  return Array.isArray(tags) && tags.some((t) => String(t?.name ?? '').toUpperCase() === up);
+}
 
 /**
  * Check if a tile is walkable
@@ -39,16 +46,15 @@ export function is_tile_walkable(
   // Walking pathing rule (3dification test room):
   // - z=1 must be empty or non-occupying
   // - z=0 beneath must exist and be OCCUPIES (support)
+  // Walking pathing rule (3dification test room), renderer-safe:
+  // - z=1 blocks movement when OCCUPIES
+  // - z=0 must support (OCCUPIES) when tiles_z0 exists
   try {
-    const t1 = (place as any)?.tiles?.cells?.[tile.y]?.[tile.x];
-    if (t1?.tags) {
-      const blocks = t1.tags.some((tag: any) => tag.name === 'OCCUPIES');
-      if (blocks) return false;
-    }
-    const t0 = (place as any)?.tiles_z0?.cells?.[tile.y]?.[tile.x];
+    const t1 = (place as any)?.tiles?.cells?.[tile.y]?.[tile.x] ?? null;
+    if (tile_has_tag(t1, 'OCCUPIES')) return false;
     if ((place as any)?.tiles_z0) {
-      const supports = t0?.tags ? t0.tags.some((tag: any) => tag.name === 'OCCUPIES') : false;
-      if (!supports) return false;
+      const t0 = (place as any)?.tiles_z0?.cells?.[tile.y]?.[tile.x] ?? null;
+      if (!tile_has_tag(t0, 'OCCUPIES')) return false;
     }
   } catch {
     // ignore

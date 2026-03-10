@@ -1,5 +1,6 @@
 import type { Place, PlaceTile, PlaceTiles, TilePosition, PlaceConnection } from "../types/place.js";
 import { load_master_tile } from "../tile_storage/store.js";
+import { resolve_place_tile, has_effective_tile_tag } from "../tile_storage/resolve.js";
 
 function clamp_int(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, Math.trunc(n)));
@@ -46,11 +47,11 @@ function calculate_door_position(place: Place, direction: string): TilePosition 
  * Copies base tags and container capacity from the definition.
  */
 function create_tile_from_definition(def_id: string, overrides?: Partial<PlaceTile>): PlaceTile {
-  const result = load_master_tile(def_id);
   const tile: PlaceTile = {
     kind: def_id,
-    tags: result.ok ? [...(result.tile.tags ?? [])] : [],
   };
+
+  const result = load_master_tile(def_id);
 
   if (result.ok && result.tile.container_capacity) {
     tile.container_capacity = { ...result.tile.container_capacity };
@@ -96,20 +97,30 @@ function get_tile(tiles: PlaceTiles, x: number, y: number): PlaceTile | null {
 
 export function tile_blocks_movement(tile: PlaceTile | null): boolean {
   if (!tile) return false;
-  const tags = tile.tags ?? [];
-  return tags.some(t => t.name === "OCCUPIES");
+  const resolved = resolve_place_tile(tile.kind, tile);
+  const tags = resolved ? resolved.effective_tags : (tile.tags ?? []);
+  return has_effective_tile_tag(tags, "OCCUPIES");
+}
+
+export function tile_blocks_los(tile: PlaceTile | null): boolean {
+  if (!tile) return false;
+  const resolved = resolve_place_tile(tile.kind, tile);
+  const tags = resolved ? resolved.effective_tags : (tile.tags ?? []);
+  return has_effective_tile_tag(tags, "COVER");
 }
 
 export function tile_is_door(tile: PlaceTile | null): boolean {
   if (!tile) return false;
-  const tags = tile.tags ?? [];
-  return tags.some(t => t.name === "DOOR");
+  const resolved = resolve_place_tile(tile.kind, tile);
+  const tags = resolved ? resolved.effective_tags : (tile.tags ?? []);
+  return has_effective_tile_tag(tags, "DOOR");
 }
 
 export function tile_is_container(tile: PlaceTile | null): boolean {
   if (!tile) return false;
-  const tags = tile.tags ?? [];
-  return tags.some(t => t.name === "CONTAINER");
+  const resolved = resolve_place_tile(tile.kind, tile);
+  const tags = resolved ? resolved.effective_tags : (tile.tags ?? []);
+  return has_effective_tile_tag(tags, "CONTAINER");
 }
 
 export function ensure_place_tiles(place: Place): { changed: boolean } {
@@ -232,6 +243,18 @@ export function ensure_place_tiles(place: Place): { changed: boolean } {
     if (!get_tile(tiles, bush_x, bush_y)) {
       set_tile(tiles, bush_x, bush_y, create_tile_from_definition("foliage_snowberry_bush", { last_tick_processed: 0 }));
       changed = true;
+    }
+
+    // Dev fixture: small interior stone segment for LOS testing.
+    // Only fill empty cells so real authored places can override.
+    const wall_x = clamp_int(b.min_x + 6, b.min_x, b.max_x);
+    const wall_y0 = clamp_int(b.min_y + 3, b.min_y, b.max_y);
+    const wall_y1 = clamp_int(b.min_y + 6, b.min_y, b.max_y);
+    for (let y = wall_y0; y <= wall_y1; y++) {
+      if (!get_tile(tiles, wall_x, y)) {
+        set_tile(tiles, wall_x, y, create_tile_from_definition("tile_stone_brick"));
+        changed = true;
+      }
     }
   } catch {
     // ignore

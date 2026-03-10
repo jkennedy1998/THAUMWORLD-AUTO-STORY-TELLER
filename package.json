@@ -44,7 +44,11 @@
     "logs:fix:painter": "node scripts/validate_logs.js --fix --mode=painter",
     "dev:ascii": "node scripts/dev_ascii.js",
     "dev:ascii:logs": "node scripts/dev_ascii.js",
-    "build:exe": "node scripts/build_exe.js"
+    "build:exe": "node scripts/build_exe.js",
+    "migrate:sanitize_defs_deltas": "tsx scripts/sanitize_defs_deltas.ts",
+    "migrate:sanitize_defs_deltas:slot1": "tsx scripts/sanitize_defs_deltas.ts --slot=1",
+    "check:defs_deltas_clean": "tsx scripts/check_defs_deltas_clean.ts",
+    "check:defs_deltas_clean:slot1": "tsx scripts/check_defs_deltas_clean.ts --slot=1"
   },
   "repository": {
     "type": "git",

@@ -72,8 +72,10 @@ export type PlaceTile = {
   // Door metadata (only present if tile has DOOR tag)
   door?: PlaceDoorMeta;
 
-  // Tags on tiles (same tag system as items/characters).
-  // Start with base_tags from tile definition, can gain/lose over time.
+  // Tag deltas (remove+add) applied on top of tile definition tags.
+  // Effective tags are resolved server-side; `tags` is treated as derived/runtime-only.
+  tag_add?: TagInstance[];
+  tag_remove?: Array<{ key: string; mag: number }>;
   tags?: TagInstance[];
 
   // Inline container-like storage for tile contents (e.g., harvestables, planters).

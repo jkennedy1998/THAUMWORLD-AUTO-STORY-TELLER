@@ -9,8 +9,10 @@ import { get_actor_dir, get_actor_path } from "../engine/paths.js";
 import { ensure_dir_exists } from "../engine/log_store.js";
 import { debug_log, debug_error } from "../shared/debug.js";
 import type { InlineItem, InlineBodySlot } from "../types/inline_item.js";
-import type { TagInstance } from "../tag_system/registry.js";
 import { randomUUID } from "node:crypto";
+import { load_master_item } from "./store.js";
+import { resolve_inline_item, has_effective_tag } from "./resolve.js";
+import { sanitize_actor_for_save } from "../shared/defs_deltas_sanitize.js";
 
 function read_jsonc(pathname: string): Record<string, unknown> {
     const raw = fs.readFileSync(pathname, "utf-8");
@@ -63,6 +65,8 @@ export function save_actor_with_items(
     actor: Record<string, unknown>
 ): { ok: true } | { ok: false; error: string } {
     try {
+        // defs+deltas migration: strip derived/legacy inline fields before persisting.
+        sanitize_actor_for_save(actor as any);
         const actor_path = get_actor_path(slot, actor_id);
         write_jsonc(actor_path, actor);
         debug_log("inline_items", `Saved actor ${actor_id} with inline items`);
@@ -446,8 +450,9 @@ export function add_item_to_container(
         return { ok: false, error: 'container_not_found' };
     }
     
-    // Check if it's a container
-    const has_container_tag = container_item.tags.some(tag => tag.name === 'CONTAINER');
+    // Check if it's a container (resolved from database + deltas)
+    const container_resolved = resolve_inline_item(String(container_item.def_id ?? ''), container_item);
+    const has_container_tag = !!(container_resolved && has_effective_tag(container_resolved.effective_tags, 'CONTAINER'));
     if (!has_container_tag) {
         return { ok: false, error: 'not_a_container' };
     }
@@ -519,9 +524,7 @@ export function calculate_actor_carry_weight(actor: Record<string, unknown>): nu
     let total = 0;
     
     const items = get_all_actor_items(actor);
-    for (const { item } of items) {
-        total += calculate_item_weight(item);
-    }
+    for (const { item } of items) total += calculate_item_weight(item);
     
     return total;
 }
@@ -530,16 +533,14 @@ export function calculate_actor_carry_weight(actor: Record<string, unknown>): nu
  * Calculate weight of item including contents
  */
 function calculate_item_weight(item: InlineItem): number {
-    const base_weight = item.weight * item.qty;
-    
-    if (item.contents && item.contents.length > 0) {
-        const contents_weight = item.contents.reduce((sum, child) => 
-            sum + calculate_item_weight(child), 0
-        );
-        return base_weight + contents_weight;
+    const qty = typeof item.qty === 'number' && Number.isFinite(item.qty) && item.qty > 0 ? item.qty : 1;
+    const def_res = load_master_item(String(item.def_id ?? ''));
+    const unit = def_res.ok ? Number(def_res.item.weight ?? 0) : 0;
+    let total = unit * qty;
+    if (Array.isArray(item.contents) && item.contents.length > 0) {
+        for (const child of item.contents) total += calculate_item_weight(child);
     }
-    
-    return base_weight;
+    return total;
 }
 
 /**
@@ -554,29 +555,15 @@ export function generate_item_id(): string {
  */
 export function create_inline_item(
     def_id: string,
-    name: string,
-    weight: number,
     qty: number = 1,
-    tags: TagInstance[] = [],
     container_capacity?: { max_slots?: number; max_weight?: number }
 ): InlineItem {
     const item: InlineItem = {
         id: generate_item_id(),
-        def_id,
-        name,
-        qty,
-        weight,
-        tags
+        def_id: String(def_id ?? ''),
+        qty: Math.max(1, Math.floor(qty)),
     };
-    
-    if (container_capacity) {
-        item.container_capacity = container_capacity;
-        // Ensure CONTAINER tag exists
-        if (!item.tags.some(tag => tag.name === 'CONTAINER')) {
-            item.tags.push({ name: 'CONTAINER', mag: 1, meta: [] });
-        }
-    }
-    
+    if (container_capacity) item.container_capacity = container_capacity;
     return item;
 }
 
@@ -590,8 +577,8 @@ export function find_first_container(
     const items = get_all_actor_items(actor);
     
     for (const { item, path } of items) {
-        const has_container_tag = item.tags.some(tag => tag.name === 'CONTAINER');
-        if (has_container_tag) {
+        const resolved = resolve_inline_item(String(item.def_id ?? ''), item);
+        if (resolved && has_effective_tag(resolved.effective_tags, 'CONTAINER')) {
             return { item, path };
         }
     }
@@ -613,14 +600,7 @@ export function ensure_actor_has_sack(
     }
     
     // Create default sack
-    const sack = create_inline_item(
-        'small_sack',
-        'Small Sack',
-        0.5,
-        1,
-        [{ name: 'CONTAINER', mag: 1, meta: [] }, { name: 'GARB', mag: 1, meta: [] }],
-        { max_slots: 10, max_weight: 50 }
-    );
+    const sack = create_inline_item('small_sack', 1, { max_slots: 10, max_weight: 5000 });
     
     // Add to leg_left garb
     const result = add_item_to_body_slot(actor, 'leg_left', 'garb', sack);

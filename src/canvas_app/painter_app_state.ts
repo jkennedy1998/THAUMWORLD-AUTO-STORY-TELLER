@@ -70,6 +70,7 @@ import { makeLayerRendererModule } from '../ascii_painter/layer_renderer_module.
 import { makeLayerPaletteModule } from '../ascii_painter/layer_palette_module.js';
 import { makeCameraControlModule } from '../ascii_painter/camera_control_module.js';
 import { VoxelDOMRenderer, createVoxelDOMRenderer } from '../ascii_painter/voxel_dom_renderer.js';
+import { touch_world_layers_owner } from '../mono_ui/world_layers_owner.js';
 
 // Configuration matching the game but with relaxed letter spacing
 export const PAINTER_CONFIG = {
@@ -164,6 +165,7 @@ export function create_painter_app_state(): PainterAppState {
 
   // Create DOM-based voxel renderer for true off-grid rendering
   let domRenderer: VoxelDOMRenderer | null = null;
+  let domRoot: HTMLElement | null = null;
 
   // Initialize DOM renderer when container is available
   function initDOMRenderer(): void {
@@ -175,8 +177,34 @@ export function create_painter_app_state(): PainterAppState {
       return;
     }
 
+    // Phase 0.5: single-owner lifecycle for #voxel_layers_container.
+    // If the game place layers are mounted, release them before mounting painter layers.
+    try {
+      const other = container.querySelectorAll('[data-place-world-layers]');
+      for (const el of Array.from(other)) {
+        try {
+          el.remove();
+        } catch {
+          // ignore
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    domRoot = document.createElement('div');
+    domRoot.style.position = 'absolute';
+    domRoot.style.left = '0px';
+    domRoot.style.top = '0px';
+    domRoot.style.width = '100%';
+    domRoot.style.height = '100%';
+    domRoot.style.pointerEvents = 'none';
+    domRoot.setAttribute('data-world-layers-owner', 'painter');
+    domRoot.setAttribute('data-painter-world-layers', 'true');
+    container.appendChild(domRoot);
+
     domRenderer = createVoxelDOMRenderer(
-      container,
+      domRoot,
       PAINTER_CONFIG.font_family,
       PAINTER_CONFIG.base_font_size_px
     );
@@ -1780,6 +1808,7 @@ export function create_painter_app_state(): PainterAppState {
 
     render_dom_layers: () => {
       if (domRenderer) {
+        touch_world_layers_owner('painter');
         domRenderer.render();
       }
     },

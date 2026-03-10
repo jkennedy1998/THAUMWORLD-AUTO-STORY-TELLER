@@ -30,6 +30,8 @@ import { calculate_grid_dimensions } from "../types/container.js";
 import { load_item_def, load_master_item } from "../item_storage/store.js";
 import { create_inline_item } from "../item_instances/store.js";
 import { load_master_tile } from "../tile_storage/store.js";
+import { resolve_inline_item } from "../item_storage/resolve.js";
+import { resolve_place_tile } from "../tile_storage/resolve.js";
 import {
     load_actor_with_items,
     save_actor_with_items,
@@ -187,6 +189,41 @@ function resolve_inline_container_capacity(container_item: any, contents_len: nu
     }
 
     return { max_slots, max_weight, patched };
+}
+
+function resolve_inline_item_payload_for_api(item_any: any): {
+    id: string;
+    def_id: string;
+    qty: number;
+    name: string;
+    unit_weight: number;
+    display_char: string;
+    display_color: string | null;
+    tags: any[];
+} {
+    const id = String(item_any?.id ?? '');
+    const def_id = String(item_any?.def_id ?? '');
+    const qty_raw = item_any?.qty;
+    const qty = (typeof qty_raw === 'number' && Number.isFinite(qty_raw))
+        ? qty_raw
+        : (Number(qty_raw ?? 1) || 1);
+
+    const r = resolve_inline_item(def_id, item_any);
+
+    const name = r?.name ?? (def_id || String(item_any?.name ?? 'item'));
+    const unit_weight = r?.unit_weight ?? (typeof item_any?.weight === 'number' ? item_any.weight : 0);
+    const tags = r?.effective_tags ?? (Array.isArray(item_any?.tags) ? item_any.tags : []);
+
+    const base_char = typeof r?.display_char === 'string' ? r.display_char : '';
+    const display_char = base_char && base_char.length > 0
+        ? base_char.charAt(0)
+        : (name ? String(name).charAt(0).toLowerCase() : '·');
+
+    const display_color = (typeof r?.display_color === 'string' && r.display_color.length > 0)
+        ? r.display_color
+        : (typeof item_any?.display_color === 'string' ? item_any.display_color : null);
+
+    return { id, def_id, qty, name, unit_weight, display_char, display_color, tags };
 }
 
 function expand_body_slot_meta(meta: unknown): string[] {
@@ -1701,7 +1738,7 @@ function start_http_server(log_path: string): void {
                             for (let tx = 0; tx < row.length; tx++) {
                                 const tile = row[tx];
                                 if (!tile) continue;
-                                const tags = Array.isArray(tile.tags) ? tile.tags : [];
+                                const tags = (resolve_place_tile(String(tile.kind ?? ''), tile) ?? null)?.effective_tags ?? (Array.isArray(tile.tags) ? tile.tags : []);
                                 if (!has_tag_name(tags, 'GROW')) continue;
 
                                 if (typeof tile.last_tick_processed !== 'number' || !Number.isFinite(tile.last_tick_processed)) {
@@ -1753,17 +1790,11 @@ function start_http_server(log_path: string): void {
 
                                 for (let i = 0; i < events; i++) {
                                     const def_id = def_ids[i % def_ids.length] as string;
-                                    const def_res = load_item_def(slot, def_id);
+                                    const def_res = load_master_item(def_id);
                                     if (!def_res.ok) continue;
                                     const def = def_res.item as any;
 
-                                    const created = create_inline_item_from_store(
-                                        String(def.id ?? def_id),
-                                        String(def.name ?? def_id),
-                                        Number(def.weight ?? 0),
-                                        1,
-                                        Array.isArray(def.tags) ? def.tags : [],
-                                    );
+                                    const created = create_inline_item_from_store(String(def.id ?? def_id), 1);
 
                                     const can_put_in_container = is_container && Array.isArray(tile.contents);
                                     const max_slots = can_put_in_container
@@ -2012,13 +2043,15 @@ function start_http_server(log_path: string): void {
                             for (const tile of row) {
                                 if (!tile?.kind) continue;
                                 totalTiles++;
-                                const def_result = load_master_tile(tile.kind);
-                                if (def_result.ok) {
-                                    tile.display_char = def_result.tile.display_char;
-                                    tile.display_color = def_result.tile.display_color;
+                                const resolved = resolve_place_tile(tile.kind, tile);
+                                if (resolved) {
+                                    tile.display_char = resolved.display_char;
+                                    tile.display_color = resolved.display_color;
+                                    tile.tags = resolved.effective_tags;
+                                    tile.__derived_runtime = true;
                                     augmentedTiles++;
-                                    if (def_result.tile.container_glyphs) {
-                                        tile.container_glyphs = def_result.tile.container_glyphs;
+                                    if (resolved.container_glyphs) {
+                                        tile.container_glyphs = resolved.container_glyphs;
                                     }
                                 } else {
                                     failedTiles++;
@@ -2319,35 +2352,20 @@ function start_http_server(log_path: string): void {
                     return;
                 }
 
-                // Best-effort: attach display_char to inline items in body_slots for consistent UI rendering.
-                // This is a response-only augmentation (we do not persist these fields here).
+                // Response-only augmentation: attach derived item props from database for consistent UI rendering.
+                // (Do not persist these fields.)
                 try {
-                    const display_char_by_def_id = new Map<string, string>();
-                    const get_display_char = (def_id: string, fallback_name: string): string => {
-                        const key = String(def_id || '');
-                        const cached = display_char_by_def_id.get(key);
-                        if (cached) return cached;
-                        const def_res = load_item_def(slot, key);
-                        if (def_res.ok) {
-                            const base = String((def_res.item as any)?.display_char ?? '');
-                            const out = base && base.length > 0
-                                ? base.charAt(0)
-                                : (fallback_name ? fallback_name.charAt(0).toLowerCase() : '·');
-                            display_char_by_def_id.set(key, out);
-                            return out;
-                        }
-                        const out = fallback_name ? fallback_name.charAt(0).toLowerCase() : '·';
-                        display_char_by_def_id.set(key, out);
-                        return out;
-                    };
-
                     const patch_inline_item = (it: any): void => {
                         if (!it || typeof it !== 'object') return;
                         const def_id = typeof it.def_id === 'string' ? it.def_id : '';
-                        const name = typeof it.name === 'string' ? it.name : '';
-                        const cur = typeof it.display_char === 'string' ? it.display_char : '';
-                        if (!cur || cur === '·' || cur === ' ') {
-                            it.display_char = get_display_char(def_id, name);
+                        const resolved = def_id ? resolve_inline_item(def_id, it as any) : null;
+                        if (resolved) {
+                            it.name = resolved.name;
+                            it.weight = resolved.unit_weight;
+                            it.tags = resolved.effective_tags;
+                            it.display_char = resolved.display_char;
+                            if (resolved.display_color) it.display_color = resolved.display_color;
+                            it.__derived_runtime = true;
                         }
                         if (Array.isArray(it.contents)) {
                             for (const child of it.contents) patch_inline_item(child);
@@ -2368,7 +2386,7 @@ function start_http_server(log_path: string): void {
                         }
                     }
                 } catch {
-                    // Non-fatal: actor data still returns even if meta augmentation fails.
+                    // Non-fatal: actor data still returns even if augmentation fails.
                 }
 
                 debug_log("API", `/api/actor: Loaded ${actor_id}`);
@@ -3022,21 +3040,8 @@ function start_http_server(log_path: string): void {
             }
 
             try {
-                // Load item definition from master database
-                // Prefer slot-local item defs (allows per-campaign overrides), fallback to master.
-                const def_result = (() => {
-                    const local = load_item_def(data_slot_number, item_def_id);
-                    if (local.ok) {
-                        debug_log('API', `[COMPAT_SRC] ${item_def_id} local=${local.path}`);
-                        return local;
-                    }
-                    const master = load_master_item(item_def_id);
-                    if (master.ok) {
-                        debug_log('API', `[COMPAT_SRC] ${item_def_id} master=${master.path}`);
-                        return master;
-                    }
-                    return master;
-                })();
+                // Load item definition from master database (single source of truth)
+                const def_result = load_master_item(item_def_id);
                 if (!def_result.ok) {
                     res.writeHead(400, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: "item_def_not_found" }));
@@ -3092,7 +3097,10 @@ function start_http_server(log_path: string): void {
                 }
 
                 const item_any: any = found.item as any;
-                const tags = Array.isArray(item_any.tags) ? item_any.tags : [];
+
+                // NEW INLINE SYSTEM: resolve tags from defs + deltas (do not rely on stored item.tags)
+                const resolved = resolve_inline_item(String(item_any?.def_id ?? ''), item_any as any);
+                const tags = (resolved?.effective_tags ?? (Array.isArray(item_any?.tags) ? item_any.tags : [])) as any[];
                 const compatible_slots = compute_compatible_slots_from_tags(tags, `inst:${actor_id}:${item_id}`);
 
                 res.writeHead(200, { "Content-Type": "application/json" });
@@ -3138,7 +3146,10 @@ function start_http_server(log_path: string): void {
                 }
 
                 const item_any: any = found.item as any;
-                const tags = Array.isArray(item_any.tags) ? item_any.tags : [];
+
+                // NEW INLINE SYSTEM: resolve tags from defs + deltas (do not rely on stored item.tags)
+                const resolved = resolve_inline_item(String(item_any?.def_id ?? ''), item_any as any);
+                const tags = (resolved?.effective_tags ?? (Array.isArray(item_any?.tags) ? item_any.tags : [])) as any[];
                 const compatible_slots = compute_compatible_slots_from_tags(tags, `place:${place_id}:${item_id}`);
                 res.writeHead(200, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ ok: true, place_id, item_id, compatible_slots }));
@@ -3504,13 +3515,7 @@ function start_http_server(log_path: string): void {
                     }
 
                     // Create inline item
-                    const item = create_inline_item_from_store(
-                        item_def_id,
-                        def.name,
-                        def.weight,
-                        qty,
-                        def.tags || []
-                    );
+                    const item = create_inline_item_from_store(item_def_id, qty);
 
                     // If contents provided (for containers), add them
                     if (contents && Array.isArray(contents) && contents.length > 0) {
@@ -3519,13 +3524,7 @@ function start_http_server(log_path: string): void {
                             const content_def_result = load_master_item(content_item.def_id);
                             if (content_def_result.ok) {
                                 const content_def = content_def_result.item;
-                                const content_inline = create_inline_item_from_store(
-                                    content_item.def_id,
-                                    content_def.name,
-                                    content_def.weight,
-                                    content_item.qty || 1,
-                                    content_def.tags || []
-                                );
+                                const content_inline = create_inline_item_from_store(content_item.def_id, content_item.qty || 1);
                                 item.contents.push(content_inline);
                             }
                         }
@@ -3659,13 +3658,7 @@ function start_http_server(log_path: string): void {
                     }
 
                     // Create inline item
-                    const item = create_inline_item_from_store(
-                        item_def_id,
-                        def.name,
-                        def.weight,
-                        qty,
-                        def.tags || []
-                    );
+                    const item = create_inline_item_from_store(item_def_id, qty);
 
                     // Add to sack
                     const add_result = add_item_to_inline_container(actor_result.actor, sack_result.sack_path, item);
@@ -3754,7 +3747,9 @@ function start_http_server(log_path: string): void {
                     const slot_priority = ['leg_left', 'leg_right', 'torso', 'head', 'hand_left', 'hand_right'];
 
                     function has_container_tag(it: any): boolean {
-                        return !!it?.tags?.some((t: any) => t?.name === 'CONTAINER');
+                        if (!it || typeof it !== 'object') return false;
+                        const p = resolve_inline_item_payload_for_api(it);
+                        return p.tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER');
                     }
 
                     let to_container: string | null = null;
@@ -3883,7 +3878,8 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    debug_log("API", `Picked up ${remove_result.item.name} to ${actor_id}`);
+                    const picked_name = (resolve_inline_item(String(remove_result.item.def_id ?? ''), remove_result.item) ?? null)?.name ?? String(remove_result.item.def_id ?? 'item');
+                    debug_log("API", `Picked up ${picked_name} to ${actor_id}`);
                     res.writeHead(200, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ 
                         ok: true, 
@@ -3986,7 +3982,9 @@ function start_http_server(log_path: string): void {
                     const body_slots = actor_any.body_slots || {};
 
                     function has_container_tag(it: any): boolean {
-                        return !!it?.tags?.some((t: any) => t?.name === 'CONTAINER');
+                        if (!it || typeof it !== 'object') return false;
+                        const p = resolve_inline_item_payload_for_api(it);
+                        return p.tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER');
                     }
 
                     function parse_body_slots_path(p: string): { slot_name: string; slot_type: 'armor'|'tool'|'garb'; garb_index: number | null } | null {
@@ -4244,7 +4242,8 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    debug_log("API", `Dropped ${removed.item.name} to ground at (${drop_x}, ${drop_y})`);
+                    const dropped_name = (resolve_inline_item(String(removed.item.def_id ?? ''), removed.item) ?? null)?.name ?? String(removed.item.def_id ?? 'item');
+                    debug_log("API", `Dropped ${dropped_name} to ground at (${drop_x}, ${drop_y})`);
                     res.writeHead(200, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ 
                         ok: true, 
@@ -4307,7 +4306,8 @@ function start_http_server(log_path: string): void {
                     }
 
                     const container_item = found.item as any;
-                    const is_container = container_item.tags?.some((t: any) => t?.name === 'CONTAINER');
+                    const container_payload = resolve_inline_item_payload_for_api(container_item);
+                    const is_container = container_payload.tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER');
                     if (!is_container) {
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
@@ -4511,7 +4511,7 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    const tags = Array.isArray(tile.tags) ? tile.tags : [];
+                    const tags = (resolve_place_tile(String(tile.kind ?? ''), tile) ?? null)?.effective_tags ?? (Array.isArray(tile.tags) ? tile.tags : []);
                     const is_container = tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER') || Array.isArray(tile.contents);
                     if (!is_container) {
                         res.writeHead(400, { "Content-Type": "application/json" });
@@ -4658,7 +4658,7 @@ function start_http_server(log_path: string): void {
                         }
                     }
 
-                    const tags = Array.isArray(tile.tags) ? tile.tags : [];
+                    const tags = (resolve_place_tile(String(tile.kind ?? ''), tile) ?? null)?.effective_tags ?? (Array.isArray(tile.tags) ? tile.tags : []);
                     const is_container = tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER') || Array.isArray(tile.contents);
                     if (!is_container) {
                         res.writeHead(400, { "Content-Type": "application/json" });
@@ -4775,7 +4775,7 @@ function start_http_server(log_path: string): void {
                         }
                     }
 
-                    const tags = Array.isArray(tile.tags) ? tile.tags : [];
+                    const tags = (resolve_place_tile(String(tile.kind ?? ''), tile) ?? null)?.effective_tags ?? (Array.isArray(tile.tags) ? tile.tags : []);
                     const is_container = tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER') || Array.isArray(tile.contents);
                     if (!is_container) {
                         res.writeHead(400, { "Content-Type": "application/json" });
@@ -5108,7 +5108,7 @@ function start_http_server(log_path: string): void {
                         }
                     }
 
-                    const tags = Array.isArray(tile.tags) ? tile.tags : [];
+                    const tags = (resolve_place_tile(String(tile.kind ?? ''), tile) ?? null)?.effective_tags ?? (Array.isArray(tile.tags) ? tile.tags : []);
                     const is_container = tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER') || Array.isArray(tile.contents);
                     if (!is_container) {
                         res.writeHead(400, { "Content-Type": "application/json" });
@@ -5219,8 +5219,8 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    const src_tags = Array.isArray(src_tile.tags) ? src_tile.tags : [];
-                    const dst_tags = Array.isArray(dst_tile.tags) ? dst_tile.tags : [];
+                    const src_tags = (resolve_place_tile(String(src_tile.kind ?? ''), src_tile) ?? null)?.effective_tags ?? (Array.isArray(src_tile.tags) ? src_tile.tags : []);
+                    const dst_tags = (resolve_place_tile(String(dst_tile.kind ?? ''), dst_tile) ?? null)?.effective_tags ?? (Array.isArray(dst_tile.tags) ? dst_tile.tags : []);
                     const src_is_container = src_tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER') || Array.isArray(src_tile.contents);
                     const dst_is_container = dst_tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER') || Array.isArray(dst_tile.contents);
                     if (!src_is_container || !dst_is_container) {
@@ -5349,7 +5349,7 @@ function start_http_server(log_path: string): void {
                         }
                     }
 
-                    const tags = Array.isArray(tile.tags) ? tile.tags : [];
+                    const tags = (resolve_place_tile(String(tile.kind ?? ''), tile) ?? null)?.effective_tags ?? (Array.isArray(tile.tags) ? tile.tags : []);
                     const is_container = tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER') || Array.isArray(tile.contents);
                     if (!is_container) {
                         res.writeHead(400, { "Content-Type": "application/json" });
@@ -6646,6 +6646,144 @@ function start_http_server(log_path: string): void {
             return;
         }
 
+        // POST /api/place/items/move_within_pile - Move an item inside a ground pile (grid reposition)
+        if (url.pathname === "/api/place/items/move_within_pile") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", (chunk) => { body += chunk; });
+            req.on("end", () => {
+                try {
+                    const data = JSON.parse(body);
+                    const { actor_id, place_id, position_key, item_id, target_grid_x, target_grid_y, action_cost } = data;
+
+                    if (!actor_id || !place_id || !position_key || !item_id) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                        return;
+                    }
+
+                    if (typeof target_grid_x !== 'number' || typeof target_grid_y !== 'number') {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_target_grid" }));
+                        return;
+                    }
+
+                    debug_log('API', `[INLINE] move_within_pile actor=${actor_id} place=${place_id} key=${position_key} item=${item_id} target=(${target_grid_x},${target_grid_y}) cost=${typeof action_cost === 'string' ? action_cost : '-'}`);
+
+                    const actor_result = load_actor(data_slot_number, actor_id);
+                    if (!actor_result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: actor_result.error }));
+                        return;
+                    }
+
+                    const actor_any = actor_result.actor as any;
+                    const actual_place_id = actor_any.location?.place_id;
+                    if (!actual_place_id) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "actor_not_in_any_place" }));
+                        return;
+                    }
+                    if (actual_place_id !== place_id) {
+                        debug_log('API', `[INLINE] move_within_pile place mismatch client=${place_id} actor=${actual_place_id}`);
+                    }
+
+                    const place_result = load_place_with_ground(data_slot_number, actual_place_id);
+                    if (!place_result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: place_result.error }));
+                        return;
+                    }
+
+                    const [xs, ys] = String(position_key).split('_');
+                    const pile_x = parseInt(xs || '0', 10);
+                    const pile_y = parseInt(ys || '0', 10);
+
+                    // Range check: cardinal touch range to the pile tile.
+                    const actor_pos = actor_any.location?.tile;
+                    if (actor_pos && typeof actor_pos.x === 'number' && typeof actor_pos.y === 'number') {
+                        const dist = Math.abs(actor_pos.x - pile_x) + Math.abs(actor_pos.y - pile_y);
+                        if (dist > 1) {
+                            res.writeHead(400, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: false, error: "too_far" }));
+                            return;
+                        }
+                    }
+
+                    const place_any = place_result.place as any;
+                    const list: any[] = Array.isArray(place_any.ground?.scattered?.[position_key]) ? place_any.ground.scattered[position_key] : [];
+                    if (list.length < 2) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "not_a_pile" }));
+                        return;
+                    }
+
+                    // Ensure stable sparse layout for ground piles.
+                    const max_slots = Math.max(10, list.length);
+                    const normalized = normalize_inline_container_grid(list, max_slots, `ground_pile:${actual_place_id}:${position_key}`);
+                    const coords_by_id = new Map<string, { x: number; y: number }>();
+                    for (const e of normalized) {
+                        const id = String(e.item?.id ?? '');
+                        if (id) coords_by_id.set(id, { x: e.grid_x, y: e.grid_y });
+                    }
+                    for (const it of list) {
+                        const c = coords_by_id.get(String(it?.id ?? ''));
+                        if (c) {
+                            it.grid_x = c.x;
+                            it.grid_y = c.y;
+                        }
+                    }
+
+                    const grid_target: GridTarget = { x: Math.floor(target_grid_x), y: Math.floor(target_grid_y) };
+                    const grid_ok = validate_grid_target(max_slots, grid_target);
+                    if (!grid_ok.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: grid_ok.error, detail: grid_ok.detail }));
+                        return;
+                    }
+
+                    const moving = list.find((it: any) => String(it?.id ?? '') === String(item_id));
+                    if (!moving) {
+                        res.writeHead(404, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "item_not_found_on_ground" }));
+                        return;
+                    }
+
+                    const occupied = list.find((it: any) =>
+                        String(it?.id ?? '') !== String(item_id) && it?.grid_x === grid_target.x && it?.grid_y === grid_target.y
+                    );
+                    if (occupied) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "target_slot_occupied" }));
+                        return;
+                    }
+
+                    moving.grid_x = grid_target.x;
+                    moving.grid_y = grid_target.y;
+
+                    const save_place_result = save_place_with_ground(data_slot_number, actual_place_id, place_result.place);
+                    if (!save_place_result.ok) {
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: save_place_result.error }));
+                        return;
+                    }
+
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true }));
+                } catch (err) {
+                    debug_error('API', '/api/place/items/move_within_pile error', err);
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "internal_error" }));
+                }
+            });
+            return;
+        }
+
         // POST /api/place/items/drag - Drag ground item(s) to another ground tile (sweep)
         if (url.pathname === "/api/place/items/drag") {
             if (req.method !== "POST") {
@@ -7219,7 +7357,8 @@ function start_http_server(log_path: string): void {
                     let add_ok = false;
                     if (to_container.startsWith('body_slots.') || to_container.startsWith('actor.item.')) {
                         const dest_item = get_container_item(to_container);
-                        const is_dest_container = dest_item?.tags?.some((t: any) => t?.name === 'CONTAINER');
+                        const dest_payload = resolve_inline_item_payload_for_api(dest_item);
+                        const is_dest_container = dest_payload.tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER');
                         if (is_dest_container) {
                             if (!Array.isArray(dest_item.contents)) dest_item.contents = [];
                             const max_slots = get_container_capacity_max_slots(dest_item);
@@ -7361,42 +7500,28 @@ function start_http_server(log_path: string): void {
 
                 const items: Array<{ item: InlineItem; position?: { x: number; y: number }; position_key?: string }> = get_all_ground_items(result.place);
 
-                // Best-effort display_char and display_color lookup from item defs (for UI rendering).
-                const display_props_by_def_id = new Map<string, { char: string; color: string }>();
-                const get_display_props = (def_id: string, fallback_name: string): { char: string; color: string } => {
-                    const key = String(def_id || '');
-                    const cached = display_props_by_def_id.get(key);
-                    if (cached) return cached;
-                    const def_res = load_item_def(data_slot_number, key);
-                    if (def_res.ok) {
-                        const base_char = String((def_res.item as any)?.display_char ?? '');
-                        const char = base_char && base_char.length > 0 ? base_char.charAt(0) : (fallback_name ? fallback_name.charAt(0).toLowerCase() : '·');
-                        const color = String((def_res.item as any)?.display_color ?? '#9da5ae');
-                        const props = { char, color };
-                        display_props_by_def_id.set(key, props);
-                        return props;
-                    }
-                    const char = fallback_name ? fallback_name.charAt(0).toLowerCase() : '·';
-                    const props = { char, color: '#9da5ae' };
-                    display_props_by_def_id.set(key, props);
-                    return props;
-                };
+                // Resolve item display + tags from database definitions.
                 
                 res.writeHead(200, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ 
                         ok: true, 
                         place_id,
                         items: items.map(({ item, position, position_key }: { item: InlineItem; position?: { x: number; y: number }; position_key?: string }) => {
-                            const props = get_display_props(String(item.def_id ?? ''), String(item.name ?? ''));
+                            const resolved = resolve_inline_item(String(item.def_id ?? ''), item);
+                            const display_char = resolved?.display_char ?? '·';
+                            const display_color = resolved?.display_color ?? '#9da5ae';
+                            const name = resolved?.name ?? String(item.def_id ?? '');
+                            const weight = resolved?.unit_weight ?? 0;
+                            const tags = resolved?.effective_tags ?? [];
                             return ({
                              id: item.id,
                              def_id: item.def_id,
-                             name: item.name,
+                             name,
                              qty: item.qty,
-                             weight: item.weight,
-                             display_char: props.char,
-                             display_color: props.color,
-                             tags: (item as any).tags || [],
+                             weight,
+                             display_char,
+                             display_color,
+                             tags,
                              position,
                              position_key
                          });
@@ -7404,6 +7529,103 @@ function start_http_server(log_path: string): void {
                      }));
             } catch (err) {
                 debug_error("API", "/api/place/items error", err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "internal_error" }));
+            }
+            return;
+        }
+
+        // GET /api/place/pile_container?place_id=xxx&position_key=x_y - Open a ground pile as a virtual container
+        if (url.pathname === "/api/place/pile_container") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const place_id = url.searchParams.get("place_id");
+            const position_key = url.searchParams.get("position_key");
+            if (!place_id || !position_key) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                return;
+            }
+
+            try {
+                const place_result = load_place_with_ground(data_slot_number, place_id);
+                if (!place_result.ok) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: place_result.error }));
+                    return;
+                }
+
+                const [xs, ys] = String(position_key).split('_');
+                const pile_x = parseInt(xs || '0', 10);
+                const pile_y = parseInt(ys || '0', 10);
+                if (!Number.isFinite(pile_x) || !Number.isFinite(pile_y)) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "invalid_position_key" }));
+                    return;
+                }
+
+                const place_any = place_result.place as any;
+                const list: any[] = Array.isArray(place_any.ground?.scattered?.[position_key]) ? place_any.ground.scattered[position_key] : [];
+                if (list.length < 2) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "not_a_pile" }));
+                    return;
+                }
+
+                // Canonical container-like layout for piles.
+                const max_slots = Math.max(10, list.length);
+                const normalized = normalize_inline_container_grid(list, max_slots, `ground_pile:${place_id}:${position_key}`);
+                const coords_by_id = new Map<string, { x: number; y: number }>();
+                for (const e of normalized) {
+                    const id = String(e.item?.id ?? '');
+                    if (id) coords_by_id.set(id, { x: e.grid_x, y: e.grid_y });
+                }
+                let repaired = 0;
+                for (const it of list) {
+                    const c = coords_by_id.get(String(it?.id ?? ''));
+                    if (!c) continue;
+                    if (it.grid_x !== c.x || it.grid_y !== c.y) {
+                        it.grid_x = c.x;
+                        it.grid_y = c.y;
+                        repaired++;
+                    }
+                }
+                if (repaired > 0) {
+                    const save_res = save_place_with_ground(data_slot_number, place_id, place_result.place);
+                    if (!save_res.ok) {
+                        debug_error('API', `[GRID_SANITY] failed to save pile repair ${place_id}:${position_key}`, save_res.error);
+                    }
+                    debug_log('API', `[GRID_SANITY] ground_pile:${place_id}:${position_key} repaired=${repaired}`);
+                }
+
+                const container_id = `place.pile.${place_id}.${position_key}`;
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({
+                    ok: true,
+                    container: {
+                        id: container_id,
+                        name: `Pile (${position_key})`,
+                        def_id: `place_pile.${place_id}.${position_key}`,
+                        capacity: { max_slots },
+                        contents: normalized.map(({ item, grid_x, grid_y }: any) => {
+                            const p = resolve_inline_item_payload_for_api(item);
+                            return {
+                                instance: { id: p.id, def_id: p.def_id, qty: p.qty, tags: p.tags },
+                                definition: { id: p.def_id, name: p.name, weight: p.unit_weight, tags: p.tags, display_char: p.display_char, display_color: p.display_color },
+                                grid_x,
+                                grid_y,
+                            };
+                        }),
+                        position_key,
+                        position: { x: pile_x, y: pile_y },
+                    }
+                }));
+            } catch (err) {
+                debug_error('API', '/api/place/pile_container error', err);
                 res.writeHead(500, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ ok: false, error: "internal_error" }));
             }
@@ -7443,7 +7665,8 @@ function start_http_server(log_path: string): void {
                 }
 
                 const container_item = found.item as any;
-                const is_container = container_item.tags?.some((t: any) => t?.name === 'CONTAINER');
+                const container_payload = resolve_inline_item_payload_for_api(container_item);
+                const is_container = container_payload.tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER');
                 if (!is_container) {
                     res.writeHead(400, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
@@ -7454,23 +7677,6 @@ function start_http_server(log_path: string): void {
                 const cap_res = resolve_inline_container_capacity(container_item, contents_raw.length, `place_container_item:${place_id}:${item_id}`);
                 const max_slots = cap_res.max_slots;
                 const contents = normalize_inline_container_grid(contents_raw, max_slots, `place_container_item:${place_id}:${item_id}`);
-
-                const display_char_by_def_id = new Map<string, string>();
-                const get_display_char = (def_id: string, fallback_name: string): string => {
-                    const key = String(def_id || '');
-                    const cached = display_char_by_def_id.get(key);
-                    if (cached) return cached;
-                    const def_res = load_item_def(data_slot_number, key);
-                    if (def_res.ok) {
-                        const base = String((def_res.item as any)?.display_char ?? '');
-                        const out = base && base.length > 0 ? base.charAt(0) : (fallback_name ? fallback_name.charAt(0).toLowerCase() : '·');
-                        display_char_by_def_id.set(key, out);
-                        return out;
-                    }
-                    const out = fallback_name ? fallback_name.charAt(0).toLowerCase() : '·';
-                    display_char_by_def_id.set(key, out);
-                    return out;
-                };
 
                 // Repair coords + capacity in-place.
                 const coords_by_id = new Map<string, { x: number; y: number }>();
@@ -7501,16 +7707,19 @@ function start_http_server(log_path: string): void {
                 res.end(JSON.stringify({
                     ok: true,
                     container: {
-                        id: container_item.id,
-                        name: container_item.name,
-                        def_id: container_item.def_id,
+                        id: container_payload.id,
+                        name: container_payload.name,
+                        def_id: container_payload.def_id,
                         capacity: { max_slots },
-                        contents: contents.map(({ item, grid_x, grid_y }: any) => ({
-                            instance: { id: item.id, def_id: item.def_id, qty: item.qty, tags: item.tags },
-                            definition: { id: item.def_id, name: item.name, weight: item.weight, tags: item.tags, display_char: get_display_char(String(item.def_id ?? ''), String(item.name ?? '')) },
-                            grid_x,
-                            grid_y,
-                        })),
+                        contents: contents.map(({ item, grid_x, grid_y }: any) => {
+                            const p = resolve_inline_item_payload_for_api(item);
+                            return {
+                                instance: { id: p.id, def_id: p.def_id, qty: p.qty, tags: p.tags },
+                                definition: { id: p.def_id, name: p.name, weight: p.unit_weight, tags: p.tags, display_char: p.display_char, display_color: p.display_color },
+                                grid_x,
+                                grid_y,
+                            };
+                        }),
                     }
                 }));
             } catch (err) {
@@ -7558,7 +7767,7 @@ function start_http_server(log_path: string): void {
                     return;
                 }
 
-                const tags = Array.isArray(tile.tags) ? tile.tags : [];
+                const tags = (resolve_place_tile(String(tile.kind ?? ''), tile) ?? null)?.effective_tags ?? (Array.isArray(tile.tags) ? tile.tags : []);
                 const is_container = tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER') || Array.isArray(tile.contents);
                 if (!is_container) {
                     res.writeHead(400, { "Content-Type": "application/json" });
@@ -7575,23 +7784,6 @@ function start_http_server(log_path: string): void {
 
                 const max_slots = Math.floor(tile.container_capacity.max_slots);
                 const contents = normalize_inline_container_grid(tile.contents, max_slots, `place_tile_container:${place_id}:${tx},${ty}`);
-
-                const display_char_by_def_id = new Map<string, string>();
-                const get_display_char = (def_id: string, fallback_name: string): string => {
-                    const key = String(def_id || '');
-                    const cached = display_char_by_def_id.get(key);
-                    if (cached) return cached;
-                    const def_res = load_item_def(data_slot_number, key);
-                    if (def_res.ok) {
-                        const base = String((def_res.item as any)?.display_char ?? '');
-                        const out = base && base.length > 0 ? base.charAt(0) : (fallback_name ? fallback_name.charAt(0).toLowerCase() : '·');
-                        display_char_by_def_id.set(key, out);
-                        return out;
-                    }
-                    const out = fallback_name ? fallback_name.charAt(0).toLowerCase() : '·';
-                    display_char_by_def_id.set(key, out);
-                    return out;
-                };
 
                 // Repair coords in-place and persist (like container-items).
                 const coords_by_id = new Map<string, { x: number; y: number }>();
@@ -7623,12 +7815,15 @@ function start_http_server(log_path: string): void {
                         name: `Tile (${tx},${ty})`,
                         def_id: `place_tile.${place_id}.${tx}.${ty}`,
                         capacity: { max_slots },
-                        contents: contents.map(({ item, grid_x, grid_y }: any) => ({
-                            instance: { id: item.id, def_id: item.def_id, qty: item.qty, tags: item.tags },
-                            definition: { id: item.def_id, name: item.name, weight: item.weight, tags: item.tags, display_char: get_display_char(String(item.def_id ?? ''), String(item.name ?? '')) },
-                            grid_x,
-                            grid_y,
-                        })),
+                        contents: contents.map(({ item, grid_x, grid_y }: any) => {
+                            const p = resolve_inline_item_payload_for_api(item);
+                            return {
+                                instance: { id: p.id, def_id: p.def_id, qty: p.qty, tags: p.tags },
+                                definition: { id: p.def_id, name: p.name, weight: p.unit_weight, tags: p.tags, display_char: p.display_char, display_color: p.display_color },
+                                grid_x,
+                                grid_y,
+                            };
+                        }),
                     }
                 }));
             } catch (err) {
@@ -7671,7 +7866,8 @@ function start_http_server(log_path: string): void {
                 }
 
                 const container_item = found.item as any;
-                const is_container = container_item.tags?.some((t: any) => t?.name === 'CONTAINER');
+                const container_payload = resolve_inline_item_payload_for_api(container_item);
+                const is_container = container_payload.tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER');
                 if (!is_container) {
                     res.writeHead(400, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
@@ -7682,23 +7878,6 @@ function start_http_server(log_path: string): void {
                 const cap_res = resolve_inline_container_capacity(container_item, contents_raw.length, `actor_container_item:${actor_id}:${item_id}`);
                 const max_slots = cap_res.max_slots;
                 const contents = normalize_inline_container_grid(contents_raw, max_slots, `actor_container_item:${actor_id}:${item_id}`);
-
-                const display_char_by_def_id = new Map<string, string>();
-                const get_display_char = (def_id: string, fallback_name: string): string => {
-                    const key = String(def_id || '');
-                    const cached = display_char_by_def_id.get(key);
-                    if (cached) return cached;
-                    const def_res = load_item_def(data_slot_number, key);
-                    if (def_res.ok) {
-                        const base = String((def_res.item as any)?.display_char ?? '');
-                        const out = base && base.length > 0 ? base.charAt(0) : (fallback_name ? fallback_name.charAt(0).toLowerCase() : '·');
-                        display_char_by_def_id.set(key, out);
-                        return out;
-                    }
-                    const out = fallback_name ? fallback_name.charAt(0).toLowerCase() : '·';
-                    display_char_by_def_id.set(key, out);
-                    return out;
-                };
 
                 // Repair coords + capacity in-place and persist.
                 const coords_by_id = new Map<string, { x: number; y: number }>();
@@ -7729,16 +7908,19 @@ function start_http_server(log_path: string): void {
                 res.end(JSON.stringify({
                     ok: true,
                     container: {
-                        id: container_item.id,
-                        name: container_item.name,
-                        def_id: container_item.def_id,
+                        id: container_payload.id,
+                        name: container_payload.name,
+                        def_id: container_payload.def_id,
                         capacity: { max_slots },
-                        contents: contents.map(({ item, grid_x, grid_y }: any) => ({
-                            instance: { id: item.id, def_id: item.def_id, qty: item.qty, tags: item.tags },
-                            definition: { id: item.def_id, name: item.name, weight: item.weight, tags: item.tags, display_char: get_display_char(String(item.def_id ?? ''), String(item.name ?? '')) },
-                            grid_x,
-                            grid_y,
-                        })),
+                        contents: contents.map(({ item, grid_x, grid_y }: any) => {
+                            const p = resolve_inline_item_payload_for_api(item);
+                            return {
+                                instance: { id: p.id, def_id: p.def_id, qty: p.qty, tags: p.tags },
+                                definition: { id: p.def_id, name: p.name, weight: p.unit_weight, tags: p.tags, display_char: p.display_char, display_color: p.display_color },
+                                grid_x,
+                                grid_y,
+                            };
+                        }),
                     }
                 }));
             } catch (err) {
@@ -7815,8 +7997,9 @@ function start_http_server(log_path: string): void {
                     return;
                 }
 
-                // Check if it's a container
-                const is_container = container_item.tags?.some((tag: any) => tag.name === 'CONTAINER');
+                // Check if it's a container (resolved)
+                const container_payload = resolve_inline_item_payload_for_api(container_item);
+                const is_container = container_payload.tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER');
                 if (!is_container) {
                     res.writeHead(400, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
@@ -7828,23 +8011,6 @@ function start_http_server(log_path: string): void {
                 const cap_res = resolve_inline_container_capacity(container_item, Array.isArray(contents_raw) ? contents_raw.length : 0, `body_slot:${actor_id}:${container_path}`);
                 const max_slots = cap_res.max_slots;
                 const contents = normalize_inline_container_grid(contents_raw, max_slots, `body_slot:${actor_id}:${container_path}`);
-
-                const display_char_by_def_id = new Map<string, string>();
-                const get_display_char = (def_id: string, fallback_name: string): string => {
-                    const key = String(def_id || '');
-                    const cached = display_char_by_def_id.get(key);
-                    if (cached) return cached;
-                    const def_res = load_item_def(data_slot_number, key);
-                    if (def_res.ok) {
-                        const base = String((def_res.item as any)?.display_char ?? '');
-                        const out = base && base.length > 0 ? base.charAt(0) : (fallback_name ? fallback_name.charAt(0).toLowerCase() : '·');
-                        display_char_by_def_id.set(key, out);
-                        return out;
-                    }
-                    const out = fallback_name ? fallback_name.charAt(0).toLowerCase() : '·';
-                    display_char_by_def_id.set(key, out);
-                    return out;
-                };
 
                 // Repair coords in-place so future operations are consistent.
                 const coords_by_id = new Map<string, { x: number; y: number }>();
@@ -7881,30 +8047,34 @@ function start_http_server(log_path: string): void {
                 res.end(JSON.stringify({
                     ok: true,
                     container: {
-                        id: container_item.id,
-                        name: container_item.name,
-                        def_id: container_item.def_id,
+                        id: container_payload.id,
+                        name: container_payload.name,
+                        def_id: container_payload.def_id,
                         path: container_path,
                         capacity: {
                             max_slots,
                         },
-                        contents: contents.map(({ item, grid_x, grid_y }: any) => ({
-                            instance: {
-                                id: item.id,
-                                def_id: item.def_id,
-                                qty: item.qty,
-                                tags: item.tags
-                            },
-                            definition: {
-                                id: item.def_id,
-                                name: item.name,
-                                weight: item.weight,
-                                tags: item.tags,
-                                display_char: get_display_char(String(item.def_id ?? ''), String(item.name ?? '')),
-                            },
-                            grid_x,
-                            grid_y,
-                        }))
+                        contents: contents.map(({ item, grid_x, grid_y }: any) => {
+                            const p = resolve_inline_item_payload_for_api(item);
+                            return {
+                                instance: {
+                                    id: p.id,
+                                    def_id: p.def_id,
+                                    qty: p.qty,
+                                    tags: p.tags,
+                                },
+                                definition: {
+                                    id: p.def_id,
+                                    name: p.name,
+                                    weight: p.unit_weight,
+                                    tags: p.tags,
+                                    display_char: p.display_char,
+                                    display_color: p.display_color,
+                                },
+                                grid_x,
+                                grid_y,
+                            };
+                        })
                     }
                 }));
             } catch (err) {
@@ -7962,33 +8132,44 @@ function start_http_server(log_path: string): void {
 
                 const container_item = items_at_position[index];
 
-                // Check if it's a container
-                const is_container = container_item.tags?.some((tag: any) => tag.name === 'CONTAINER');
+                const container_payload = resolve_inline_item_payload_for_api(container_item);
+                const is_container = container_payload.tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER') || Array.isArray((container_item as any)?.contents);
                 if (!is_container) {
                     res.writeHead(400, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
                     return;
                 }
 
-                // Return container data with contents
-                const contents = container_item.contents || [];
+                const contents_raw = Array.isArray((container_item as any)?.contents) ? (container_item as any).contents : [];
+                const cap_res = resolve_inline_container_capacity(container_item, contents_raw.length, `ground_container:${place_id}:${position_key}[${index}]`);
+                const max_slots = cap_res.max_slots;
+                const contents = normalize_inline_container_grid(contents_raw, max_slots, `ground_container:${place_id}:${position_key}[${index}]`);
 
-                const display_char_by_def_id = new Map<string, string>();
-                const get_display_char = (def_id: string, fallback_name: string): string => {
-                    const key = String(def_id || '');
-                    const cached = display_char_by_def_id.get(key);
-                    if (cached) return cached;
-                    const def_res = load_item_def(data_slot_number, key);
-                    if (def_res.ok) {
-                        const base = String((def_res.item as any)?.display_char ?? '');
-                        const out = base && base.length > 0 ? base.charAt(0) : (fallback_name ? fallback_name.charAt(0).toLowerCase() : '·');
-                        display_char_by_def_id.set(key, out);
-                        return out;
+                // Repair coords in-place and persist (same as other container endpoints).
+                const coords_by_id = new Map<string, { x: number; y: number }>();
+                for (const e of contents) {
+                    coords_by_id.set(String(e.item?.id ?? ''), { x: e.grid_x, y: e.grid_y });
+                }
+                let repaired = 0;
+                for (const it of contents_raw) {
+                    const id = String(it?.id ?? '');
+                    const c = coords_by_id.get(id);
+                    if (!c) continue;
+                    if (it.grid_x !== c.x || it.grid_y !== c.y) {
+                        it.grid_x = c.x;
+                        it.grid_y = c.y;
+                        repaired++;
                     }
-                    const out = fallback_name ? fallback_name.charAt(0).toLowerCase() : '·';
-                    display_char_by_def_id.set(key, out);
-                    return out;
-                };
+                }
+                if (cap_res.patched || repaired > 0) {
+                    const save_place_res = save_place_with_ground(data_slot_number, place_id, place_result.place);
+                    if (!save_place_res.ok) {
+                        debug_error('API', `[CAPACITY_SANITY] failed to save place after patch ${place_id}`, save_place_res.error);
+                    }
+                    if (repaired > 0) {
+                        debug_log('API', `[GRID_SANITY] ground_container:${place_id}:${position_key}[${index}] repaired=${repaired}`);
+                    }
+                }
                 
                 debug_log("API", `/api/place/ground_container: Found container with ${contents.length} items`);
 
@@ -7996,29 +8177,23 @@ function start_http_server(log_path: string): void {
                 res.end(JSON.stringify({
                     ok: true,
                     container: {
-                        id: container_item.id,
-                        name: container_item.name,
-                        def_id: container_item.def_id,
+                        id: container_payload.id,
+                        name: container_payload.name,
+                        def_id: container_payload.def_id,
                         position_key: position_key,
                         index: index,
                         capacity: {
-                            max_slots: container_item.container_capacity?.max_slots ?? contents.length,
+                            max_slots,
                         },
-                        contents: contents.map((item: any) => ({
-                            instance: {
-                                id: item.id,
-                                def_id: item.def_id,
-                                qty: item.qty,
-                                tags: item.tags
-                            },
-                            definition: {
-                                id: item.def_id,
-                                name: item.name,
-                                weight: item.weight,
-                                tags: item.tags,
-                                display_char: get_display_char(String(item.def_id ?? ''), String(item.name ?? '')),
-                            }
-                        }))
+                        contents: contents.map(({ item, grid_x, grid_y }: any) => {
+                            const p = resolve_inline_item_payload_for_api(item);
+                            return {
+                                instance: { id: p.id, def_id: p.def_id, qty: p.qty, tags: p.tags },
+                                definition: { id: p.def_id, name: p.name, weight: p.unit_weight, tags: p.tags, display_char: p.display_char, display_color: p.display_color },
+                                grid_x,
+                                grid_y,
+                            };
+                        })
                     }
                 }));
             } catch (err) {

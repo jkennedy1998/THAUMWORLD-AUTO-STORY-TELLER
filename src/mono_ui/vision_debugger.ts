@@ -4,10 +4,7 @@
  * Visualizes vision cones, hearing ranges, and sense broadcasts
  * using the existing particle system in the place module.
  * 
- * Press \ (backslash) to toggle global renderer debug mode
- * - H toggles hearing radius visualization
- * - B toggles sense broadcast visualization
- * - V toggles line-of-sight occlusion (shadow behind blockers)
+ * Debug overlays are toggled from UI (button) rather than hotkeys.
  * 
  * Visual Guide:
  * - Yellow ▲ = Vision cone tiles (light sense)
@@ -56,6 +53,19 @@ export const DEBUG_VISION = {
 export function set_debug_enabled(enabled: boolean): void {
   DEBUG_VISION.enabled = enabled;
   debug_log("VisionDebug", `Debug mode: ${DEBUG_VISION.enabled ? "ON" : "OFF"}`);
+}
+
+// Single button preset: the overlays we use most during development.
+export function set_debug_bundle_enabled(enabled: boolean): void {
+  set_debug_enabled(enabled);
+  DEBUG_VISION.show_facing = enabled;
+  DEBUG_VISION.show_sense_broadcasts = enabled;
+  DEBUG_VISION.show_hearing_ranges = enabled;
+  DEBUG_VISION.show_blocked_vision = enabled;
+
+  // Keep heavier overlays off by default to reduce clutter.
+  DEBUG_VISION.show_vision_cones = false;
+  DEBUG_VISION.show_conversation_state = false;
 }
 
 export function toggle_hearing_ranges(): void {
@@ -118,7 +128,8 @@ export function spawn_vision_cone_particles(
   entity_ref: string,
   blockers?: Set<string>
 ): void {
-  if (!DEBUG_VISION.enabled || !DEBUG_VISION.show_vision_cones) return;
+  if (!DEBUG_VISION.enabled) return;
+  if (!DEBUG_VISION.show_vision_cones && !DEBUG_VISION.show_blocked_vision) return;
 
   // Throttle: cone outlines are stable and expensive to respawn every frame.
   const now = Date.now();
@@ -166,7 +177,7 @@ export function spawn_vision_cone_particles(
   }
 
   // Optional: show LOS occlusion (shadow) inside the cone.
-  // For now, treat *NPC tiles* as opaque blockers.
+  // Blockers should include tiles tagged COVER (and optionally characters).
   if (DEBUG_VISION.show_blocked_vision && blockers && cone.angle_degrees > 0 && cone.range_tiles > 0) {
     const ox = Number(origin.x);
     const oy = Number(origin.y);
@@ -232,27 +243,29 @@ export function spawn_vision_cone_particles(
     }
   }
   
-  for (const tile of outline) {
-    const distance = Math.sqrt(
-      Math.pow(tile.x - origin.x, 2) + Math.pow(tile.y - origin.y, 2)
-    );
-    
-    // Fade with distance
-    const opacity = 1 - (distance / cone.range_tiles) * 0.5;
-    
-    spawn_debug_particle({
-      x: tile.x,
-      y: tile.y,
-      char: "▲",
-      rgb: { 
-        r: Math.floor(255 * opacity), 
-        g: Math.floor(255 * opacity), 
-        b: 0 
-      },
-      created_at: now,
-      lifespan_ms: 900,
-      weight: 2,
-    });
+  if (DEBUG_VISION.show_vision_cones) {
+    for (const tile of outline) {
+      const distance = Math.sqrt(
+        Math.pow(tile.x - origin.x, 2) + Math.pow(tile.y - origin.y, 2)
+      );
+
+      // Fade with distance
+      const opacity = 1 - (distance / cone.range_tiles) * 0.5;
+
+      spawn_debug_particle({
+        x: tile.x,
+        y: tile.y,
+        char: "▲",
+        rgb: {
+          r: Math.floor(255 * opacity),
+          g: Math.floor(255 * opacity),
+          b: 0
+        },
+        created_at: now,
+        lifespan_ms: 900,
+        weight: 2,
+      });
+    }
   }
 }
 
@@ -448,7 +461,7 @@ export function update_npc_debug_visuals(
     spawn_facing_indicator(position, direction);
   }
   
-  if (DEBUG_VISION.show_vision_cones) {
+  if (DEBUG_VISION.show_vision_cones || DEBUG_VISION.show_blocked_vision) {
     spawn_vision_cone_particles(position, direction, npc_ref, blockers);
   }
   

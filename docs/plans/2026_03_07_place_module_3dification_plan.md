@@ -210,28 +210,57 @@ Legend:
 - [x] Define selection policy: no implicit "pick topmost" (click resolves to focused world layer only).
 - [x] Add focus layer control: mouse wheel cycles `focus_z` up/down in Place module (clamped to 0..2).
 - [x] Confirm wheel binding: Place module wheel is reserved for layer selection (no zoom).
-- [ ] Define `blocks_movement` vs `blocks_los` semantics (tile vs entity vs item)
+- [x] Define `blocks_movement` vs `blocks_los` semantics (tile vs entity vs item)
+  - Initial semantics (zoo):
+    - tiles:
+      - movement: `OCCUPIES` on z=1 blocks movement; z=0 must have `OCCUPIES` to provide support (no holes)
+      - LOS: `COVER` on z=1 blocks LOS (explicit tag for vision blocking)
+    - entities: actors/NPCs block movement on z=1; they do not block LOS by default
+    - items: items do not block movement or LOS by default
+  - Implemented tag resolution (defs+deltas-safe) for movement/pathing:
+    - `src/travel/movement.ts`
+    - `src/shared/pathfinding.ts`
 - [x] Confirm initial LOS behavior: ray in actor plane (z=1) only
 
 ### Phase 0.5: DOM Layer Lifecycle (Stability)
 
-- [ ] Define a single owner + lifecycle API for `#voxel_layers_container` in game mode:
-  - Place module acquires the container when visible.
-  - Place module releases/unmounts when hidden or when switching places.
-  - No stale canvases across sessions/place switches.
-- [ ] Efficiency constraint: update only changed regions where possible; avoid full re-paint every tick if the world did not change.
-- [ ] Deterministic alignment: one source of truth for mapping Place module tile rect -> DOM clip rect.
+- [x] Define a single owner + lifecycle API for `#voxel_layers_container` in game mode:
+  - Implemented shared ownership heartbeat + TTL cleanup:
+    - `src/mono_ui/world_layers_owner.ts`
+    - owners mark DOM roots with `data-world-layers-owner` (`place` / `painter`)
+  - Place module touches owner every Draw; painter touches owner when it renders DOM layers.
+  - Stale DOM roots are removed automatically when an owner stops touching (covers "hidden but still running" cases).
+- [x] Efficiency constraint: reduce allocations and avoid waste when possible.
+  - Reuse offscreen canvases for z=0/1/2 (no per-frame create/free) in `src/mono_ui/modules/place_module.ts`.
+  - Reuse DOM-export `GridCell[][]` buffers and sync in-place (no per-frame object creation) in `src/mono_ui/modules/place_module.ts`.
+  - Add per-layer content versioning so DOM renderer re-rasterizes only when cell content changes (transforms still update every frame):
+    - `src/ascii_painter/voxel_dom_renderer.ts`
+    - `src/mono_ui/place_dom_layers.ts`
+  - Avoid redundant layer updates: PlaceModule only calls `set_layer_cells` when a layer's cells actually changed.
+- [x] Deterministic alignment: one source of truth for mapping Place module tile rect -> DOM clip rect.
+  - Implemented shared helper and wired in both game place + painter:
+    - `src/mono_ui/runtime/dom_viewport.ts` (`compute_dom_viewport_for_rect`)
+    - `src/mono_ui/modules/place_module.ts`
+  - [x] Painter viewport math migrated to reuse the same helper:
+    - `src/canvas_app/main.ts`
 
 ### Phase 0.6: Camera + Persistence (Maintainability)
 
-- [ ] Create a Place "camera" controller with the same settings/behaviors as the ASCII painter camera.
+- [~] Create a Place "camera" controller with the same settings/behaviors as the ASCII painter camera.
   - It drives Place module view (pan offsets) + layered DOM transforms.
   - Reuse the same helper logic as painter where possible so changes apply to both.
+   - Current state: the camera behavior is integrated but split across:
+     - `src/mono_ui/runtime/place_camera_controller.ts` (view state + persistence + shared tuning)
+     - `src/mono_ui/runtime/canvas_runtime.ts` (Space+Drag routing)
+     - `src/mono_ui/runtime/dom_viewport.ts` (viewport math)
 
 Panning/interaction parity:
 
 - Place panning should behave like the ASCII painter (space+drag / drag gestures), and should reuse the same helper code paths.
   - Goal: one sustainable implementation so future camera changes apply to both.
+
+- [x] Space+Drag pans within Place (and does not trigger global UI pan).
+  - Implemented routing in `src/mono_ui/runtime/canvas_runtime.ts`.
 
 Persistence policy:
 
@@ -244,6 +273,15 @@ Persistence policy:
 - Per-program / per-module:
   - module position + size
   - module pan position
+
+- [x] Persist Place view pan (offset_x/offset_y) per place id.
+  - Implemented: `src/mono_ui/modules/place_module.ts` uses localStorage key prefix `thaumworld_place_view_state:`
+
+- [x] Add a manual recovery control to re-center on the player.
+  - Implemented debug button `CEN` (top right) in `src/canvas_app/app_state.ts` calling `place.debug_center_on_actor()`.
+
+- [x] Persist focus plane (`focus_z`) for game place.
+  - Implemented: `src/canvas_app/app_state.ts` localStorage key `thaumworld:place_focus_z:v1`
 
 Implementation note (storage):
 
@@ -266,11 +304,12 @@ Suggested implementation (align with existing code):
 
 ### Phase 1: Authoritative Tiles (z=0)
 
-- [ ] Reuse `src/tile_storage/*` (no new tile definition system)
-- [ ] Add per-place tile grid storage (instances) for z=0, owned by the server backend
-- [ ] Add a default tile id for fill (e.g. `tile.stone_bricks`)
-- [ ] Add `tile.stone_bricks` to `local_data/shared/tiles/default_tiles.jsonc` if missing
-- [ ] Map rule semantics to existing fields: `walkable`, `blocks_sight`, `blocks_sound`, plus `tags`
+- [x] Reuse `src/tile_storage/*` (no new tile definition system)
+- [~] Per-place tile instance grids already exist on Place (`tiles_z0` and `tiles`).
+  - Ongoing work: ensure tiles are treated as defs+deltas (persist only `kind` + `tag_add/tag_remove`; never persist derived `tags/display_*`).
+  - Server may still embed derived display/tags at response time for UI compatibility.
+- [ ] Finalize authoritative z=0 semantics (server-owned mutations + persistence rules)
+  - Map rule semantics to existing tile definition fields: `walkable`, `blocks_sight`, plus tags.
 
 Storage preference:
 
@@ -279,9 +318,18 @@ Storage preference:
 
 ### Phase 2: PlaceVoxelGrid3 view + Occupancy Index
 
-- [ ] Implement `PlaceVoxelGrid3` for a place
-- [ ] Implement cached occupancy index for blocks_movement + blocks_los
-- [ ] Integrate collision checks to read `blocks_movement` from the index
+- [~] Implement `PlaceVoxelGrid3` for a place
+  - Implemented minimal adapter over place tiles + occupancy index:
+    - `src/place_storage/voxel_grid3.ts`
+- [~] Implement cached occupancy index for blocks_movement + blocks_los
+  - Implemented cached occupancy index for movement support/blocking:
+    - `src/place_storage/occupancy_index.ts`
+    - wired into `src/travel/movement.ts` and `src/shared/pathfinding.ts`
+  - Updated LOS semantics: `COVER` tag blocks LOS (separate from movement).
+- [~] Integrate collision checks to read `blocks_movement` from the index
+  - Implemented for NPC movement + shared pathing:
+    - `src/travel/movement.ts`
+    - `src/shared/pathfinding.ts`
 
 Initial movement semantics (zoo):
 
@@ -293,14 +341,19 @@ Initial movement semantics (zoo):
 
 ### Phase 3: Place DOM Layer Renderer (3 canvases)
 
-- [ ] Build a place-specific DOM renderer (3 layers) based on `VoxelDOMRenderer` architecture
-- [ ] Clip and align to the place module viewport (type grid alignment)
-- [ ] Render shaded cells for each world z
+- [x] Build a place-specific DOM renderer (3 layers) based on `VoxelDOMRenderer` architecture
+  - Implemented: `src/mono_ui/place_dom_layers.ts` + integration in `src/mono_ui/modules/place_module.ts`.
+- [x] Clip and align to the place module viewport (type grid alignment)
+  - Implemented via shared viewport helper + `#voxel_layers_container`.
+- [~] Render shaded cells for each world z
+  - Implemented: PlaceModule partitions requests into z=0/1/2 and renders each into DOM.
+  - Optimized: DOM renderer re-rasterizes only when per-layer content versions change; transforms still update every frame.
+  - TODO: incremental world draw into offscreen canvases (PlaceModule still draws full render queues each frame).
 
 Ownership note:
 
 - The layered DOM canvases represent the world/place. The Place system owns the DOM layer container lifecycle.
-  - This still needs an explicit mount/unmount path to prevent stale canvases between place switches.
+  - Implemented owner heartbeat + TTL cleanup to prevent stale canvases between mode switches.
 
 ### Phase 4: Shader Integration for Tiles/Entities
 

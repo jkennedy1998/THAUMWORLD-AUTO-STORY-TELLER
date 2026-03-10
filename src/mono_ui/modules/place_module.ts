@@ -11,9 +11,6 @@ import {
   DEBUG_VISION,
   register_particle_spawner,
   update_npc_debug_visuals,
-  toggle_hearing_ranges,
-  toggle_sense_broadcasts,
-  toggle_blocked_vision,
   spawn_sense_broadcast_particles,
 } from "../vision_debugger.js";
 import { get_sense_profile } from "../../action_system/sense_broadcast.js";
@@ -25,8 +22,10 @@ import { draw_render_queue, type RenderRequest } from "../../render_shaders/rend
 import { ctx_place_tile } from "../../render_shaders/context_builders.js";
 import { PlaceDomLayers } from "../place_dom_layers.js";
 import type { GridCell } from "../../ascii_painter/types.js";
-import { loadCameraConfig } from "../../ascii_painter/save_system.js";
 import { create_canvas } from "../canvas.js";
+import { touch_world_layers_owner } from "../world_layers_owner.js";
+import { compute_dom_viewport_for_rect } from "../runtime/dom_viewport.js";
+import { create_place_camera_controller } from "../runtime/place_camera_controller.js";
 
 /**
  * Convert hex color string to RGB object
@@ -54,8 +53,6 @@ function footstep_cooldown_ms(speed_tpm: number): number {
   const ms_per_tile = (60 * 1000) / tpm;
   return Math.max(55, Math.min(260, Math.round(ms_per_tile * 0.75)));
 }
-import { UI_DEBUG } from "../runtime/ui_debug.js";
-
 // Debug logging helper - re-enabled with balanced output
 function debug_log_place(...args: any[]) {
   // eslint-disable-next-line no-console
@@ -176,6 +173,8 @@ export type PlaceModuleConfig = {
   on_hover_ground_item?: (tile_x: number, tile_y: number, item_id: string | null) => void;
 
   // Optional ground item metadata (instance ids, tags, display_char). If provided, prefer this over place.contents.items_on_ground.
+  // When present, ground item rendering and interaction should use this cache as the single source of truth.
+  get_ground_item_position_keys?: () => string[];
   get_ground_item_ids_at?: (tile_x: number, tile_y: number) => string[];
   get_ground_item_meta?: (item_instance_id: string) => any | null;
 
@@ -257,11 +256,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   const grid_rgb = config.grid_rgb ?? get_color_by_name("medium_gray").rgb;
 
   // View state
-  const view: ViewState = {
-    offset_x: 0,
-    offset_y: 0,
-    scale: config.initial_scale ?? 1,
-  };
+  const camera = create_place_camera_controller({ initial_scale: config.initial_scale ?? 1, padding_tiles: PADDING_TILES });
+  const view: ViewState = camera.view;
 
   let hovered: HoveredTile = null;
   let targeted: TargetedEntity = null; // Track selected target for communication (follows entity)
@@ -351,17 +347,23 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
   function tile_is_collidable(t: PlaceTile | null): boolean {
     if (!t) return false;
-    // Check for OCCUPIES tag (new tile system)
-    const tags = t.tags ?? [];
-    return tags.some(tag => tag.name === 'OCCUPIES');
+    // Check for OCCUPIES tag (derived at response-time from defs+deltas).
+    const tags: any[] = (t as any)?.tags ?? [];
+    return Array.isArray(tags) && tags.some(tag => String(tag?.name ?? '').toUpperCase() === 'OCCUPIES');
   }
 
   function is_edge_kind(t: PlaceTile | null): boolean {
     if (!t) return false;
     // Check for OCCUPIES tag or DOOR tag (visual edge tiles)
-    const tags = t.tags ?? [];
-    return tags.some(tag => tag.name === 'OCCUPIES' || tag.name === 'DOOR');
+    const tags: any[] = (t as any)?.tags ?? [];
+    if (!Array.isArray(tags)) return false;
+    return tags.some(tag => {
+      const n = String(tag?.name ?? '').toUpperCase();
+      return n === 'OCCUPIES' || n === 'DOOR';
+    });
   }
+
+  const warned_missing_tile_display = new Set<string>();
 
   /**
    * Get display character and color for a tile.
@@ -376,12 +378,12 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       return { char: display_char, color: display_color };
     }
     
-    // Debug: log missing display properties
-    console.warn(`[TILE_RENDER] Missing display properties at (${tile_x},${tile_y}):`, {
-      kind: t.kind,
-      has_display_char: typeof display_char === 'string',
-      has_display_color: typeof display_color === 'string'
-    });
+    // Debug: log missing display properties once per kind (avoid log floods)
+    const k = String(t.kind ?? '');
+    if (!warned_missing_tile_display.has(k)) {
+      warned_missing_tile_display.add(k);
+      console.warn(`[TILE_RENDER] Missing display properties for kind='${k}' (example at ${tile_x},${tile_y})`);
+    }
     
     // Fallback defaults
     return { char: '?', color: '#888888' };
@@ -441,6 +443,23 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   });
   let dom_pan_px = { x: 0, y: 0, tileW: 0, tileH: 0, scale: 1 };
   let dom_last_place_id: string | null = null;
+
+  // Reuse offscreen canvases to avoid allocating every frame.
+  let dom_off_w = 0;
+  let dom_off_h = 0;
+  let dom_off0: Canvas | null = null;
+  let dom_off1: Canvas | null = null;
+  let dom_off2: Canvas | null = null;
+
+  // Reuse DOM-export buffers to reduce GC.
+  let dom_cells_w = 0;
+  let dom_cells_h = 0;
+  let dom_cells0: GridCell[][] | null = null;
+  let dom_cells1: GridCell[][] | null = null;
+  let dom_cells2: GridCell[][] | null = null;
+  let dom_cells_ver0 = 1;
+  let dom_cells_ver1 = 1;
+  let dom_cells_ver2 = 1;
 
   try {
     window.addEventListener('thaumworld_ui_pan', (ev: any) => {
@@ -505,6 +524,54 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       rows.push(row);
     }
     return rows;
+  }
+
+  function ensure_grid_cell_buffer(w: number, h: number): GridCell[][] {
+    const rows: GridCell[][] = [];
+    for (let y = 0; y < h; y++) {
+      const row: GridCell[] = [];
+      for (let x = 0; x < w; x++) {
+        row.push({ char: ' ', rgb: { r: 0, g: 0, b: 0 }, weight_index: 3, render_index: undefined });
+      }
+      rows.push(row);
+    }
+    return rows;
+  }
+
+  function sync_grid_cells_from_canvas(local: any, out: GridCell[][]): boolean {
+    const h = local.height;
+    const w = local.width;
+    let changed = false;
+    for (let y = 0; y < h; y++) {
+      const row = out[y];
+      if (!row) continue;
+      for (let x = 0; x < w; x++) {
+        const c = local.get(x, y);
+        const dst = row[x];
+        if (!dst) continue;
+
+        const next_char = c?.char ?? ' ';
+        const next_rgb = c?.rgb ?? { r: 0, g: 0, b: 0 };
+        const next_weight = (c as any)?.weight_index ?? 3;
+        const next_render = (c as any)?.render_index;
+
+        if (
+          dst.char !== next_char ||
+          dst.weight_index !== next_weight ||
+          (dst as any).render_index !== next_render ||
+          dst.rgb.r !== next_rgb.r ||
+          dst.rgb.g !== next_rgb.g ||
+          dst.rgb.b !== next_rgb.b
+        ) {
+          changed = true;
+          dst.char = next_char;
+          dst.rgb = next_rgb;
+          dst.weight_index = next_weight;
+          (dst as any).render_index = next_render;
+        }
+      }
+    }
+    return changed;
   }
 
   // Derived dimensions (excluding border)
@@ -631,44 +698,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     return { x: Math.floor(tile_x), y: Math.floor(tile_y) };
   }
 
-  // Get view bounds with padding
-  function get_view_bounds(place: Place): { min_x: number; max_x: number; min_y: number; max_y: number } {
-    const { width, height } = inner_size();
-    const tiles_visible_x = width * view.scale;
-    const tiles_visible_y = height * view.scale;
-    
-    return {
-      min_x: -PADDING_TILES,
-      max_x: Math.max(0, place.tile_grid.width + PADDING_TILES - tiles_visible_x),
-      min_y: -PADDING_TILES,
-      max_y: Math.max(0, place.tile_grid.height + PADDING_TILES - tiles_visible_y),
-    };
-  }
-
-  // Center view on a specific tile
   function center_on_tile(tile_x: number, tile_y: number, place: Place): void {
     const { width, height } = inner_size();
-    const tiles_visible_x = width * view.scale;
-    const tiles_visible_y = height * view.scale;
-    const bounds = get_view_bounds(place);
-
-    // Calculate offset to center the tile with some margin so it's not at the edge
-    // Add a small margin (2 tiles) to ensure the entity is clearly visible
-    const MARGIN = 2;
-    const target_offset_x = Math.floor(tile_x - tiles_visible_x / 2 + MARGIN);
-    const target_offset_y = Math.floor(tile_y - tiles_visible_y / 2 + MARGIN);
-
-    view.offset_x = clamp(target_offset_x, bounds.min_x, bounds.max_x);
-    view.offset_y = clamp(target_offset_y, bounds.min_y, bounds.max_y);
-
-    debug_log_place("Centered view on tile", JSON.stringify({
-      target_tile: { x: tile_x, y: tile_y },
-      view_size: { w: width, h: height },
-      tiles_visible: { x: tiles_visible_x, y: tiles_visible_y },
-      calculated_offset: { x: target_offset_x, y: target_offset_y },
-      clamped_offset: { x: view.offset_x, y: view.offset_y },
-      bounds
-    }));
+    camera.center_on_tile(place, width, height, tile_x, tile_y);
   }
 
   // Get all entities at tile position (for cycling)
@@ -748,9 +780,26 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       return false;
     }
     
-    // Not implemented: treat solid place features (walls/furniture) as blockers.
-    // For now, all empty tiles are walkable.
-    
+    // Phase 2 (partial): walking semantics match server movement rules:
+    // - z=1 blocks movement when OCCUPIES.
+    // - z=0 must provide support (OCCUPIES) when tiles_z0 exists.
+    if (tile_is_collidable(get_place_tile(place, tile_x, tile_y))) {
+      return false;
+    }
+
+    const t0 = get_place_tile_z0(place, tile_x, tile_y);
+    if ((place as any)?.tiles_z0) {
+      const supports = tile_is_collidable(t0);
+      if (!supports) return false;
+    }
+
+    // Phase 2 (partial): entity occupancy on z=1 blocks movement.
+    // (Items do not block movement by default.)
+    const has_actor = place.contents.actors_present?.some(a => a.tile_position.x === tile_x && a.tile_position.y === tile_y) ?? false;
+    if (has_actor) return false;
+    const has_npc = place.contents.npcs_present?.some(n => n.tile_position.x === tile_x && n.tile_position.y === tile_y) ?? false;
+    if (has_npc) return false;
+
     return true;
   }
 
@@ -1118,6 +1167,32 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const p = actor.tile_position;
       character_blockers.add(`${p.x},${p.y}`);
     }
+
+    // Tile COVER blockers (for LOS debug). Only computed when the overlay is on.
+    let cover_blockers: Set<string> | null = null;
+    if (DEBUG_VISION.enabled && DEBUG_VISION.show_blocked_vision) {
+      cover_blockers = new Set<string>();
+      try {
+        const cells: any[][] | undefined = (place as any)?.tiles?.cells;
+        if (Array.isArray(cells)) {
+          for (let y = 0; y < cells.length; y++) {
+            const row = cells[y];
+            if (!Array.isArray(row)) continue;
+            for (let x = 0; x < row.length; x++) {
+              const t: any = row[x];
+              if (!t) continue;
+              const tags = Array.isArray(t.tags) ? t.tags : [];
+              const has_cover = tags.some((tag: any) => String(tag?.name ?? '').toUpperCase() === 'COVER');
+              if (has_cover) cover_blockers.add(`${x},${y}`);
+            }
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    const los_blockers = cover_blockers ? new Set<string>([...character_blockers, ...cover_blockers]) : character_blockers;
     for (const npc of place.contents.npcs_present) {
       const npc_position = npc.tile_position;
       const npc_facing = get_facing(npc.npc_ref);
@@ -1126,8 +1201,15 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const npc_visual_status = get_npc_visual_status(npc.npc_ref) ?? npc.status;
       const npc_conversation_visual = npc_visual_status === "busy";
       
-      update_npc_debug_visuals(npc.npc_ref, npc_position, npc_facing, npc_conversation_visual, character_blockers);
+      update_npc_debug_visuals(npc.npc_ref, npc_position, npc_facing, npc_conversation_visual, los_blockers);
       
+    }
+
+    // Also render debug visuals for player actors (LOS testing often happens solo).
+    for (const actor of place.contents.actors_present) {
+      const actor_position = actor.tile_position;
+      const actor_facing = get_facing(actor.actor_ref);
+      update_npc_debug_visuals(actor.actor_ref, actor_position, actor_facing, false, los_blockers);
     }
     
     // Update particles (path visualization and effects), but enqueue them to draw later.
@@ -1180,22 +1262,42 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       });
     }
 
-    // Draw items on ground (tabletop UX)
-    // - Exactly 1 item on a tile: draw the item (qty-based glyph)
-    // - 2+ items on a tile: draw a pile glyph (single interaction target)
-    const ground_by_tile = new Map<string, typeof place.contents.items_on_ground>();
-    for (const it of place.contents.items_on_ground) {
-      const key = `${it.tile_position.x}_${it.tile_position.y}`;
-      const arr = ground_by_tile.get(key);
-      if (arr) arr.push(it);
-      else ground_by_tile.set(key, [it]);
-    }
+      // Draw items on ground (tabletop UX)
+      // - Exactly 1 item on a tile: draw the item (qty-based glyph)
+      // - 2+ items on a tile: draw a pile glyph (single interaction target)
+      let keys: string[] = [];
+      let fallback_qty_by_key: Map<string, number> | null = null;
 
-    debug_log_place(`[GroundItems] Rendering ${ground_by_tile.size} ground tile(s)`);
-    for (const [key, items] of ground_by_tile.entries()) {
-      const [txs, tys] = key.split('_');
-      const tile_x = parseInt(txs || '0', 10);
-      const tile_y = parseInt(tys || '0', 10);
+      // Preferred: render from the ground item cache (same source used for interactions).
+      // Important: do NOT fall back to place.contents.items_on_ground when cache providers exist,
+      // otherwise stale place snapshots can render "ghost" items that cannot be interacted with.
+      if (config.get_ground_item_position_keys && config.get_ground_item_ids_at) {
+        try {
+          keys = config.get_ground_item_position_keys() ?? [];
+        } catch {
+          keys = [];
+        }
+      } else {
+        // Legacy fallback: derive keys from place.contents.items_on_ground.
+        const ground_by_tile = new Map<string, typeof place.contents.items_on_ground>();
+        fallback_qty_by_key = new Map();
+        for (const it of place.contents.items_on_ground) {
+          const key = `${it.tile_position.x}_${it.tile_position.y}`;
+          const arr = ground_by_tile.get(key);
+          if (arr) arr.push(it);
+          else ground_by_tile.set(key, [it]);
+        }
+        keys = Array.from(ground_by_tile.keys());
+        for (const [key, items] of ground_by_tile.entries()) {
+          if (items.length === 1) fallback_qty_by_key.set(key, items[0]?.quantity ?? 1);
+        }
+      }
+
+      debug_log_place(`[GroundItems] Rendering ${keys.length} ground tile(s)`);
+      for (const key of keys) {
+        const [txs, tys] = key.split('_');
+        const tile_x = parseInt(txs || '0', 10);
+        const tile_y = parseInt(tys || '0', 10);
 
       const screen_x = inner.x0 + Math.floor((tile_x - view.offset_x) / view.scale);
       const screen_y = inner.y0 + Math.floor((tile_y - view.offset_y) / view.scale);
@@ -1214,16 +1316,17 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
       if (entity_present) continue;
 
-      const item_ids = config.get_ground_item_ids_at?.(tile_x, tile_y) ?? [];
+        const item_ids = config.get_ground_item_ids_at?.(tile_x, tile_y) ?? [];
+        if (item_ids.length < 1) continue;
       const open_containers = config.get_open_containers?.();
       const pile_container_id = `place.pile.${place.id}.${key}`;
       const pile_open = Boolean(open_containers && open_containers.has(pile_container_id));
       const tile_hovered = Boolean(hovered && hovered.x === tile_x && hovered.y === tile_y);
 
-      // Prefer rich metadata path when available and exactly one item exists.
-      if (item_ids.length === 1) {
-        const meta: any = config.get_ground_item_meta?.(item_ids[0]!) ?? null;
-        if (meta) {
+        // Prefer rich metadata path when available and exactly one item exists.
+        if (item_ids.length === 1) {
+          const meta: any = config.get_ground_item_meta?.(item_ids[0]!) ?? null;
+          if (meta) {
           const item_container_id = `place.item.${place.id}.${String(meta.id ?? item_ids[0])}`;
           const item_open = Boolean(open_containers && open_containers.has(item_container_id));
           const is_hovered = tile_hovered;
@@ -1245,9 +1348,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
             }) as any,
             ctx: ctx_place_tile({ hovered: is_hovered, selected: item_open }),
           });
-          continue;
+            continue;
+          }
         }
-      }
 
       // Prefer rich metadata path for piles too (styling via representative item).
       if (item_ids.length >= 2) {
@@ -1277,22 +1380,26 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         }
       }
 
-      const single = items.length === 1 ? items[0] : null;
-      rq_z1.push({
-        pass: 'item',
-        x: screen_x,
-        y: screen_y,
-        order: 0,
-        key: pile_container_id,
-        payload: make_ground_items_tile_payload(
-          `ground:${place.id}:${key}`,
-          items.length,
-          single ? single.quantity : undefined,
-          undefined,
-        ) as any,
-        ctx: ctx_place_tile({ hovered: tile_hovered, selected: pile_open }),
-      });
-    }
+        const single_qty = item_ids.length === 1
+          ? (typeof (config.get_ground_item_meta?.(item_ids[0]!) as any)?.qty === 'number'
+              ? Number((config.get_ground_item_meta?.(item_ids[0]!) as any).qty)
+              : (fallback_qty_by_key?.get(key) ?? undefined))
+          : undefined;
+        rq_z1.push({
+          pass: 'item',
+          x: screen_x,
+          y: screen_y,
+          order: 0,
+          key: pile_container_id,
+          payload: make_ground_items_tile_payload(
+            `ground:${place.id}:${key}`,
+            item_ids.length,
+            single_qty,
+            undefined,
+          ) as any,
+          ctx: ctx_place_tile({ hovered: tile_hovered, selected: pile_open }),
+        });
+      }
 
     // System/UI overlays are queued as the final pass.
 
@@ -1401,22 +1508,14 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     // World layers render into DOM canvases (z=0/1/2) clipped to the place inner rect.
     const focus_z = config.get_focus_z ? config.get_focus_z() : 1;
 
+     // Phase 0.5: explicit ownership heartbeat (prevents stale layers when place isn't drawn).
+     touch_world_layers_owner('place');
+
     maybe_mount_dom(place.id);
     dom_layers.ensure_space(width, height);
 
     // Apply shared camera tuning from painter, but keep focus/pan per Place.
-    const cam = loadCameraConfig();
-    dom_layers.apply_shared_camera_tuning({
-      calibration: cam.calibration,
-      char_spacing_x: cam.char_spacing_x,
-      char_spacing_y: cam.char_spacing_y,
-      parallax_intensity: cam.parallax_intensity,
-      parallax_move_enabled: cam.parallax_move_enabled,
-      parallax_size_enabled: cam.parallax_size_enabled,
-      scale_per_layer: cam.scale_per_layer,
-      movement_per_layer: cam.movement_per_layer,
-      base_layer_scale: cam.base_layer_scale,
-    });
+    dom_layers.apply_shared_camera_tuning(camera.get_shared_dom_tuning());
     dom_layers.set_focus_z(focus_z);
 
     // Parallax neutral point is Henry (or later: highlighted target).
@@ -1465,26 +1564,48 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     }
 
     if (dom_pan_px.tileW > 0 && dom_pan_px.tileH > 0) {
-      const viewportX = dom_pan_px.x + inner.x0 * dom_pan_px.tileW;
-      const viewportY = dom_pan_px.y + (config.grid_height - 1 - inner.y1) * dom_pan_px.tileH;
-      const viewportW = (inner.x1 - inner.x0 + 1) * dom_pan_px.tileW;
-      const viewportH = (inner.y1 - inner.y0 + 1) * dom_pan_px.tileH;
-      const fontSizePx = config.base_font_size_px * (Number.isFinite(dom_pan_px.scale) ? dom_pan_px.scale : 1.0);
-
-      dom_layers.set_viewport({
-        x: viewportX,
-        y: viewportY,
-        width: viewportW,
-        height: viewportH,
-        tileW: dom_pan_px.tileW,
-        tileH: dom_pan_px.tileH,
-        fontSizePx,
+      const vp = compute_dom_viewport_for_rect({
+        pan_x_px: dom_pan_px.x,
+        pan_y_px: dom_pan_px.y,
+        tile_w_px: dom_pan_px.tileW,
+        tile_h_px: dom_pan_px.tileH,
+        grid_height: config.grid_height,
+        rect: inner,
+        base_font_size_px: config.base_font_size_px,
+        ui_scale: dom_pan_px.scale,
       });
 
+      if (!vp) return;
+      dom_layers.set_viewport(vp);
+
       // z=0: floor is now emitted via rq_z0 (inside bounds only).
-      const off0 = create_canvas(width, height, { char: ' ', rgb: { r: 0, g: 0, b: 0 } });
-      const off1 = create_canvas(width, height, { char: ' ', rgb: { r: 0, g: 0, b: 0 } });
-      const off2 = create_canvas(width, height, { char: ' ', rgb: { r: 0, g: 0, b: 0 } });
+      // Reuse offscreen canvases across frames.
+      if (!dom_off0 || !dom_off1 || !dom_off2 || dom_off_w !== width || dom_off_h !== height) {
+        dom_off_w = width;
+        dom_off_h = height;
+        dom_off0 = create_canvas(width, height, { char: ' ', rgb: { r: 0, g: 0, b: 0 } });
+        dom_off1 = create_canvas(width, height, { char: ' ', rgb: { r: 0, g: 0, b: 0 } });
+        dom_off2 = create_canvas(width, height, { char: ' ', rgb: { r: 0, g: 0, b: 0 } });
+      } else {
+        const full = { x0: 0, y0: 0, x1: width - 1, y1: height - 1 };
+        dom_off0.fill_rect(full, { char: ' ', rgb: { r: 0, g: 0, b: 0 } });
+        dom_off1.fill_rect(full, { char: ' ', rgb: { r: 0, g: 0, b: 0 } });
+        dom_off2.fill_rect(full, { char: ' ', rgb: { r: 0, g: 0, b: 0 } });
+      }
+
+      const off0 = dom_off0;
+      const off1 = dom_off1;
+      const off2 = dom_off2;
+
+      let buffers_rebuilt = false;
+      if (!dom_cells0 || !dom_cells1 || !dom_cells2 || dom_cells_w !== width || dom_cells_h !== height) {
+        buffers_rebuilt = true;
+        dom_cells_w = width;
+        dom_cells_h = height;
+        dom_cells0 = ensure_grid_cell_buffer(width, height);
+        dom_cells1 = ensure_grid_cell_buffer(width, height);
+        dom_cells2 = ensure_grid_cell_buffer(width, height);
+      }
 
       const wrap = (local: any) => ({
         set: (x: number, y: number, cell: Cell) => local.set(x - inner.x0, y - inner.y0, cell),
@@ -1497,9 +1618,18 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       draw_render_queue(wrap(off1) as any, rq_z1, { now_ms: Date.now(), pass_order: ['tile', 'item', 'character', 'particle'], character_flash_period_ms: 240 });
       draw_render_queue(wrap(off2) as any, rq_z2, { now_ms: Date.now(), pass_order: ['tile', 'item', 'character', 'particle'], character_flash_period_ms: 240 });
 
-      dom_layers.set_layer_cells(0, export_grid_cells_from_canvas(off0));
-      dom_layers.set_layer_cells(1, export_grid_cells_from_canvas(off1));
-      dom_layers.set_layer_cells(2, export_grid_cells_from_canvas(off2));
+      const changed0 = sync_grid_cells_from_canvas(off0, dom_cells0!);
+      const changed1 = sync_grid_cells_from_canvas(off1, dom_cells1!);
+      const changed2 = sync_grid_cells_from_canvas(off2, dom_cells2!);
+      if (changed0) dom_cells_ver0++;
+      if (changed1) dom_cells_ver1++;
+      if (changed2) dom_cells_ver2++;
+
+      // Only notify DOM layers when content changes (renderer still updates transforms every frame).
+      // When buffers are (re)allocated, bind them to layers at least once.
+      if (buffers_rebuilt || changed0) dom_layers.set_layer_cells(0, dom_cells0!, dom_cells_ver0);
+      if (buffers_rebuilt || changed1) dom_layers.set_layer_cells(1, dom_cells1!, dom_cells_ver1);
+      if (buffers_rebuilt || changed2) dom_layers.set_layer_cells(2, dom_cells2!, dom_cells_ver2);
       dom_layers.render();
 
       dom_last_place_id = place.id;
@@ -1567,7 +1697,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     entityTagCache.set(event.entityRef, currentTags);
   }
 
-  return {
+  const mod: Module = {
     id: config.id,
     rect: config.rect,
     Focusable: true,
@@ -1605,17 +1735,23 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         return;
       }
 
-      // Center on default entry if this is first render and we're at origin
-      if (view.offset_x === 0 && view.offset_y === 0) {
-        debug_log_place("First render, centering on default entry", {
-          entry: place.tile_grid.default_entry,
+      // Phase 0.6: per-place view persistence (camera controller).
+      const { width: inner_w, height: inner_h } = inner_size();
+      const view_loaded = camera.ensure_loaded_for_place(place, inner_w, inner_h);
+
+      // First render: center on the actor when available; otherwise default entry.
+      // Only do this if we did not load a persisted view state for this place.
+      if (!view_loaded && view.offset_x === 0 && view.offset_y === 0) {
+        const actor_pos = config.get_actor_position?.() ?? null;
+        const target = actor_pos ?? place.tile_grid.default_entry;
+        debug_log_place("First render, centering on", {
+          target,
+          using_actor: !!actor_pos,
+          default_entry: place.tile_grid.default_entry,
           place_size: { w: place.tile_grid.width, h: place.tile_grid.height }
         });
-        center_on_tile(
-          place.tile_grid.default_entry.x,
-          place.tile_grid.default_entry.y,
-          place
-        );
+        center_on_tile(target.x, target.y, place);
+        camera.schedule_save(place);
       }
 
       // Register place with unified movement engine if changed
@@ -1676,6 +1812,10 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const place = config.get_place();
       if (!place) return;
 
+      // Phase 0.6: Space+Drag is reserved for camera/view panning.
+      // Do not start item drags while panning gesture is active.
+      if (e.space) return;
+
       // Don't start a ground drag if a UI drag is active.
       if (config.is_dragging?.()) return;
 
@@ -1713,9 +1853,12 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       // When dragging an item (inventory/ground), do not pan the view.
       if (config.is_dragging?.()) return;
 
+      // Note: Space+Drag routing is handled by CanvasRuntime to avoid triggering global pan.
+
       const dx = e.step_dx;
       const dy = e.step_dy;
-      const bounds = get_view_bounds(place);
+      const { width: inner_w, height: inner_h } = inner_size();
+      const bounds = camera.get_bounds(place, inner_w, inner_h);
 
       // Convert screen delta to tile delta (inverted - dragging moves view opposite)
       view.offset_x = clamp(
@@ -1728,6 +1871,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         bounds.min_y,
         bounds.max_y
       );
+
+      camera.schedule_save(place);
     },
 
     OnDragEnd(e: DragEvent): void {
@@ -1881,12 +2026,14 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
 
       // PRIORITY 1.5: Double-click tile container (z=1)
+      // defs+deltas migration: do not rely on legacy stored tile.tags to decide container-ness.
+      // Use structural markers (contents/capacity/glyph hints) and let the backend validate.
       if (focus_z === 1 && e.click_count === 2 && config.on_open_tile_container) {
-        const t = get_place_tile(place, tile.x, tile.y);
-        const tags: any[] = (t as any)?.tags ?? [];
+        const t = get_place_tile(place, tile.x, tile.y) as any;
         const is_container =
-          Array.isArray((t as any)?.contents) ||
-          (Array.isArray(tags) && tags.some((tg: any) => String(tg?.name ?? '').toUpperCase() === 'CONTAINER'));
+          Array.isArray(t?.contents) ||
+          !!t?.container_capacity ||
+          !!t?.container_glyphs;
         if (is_container) {
           config.on_open_tile_container(tile.x, tile.y);
           return;
@@ -2201,7 +2348,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       if (!place) return;
 
       const scroll_step = Math.max(1, view.scale);
-      const bounds = get_view_bounds(place);
+      const { width: inner_w, height: inner_h } = inner_size();
+      const bounds = camera.get_bounds(place, inner_w, inner_h);
 
       switch (e.key) {
         case "ArrowUp":
@@ -2212,6 +2360,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
             bounds.min_y,
             bounds.max_y
           );
+          camera.schedule_save(place);
           break;
         case "ArrowDown":
         case "s":
@@ -2221,6 +2370,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
             bounds.min_y,
             bounds.max_y
           );
+          camera.schedule_save(place);
           break;
         case "ArrowLeft":
         case "a":
@@ -2230,6 +2380,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
             bounds.min_x,
             bounds.max_x
           );
+          camera.schedule_save(place);
           break;
         case "ArrowRight":
         case "d":
@@ -2239,32 +2390,16 @@ export function make_place_module(config: PlaceModuleConfig): Module {
             bounds.min_x,
             bounds.max_x
           );
+          camera.schedule_save(place);
           break;
         case "Home":
-          // Center on default entry
-          center_on_tile(
-            place.tile_grid.default_entry.x,
-            place.tile_grid.default_entry.y,
-            place
-          );
-          break;
-        case "h":
-        case "H":
-          // Toggle hearing radius visualization
-          if (!UI_DEBUG.enabled) break;
-          toggle_hearing_ranges();
-          break;
-        case "b":
-        case "B":
-          // Toggle sense broadcast visualization
-          if (!UI_DEBUG.enabled) break;
-          toggle_sense_broadcasts();
-          break;
-        case "v":
-        case "V":
-          // Toggle LOS occlusion visualization
-          if (!UI_DEBUG.enabled) break;
-          toggle_blocked_vision();
+          // Center on actor when available; otherwise default entry.
+          {
+            const actor_pos = config.get_actor_position?.() ?? null;
+            const target = actor_pos ?? place.tile_grid.default_entry;
+            center_on_tile(target.x, target.y, place);
+            camera.schedule_save(place);
+          }
           break;
         case "m":
         case "M":
@@ -2274,4 +2409,17 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
     },
   };
+
+  // Debug helper: recenters the place view on the player actor.
+  // Exposed so top-right debug buttons can recover from a bad view offset.
+  (mod as any).debug_center_on_actor = (): void => {
+    const place = config.get_place();
+    if (!place) return;
+    const pos = config.get_actor_position?.() ?? null;
+    if (!pos) return;
+    center_on_tile(pos.x, pos.y, place);
+    camera.schedule_save(place);
+  };
+
+  return mod as any;
 }

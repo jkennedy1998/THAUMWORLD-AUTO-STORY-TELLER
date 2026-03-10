@@ -24,9 +24,9 @@ import { calculate_grid_dimensions, get_container_grid } from '../container_stor
 import { type ItemInstance } from '../item_instances/store.js';
 import { type ItemDefinition } from '../item_storage/store.js';
 import { type BodySlots, get_slot_item_id } from '../types/body_slots.js';
-import { DEBUG_VISION, spawn_sense_broadcast_particles } from '../mono_ui/vision_debugger.js';
+import { DEBUG_VISION, set_debug_bundle_enabled, spawn_sense_broadcast_particles } from '../mono_ui/vision_debugger.js';
+import { set_ui_debug_enabled, UI_DEBUG } from '../mono_ui/runtime/ui_debug.js';
 import { get_senses_for_action } from '../action_system/sense_broadcast.js';
-import { UI_DEBUG } from '../mono_ui/runtime/ui_debug.js';
 import { get_facing } from '../npc_ai/facing_system.js';
 import { play_sfx } from '../mono_ui/sfx/sfx_player.js';
 import {
@@ -99,6 +99,12 @@ function is_container_item(definition: ItemDefinition): boolean {
     }
     
     return false;
+}
+
+function has_tag(tags: any[] | undefined | null, want: string): boolean {
+    const up = String(want ?? '').toUpperCase();
+    if (!up) return false;
+    return Array.isArray(tags) && tags.some((t: any) => String(t?.name ?? '').toUpperCase() === up);
 }
 
 export function create_app_state(): AppState {
@@ -190,6 +196,7 @@ export function create_app_state(): AppState {
     };
 
     const MODULE_LAYOUT_STORAGE_KEY = 'thaumworld:module_layout:v1';
+    const PLACE_FOCUS_Z_STORAGE_KEY = 'thaumworld:place_focus_z:v1';
 
     function is_rect(v: any): v is Rect {
         return !!v &&
@@ -216,6 +223,27 @@ export function create_app_state(): AppState {
                     ui_state.modules.visibility.set(id, Boolean(v));
                 }
             }
+        } catch {
+            // ignore
+        }
+    }
+
+    function load_place_focus_z(): void {
+        try {
+            const raw = window.localStorage.getItem(PLACE_FOCUS_Z_STORAGE_KEY);
+            if (!raw) return;
+            const n = Number(raw);
+            if (!Number.isFinite(n)) return;
+            const z = Math.max(0, Math.min(2, Math.floor(n))) as 0 | 1 | 2;
+            ui_state.place.focus_z = z;
+        } catch {
+            // ignore
+        }
+    }
+
+    function save_place_focus_z(): void {
+        try {
+            window.localStorage.setItem(PLACE_FOCUS_Z_STORAGE_KEY, String(ui_state.place.focus_z));
         } catch {
             // ignore
         }
@@ -260,6 +288,7 @@ export function create_app_state(): AppState {
 
     // Load persisted module state early so it affects initial rects/visibility.
     load_persisted_module_layout();
+    load_place_focus_z();
 
     // Shared drag state for cross-module drag-and-drop
     const drag_state = {
@@ -565,7 +594,8 @@ export function create_app_state(): AppState {
                 }
                 
                 const item_name = entry.definition.name || entry.instance?.def_id || 'unknown';
-                const tags: any[] = (entry.instance?.tags && Array.isArray(entry.instance.tags)) ? entry.instance.tags : (entry.definition?.tags ?? []);
+                // defs+deltas migration: treat instance.tags as non-authoritative; prefer definition/effective tags.
+                const tags: any[] = entry.definition?.tags ?? [];
 
                 function meta_matches(m: any, target: string): boolean {
                     const mm = String(m ?? '').trim();
@@ -762,7 +792,7 @@ export function create_app_state(): AppState {
                 
                 // Check armor slot for CONTAINER tag
                 if (body_slot.armor) {
-                    const is_container = body_slot.armor.tags?.some((tag: any) => tag.name === 'CONTAINER');
+                    const is_container = has_tag(body_slot.armor.tags, 'CONTAINER');
                     debug_log(`[MainInventory]   ${slot_name}.armor: ${body_slot.armor.name}, is_container=${is_container}`);
                     if (is_container) {
                         const container_id = `body_slots.${slot_name}.armor`;
@@ -782,7 +812,7 @@ export function create_app_state(): AppState {
                 
                 // Check tool slot for CONTAINER tag
                 if (body_slot.tool) {
-                    const is_container = body_slot.tool.tags?.some((tag: any) => tag.name === 'CONTAINER');
+                    const is_container = has_tag(body_slot.tool.tags, 'CONTAINER');
                     debug_log(`[MainInventory]   ${slot_name}.tool: ${body_slot.tool.name}, is_container=${is_container}`);
                     if (is_container) {
                         const container_id = `body_slots.${slot_name}.tool`;
@@ -804,7 +834,7 @@ export function create_app_state(): AppState {
                 if (body_slot.garb && Array.isArray(body_slot.garb)) {
                     for (let i = 0; i < body_slot.garb.length; i++) {
                         const garb_item = body_slot.garb[i];
-                        const is_container = garb_item.tags?.some((tag: any) => tag.name === 'CONTAINER');
+                        const is_container = has_tag(garb_item.tags, 'CONTAINER');
                         debug_log(`[MainInventory]   ${slot_name}.garb.${i}: ${garb_item.name}, is_container=${is_container}`);
                         if (is_container) {
                             const container_id = `body_slots.${slot_name}.garb.${i}`;
@@ -862,7 +892,7 @@ export function create_app_state(): AppState {
         // 1) User-selected default container
         if (ui_state.character.default_container_id) {
             const it = get_item_at_body_slots_path(ui_state.character.default_container_id);
-            if (it?.tags?.some((t: any) => t?.name === 'CONTAINER')) {
+            if (has_tag(it?.tags, 'CONTAINER')) {
                 return ui_state.character.default_container_id;
             }
             // Stale default (item moved/removed)
@@ -877,7 +907,7 @@ export function create_app_state(): AppState {
 
             // armor/tool containers
             for (const [stype, it] of [['armor', slot.armor], ['tool', slot.tool]] as const) {
-                if (it?.tags?.some((t: any) => t?.name === 'CONTAINER')) {
+                if (has_tag(it?.tags, 'CONTAINER')) {
                     const cid = `body_slots.${slot_name}.${stype}`;
                     ui_state.character.default_container_id = cid;
                     return cid;
@@ -888,7 +918,7 @@ export function create_app_state(): AppState {
             if (Array.isArray(slot.garb)) {
                 for (let i = 0; i < slot.garb.length; i++) {
                     const it = slot.garb[i];
-                    if (it?.tags?.some((t: any) => t?.name === 'CONTAINER')) {
+                    if (has_tag(it?.tags, 'CONTAINER')) {
                         const cid = `body_slots.${slot_name}.garb.${i}`;
                         ui_state.character.default_container_id = cid;
                         return cid;
@@ -922,6 +952,7 @@ export function create_app_state(): AppState {
                 // Virtual pile container (rebuild from cached ground items)
                 if (container_id.startsWith('place.pile.')) {
                     const parts = container_id.split('.');
+                    const place_id = parts[2];
                     const position_key = parts[3];
                     const item_ids = position_key ? (ui_state.place.ground_items_by_position.get(position_key) ?? []) : [];
                     if (item_ids.length <= 1) {
@@ -929,29 +960,31 @@ export function create_app_state(): AppState {
                         continue;
                     }
 
-                    // Deterministic list-order layout with spacing (blank slots between items)
-                    const max_slots = Math.max(10, item_ids.length * 2);
-                    const { cols } = calculate_grid_dimensions(max_slots);
-                    contents = item_ids
-                        .map((id, i) => {
-                            const m = ui_state.place.ground_items_by_id.get(id);
-                            if (!m) return null;
-                            const slot_index = i * 2;
-                            const grid_x = slot_index % cols;
-                            const grid_y = Math.floor(slot_index / cols);
-                            return {
-                                instance: { id: m.id, def_id: m.def_id, qty: m.qty, tags: m.tags },
-                                definition: { id: m.def_id, name: m.name, weight: m.weight, tags: m.tags },
-                                grid_x,
-                                grid_y,
-                            };
-                        })
-                        .filter(Boolean);
+                    if (!place_id || !position_key) {
+                        close_container_module(container_id);
+                        continue;
+                    }
+
+                    // Use canonical server payload so piles behave like all other containers.
+                    const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+                    const api_res = await fetch(`${base_url}/api/place/pile_container?place_id=${encodeURIComponent(place_id)}&position_key=${encodeURIComponent(position_key)}`);
+                    if (!api_res.ok) {
+                        close_container_module(container_id);
+                        continue;
+                    }
+                    const api_data = await api_res.json();
+                    if (!api_data.ok || !api_data.container) {
+                        close_container_module(container_id);
+                        continue;
+                    }
+                    contents = api_data.container.contents || [];
                     container = {
                         id: container_id,
                         kind: 'inline_pile' as any,
-                        capacity: { max_slots } as any,
-                        contents: contents as any,
+                        name: api_data.container.name,
+                        def_id: api_data.container.def_id,
+                        capacity: api_data.container.capacity,
+                        contents,
                     } as any;
                 }
 
@@ -1220,7 +1253,7 @@ export function create_app_state(): AppState {
                     }
                 }
                 
-                ui_state.place.current_place = data.place;
+                const next_place = data.place;
                 
                 // DEBUG: Log tile information when place is loaded
                 if (data.place?.tiles?.cells) {
@@ -1268,12 +1301,12 @@ export function create_app_state(): AppState {
                 // Frontend just visualizes movement updates from the callback
                 
                 // Update movement command handler with new place
-                set_command_handler_place(data.place);
-
-                // Refresh ground item cache for pile/single interactions
+                // Refresh ground item cache for pile/single interactions.
+                // Keep this atomic with the place swap so the PlaceModule doesn't render from a stale snapshot
+                // while interactions use the ground cache.
                 try {
                     const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                    const items_res = await fetch(`${base_url}/api/place/items?place_id=${encodeURIComponent(data.place.id)}`);
+                    const items_res = await fetch(`${base_url}/api/place/items?place_id=${encodeURIComponent(next_place.id)}`);
                     if (items_res.ok) {
                         const items_data = await items_res.json();
                         if (items_data.ok && Array.isArray(items_data.items)) {
@@ -1327,6 +1360,10 @@ export function create_app_state(): AppState {
                     // Non-fatal
                     debug_warn('[mono_ui]', 'failed to refresh ground item cache', err);
                 }
+
+                // Commit the place swap only after caches are refreshed.
+                ui_state.place.current_place = next_place;
+                set_command_handler_place(next_place);
             } else {
                 ui_state.place.current_place = null;
             }
@@ -1466,7 +1503,7 @@ export function create_app_state(): AppState {
                     }
                 }
                 const dbg: string[] = [];
-                dbg.push(`[debug] ${UI_DEBUG.enabled ? 'ON' : 'off'} | H:${DEBUG_VISION.show_hearing_ranges ? 'on' : 'off'} B:${DEBUG_VISION.show_sense_broadcasts ? 'on' : 'off'} V:${DEBUG_VISION.show_blocked_vision ? 'on' : 'off'}`);
+                dbg.push(`[debug] ${UI_DEBUG.enabled ? 'ON' : 'off'} | overlays:${DEBUG_VISION.enabled ? 'ON' : 'off'}`);
                 dbg.push(`[volume] ${ui_state.controls.volume}`);
                 dbg.push(`[move] ${ui_state.controls.move_mode}`);
                 if (ui_state.character.hovered_item) {
@@ -1980,7 +2017,7 @@ export function create_app_state(): AppState {
             font_family: APP_CONFIG.font_family,
             base_font_size_px: APP_CONFIG.base_font_size_px,
             get_focus_z: () => ui_state.place.focus_z,
-            set_focus_z: (z) => { ui_state.place.focus_z = z; },
+            set_focus_z: (z) => { ui_state.place.focus_z = z; save_place_focus_z(); },
             get_mouse_parallax: () => ui_state.place.mouse_parallax,
             get_move_mode: () => ui_state.controls.move_mode,
             set_move_mode: (mode) => { ui_state.controls.move_mode = mode; },
@@ -2370,6 +2407,12 @@ export function create_app_state(): AppState {
                 })();
             },
 
+            // Single source of truth for ground items in the PlaceModule.
+            // Rendering + interaction should use the same cache (ui_state.place.ground_items_by_*).
+            get_ground_item_position_keys: (): string[] => {
+                return Array.from(ui_state.place.ground_items_by_position.keys());
+            },
+
             get_ground_item_ids_at: (tile_x: number, tile_y: number): string[] => {
                 return ui_state.place.ground_items_by_position.get(`${tile_x}_${tile_y}`) ?? [];
             },
@@ -2530,7 +2573,7 @@ export function create_app_state(): AppState {
                     if (ground_ids.length === 1) {
                         const ground_item_id = ground_ids[0]!;
                         const meta = ui_state.place.ground_items_by_id.get(ground_item_id);
-                        const is_container = meta?.tags?.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER');
+                        const is_container = has_tag(meta?.tags, 'CONTAINER');
                         if (is_container) {
                         // Prevent depositing a container into itself.
                         if (drag_state.item_instance_id === ground_item_id) {
@@ -3250,6 +3293,45 @@ export function create_app_state(): AppState {
             },
         }),
 
+        // Debug overlays toggle (vision/hearing/broadcast + facing). Replaces hotkeys.
+        make_button_module({
+            id: 'debug_toggle_overlays',
+            rect: { x0: APP_CONFIG.grid_width - 7, y0: DEBUG_Y_TOP, x1: APP_CONFIG.grid_width - 1, y1: DEBUG_Y_TOP + 1 },
+            label: 'OVR',
+            rgb: get_color_by_name('pale_yellow').rgb,
+            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
+            OnPress() {
+                const next = !DEBUG_VISION.enabled;
+                set_ui_debug_enabled(next);
+                set_debug_bundle_enabled(next);
+                flash_status([next ? 'Debug overlays ON' : 'Debug overlays off'], 900);
+            },
+        }),
+
+        // Debug button: Center place view on actor (recovery if view offset gets bad)
+        make_button_module({
+            id: 'debug_center_place',
+            rect: { x0: DEBUG_X0 + 84, y0: DEBUG_Y_TOP, x1: DEBUG_X1 + 84, y1: DEBUG_Y_TOP + 1 },
+            label: 'CEN',
+            rgb: get_color_by_name('vivid_cyan').rgb,
+            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
+            OnPress() {
+                try {
+                    const place_mod: any = module_registry.get('place');
+                    if (place_mod && typeof place_mod.debug_center_on_actor === 'function') {
+                        place_mod.debug_center_on_actor();
+                        flash_status(['Centered on actor'], 900);
+                        return;
+                    }
+                } catch {
+                    // ignore
+                }
+                flash_status(['Center failed'], 900);
+            },
+        }),
+
         // Drag-and-drop equipping is now implemented:
         // - Drag item from inventory container to character body slot
         // - This replaces the EQUIP/UNEQUIP debug buttons
@@ -3603,7 +3685,7 @@ export function create_app_state(): AppState {
                         else if (slot_type === 'garb' && garb_index !== null) existing = slot.garb?.[garb_index] ?? null;
                     }
 
-                    const is_container = !!existing?.tags?.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER');
+                    const is_container = has_tag(existing?.tags, 'CONTAINER');
                     if (is_container && existing?.id) {
                         if (drag_state.item_instance_id === existing.id) {
                             flash_status(['Cannot deposit a container into itself'], 1500);
@@ -4040,7 +4122,7 @@ export function create_app_state(): AppState {
                     
                     // Check armor slot
                     if (slot.armor) {
-                        const is_container = slot.armor.tags?.some((tag: any) => tag.name === 'CONTAINER');
+                        const is_container = has_tag(slot.armor.tags, 'CONTAINER');
                         debug_log(`[get_equipped_containers]   ${slot_name}.armor: ${slot.armor.name}, is_container=${is_container}`);
                         if (is_container) {
                             containers.push({
@@ -4055,7 +4137,7 @@ export function create_app_state(): AppState {
                     
                     // Check tool slot  
                     if (slot.tool) {
-                        const is_container = slot.tool.tags?.some((tag: any) => tag.name === 'CONTAINER');
+                        const is_container = has_tag(slot.tool.tags, 'CONTAINER');
                         debug_log(`[get_equipped_containers]   ${slot_name}.tool: ${slot.tool.name}, is_container=${is_container}`);
                         if (is_container) {
                             containers.push({
@@ -4072,7 +4154,7 @@ export function create_app_state(): AppState {
                     if (slot.garb && Array.isArray(slot.garb)) {
                         debug_log(`[get_equipped_containers]   ${slot_name}.garb: ${slot.garb.length} items`);
                         slot.garb.forEach((item: any, index: number) => {
-                            const is_container = item.tags?.some((tag: any) => tag.name === 'CONTAINER');
+                            const is_container = has_tag(item.tags, 'CONTAINER');
                             debug_log(`[get_equipped_containers]     ${slot_name}.garb.${index}: ${item.name}, is_container=${is_container}`);
                             if (is_container) {
                                 containers.push({
@@ -4275,7 +4357,7 @@ export function create_app_state(): AppState {
                     }
                 }
 
-                const target_is_container = !!target_item?.definition?.tags?.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER');
+                const target_is_container = has_tag(target_item?.definition?.tags, 'CONTAINER');
                 if (target_item?.instance?.id && target_is_container) {
                     if (drag_state.item_instance_id === target_item.instance.id) {
                         flash_status(['Cannot deposit a container into itself'], 1500);
@@ -4466,9 +4548,9 @@ export function create_app_state(): AppState {
                         drag_state.end_drag();
                         return false;
                     }
-                    const has_tool = item_def.tags?.some((t: any) => t.name === "TOOL");
-                    const has_armor = item_def.tags?.some((t: any) => t.name === "ARMOR");
-                    const has_garb = item_def.tags?.some((t: any) => t.name === "GARB");
+                    const has_tool = has_tag(item_def.tags, 'TOOL');
+                    const has_armor = has_tag(item_def.tags, 'ARMOR');
+                    const has_garb = has_tag(item_def.tags, 'GARB');
                     
                     // Check if this slot is compatible with the item (call API for tag-based compatibility)
                     const compatible_slots = await get_compatible_slots_for_instance(drag_state.item_instance_id!, drag_state.source_container_id, item_def);
@@ -4671,7 +4753,7 @@ export function create_app_state(): AppState {
     });
 
     // Seed debug window
-    set_text_window_messages('debug', ['[debug] off | H:off B:on V:off', '[volume] NORMAL', '[move] WALK', '', '[region] (loading...)', 'Targets will appear here.']);
+    set_text_window_messages('debug', ['[debug] off | overlays:off', '[volume] NORMAL', '[move] WALK', '', '[region] (loading...)', 'Targets will appear here.']);
 
     // Initialize NPC movement system
     init_npc_movement((updated_place: Place) => {
@@ -4855,40 +4937,25 @@ export function create_app_state(): AppState {
                     return;
                 }
 
-                // Deterministic list-order layout with spacing (blank slots between items)
-                const max_slots = Math.max(10, item_ids.length * 2);
-                const { cols } = calculate_grid_dimensions(max_slots);
-                const contents = item_ids
-                    .map((id, i) => {
-                        const m = ui_state.place.ground_items_by_id.get(id);
-                        if (!m) return null;
-                        const slot_index = i * 2;
-                        const grid_x = slot_index % cols;
-                        const grid_y = Math.floor(slot_index / cols);
-                        return {
-                            instance: {
-                                id: m.id,
-                                def_id: m.def_id,
-                                qty: m.qty,
-                                tags: m.tags,
-                            },
-                            definition: {
-                                id: m.def_id,
-                                name: m.name,
-                                weight: m.weight,
-                                tags: m.tags,
-                            },
-                            grid_x,
-                            grid_y,
-                        };
-                    })
-                    .filter(Boolean);
-
+                // Use canonical server payload so piles behave like all other containers.
+                const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+                const api_res = await fetch(`${base_url}/api/place/pile_container?place_id=${encodeURIComponent(place_id)}&position_key=${encodeURIComponent(position_key)}`);
+                if (!api_res.ok) {
+                    flash_status([`Failed to load pile: ${api_res.status}`], 1500);
+                    return;
+                }
+                const api_data = await api_res.json();
+                if (!api_data.ok || !api_data.container) {
+                    // Auto-revert: no pile / not found.
+                    return;
+                }
+                const contents = api_data.container.contents || [];
                 container = {
                     id: container_id,
                     kind: 'inline_pile',
-                    name: `Pile (${position_key})`,
-                    capacity: { max_slots },
+                    name: api_data.container.name,
+                    def_id: api_data.container.def_id,
+                    capacity: api_data.container.capacity,
                     contents,
                 };
                 container_data = { container, contents };
@@ -5531,27 +5598,46 @@ export function create_app_state(): AppState {
                         if (src === container_id && !String(drag_state.item_instance_id ?? '').startsWith('pile:')) {
                             try {
                                 const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                                const out = await api_reorder_pile({
-                                    base_url,
-                                    actor_id: APP_CONFIG.input_actor_id,
-                                    place_id,
-                                    position_key,
-                                    item_id: String(drag_state.item_instance_id ?? ''),
-                                    target_slot_index: slot_index,
-                                    action_cost: (ui_state.controls.override_cost ?? undefined) as any,
-                                });
-                                if (out.ok) {
-                                    flash_status(['Reordered'], 800);
+
+                                // Prefer explicit grid coords from the module; fallback to slot_index mapping.
+                                let gx = grid_x;
+                                let gy = grid_y;
+                                if (gx === undefined || gy === undefined) {
+                                    const data = ui_state.container.container_data_map.get(container_id);
+                                    const cont = data?.container;
+                                    if (cont) {
+                                        const { cols } = get_container_grid(cont as any);
+                                        gx = slot_index % cols;
+                                        gy = Math.floor(slot_index / cols);
+                                    }
+                                }
+
+                                const mv = await fetch(`${base_url}/api/place/items/move_within_pile`, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({
+                                        actor_id: APP_CONFIG.input_actor_id,
+                                        place_id,
+                                        position_key,
+                                        item_id: String(drag_state.item_instance_id ?? ''),
+                                        target_grid_x: gx,
+                                        target_grid_y: gy,
+                                        action_cost: (ui_state.controls.override_cost ?? undefined) as any,
+                                    }),
+                                }).then(r => r.json().catch(() => ({ ok: false, error: `HTTP ${r.status}` } as any)));
+
+                                if (mv.ok) {
+                                    flash_status(['Moved'], 800);
                                     drag_state.end_drag();
                                     await update_current_place(place_id);
                                     void refresh_container_data();
                                     return true;
                                 }
-                                flash_status([`Reorder failed: ${out.error}`], 1500);
+                                flash_status([`Move failed: ${mv.error}`], 1500);
                                 drag_state.reject_drag();
                                 return false;
                             } catch {
-                                flash_status(['Reorder failed'], 1500);
+                                flash_status(['Move failed'], 1500);
                                 drag_state.reject_drag();
                                 return false;
                             }
@@ -5622,7 +5708,7 @@ export function create_app_state(): AppState {
 
                                 const target_item_id = target_entry?.instance?.id;
                                 const meta = target_item_id ? ui_state.place.ground_items_by_id.get(String(target_item_id)) : null;
-                                const is_container = !!meta?.tags?.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER');
+                                const is_container = has_tag(meta?.tags, 'CONTAINER');
                                 if (target_item_id && is_container) {
                                     if (drag_state.item_instance_id === target_item_id) {
                                     flash_status(['Cannot deposit a container into itself'], 1500);
@@ -6155,7 +6241,7 @@ export function create_app_state(): AppState {
                                 }
                             }
 
-                            const target_is_container = !!target_entry?.definition?.tags?.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER');
+                            const target_is_container = has_tag(target_entry?.definition?.tags, 'CONTAINER');
                             if (target_entry?.instance?.id && target_is_container) {
                                 if (drag_state.item_instance_id === target_entry.instance.id) {
                                     flash_status(['Cannot deposit a container into itself'], 1500);
@@ -6575,7 +6661,7 @@ export function create_app_state(): AppState {
                     
                     // Check armor slot for CONTAINER tag
                     if (slot.armor) {
-                        const is_container = slot.armor.tags?.some((tag: any) => tag.name === 'CONTAINER');
+                        const is_container = has_tag(slot.armor.tags, 'CONTAINER');
                         debug_log(`[NPC get_equipped_containers]   ${slot_name}.armor: ${slot.armor.name}, is_container=${is_container}`);
                         if (is_container) {
                             containers.push({
@@ -6590,7 +6676,7 @@ export function create_app_state(): AppState {
                     
                     // Check tool slot for CONTAINER tag
                     if (slot.tool) {
-                        const is_container = slot.tool.tags?.some((tag: any) => tag.name === 'CONTAINER');
+                        const is_container = has_tag(slot.tool.tags, 'CONTAINER');
                         debug_log(`[NPC get_equipped_containers]   ${slot_name}.tool: ${slot.tool.name}, is_container=${is_container}`);
                         if (is_container) {
                             containers.push({
@@ -6607,7 +6693,7 @@ export function create_app_state(): AppState {
                     if (slot.garb && Array.isArray(slot.garb)) {
                         for (let i = 0; i < slot.garb.length; i++) {
                             const garb_item = slot.garb[i];
-                            const is_container = garb_item.tags?.some((tag: any) => tag.name === 'CONTAINER');
+                            const is_container = has_tag(garb_item.tags, 'CONTAINER');
                             debug_log(`[NPC get_equipped_containers]   ${slot_name}.garb.${i}: ${garb_item.name}, is_container=${is_container}`);
                             if (is_container) {
                                 containers.push({

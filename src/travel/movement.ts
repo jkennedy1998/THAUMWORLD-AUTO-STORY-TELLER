@@ -9,6 +9,7 @@
  */
 
 import type { Place, TilePosition } from "../types/place.js";
+import { place_tile_blocks_movement } from "../place_storage/occupancy_index.js";
 import type { GameTime } from "../time_system/tracker.js";
 import { load_place, save_place, get_default_place_for_region } from "../place_storage/store.js";
 import { 
@@ -587,19 +588,8 @@ export async function is_tile_blocked(
   // Walking movement rule (3dification test room):
   // - z=1 must be empty or non-occupying
   // - z=0 beneath must exist and be OCCUPIES (support)
-  try {
-    const t1 = (place as any)?.tiles?.cells?.[tile.y]?.[tile.x];
-    if (t1?.tags) {
-      const blocks = t1.tags.some((tag: any) => tag.name === 'OCCUPIES');
-      if (blocks) return true;
-    }
-    const t0 = (place as any)?.tiles_z0?.cells?.[tile.y]?.[tile.x];
-    if ((place as any)?.tiles_z0) {
-      const supports = t0?.tags ? t0.tags.some((tag: any) => tag.name === 'OCCUPIES') : false;
-      if (!supports) return true;
-    }
-  } catch {
-    // ignore
+  {
+    if (place_tile_blocks_movement(place, tile.x, tile.y)) return true;
   }
   
   // Check for other NPCs

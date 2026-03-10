@@ -145,9 +145,12 @@ export function load_master_item(def_id: string): ItemDefLookupResult {
                 tags: (raw.tags as TagInstance[]) ?? [],
                 max_stack_size: Number(raw.max_stack_size ?? 1),
                 display_char: String(raw.display_char ?? "·"),
+                display_color: typeof (raw as any).display_color === 'string' ? String((raw as any).display_color) : undefined,
                 occupies_slots: [],
                 slot_shape: [[1]],
                 fits_actor_kind: ["*"],
+                container: (raw as any).container as any,
+                container_glyphs: (raw as any).container_glyphs as any,
             };
             
             return { ok: true, item, path: item_path };

@@ -1,5 +1,8 @@
 import { calculate_grid_dimensions } from "../container_storage/grid_calculator.js";
 import { find_actor_item_by_id } from "../item_storage/inline_store.js";
+import { load_master_item } from "../item_storage/store.js";
+import type { TagInstance } from "../tag_system/registry.js";
+import { apply_tag_deltas } from "../tag_system/tag_deltas.js";
 
 type SlotType = 'armor' | 'tool' | 'garb';
 
@@ -59,15 +62,36 @@ export function expand_body_slot_meta(meta: unknown): string[] {
 }
 
 export function has_tag(item: any, tag_name: string): boolean {
-  const tags = item?.tags;
+  const tags = resolve_effective_tags(item);
   if (!Array.isArray(tags)) return false;
-  return tags.some((t: any) => String(t?.name ?? '').toUpperCase() === String(tag_name).toUpperCase());
+  const up = String(tag_name ?? '').toUpperCase();
+  return tags.some((t: any) => String(t?.name ?? '').toUpperCase() === up);
 }
 
 export function get_tag(item: any, tag_name: string): any | null {
-  const tags = item?.tags;
+  const tags = resolve_effective_tags(item);
   if (!Array.isArray(tags)) return null;
-  return tags.find((t: any) => String(t?.name ?? '').toUpperCase() === String(tag_name).toUpperCase()) ?? null;
+  const up = String(tag_name ?? '').toUpperCase();
+  return tags.find((t: any) => String(t?.name ?? '').toUpperCase() === up) ?? null;
+}
+
+function resolve_effective_tags(item: any): TagInstance[] {
+  // Prefer database-derived tags for inline items.
+  const def_id = typeof item?.def_id === 'string' ? String(item.def_id) : '';
+  if (def_id) {
+    const def_res = load_master_item(def_id);
+    const base = def_res.ok ? (def_res.item.tags ?? []) : [];
+    const add = Array.isArray(item?.tag_add) ? (item.tag_add as TagInstance[]) : [];
+    const remove = Array.isArray(item?.tag_remove)
+      ? item.tag_remove
+          .map((op: any) => ({ key: String(op?.key ?? ''), mag: Number(op?.mag ?? 0) }))
+          .filter((op: any) => op.key && Number.isFinite(op.mag) && op.mag > 0)
+          .map((op: any) => ({ key: op.key, mag: Math.floor(op.mag) }))
+      : [];
+    return apply_tag_deltas({ base, add, remove });
+  }
+  // Fallback: legacy stored tags.
+  return Array.isArray(item?.tags) ? (item.tags as TagInstance[]) : [];
 }
 
 export function is_item_compatible_with_body_slot(item: any, target: BodySlotTarget): boolean {
@@ -148,8 +172,10 @@ function sum_inline_item_weights(items: any[], visited?: Set<string>): number {
       seen.add(id);
     }
     const qty = typeof it.qty === 'number' && Number.isFinite(it.qty) && it.qty > 0 ? it.qty : 1;
-    const w = typeof it.weight === 'number' && Number.isFinite(it.weight) ? it.weight : 0;
-    total += w * qty;
+    const def_id = typeof it.def_id === 'string' ? it.def_id : '';
+    const def_res = load_master_item(def_id);
+    const unit = def_res.ok ? Number(def_res.item.weight ?? 0) : 0;
+    total += unit * qty;
     if (Array.isArray(it.contents)) {
       total += sum_inline_item_weights(it.contents, seen);
     }

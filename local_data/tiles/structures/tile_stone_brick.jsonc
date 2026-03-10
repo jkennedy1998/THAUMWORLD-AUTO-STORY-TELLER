@@ -10,6 +10,12 @@
       "mag": 1,
       "meta": [],
       "scope": ["TILE"]
+    },
+    {
+      "name": "COVER",
+      "mag": 1,
+      "meta": [],
+      "scope": ["TILE"]
     }
   ]
 }

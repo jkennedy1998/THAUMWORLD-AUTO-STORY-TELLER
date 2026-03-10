@@ -7,9 +7,10 @@ import { parse } from "jsonc-parser";
 import { ensure_dir_exists } from "../engine/log_store.js";
 import { debug_log, debug_error } from "../shared/debug.js";
 import type { InlineItem, InlineGround } from "../types/inline_item.js";
-import type { TagInstance } from "../tag_system/registry.js";
 import { randomUUID } from "node:crypto";
 import { get_data_slot_dir } from "../engine/paths.js";
+import { resolve_inline_item } from "../item_storage/resolve.js";
+import { sanitize_place_for_save } from "../shared/defs_deltas_sanitize.js";
 
 function get_place_path(slot: number, place_id: string): string {
     return path.join(get_data_slot_dir(slot), "places", `${place_id}.jsonc`);
@@ -69,6 +70,9 @@ export function save_place_with_ground(
 ): { ok: true } | { ok: false; error: string } {
     try {
         const place_path = get_place_path(slot, place_id);
+
+        // defs+deltas migration: strip derived/legacy inline fields before persisting.
+        sanitize_place_for_save(place as any);
         write_jsonc(place_path, place);
         debug_log("ground_items", `Saved place ${place_id} with ground items`);
         return { ok: true };
@@ -100,8 +104,9 @@ export function add_item_to_ground(
     }
     
     ground.scattered[position_key]!.push(item);
-    
-    debug_log("ground_items", `Added ${item.name} to ground at (${x}, ${y})`);
+
+    const name = (resolve_inline_item(String(item.def_id ?? ''), item) ?? null)?.name ?? String(item.def_id ?? 'item');
+    debug_log("ground_items", `Added ${name} to ground at (${x}, ${y})`);
     return { ok: true, position_key };
 }
 
@@ -118,8 +123,9 @@ export function add_item_to_main_ground(
     }
     
     ground.main.push(item);
-    
-    debug_log("ground_items", `Added ${item.name} to main ground`);
+
+    const name = (resolve_inline_item(String(item.def_id ?? ''), item) ?? null)?.name ?? String(item.def_id ?? 'item');
+    debug_log("ground_items", `Added ${name} to main ground`);
     return { ok: true };
 }
 
@@ -141,7 +147,8 @@ export function remove_item_from_ground(
     if (main_index >= 0) {
         const [item] = ground.main.splice(main_index, 1);
         if (item) {
-            debug_log("ground_items", `Removed ${item.name} from main ground`);
+            const name = (resolve_inline_item(String(item.def_id ?? ''), item) ?? null)?.name ?? String(item.def_id ?? 'item');
+            debug_log("ground_items", `Removed ${name} from main ground`);
             return { ok: true, item };
         }
     }
@@ -159,8 +166,9 @@ export function remove_item_from_ground(
                 
                 const [x_str, y_str] = position_key.split('_');
                 const position = { x: parseInt(x_str!, 10), y: parseInt(y_str!, 10) };
-                
-                debug_log("ground_items", `Removed ${item.name} from ground at ${position_key}`);
+
+                const name = (resolve_inline_item(String(item.def_id ?? ''), item) ?? null)?.name ?? String(item.def_id ?? 'item');
+                debug_log("ground_items", `Removed ${name} from ground at ${position_key}`);
                 return { ok: true, item, from_position: position };
             }
         }
@@ -286,18 +294,12 @@ export function get_ground_render_char(
  */
 export function create_ground_item(
     def_id: string,
-    name: string,
-    weight: number,
     qty: number = 1,
-    tags: TagInstance[] = []
 ): InlineItem {
     return {
         id: randomUUID(),
-        def_id,
-        name,
-        qty,
-        weight,
-        tags
+        def_id: String(def_id ?? ''),
+        qty: Math.max(1, Math.floor(qty))
     };
 }
 
@@ -342,7 +344,10 @@ export function pickup_item_to_actor(
         return { ok: false, error: add_result.error };
     }
     
-    debug_log("ground_items", `Picked up ${remove_result.item.name} to actor`);
+    {
+        const name = (resolve_inline_item(String(remove_result.item.def_id ?? ''), remove_result.item) ?? null)?.name ?? String(remove_result.item.def_id ?? 'item');
+        debug_log("ground_items", `Picked up ${name} to actor`);
+    }
     return { ok: true, item: remove_result.item };
 }
 
@@ -384,7 +389,10 @@ export function drop_item_to_ground(
         return { ok: false, error: add_result.error };
     }
     
-    debug_log("ground_items", `Dropped ${remove_result.item.name} to ground at (${x}, ${y})`);
+    {
+        const name = (resolve_inline_item(String(remove_result.item.def_id ?? ''), remove_result.item) ?? null)?.name ?? String(remove_result.item.def_id ?? 'item');
+        debug_log("ground_items", `Dropped ${name} to ground at (${x}, ${y})`);
+    }
     return { ok: true, item: remove_result.item };
 }
 

@@ -16,7 +16,7 @@ import {
   unregister_place,
   type MovementGoal,
 } from "../shared/movement_engine.js";
-import { find_path } from "../shared/pathfinding.js";
+import { find_path } from "./pathfinding_node.js";
 import { is_in_conversation } from "./conversation_state.js";
 import { send_wander_command, send_stop_command } from "./movement_command_sender.js";
 

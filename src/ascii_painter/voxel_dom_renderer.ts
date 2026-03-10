@@ -40,6 +40,11 @@ export class VoxelDOMRenderer {
   private layerContexts: Map<number, CanvasRenderingContext2D> = new Map();
   private space: VoxelSpace | null = null;
 
+  // Layer content invalidation: callers can bump a version per Z to avoid
+  // re-rasterizing glyphs when only transforms (parallax/pan) change.
+  private layerContentVersion: Map<number, number> = new Map();
+  private layerRenderedVersion: Map<number, number> = new Map();
+
   // Configuration
   private fontFamily: string;
   private baseFontSize: number;
@@ -79,6 +84,15 @@ export class VoxelDOMRenderer {
   setSpace(space: VoxelSpace): void {
     this.space = space;
     this.createOrUpdateLayers();
+  }
+
+  /**
+   * Hint that a layer's cell content changed.
+   * Renderer will re-rasterize only when the version differs.
+   */
+  setLayerContentVersion(z: number, version: number): void {
+    const v = Number.isFinite(version) ? Math.trunc(version) : 0;
+    this.layerContentVersion.set(z, v);
   }
 
   /**
@@ -244,8 +258,23 @@ export class VoxelDOMRenderer {
       const isSelected = z === this.space?.camera.focus_plane;
       const paddingFactor = isSelected ? 1.0 : 1.5;
       
-      canvas.width = Math.ceil(gridW * cellW * paddingFactor);
-      canvas.height = Math.ceil(gridH * cellH * paddingFactor);
+      const nextW = Math.ceil(gridW * cellW * paddingFactor);
+      const nextH = Math.ceil(gridH * cellH * paddingFactor);
+
+      // Only resize if needed; resizing clears the canvas.
+      const prevW = canvas.width;
+      const prevH = canvas.height;
+      if (prevW !== nextW) canvas.width = nextW;
+      if (prevH !== nextH) canvas.height = nextH;
+
+      // If size changed, force raster refresh next render.
+      if (prevW !== nextW || prevH !== nextH) {
+        // If caller is using versioned invalidation, force a raster refresh.
+        if (this.layerContentVersion.has(z)) {
+          const expected = this.layerContentVersion.get(z) ?? 0;
+          this.layerRenderedVersion.set(z, expected - 1);
+        }
+      }
     }
 
     return canvas;
@@ -417,8 +446,19 @@ export class VoxelDOMRenderer {
       const ctx = this.layerContexts.get(layer.z);
       if (!ctx) continue;
 
-      // Render layer content
-      this.renderLayer(layer, ctx);
+      // Render layer content.
+      // Default behavior: rerender every frame (painter correctness).
+      // Optimized behavior: if caller supplies per-layer content versions, rerender only when changed.
+      if (!this.layerContentVersion.has(layer.z)) {
+        this.renderLayer(layer, ctx);
+      } else {
+        const version = this.layerContentVersion.get(layer.z) ?? 0;
+        const renderedVersion = this.layerRenderedVersion.get(layer.z);
+        if (renderedVersion !== version) {
+          this.renderLayer(layer, ctx);
+          this.layerRenderedVersion.set(layer.z, version);
+        }
+      }
 
       // Apply transform
       canvas.style.transform = this.calculateTransform(layer, selectedZ);

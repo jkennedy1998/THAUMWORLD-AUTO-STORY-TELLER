@@ -44,6 +44,14 @@ function normalize_cell(partial: Partial<Cell> & { char: string }): Cell {
 
 }
 
+function assign_cell(dst: Cell, src: Cell): void {
+    dst.char = src.char;
+    dst.rgb = src.rgb;
+    dst.style = src.style;
+    dst.weight_index = src.weight_index;
+    dst.render_index = src.render_index;
+}
+
 // Bottom-left coords (x,y) map to internal row-major storage (row 0 = top row)
 function to_index(width: number, height: number, x: number, y: number): number | null {
     if (!Number.isInteger(x) || !Number.isInteger(y)) return null;
@@ -59,7 +67,8 @@ export function create_canvas(width: number, height: number, fill?: Partial<Cell
     if (!Number.isInteger(height) || height <= 0) throw new Error("Canvas height must be a positive integer");
 
     const base = normalize_cell(fill ?? { char: DEFAULT_CHAR });
-    // Single array of cells - last write wins (simple, reliable)
+    // Single array of cells.
+    // Mutate existing cell objects to avoid per-frame allocation churn.
     const cells: Cell[] = Array.from({ length: width * height }, () => ({ ...base }));
 
     const api: Canvas = {
@@ -76,7 +85,9 @@ export function create_canvas(width: number, height: number, fill?: Partial<Cell
             const idx = to_index(width, height, x, y);
             if (idx === null) return;
             const next = normalize_cell(cell);
-            cells[idx] = next;  // Last write wins - simple and reliable
+            const dst = cells[idx];
+            if (!dst) return;
+            assign_cell(dst, next);
         },
 
         clear_rect(rect: Rect): void {
@@ -95,7 +106,9 @@ export function create_canvas(width: number, height: number, fill?: Partial<Cell
                 for (let x = x0; x <= x1; x++) {
                     const idx = to_index(width, height, x, y);
                     if (idx === null) continue;
-                    cells[idx] = { ...norm };
+                    const dst = cells[idx];
+                    if (!dst) continue;
+                    assign_cell(dst, norm);
                 }
             }
         },
@@ -119,7 +132,10 @@ export function create_canvas(width: number, height: number, fill?: Partial<Cell
 
             while (true) {
                 const idx = to_index(width, height, x, y);
-                if (idx !== null) cells[idx] = { ...norm };
+                if (idx !== null) {
+                    const dst = cells[idx];
+                    if (dst) assign_cell(dst, norm);
+                }
 
                 if (x === tx && y === ty) break;
 

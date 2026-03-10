@@ -380,6 +380,15 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
         const slot = slots.find(s => s.slot_index === slot_index);
         debug_log(`[ContainerModule] Clicked slot ${slot_index}: ${slot?.definition?.name || "empty"}`);
 
+        // Right-click container-items to open them.
+        if (e.button === 2 && slot?.instance && slot.definition && is_container_item(slot.definition)) {
+          const container = opts.get_container();
+          if (container) {
+            opts.on_open_container_item?.(slot.instance, slot.definition, container.id);
+          }
+          return;
+        }
+
         // Double-click container-items to open them.
         const click_count = (e as any).click_count;
         if (click_count === 2 && slot?.instance && slot.definition && is_container_item(slot.definition)) {

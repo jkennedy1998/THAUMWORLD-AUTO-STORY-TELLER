@@ -3,8 +3,7 @@ import { compose_modules } from '../compose.js';
 import type { Canvas, Cell, Module, PointerEvent, DragEvent, WheelEvent } from '../types.js';
 import { rect_contains } from '../types.js';
 import { debug_warn } from '../../shared/debug.js';
-import { toggle_ui_debug } from './ui_debug.js';
-import { set_debug_enabled as set_vision_debug_enabled } from '../vision_debugger.js';
+// NOTE: debug overlays are toggled from UI buttons (not hotkeys).
 import { unlock_sfx } from '../sfx/sfx_player.js';
 
 export type CanvasRuntimeOptions = {
@@ -469,12 +468,7 @@ export class CanvasRuntime {
             }
         }
 
-        if (ev.key === '\\') {
-            const enabled = toggle_ui_debug();
-            // Keep existing debug systems in sync.
-            set_vision_debug_enabled(enabled);
-            return true;
-        }
+        // Debug overlays are toggled from UI buttons (not hotkeys).
         // Renderer snapshot: dumps the current composed ASCII grid to disk.
         // This is used for debugging visual state in a way LLMs can ingest.
         //
@@ -683,7 +677,7 @@ export class CanvasRuntime {
             // Global pan: Check at top level so it works even with no capture_owner (blank space)
             if (this.global_pan_active && (nb.buttons & 1)) {
                 const should_global_pan = !this.capture_owner ||
-                    !(this.capture_owner.id === 'painter_canvas' || this.capture_owner.id?.startsWith('canvas'));
+                    !(this.capture_owner.id === 'painter_canvas' || this.capture_owner.id?.startsWith('canvas') || this.capture_owner.id === 'place');
 
                 if (should_global_pan) {
                     const dx = ev.clientX - this.last_pan_client_x;
@@ -788,9 +782,21 @@ export class CanvasRuntime {
                 } else {
                     this.global_pan_active = false;
                 }
-            } else {
-                this.global_pan_active = ((!typing && this.space_down) && !is_canvas_module) || (!top && !typing);
-            }
+             } else {
+                 // Game mode: route Space+Drag to modules that handle dragging (e.g. Place view pan).
+                 // Only use global UI pan when dragging blank space, or when the module does not implement drag.
+                 if (!typing && this.space_down) {
+                     if (is_canvas_module || top?.id === 'place') {
+                         this.global_pan_active = false;
+                     } else if (!top) {
+                         this.global_pan_active = true;
+                     } else {
+                         this.global_pan_active = !top.OnDragMove;
+                     }
+                 } else {
+                     this.global_pan_active = (!top && !typing);
+                 }
+             }
 
             if (this.global_pan_active) {
                 this.last_pan_client_x = ev.clientX;
@@ -980,8 +986,8 @@ export class CanvasRuntime {
                 // When dragging, use capture_owner to determine if we should pan globally
                 // If no capture_owner (blank space), always pan globally
                 // If capture_owner exists, only pan globally if it's not the canvas module
-                const should_global_pan = !this.capture_owner || 
-                    !(this.capture_owner.id === 'painter_canvas' || this.capture_owner.id?.startsWith('canvas'));
+                 const should_global_pan = !this.capture_owner || 
+                     !(this.capture_owner.id === 'painter_canvas' || this.capture_owner.id?.startsWith('canvas') || this.capture_owner.id === 'place');
                 
                 if (should_global_pan) {
                     const dx = ev.clientX - this.last_pan_client_x;
@@ -1122,10 +1128,21 @@ export class CanvasRuntime {
                 } else {
                     this.global_pan_active = false;
                 }
-            } else {
-                // Game mode: Use global UI pan
-                this.global_pan_active = ((!typing && this.space_down) && !is_canvas_module) || (!top && !typing);
-            }
+             } else {
+                 // Game mode: route Space+Drag to modules that handle dragging (e.g. Place view pan).
+                 // Only use global UI pan when dragging blank space, or when the module does not implement drag.
+                 if (!typing && this.space_down) {
+                     if (is_canvas_module || top?.id === 'place') {
+                         this.global_pan_active = false;
+                     } else if (!top) {
+                         this.global_pan_active = true;
+                     } else {
+                         this.global_pan_active = !top.OnDragMove;
+                     }
+                 } else {
+                     this.global_pan_active = (!top && !typing);
+                 }
+             }
             
             if (this.global_pan_active) {
                 this.last_pan_client_x = ev.clientX;

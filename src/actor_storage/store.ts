@@ -8,6 +8,7 @@ import { find_language } from "../language_storage/store.js";
 import { apply_level1_derived } from "../character_rules/derived.js";
 import { apply_prof_picks, make_empty_profs } from "../character_rules/creation.js";
 import { initialize_body_slots, type BodySlots } from "../types/body_slots.js";
+import { sanitize_actor_for_save } from "../shared/defs_deltas_sanitize.js";
 
 export type ActorLookupResult =
     | { ok: true; actor: Record<string, unknown>; path: string }
@@ -102,6 +103,9 @@ export function ensure_actor_exists(slot: number, actor_id: string): ActorLookup
 export function save_actor(slot: number, actor_id: string, actor: Record<string, unknown>): string {
     ensure_actor_dir(slot);
     const actor_path = get_actor_path(slot, actor_id);
+
+    // defs+deltas migration: strip derived/legacy inline item fields before persisting.
+    sanitize_actor_for_save(actor as any);
     fs.writeFileSync(actor_path, JSON.stringify(actor, null, 2), "utf-8");
     return actor_path;
 }

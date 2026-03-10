@@ -387,10 +387,11 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
               weight_index: shaded.weight_index,
             });
             
+            // Hitbox covers the full sidebar width so clicks are forgiving.
             sidebar_boxes.push({
-              x0: sidebar_x,
+              x0: rect.x0 + 1,
               y0: sidebar_y,
-              x1: sidebar_x + box_width - 1,
+              x1: rect.x0 + SIDEBAR_WIDTH - 1,
               y1: sidebar_y + box_height - 1,
               container_id: container_info.container_id
             });
@@ -587,6 +588,28 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
 
     OnPointerDown(e: PointerEvent): void {
       if (!opts.get_is_visible()) return;
+
+      // Sidebar click debugging (helps diagnose "clicking sidebar does nothing")
+      try {
+        if (sidebar_boxes.length > 0) {
+          let min_x0 = sidebar_boxes[0]!.x0;
+          let max_x1 = sidebar_boxes[0]!.x1;
+          let min_y0 = sidebar_boxes[0]!.y0;
+          let max_y1 = sidebar_boxes[0]!.y1;
+          for (const b of sidebar_boxes) {
+            if (b.x0 < min_x0) min_x0 = b.x0;
+            if (b.x1 > max_x1) max_x1 = b.x1;
+            if (b.y0 < min_y0) min_y0 = b.y0;
+            if (b.y1 > max_y1) max_y1 = b.y1;
+          }
+          const in_sidebar_band = e.x >= min_x0 && e.x <= max_x1 && e.y >= min_y0 && e.y <= max_y1;
+          if (in_sidebar_band) {
+            debug_log(`[CharacterModule] PointerDown in sidebar band at (${e.x},${e.y}) button=${e.button} clicks=${e.click_count} boxes=${sidebar_boxes.length}`);
+          }
+        }
+      } catch {
+        // ignore
+      }
       
       // Check gizmo clicks
       if (opts.gizmos && is_in_gizmo_area(e.x, e.y, rect)) {
@@ -613,6 +636,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       // Check sidebar clicks
       for (const box of sidebar_boxes) {
         if (e.x >= box.x0 && e.x <= box.x1 && e.y >= box.y0 && e.y <= box.y1) {
+          debug_log(`[CharacterModule] Sidebar hitbox matched: ${box.container_id} @(${box.x0},${box.y0})-(${box.x1},${box.y1})`);
           if (e.button === 2) {
             debug_log(`[CharacterModule] Right-clicked sidebar container: ${box.container_id}`);
             void opts.on_open_container?.(box.container_id, 'sidebar');
@@ -629,6 +653,28 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
           return;
         }
       }
+
+      // Extra debug: click in sidebar band but did not match a box.
+      try {
+        if (sidebar_boxes.length > 0) {
+          let min_x0 = sidebar_boxes[0]!.x0;
+          let max_x1 = sidebar_boxes[0]!.x1;
+          let min_y0 = sidebar_boxes[0]!.y0;
+          let max_y1 = sidebar_boxes[0]!.y1;
+          for (const b of sidebar_boxes) {
+            if (b.x0 < min_x0) min_x0 = b.x0;
+            if (b.x1 > max_x1) max_x1 = b.x1;
+            if (b.y0 < min_y0) min_y0 = b.y0;
+            if (b.y1 > max_y1) max_y1 = b.y1;
+          }
+          const in_sidebar_band = e.x >= min_x0 && e.x <= max_x1 && e.y >= min_y0 && e.y <= max_y1;
+          if (in_sidebar_band) {
+            debug_log(`[CharacterModule] Sidebar click did not match any box at (${e.x},${e.y})`);
+          }
+        }
+      } catch {
+        // ignore
+      }
       
       // Get clicked slot
       const slot = get_resolved_slot_at_position(e.x, e.y);
@@ -638,12 +684,17 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       if (e.button === 2) {
         if (slot.item_id) {
           const equipped = opts.get_equipped_items();
-          const found_item = Array.from(equipped.values()).find(item => item.instance.id === slot.item_id && item.instance.container_data);
+          const found_item = Array.from(equipped.values()).find(item => item.instance.id === slot.item_id) || null;
           if (found_item) {
-            const container_id = get_slot_container_id(opts.get_actor_id(), slot);
-            debug_log(`[CharacterModule] Right-clicked container: ${container_id}`);
-            void opts.on_open_container?.(container_id, slot.body_slot);
-            return;
+            const tags: any[] = (Array.isArray((found_item.instance as any)?.tags) ? (found_item.instance as any).tags : [])
+              .concat(Array.isArray((found_item.definition as any)?.tags) ? (found_item.definition as any).tags : []);
+            const is_container = tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER');
+            if (is_container) {
+              const container_id = get_slot_container_id(opts.get_actor_id(), slot);
+              debug_log(`[CharacterModule] Right-clicked container: ${container_id}`);
+              void opts.on_open_container?.(container_id, slot.body_slot);
+              return;
+            }
           }
         }
         return;
