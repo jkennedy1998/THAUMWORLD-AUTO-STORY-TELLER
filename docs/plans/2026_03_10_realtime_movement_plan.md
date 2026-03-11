@@ -13,6 +13,10 @@ Dependency note:
 - Multi-voxel bodies and multi-tile structures are specified in `docs/plans/2026_03_10_multi_tile_rendering_plan.md`.
   Realtime movement should treat those footprints as authoritative for traversal and collision.
 
+- Movement legality + pathfinding unification (single source of truth) is specified in:
+  - `docs/plans/2026_03_11_movement_unification_plan.md`
+  Realtime movement should build on that legality API rather than introducing new tile-walkable logic.
+
 ## Guiding Principles
 
 - Single source of truth for movement rules (collision + support + allowances + speed).
@@ -26,9 +30,10 @@ Dependency note:
 - **Voxel**: one cell in `(x,y,z)`.
 - **Body model / voxel volume**: the set of voxels occupied by an owner (not necessarily rectangular).
   This is the same concept used by the multi-tile / body-model plan.
-- **Feet voxel**: the anchor voxel representing where the entity stands (usually at `entity.elevation`).
-- **Headspace**: additional voxels above feet occupied by the body model (e.g. 2-tall character has `dz=0` body + `dz=+1` head).
-- **Support**: a rule that requires solid voxels below the feet plane (e.g. z0 must support walking on z1).
+- **Stance origin voxel**: the placement origin voxel representing where the entity stands for movement legality.
+  (This is not necessarily the camera anchor; anchor voxel is a separate concept.)
+- **Headspace**: additional voxels above stance origin occupied by the body model (e.g. 2-tall character has `dz=0` body + `dz=+1` head).
+- **Support**: a rule that requires solid voxels below the footprint plane.
 - **Allowance**: how many tiles a character can move before spending an action to refresh (e.g. `walk = 6`).
 - **Speed**: how fast steps animate in realtime (e.g. tiles/minute).
 
@@ -88,15 +93,15 @@ Important constraint
   Realtime keyboard stepping must drive this engine (or a thin extension of it), not a parallel loop.
 - Renderer keyboard event plumbing already exists in `src/mono_ui/runtime/canvas_runtime.ts`.
   Add key-state tracking there (or in PlaceModule) rather than introducing a second input system.
-- Tile support + movement blocking cache already exist in `src/place_storage/occupancy_index.ts`.
-  Extend it to cover world-z queries and entity volumes; do not create a separate collision cache.
+- Place occupancy cache already exists in `src/place_storage/occupancy_index.ts`.
+  Prefer extending it for voxel occupants/tags and fast queries, but keep movement legality rules in the unified legality helper (see dependency plan).
 - Tile tag semantics (defs+deltas safe) already exist in `src/place_storage/tiles.ts` (`tile_blocks_movement` via tag resolver).
   Collision legality must call into this path, not read legacy inline `tile.tags` directly.
 - A world-z tile adapter already exists in `src/place_storage/voxel_grid3.ts`.
   Prefer extending/fixing that contract instead of inventing a new `is_tile_blocked(place,x,y,z)` family.
   Note: `src/place_storage/voxel_grid3.ts` expects `place_voxel_blocks_movement/los` exports; ensure `src/place_storage/occupancy_index.ts` provides them.
-- Shared 2D pathfinding already exists in `src/shared/pathfinding.ts`.
-  Upgrade/extend it to 3D + volume legality; remove/avoid per-module BFS copies.
+- Shared pathfinding already exists in `src/shared/pathfinding.ts`.
+  Upgrade/extend it to call the unified legality helper and remove per-module BFS copies.
 - PlaceModule already wires click-to-move into `start_entity_movement(...)` and has move-mode toggles.
   Keyboard stepping should use the same speed/mode model (WALK/SNEAK) and the same engine entrypoints.
 - Renderer-side position tracking helpers already exist in `src/mono_ui/modules/movement_command_handler.ts`.
@@ -182,29 +187,24 @@ Movement simulation stays in tiles/voxels; only convert for display.
 
 All legality checks operate on the entity's occupied voxel set (body model / voxel volume), which may be non-rectangular.
 
-Core helper shape (conceptual):
+Core helper shape (conceptual; see `docs/plans/2026_03_11_movement_unification_plan.md` for the authoritative API):
 
 ```ts
 type VoxelPos = { x: number; y: number; z: number };
 
 type MoveCheck = {
   ok: boolean;
-  reason?: 'out_of_bounds' | 'blocked_by_tile' | 'blocked_by_entity' | 'no_support';
+  reason?: 'out_of_bounds' | 'blocked' | 'no_support' | 'reserved';
   blocked_voxel?: VoxelPos;
 };
 
-// Returns all occupied voxels for an owner at a candidate feet voxel.
+// Returns all occupied voxels for an owner at a candidate stance origin voxel.
 // Must reflect the multitile/body-model system (not a parallel shape system).
-get_occupied_voxels(owner_ref, feet: VoxelPos): VoxelPos[];
+get_occupied_voxels(owner_ref, stance_origin: VoxelPos): VoxelPos[];
 
-// Tile-only helper remains useful, but must accept world-z.
-is_tile_blocked(place, x, y, z): boolean;
-
-// Full volume check (tiles + entities) with self-exclusion.
-can_place_volume(place, owner_ref, occupied_voxels: VoxelPos[]): MoveCheck;
-
-// Support: for each footprint voxel at feet plane, require solid support under it.
-has_support(place, occupied_voxels: VoxelPos[]): boolean;
+// Movement legality MUST remain reasoned (not boolean-only), and MUST separate collision vs support.
+// Pathfinding and realtime stepping both call into the same legality helper.
+can_place_volume(place, owner_ref, stance_origin: VoxelPos, movement_mode: string, opts?): MoveCheck;
 ```
 
 Self-exclusion rule:
@@ -214,18 +214,22 @@ Self-exclusion rule:
 
 Support rule (current 3dification semantics)
 
-- Walking plane is `z=base_z` (structure plane).
-- Support plane is `z=base_z-1` (z0).
 - A step is legal only if:
-  - all occupied voxels on the walking/headspace planes are not `OCCUPIES`, and
-  - every feet-plane footprint voxel has support below.
+  - all occupied voxels are not `OCCUPIES`, and
+  - WALK has support under ANY footprint voxel.
 
-Integration note (avoid duplicating tile semantics):
+Entity support note:
 
-- The current repo already has the tile-only support rule encapsulated in `src/place_storage/occupancy_index.ts`.
-  Prefer implementing world-z tile semantics as `place_voxel_blocks_movement(place,x,y,world_z)` and
-  `place_voxel_blocks_los(place,x,y,world_z)` to match `src/place_storage/voxel_grid3.ts`.
-  Keep `place_tile_blocks_movement(place,x,y)` as the fast-path for the walking plane.
+- An entity that `OCCUPIES` blocks entering its voxels, but may provide support when it is below the mover.
+
+Integration note:
+
+- `src/place_storage/occupancy_index.ts` should provide voxel occupants and tile tag lookups.
+  Movement legality (collision/support/mode) lives in the unified legality helper from `docs/plans/2026_03_11_movement_unification_plan.md`.
+
+Facing note:
+
+- Movement execution updates facing in place state so legality/rendering/interaction can consult it as a normal part of entity data.
 
 ## Realtime Input Integration (Tick-Based Step Requests)
 
@@ -252,9 +256,9 @@ Integration note (current duplication):
 
 ## Pathfinding (3D + Voxel-Aware)
 
-Pathfinding operates on candidate feet voxels `{x,y,zFeet}` but uses volume legality:
+Pathfinding operates on candidate stance origin voxels `{x,y,z}` but uses volume legality:
 
-- A node is traversable iff `can_place_volume(...)` and `has_support(...)` succeed.
+- A node is traversable iff the unified legality check succeeds for the movement mode.
 - Neighbors:
   - cardinal: `{x±1,y,z}`, `{x,y±1,z}`
   - later: step up/down and vault sequences (see Jump/Vault)
@@ -264,11 +268,16 @@ Important:
 - Pathfinding must call the same legality helper used by realtime stepping.
   Do not duplicate "walkable" checks in separate modules.
 
+Execution-time rule:
+
+- Pathfinding is advisory; step execution re-validates legality each step and stops on first failure (reason logged).
+
 ## Repo Touchpoints (Where This Lands)
 
 - Stepping + interpolation: `src/shared/movement_engine.ts`
-- Shared legality helpers (new/extended): `src/place_storage/occupancy_index.ts` + body-model occupancy from `docs/plans/2026_03_10_multi_tile_rendering_plan.md`
-- Pathfinding: `src/shared/pathfinding.ts` (replace/extend to call unified legality)
+- Shared legality helpers (new): `src/place_storage/movement_legality.ts` (see `docs/plans/2026_03_11_movement_unification_plan.md`)
+- Occupancy data: `src/place_storage/occupancy_index.ts` (voxel occupants + tile tags)
+- Pathfinding: `src/shared/pathfinding.ts` (calls unified legality)
 - Place input bindings + player movement wiring: `src/mono_ui/modules/place_module.ts`
 - Keyboard event plumbing + focus gating: `src/mono_ui/runtime/canvas_runtime.ts`
 - Action pipeline (allowances + turn integration target): `src/action_system/pipeline.ts`, `src/action_system/registry.ts`
@@ -285,7 +294,7 @@ Jump/vault is not free-fly; it is a deterministic sequence of legal placements.
 
 Example vault over a 1-voxel obstacle:
 
-- If forward feet voxel is blocked but `up` and `up+forward` are legal and supported appropriately,
+- If forward stance-origin voxel is blocked but `up` and `up+forward` are legal and supported appropriately,
   allow the sequence: `up -> forward -> down`.
 
 All intermediate steps must pass `can_place_volume` and `has_support` (and obey self-exclusion).
@@ -309,8 +318,8 @@ Legend:
 
 ### Phase 0: Unify Legality Helpers (No New Movement Yet)
 
+- [ ] Complete `docs/plans/2026_03_11_movement_unification_plan.md` (legality + pathfinding single source).
 - [ ] Add shared legality helpers that operate on occupied voxels (tiles + entities) and accept `exclude_owner_ref`.
-- [ ] Keep `is_tile_blocked` as a tile-only helper but make it world-z aware.
 - [ ] Ensure all movement checks call the unified helper (no duplicate walkable checks).
 
 ### Phase 1: Use Body Models For Collision (2-Tall First)
@@ -334,7 +343,7 @@ Legend:
 
 ### Phase 4: Movement Accounting Plumbing (Action Pipeline Ready)
 
-- [ ] Define an action-pipeline verb (conceptual): `MOVE_STEP` and `MOVE_REFRESH`.
+- [ ] Route movement accounting through the existing `MOVE` verb + subtype (`WALK`/`SNEAKWALK`/etc, `REFRESH`).
 - [ ] Route successful steps through action pipeline accounting (decrement pools).
 - [ ] Implement the rule: walk consumption also ticks down other pools that are > 0.
 - [ ] Implement full-action refresh: reset all movement pools to max.
@@ -343,9 +352,9 @@ Testing mode note:
 
 - [ ] In unpaused/free movement tests, allow a feature flag to bypass accounting (infinite movement) while keeping the call sites intact.
 
-### Phase 5: 3D Pathfinding Over Feet Voxels (Volume-Aware)
+### Phase 5: 3D Pathfinding Over Stance Origins (Volume-Aware)
 
-- [ ] Implement A*/Dijkstra over `{x,y,zFeet}` nodes using unified legality helper.
+- [ ] Implement A*/Dijkstra over `{x,y,z}` nodes using unified legality helper.
 - [ ] Weighted edges for vertical sequences (vault/jump) without implying flight.
 - [ ] Add small deterministic test scenes.
 

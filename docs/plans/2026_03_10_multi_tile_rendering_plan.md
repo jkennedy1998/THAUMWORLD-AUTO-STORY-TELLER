@@ -217,7 +217,7 @@ Extension constraints:
 ### Phase 2: Occupancy Index v2 (Owners + Parts)
 
 - [~] Extend `src/place_storage/occupancy_index.ts` to include occupant owner_id + part tags per voxel (keep tile-only fast-path)
-- [~] Update movement/pathing collision queries to consult multi-voxel occupancy
+- [~] Ensure movement/pathfinding can consult multi-voxel occupancy (see `docs/plans/2026_03_11_movement_unification_plan.md` for authoritative movement rules)
 - [x] Update LOS queries to consult multi-voxel occupancy where appropriate
 
 - [~] Add hit-context query helper returning `{ owner_id, owner_kind, part, voxel }`
@@ -266,7 +266,7 @@ Extension constraints:
 ## Devlog Verification (npm run dev:logs)
 
 - [~] `MULTITILE_TEST PASS actor occupies head voxel` (occupancy shows `dz=+1` occupied)
-- [ ] `MULTITILE_TEST PASS head voxel blocks movement` (attempt to path into head voxel is rejected)
+- [ ] `MULTITILE_TEST PASS head voxel blocks movement` (moved to movement unification verification: `MOVE_UNIFY_TEST PASS head voxel blocks movement`)
 - [~] `MULTITILE_TEST PASS head voxel render present` (upper world-z layer shows head glyph)
 - [~] `MULTITILE_TEST PASS interaction resolves hit context` (log shows owner id + part + voxel when clicking head)
 - [~] `MULTITILE_TEST PASS anchor voxel resolved` (log shows anchor voxel used for camera targeting)
