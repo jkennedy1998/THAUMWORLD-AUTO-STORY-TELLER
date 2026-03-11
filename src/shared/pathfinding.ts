@@ -6,6 +6,7 @@
  */
 
 import type { Place, TilePosition, PlaceTile } from "../types/place.js";
+import { place_voxel_blocks_movement } from "../place_storage/occupancy_index.js";
 
 export type PathfindingOptions = {
   exclude_entity?: string;  // Entity ref to exclude from blocking (the moving entity)
@@ -50,6 +51,9 @@ export function is_tile_walkable(
   // - z=1 blocks movement when OCCUPIES
   // - z=0 must support (OCCUPIES) when tiles_z0 exists
   try {
+    const base_z = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
+    if (place_voxel_blocks_movement(place, tile.x, tile.y, base_z)) return false;
+
     const t1 = (place as any)?.tiles?.cells?.[tile.y]?.[tile.x] ?? null;
     if (tile_has_tag(t1, 'OCCUPIES')) return false;
     if ((place as any)?.tiles_z0) {

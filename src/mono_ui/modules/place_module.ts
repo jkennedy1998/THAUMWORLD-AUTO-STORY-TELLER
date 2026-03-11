@@ -15,10 +15,13 @@ import {
 } from "../vision_debugger.js";
 import { get_sense_profile } from "../../action_system/sense_broadcast.js";
 import { get_facing } from "../../npc_ai/facing_system.js";
+import { compute_anchor_world_voxel, eval_body_model_voxels, get_body_model_def } from "../../shared/body_model.js";
+import { get_body_slots_for_character_hit } from "../../shared/body_slot_representation.js";
+import { place_voxel_blocks_los, place_voxel_blocks_movement } from "../../place_storage/occupancy_index.js";
 import { update_actor_position_in_place, set_npc_tracked_position, get_npc_visual_status } from "./movement_command_handler.js";
 import { play_sfx } from "../sfx/sfx_player.js";
 import { make_entity_payload, make_ground_items_tile_payload, make_item_like_payload, make_pile_payload, make_simple_tile_payload } from "../../render_shaders/payload_builders.js";
-import { draw_render_queue, type RenderRequest } from "../../render_shaders/render_queue.js";
+import { draw_render_queue, select_flash_index, type RenderRequest } from "../../render_shaders/render_queue.js";
 import { ctx_place_tile } from "../../render_shaders/context_builders.js";
 import { PlaceDomLayers } from "../place_dom_layers.js";
 import type { GridCell } from "../../ascii_painter/types.js";
@@ -60,7 +63,13 @@ function debug_log_place(...args: any[]) {
 }
 
 // Simple entity tag cache - populated from place data, updated via events
-const entityTagCache = new Map<string, TagInstance[]>();
+  const entityTagCache = new Map<string, TagInstance[]>();
+
+  // Last resolved entity hit context (owner + part + voxel).
+  // Used for debugging now; later used for part-targeted actions + body slot mapping.
+  let last_entity_hit: { ref: string; part: string; voxel: { x: number; y: number; z: number } } | null = null;
+
+  const multitile_devlog_once = new Set<string>();
 let last_cached_place_id: string | null = null;
 
 /**
@@ -124,7 +133,7 @@ export type PlaceModuleConfig = {
   // Right-click cycles: Characters -> Items -> Tile
   // Shift+Right-click forces tile inspection
   on_inspect?: (target: {
-    type: "npc" | "actor" | "item" | "tile";
+    type: "npc" | "actor" | "structure" | "item" | "tile";
     ref?: string;
     place_id?: string;
     tile_position: TilePosition;
@@ -698,12 +707,36 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     if (targeted.type === "npc" && place.contents?.npcs_present) {
       const npc = place.contents.npcs_present.find(n => n.npc_ref === targeted!.ref);
       if (npc) {
-        return npc.tile_position;
+        try {
+          const base_z = get_place_base_z(place);
+          const z0 = get_entity_world_z(npc as any, base_z);
+          const anchor = compute_anchor_world_voxel({
+            origin: { x: npc.tile_position.x, y: npc.tile_position.y, z: z0 },
+            body_model_id: (npc as any)?.body_model_id,
+            facing: get_facing(String((npc as any)?.npc_ref ?? targeted!.ref)),
+            mode: 'physical',
+          });
+          return { x: anchor.x, y: anchor.y };
+        } catch {
+          return npc.tile_position;
+        }
       }
     } else if (targeted.type === "actor" && place.contents?.actors_present) {
       const actor = place.contents.actors_present.find(a => a.actor_ref === targeted!.ref);
       if (actor) {
-        return actor.tile_position;
+        try {
+          const base_z = get_place_base_z(place);
+          const z0 = get_entity_world_z(actor as any, base_z);
+          const anchor = compute_anchor_world_voxel({
+            origin: { x: actor.tile_position.x, y: actor.tile_position.y, z: z0 },
+            body_model_id: (actor as any)?.body_model_id,
+            facing: get_facing(String((actor as any)?.actor_ref ?? targeted!.ref)),
+            mode: 'physical',
+          });
+          return { x: anchor.x, y: anchor.y };
+        } catch {
+          return actor.tile_position;
+        }
       }
     }
     
@@ -773,8 +806,101 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     const wz = Math.floor(Number(world_z));
     if (!Number.isFinite(wz)) return [];
 
-    const entities = get_all_entities_at(tile_x, tile_y, place);
-    return entities.filter((e: any) => get_entity_world_z(e, base_z) === wz);
+    // Multi-voxel aware: include any entity whose body model occupies this voxel.
+    const out: (PlaceNPC | PlaceActor)[] = [];
+    const all = [...(place.contents?.npcs_present ?? []), ...(place.contents?.actors_present ?? [])] as any[];
+    for (const e of all) {
+      const tp = e?.tile_position;
+      if (!tp || typeof tp.x !== 'number' || typeof tp.y !== 'number') continue;
+      const ez0 = get_entity_world_z(e, base_z);
+      const def = get_body_model_def((e as any)?.body_model_id);
+      const facing = get_facing(String((e as any)?.npc_ref ?? (e as any)?.actor_ref ?? ''));
+      const voxels = eval_body_model_voxels(def, { mode: 'physical', facing });
+      let occupies = false;
+      for (const v of voxels) {
+        const x = Math.floor(tp.x) + Math.floor(Number(v.dx ?? 0));
+        const y = Math.floor(tp.y) + Math.floor(Number(v.dy ?? 0));
+        const z = ez0 + Math.floor(Number(v.dz ?? 0));
+        if (x === tile_x && y === tile_y && z === wz) {
+          occupies = true;
+          break;
+        }
+      }
+      if (occupies) out.push(e);
+    }
+    return out;
+  }
+
+  function get_structures_at_world_z(
+    tile_x: number,
+    tile_y: number,
+    place: Place,
+    world_z: number,
+  ): any[] {
+    const base_z = get_place_base_z(place);
+    const wz = Math.floor(Number(world_z));
+    if (!Number.isFinite(wz)) return [];
+
+    const out: any[] = [];
+    for (const s of (place as any)?.structures ?? []) {
+      const origin = (s as any)?.origin;
+      const ox = Number(origin?.x);
+      const oy = Number(origin?.y);
+      const oz0 = Number(origin?.z);
+      if (!Number.isFinite(ox) || !Number.isFinite(oy)) continue;
+      const oz = Number.isFinite(oz0) ? Math.floor(oz0) : base_z;
+
+      const phys = Array.isArray((s as any)?.body_model?.physical)
+        ? (s as any).body_model.physical
+        : [{ part: 'body', dx: 0, dy: 0, dz: 0 }];
+
+      let occupies = false;
+      for (const v of phys) {
+        const x = Math.floor(ox) + Math.floor(Number((v as any)?.dx ?? 0));
+        const y = Math.floor(oy) + Math.floor(Number((v as any)?.dy ?? 0));
+        const z = oz + Math.floor(Number((v as any)?.dz ?? 0));
+        if (x === tile_x && y === tile_y && z === wz) {
+          occupies = true;
+          break;
+        }
+      }
+      if (occupies) out.push(s);
+    }
+    return out;
+  }
+
+  function get_entity_hit_at_world_z(
+    tile_x: number,
+    tile_y: number,
+    place: Place,
+    world_z: number,
+  ): { entity: PlaceNPC | PlaceActor; part: string; voxel: { x: number; y: number; z: number } } | null {
+    const base_z = get_place_base_z(place);
+    const wz = Math.floor(Number(world_z));
+    if (!Number.isFinite(wz)) return null;
+
+    const entities = get_all_entities_at_world_z(tile_x, tile_y, place, wz);
+    if (entities.length < 1) return null;
+
+    const entity = entities[0]!;
+    const tp = (entity as any)?.tile_position;
+    if (!tp) return null;
+    const ez0 = get_entity_world_z(entity as any, base_z);
+    const def = get_body_model_def((entity as any)?.body_model_id);
+    const ref = String((entity as any)?.npc_ref ?? (entity as any)?.actor_ref ?? '');
+    const facing = get_facing(ref);
+    const voxels = eval_body_model_voxels(def, { mode: 'physical', facing });
+    let part = 'body';
+    for (const v of voxels) {
+      const x = Math.floor(tp.x) + Math.floor(Number(v.dx ?? 0));
+      const y = Math.floor(tp.y) + Math.floor(Number(v.dy ?? 0));
+      const z = ez0 + Math.floor(Number(v.dz ?? 0));
+      if (x === tile_x && y === tile_y && z === wz) {
+        part = String((v as any)?.part ?? 'body');
+        break;
+      }
+    }
+    return { entity, part, voxel: { x: tile_x, y: tile_y, z: wz } };
   }
 
   function get_focus_world_z_for_place(place: Place): number {
@@ -901,44 +1027,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
   // Check if a tile is walkable (not occupied, in bounds)
   function is_tile_walkable(tile_x: number, tile_y: number, place: Place): boolean {
-    // Check bounds
-    if (tile_x < 0 || tile_x >= place.tile_grid.width ||
-        tile_y < 0 || tile_y >= place.tile_grid.height) {
-      return false;
-    }
-
-    // Check for collidable tiles (walls)
-    if (tile_is_collidable(get_place_tile(place, tile_x, tile_y))) {
-      return false;
-    }
-    
-    // Check for entities
-    const entities = get_all_entities_at(tile_x, tile_y, place);
-    if (entities.length > 0) {
-      return false;
-    }
-    
-    // Phase 2 (partial): walking semantics match server movement rules:
-    // - z=1 blocks movement when OCCUPIES.
-    // - z=0 must provide support (OCCUPIES) when tiles_z0 exists.
-    if (tile_is_collidable(get_place_tile(place, tile_x, tile_y))) {
-      return false;
-    }
-
-    const t0 = get_place_tile_z0(place, tile_x, tile_y);
-    if ((place as any)?.tiles_z0) {
-      const supports = tile_is_collidable(t0);
-      if (!supports) return false;
-    }
-
-    // Phase 2 (partial): entity occupancy on z=1 blocks movement.
-    // (Items do not block movement by default.)
-    const has_actor = place.contents.actors_present?.some(a => a.tile_position.x === tile_x && a.tile_position.y === tile_y) ?? false;
-    if (has_actor) return false;
-    const has_npc = place.contents.npcs_present?.some(n => n.tile_position.x === tile_x && n.tile_position.y === tile_y) ?? false;
-    if (has_npc) return false;
-
-    return true;
+    const base_z = get_place_base_z(place);
+    return !place_voxel_blocks_movement(place as any, tile_x, tile_y, base_z);
   }
 
   // Get actor walk speed from their data
@@ -1060,7 +1150,17 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     // Fallback: derive from the first actor in the place snapshot.
     try {
       const a0: any = place?.contents?.actors_present?.[0];
+      const tp = a0?.tile_position;
       const z1 = Number(a0?.elevation);
+      if (tp && typeof tp.x === 'number' && typeof tp.y === 'number' && Number.isFinite(z1)) {
+        const anchor = compute_anchor_world_voxel({
+          origin: { x: tp.x, y: tp.y, z: Math.floor(z1) },
+          body_model_id: a0?.body_model_id,
+          facing: get_facing(String(a0?.actor_ref ?? '')),
+          mode: 'physical',
+        });
+        return Math.floor(anchor.z);
+      }
       if (Number.isFinite(z1)) return Math.floor(z1);
     } catch {
       // ignore
@@ -1357,35 +1457,102 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     // Track occupied voxels by world layer slot (for correct item/entity overlap behavior).
     const entity_occupied = new Set<string>(); // `${slot}:${tile_x}_${tile_y}`
 
+    // Render explicit multi-voxel structures.
+    {
+      const structs: any[] = (place as any)?.structures ?? [];
+      for (const s of structs) {
+        const id = String((s as any)?.id ?? '');
+        const def_id = String((s as any)?.def_id ?? '');
+        if (!id || !def_id) continue;
+
+        const origin = (s as any)?.origin;
+        const ox = Number(origin?.x);
+        const oy = Number(origin?.y);
+        const oz0 = Number(origin?.z);
+        if (!Number.isFinite(ox) || !Number.isFinite(oy)) continue;
+        const oz = Number.isFinite(oz0) ? Math.floor(oz0) : base_z;
+
+        const closed_char = (typeof (s as any)?.display_char === 'string' && (s as any).display_char.length > 0)
+          ? String((s as any).display_char).charAt(0)
+          : (def_id ? def_id.charAt(0) : '#');
+        const display_color = (typeof (s as any)?.display_color === 'string' && (s as any).display_color.length > 0)
+          ? String((s as any).display_color)
+          : '#888888';
+
+        const glyphs = (s as any)?.container_glyphs;
+        const open_containers = config.get_open_containers ? config.get_open_containers() : null;
+
+        const phys = Array.isArray((s as any)?.body_model?.physical)
+          ? (s as any).body_model.physical
+          : [{ part: 'body', dx: 0, dy: 0, dz: 0, tags: Array.isArray((s as any)?.tags) ? (s as any).tags : [] }];
+
+        // Open state: if any occupied voxel's container id is open, highlight all voxels.
+        let is_open = false;
+        if (open_containers && open_containers.size > 0) {
+          for (const v of phys) {
+            const tile_x = Math.floor(ox) + Math.floor(Number((v as any)?.dx ?? 0));
+            const tile_y = Math.floor(oy) + Math.floor(Number((v as any)?.dy ?? 0));
+            const cid = `place.tile.${place.id}.${tile_x}_${tile_y}`;
+            if (open_containers.has(cid)) { is_open = true; break; }
+          }
+        }
+
+        const display_char = (glyphs && typeof glyphs === 'object' && typeof glyphs.open === 'string' && typeof glyphs.closed === 'string')
+          ? String(is_open ? glyphs.open : glyphs.closed).charAt(0)
+          : closed_char;
+
+        for (const v of phys) {
+          const tile_x = Math.floor(ox) + Math.floor(Number((v as any)?.dx ?? 0));
+          const tile_y = Math.floor(oy) + Math.floor(Number((v as any)?.dy ?? 0));
+          const wz = oz + Math.floor(Number((v as any)?.dz ?? 0));
+
+          const slot = slot_for_world_z(wz, visible_planes_z);
+          if (slot === null) continue;
+
+          const screen_x = inner.x0 + Math.floor((tile_x - view.offset_x) / view.scale);
+          const screen_y = inner.y0 + Math.floor((tile_y - view.offset_y) / view.scale);
+          if (!(screen_x >= inner.x0 && screen_x <= inner.x1 && screen_y >= inner.y0 && screen_y <= inner.y1)) continue;
+
+          entity_occupied.add(`${slot}:${tile_x}_${tile_y}`);
+
+          const tags = Array.isArray((v as any)?.tags)
+            ? (v as any).tags
+            : (Array.isArray((s as any)?.tags) ? (s as any).tags : []);
+          q_for_slot(slot).push({
+            pass: 'tile',
+            x: screen_x,
+            y: screen_y,
+            order: 2,
+            key: `structure:${id}:${tile_x},${tile_y},${wz}`,
+            payload: make_simple_tile_payload({
+              id: `structure:${place.id}:${id}:${String((v as any)?.part ?? 'body')}`,
+              char: display_char,
+              tags,
+              base_fg: hex_to_rgb(display_color),
+              weight_index: 3,
+            }) as any,
+            ctx: { ...ctx_place_tile({ selected: is_open }), body_part: String((v as any)?.part ?? 'body'), facing: (s as any)?.facing, world_z: wz } as any,
+          });
+
+          if (Math.floor(Number((v as any)?.dz ?? 0)) === 1) {
+            const k = `struct_top:${id}`;
+            if (!multitile_devlog_once.has(k)) {
+              multitile_devlog_once.add(k);
+              debug_log_place(`MULTITILE_TEST PASS structure voxel at z+1 renders (id=${id} def=${def_id} wz=${wz})`);
+            }
+          }
+        }
+      }
+    }
+
     // Walls/doors come from place.tiles; no extra border drawing here.
 
     // (Movement already checked above; avoid double-spawning.)
     
     // Update debug visuals for all NPCs (vision cones, facing, etc.)
-    // Phase 5: LOS raycast queries tile COVER at point-samples (no precomputed blocker set).
+    // LOS uses the unified occupancy query so structures/entities can block too.
     const blocks_los_at = (x: number, y: number, world_z: number): boolean => {
-      const w = Math.max(0, Math.floor(place.tile_grid.width));
-      const h = Math.max(0, Math.floor(place.tile_grid.height));
-      if (x < 0 || y < 0 || x >= w || y >= h) return true;
-      const base_z = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
-      const wz = Math.floor(Number(world_z));
-      try {
-        // Map absolute world-z to the authored tile layers.
-        // - tiles (structures / walking plane) lives at base_z
-        // - tiles_z0 (support) lives at base_z - 1
-        // Everything else is air.
-        if (wz === base_z - 1) {
-          const t0: any = (place as any)?.tiles_z0?.cells?.[y]?.[x] ?? null;
-          return !!(t0 && tile_has_tag(t0 as any, 'COVER'));
-        }
-        if (wz === base_z) {
-          const t1: any = (place as any)?.tiles?.cells?.[y]?.[x] ?? null;
-          return !!(t1 && tile_has_tag(t1 as any, 'COVER'));
-        }
-        return false;
-      } catch {
-        return false;
-      }
+      return place_voxel_blocks_los(place as any, x, y, world_z);
     };
     for (const npc of place.contents.npcs_present) {
       const npc_position = { x: npc.tile_position.x, y: npc.tile_position.y, z: get_entity_world_z(npc as any, base_z) };
@@ -1438,41 +1605,104 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
     // Enqueue characters into the correct visible world layer.
     {
-      const enqueue_entity = (entity: any, is_npc: boolean) => {
-        const entityRef = is_npc ? String(entity.npc_ref ?? '') : String(entity.actor_ref ?? '');
-        if (!entityRef) return;
+      type EntityEntry = { entity: any; is_npc: boolean; ref: string; tile_x0: number; tile_y0: number; wz0: number };
+      const entries: EntityEntry[] = [];
+      for (const npc of place.contents.npcs_present) {
+        const ref = String((npc as any)?.npc_ref ?? '');
+        if (!ref) continue;
+        const tp = (npc as any)?.tile_position;
+        if (!tp || typeof tp.x !== 'number' || typeof tp.y !== 'number') continue;
+        entries.push({ entity: npc as any, is_npc: true, ref, tile_x0: tp.x, tile_y0: tp.y, wz0: get_entity_world_z(npc as any, base_z) });
+      }
+      for (const actor of place.contents.actors_present) {
+        const ref = String((actor as any)?.actor_ref ?? '');
+        if (!ref) continue;
+        const tp = (actor as any)?.tile_position;
+        if (!tp || typeof tp.x !== 'number' || typeof tp.y !== 'number') continue;
+        entries.push({ entity: actor as any, is_npc: false, ref, tile_x0: tp.x, tile_y0: tp.y, wz0: get_entity_world_z(actor as any, base_z) });
+      }
 
-        const wz = get_entity_world_z(entity, base_z);
-        const slot = slot_for_world_z(wz, visible_planes_z);
-        if (slot === null) return;
+      // Coherent collision flashing for multi-voxel bodies:
+      // choose one owner per anchor tile, then draw all its voxels.
+      const by_anchor = new Map<string, EntityEntry[]>();
+      for (const e of entries) {
+        const k = `${Math.floor(e.tile_x0)},${Math.floor(e.tile_y0)},${Math.floor(e.wz0)}`;
+        const arr = by_anchor.get(k);
+        if (arr) arr.push(e);
+        else by_anchor.set(k, [e]);
+      }
 
-        const tile_x = entity.tile_position?.x;
-        const tile_y = entity.tile_position?.y;
-        if (typeof tile_x !== 'number' || typeof tile_y !== 'number') return;
+      const chosen: EntityEntry[] = [];
+      const now_ms = Date.now();
+      for (const arr of by_anchor.values()) {
+        if (!arr || arr.length === 0) continue;
+        if (arr.length === 1) {
+          chosen.push(arr[0]!);
+          continue;
+        }
 
-        const screen_x = inner.x0 + Math.floor((tile_x - view.offset_x) / view.scale);
-        const screen_y = inner.y0 + Math.floor((tile_y - view.offset_y) / view.scale);
-        if (!(screen_x >= inner.x0 && screen_x <= inner.x1 && screen_y >= inner.y0 && screen_y <= inner.y1)) return;
+        // Stable deterministic ordering.
+        arr.sort((a, b) => {
+          const pa = a.is_npc ? 1 : 0;
+          const pb = b.is_npc ? 1 : 0;
+          if (pa !== pb) return pa - pb;
+          return a.ref.localeCompare(b.ref);
+        });
+        const idx = select_flash_index(now_ms, arr.length, 240);
+        chosen.push(arr[idx]!);
+      }
 
-        entity_occupied.add(`${slot}:${tile_x}_${tile_y}`);
+      const enqueue_entity = (ent: EntityEntry) => {
+        const entity = ent.entity;
+        const is_npc = ent.is_npc;
+        const entityRef = ent.ref;
+        const facing = get_facing(entityRef);
+        const wz0 = ent.wz0;
+        const tile_x0 = ent.tile_x0;
+        const tile_y0 = ent.tile_y0;
 
         const name = entityRef.split(".").pop() ?? (is_npc ? "N" : "A");
         const defaultRgb = is_npc ? npc_rgb : actor_rgb;
         const cachedTags = entityTagCache.get(entityRef) ?? [];
 
-        q_for_slot(slot).push({
-          pass: 'character',
-          x: screen_x,
-          y: screen_y,
-          order: is_npc ? 1 : 0,
-          key: entityRef,
-          payload: make_entity_payload(is_npc ? 'npc' : 'actor', entityRef, name, cachedTags, { base_fg: defaultRgb }) as any,
-          ctx: ctx_place_tile(),
-        });
+        const def = get_body_model_def((entity as any)?.body_model_id);
+        const voxels = eval_body_model_voxels(def, { mode: 'render', facing });
+
+        for (const v of voxels) {
+          const wz = wz0 + Math.floor(Number(v.dz ?? 0));
+          const slot = slot_for_world_z(wz, visible_planes_z);
+          if (slot === null) continue;
+
+          const tile_x = tile_x0 + Math.floor(Number(v.dx ?? 0));
+          const tile_y = tile_y0 + Math.floor(Number(v.dy ?? 0));
+
+          const screen_x = inner.x0 + Math.floor((tile_x - view.offset_x) / view.scale);
+          const screen_y = inner.y0 + Math.floor((tile_y - view.offset_y) / view.scale);
+          if (!(screen_x >= inner.x0 && screen_x <= inner.x1 && screen_y >= inner.y0 && screen_y <= inner.y1)) continue;
+
+          entity_occupied.add(`${slot}:${tile_x}_${tile_y}`);
+
+          q_for_slot(slot).push({
+            pass: 'character',
+            x: screen_x,
+            y: screen_y,
+            order: is_npc ? 1 : 0,
+            key: entityRef,
+            payload: make_entity_payload(is_npc ? 'npc' : 'actor', entityRef, name, cachedTags, { base_fg: defaultRgb }) as any,
+            ctx: { ...ctx_place_tile(), body_part: String(v.part ?? ''), facing, world_z: wz } as any,
+          });
+
+          if (String(v.part ?? '') === 'head') {
+            const k = `head_render:${entityRef}`;
+            if (!multitile_devlog_once.has(k)) {
+              multitile_devlog_once.add(k);
+              debug_log_place(`MULTITILE_TEST PASS head voxel render present (entity=${entityRef} wz=${wz})`);
+            }
+          }
+        }
       };
 
-      for (const npc of place.contents.npcs_present) enqueue_entity(npc as any, true);
-      for (const actor of place.contents.actors_present) enqueue_entity(actor as any, false);
+      for (const e of chosen) enqueue_entity(e);
     }
 
       // Draw items on ground (tabletop UX)
@@ -2007,7 +2237,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const tile = screen_to_tile(e.x, e.y);
       if (tile) {
         const focus_world_z = get_focus_world_z_for_place(place);
-        const entity = get_entity_at_world_z(tile.x, tile.y, place, focus_world_z);
+        const hit = get_entity_hit_at_world_z(tile.x, tile.y, place, focus_world_z);
+        const entity = hit?.entity ?? null;
         hovered = { x: tile.x, y: tile.y, world_z: focus_world_z, entity: entity ?? undefined };
 
       // Ground hover callback for highlighting (single item only)
@@ -2241,11 +2472,23 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       // Use structural markers (contents/capacity/glyph hints) and let the backend validate.
       if (focus_world_z === base_z && e.click_count === 2 && config.on_open_tile_container) {
         const t = get_place_tile(place, tile.x, tile.y) as any;
-        const is_container =
+        const is_container_tile =
           Array.isArray(t?.contents) ||
           !!t?.container_capacity ||
           !!t?.container_glyphs;
-        if (is_container) {
+
+        const is_container_structure = (() => {
+          const structs = get_structures_at_world_z(tile.x, tile.y, place, focus_world_z);
+          for (const s of structs) {
+            if (!s) continue;
+            if (Array.isArray((s as any).contents) || !!(s as any).container_capacity) return true;
+            const tags = Array.isArray((s as any).tags) ? (s as any).tags : [];
+            if (tags.some((tag: any) => String(tag?.name ?? '').toUpperCase() === 'CONTAINER')) return true;
+          }
+          return false;
+        })();
+
+        if (is_container_tile || is_container_structure) {
           config.on_open_tile_container(tile.x, tile.y);
           return;
         }
@@ -2304,12 +2547,39 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
 
       // Entity selection (focus world-z only)
-      const entity = get_entity_at_world_z(tile.x, tile.y, place, focus_world_z);
+      const hit = get_entity_hit_at_world_z(tile.x, tile.y, place, focus_world_z);
+      const entity = hit?.entity ?? null;
       if (entity) {
         const is_npc = "npc_ref" in entity;
         const ref = is_npc
           ? (entity as PlaceNPC).npc_ref
           : (entity as PlaceActor).actor_ref;
+
+        if (hit) {
+          last_entity_hit = { ref, part: hit.part, voxel: hit.voxel };
+          const k = `hit_ctx:${ref}:${hit.part}`;
+          if (!multitile_devlog_once.has(k)) {
+            multitile_devlog_once.add(k);
+            debug_log_place(`MULTITILE_TEST PASS interaction resolves hit context (entity=${ref} part=${hit.part} voxel=${hit.voxel.x},${hit.voxel.y},${hit.voxel.z})`);
+          }
+
+          try {
+            const slots = get_body_slots_for_character_hit({
+              body_slot_representation: (entity as any)?.body_slot_representation ?? null,
+              hit_part: hit.part,
+              hit_voxel: null,
+            });
+            if (slots.length > 0) {
+              const k2 = `hit_slots:${ref}:${hit.part}`;
+              if (!multitile_devlog_once.has(k2)) {
+                multitile_devlog_once.add(k2);
+                debug_log_place(`MULTITILE_TEST body slots for hit (entity=${ref} part=${hit.part} slots=${slots.join(',')})`);
+              }
+            }
+          } catch {
+            // ignore
+          }
+        }
 
         // Phase 2: Handle double-click on NPC (e.click_count is set by runtime)
         if (e.click_count === 2 && is_npc && config.on_double_click_npc) {
@@ -2482,37 +2752,43 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         }
         
         // Normal right-click: cycle through inspectable targets
-        // Order: Characters -> Items -> Tile
-        const inspectable_targets: Array<{ type: "npc" | "actor" | "item" | "tile"; ref?: string }> = [];
+        // Order: Characters -> Structures -> Items -> Tile
+        const inspectable_targets: Array<{ type: "npc" | "actor" | "structure" | "item" | "tile"; ref?: string }> = [];
 
         // No pick-topmost: inspection targets come only from the focused world layer.
-        // Entities/items live on the structure plane (base_z).
-        if (focus_world_z === base_z) {
-          // 1. Add characters (NPCs/Actors)
-          const all_entities = get_all_entities_at_world_z(tile.x, tile.y, place, focus_world_z);
-          for (const ent of all_entities) {
-            const is_npc = "npc_ref" in ent;
-            inspectable_targets.push({
-              type: is_npc ? "npc" : "actor",
-              ref: is_npc
-                ? (ent as PlaceNPC).npc_ref
-                : (ent as PlaceActor).actor_ref
-            });
-          }
-
-          // 2. Add items on ground
-          const items_on_ground = place.contents.items_on_ground.filter(
-            item => item.tile_position.x === tile.x && item.tile_position.y === tile.y
-          );
-          for (const item of items_on_ground) {
-            inspectable_targets.push({
-              type: "item",
-              ref: item.item_ref
-            });
-          }
+        // 1. Add characters (NPCs/Actors)
+        const all_entities = get_all_entities_at_world_z(tile.x, tile.y, place, focus_world_z);
+        for (const ent of all_entities) {
+          const is_npc = "npc_ref" in ent;
+          inspectable_targets.push({
+            type: is_npc ? "npc" : "actor",
+            ref: is_npc
+              ? (ent as PlaceNPC).npc_ref
+              : (ent as PlaceActor).actor_ref
+          });
         }
 
-        // 3. Add tile itself
+        // 2. Add structure instances
+        const structs = get_structures_at_world_z(tile.x, tile.y, place, focus_world_z);
+        for (const s of structs) {
+          const def_id = String((s as any)?.def_id ?? '').trim();
+          if (!def_id) continue;
+          inspectable_targets.push({
+            type: "structure",
+            ref: def_id.startsWith('tile.') ? def_id : `tile.${def_id}`,
+          });
+        }
+
+        // 3. Add items on ground (focused world layer)
+        const item_ids = get_items_on_ground_at_world_z(place, tile.x, tile.y, focus_world_z);
+        for (const id of item_ids) {
+          inspectable_targets.push({
+            type: "item",
+            ref: id,
+          });
+        }
+
+        // 4. Add tile itself
         inspectable_targets.push({
           type: "tile"
         });

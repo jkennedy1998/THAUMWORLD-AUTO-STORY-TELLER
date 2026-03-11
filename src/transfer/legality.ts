@@ -1,6 +1,7 @@
 import { calculate_grid_dimensions } from "../container_storage/grid_calculator.js";
 import { find_actor_item_by_id } from "../item_storage/inline_store.js";
 import { load_master_item } from "../item_storage/store.js";
+import { load_master_tile } from "../tile_storage/store.js";
 import type { TagInstance } from "../tag_system/registry.js";
 import { apply_tag_deltas } from "../tag_system/tag_deltas.js";
 
@@ -80,7 +81,10 @@ function resolve_effective_tags(item: any): TagInstance[] {
   const def_id = typeof item?.def_id === 'string' ? String(item.def_id) : '';
   if (def_id) {
     const def_res = load_master_item(def_id);
-    const base = def_res.ok ? (def_res.item.tags ?? []) : [];
+    const tile_res = !def_res.ok ? load_master_tile(def_id) : null;
+    const base = def_res.ok
+      ? (def_res.item.tags ?? [])
+      : (tile_res && tile_res.ok ? (tile_res.tile.tags ?? []) : []);
     const add = Array.isArray(item?.tag_add) ? (item.tag_add as TagInstance[]) : [];
     const remove = Array.isArray(item?.tag_remove)
       ? item.tag_remove
@@ -90,6 +94,22 @@ function resolve_effective_tags(item: any): TagInstance[] {
       : [];
     return apply_tag_deltas({ base, add, remove });
   }
+
+  // Place tiles / structures used as inline containers.
+  const kind = typeof item?.kind === 'string' ? String(item.kind) : '';
+  if (kind) {
+    const def_res = load_master_tile(kind);
+    const base = def_res.ok ? (def_res.tile.tags ?? []) : [];
+    const add = Array.isArray(item?.tag_add) ? (item.tag_add as TagInstance[]) : [];
+    const remove = Array.isArray(item?.tag_remove)
+      ? item.tag_remove
+          .map((op: any) => ({ key: String(op?.key ?? ''), mag: Number(op?.mag ?? 0) }))
+          .filter((op: any) => op.key && Number.isFinite(op.mag) && op.mag > 0)
+          .map((op: any) => ({ key: op.key, mag: Math.floor(op.mag) }))
+      : [];
+    return apply_tag_deltas({ base, add, remove });
+  }
+
   // Fallback: legacy stored tags.
   return Array.isArray(item?.tags) ? (item.tags as TagInstance[]) : [];
 }

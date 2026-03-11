@@ -4,6 +4,15 @@
     {
       "id": "DEFAULT_KIND",
       "name": "Default Kind",
+      "body_model_id": "character.biped_2z",
+      "body_slot_representation": {
+        "head": { "parts": ["head"] },
+        "torso": { "parts": ["body"] },
+        "hand_left": { "parts": ["body"] },
+        "hand_right": { "parts": ["body"] },
+        "leg_left": { "parts": ["body"] },
+        "leg_right": { "parts": ["body"] }
+      },
       "size_mag": 0,
       "sleep_type": "SLEEP",
       "sleep_required_per_day": 4,
@@ -55,6 +64,15 @@
       "id": "APE_NAKED",
       "name": "Naked Ape",
       "greater_kind": "APE",
+      "body_model_id": "character.biped_2z",
+      "body_slot_representation": {
+        "head": { "parts": ["head"] },
+        "torso": { "parts": ["body"] },
+        "hand_left": { "parts": ["body"] },
+        "hand_right": { "parts": ["body"] },
+        "leg_left": { "parts": ["body"] },
+        "leg_right": { "parts": ["body"] }
+      },
       "parts": [
         { "slot": "head", "critical": true },
         { "slot": "torso", "critical": true },
@@ -122,6 +140,15 @@
       "id": "APE_MANED",
       "name": "Maned Ape",
       "greater_kind": "APE",
+      "body_model_id": "character.biped_2z",
+      "body_slot_representation": {
+        "head": { "parts": ["head"] },
+        "torso": { "parts": ["body"] },
+        "hand_left": { "parts": ["body"] },
+        "hand_right": { "parts": ["body"] },
+        "leg_left": { "parts": ["body"] },
+        "leg_right": { "parts": ["body"] }
+      },
       "parts": [
         { "slot": "head", "critical": true },
         { "slot": "torso", "critical": true },
@@ -182,6 +209,15 @@
       "id": "APE_WOOLY",
       "name": "Wooly Ape",
       "greater_kind": "APE",
+      "body_model_id": "character.biped_2z",
+      "body_slot_representation": {
+        "head": { "parts": ["head"] },
+        "torso": { "parts": ["body"] },
+        "hand_left": { "parts": ["body"] },
+        "hand_right": { "parts": ["body"] },
+        "leg_left": { "parts": ["body"] },
+        "leg_right": { "parts": ["body"] }
+      },
       "parts": [
         { "slot": "head", "critical": true },
         { "slot": "torso", "critical": true },
@@ -250,6 +286,15 @@
       "id": "RODENT_SNOW_SNOUTLING",
       "name": "Snow Snoutling",
       "greater_kind": "RODENT",
+      "body_model_id": "character.biped_2z",
+      "body_slot_representation": {
+        "head": { "parts": ["head"] },
+        "torso": { "parts": ["body"] },
+        "hand_left": { "parts": ["body"] },
+        "hand_right": { "parts": ["body"] },
+        "leg_left": { "parts": ["body"] },
+        "leg_right": { "parts": ["body"] }
+      },
       "parts": [
         { "slot": "head", "critical": true },
         { "slot": "torso", "critical": true },

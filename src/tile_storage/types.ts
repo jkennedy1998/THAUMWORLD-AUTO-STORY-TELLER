@@ -2,6 +2,7 @@
 // Type definitions for tile database (mirrors item_storage pattern)
 
 import type { TagInstance } from "../tag_system/registry.js";
+import type { BodyModelVoxel } from "../shared/body_model.js";
 
 export type TileCategory = "structures" | "foliage" | "terrain" | "water" | "features" | "special";
 
@@ -61,6 +62,13 @@ export interface TileDefinition {
     
     // Optional inspection data (for rich inspectable tiles)
     inspection?: TileInspection;
+
+    // Optional multi-voxel body model for structure instances.
+    // When absent, the definition is treated as a single voxel at the origin.
+    body_model?: {
+      anchor_part?: string;
+      physical: BodyModelVoxel[];
+    };
 }
 
 export type TileDefLookupResult =

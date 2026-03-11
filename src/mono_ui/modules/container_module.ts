@@ -222,7 +222,10 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
         last_logged_container_id = container.id;
       }
       
-      const title = container ? (container.id.split(".").pop() || "container").toUpperCase().slice(0, 10) : "CONTAINER";
+      const title_src = container
+        ? (String((container as any)?.name ?? '').trim() || (container.id.split(".").pop() || "container"))
+        : "CONTAINER";
+      const title = String(title_src).toUpperCase().slice(0, 16);
 
       draw_module_border(c, {
         rect,

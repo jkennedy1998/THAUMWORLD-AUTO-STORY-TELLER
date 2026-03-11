@@ -9,6 +9,7 @@ import type { BodySlots } from "./body_slots.js";
 import type { Container } from "./container.js";
 import type { InlineItem } from "./inline_item.js";
 import type { TagInstance } from "../tag_system/registry.js";
+import type { BodyModelVoxel } from "../shared/body_model.js";
 
 /**
  * A place represents a bounded area within a region where interactions are local.
@@ -51,11 +52,53 @@ export type Place = {
     scattered: Record<string, InlineItem[]>;  // Key = "x_y", items at that position
   };
 
+  // Multi-voxel structures stored as explicit instances.
+  // Each instance references a tile definition (`def_id`) for behavior/appearance.
+  structures?: PlaceStructureInstance[];
+
   // Metadata
   is_public: boolean;            // Can random travelers enter?
   is_default: boolean;           // Is this the region's default entry place?
   max_occupancy?: number;        // Soft limit for realism
   description: PlaceDescription;
+};
+
+export type PlaceStructureInstance = {
+  // Stable instance id (unique within the place).
+  id: string;
+  // Tile definition id from local_data/tiles/** (e.g. "chest", "door", "tall_statue").
+  def_id: string;
+
+  // Origin voxel in place tile coordinates.
+  // z is absolute world-z; when omitted, defaults to place.coordinates.elevation.
+  origin: { x: number; y: number; z?: number };
+
+  // Optional facing/orientation (future: used to rotate (dx,dy) footprints).
+  facing?: string;
+
+  // Optional arbitrary instance state (open/closed, growth stage, etc.).
+  state?: Record<string, unknown>;
+
+  // Inline container-like storage for structure contents (e.g. multi-tile chest).
+  // Only used if the effective tags include CONTAINER.
+  contents?: InlineItem[];
+  container_capacity?: {
+    max_slots?: number;
+    max_weight?: number;
+  };
+
+  // Optional tag deltas applied on top of the tile definition's tags.
+  tag_add?: TagInstance[];
+  tag_remove?: Array<{ key: string; mag: number }>;
+
+  // Derived/runtime-only (populated by server API):
+  display_char?: string;
+  display_color?: string;
+  container_glyphs?: { closed: string; open: string };
+  tags?: TagInstance[];
+  // Resolved physical body model (voxel footprint). When absent, treated as 1 voxel at origin.
+  body_model?: { anchor_part?: string; physical: BodyModelVoxel[] };
+  __derived_runtime?: boolean;
 };
 
 // Tile definition reference - references local_data/tiles/{category}/{kind}.jsonc
@@ -177,6 +220,9 @@ export type PlaceContents = {
 export type PlaceNPC = {
   npc_ref: string;               // "npc.gunther"
   tile_position: TilePosition;
+  kind_id?: string;              // Kind id (used for body models + rendering)
+  body_model_id?: string;        // Body model id for multi-voxel occupancy/render
+  body_slot_representation?: Record<string, any>; // Kind-driven body slot mapping (optional)
   // 3Dification: vertical position in place/world space.
   // For now this is sourced from npc.location.elevation when available.
   elevation?: number;
@@ -192,6 +238,9 @@ export type PlaceNPC = {
 export type PlaceActor = {
   actor_ref: string;             // "actor.henry_actor"
   tile_position: TilePosition;
+  kind_id?: string;              // Kind id (used for body models + rendering)
+  body_model_id?: string;        // Body model id for multi-voxel occupancy/render
+  body_slot_representation?: Record<string, any>; // Kind-driven body slot mapping (optional)
   // 3Dification: vertical position in place/world space.
   // For now this is sourced from actor.location.elevation when available.
   elevation?: number;

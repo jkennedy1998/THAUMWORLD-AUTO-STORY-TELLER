@@ -99,6 +99,24 @@ export function sanitize_place_for_save(place_any: any): boolean {
   scrub_tiles((place_any as any).tiles_z0);
   scrub_tiles((place_any as any).tiles);
 
+  // Structures (instances): strip derived/runtime-only fields.
+  try {
+    const structs = (place_any as any).structures;
+    if (Array.isArray(structs)) {
+      for (const s of structs) {
+        if (!is_obj(s)) continue;
+        changed = del(s, 'tags') || changed;
+        changed = del(s, 'display_char') || changed;
+        changed = del(s, 'display_color') || changed;
+        changed = del(s, 'container_glyphs') || changed;
+        changed = del(s, 'body_model') || changed;
+        changed = del(s, '__derived_runtime') || changed;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
   return changed;
 }
 

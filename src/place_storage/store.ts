@@ -11,6 +11,8 @@ import { parse } from "jsonc-parser";
 import type { Place, PlaceResult, PlaceListResult } from "../types/place.js";
 import { get_data_slot_dir } from "../engine/paths.js";
 import { ensure_place_tiles, ensure_place_entities_not_on_walls } from "./tiles.js";
+import { resolve_place_tile } from "../tile_storage/resolve.js";
+import { rotate_offset_xy } from "../shared/body_model.js";
 import { sanitize_place_for_save } from "../shared/defs_deltas_sanitize.js";
 import { normalize_ground_scattered } from "./ground_store.js";
 
@@ -109,6 +111,77 @@ export function load_place(slot: number, place_id: string): PlaceResult {
     if (t.changed) dirty = true;
     const e = ensure_place_entities_not_on_walls(place);
     if (e.changed) dirty = true;
+
+    // Augment tiles + structure instances with derived/runtime fields so downstream
+    // systems (movement/occupancy) can consult effective tags without loading defs.
+    try {
+      const augment_tiles = (tiles_obj: any) => {
+        if (!tiles_obj || !Array.isArray(tiles_obj.cells)) return;
+        for (const row of tiles_obj.cells) {
+          if (!Array.isArray(row)) continue;
+          for (const tile of row) {
+            if (!tile || !tile.kind) continue;
+            const r = resolve_place_tile(String(tile.kind), tile as any);
+            if (!r) continue;
+            (tile as any).tags = r.effective_tags;
+            (tile as any).__derived_runtime = true;
+          }
+        }
+      };
+      augment_tiles((place as any).tiles_z0);
+      augment_tiles((place as any).tiles);
+
+      const structs = (place as any).structures;
+      if (Array.isArray(structs)) {
+        for (const s of structs) {
+          if (!s || typeof s !== 'object') continue;
+          const def_id = String((s as any).def_id ?? '');
+          if (!def_id) continue;
+
+          // Reuse tile resolver (tags + display) with tag deltas.
+          const r = resolve_place_tile(def_id, {
+            kind: def_id,
+            tag_add: (s as any).tag_add,
+            tag_remove: (s as any).tag_remove,
+          } as any);
+          if (!r) continue;
+
+          (s as any).display_char = r.display_char;
+          (s as any).display_color = r.display_color;
+          (s as any).tags = r.effective_tags;
+          (s as any).container_glyphs = r.container_glyphs ?? null;
+
+          const bm = (r.def as any)?.body_model;
+          const phys_raw = Array.isArray(bm?.physical) ? bm.physical : null;
+          const phys = (phys_raw && phys_raw.length > 0)
+            ? phys_raw
+            : [{ part: 'body', dx: 0, dy: 0, dz: 0 }];
+
+          const facing = (() => {
+            const f = String((s as any)?.facing ?? '').toLowerCase();
+            if (f === 'north' || f === 'east' || f === 'south' || f === 'west') return f;
+            return null;
+          })();
+
+          const effective_tags = Array.isArray(r.effective_tags) ? r.effective_tags : [];
+          (s as any).body_model = {
+            anchor_part: typeof bm?.anchor_part === 'string' ? String(bm.anchor_part) : undefined,
+            physical: phys.map((v: any) => ({
+              part: String(v?.part ?? 'body'),
+              ...(() => {
+                const o = rotate_offset_xy(Number(v?.dx ?? 0), Number(v?.dy ?? 0), facing as any);
+                return { dx: o.dx, dy: o.dy };
+              })(),
+              dz: Number(v?.dz ?? 0),
+              tags: [...effective_tags, ...(Array.isArray(v?.tags) ? v.tags : [])],
+            })),
+          };
+          (s as any).__derived_runtime = true;
+        }
+      }
+    } catch {
+      // ignore
+    }
     if (dirty) {
       // Persist once so subsequent loads are stable.
       save_place(slot, place);
@@ -305,6 +378,7 @@ export function create_basic_place(
       items_on_ground: [],
       features: []
     },
+    structures: [],
     is_public: true,
     is_default: options?.is_default ?? false,
     description: {

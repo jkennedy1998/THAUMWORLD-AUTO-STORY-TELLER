@@ -7,6 +7,8 @@ import { find_kind, load_kind_definitions } from "../kind_storage/store.js";
 import { find_language } from "../language_storage/store.js";
 import { apply_level1_derived } from "../character_rules/derived.js";
 import { apply_prof_picks, make_empty_profs, random_prof_picks, random_stat_assignment, shuffle } from "../character_rules/creation.js";
+import { resolve_character_body_model_id } from "../shared/body_model.js";
+import { DEFAULT_CHARACTER_BODY_SLOT_REPRESENTATION } from "../shared/body_slot_representation.js";
 
 export type NpcLookupResult =
     | { ok: true; npc: Record<string, unknown>; path: string }
@@ -199,6 +201,14 @@ export function create_npc_from_kind(slot: number, input: CreateNpcFromKindInput
     const npc = { ...template.npc, id: npc_id, name: input.name } as Record<string, unknown>;
 
     npc.kind = kind.id;
+    // Multi-tile rendering: body model + body slot representation are kind-driven.
+    // Fall back to current defaults when a kind does not specify them.
+    npc.body_model_id = typeof (kind as any)?.body_model_id === 'string'
+        ? String((kind as any).body_model_id)
+        : resolve_character_body_model_id(kind.id);
+    npc.body_slot_representation = ((kind as any)?.body_slot_representation && typeof (kind as any).body_slot_representation === 'object')
+        ? (kind as any).body_slot_representation
+        : DEFAULT_CHARACTER_BODY_SLOT_REPRESENTATION;
     if (typeof kind.size_mag === "number") npc.size_mag = kind.size_mag;
     if (typeof kind.sleep_type === "string") npc.sleep_type = kind.sleep_type;
     if (typeof kind.sleep_required_per_day === "number") npc.sleep_required_per_day = kind.sleep_required_per_day;

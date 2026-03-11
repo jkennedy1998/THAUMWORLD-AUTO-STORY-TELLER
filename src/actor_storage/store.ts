@@ -9,6 +9,8 @@ import { apply_level1_derived } from "../character_rules/derived.js";
 import { apply_prof_picks, make_empty_profs } from "../character_rules/creation.js";
 import { initialize_body_slots, type BodySlots } from "../types/body_slots.js";
 import { sanitize_actor_for_save } from "../shared/defs_deltas_sanitize.js";
+import { resolve_character_body_model_id } from "../shared/body_model.js";
+import { DEFAULT_CHARACTER_BODY_SLOT_REPRESENTATION } from "../shared/body_slot_representation.js";
 
 export type ActorLookupResult =
     | { ok: true; actor: Record<string, unknown>; path: string }
@@ -161,6 +163,14 @@ export function create_actor_from_kind(slot: number, input: CreateActorFromKindI
     const actor = { ...template.actor, id: actor_id, name: input.name } as Record<string, unknown>;
 
     actor.kind = kind.id;
+    // Multi-tile rendering: body model + body slot representation are kind-driven.
+    // Fall back to current defaults when a kind does not specify them.
+    (actor as any).body_model_id = typeof (kind as any)?.body_model_id === 'string'
+        ? String((kind as any).body_model_id)
+        : resolve_character_body_model_id(kind.id);
+    (actor as any).body_slot_representation = ((kind as any)?.body_slot_representation && typeof (kind as any).body_slot_representation === 'object')
+        ? (kind as any).body_slot_representation
+        : DEFAULT_CHARACTER_BODY_SLOT_REPRESENTATION;
     if (typeof kind.size_mag === "number") actor.size_mag = kind.size_mag;
     if (typeof kind.sleep_type === "string") actor.sleep_type = kind.sleep_type;
     if (typeof kind.sleep_required_per_day === "number") actor.sleep_required_per_day = kind.sleep_required_per_day;

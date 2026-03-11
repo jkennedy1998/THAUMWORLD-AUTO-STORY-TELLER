@@ -97,6 +97,13 @@ export type RenderContext = {
     y?: number;
     time_ms?: number;
     ui?: RenderUiState;
+
+    // Optional additional context for multi-voxel rendering.
+    // These are intentionally loose so modules can pass richer semantics
+    // without expanding the discriminated payload surface.
+    body_part?: string;
+    facing?: string;
+    world_z?: number;
 };
 
 export type RenderBlendMode = 'normal' | 'add' | 'multiply';

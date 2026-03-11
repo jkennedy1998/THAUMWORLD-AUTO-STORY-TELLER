@@ -1,0 +1,19 @@
+{
+  "id": "tall_statue",
+  "name": "Tall Statue",
+  "description": "A tall stone statue that rises above head-height.",
+  "display_char": "T",
+  "display_color": "#7a7a7a",
+  "tags": [
+    { "name": "STRUCTURE", "mag": 1, "meta": [], "scope": ["TILE"] },
+    { "name": "OCCUPIES", "mag": 1, "meta": [], "scope": ["TILE"] },
+    { "name": "COVER", "mag": 1, "meta": [], "scope": ["TILE"] }
+  ],
+  "body_model": {
+    "anchor_part": "base",
+    "physical": [
+      { "part": "base", "dx": 0, "dy": 0, "dz": 0 },
+      { "part": "top", "dx": 0, "dy": 0, "dz": 1 }
+    ]
+  }
+}

@@ -9,7 +9,7 @@
  */
 
 import type { Place, TilePosition } from "../types/place.js";
-import { place_tile_blocks_movement } from "../place_storage/occupancy_index.js";
+import { get_voxel_occupants, place_tile_blocks_movement } from "../place_storage/occupancy_index.js";
 import type { GameTime } from "../time_system/tracker.js";
 import { load_place, save_place, get_default_place_for_region } from "../place_storage/store.js";
 import { 
@@ -591,22 +591,20 @@ export async function is_tile_blocked(
   {
     if (place_tile_blocks_movement(place, tile.x, tile.y)) return true;
   }
-  
-  // Check for other NPCs
-  for (const npc of place.contents.npcs_present) {
-    if (npc.npc_ref !== exclude_npc_ref &&
-        npc.tile_position.x === tile.x &&
-        npc.tile_position.y === tile.y) {
-      return true;
+
+  // Multi-voxel entity occupancy (body models).
+  // Only consider the walking plane for now (base_z).
+  try {
+    const base_z = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
+    const occ = get_voxel_occupants(place, tile.x, tile.y, base_z);
+    for (const o of occ) {
+      if (exclude_npc_ref && o.owner_id === exclude_npc_ref) continue;
+      if (Array.isArray(o.tags) && o.tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'OCCUPIES')) {
+        return true;
+      }
     }
-  }
-  
-  // Check for actors (player characters)
-  for (const actor of place.contents.actors_present) {
-    if (actor.tile_position.x === tile.x &&
-        actor.tile_position.y === tile.y) {
-      return true;
-    }
+  } catch {
+    // ignore
   }
   
   // Check for obstacle features

@@ -1,12 +1,18 @@
 import * as fs from "node:fs";
 import { parse } from "jsonc-parser";
 import { get_kind_definitions_path } from "../engine/paths.js";
+import type { BodySlotRepresentation } from "../shared/body_slot_representation.js";
 
 export type KindDefinition = {
     id: string;
     name: string;
     greater_kind?: string;
     parts?: { slot: string; critical?: boolean }[];
+
+    // Multi-tile rendering / occupancy
+    body_model_id?: string;
+    body_slot_representation?: BodySlotRepresentation;
+
     sleep_type?: "SLEEP" | "REPAIR";
     sleep_required_per_day?: number;
     age?: { adulthood?: number; decline?: number; death?: number };

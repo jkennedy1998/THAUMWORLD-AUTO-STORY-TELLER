@@ -77,6 +77,43 @@ function appendToLog(entry) {
   }
 }
 
+function shouldPrintToConsole(processName, level, line) {
+  // Always show stderr + explicit non-INFO levels.
+  if (level !== "INFO") return true;
+  const msg = String(line ?? "");
+
+  // If a child process writes an error/warn to stdout, keep it visible.
+  if (/\b(ERROR|WARN|WARNING)\b/i.test(msg)) return true;
+  if (/\b(MULTITILE_TEST|LEGALITY|RANGE)\b/.test(msg)) return true;
+
+  // Keep startup / connectivity signals.
+  if (/\blistening\b/i.test(msg)) return true;
+  if (/\bstarted\b/i.test(msg) && /(Event Bridge|HTTP bridge|booted|initialized)/i.test(msg)) return true;
+  if (/\bVITE\b/i.test(msg) || /\bready in\b/i.test(msg) || /\bLocal:\b/i.test(msg) || /\bNetwork\b/i.test(msg)) return true;
+  if (/\bConnected\b/i.test(msg) || /\bconnecting\b/i.test(msg)) return true;
+
+  // Drop common spam.
+  const drop = [
+    /\bheartbeat\b/i,
+    /Tick started - checking \d+ messages/i,
+    /polling interval set/i,
+    /running initial tick/i,
+    /\bPOLL\b.*messages/i,
+    /process_dispersing\./i,
+    /\[ModuleRegistry\] Registered module:/i,
+    /\[fetch_log_messages\]/i,
+    /\[get_equipped_containers\]/i,
+    /\[CharacterModule\] Drawing character/i,
+    /Electron Security Warning/i,
+  ];
+  for (const rx of drop) {
+    if (rx.test(msg)) return false;
+  }
+
+  // Default: hide INFO noise on the console (but still write to the session log).
+  return false;
+}
+
 /**
  * Spawn a process with captured output
  */
@@ -104,7 +141,7 @@ function spawnWithLogging(name, command, args, options = {}) {
       if (line.trim()) {
         const entry = formatLogEntry(name, "INFO", line);
         appendToLog(entry);
-        console.log(entry);
+        if (shouldPrintToConsole(name, "INFO", line)) console.log(entry);
       }
     }
   });
@@ -116,7 +153,7 @@ function spawnWithLogging(name, command, args, options = {}) {
       if (line.trim()) {
         const entry = formatLogEntry(name, "ERROR", line);
         appendToLog(entry);
-        console.error(entry);
+        if (shouldPrintToConsole(name, "ERROR", line)) console.error(entry);
       }
     }
   });

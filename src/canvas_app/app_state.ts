@@ -30,18 +30,7 @@ import { get_senses_for_action } from '../action_system/sense_broadcast.js';
 import { get_facing } from '../npc_ai/facing_system.js';
 import { play_sfx } from '../mono_ui/sfx/sfx_player.js';
 import {
-    api_deposit_to_container_item,
-    api_deposit_ground_to_container_item,
-    api_move_within_container_item,
-    api_move_place_sourced_item,
-    api_place_drag,
-    api_place_drop,
-    api_pickup_to,
-    api_reorder_pile,
     api_transfer_inline,
-    api_spill_from_container_item,
-    api_transfer_between_container_items,
-    api_withdraw_from_ground_container_item,
 } from './transfer_api.js';
 
 export const APP_CONFIG = {
@@ -175,6 +164,9 @@ export function create_app_state(): AppState {
             opening_containers: new Set<string>(),
             // Phase 7: Track container_id -> module_id mapping for closing
             container_module_map: new Map<string, string>(), // container_id -> module_id
+            // Redirect support: alias container ids (e.g. 2nd tile of a wide chest) -> canonical container id.
+            canonical_by_alias: new Map<string, string>(),
+            aliases_by_canonical: new Map<string, string[]>(),
             // Container window slots (1..5): stable positions by slot index
             container_slot_by_container_id: new Map<string, number>(),
             container_slots: [null, null, null, null, null] as Array<string | null>,
@@ -954,9 +946,9 @@ export function create_app_state(): AppState {
         return null;
     }
 
-    // Refresh ALL open containers by iterating through the open_containers Set
+    // Refresh ALL open containers by iterating through the canonical container_data_map keys.
     async function refresh_container_data(): Promise<void> {
-        const open_containers = Array.from(ui_state.container.open_containers);
+        const open_containers = Array.from(ui_state.container.container_data_map.keys());
         if (open_containers.length === 0) return;
         
         debug_log(`[ContainerRefresh] Refreshing ${open_containers.length} open container(s)`);
@@ -1130,15 +1122,9 @@ export function create_app_state(): AppState {
                 }
 
                 else {
-                    // Regular container - fetch directly
-                    const container_res = await fetch(`http://localhost:8787/api/container?id=${container_id}&slot=${slot}`);
-                    if (container_res.ok) {
-                        const container_data = await container_res.json();
-                        if (container_data.ok) {
-                            container = container_data.container;
-                            contents = container_data.contents || [];
-                        }
-                    }
+                    // No legacy container ids supported.
+                    close_container_module(container_id);
+                    continue;
                 }
                 
                 if (container) {
@@ -2133,6 +2119,82 @@ export function create_app_state(): AppState {
         return Number.isFinite(wz) ? wz : base_z;
     }
 
+    function is_tile_or_structure_container_at(place: Place, tile_x: number, tile_y: number, world_z: number): boolean {
+        try {
+            const base_z = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
+            if (Math.floor(world_z) !== base_z) return false;
+
+            const t: any = (place as any)?.tiles?.cells?.[tile_y]?.[tile_x] ?? null;
+            const is_tile_container = Array.isArray(t?.contents) || !!t?.container_capacity || !!t?.container_glyphs;
+            if (is_tile_container) return true;
+
+            const structs: any[] = Array.isArray((place as any)?.structures) ? (place as any).structures : [];
+            for (const s of structs) {
+                const origin = (s as any)?.origin;
+                const ox = Number(origin?.x);
+                const oy = Number(origin?.y);
+                const oz0 = Number(origin?.z);
+                if (!Number.isFinite(ox) || !Number.isFinite(oy)) continue;
+                const oz = Number.isFinite(oz0) ? Math.floor(oz0) : base_z;
+                if (oz !== base_z) continue;
+
+                const phys = Array.isArray((s as any)?.body_model?.physical)
+                    ? (s as any).body_model.physical
+                    : [{ dx: 0, dy: 0, dz: 0 }];
+                let occupies = false;
+                for (const v of phys) {
+                    const vx = Math.floor(ox) + Math.floor(Number((v as any)?.dx ?? 0));
+                    const vy = Math.floor(oy) + Math.floor(Number((v as any)?.dy ?? 0));
+                    const vz = oz + Math.floor(Number((v as any)?.dz ?? 0));
+                    if (vx === tile_x && vy === tile_y && vz === base_z) { occupies = true; break; }
+                }
+                if (!occupies) continue;
+
+                if (Array.isArray((s as any).contents) || !!(s as any).container_capacity) return true;
+                if (has_tag((s as any).tags, 'CONTAINER')) return true;
+            }
+            return false;
+        } catch {
+            return false;
+        }
+    }
+
+    async function perform_drag_drop_into_tile_container(args: {
+        place: Place;
+        tile_x: number;
+        tile_y: number;
+        grid_x?: number;
+        grid_y?: number;
+    }): Promise<boolean> {
+        if (!drag_state.is_dragging) return false;
+        const place = args.place;
+        const dest_container_id = `place.tile.${place.id}.${args.tile_x}_${args.tile_y}`;
+        const src = String(drag_state.source_container_id ?? '');
+
+        // One endpoint for everything: route through /api/transfer.
+        const tx = await api_transfer_inline({
+            actor_id: APP_CONFIG.input_actor_id,
+            item_instance_id: String(drag_state.item_instance_id ?? ''),
+            from_container: src,
+            to_container: dest_container_id,
+            target_grid_x: typeof args.grid_x === 'number' ? args.grid_x : undefined,
+            target_grid_y: typeof args.grid_y === 'number' ? args.grid_y : undefined,
+        });
+
+        if (tx.ok) {
+            flash_status(['Moved'], 900);
+            drag_state.end_drag();
+            await update_current_place(place.id);
+            void refresh_container_data();
+            void refresh_character_data();
+            return true;
+        }
+
+        flash_status([`Move failed: ${tx.error || 'unknown'}`], 1500);
+        drag_state.reject_drag();
+        return false;
+    }
+
     const modules: Module[] = [
         make_fill_module({
             id: 'bg',
@@ -2270,7 +2332,7 @@ export function create_app_state(): AppState {
                 const place = get_current_place();
                 if (!place) return;
                 const cid = `place.tile.${place.id}.${tile_x}_${tile_y}`;
-                void open_container_module(cid, `Tile (${tile_x},${tile_y})`);
+                void open_container_module(cid);
             },
             on_place_transition: async (target_place_id: string, direction: string): Promise<boolean> => {
                 // Handle place transition when user clicks on a door
@@ -2379,11 +2441,11 @@ export function create_app_state(): AppState {
                  const item_ids = ui_state.place.ground_items_by_voxel.get(voxel_key) ?? [];
 
                 // Multiple items => open pile UI
-                if (item_ids.length >= 2) {
-                    const pile_id = `place.pile.${place.id}.${voxel_key}`;
-                    void open_container_module(pile_id, 'pile');
-                    return;
-                }
+                 if (item_ids.length >= 2) {
+                     const pile_id = `place.pile.${place.id}.${voxel_key}`;
+                     void open_container_module(pile_id);
+                     return;
+                 }
 
                 // Single item => open if container-item; otherwise attempt pickup into default.
                 if (item_ids.length === 1) {
@@ -2409,11 +2471,11 @@ export function create_app_state(): AppState {
                         fits_actor_kind: ['*'],
                     };
 
-                    if (is_container_item(def)) {
-                        const cid = `place.item.${place.id}.${item_id}`;
-                        void open_container_module(cid, 'container');
-                        return;
-                    }
+                     if (is_container_item(def)) {
+                         const cid = `place.item.${place.id}.${item_id}`;
+                         void open_container_module(cid);
+                         return;
+                     }
 
                     void (async () => {
                         const target = await get_default_pickup_target_container_id();
@@ -2422,12 +2484,11 @@ export function create_app_state(): AppState {
                             return;
                         }
 
-                        const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                        const data = await api_pickup_to({
-                            base_url,
+                        const from_container = `place.ground.${place.id}.${voxel_key}`;
+                        const data = await api_transfer_inline({
                             actor_id: APP_CONFIG.input_actor_id,
-                            place_id: place.id,
-                            item_id,
+                            item_instance_id: String(item_id),
+                            from_container,
                             to_container: target,
                         });
 
@@ -2596,6 +2657,22 @@ export function create_app_state(): AppState {
                     return false;
                 }
 
+                // Priority: dropping onto a tile/structure container should deposit into it.
+                // This must happen before any ground-drag handling (which otherwise interprets the drop as a ground move).
+                try {
+                    const place0 = get_current_place();
+                    if (place0) {
+                        const focus_wz0 = get_focus_world_z_for_current_place();
+                        if (is_tile_or_structure_container_at(place0, tile_x, tile_y, focus_wz0)) {
+                            return await perform_drag_drop_into_tile_container({ place: place0, tile_x, tile_y });
+                        }
+                    }
+                } catch (err) {
+                    debug_warn('[PlaceModule]', 'perform_drag_drop_into_tile_container failed', err);
+                    drag_state.reject_drag();
+                    return false;
+                }
+
                 // If the drag source is a pile UI (ContainerModule), treat it as a place-sourced single-item move.
                 // This prevents actor-only /api/place/items/drop from being called for ground items.
                 const src_container_id = String(drag_state.source_container_id ?? '');
@@ -2613,23 +2690,12 @@ export function create_app_state(): AppState {
                         return true;
                     }
                     try {
-                        const [xs, ys, zs] = (position_key || '').split('_');
-                        const from_x = parseInt(xs || '0', 10);
-                        const from_y = parseInt(ys || '0', 10);
-                        const from_z = parseInt(zs || '', 10);
-                        const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                        const mv = await api_place_drag({
-                            base_url,
+                        const to_key = `${tile_x}_${tile_y}_${get_focus_world_z_for_current_place()}`;
+                        const mv = await api_transfer_inline({
                             actor_id: APP_CONFIG.input_actor_id,
-                            place_id,
-                            from_x,
-                            from_y,
-                            from_elevation: Number.isFinite(from_z) ? Math.floor(from_z) : undefined,
-                            to_x: tile_x,
-                            to_y: tile_y,
-                            to_elevation: get_focus_world_z_for_current_place(),
-                            item_id: String(drag_state.item_instance_id ?? ''),
-                            action_cost: (ui_state.controls.override_cost ?? undefined) as any,
+                            item_instance_id: String(drag_state.item_instance_id ?? ''),
+                            from_container: src_container_id,
+                            to_container: `place.ground.${place_id}.${to_key}`,
                         });
                         if (mv.ok) {
                             flash_status(['Dragged'], 900);
@@ -2667,26 +2733,14 @@ export function create_app_state(): AppState {
                         return true;
                     }
 
-                    // Dragging a pile/item within the place: call ground drag API.
+                    // Dragging a pile/item within the place: use /api/transfer.
                     try {
-                        const [xs, ys, zs] = (position_key || '').split('_');
-                        const from_x = parseInt(xs || '0', 10);
-                        const from_y = parseInt(ys || '0', 10);
-                        const from_z = parseInt(zs || '', 10);
-                        const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                        const mv = await api_place_drag({
-                            base_url,
+                        const to_key = `${tile_x}_${tile_y}_${get_focus_world_z_for_current_place()}`;
+                        const mv = await api_transfer_inline({
                             actor_id: APP_CONFIG.input_actor_id,
-                            place_id,
-                            from_x,
-                            from_y,
-                            from_elevation: Number.isFinite(from_z) ? Math.floor(from_z) : undefined,
-                            to_x: tile_x,
-                            to_y: tile_y,
-                            to_elevation: get_focus_world_z_for_current_place(),
-                            mode: kind === 'pile' ? 'pile' : undefined,
-                            item_id: kind === 'ground' ? String(drag_state.item_instance_id ?? '') : undefined,
-                            action_cost: (ui_state.controls.override_cost ?? undefined) as any,
+                            item_instance_id: String(drag_state.item_instance_id ?? ''),
+                            from_container: src,
+                            to_container: `place.ground.${place_id}.${to_key}`,
                         });
                         if (mv.ok) {
                             flash_status(['Dragged'], 900);
@@ -2730,101 +2784,24 @@ export function create_app_state(): AppState {
                         }
 
                         try {
-                            const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
                             const src = String(drag_state.source_container_id ?? '');
 
-                            // Ground container-item -> ground container-item.
-                            if (src.startsWith('place.item.')) {
-                                const parts = src.split('.');
-                                const src_place_id = parts[2];
-                                const src_container_item_id = parts[3];
-                                if (!src_place_id || !src_container_item_id) {
-                                    drag_state.reject_drag();
-                                    return false;
-                                }
-
-                                const tx = await api_transfer_between_container_items({
-                                    base_url,
-                                    actor_id: APP_CONFIG.input_actor_id,
-                                    place_id: place.id,
-                                    from_container_item_id: String(src_container_item_id),
-                                    to_container_item_id: String(ground_item_id),
-                                    item_id: String(drag_state.item_instance_id ?? ''),
-                                    action_cost: (ui_state.controls.override_cost ?? undefined) as any,
-                                });
-                                if (tx.ok) {
-                                    flash_status([`Moved into ${meta?.name ?? 'container'}`], 1500);
-                                    drag_state.end_drag();
-                                    await update_current_place(place.id);
-                                    void refresh_container_data();
-                                    return true;
-                                }
-                                flash_status([`Cannot deposit: ${tx.error}`], 2000);
+                            if (src.startsWith('place.pile.') && String(drag_state.item_instance_id ?? '').startsWith('pile:')) {
+                                flash_status(['Open the pile and drag a specific item out'], 2000);
                                 drag_state.reject_drag();
                                 return false;
                             }
 
-                            // Ground (top-level) -> ground container-item.
-                            if (src.startsWith('place.ground.') || src.startsWith('place.pile.')) {
-                                if (String(drag_state.item_instance_id ?? '').startsWith('pile:')) {
-                                    flash_status(['Open the pile and drag a specific item out'], 2000);
-                                    drag_state.reject_drag();
-                                    return false;
-                                }
-
-                                const parts = src.split('.');
-                                const src_place_id = parts[2];
-                                const src_position_key = parts[3];
-                                if (!src_place_id || !src_position_key) {
-                                    drag_state.reject_drag();
-                                    return false;
-                                }
-                                const [xs, ys, zs] = (src_position_key || '').split('_');
-                                const from_x = parseInt(xs || '0', 10);
-                                const from_y = parseInt(ys || '0', 10);
-                                const from_z = parseInt(zs || '', 10);
-
-                                const dep = await api_deposit_ground_to_container_item({
-                                    base_url,
-                                    actor_id: APP_CONFIG.input_actor_id,
-                                    place_id: place.id,
-                                    from_x,
-                                    from_y,
-                                    from_elevation: Number.isFinite(from_z) ? Math.floor(from_z) : undefined,
-                                    item_id: String(drag_state.item_instance_id ?? ''),
-                                    container_item_id: String(ground_item_id),
-                                    action_cost: (ui_state.controls.override_cost ?? undefined) as any,
-                                });
-                                if (dep.ok) {
-                                    flash_status([`Moved into ${meta?.name ?? 'container'}`], 1500);
-                                    drag_state.end_drag();
-                                    await update_current_place(place.id);
-                                    void refresh_container_data();
-                                    void refresh_character_data();
-                                    return true;
-                                }
-                                flash_status([`Cannot deposit: ${dep.error}`], 2000);
-                                drag_state.reject_drag();
-                                return false;
-                            }
-
-                            // Only actor-owned items can be deposited via this shortcut.
-                            if (drag_state.source_module === 'ground' || src.startsWith('place.ground.') || src.startsWith('place.pile.') || src.startsWith('place.item.') || src.startsWith('place.tile.')) {
-                                flash_status(['Pick up the item first'], 1500);
-                                drag_state.reject_drag();
-                                return false;
-                            }
-
-                            const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
-                            const dep = await api_deposit_to_container_item({
-                                base_url,
+                            // One endpoint for everything: route through /api/transfer.
+                            const dest = `place.item.${place.id}.${ground_item_id}`;
+                            const tx = await api_transfer_inline({
                                 actor_id: APP_CONFIG.input_actor_id,
-                                place_id: place.id,
-                                item_id: String(drag_state.item_instance_id ?? ''),
-                                container_item_id: ground_item_id,
-                                action_cost,
+                                item_instance_id: String(drag_state.item_instance_id ?? ''),
+                                from_container: src,
+                                to_container: dest,
                             });
-                            if (dep.ok) {
+
+                            if (tx.ok) {
                                 flash_status([`Moved into ${meta?.name ?? 'container'}`], 1500);
                                 drag_state.end_drag();
                                 await update_current_place(place.id);
@@ -2832,8 +2809,8 @@ export function create_app_state(): AppState {
                                 void refresh_character_data();
                                 return true;
                             }
-                            const err = dep.error ? String(dep.error) : 'unknown error';
-                            flash_status([`Cannot deposit: ${err}`], 2000);
+
+                            flash_status([`Cannot deposit: ${tx.error || 'unknown error'}`], 2000);
                             drag_state.reject_drag();
                             return false;
                         } catch (err) {
@@ -2848,32 +2825,21 @@ export function create_app_state(): AppState {
                 // Place container (ground container-item / tile container) -> ground tile: spill to ground.
                 const spill_src = String(drag_state.source_container_id ?? '');
                 if (spill_src.startsWith('place.item.')) {
-                    const parts = spill_src.split('.');
-                    const src_place_id = parts[2];
-                    const src_container_item_id = parts[3];
-                    if (!src_place_id || !src_container_item_id) {
-                        drag_state.reject_drag();
-                        return false;
-                    }
-
                     try {
-                        const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                        const sp = await api_spill_from_container_item({
-                            base_url,
+                        const to_z = get_focus_world_z_for_current_place();
+                        const to_container = `place.ground.${place.id}.${tile_x}_${tile_y}_${to_z}`;
+                        const sp = await api_transfer_inline({
                             actor_id: APP_CONFIG.input_actor_id,
-                            place_id: place.id,
-                            container_item_id: String(src_container_item_id),
-                            item_id: String(drag_state.item_instance_id ?? ''),
-                            x: tile_x,
-                            y: tile_y,
-                            to_elevation: get_focus_world_z_for_current_place(),
-                            action_cost: (ui_state.controls.override_cost ?? undefined) as any,
+                            item_instance_id: String(drag_state.item_instance_id ?? ''),
+                            from_container: spill_src,
+                            to_container,
                         });
                         if (sp.ok) {
                             flash_status(['Dropped'], 1200);
                             drag_state.end_drag();
                             await update_current_place(place.id);
                             void refresh_container_data();
+                            void refresh_character_data();
                             return true;
                         }
                         flash_status([`Cannot drop: ${sp.error}`], 2000);
@@ -2887,40 +2853,22 @@ export function create_app_state(): AppState {
                 }
 
                 if (spill_src.startsWith('place.tile.')) {
-                    const parts = spill_src.split('.');
-                    const src_place_id = parts[2];
-                    const pos_key = parts[3];
-                    const [xs, ys] = (pos_key || '').split('_');
-                    const sx = Number(xs);
-                    const sy = Number(ys);
-                    if (!src_place_id || !Number.isFinite(sx) || !Number.isFinite(sy)) {
-                        drag_state.reject_drag();
-                        return false;
-                    }
-
                     try {
-                        const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                                const sp = await fetch(`${base_url}/api/place/items/spill_from_tile_container`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        actor_id: APP_CONFIG.input_actor_id,
-                                        place_id: place.id,
-                                        x: sx,
-                                        y: sy,
-                                        item_id: String(drag_state.item_instance_id ?? ''),
-                                        to_x: tile_x,
-                                        to_y: tile_y,
-                                        to_elevation: get_focus_world_z_for_current_place(),
-                                        action_cost: (ui_state.controls.override_cost ?? undefined) as any,
-                                    }),
-                                }).then(r => r.json().catch(() => ({ ok: false, error: `HTTP ${r.status}` } as any)));
+                        const to_z = get_focus_world_z_for_current_place();
+                        const to_container = `place.ground.${place.id}.${tile_x}_${tile_y}_${to_z}`;
+                        const sp = await api_transfer_inline({
+                            actor_id: APP_CONFIG.input_actor_id,
+                            item_instance_id: String(drag_state.item_instance_id ?? ''),
+                            from_container: spill_src,
+                            to_container,
+                        });
 
                         if (sp.ok) {
                             flash_status(['Dropped'], 1200);
                             drag_state.end_drag();
                             await update_current_place(place.id);
                             void refresh_container_data();
+                            void refresh_character_data();
                             return true;
                         }
                         flash_status([`Cannot drop: ${sp.error || 'unknown'}`], 2000);
@@ -2943,31 +2891,15 @@ export function create_app_state(): AppState {
                 // Distance validation is now handled by backend (cardinal adjacency check)
                 // Frontend accepts drops anywhere and lets backend validate
 
-                // Call the NEW inline drop API
-                const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                const url = `${base_url}/api/place/items/drop`;
-                
-                const actor_id = APP_CONFIG.input_actor_id;
-                const request_body = {
-                    actor_id,
-                    place_id: place.id,
-                    item_id: drag_state.item_instance_id,
-                    x: tile_x,
-                    y: tile_y,
-                };
-                
-                debug_log(`[PlaceModule] on_drop: Calling API ${url}`);
-                debug_log(`[PlaceModule] on_drop: Request body: ${JSON.stringify(request_body)}`);
-
                 try {
-                    const drop_res = await api_place_drop({
-                        base_url,
+                    const actor_id = APP_CONFIG.input_actor_id;
+                    const to_z = get_focus_world_z_for_current_place();
+                    const to_container = `place.ground.${place.id}.${tile_x}_${tile_y}_${to_z}`;
+                    const drop_res = await api_transfer_inline({
                         actor_id,
-                        place_id: place.id,
-                        item_id: String(drag_state.item_instance_id ?? ''),
-                        x: tile_x,
-                        y: tile_y,
-                        elevation: get_focus_world_z_for_current_place(),
+                        item_instance_id: String(drag_state.item_instance_id ?? ''),
+                        from_container: String(drag_state.source_container_id ?? ''),
+                        to_container,
                     });
 
                     debug_log(`[PlaceModule] on_drop: Response data: ${JSON.stringify(drop_res)}`);
@@ -3025,86 +2957,48 @@ export function create_app_state(): AppState {
                     return false;
                 }
 
-                // Determine which hand is holding the item
-                // source_container_id format: container.{actor_id}.{slot_name}.{slot_type}
-                const source_parts = drag_state.source_container_id?.split('.');
-                if (!source_parts || source_parts.length < 4) {
-                    debug_log(`[PlaceModule] on_throw: Invalid source container format`);
-                    drag_state.reject_drag();
-                    flash_status([`Cannot throw: item not in hand`], 2000);
-                    return false;
-                }
-                
-                const slot_name = source_parts[2]; // hand_left or hand_right
-                const slot_type = source_parts[3]; // tool, armor, or garb
-                
-                // Only allow throwing from tool slots (held items)
-                if (slot_type !== 'tool') {
-                    debug_log(`[PlaceModule] on_throw: Item not held in tool slot (${slot_type})`);
+                // Only allow throwing from a hand tool slot.
+                // source_container_id format: body_slots.<slot_name>.<slot_type>[.<index>]
+                const from_container = String(drag_state.source_container_id ?? '');
+                const parts = from_container.split('.');
+                const slot_name = parts[0] === 'body_slots' ? String(parts[1] ?? '') : '';
+                const slot_type = parts[0] === 'body_slots' ? String(parts[2] ?? '') : '';
+
+                if (slot_type !== 'tool' || (slot_name !== 'hand_left' && slot_name !== 'hand_right')) {
+                    debug_log(`[PlaceModule] on_throw: Invalid throw source ${from_container}`);
                     drag_state.reject_drag();
                     flash_status([`Cannot throw: must be holding item in hand`], 2000);
                     return false;
                 }
-                
-                const from_slot = `${slot_name}.tool`;
-                debug_log(`[PlaceModule] on_throw: Throwing from ${from_slot}`);
 
-                // Call the throw API
-                const slot = APP_CONFIG.selected_data_slot;
-                const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                const url = `${base_url}/api/place/throw?slot=${slot}`;
-                
                 const actor_id = APP_CONFIG.input_actor_id;
-                const request_body = {
-                    actor_id: actor_id,
-                    item_instance_id: drag_state.item_instance_id,
-                    from_slot: from_slot,
-                    target_tile: { x: tile_x, y: tile_y }
-                };
-                
-                debug_log(`[PlaceModule] on_throw: Calling API ${url}`);
-                debug_log(`[PlaceModule] on_throw: Request body: ${JSON.stringify(request_body)}`);
+                const to_z = get_focus_world_z_for_current_place();
+                const to_container = `place.ground.${place.id}.${tile_x}_${tile_y}_${to_z}`;
 
                 try {
-                    const response = await fetch(url, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(request_body)
+                    const throw_res = await api_transfer_inline({
+                        transfer_mode: 'throw',
+                        actor_id,
+                        item_instance_id: String(drag_state.item_instance_id ?? ''),
+                        from_container,
+                        to_container,
                     });
 
-                    debug_log(`[PlaceModule] on_throw: Response status: ${response.status}`);
+                    debug_log(`[PlaceModule] on_throw: Response data: ${JSON.stringify(throw_res)}`);
 
-                    if (!response.ok) {
-                        const error_text = await response.text();
-                        debug_log(`[PlaceModule] on_throw: HTTP error: ${response.status} - ${error_text}`);
-                        drag_state.reject_drag();
-                        flash_status([`Cannot throw: ${error_text}`], 2000);
-                        return false;
-                    }
-
-                    const data = await response.json();
-                    debug_log(`[PlaceModule] on_throw: Response data: ${JSON.stringify(data)}`);
-
-                    if (data.ok) {
+                    if (throw_res.ok) {
                         debug_log(`[PlaceModule] on_throw: SUCCESS!`);
                         flash_status([`Threw item to (${tile_x}, ${tile_y})`], 1500);
-                        // Refresh place view to show thrown item
                         await update_current_place(place.id);
-                        // Refresh character data to update hand slot display
                         void refresh_character_data();
-                        // Clear drag state
-                        drag_state.is_dragging = false;
-                        drag_state.item_instance_id = null;
-                        drag_state.source_container_id = null;
-                        drag_state.item_definition = null;
-                        drag_state.source_module = null;
+                        drag_state.end_drag();
                         return true;
-                    } else {
-                        debug_log(`[PlaceModule] on_throw: API returned error: ${data.error}`);
-                        drag_state.reject_drag();
-                        flash_status([`Cannot throw: ${data.error}`], 2000);
-                        return false;
                     }
+
+                    debug_log(`[PlaceModule] on_throw: API returned error: ${throw_res.error}`);
+                    drag_state.reject_drag();
+                    flash_status([`Cannot throw: ${throw_res.error}`], 2000);
+                    return false;
                 } catch (err) {
                     debug_log(`[PlaceModule] on_throw: Exception: ${err}`);
                     drag_state.reject_drag();
@@ -3855,66 +3749,26 @@ export function create_app_state(): AppState {
                             return false;
                         }
 
-                        // Place(single item) -> nested container uses pickup_to
-                        if (src.startsWith('place.ground.') || src.startsWith('place.pile.')) {
-                            const place = get_current_place();
-                            if (!place) {
-                                drag_state.reject_drag();
-                                return false;
-                            }
-                            const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                            const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
-                            const data = await api_pickup_to({
-                                base_url,
+                        // One endpoint for everything: place or inventory -> nested container.
+                        if (src.startsWith('place.ground.') || src.startsWith('place.pile.') || src.startsWith('place.item.')) {
+                            const tx = await api_transfer_inline({
                                 actor_id,
-                                place_id: place.id,
-                                item_id: String(drag_state.item_instance_id ?? ''),
+                                item_instance_id: String(drag_state.item_instance_id ?? ''),
+                                from_container: src,
                                 to_container: nested_dest,
-                                action_cost,
                             });
-                            if (data.ok) {
+                            if (tx.ok) {
                                 flash_status([`Moved into ${existing.name || 'container'}`], 1500);
                                 drag_state.end_drag();
-                                await update_current_place(place.id);
+                                const place = get_current_place();
+                                if (place) await update_current_place(place.id);
                                 void refresh_container_data();
                                 void refresh_character_data();
                                 return true;
                             }
-                            flash_status([`Failed to move: ${data.error || 'unknown error'}`], 1500);
+                            flash_status([`Failed to move: ${tx.error || 'unknown error'}`], 1500);
                             drag_state.reject_drag();
                             return false;
-                        }
-
-                        // Ground container-item -> nested container uses withdraw endpoint.
-                        if (src.startsWith('place.item.')) {
-                            const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                            try {
-                                const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
-                                const wd = await api_withdraw_from_ground_container_item({
-                                    base_url,
-                                    actor_id,
-                                    src_container_id: src,
-                                    item_id: String(drag_state.item_instance_id ?? ''),
-                                    to_container: nested_dest,
-                                    action_cost,
-                                });
-                                if (wd.ok) {
-                                    flash_status([`Moved into ${existing.name || 'container'}`], 1500);
-                                    drag_state.end_drag();
-                                    await update_current_place(wd.place_id);
-                                    void refresh_container_data();
-                                    void refresh_character_data();
-                                    return true;
-                                }
-                                const detail = wd.detail ? ` (${JSON.stringify(wd.detail)})` : '';
-                                flash_status([`Failed to move: ${wd.error}${detail}`], 1500);
-                                drag_state.reject_drag();
-                                return false;
-                            } catch {
-                                flash_status(['Failed to move'], 1500);
-                                drag_state.reject_drag();
-                                return false;
-                            }
                         }
 
                         // Inventory/container/character -> nested container uses transfer
@@ -3949,12 +3803,6 @@ export function create_app_state(): AppState {
                 }
 
                 if (src.startsWith('place.ground.') || src.startsWith('place.pile.')) {
-                    const place = get_current_place();
-                    if (!place) {
-                        drag_state.reject_drag();
-                        return false;
-                    }
-
                     // Validate compatibility using backend API (same as inventory->character)
                     const item_def = drag_state.item_definition;
                     if (item_def) {
@@ -3970,21 +3818,18 @@ export function create_app_state(): AppState {
                     }
 
                     try {
-                        const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                        const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
-                        const pickup_data = await api_pickup_to({
-                            base_url,
+                        const pickup_data = await api_transfer_inline({
                             actor_id,
-                            place_id: place.id,
-                            item_id: String(drag_state.item_instance_id ?? ''),
+                            item_instance_id: String(drag_state.item_instance_id ?? ''),
+                            from_container: src,
                             to_container: target_container_id,
-                            action_cost,
                         });
 
                         if (pickup_data.ok) {
+                            const place = get_current_place();
                             flash_status([`${drag_state.item_definition?.name} picked up`], 1500);
                             drag_state.end_drag();
-                            await update_current_place(place.id);
+                            if (place) await update_current_place(place.id);
                             void refresh_container_data();
                             void refresh_character_data();
                             return true;
@@ -3993,8 +3838,8 @@ export function create_app_state(): AppState {
                         drag_state.reject_drag();
                         return false;
                     } catch (err) {
-                        console.error('[Character] pickup_to error:', err);
-                        flash_status(['Error picking up item'], 1500);
+                        console.error('[Character] transfer error:', err);
+                        flash_status(['Error moving item'], 1500);
                         drag_state.reject_drag();
                         return false;
                     }
@@ -4002,22 +3847,19 @@ export function create_app_state(): AppState {
 
                 // Dragging from a ground container-item window -> body slot: withdraw.
                 if (src.startsWith('place.item.')) {
-                    const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
                     try {
-                        const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
-                        const wd = await api_move_place_sourced_item({
-                            base_url,
+                        const wd = await api_transfer_inline({
                             actor_id,
-                            source_container_id: src,
-                            item_id: String(drag_state.item_instance_id ?? ''),
+                            item_instance_id: String(drag_state.item_instance_id ?? ''),
+                            from_container: src,
                             to_container: target_container_id,
-                            action_cost,
                         });
 
                         if (wd.ok) {
                             flash_status([`${drag_state.item_definition?.name || 'Item'} withdrawn`], 1500);
                             drag_state.end_drag();
-                            await update_current_place(wd.place_id);
+                            const place = get_current_place();
+                            if (place) await update_current_place(place.id);
                             void refresh_container_data();
                             void refresh_character_data();
                             return true;
@@ -4531,21 +4373,18 @@ export function create_app_state(): AppState {
 
                 // Ground container-item -> actor container: withdraw nested item.
                 if (src.startsWith('place.item.')) {
-                    const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
                     try {
-                        const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
-                        const wd = await api_withdraw_from_ground_container_item({
-                            base_url,
+                        const wd = await api_transfer_inline({
                             actor_id: APP_CONFIG.input_actor_id,
-                            src_container_id: src,
-                            item_id: String(drag_state.item_instance_id ?? ''),
+                            item_instance_id: String(drag_state.item_instance_id ?? ''),
+                            from_container: src,
                             to_container: target_container_id,
-                            action_cost,
                         });
                         if (wd.ok) {
                             flash_status([`${drag_state.item_definition?.name} moved to ${target_name}`], 1500);
                             drag_state.end_drag();
-                            await update_current_place(wd.place_id);
+                            const place = get_current_place();
+                            if (place) await update_current_place(place.id);
                             void refresh_container_data();
                             void refresh_character_data();
                             return true;
@@ -4569,38 +4408,35 @@ export function create_app_state(): AppState {
 
                 // If source is a place item (ground single OR pile contents), use pickup_to.
                 if (src.startsWith('place.ground.') || src.startsWith('place.pile.')) {
-                    const place = get_current_place();
-                    if (!place) {
-                        drag_state.reject_drag();
-                        return false;
-                    }
-
                     try {
-                        const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                        const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
-                        const pickup_data = await api_pickup_to({
-                            base_url,
+                        if (src.startsWith('place.pile.') && String(drag_state.item_instance_id ?? '').startsWith('pile:')) {
+                            flash_status(['Open the pile and drag a specific item out'], 2000);
+                            drag_state.reject_drag();
+                            return false;
+                        }
+
+                        const tx = await api_transfer_inline({
                             actor_id: APP_CONFIG.input_actor_id,
-                            place_id: place.id,
-                            item_id: String(drag_state.item_instance_id ?? ''),
+                            item_instance_id: String(drag_state.item_instance_id ?? ''),
+                            from_container: src,
                             to_container: target_container_id,
-                            action_cost,
                         });
 
-                        if (pickup_data.ok) {
+                        if (tx.ok) {
+                            const place = get_current_place();
                             flash_status([`${drag_state.item_definition?.name} moved to ${target_name}`], 1500);
                             drag_state.end_drag();
-                            await update_current_place(place.id);
+                            if (place) await update_current_place(place.id);
                             void refresh_container_data();
                             void refresh_character_data();
                             return true;
                         }
-                        flash_status([`Failed to pick up: ${pickup_data.error || 'unknown error'}`], 1500);
+                        flash_status([`Failed to move: ${tx.error || 'unknown error'}`], 1500);
                         drag_state.reject_drag();
                         return false;
                     } catch (err) {
-                        console.error('[Inventory] pickup_to error:', err);
-                        flash_status(['Error picking up item'], 1500);
+                        console.error('[Inventory] transfer error:', err);
+                        flash_status(['Error moving item'], 1500);
                         drag_state.reject_drag();
                         return false;
                     }
@@ -4980,35 +4816,48 @@ export function create_app_state(): AppState {
      */
     async function get_npc_equipped_items(npc_id: string): Promise<Map<string, { instance: ItemInstance; definition: ItemDefinition }>> {
         const equipped = new Map<string, { instance: ItemInstance; definition: ItemDefinition }>();
-        
+
         try {
-            const slot = APP_CONFIG.selected_data_slot;
-            const containers_res = await fetch(`http://localhost:8787/api/containers?owner_ref=npc.${npc_id}&slot=${slot}`);
-            if (!containers_res.ok) return equipped;
-            
-            const containers_data = await containers_res.json();
-            if (!containers_data.ok || !containers_data.containers) return equipped;
-            
-            // Load equipped items from body slot containers
-            for (const container of containers_data.containers) {
-                const slot_name = container.id.split('.').pop();
-                if (!slot_name) continue;
-                
-                const container_res = await fetch(`http://localhost:8787/api/container?id=${container.id}`);
-                if (!container_res.ok) continue;
-                
-                const container_data = await container_res.json();
-                if (container_data.ok && container_data.contents && container_data.contents.length > 0) {
-                    const item = container_data.contents[0];
-                    if (item.instance && item.definition) {
-                        equipped.set(slot_name, { instance: item.instance, definition: item.definition });
+            const body_slots = get_npc_body_slots(npc_id) as any;
+            for (const [slot_name, slot_data] of Object.entries(body_slots ?? {})) {
+                const s = slot_data as any;
+                for (const [slot_type, value] of Object.entries({ armor: s.armor, tool: s.tool })) {
+                    if (value && typeof (value as any).id === 'string') {
+                        const item = value as any;
+                        equipped.set(slot_name, {
+                            instance: { id: item.id, def_id: item.def_id, qty: item.qty || 1, tags: item.tags || [] } as any,
+                            definition: {
+                                id: item.def_id,
+                                name: item.name,
+                                weight: item.weight || 0,
+                                tags: item.tags || [],
+                                display_char: (typeof item.display_char === 'string' && item.display_char.length > 0) ? String(item.display_char).charAt(0) : '·',
+                            } as any,
+                        });
+                    }
+                }
+                if (Array.isArray(s.garb)) {
+                    for (let i = 0; i < s.garb.length; i++) {
+                        const item = s.garb[i];
+                        if (item && typeof item.id === 'string') {
+                            equipped.set(`${slot_name}.garb.${i}`, {
+                                instance: { id: item.id, def_id: item.def_id, qty: item.qty || 1, tags: item.tags || [] } as any,
+                                definition: {
+                                    id: item.def_id,
+                                    name: item.name,
+                                    weight: item.weight || 0,
+                                    tags: item.tags || [],
+                                    display_char: (typeof (item as any).display_char === 'string' && String((item as any).display_char).length > 0) ? String((item as any).display_char).charAt(0) : '·',
+                                } as any,
+                            });
+                        }
                     }
                 }
             }
         } catch (err) {
             debug_log(`[NPC Module] Error loading equipped items for ${npc_id}:`, err);
         }
-        
+
         return equipped;
     }
 
@@ -5017,28 +4866,29 @@ export function create_app_state(): AppState {
      */
     async function get_npc_weight_data(npc_id: string): Promise<{ current: number; max: number }> {
         try {
-            const slot = APP_CONFIG.selected_data_slot;
-            const containers_res = await fetch(`http://localhost:8787/api/containers?owner_ref=npc.${npc_id}&slot=${slot}`);
-            if (!containers_res.ok) return { current: 0, max: 100 };
-            
-            const containers_data = await containers_res.json();
-            if (!containers_data.ok || !containers_data.containers) return { current: 0, max: 100 };
-            
+            const body_slots = get_npc_body_slots(npc_id) as any;
             let total_weight = 0;
-            for (const container of containers_data.containers) {
-                const container_res = await fetch(`http://localhost:8787/api/container?id=${container.id}`);
-                if (!container_res.ok) continue;
-                
-                const container_data = await container_res.json();
-                if (container_data.ok && container_data.contents) {
-                    for (const item of container_data.contents) {
-                        if (item.instance && item.definition) {
-                            total_weight += (item.definition.weight || 0) * (item.instance.qty || 1);
-                        }
-                    }
+
+            function add_weight(item: any): number {
+                if (!item) return 0;
+                const qty = typeof item.qty === 'number' ? item.qty : 1;
+                const w = typeof item.weight === 'number' ? item.weight : 0;
+                let sum = w * qty;
+                if (Array.isArray(item.contents)) {
+                    for (const child of item.contents) sum += add_weight(child);
+                }
+                return sum;
+            }
+
+            for (const slot_data of Object.values(body_slots ?? {})) {
+                const s = slot_data as any;
+                if (s?.armor) total_weight += add_weight(s.armor);
+                if (s?.tool) total_weight += add_weight(s.tool);
+                if (Array.isArray(s?.garb)) {
+                    for (const it of s.garb) total_weight += add_weight(it);
                 }
             }
-            
+
             return { current: total_weight, max: 100 };
         } catch (err) {
             debug_log(`[NPC Module] Error calculating weight for ${npc_id}:`, err);
@@ -5055,6 +4905,22 @@ export function create_app_state(): AppState {
     async function open_container_module(container_id: string, source_name?: string): Promise<void> {
         debug_log(`[ContainerOpener] === OPENING CONTAINER: ${container_id} ===`);
         debug_log(`[ContainerOpener] Source name: ${source_name || '(none)'}`);
+
+        const opening_lock_id = container_id;
+
+        // Redirect support: if this id is an alias for a canonical open container, treat as already open.
+        try {
+            const canonical = ui_state.container.canonical_by_alias.get(container_id);
+            if (canonical && ui_state.container.open_containers.has(canonical)) {
+                ui_state.container.open_containers.add(container_id);
+                const mid = ui_state.container.container_module_map.get(canonical);
+                if (mid) ui_state.container.container_module_map.set(container_id, mid);
+                flash_status([`Container already open`], 800);
+                return;
+            }
+        } catch {
+            // ignore
+        }
         
         // Check if already open
         if (ui_state.container.open_containers.has(container_id)) {
@@ -5064,14 +4930,14 @@ export function create_app_state(): AppState {
         }
         
         // Check if currently being opened (prevents double-clicks)
-        if (ui_state.container.opening_containers.has(container_id)) {
+        if (ui_state.container.opening_containers.has(opening_lock_id)) {
             debug_log(`[ContainerOpener] Container ${container_id} is already being opened, ignoring click`);
             return;
         }
         
         // Mark as opening (acquire lock)
-        ui_state.container.opening_containers.add(container_id);
-        debug_log(`[ContainerOpener] Acquired opening lock for ${container_id}`);
+        ui_state.container.opening_containers.add(opening_lock_id);
+        debug_log(`[ContainerOpener] Acquired opening lock for ${opening_lock_id}`);
         
         try {
             let container: any;
@@ -5179,6 +5045,37 @@ export function create_app_state(): AppState {
                 if (!api_data.ok || !api_data.container) {
                     flash_status([`Tile container not found: ${api_data.error || 'unknown'}`], 1500);
                     return;
+                }
+
+                // Canonicalize: structure multi-tiles return a canonical anchor tile id.
+                const canonical_id = (typeof api_data.container.id === 'string' && api_data.container.id.length > 0)
+                    ? String(api_data.container.id)
+                    : container_id;
+                const redirect = api_data.container.redirect ?? null;
+                const alias_ids: string[] = Array.isArray(redirect?.alias_ids)
+                    ? redirect.alias_ids.map((s: any) => String(s)).filter((s: string) => s.length > 0)
+                    : [];
+
+                // If canonical already open, just mark aliases open and stop.
+                if (canonical_id !== container_id && ui_state.container.open_containers.has(canonical_id)) {
+                    const all_aliases = Array.from(new Set([container_id, canonical_id, ...alias_ids]));
+                    ui_state.container.aliases_by_canonical.set(canonical_id, all_aliases);
+                    for (const a of all_aliases) ui_state.container.canonical_by_alias.set(a, canonical_id);
+                    for (const a of all_aliases) ui_state.container.open_containers.add(a);
+                    flash_status([`Container already open`], 800);
+                    return;
+                }
+
+                // Switch to canonical id for module identity.
+                {
+                    const all_aliases = Array.from(new Set([container_id, canonical_id, ...alias_ids]));
+                    if (redirect && all_aliases.length > 0) {
+                        ui_state.container.aliases_by_canonical.set(canonical_id, all_aliases);
+                        for (const a of all_aliases) ui_state.container.canonical_by_alias.set(a, canonical_id);
+                    }
+                    if (canonical_id !== container_id) {
+                        container_id = canonical_id;
+                    }
                 }
 
                 const contents = api_data.container.contents || [];
@@ -5346,27 +5243,8 @@ export function create_app_state(): AppState {
             }
             // OLD SYSTEM: Handle regular container IDs (container.xxx format) - DEPRECATED but kept for transition
             else {
-                debug_log(`[ContainerOpener] OLD SYSTEM: Opening regular container: ${container_id}`);
-                
-                // Regular container - fetch from API
-                const res = await fetch(`http://localhost:8787/api/container?id=${container_id}`);
-                
-                if (!res.ok) {
-                    debug_log(`[ContainerOpener] ERROR: Failed to load container: ${res.status}`);
-                    flash_status([`Failed to load container`], 1500);
-                    return;
-                }
-                
-                container_data = await res.json();
-                
-                if (!container_data.ok) {
-                    debug_log(`[ContainerOpener] ERROR: API returned not ok: ${container_data.error || 'unknown'}`);
-                    flash_status([`Failed to load container`], 1500);
-                    return;
-                }
-                
-                container = container_data.container;
-                debug_log(`[ContainerOpener] Successfully loaded regular container: ${container.id} (${container.contents?.length || 0} items)`);
+                flash_status([`Unsupported container id`], 1500);
+                return;
             }
             
             // Assign a stable window slot (1..5) so positions persist per "version".
@@ -5529,10 +5407,16 @@ export function create_app_state(): AppState {
 
                     // Tile containers behave like ground container-items.
                     if (container_id.startsWith('place.tile.')) {
+                        const place = get_current_place();
+                        if (!place) {
+                            drag_state.reject_drag();
+                            return false;
+                        }
+
                         const parts = container_id.split('.');
                         const place_id = parts[2];
                         const pos_key = parts[3];
-                        if (!place_id || !pos_key) {
+                        if (!place_id || !pos_key || place.id !== place_id) {
                             drag_state.reject_drag();
                             return false;
                         }
@@ -5544,199 +5428,13 @@ export function create_app_state(): AppState {
                             return false;
                         }
 
-                        try {
-                            const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                            const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
-
-                            // Move within the same tile container.
-                            if (src === container_id) {
-                                const mv = await fetch(`${base_url}/api/place/items/move_within_tile_container`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        actor_id: APP_CONFIG.input_actor_id,
-                                        place_id,
-                                        x,
-                                        y,
-                                        item_id: String(drag_state.item_instance_id ?? ''),
-                                        target_grid_x: grid_x,
-                                        target_grid_y: grid_y,
-                                    }),
-                                }).then(r => r.json().catch(() => ({ ok: false, error: `HTTP ${r.status}` } as any)));
-
-                                if (mv.ok) {
-                                    flash_status(['Moved'], 900);
-                                    drag_state.end_drag();
-                                    await update_current_place(place_id);
-                                    void refresh_container_data();
-                                    return true;
-                                }
-                                flash_status([`Move failed: ${mv.error || 'unknown'}`], 1500);
-                                drag_state.reject_drag();
-                                return false;
-                            }
-
-                            // From top-level ground -> tile container
-                            if (src.startsWith('place.ground.') || src.startsWith('place.pile.')) {
-                                const sp = src.split('.');
-                                const src_place_id = sp[2];
-                                const src_position_key = sp[3];
-                                if (!src_place_id || !src_position_key || src_place_id !== place_id) {
-                                    drag_state.reject_drag();
-                                    return false;
-                                }
-                                if (String(drag_state.item_instance_id ?? '').startsWith('pile:')) {
-                                    flash_status(['Open the pile and drag a specific item out'], 2000);
-                                    drag_state.reject_drag();
-                                    return false;
-                                }
-                                const [fxs, fys, fzs] = (src_position_key || '').split('_');
-                                const from_x = parseInt(fxs || '0', 10);
-                                const from_y = parseInt(fys || '0', 10);
-                                const from_z = parseInt(fzs || '', 10);
-
-                                const dep = await fetch(`${base_url}/api/place/items/deposit_ground_to_tile_container`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        actor_id: APP_CONFIG.input_actor_id,
-                                        place_id,
-                                        from_x,
-                                        from_y,
-                                        from_elevation: Number.isFinite(from_z) ? Math.floor(from_z) : undefined,
-                                        item_id: String(drag_state.item_instance_id ?? ''),
-                                        x,
-                                        y,
-                                        target_grid_x: grid_x,
-                                        target_grid_y: grid_y,
-                                        action_cost,
-                                    }),
-                                }).then(r => r.json().catch(() => ({ ok: false, error: `HTTP ${r.status}` } as any)));
-
-                                if (dep.ok) {
-                                    flash_status(['Deposited'], 900);
-                                    drag_state.end_drag();
-                                    await update_current_place(place_id);
-                                    void refresh_container_data();
-                                    void refresh_character_data();
-                                    return true;
-                                }
-                                flash_status([`Deposit failed: ${dep.error || 'unknown'}`], 1500);
-                                drag_state.reject_drag();
-                                return false;
-                            }
-
-                            // From ground container-item -> tile container
-                            if (src.startsWith('place.item.')) {
-                                const sp = src.split('.');
-                                const src_place_id = sp[2];
-                                const src_container_item_id = sp[3];
-                                if (!src_place_id || !src_container_item_id) {
-                                    drag_state.reject_drag();
-                                    return false;
-                                }
-                                const tx = await fetch(`${base_url}/api/place/items/transfer_from_container_item_to_tile_container`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        actor_id: APP_CONFIG.input_actor_id,
-                                        place_id,
-                                        from_container_item_id: String(src_container_item_id),
-                                        to_x: x,
-                                        to_y: y,
-                                        item_id: String(drag_state.item_instance_id ?? ''),
-                                        target_grid_x: grid_x,
-                                        target_grid_y: grid_y,
-                                        action_cost,
-                                    }),
-                                }).then(r => r.json().catch(() => ({ ok: false, error: `HTTP ${r.status}` } as any)));
-
-                                if (tx.ok) {
-                                    flash_status(['Moved'], 900);
-                                    drag_state.end_drag();
-                                    await update_current_place(place_id);
-                                    void refresh_container_data();
-                                    void refresh_character_data();
-                                    return true;
-                                }
-                                flash_status([`Move failed: ${tx.error || 'unknown'}`], 1500);
-                                drag_state.reject_drag();
-                                return false;
-                            }
-
-                            // From another tile container -> this tile container
-                            if (src.startsWith('place.tile.')) {
-                                const sp = src.split('.');
-                                const src_place_id = sp[2];
-                                const src_pos_key = sp[3];
-                                const [sxs, sys] = (src_pos_key || '').split('_');
-                                const from_x = Number(sxs);
-                                const from_y = Number(sys);
-                                if (!src_place_id || !Number.isFinite(from_x) || !Number.isFinite(from_y) || src_place_id !== place_id) {
-                                    drag_state.reject_drag();
-                                    return false;
-                                }
-                                const tx = await fetch(`${base_url}/api/place/items/transfer_between_tile_containers`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        actor_id: APP_CONFIG.input_actor_id,
-                                        place_id,
-                                        from_x,
-                                        from_y,
-                                        to_x: x,
-                                        to_y: y,
-                                        item_id: String(drag_state.item_instance_id ?? ''),
-                                        target_grid_x: grid_x,
-                                        target_grid_y: grid_y,
-                                        action_cost,
-                                    }),
-                                }).then(r => r.json().catch(() => ({ ok: false, error: `HTTP ${r.status}` } as any)));
-
-                                if (tx.ok) {
-                                    flash_status(['Moved'], 900);
-                                    drag_state.end_drag();
-                                    await update_current_place(place_id);
-                                    void refresh_container_data();
-                                    void refresh_character_data();
-                                    return true;
-                                }
-                                flash_status([`Move failed: ${tx.error || 'unknown'}`], 1500);
-                                drag_state.reject_drag();
-                                return false;
-                            }
-
-                            // Actor-owned item -> tile container
-                            const dep = await fetch(`${base_url}/api/place/items/deposit_to_tile_container`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    actor_id: APP_CONFIG.input_actor_id,
-                                    place_id,
-                                    item_id: String(drag_state.item_instance_id ?? ''),
-                                    x,
-                                    y,
-                                    target_grid_x: grid_x,
-                                    target_grid_y: grid_y,
-                                    action_cost,
-                                }),
-                            }).then(r => r.json().catch(() => ({ ok: false, error: `HTTP ${r.status}` } as any)));
-                            if (dep.ok) {
-                                flash_status(['Deposited'], 1000);
-                                drag_state.end_drag();
-                                await update_current_place(place_id);
-                                void refresh_container_data();
-                                void refresh_character_data();
-                                return true;
-                            }
-                            flash_status([`Deposit failed: ${dep.error || 'unknown'}`], 1500);
-                            drag_state.reject_drag();
-                            return false;
-                        } catch {
-                            flash_status(['Deposit failed'], 1500);
-                            drag_state.reject_drag();
-                            return false;
-                        }
+                        return await perform_drag_drop_into_tile_container({
+                            place,
+                            tile_x: Math.floor(x),
+                            tile_y: Math.floor(y),
+                            grid_x,
+                            grid_y,
+                        });
                     }
 
                     // Target is a ground pile UI: treat drops into it as dropping to ground at that tile.
@@ -5757,8 +5455,6 @@ export function create_app_state(): AppState {
                         // Reorder within the same pile (acts like container reordering).
                         if (src === container_id && !String(drag_state.item_instance_id ?? '').startsWith('pile:')) {
                             try {
-                                const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-
                                 // Prefer explicit grid coords from the module; fallback to slot_index mapping.
                                 let gx = grid_x;
                                 let gy = grid_y;
@@ -5772,19 +5468,14 @@ export function create_app_state(): AppState {
                                     }
                                 }
 
-                                const mv = await fetch(`${base_url}/api/place/items/move_within_pile`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        actor_id: APP_CONFIG.input_actor_id,
-                                        place_id,
-                                        position_key,
-                                        item_id: String(drag_state.item_instance_id ?? ''),
-                                        target_grid_x: gx,
-                                        target_grid_y: gy,
-                                        action_cost: (ui_state.controls.override_cost ?? undefined) as any,
-                                    }),
-                                }).then(r => r.json().catch(() => ({ ok: false, error: `HTTP ${r.status}` } as any)));
+                                const mv = await api_transfer_inline({
+                                    actor_id: APP_CONFIG.input_actor_id,
+                                    item_instance_id: String(drag_state.item_instance_id ?? ''),
+                                    from_container: container_id,
+                                    to_container: container_id,
+                                    target_grid_x: typeof gx === 'number' ? gx : undefined,
+                                    target_grid_y: typeof gy === 'number' ? gy : undefined,
+                                });
 
                                 if (mv.ok) {
                                     flash_status(['Moved'], 800);
@@ -5817,19 +5508,11 @@ export function create_app_state(): AppState {
                             const from_y = parseInt(fys || '0', 10);
                             const from_z = parseInt(fzs || '', 10);
                             try {
-                                const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                                const mv = await api_place_drag({
-                                    base_url,
+                                const mv = await api_transfer_inline({
                                     actor_id: APP_CONFIG.input_actor_id,
-                                    place_id,
-                                    from_x,
-                                    from_y,
-                                    from_elevation: Number.isFinite(from_z) ? Math.floor(from_z) : undefined,
-                                    to_x: x,
-                                    to_y: y,
-                                    to_elevation,
-                                    item_id: String(drag_state.item_instance_id ?? ''),
-                                    action_cost: (ui_state.controls.override_cost ?? undefined) as any,
+                                    item_instance_id: String(drag_state.item_instance_id ?? ''),
+                                    from_container: src,
+                                    to_container: container_id,
                                 });
                                 if (mv.ok) {
                                     flash_status(['Moved'], 900);
@@ -5879,106 +5562,33 @@ export function create_app_state(): AppState {
                                     return false;
                                 }
 
-                                const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-
-                                // Ground container-item -> ground container-item
-                                if (src.startsWith('place.item.')) {
-                                    const parts = src.split('.');
-                                    const src_place_id = parts[2];
-                                    const src_container_item_id = parts[3];
-                                    if (!src_place_id || !src_container_item_id) {
+                                    if (src.startsWith('place.pile.') && String(drag_state.item_instance_id ?? '').startsWith('pile:')) {
+                                        flash_status(['Open the pile and drag a specific item out'], 2000);
                                         drag_state.reject_drag();
                                         return false;
                                     }
 
-                                    const tx = await api_transfer_between_container_items({
-                                        base_url,
+                                    const dest = `place.item.${place_id}.${String(target_item_id)}`;
+                                    const tx = await api_transfer_inline({
                                         actor_id: APP_CONFIG.input_actor_id,
-                                        place_id,
-                                        from_container_item_id: String(src_container_item_id),
-                                        to_container_item_id: String(target_item_id),
-                                        item_id: String(drag_state.item_instance_id ?? ''),
-                                        action_cost: (ui_state.controls.override_cost ?? undefined) as any,
+                                        item_instance_id: String(drag_state.item_instance_id ?? ''),
+                                        from_container: src,
+                                        to_container: dest,
                                     });
+
                                     if (tx.ok) {
                                         flash_status([`Moved into ${meta?.name ?? 'container'}`], 1500);
                                         drag_state.end_drag();
                                         await update_current_place(place_id);
                                         void refresh_container_data();
+                                        void refresh_character_data();
                                         return true;
                                     }
-                                    flash_status([`Deposit failed: ${tx.error}`], 1500);
-                                    drag_state.reject_drag();
-                                return false;
-                            }
 
-                            // Ground (top-level) -> ground container-item.
-                            if (src.startsWith('place.ground.') || src.startsWith('place.pile.')) {
-                                const parts = src.split('.');
-                                const src_place_id = parts[2];
-                                const position_key = parts[3];
-                                if (!src_place_id || !position_key) {
+                                    flash_status([`Deposit failed: ${tx.error || 'unknown error'}`], 1500);
                                     drag_state.reject_drag();
                                     return false;
                                 }
-                                const [xs, ys, zs] = (position_key || '').split('_');
-                                const from_x = parseInt(xs || '0', 10);
-                                const from_y = parseInt(ys || '0', 10);
-                                const from_z = parseInt(zs || '', 10);
-
-                                const dep = await api_deposit_ground_to_container_item({
-                                    base_url,
-                                    actor_id: APP_CONFIG.input_actor_id,
-                                    place_id,
-                                    from_x,
-                                    from_y,
-                                    from_elevation: Number.isFinite(from_z) ? Math.floor(from_z) : undefined,
-                                    item_id: String(drag_state.item_instance_id ?? ''),
-                                    container_item_id: String(target_item_id),
-                                    action_cost: (ui_state.controls.override_cost ?? undefined) as any,
-                                });
-                                if (dep.ok) {
-                                    flash_status([`Moved into ${meta?.name ?? 'container'}`], 1500);
-                                    drag_state.end_drag();
-                                    await update_current_place(place_id);
-                                    void refresh_container_data();
-                                    void refresh_character_data();
-                                    return true;
-                                }
-                                flash_status([`Cannot deposit: ${dep.error}`], 2000);
-                                drag_state.reject_drag();
-                                return false;
-                            }
-
-                            // Only actor-owned items can be deposited via this shortcut.
-                            if (drag_state.source_module === 'ground' || src.startsWith('place.ground.') || src.startsWith('place.pile.') || src.startsWith('place.item.')) {
-                                flash_status(['Pick up the item first'], 1500);
-                                drag_state.reject_drag();
-                                return false;
-                            }
-
-                                const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
-                                const dep = await api_deposit_to_container_item({
-                                    base_url,
-                                    actor_id: APP_CONFIG.input_actor_id,
-                                    place_id,
-                                    item_id: String(drag_state.item_instance_id ?? ''),
-                                    container_item_id: String(target_item_id),
-                                    action_cost,
-                                });
-                                if (dep.ok) {
-                                    flash_status([`Moved into ${meta?.name ?? 'container'}`], 1500);
-                                    drag_state.end_drag();
-                                    await update_current_place(place_id);
-                                    void refresh_container_data();
-                                    void refresh_character_data();
-                                    return true;
-                                }
-                                const detail = dep.detail ? ` (${JSON.stringify(dep.detail)})` : '';
-                                flash_status([`Deposit failed: ${dep.error || 'unknown error'}${detail}`], 1500);
-                                drag_state.reject_drag();
-                                return false;
-                            }
                             }
                         } catch {
                             // fall through to drop
@@ -5996,32 +5606,20 @@ export function create_app_state(): AppState {
 
                         // Ground container-item -> ground tile (pile tile): spill to ground.
                         if (src.startsWith('place.item.')) {
-                            const parts = src.split('.');
-                            const src_place_id = parts[2];
-                            const src_container_item_id = parts[3];
-                            if (!src_place_id || !src_container_item_id) {
-                                drag_state.reject_drag();
-                                return false;
-                            }
-
                             try {
-                                const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                                const sp = await api_spill_from_container_item({
-                                    base_url,
+                                const to_container = `place.ground.${place_id}.${x}_${y}_${to_elevation}`;
+                                const sp = await api_transfer_inline({
                                     actor_id: APP_CONFIG.input_actor_id,
-                                    place_id: String(src_place_id),
-                                    container_item_id: String(src_container_item_id),
-                                    item_id: String(drag_state.item_instance_id ?? ''),
-                                    x,
-                                    y,
-                                    to_elevation,
-                                    action_cost: (ui_state.controls.override_cost ?? undefined) as any,
+                                    item_instance_id: String(drag_state.item_instance_id ?? ''),
+                                    from_container: src,
+                                    to_container,
                                 });
                                 if (sp.ok) {
                                     flash_status(['Dropped to pile'], 1200);
                                     drag_state.end_drag();
-                                    await update_current_place(src_place_id);
+                                    await update_current_place(place_id);
                                     void refresh_container_data();
+                                    void refresh_character_data();
                                     return true;
                                 }
                                 flash_status([`Drop failed: ${sp.error}`], 1500);
@@ -6036,39 +5634,20 @@ export function create_app_state(): AppState {
 
                         // Tile container -> ground tile (pile tile): spill to ground.
                         if (src.startsWith('place.tile.')) {
-                            const parts = src.split('.');
-                            const src_place_id = parts[2];
-                            const pos_key = parts[3];
-                            const [xs, ys] = (pos_key || '').split('_');
-                            const sx = Number(xs);
-                            const sy = Number(ys);
-                            if (!src_place_id || !Number.isFinite(sx) || !Number.isFinite(sy)) {
-                                drag_state.reject_drag();
-                                return false;
-                            }
-
                             try {
-                                const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                                const sp = await fetch(`${base_url}/api/place/items/spill_from_tile_container`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        actor_id: APP_CONFIG.input_actor_id,
-                                        place_id: String(src_place_id),
-                                        x: sx,
-                                        y: sy,
-                                        item_id: String(drag_state.item_instance_id ?? ''),
-                                        to_x: x,
-                                        to_y: y,
-                                        to_elevation,
-                                        action_cost: (ui_state.controls.override_cost ?? undefined) as any,
-                                    }),
-                                }).then(r => r.json().catch(() => ({ ok: false, error: `HTTP ${r.status}` } as any)));
+                                const to_container = `place.ground.${place_id}.${x}_${y}_${to_elevation}`;
+                                const sp = await api_transfer_inline({
+                                    actor_id: APP_CONFIG.input_actor_id,
+                                    item_instance_id: String(drag_state.item_instance_id ?? ''),
+                                    from_container: src,
+                                    to_container,
+                                });
                                 if (sp.ok) {
                                     flash_status(['Dropped to pile'], 1200);
                                     drag_state.end_drag();
-                                    await update_current_place(src_place_id);
+                                    await update_current_place(place_id);
                                     void refresh_container_data();
+                                    void refresh_character_data();
                                     return true;
                                 }
                                 flash_status([`Drop failed: ${sp.error}`], 1500);
@@ -6082,15 +5661,12 @@ export function create_app_state(): AppState {
                         }
 
                         try {
-                            const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                            const drop_data = await api_place_drop({
-                                base_url,
+                            const to_container = `place.ground.${place_id}.${x}_${y}_${to_elevation}`;
+                            const drop_data = await api_transfer_inline({
                                 actor_id: APP_CONFIG.input_actor_id,
-                                place_id,
-                                item_id: String(drag_state.item_instance_id ?? ''),
-                                x,
-                                y,
-                                elevation: to_elevation,
+                                item_instance_id: String(drag_state.item_instance_id ?? ''),
+                                from_container: src,
+                                to_container,
                             });
                             if (drop_data.ok) {
                                 flash_status(['Dropped to pile'], 1200);
@@ -6127,165 +5703,24 @@ export function create_app_state(): AppState {
                         }
 
                         try {
-                            const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
                             const src = String(drag_state.source_container_id ?? '');
 
-                            // Move within the same ground container-item.
-                            if (src === container_id) {
-                                const mv = await api_move_within_container_item({
-                                    base_url,
-                                    actor_id: APP_CONFIG.input_actor_id,
-                                    place_id,
-                                    container_item_id,
-                                    item_id: String(drag_state.item_instance_id ?? ''),
-                                    target_grid_x: grid_x,
-                                    target_grid_y: grid_y,
-                                });
-                                if (mv.ok) {
-                                    flash_status(['Moved'], 1200);
-                                    drag_state.end_drag();
-                                    await update_current_place(place_id);
-                                    void refresh_container_data();
-                                    return true;
-                                }
-                                flash_status([`Move failed: ${mv.error}`], 1500);
+                            if (src.startsWith('place.pile.') && String(drag_state.item_instance_id ?? '').startsWith('pile:')) {
+                                flash_status(['Open the pile and drag a specific item out'], 2000);
                                 drag_state.reject_drag();
                                 return false;
                             }
 
-                            // Ground container-item -> ground container-item transfer.
-                            if (src.startsWith('place.item.')) {
-                                const parts = src.split('.');
-                                const src_place_id = parts[2];
-                                const src_container_item_id = parts[3];
-                                if (!src_place_id || !src_container_item_id) {
-                                    drag_state.reject_drag();
-                                    return false;
-                                }
-
-                                const tx = await api_transfer_between_container_items({
-                                    base_url,
-                                    actor_id: APP_CONFIG.input_actor_id,
-                                    place_id,
-                                    from_container_item_id: String(src_container_item_id),
-                                    to_container_item_id: String(container_item_id),
-                                    item_id: String(drag_state.item_instance_id ?? ''),
-                                    target_grid_x: grid_x,
-                                    target_grid_y: grid_y,
-                                    action_cost: (ui_state.controls.override_cost ?? undefined) as any,
-                                });
-                                if (tx.ok) {
-                                    flash_status(['Moved'], 1200);
-                                    drag_state.end_drag();
-                                    await update_current_place(place_id);
-                                    void refresh_container_data();
-                                    return true;
-                                }
-                                flash_status([`Move failed: ${tx.error}`], 1500);
-                                drag_state.reject_drag();
-                                return false;
-                            }
-
-                            // Tile container -> ground container-item transfer.
-                            if (src.startsWith('place.tile.')) {
-                                const parts = src.split('.');
-                                const src_place_id = parts[2];
-                                const pos_key = parts[3];
-                                const [xs, ys] = (pos_key || '').split('_');
-                                const from_x = Number(xs);
-                                const from_y = Number(ys);
-                                if (!src_place_id || !Number.isFinite(from_x) || !Number.isFinite(from_y)) {
-                                    drag_state.reject_drag();
-                                    return false;
-                                }
-
-                                const tx = await fetch(`${base_url}/api/place/items/transfer_from_tile_container_to_container_item`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        actor_id: APP_CONFIG.input_actor_id,
-                                        place_id,
-                                        from_x,
-                                        from_y,
-                                        to_container_item_id: String(container_item_id),
-                                        item_id: String(drag_state.item_instance_id ?? ''),
-                                        target_grid_x: grid_x,
-                                        target_grid_y: grid_y,
-                                        action_cost: (ui_state.controls.override_cost ?? undefined) as any,
-                                    }),
-                                }).then(r => r.json().catch(() => ({ ok: false, error: `HTTP ${r.status}` } as any)));
-                                if (tx.ok) {
-                                    flash_status(['Moved'], 1200);
-                                    drag_state.end_drag();
-                                    await update_current_place(place_id);
-                                    void refresh_container_data();
-                                    void refresh_character_data();
-                                    return true;
-                                }
-                                flash_status([`Move failed: ${tx.error}`], 1500);
-                                drag_state.reject_drag();
-                                return false;
-                            }
-
-                            // Ground (top-level) -> ground container-item deposit.
-                            if (src.startsWith('place.ground.') || src.startsWith('place.pile.')) {
-                                if (String(drag_state.item_instance_id ?? '').startsWith('pile:')) {
-                                    flash_status(['Open the pile and drag a specific item out'], 2000);
-                                    drag_state.reject_drag();
-                                    return false;
-                                }
-
-                                const parts = src.split('.');
-                                const src_place_id = parts[2];
-                                const src_position_key = parts[3];
-                                if (!src_place_id || !src_position_key) {
-                                    drag_state.reject_drag();
-                                    return false;
-                                }
-                                const [xs, ys, zs] = (src_position_key || '').split('_');
-                                const from_x = parseInt(xs || '0', 10);
-                                const from_y = parseInt(ys || '0', 10);
-                                const from_z = parseInt(zs || '', 10);
-
-                                const dep = await api_deposit_ground_to_container_item({
-                                    base_url,
-                                    actor_id: APP_CONFIG.input_actor_id,
-                                    place_id,
-                                    from_x,
-                                    from_y,
-                                    from_elevation: Number.isFinite(from_z) ? Math.floor(from_z) : undefined,
-                                    item_id: String(drag_state.item_instance_id ?? ''),
-                                    container_item_id,
-                                    target_grid_x: grid_x,
-                                    target_grid_y: grid_y,
-                                    action_cost: (ui_state.controls.override_cost ?? undefined) as any,
-                                });
-                                if (dep.ok) {
-                                    flash_status(['Deposited'], 1200);
-                                    drag_state.end_drag();
-                                    await update_current_place(place_id);
-                                    void refresh_container_data();
-                                    void refresh_character_data();
-                                    return true;
-                                }
-                                flash_status([`Deposit failed: ${dep.error}`], 1500);
-                                drag_state.reject_drag();
-                                return false;
-                            }
-
-                            // Actor item -> ground container-item deposit.
-                            const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
-                            const dep = await api_deposit_to_container_item({
-                                base_url,
+                            const tx = await api_transfer_inline({
                                 actor_id: APP_CONFIG.input_actor_id,
-                                place_id,
-                                item_id: String(drag_state.item_instance_id ?? ''),
-                                container_item_id,
-                                target_grid_x: grid_x,
-                                target_grid_y: grid_y,
-                                action_cost,
+                                item_instance_id: String(drag_state.item_instance_id ?? ''),
+                                from_container: src,
+                                to_container: container_id,
+                                target_grid_x: typeof grid_x === 'number' ? grid_x : undefined,
+                                target_grid_y: typeof grid_y === 'number' ? grid_y : undefined,
                             });
-                            if (dep.ok) {
+
+                            if (tx.ok) {
                                 flash_status(['Deposited'], 1200);
                                 drag_state.end_drag();
                                 await update_current_place(place_id);
@@ -6293,8 +5728,8 @@ export function create_app_state(): AppState {
                                 void refresh_character_data();
                                 return true;
                             }
-                            const detail = dep.detail ? ` (${JSON.stringify(dep.detail)})` : '';
-                            flash_status([`Deposit failed: ${dep.error || 'unknown error'}${detail}`], 1500);
+
+                            flash_status([`Deposit failed: ${tx.error || 'unknown error'}`], 1500);
                             drag_state.reject_drag();
                             return false;
                         } catch {
@@ -6313,12 +5748,6 @@ export function create_app_state(): AppState {
                     }
 
                     if (drag_state.source_module === 'ground' || src0.startsWith('place.ground.') || src0.startsWith('place.item.')) {
-                        const place = get_current_place();
-                        if (!place) {
-                            drag_state.reject_drag();
-                            return false;
-                        }
-
                         if (!container_id.startsWith('body_slots.') && !container_id.startsWith('actor.item.')) {
                             flash_status(['Cannot place ground items into that container yet'], 1500);
                             drag_state.reject_drag();
@@ -6326,54 +5755,28 @@ export function create_app_state(): AppState {
                         }
 
                         try {
-                            const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-
-                            // Ground container-item -> actor: withdraw nested item.
                             const src = src0;
-                            if (src.startsWith('place.item.')) {
-                                const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
-                                const wd = await api_withdraw_from_ground_container_item({
-                                    base_url,
-                                    actor_id: APP_CONFIG.input_actor_id,
-                                    src_container_id: src,
-                                    item_id: String(drag_state.item_instance_id ?? ''),
-                                    to_container: container_id,
-                                    target_grid_x: grid_x,
-                                    target_grid_y: grid_y,
-                                    action_cost,
-                                });
-                                if (wd.ok) {
-                                    flash_status(['Picked up'], 1200);
-                                    drag_state.end_drag();
-                                    await update_current_place(wd.place_id);
-                                    void refresh_container_data();
-                                    void refresh_character_data();
-                                    return true;
-                                }
-                                const detail = wd.detail ? ` (${JSON.stringify(wd.detail)})` : '';
-                                flash_status([`Pickup failed: ${wd.error}${detail}`], 1500);
-                                drag_state.reject_drag();
-                                return false;
-                            }
 
-                            const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
-                            const pickup_data = await api_pickup_to({
-                                base_url,
+                            const tx = await api_transfer_inline({
                                 actor_id: APP_CONFIG.input_actor_id,
-                                place_id: place.id,
-                                item_id: String(drag_state.item_instance_id ?? ''),
+                                item_instance_id: String(drag_state.item_instance_id ?? ''),
+                                from_container: src,
                                 to_container: container_id,
-                                action_cost,
+                                target_grid_x: typeof grid_x === 'number' ? grid_x : undefined,
+                                target_grid_y: typeof grid_y === 'number' ? grid_y : undefined,
                             });
-                            if (pickup_data.ok) {
+
+                            if (tx.ok) {
+                                const place = get_current_place();
                                 flash_status(['Picked up'], 1200);
                                 drag_state.end_drag();
-                                await update_current_place(place.id);
+                                if (place) await update_current_place(place.id);
                                 void refresh_container_data();
                                 void refresh_character_data();
                                 return true;
                             }
-                            flash_status([`Pickup failed: ${pickup_data.error || 'unknown error'}`], 1500);
+
+                            flash_status([`Pickup failed: ${tx.error || 'unknown error'}`], 1500);
                             drag_state.reject_drag();
                             return false;
                         } catch {
@@ -6423,53 +5826,7 @@ export function create_app_state(): AppState {
                             }
                         }
 
-                        // Place-sourced item (ground / pile contents / ground container-item) -> actor container: use place endpoints.
                         const src = String(drag_state.source_container_id ?? '');
-                        if ((src.startsWith('place.ground.') || src.startsWith('place.pile.') || src.startsWith('place.item.') || src.startsWith('place.tile.')) && (container_id.startsWith('body_slots.') || container_id.startsWith('actor.item.'))) {
-                            if (String(drag_state.item_instance_id ?? '').startsWith('pile:')) {
-                                flash_status(['Open the pile and drag a specific item out'], 2000);
-                                drag_state.reject_drag();
-                                return false;
-                            }
-
-                            const place = get_current_place();
-                            if (!place) {
-                                drag_state.reject_drag();
-                                return false;
-                            }
-
-                            try {
-                                const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                                const action_cost = typeof ui_state.controls.override_cost === 'number' ? ui_state.controls.override_cost : undefined;
-                                const move_res = await api_move_place_sourced_item({
-                                    base_url,
-                                    actor_id: APP_CONFIG.input_actor_id,
-                                    source_container_id: src,
-                                    item_id: String(drag_state.item_instance_id ?? ''),
-                                    to_container: target_container_id,
-                                    target_grid_x: (target_container_id === container_id) ? grid_x : undefined,
-                                    target_grid_y: (target_container_id === container_id) ? grid_y : undefined,
-                                    action_cost,
-                                });
-
-                                if (move_res.ok) {
-                                    flash_status([`${drag_state.item_definition?.name} moved to ${target_name}`], 1500);
-                                    drag_state.end_drag();
-                                    await update_current_place(move_res.place_id);
-                                    void refresh_container_data();
-                                    void refresh_character_data();
-                                    return true;
-                                }
-                                const detail = move_res.detail ? ` (${JSON.stringify(move_res.detail)})` : '';
-                                flash_status([`Failed to pick up: ${move_res.error}${detail}`], 1500);
-                                drag_state.reject_drag();
-                                return false;
-                            } catch {
-                                flash_status(['Error picking up item'], 1500);
-                                drag_state.reject_drag();
-                                return false;
-                            }
-                        }
                         
                         // Build transfer request body
                         const transfer_body: any = {
@@ -6509,12 +5866,17 @@ export function create_app_state(): AppState {
                             // Refresh both container and character data
                             void refresh_container_data();
                             void refresh_character_data();
-                            // BUG FIX: If source was a ground container, refresh place to update ground items display
-                            if (drag_state.source_container_id?.includes('.scattered_')) {
-                                const place = get_current_place();
-                                if (place) {
-                                    void update_current_place(place.id);
+
+                            // If either side is place-owned, refresh the place snapshot.
+                            try {
+                                const fromc = String(drag_state.source_container_id ?? '');
+                                const toc = String(target_container_id ?? '');
+                                if (fromc.startsWith('place.') || toc.startsWith('place.')) {
+                                    const place = get_current_place();
+                                    if (place) void update_current_place(place.id);
                                 }
+                            } catch {
+                                // ignore
                             }
                             return true;
                         } else {
@@ -6557,8 +5919,12 @@ export function create_app_state(): AppState {
             
             // Register module
             module_registry.register(container_module);
-            ui_state.container.open_containers.add(container_id);
-            ui_state.container.container_module_map.set(container_id, instance_id);
+
+            const aliases = ui_state.container.aliases_by_canonical.get(container_id) ?? [container_id];
+            for (const a of aliases) {
+                ui_state.container.open_containers.add(a);
+                ui_state.container.container_module_map.set(a, instance_id);
+            }
             
             // Store container data in shared state for refreshing
             // FIX: Use container_data.contents (from API) which has migrated grid coordinates
@@ -6579,7 +5945,7 @@ export function create_app_state(): AppState {
                 contents: contents_to_store
             });
             
-            const display_name = source_name || container_id.split('.').pop() || 'container';
+            const display_name = source_name || (container?.name ?? null) || container_id.split('.').pop() || 'container';
             flash_status([`Opened ${display_name}`], 1000);
             debug_log(`[ContainerOpener] Opened ${container_id} as ${instance_id}`);
             
@@ -6588,6 +5954,7 @@ export function create_app_state(): AppState {
             flash_status([`Failed to open container`], 1500);
         } finally {
             // Release the opening lock
+            ui_state.container.opening_containers.delete(opening_lock_id);
             ui_state.container.opening_containers.delete(container_id);
         }
     }
@@ -6597,6 +5964,10 @@ export function create_app_state(): AppState {
      */
     function close_container_module(container_id: string): void {
         debug_log(`[ContainerOpener] Closing container: ${container_id}`);
+
+        // Canonicalize so closing an alias closes the canonical module.
+        const canonical = ui_state.container.canonical_by_alias.get(container_id);
+        if (canonical) container_id = canonical;
         
         // Get the module_id from our tracking map
         const module_id = ui_state.container.container_module_map.get(container_id);
@@ -6609,17 +5980,23 @@ export function create_app_state(): AppState {
             debug_log(`[ContainerOpener] Warning: No module found for ${container_id}`);
         }
         
-        // Clean up tracking
-        ui_state.container.open_containers.delete(container_id);
-        ui_state.container.container_module_map.delete(container_id);
-
-        // Free the stable slot assignment.
+        // Free the stable slot assignment (canonical id only).
         const slot = ui_state.container.container_slot_by_container_id.get(container_id);
+
+        // Clean up tracking (canonical + aliases)
+        const aliases = ui_state.container.aliases_by_canonical.get(container_id) ?? [container_id];
+        for (const a of aliases) {
+            ui_state.container.open_containers.delete(a);
+            ui_state.container.container_module_map.delete(a);
+            ui_state.container.canonical_by_alias.delete(a);
+        }
+        ui_state.container.aliases_by_canonical.delete(container_id);
+        ui_state.container.container_data_map.delete(container_id);
         if (typeof slot === 'number' && slot >= 1 && slot <= ui_state.container.container_slots.length) {
             ui_state.container.container_slots[slot - 1] = null;
         }
         ui_state.container.container_slot_by_container_id.delete(container_id);
-        ui_state.container.container_data_map.delete(container_id);
+
         
         flash_status([`Container closed`], 800);
     }
