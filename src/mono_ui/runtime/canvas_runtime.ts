@@ -2,9 +2,10 @@ import { create_canvas } from '../canvas.js';
 import { compose_modules } from '../compose.js';
 import type { Canvas, Cell, Module, PointerEvent, DragEvent, WheelEvent } from '../types.js';
 import { rect_contains } from '../types.js';
-import { debug_warn } from '../../shared/debug.js';
+import { debug_warn, debug_log, DEBUG_LEVEL } from '../../shared/debug.js';
 // NOTE: debug overlays are toggled from UI buttons (not hotkeys).
 import { unlock_sfx } from '../sfx/sfx_player.js';
+import { handle_keydown, handle_keyup, reset_all } from './input_actions.js';
 
 export type CanvasRuntimeOptions = {
     canvas: HTMLCanvasElement;
@@ -1272,10 +1273,16 @@ export class CanvasRuntime {
 
         this.key_sink.addEventListener('keydown', (ev) => {
             unlock_sfx();
+
+            // Update authoritative action state (so movement can poll it)
+            handle_keydown(ev, { typing: this.focused_owner?.id === 'input' });
+
             if (ev.code === 'Space') {
                 // Space is reserved for global UI pan gesture when not typing into input.
                 const typing = this.focused_owner?.id === 'input';
-                console.log('[RUNTIME-DEBUG] Space keydown - typing:', typing, 'focused_owner:', this.focused_owner?.id);
+                if (DEBUG_LEVEL >= 4 && !ev.repeat) {
+                    debug_log('[RUNTIME-DEBUG] Space keydown - typing:', typing, 'focused_owner:', this.focused_owner?.id);
+                }
                 if (!typing) {
                     this.space_down = true;
                     ev.preventDefault();
@@ -1291,13 +1298,29 @@ export class CanvasRuntime {
             }
 
             if (this.dispatch_global_keydown(ev)) return;
-            console.log('[RUNTIME-DEBUG] Calling OnKeyDown on focused_owner:', this.focused_owner?.id, 'key:', ev.code);
+            if (DEBUG_LEVEL >= 4 && !ev.repeat) {
+                debug_log('[RUNTIME-DEBUG] Calling OnKeyDown on focused_owner:', this.focused_owner?.id, 'key:', ev.code);
+            }
             this.focused_owner?.OnKeyDown?.(ev);
         });
 
         this.key_sink.addEventListener('keyup', (ev) => {
+            // Update authoritative action state (clears action on keyup)
+            handle_keyup(ev, { typing: this.focused_owner?.id === 'input' });
+
             if (ev.code === 'Space') {
                 this.space_down = false;
+            }
+            // Key-up is broadcast as a global lane so held-input systems (eg movement)
+            // can release even if focus changes mid-press.
+            for (let i = this.modules.length - 1; i >= 0; i--) {
+                const m = this.modules[i];
+                if (!m) continue;
+                try {
+                    m.OnGlobalKeyUp?.(ev);
+                } catch {
+                    // ignore
+                }
             }
             this.focused_owner?.OnKeyUp?.(ev);
         });
@@ -1310,6 +1333,30 @@ export class CanvasRuntime {
 
             if (typeof data === 'string' && data.length > 0) {
                 this.focused_owner.OnTextInput(data);
+            }
+        });
+
+        // Reset action states on blur/visibility change to prevent stuck keys
+        window.addEventListener('blur', () => {
+            if (DEBUG_LEVEL >= 3) {
+                try {
+                    debug_log('MOVE_UNIFY_TEST', 'window blur -> input reset_all');
+                } catch {
+                    // ignore
+                }
+            }
+            reset_all();
+        });
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                if (DEBUG_LEVEL >= 3) {
+                    try {
+                        debug_log('MOVE_UNIFY_TEST', 'document hidden -> input reset_all');
+                    } catch {
+                        // ignore
+                    }
+                }
+                reset_all();
             }
         });
     }

@@ -16,7 +16,7 @@ export class WebSocketClient {
   private url: string;
   private reconnectInterval: number = 5000;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private eventHandlers: Map<string, ((event: TagChangeEvent) => void)[]> = new Map();
+  private eventHandlers: Map<string, ((event: any) => void)[]> = new Map();
 
   constructor(port: number = 8789) {
     this.url = `ws://localhost:${port}`;
@@ -67,23 +67,16 @@ export class WebSocketClient {
    * Handle incoming WebSocket messages
    */
   private handleMessage(data: any): void {
-    console.log('[WebSocketClient] Received:', data.type);
+    const t = String(data?.type ?? '');
+    if (!t) return;
 
-    switch (data.type) {
-      case 'CONNECTED':
-        console.log('[WebSocketClient] Server says:', data.message);
-        break;
-
-      case 'TAG_CHANGED':
-      case 'TAG_ADDED':
-      case 'TAG_REMOVED':
-      case 'TAG_DISPERSING':
-        this.emit(data.type, data.data as TagChangeEvent);
-        break;
-
-      default:
-        console.log('[WebSocketClient] Unknown message type:', data.type);
+    if (t === 'CONNECTED') {
+      console.log('[WebSocketClient] Server says:', data.message);
+      return;
     }
+
+    // Standard bridge payload shape: { type, data }
+    this.emit(t, (data as any)?.data);
   }
 
   /**
@@ -117,7 +110,7 @@ export class WebSocketClient {
   /**
    * Subscribe to tag events
    */
-  on(eventType: string, handler: (event: TagChangeEvent) => void): void {
+  on(eventType: string, handler: (event: any) => void): void {
     if (!this.eventHandlers.has(eventType)) {
       this.eventHandlers.set(eventType, []);
     }
@@ -127,7 +120,7 @@ export class WebSocketClient {
   /**
    * Unsubscribe from tag events
    */
-  off(eventType: string, handler: (event: TagChangeEvent) => void): void {
+  off(eventType: string, handler: (event: any) => void): void {
     const handlers = this.eventHandlers.get(eventType);
     if (handlers) {
       const index = handlers.indexOf(handler);

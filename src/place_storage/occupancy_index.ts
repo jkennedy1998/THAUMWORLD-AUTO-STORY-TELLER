@@ -1,6 +1,7 @@
 import type { Place } from "../types/place.js";
 import type { PlaceTile } from "../types/place.js";
 import { eval_body_model_voxels, get_body_model_def } from "../shared/body_model.js";
+import { get_facing, type Direction } from "../npc_ai/facing_system.js";
 
 export type PlaceOccupancyIndex = {
   width: number;
@@ -20,7 +21,9 @@ export type PlaceOccupancyIndex = {
   occupants_by_voxel: Map<string, Array<{ owner_kind: string; owner_id: string; part: string; tags: any[] }>>;
 };
 
-const cache = new WeakMap<Place, PlaceOccupancyIndex>();
+// NOTE: Do not cache this index for now.
+// The place object is mutated in-place (movement, interactions), which can stale a WeakMap cache.
+// Once correctness is proven, reintroduce caching with explicit invalidation/revisioning.
 
 function make_bool_grid(w: number, h: number, fill: boolean): boolean[][] {
   const rows: boolean[][] = [];
@@ -58,9 +61,6 @@ function tile_blocks_los_runtime(tile: any): boolean {
 }
 
 export function get_place_occupancy_index(place: Place): PlaceOccupancyIndex {
-  const hit = cache.get(place);
-  if (hit) return hit;
-
   const w = Math.max(1, Math.floor(place.tile_grid.width));
   const h = Math.max(1, Math.floor(place.tile_grid.height));
 
@@ -102,13 +102,35 @@ export function get_place_occupancy_index(place: Place): PlaceOccupancyIndex {
   // Multi-voxel character occupancy (from place contents snapshot).
   // This is used for collision/selection/raycasting in voxel-aware systems.
   try {
+    const resolve_facing = (e: any, ref: string): Direction | null => {
+      const f0 = String(e?.facing ?? '').toLowerCase();
+      if (
+        f0 === 'north' ||
+        f0 === 'south' ||
+        f0 === 'east' ||
+        f0 === 'west' ||
+        f0 === 'northeast' ||
+        f0 === 'northwest' ||
+        f0 === 'southeast' ||
+        f0 === 'southwest'
+      ) {
+        return f0 as any;
+      }
+      try {
+        return get_facing(ref);
+      } catch {
+        return null;
+      }
+    };
+
     const add_entity = (e: any, owner_kind: string, owner_id: string): void => {
       const tp = e?.tile_position;
       if (!tp || typeof tp.x !== 'number' || typeof tp.y !== 'number') return;
       const ez0 = Number(e?.elevation);
       const ez = Number.isFinite(ez0) ? Math.floor(ez0) : base_z;
       const def = get_body_model_def(e?.body_model_id);
-      const vox = eval_body_model_voxels(def, { mode: 'physical', facing: null });
+      const facing = resolve_facing(e, owner_id);
+      const vox = eval_body_model_voxels(def, { mode: 'physical', facing });
       for (const v of vox) {
         const x = Math.floor(tp.x) + Math.floor(Number(v.dx ?? 0));
         const y = Math.floor(tp.y) + Math.floor(Number(v.dy ?? 0));
@@ -166,7 +188,6 @@ export function get_place_occupancy_index(place: Place): PlaceOccupancyIndex {
     supports_z0,
     occupants_by_voxel,
   };
-  cache.set(place, idx);
   return idx;
 }
 

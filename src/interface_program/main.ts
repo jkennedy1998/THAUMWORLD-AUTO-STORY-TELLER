@@ -7,6 +7,7 @@ import { ollama_chat } from "../shared/ollama_client.js";
 import { isCurrentSession, getSessionMeta, SESSION_ID } from "../shared/session.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
 import { eval_body_model_voxels, get_body_model_def, resolve_character_body_model_id, rotate_offset_xy } from "../shared/body_model.js";
+import { get_facing, set_facing, calculate_direction } from "../npc_ai/facing_system.js";
 
 import { get_data_slot_dir, get_inbox_path, get_item_dir, get_log_path, get_outbox_path, get_status_path, get_world_dir, get_roller_status_path } from "../engine/paths.js";
 import { read_inbox, clear_inbox, ensure_inbox_exists, append_inbox_message, write_inbox } from "../engine/inbox_store.js";
@@ -27,11 +28,13 @@ import { travel_between_places } from "../travel/movement.js";
 import { load_npc } from "../npc_storage/store.js";
 import { load_place, list_places_in_region, save_place, create_basic_place } from "../place_storage/store.js";
 import { find_empty_grid_position } from "../shared/migration.js";
+import { find_path as shared_find_path } from "../shared/pathfinding.js";
 import { calculate_grid_dimensions } from "../types/container.js";
 import { load_item_def, load_master_item } from "../item_storage/store.js";
 import { create_inline_item } from "../item_instances/store.js";
 import { load_master_tile } from "../tile_storage/store.js";
-import { resolve_inline_item } from "../item_storage/resolve.js";
+import { resolve_inline_item, has_effective_tag } from "../item_storage/resolve.js";
+import { emitBridgeMessage } from "../shared/event_bridge_client.js";
 import { resolve_place_tile } from "../tile_storage/resolve.js";
 import {
     load_actor_with_items,
@@ -63,6 +66,7 @@ import {
 import { emitTagChange } from "../shared/event_emitter.js";
 import type { PlaceConnection, PlaceItem } from "../types/place.js";
 import { DEFAULT_CHARACTER_BODY_SLOT_REPRESENTATION } from "../shared/body_slot_representation.js";
+import { can_place_volume, get_place_world_z_bounds } from "../place_storage/movement_legality.js";
 import {
     validate_transfer_destination,
     validate_deposit_into_container_item,
@@ -75,6 +79,1068 @@ import {
     get_container_capacity_max_slots,
     type GridTarget,
 } from "../transfer/legality.js";
+
+// ---------------------------------------------------------------------------
+// Breath Loop (Server Authority, Active Places Only)
+// ---------------------------------------------------------------------------
+
+type PlaceBreathState = {
+    place_id: string;
+    slot: number;
+    breath_index: number;
+    breath_last_processed: number;
+    last_seen_ms: number;
+    last_persist_ms: number;
+
+    // Base place snapshot for breath processing.
+    // Must NOT include `/api/place` derived entity lists.
+    place_base: any | null;
+    place_dirty: boolean;
+};
+
+const BREATH_MS = 33; // Fast fixed tick; most entities won't step every breath.
+const ACTIVE_PLACE_TIMEOUT_MS = 10_000;
+const PLACE_PERSIST_COOLDOWN_MS = 5_000;
+const CATCHUP_MAX_BREATHS = 300;
+const CATCHUP_MAX_GRAVITY_STEPS = 64;
+
+const place_breath = new Map<string, PlaceBreathState>();
+
+// ---------------------------------------------------------------------------
+// Server-Authoritative Movement Controller (intent + click-to-move)
+// ---------------------------------------------------------------------------
+
+type MoveMode = "WALK" | "SNEAK" | "SPRINT";
+
+type EntityMoveController = {
+    slot: number;
+    entity_ref: string; // actor.xxx or npc.xxx
+    entity_type: "actor" | "npc";
+    place_id: string;
+    mode: MoveMode;
+    intent: { dx: number; dy: number } | null;
+    // Click-to-move goal (renderer sends a tile; server plans path on think ticks).
+    goal: { x: number; y: number } | null;
+    path: Array<{ x: number; y: number }> | null;
+    path_index: number;
+    need_repath: boolean;
+    last_plan_breath: number;
+    last_brain_breath: number;
+    // Physics scheduler (grid step budget). Accumulates toward 1.0 step.
+    // This MUST NOT be reset by input spam.
+    move_accum: number;
+    breaths_per_step: number; // derived from sheet stats; for diagnostics
+    updated_at_ms: number;
+    move_seq: number;
+};
+
+const move_ctl = new Map<string, EntityMoveController>(); // key `${slot}:${entity_ref}`
+
+const THINK_EVERY_BREATHS = 10;
+const THINK_PLAN_COOLDOWN_BREATHS = 10;
+
+const BRAIN_EVERY_BREATHS = 30;
+// Similar to old npc_ai 8s throttle: 8000ms / 33ms ~= 242
+const NPC_WANDER_MIN_INTERVAL_BREATHS = 240;
+const NPC_WANDER_RADIUS_TILES = 6;
+
+function entity_has_tag(any_entity: any, tag_name: string): boolean {
+    const want = String(tag_name ?? '').toUpperCase();
+    const tags = Array.isArray(any_entity?.tags) ? any_entity.tags : [];
+    return tags.some((t: any) => String(t?.name ?? t ?? '').toUpperCase() === want);
+}
+
+function move_ctl_key(slot: number, entity_ref: string): string {
+    return `${slot}:${String(entity_ref ?? "").trim()}`;
+}
+
+function stat_to_bps(speed: number): number | null {
+    const s = Math.floor(Number(speed));
+    if (!Number.isFinite(s) || s <= 0) return null;
+    if (s >= 8) return 1;
+    return 9 - s;
+}
+
+function get_bps_for_walk(any_entity: any, mode: MoveMode): number | null {
+    const base_stat = Math.floor(Number(any_entity?.movement?.walk));
+    const bps0 = stat_to_bps(base_stat);
+    if (!bps0) return null;
+    const mult = mode === "SPRINT" ? 1.8 : mode === "SNEAK" ? 0.6 : 1.0;
+    return Math.max(1, Math.round(bps0 / mult));
+}
+
+function normalize_move_mode(mode_raw: any): MoveMode {
+    const m = String(mode_raw ?? "WALK").toUpperCase();
+    if (m === "SNEAK") return "SNEAK";
+    if (m === "SPRINT") return "SPRINT";
+    return "WALK";
+}
+
+function clamp_intent(v: any): number {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return 0;
+    if (n > 0) return 1;
+    if (n < 0) return -1;
+    return 0;
+}
+
+function infer_entity_type(entity_ref: string): "actor" | "npc" {
+    const ref = String(entity_ref ?? "");
+    if (ref.startsWith("npc.")) return "npc";
+    return "actor";
+}
+
+function get_entity_any_cached(slot: number, entity_ref: string): any | null {
+    const ref = String(entity_ref ?? "");
+    const id = ref.replace(/^(actor|npc)\./, "");
+    if (ref.startsWith("npc.")) return get_npc_any_cached(slot, id);
+    return get_actor_any_cached(slot, id);
+}
+
+function get_entity_any_cached_or_load(slot: number, entity_ref: string): any | null {
+    const ref = String(entity_ref ?? "");
+    const id = ref.replace(/^(actor|npc)\./, "");
+    const hit = get_entity_any_cached(slot, ref);
+    if (hit) return hit;
+    try {
+        if (ref.startsWith("npc.")) {
+            const r = load_npc(slot, id);
+            if (r.ok && r.npc) {
+                npc_cache.set(entity_key(slot, id), r.npc as any);
+                return r.npc as any;
+            }
+            return null;
+        }
+        const r = load_actor(slot, id);
+        if (r.ok && r.actor) {
+            actor_cache.set(entity_key(slot, id), r.actor as any);
+            return r.actor as any;
+        }
+    } catch {
+        // ignore
+    }
+    return null;
+}
+
+function queue_save_entity(slot: number, entity_ref: string): void {
+    const ref = String(entity_ref ?? "");
+    const id = ref.replace(/^(actor|npc)\./, "");
+    if (ref.startsWith("npc.")) {
+        queue_save_npc(slot, id);
+        return;
+    }
+    queue_save_actor(slot, id);
+}
+
+function build_place_contents_for_legality(slot: number, place_id: string, place_any: any): void {
+    // Populate place_any.contents.{actors_present,npcs_present} from cached storage.
+    // This is required so can_place_volume and shared pathfinding can see occupants.
+    try {
+        const entity_refs = get_entities_in_place(slot, place_id);
+        const snap_actors: any[] = [];
+        const snap_npcs: any[] = [];
+
+        for (const npc_ref of entity_refs.npcs) {
+            const npc_id = String(npc_ref).startsWith('npc.') ? String(npc_ref).slice('npc.'.length) : String(npc_ref);
+            const npc_any: any = get_npc_any_cached(slot, npc_id);
+            if (!npc_any) continue;
+            const loc = npc_any?.location;
+            if (!loc?.tile || typeof loc.tile.x !== 'number' || typeof loc.tile.y !== 'number') continue;
+            snap_npcs.push({
+                npc_ref: String(npc_ref).startsWith('npc.') ? String(npc_ref) : `npc.${npc_id}`,
+                tile_position: { x: Math.floor(loc.tile.x), y: Math.floor(loc.tile.y) },
+                elevation: (typeof loc.elevation === 'number' && Number.isFinite(loc.elevation)) ? Math.floor(loc.elevation) : Math.floor(Number(place_any?.coordinates?.elevation ?? 0)) || 0,
+                facing: typeof npc_any?.facing === 'string' ? String(npc_any.facing).toLowerCase() : get_facing(`npc.${npc_id}`),
+                body_model_id: typeof npc_any?.body_model_id === 'string' ? String(npc_any.body_model_id) : undefined,
+                status: 'present',
+                tags: Array.isArray(npc_any?.tags) ? npc_any.tags : [],
+                __any: npc_any,
+            });
+        }
+
+        for (const actor_ref of entity_refs.actors) {
+            const actor_id = String(actor_ref).startsWith('actor.') ? String(actor_ref).slice('actor.'.length) : String(actor_ref);
+            const actor_any: any = get_actor_any_cached(slot, actor_id);
+            if (!actor_any) continue;
+            const loc = actor_any?.location;
+            if (!loc?.tile || typeof loc.tile.x !== 'number' || typeof loc.tile.y !== 'number') continue;
+            snap_actors.push({
+                actor_ref: String(actor_ref).startsWith('actor.') ? String(actor_ref) : `actor.${actor_id}`,
+                tile_position: { x: Math.floor(loc.tile.x), y: Math.floor(loc.tile.y) },
+                elevation: (typeof loc.elevation === 'number' && Number.isFinite(loc.elevation)) ? Math.floor(loc.elevation) : Math.floor(Number(place_any?.coordinates?.elevation ?? 0)) || 0,
+                facing: typeof actor_any?.facing === 'string' ? String(actor_any.facing).toLowerCase() : get_facing(`actor.${actor_id}`),
+                body_model_id: typeof actor_any?.body_model_id === 'string' ? String(actor_any.body_model_id) : undefined,
+                status: 'present',
+                tags: Array.isArray(actor_any?.tags) ? actor_any.tags : [],
+                __any: actor_any,
+            });
+        }
+
+        if (!place_any.contents) place_any.contents = { npcs_present: [], actors_present: [], items_on_ground: [], features: [] };
+        place_any.contents.npcs_present = snap_npcs;
+        place_any.contents.actors_present = snap_actors;
+    } catch {
+        // ignore
+    }
+}
+
+function apply_server_movement_one_breath(state: PlaceBreathState, movement_updates: any[]): void {
+    const place_any: any = state.place_base;
+    if (!place_any) return;
+
+    // Ensure contents is populated for legality.
+    build_place_contents_for_legality(state.slot, state.place_id, place_any);
+
+    const place_bi = Math.floor(Number(state.breath_index ?? 0)) || 0;
+    const bz = Math.floor(Number(place_any?.coordinates?.elevation ?? 0)) || 0;
+
+    const actors: any[] = Array.isArray(place_any?.contents?.actors_present) ? place_any.contents.actors_present : [];
+    const npcs: any[] = Array.isArray(place_any?.contents?.npcs_present) ? place_any.contents.npcs_present : [];
+
+    const step_entity = (entity_ref: string, entity_type: "actor" | "npc", ent_snap: any): void => {
+        const key = move_ctl_key(state.slot, entity_ref);
+        const ctl = move_ctl.get(key);
+        if (!ctl) return;
+        if (ctl.place_id !== state.place_id) return;
+
+        const intent_active = !!(ctl.intent && (ctl.intent.dx !== 0 || ctl.intent.dy !== 0));
+        const has_path = !!(ctl.path && ctl.path_index < ctl.path.length);
+        const has_goal = !!(ctl.goal && Number.isFinite(ctl.goal.x) && Number.isFinite(ctl.goal.y));
+        if (!intent_active && !has_path && !has_goal) return;
+
+        // Held intent overrides click-to-move.
+        if (intent_active) {
+            ctl.goal = null;
+            ctl.path = null;
+            ctl.path_index = 0;
+            ctl.need_repath = false;
+        }
+
+        const any_entity = get_entity_any_cached_or_load(state.slot, entity_ref);
+        if (!any_entity) return;
+
+        const bps = get_bps_for_walk(any_entity, ctl.mode);
+        if (!bps) {
+            // Cannot move; clear controller.
+            ctl.intent = null;
+            ctl.path = null;
+            ctl.path_index = 0;
+            move_ctl.set(key, ctl);
+            return;
+        }
+        ctl.breaths_per_step = bps;
+
+        // Physics scheduler: accumulate toward one grid step.
+        // Recharge at a rate of 1 step per `bps` breaths.
+        const inc = 1 / Math.max(1, bps);
+        const cur_acc = Number(ctl.move_accum);
+        ctl.move_accum = Math.min(1, (Number.isFinite(cur_acc) ? cur_acc : 0) + inc);
+
+        // Only attempt a step when budget allows.
+        if (ctl.move_accum < 1) {
+            move_ctl.set(key, ctl);
+            return;
+        }
+
+        const cur_x = Math.floor(Number(ent_snap?.tile_position?.x ?? 0)) || 0;
+        const cur_y = Math.floor(Number(ent_snap?.tile_position?.y ?? 0)) || 0;
+        const cur_z = (typeof ent_snap?.elevation === 'number' && Number.isFinite(ent_snap.elevation)) ? Math.floor(ent_snap.elevation) : bz;
+
+        const target = (() => {
+            if (intent_active && ctl.intent) {
+                return { x: cur_x + ctl.intent.dx, y: cur_y + ctl.intent.dy };
+            }
+            if (ctl.path && ctl.path_index < ctl.path.length) {
+                const p = ctl.path[ctl.path_index];
+                if (!p) return null;
+                return { x: Math.floor(p.x), y: Math.floor(p.y) };
+            }
+            return null;
+        })();
+
+        if (!target) return;
+
+        const owner = { kind: entity_type as any, id: entity_ref };
+        const ok = can_place_volume(place_any as any, owner as any, { x: target.x, y: target.y, z: cur_z }, 'WALK' as any, {
+            exclude_owner: owner as any,
+            support_policy: 'any_footprint' as any,
+        });
+
+        if (!ok.ok) {
+            // Blocked; path stops, intent keeps trying.
+            if (!intent_active) {
+                ctl.goal = null;
+                ctl.path = null;
+                ctl.path_index = 0;
+                ctl.need_repath = false;
+            }
+            move_ctl.set(key, ctl);
+            return;
+        }
+
+        // Commit authoritative position into cached storage.
+        try {
+            if (!any_entity.location) any_entity.location = {};
+            if (!any_entity.location.tile) any_entity.location.tile = {};
+            const from = { x: Math.floor(any_entity.location.tile.x ?? cur_x), y: Math.floor(any_entity.location.tile.y ?? cur_y) };
+            any_entity.location.tile.x = target.x;
+            any_entity.location.tile.y = target.y;
+            any_entity.location.elevation = cur_z;
+
+            const next_seq = (typeof (any_entity as any).move_seq === 'number' && Number.isFinite((any_entity as any).move_seq))
+                ? Math.floor((any_entity as any).move_seq) + 1
+                : 1;
+            (any_entity as any).move_seq = next_seq;
+            ctl.move_seq = next_seq;
+            any_entity.breath_index = place_bi;
+            any_entity.breath_last_processed = place_bi;
+            any_entity.breath_last_processed_ms = Date.now();
+
+            // Facing follows movement.
+            try {
+                const dir = calculate_direction(from as any, target as any, entity_ref);
+                any_entity.facing = dir;
+                set_facing(entity_ref, dir);
+            } catch {
+                // ignore
+            }
+
+            // Update in-place legality snapshot for subsequent moves this breath.
+            ent_snap.tile_position = { x: target.x, y: target.y };
+            ent_snap.elevation = cur_z;
+
+            queue_save_entity(state.slot, entity_ref);
+        } catch {
+            // ignore
+        }
+
+        // Advance controller.
+        if (!intent_active) {
+            ctl.path_index += 1;
+            if (ctl.path && ctl.path_index >= ctl.path.length) {
+                // Arrived.
+                ctl.goal = null;
+                ctl.path = null;
+                ctl.path_index = 0;
+                ctl.need_repath = false;
+            }
+        }
+        // Consume one step of budget.
+        ctl.move_accum = Math.max(0, Number(ctl.move_accum) - 1);
+        ctl.updated_at_ms = Date.now();
+        move_ctl.set(key, ctl);
+
+        movement_updates.push({
+            slot: state.slot,
+            place_id: state.place_id,
+            entity_ref,
+            x: target.x,
+            y: target.y,
+            z: cur_z,
+            breath_index: place_bi,
+            seq: ctl.move_seq,
+        });
+    };
+
+    for (const a of actors) {
+        const ref = String(a?.actor_ref ?? "");
+        if (!ref) continue;
+        step_entity(ref, 'actor', a);
+    }
+    for (const n of npcs) {
+        const ref = String(n?.npc_ref ?? "");
+        if (!ref) continue;
+        step_entity(ref, 'npc', n);
+    }
+}
+
+function apply_server_thinking_one_breath(state: PlaceBreathState): void {
+    const place_any: any = state.place_base;
+    if (!place_any) return;
+
+    const place_bi = Math.floor(Number(state.breath_index ?? 0)) || 0;
+
+    // Populate contents so shared pathfinding sees occupants.
+    build_place_contents_for_legality(state.slot, state.place_id, place_any);
+
+    for (const [k, ctl0] of move_ctl) {
+        if (ctl0.slot !== state.slot) continue;
+        if (ctl0.place_id !== state.place_id) continue;
+
+        const intent_active = !!(ctl0.intent && (ctl0.intent.dx !== 0 || ctl0.intent.dy !== 0));
+        if (intent_active) continue;
+
+        const has_goal = !!(ctl0.goal && Number.isFinite(ctl0.goal.x) && Number.isFinite(ctl0.goal.y));
+        if (!has_goal) continue;
+
+        const has_path = !!(ctl0.path && ctl0.path_index < ctl0.path.length);
+        if (has_path && !ctl0.need_repath) continue;
+
+        if ((place_bi - (ctl0.last_plan_breath || 0)) < THINK_PLAN_COOLDOWN_BREATHS) continue;
+
+        const any_entity = get_entity_any_cached_or_load(state.slot, ctl0.entity_ref);
+        if (!any_entity) continue;
+
+        const sx = Math.floor(Number(any_entity?.location?.tile?.x ?? 0)) || 0;
+        const sy = Math.floor(Number(any_entity?.location?.tile?.y ?? 0)) || 0;
+        const gx = Math.floor(Number((ctl0.goal as any).x));
+        const gy = Math.floor(Number((ctl0.goal as any).y));
+
+        const path_res = shared_find_path(
+            place_any as any,
+            { x: sx, y: sy },
+            { x: gx, y: gy },
+            { exclude_entity: ctl0.entity_ref, treat_occupied_as_wall: true }
+        );
+
+        ctl0.last_plan_breath = place_bi;
+
+        if (path_res.blocked || !Array.isArray(path_res.path) || path_res.path.length === 0) {
+            // Can't reach goal; clear it.
+            ctl0.goal = null;
+            ctl0.path = null;
+            ctl0.path_index = 0;
+            ctl0.need_repath = false;
+            move_ctl.set(k, ctl0);
+            continue;
+        }
+
+        ctl0.path = path_res.path.map((p: any) => ({ x: Math.floor(p.x), y: Math.floor(p.y) }));
+        ctl0.path_index = 0;
+        ctl0.need_repath = false;
+        move_ctl.set(k, ctl0);
+    }
+}
+
+function apply_server_brain_one_breath(state: PlaceBreathState): void {
+    const place_any: any = state.place_base;
+    if (!place_any) return;
+
+    const place_bi = Math.floor(Number(state.breath_index ?? 0)) || 0;
+
+    // Ensure contents is populated for bounds + basic legality checks.
+    build_place_contents_for_legality(state.slot, state.place_id, place_any);
+
+    const w = Math.floor(Number(place_any?.tile_grid?.width ?? 0)) || 0;
+    const h = Math.floor(Number(place_any?.tile_grid?.height ?? 0)) || 0;
+    if (w <= 0 || h <= 0) return;
+
+    const npcs: any[] = Array.isArray(place_any?.contents?.npcs_present) ? place_any.contents.npcs_present : [];
+    for (const n of npcs) {
+        const npc_ref = String(n?.npc_ref ?? "");
+        if (!npc_ref) continue;
+
+        // Don't wander if NPC is in conversation.
+        try {
+            if (is_in_conversation_state(npc_ref)) continue;
+        } catch {
+            // ignore
+        }
+
+        const any_entity = get_entity_any_cached_or_load(state.slot, npc_ref);
+        if (!any_entity) continue;
+
+        // Allow opt-out.
+        if (entity_has_tag(any_entity, 'NO_WANDER')) continue;
+
+        const key = move_ctl_key(state.slot, npc_ref);
+        const existing = move_ctl.get(key);
+        const ctl: EntityMoveController = existing ?? {
+            slot: state.slot,
+            entity_ref: npc_ref,
+            entity_type: 'npc',
+            place_id: state.place_id,
+            mode: 'WALK',
+            intent: null,
+            goal: null,
+            path: null,
+            path_index: 0,
+            need_repath: false,
+            last_plan_breath: 0,
+            last_brain_breath: 0,
+            move_accum: 1,
+            breaths_per_step: 0,
+            updated_at_ms: Date.now(),
+            move_seq: 0,
+        };
+
+        // Only choose a new wander goal when idle.
+        const intent_active = !!(ctl.intent && (ctl.intent.dx !== 0 || ctl.intent.dy !== 0));
+        const has_goal = !!(ctl.goal);
+        const has_path = !!(ctl.path && ctl.path_index < ctl.path.length);
+        if (intent_active || has_goal || has_path) {
+            move_ctl.set(key, ctl);
+            continue;
+        }
+
+        if ((place_bi - (ctl.last_brain_breath || 0)) < NPC_WANDER_MIN_INTERVAL_BREATHS) {
+            move_ctl.set(key, ctl);
+            continue;
+        }
+
+        const cx = Math.floor(Number(any_entity?.location?.tile?.x ?? 0)) || 0;
+        const cy = Math.floor(Number(any_entity?.location?.tile?.y ?? 0)) || 0;
+        const cz = (typeof any_entity?.location?.elevation === 'number' && Number.isFinite(any_entity.location.elevation))
+            ? Math.floor(any_entity.location.elevation)
+            : (typeof n?.elevation === 'number' && Number.isFinite(n.elevation) ? Math.floor(n.elevation) : Math.floor(Number(place_any?.coordinates?.elevation ?? 0)) || 0);
+
+        // Pick a random nearby reachable-ish goal. We only do local legality checks here;
+        // full path planning is handled by the think tick.
+        let picked: { x: number; y: number } | null = null;
+        const tries = 12;
+        for (let i = 0; i < tries; i++) {
+            const rx = (Math.floor(Math.random() * (NPC_WANDER_RADIUS_TILES * 2 + 1)) - NPC_WANDER_RADIUS_TILES);
+            const ry = (Math.floor(Math.random() * (NPC_WANDER_RADIUS_TILES * 2 + 1)) - NPC_WANDER_RADIUS_TILES);
+            const gx = cx + rx;
+            const gy = cy + ry;
+            if (gx === cx && gy === cy) continue;
+            if (gx < 0 || gy < 0 || gx >= w || gy >= h) continue;
+
+            const owner = { kind: 'npc' as any, id: npc_ref };
+            const ok = can_place_volume(place_any as any, owner as any, { x: gx, y: gy, z: cz }, 'WALK' as any, {
+                exclude_owner: owner as any,
+                support_policy: 'any_footprint' as any,
+            });
+            if (!ok.ok) continue;
+            picked = { x: gx, y: gy };
+            break;
+        }
+
+        if (!picked) {
+            ctl.last_brain_breath = place_bi;
+            ctl.updated_at_ms = Date.now();
+            move_ctl.set(key, ctl);
+            continue;
+        }
+
+        ctl.goal = picked;
+        ctl.need_repath = true;
+        ctl.last_brain_breath = place_bi;
+        ctl.updated_at_ms = Date.now();
+        move_ctl.set(key, ctl);
+    }
+}
+
+// In-memory entity caches and debounced persistence.
+// This prevents per-step disk IO from collapsing the breath cadence.
+const ACTOR_SAVE_DEBOUNCE_MS = 250;
+const NPC_SAVE_DEBOUNCE_MS = 250;
+const actor_cache = new Map<string, any>(); // key `${slot}:${actor_id}`
+const npc_cache = new Map<string, any>();   // key `${slot}:${npc_id}`
+const actor_save_timer = new Map<string, ReturnType<typeof setTimeout>>();
+const npc_save_timer = new Map<string, ReturnType<typeof setTimeout>>();
+const actor_move_log_last_ms = new Map<string, number>();
+
+function entity_key(slot: number, id: string): string {
+    return `${slot}:${id}`;
+}
+
+function get_actor_any_cached(slot: number, actor_id: string): any | null {
+    const key = entity_key(slot, actor_id);
+    const cached = actor_cache.get(key);
+    if (cached) return cached;
+    const res = load_actor(slot, actor_id);
+    if (!res.ok) return null;
+    actor_cache.set(key, res.actor);
+    return res.actor as any;
+}
+
+function get_npc_any_cached(slot: number, npc_id: string): any | null {
+    const key = entity_key(slot, npc_id);
+    const cached = npc_cache.get(key);
+    if (cached) return cached;
+    const res = load_npc(slot, npc_id);
+    if (!res.ok) return null;
+    npc_cache.set(key, res.npc);
+    return res.npc as any;
+}
+
+function queue_save_actor(slot: number, actor_id: string): void {
+    const key = entity_key(slot, actor_id);
+    const existing = actor_save_timer.get(key);
+    if (existing) clearTimeout(existing);
+
+    const t = setTimeout(() => {
+        actor_save_timer.delete(key);
+        const actor_any = actor_cache.get(key);
+        if (!actor_any) return;
+        try {
+            save_actor(slot, actor_id, actor_any);
+        } catch {
+            // ignore
+        }
+    }, ACTOR_SAVE_DEBOUNCE_MS);
+
+    actor_save_timer.set(key, t);
+}
+
+function queue_save_npc(slot: number, npc_id: string): void {
+    const key = entity_key(slot, npc_id);
+    const existing = npc_save_timer.get(key);
+    if (existing) clearTimeout(existing);
+
+    const t = setTimeout(() => {
+        npc_save_timer.delete(key);
+        const npc_any = npc_cache.get(key);
+        if (!npc_any) return;
+        try {
+            save_npc(slot, npc_id, npc_any);
+        } catch {
+            // ignore
+        }
+    }, NPC_SAVE_DEBOUNCE_MS);
+
+    npc_save_timer.set(key, t);
+}
+
+// Lightweight counters for /api/place/touch heartbeats (debuggable, low-volume).
+const place_touch_heartbeat_count = new Map<string, number>();
+
+function place_breath_key(slot: number, place_id: string): string {
+    return `${slot}:${place_id}`;
+}
+
+function touch_place_breath(slot: number, place_any: any): void {
+    try {
+        const place_id = String(place_any?.id ?? '');
+        if (!place_id) return;
+        const key = place_breath_key(slot, place_id);
+        const now = Date.now();
+
+        const existing = place_breath.get(key);
+        if (existing) {
+            existing.last_seen_ms = now;
+            // Keep place snapshot in sync with authoritative in-memory breath.
+            place_any.breath_index = existing.breath_index;
+            place_any.breath_last_processed = existing.breath_last_processed;
+
+            // Refresh base snapshot (clone) for breath processing.
+            try {
+                existing.place_base = JSON.parse(JSON.stringify(place_any));
+            } catch {
+                // ignore
+            }
+            return;
+        }
+
+        const bi0 = Number(place_any?.breath_index);
+        const bl0 = Number(place_any?.breath_last_processed);
+        const bi = Number.isFinite(bi0) ? Math.floor(bi0) : 0;
+        const bl = Number.isFinite(bl0) ? Math.floor(bl0) : bi;
+
+        // Catch-up: advance breath index based on wallclock elapsed while inactive.
+        let catchup_breaths = 0;
+        try {
+            const last_ms0 = Number(place_any?.breath_last_processed_ms);
+            const last_ms = Number.isFinite(last_ms0) ? Math.floor(last_ms0) : now;
+            const delta_ms = Math.max(0, now - last_ms);
+            catchup_breaths = Math.floor(delta_ms / BREATH_MS);
+            if (!Number.isFinite(catchup_breaths) || catchup_breaths < 0) catchup_breaths = 0;
+            catchup_breaths = Math.min(catchup_breaths, CATCHUP_MAX_BREATHS);
+        } catch {
+            catchup_breaths = 0;
+        }
+
+        const state: PlaceBreathState = {
+            place_id,
+            slot,
+            breath_index: bi + catchup_breaths,
+            breath_last_processed: (bi + catchup_breaths),
+            last_seen_ms: now,
+            last_persist_ms: 0,
+            place_base: null,
+            place_dirty: false,
+        };
+        place_breath.set(key, state);
+
+        try {
+            state.place_base = JSON.parse(JSON.stringify(place_any));
+        } catch {
+            state.place_base = null;
+        }
+
+        // Coarse settle: apply limited gravity steps during catch-up.
+        if (catchup_breaths > 0 && state.place_base) {
+            const steps = Math.min(catchup_breaths, CATCHUP_MAX_GRAVITY_STEPS);
+            for (let i = 0; i < steps; i++) {
+                apply_gravity_to_place_ground(state);
+            }
+        }
+
+        place_any.breath_index = state.breath_index;
+        place_any.breath_last_processed = state.breath_last_processed;
+    } catch {
+        // ignore
+    }
+}
+
+function touch_place_breath_by_id(slot: number, place_id: string): { ok: boolean; error?: string; breath_index?: number } {
+    const pid = String(place_id ?? '');
+    if (!pid) return { ok: false, error: 'missing_place_id' };
+
+    const key = place_breath_key(slot, pid);
+    const now = Date.now();
+
+    const existing = place_breath.get(key);
+    if (existing) {
+        existing.last_seen_ms = now;
+
+        // Devlog marker: only once per minute per place (heartbeat is 2s).
+        const n = (place_touch_heartbeat_count.get(key) ?? 0) + 1;
+        place_touch_heartbeat_count.set(key, n);
+        if (n % 30 === 0) {
+            debug_log('MOVE_UNIFY_TEST', 'place touch heartbeat', { slot, place_id: pid, count: n });
+        }
+
+        return { ok: true, breath_index: existing.breath_index };
+    }
+
+    const place_res = load_place(slot, pid);
+    if (!place_res.ok) {
+        return { ok: false, error: 'place_not_found' };
+    }
+
+    touch_place_breath(slot, place_res.place as any);
+    const created = place_breath.get(key);
+    return { ok: true, breath_index: created?.breath_index ?? 0 };
+}
+
+function persist_place_breath_if_needed(state: PlaceBreathState): void {
+    const now = Date.now();
+    if (now - state.last_persist_ms < PLACE_PERSIST_COOLDOWN_MS) return;
+    state.last_persist_ms = now;
+
+    try {
+        const res = load_place(state.slot, state.place_id);
+        if (!res.ok) return;
+
+        const place_any: any = res.place as any;
+        place_any.breath_index = state.breath_index;
+        place_any.breath_last_processed = state.breath_last_processed;
+        place_any.breath_last_processed_ms = Date.now();
+
+        // If breath processing mutated the base place (e.g. gravity on ground items), persist it.
+        // Keep persistence safe: use the loaded place as the baseline and only carry over stable fields.
+        if (state.place_dirty && state.place_base) {
+            try {
+                place_any.ground = state.place_base.ground;
+                state.place_dirty = false;
+            } catch {
+                // ignore
+            }
+        }
+
+        save_place(state.slot, place_any);
+    } catch {
+        // ignore
+    }
+}
+
+function apply_gravity_to_place_ground(state: PlaceBreathState): void {
+    const place_any: any = state.place_base;
+    if (!place_any || !place_any.ground || !place_any.ground.scattered) return;
+
+    // In place ground, items are top-level. Items inside containers ignore GRAVITY.
+    // (Container item contents are ignored for now.)
+    const scattered = place_any.ground.scattered as Record<string, any[]>;
+    const entries = Object.entries(scattered);
+    if (entries.length === 0) return;
+
+    const mover_owner = { kind: 'item' as const, id: 'place_ground_item' };
+
+    let moved_any = false;
+
+    for (const [key, items] of entries) {
+        const parts = String(key).split('_');
+        const x = Number(parts[0]);
+        const y = Number(parts[1]);
+        const z = Number(parts[2]);
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+
+        if (!Array.isArray(items) || items.length === 0) continue;
+
+        // Iterate backwards so splices are safe.
+        for (let i = items.length - 1; i >= 0; i--) {
+            const it = items[i];
+            if (!it || typeof it !== 'object') continue;
+            const def_id = String((it as any)?.def_id ?? '');
+            if (!def_id) continue;
+            const resolved = resolve_inline_item(def_id, it as any);
+            if (!resolved) continue;
+            if (!has_effective_tag(resolved.effective_tags, 'GRAVITY')) continue;
+            if ((it as any)?.container_id) continue;
+
+            // If the item is supported, do nothing.
+            const supported = can_place_volume(place_any as any, mover_owner as any, { x, y, z }, 'WALK' as any, {
+                exclude_owner: mover_owner as any,
+                support_policy: 'any_footprint' as any,
+                ignore_occupants: false,
+            });
+
+            if (supported.ok) continue;
+            if (!supported.ok && supported.reason !== 'no_support') continue;
+
+            // Attempt one fall step (collision-only).
+            const nz = Math.floor(z) - 1;
+            const fall_ok = can_place_volume(place_any as any, mover_owner as any, { x, y, z: nz }, 'FLY' as any, {
+                exclude_owner: mover_owner as any,
+                ignore_occupants: false,
+            });
+
+            if (!fall_ok.ok) {
+                // Blocked fall; pushables block for now.
+                debug_log('MOVE_UNIFY_TEST', 'gravity fall blocked', {
+                    place_id: state.place_id,
+                    key,
+                    target: { x, y, z: nz },
+                    reason: fall_ok.reason,
+                    detail: fall_ok.detail,
+                });
+                continue;
+            }
+
+            // Move item to new z bucket.
+            const moved = items.splice(i, 1)[0];
+            if (!moved) continue;
+            (moved as any).elevation = nz;
+
+            const nkey = `${Math.floor(x)}_${Math.floor(y)}_${Math.floor(nz)}`;
+            if (!scattered[nkey]) scattered[nkey] = [];
+            scattered[nkey].push(moved);
+            moved_any = true;
+        }
+
+        if (Array.isArray(scattered[key]) && scattered[key].length === 0) {
+            delete scattered[key];
+        }
+    }
+
+    if (moved_any) {
+        state.place_dirty = true;
+    }
+}
+
+function has_simple_tag(tags: any, name: string): boolean {
+    const up = String(name ?? '').toUpperCase();
+    if (!Array.isArray(tags)) return false;
+    return tags.some((t: any) => String(t?.name ?? '').toUpperCase() === up);
+}
+
+function apply_gravity_to_place_characters(state: PlaceBreathState): void {
+    const place_any: any = state.place_base;
+    if (!place_any) return;
+
+    // Build a minimal snapshot of actors/npcs present for legality checks.
+    const entity_refs = get_entities_in_place(state.slot, state.place_id);
+    const snap_actors: any[] = [];
+    const snap_npcs: any[] = [];
+
+                for (const npc_ref of entity_refs.npcs) {
+        const npc_id = String(npc_ref).startsWith('npc.') ? String(npc_ref).slice('npc.'.length) : String(npc_ref);
+        const npc_any: any = get_npc_any_cached(state.slot, npc_id);
+        if (!npc_any) continue;
+        const loc = npc_any?.location;
+        if (!loc?.tile || typeof loc.tile.x !== 'number' || typeof loc.tile.y !== 'number') continue;
+        snap_npcs.push({
+            npc_ref,
+            tile_position: { x: Math.floor(loc.tile.x), y: Math.floor(loc.tile.y) },
+            elevation: (typeof loc.elevation === 'number' && Number.isFinite(loc.elevation)) ? Math.floor(loc.elevation) : Math.floor(Number(place_any?.coordinates?.elevation ?? 0)) || 0,
+            facing: typeof npc_any?.facing === 'string' ? String(npc_any.facing).toLowerCase() : undefined,
+            body_model_id: typeof npc_any?.body_model_id === 'string' ? String(npc_any.body_model_id) : undefined,
+            tags: Array.isArray(npc_any?.tags) ? npc_any.tags : [],
+            __npc_id: npc_id,
+            __npc_any: npc_any,
+        });
+    }
+                for (const actor_ref of entity_refs.actors) {
+        const actor_id = String(actor_ref).startsWith('actor.') ? String(actor_ref).slice('actor.'.length) : String(actor_ref);
+        const actor_any: any = get_actor_any_cached(state.slot, actor_id);
+        if (!actor_any) continue;
+        const loc = actor_any?.location;
+        if (!loc?.tile || typeof loc.tile.x !== 'number' || typeof loc.tile.y !== 'number') continue;
+        snap_actors.push({
+            actor_ref,
+            tile_position: { x: Math.floor(loc.tile.x), y: Math.floor(loc.tile.y) },
+            elevation: (typeof loc.elevation === 'number' && Number.isFinite(loc.elevation)) ? Math.floor(loc.elevation) : Math.floor(Number(place_any?.coordinates?.elevation ?? 0)) || 0,
+            facing: typeof actor_any?.facing === 'string' ? String(actor_any.facing).toLowerCase() : undefined,
+            body_model_id: typeof actor_any?.body_model_id === 'string' ? String(actor_any.body_model_id) : undefined,
+            tags: Array.isArray(actor_any?.tags) ? actor_any.tags : [],
+            __actor_id: actor_id,
+            __actor_any: actor_any,
+        });
+    }
+
+    if (!place_any.contents) place_any.contents = { npcs_present: [], actors_present: [], items_on_ground: [], features: [] };
+    place_any.contents.npcs_present = snap_npcs.map((n: any) => ({
+        npc_ref: n.npc_ref,
+        tile_position: n.tile_position,
+        elevation: n.elevation,
+        facing: n.facing,
+        body_model_id: n.body_model_id,
+        status: 'present',
+        activity: 'standing here',
+        tags: n.tags,
+    }));
+    place_any.contents.actors_present = snap_actors.map((a: any) => ({
+        actor_ref: a.actor_ref,
+        tile_position: a.tile_position,
+        elevation: a.elevation,
+        facing: a.facing,
+        body_model_id: a.body_model_id,
+        status: 'present',
+        tags: a.tags,
+    }));
+
+    const bz = Math.floor(Number(place_any?.coordinates?.elevation ?? 0)) || 0;
+    const place_breath = Math.floor(Number(state.breath_index ?? 0)) || 0;
+
+    // Apply one fall step per entity per invocation (coarse settle calls this multiple times).
+    const apply_one = (kind: 'actor' | 'npc', e: any): void => {
+        if (!has_simple_tag(e.tags, 'GRAVITY')) return;
+        const owner = { kind, id: kind === 'actor' ? e.actor_ref : e.npc_ref };
+        const x = Math.floor(e.tile_position.x);
+        const y = Math.floor(e.tile_position.y);
+        const z = (typeof e.elevation === 'number' && Number.isFinite(e.elevation)) ? Math.floor(e.elevation) : bz;
+
+        const supported = can_place_volume(place_any as any, owner as any, { x, y, z }, 'WALK' as any, {
+            exclude_owner: owner as any,
+            support_policy: 'any_footprint' as any,
+        });
+        if (supported.ok) return;
+        if (supported.reason !== 'no_support') return;
+
+        const nz = z - 1;
+        const fall_ok = can_place_volume(place_any as any, owner as any, { x, y, z: nz }, 'FLY' as any, {
+            exclude_owner: owner as any,
+        });
+        if (!fall_ok.ok) {
+            debug_log('MOVE_UNIFY_TEST', 'gravity character fall blocked', {
+                place_id: state.place_id,
+                owner,
+                target: { x, y, z: nz },
+                reason: fall_ok.reason,
+                detail: fall_ok.detail,
+            });
+            return;
+        }
+
+        // Commit into the legality snapshot so subsequent checks see the updated elevation.
+        e.elevation = nz;
+        moved_any = true;
+
+        debug_log('MOVE_UNIFY_TEST', 'gravity character fell', {
+            place_id: state.place_id,
+            owner,
+            from: { x, y, z },
+            to: { x, y, z: nz },
+        });
+
+        // Persist to storage (debounced).
+        if (kind === 'actor') {
+            try {
+                const actor_any: any = e.__actor_any;
+                const actor_id = String(e.__actor_id ?? '');
+                if (!actor_id || !actor_any) return;
+                if (!actor_any.location) actor_any.location = {};
+                actor_any.location.elevation = nz;
+                actor_any.breath_index = place_breath;
+                actor_any.breath_last_processed = place_breath;
+                actor_any.breath_last_processed_ms = Date.now();
+                actor_cache.set(entity_key(state.slot, actor_id), actor_any);
+                queue_save_actor(state.slot, actor_id);
+            } catch {
+                // ignore
+            }
+        } else {
+            try {
+                const npc_any: any = e.__npc_any;
+                const npc_id = String(e.__npc_id ?? '');
+                if (!npc_id || !npc_any) return;
+                if (!npc_any.location) npc_any.location = {};
+                npc_any.location.elevation = nz;
+                npc_any.breath_index = place_breath;
+                npc_any.breath_last_processed = place_breath;
+                npc_any.breath_last_processed_ms = Date.now();
+                npc_cache.set(entity_key(state.slot, npc_id), npc_any);
+                queue_save_npc(state.slot, npc_id);
+            } catch {
+                // ignore
+            }
+        }
+    };
+
+    let moved_any = false;
+    for (const a of snap_actors) apply_one('actor', a);
+    for (const n of snap_npcs) apply_one('npc', n);
+
+    if (moved_any) {
+        state.place_dirty = true;
+    }
+}
+
+setInterval(() => {
+    const now = Date.now();
+    const breath_ticks: Array<{ slot: number; place_id: string; breath_index: number }> = [];
+    const movement_updates: any[] = [];
+    for (const [key, state] of place_breath) {
+        const active = (now - state.last_seen_ms) <= ACTIVE_PLACE_TIMEOUT_MS;
+        if (active) {
+            state.breath_index += 1;
+            state.breath_last_processed = state.breath_index;
+
+            breath_ticks.push({ slot: state.slot, place_id: state.place_id, breath_index: state.breath_index });
+
+            // Lightweight devlog marker to confirm breath is ticking.
+            if (state.breath_index % 60 === 0) {
+                debug_log('MOVE_UNIFY_TEST', 'breath tick', {
+                    slot: state.slot,
+                    place_id: state.place_id,
+                    breath_index: state.breath_index,
+                });
+            }
+
+            if (state.place_base) {
+                (state.place_base as any).breath_index = state.breath_index;
+                (state.place_base as any).breath_last_processed = state.breath_last_processed;
+
+                // Thinking: path planning / heavy decisions at a lower frequency than physics.
+                if ((state.breath_index % BRAIN_EVERY_BREATHS) === 0) {
+                    apply_server_brain_one_breath(state);
+                }
+                if ((state.breath_index % THINK_EVERY_BREATHS) === 0) {
+                    apply_server_thinking_one_breath(state);
+                }
+
+                // Controller stepping is authoritative and runs before gravity.
+                apply_server_movement_one_breath(state, movement_updates);
+
+                apply_gravity_to_place_ground(state);
+                apply_gravity_to_place_characters(state);
+            }
+            continue;
+        }
+
+        // Place is inactive; persist and drop state.
+        persist_place_breath_if_needed(state);
+        place_breath.delete(key);
+    }
+
+    if (breath_ticks.length > 0) {
+        void emitBridgeMessage('PLACE_BREATH_TICK', {
+            breath_ms: BREATH_MS,
+            sent_at_ms: now,
+            ticks: breath_ticks,
+        });
+    }
+
+    if (movement_updates.length > 0) {
+        // Batch movement updates to avoid per-step WS spam.
+        void emitBridgeMessage('ENTITY_MOVED_BATCH', {
+            sent_at_ms: now,
+            updates: movement_updates,
+        });
+    }
+}, BREATH_MS);
 
 function normalize_inline_container_grid(contents: any[], max_slots: number, log_ctx: string): Array<{ item: any; grid_x: number; grid_y: number }> {
     const safe_contents = Array.isArray(contents) ? contents : [];
@@ -2041,6 +3107,9 @@ function start_http_server(log_path: string): void {
 
                 const place = place_res.place;
 
+                // Mark place as active for breath ticking and sync returned snapshot.
+                touch_place_breath(slot, place as any);
+
                 // Kind lookup cache (kind-driven body_model / slot representation).
                 const kind_defs = load_kind_definitions();
                 const kind_by_id = new Map<string, any>();
@@ -2227,16 +3296,18 @@ function start_http_server(log_path: string): void {
                 place.contents.npcs_present = [];
                 place.contents.actors_present = [];
 
-                // Load NPC data
+                const place_zb = get_place_world_z_bounds(place as any);
+
+                // Load NPC data (prefer cache: server-authoritative movement updates caches before disk)
                 for (const npc_ref of entity_refs.npcs) {
                     const npc_id = npc_ref.replace("npc.", "");
-                    const npc_res = load_npc(slot, npc_id);
-                    if (!npc_res.ok) {
-                        debug_warn("API", `Failed to load NPC ${npc_id} for place ${place_id}`, { error: npc_res.error });
+                    const npc_any = get_entity_any_cached_or_load(slot, npc_ref) as any;
+                    if (!npc_any) {
+                        debug_warn("API", `Failed to load NPC ${npc_id} for place ${place_id}`, { error: 'npc_not_found' });
                         continue;
                     }
 
-                    const location = get_npc_location(npc_res.npc);
+                    const location = get_npc_location(npc_any);
                     if (!location?.tile) {
                         debug_warn("API", `NPC ${npc_id} has no tile position`, { npc_ref });
                         continue;
@@ -2253,6 +3324,25 @@ function start_http_server(log_path: string): void {
                         x: Math.max(bx0, Math.min(location.tile.x, bx1)),
                         y: Math.max(by0, Math.min(location.tile.y, by1))
                     };
+
+                    // Clamp elevation to place z bounds.
+                    const ez0 = (typeof (location as any)?.elevation === 'number' && Number.isFinite((location as any).elevation))
+                        ? Math.floor((location as any).elevation)
+                        : 0;
+                    const ez = Math.max(place_zb.min_z, Math.min(place_zb.max_z, ez0));
+                    if (ez !== ez0) {
+                        try {
+                            const npc_any: any = get_npc_any_cached(slot, npc_id);
+                            if (npc_any) {
+                                if (!npc_any.location) npc_any.location = {};
+                                npc_any.location.elevation = ez;
+                                npc_cache.set(entity_key(slot, npc_id), npc_any);
+                                queue_save_npc(slot, npc_id);
+                            }
+                        } catch {
+                            // ignore
+                        }
+                    }
                     
                     if (clamped_location.x !== location.tile.x || clamped_location.y !== location.tile.y) {
                         debug_warn("API", `NPC ${npc_id} position clamped from (${location.tile.x},${location.tile.y}) to (${clamped_location.x},${clamped_location.y})`, {
@@ -2268,43 +3358,66 @@ function start_http_server(log_path: string): void {
                         ? "present"
                         : raw_status;
 
-                    const kind_id = typeof (npc_res.npc as any)?.kind === 'string' ? String((npc_res.npc as any).kind) : undefined;
+                    const kind_id = typeof (npc_any as any)?.kind === 'string' ? String((npc_any as any).kind) : undefined;
                     const kind_def = get_kind_def(kind_id);
 
                     place.contents.npcs_present.push({
                         npc_ref,
                         tile_position: clamped_location,
+                        facing: get_facing(npc_ref),
                         kind_id,
-                        body_model_id: typeof (npc_res.npc as any)?.body_model_id === 'string'
-                            ? String((npc_res.npc as any).body_model_id)
+                        movement: ((npc_any as any)?.movement && typeof (npc_any as any).movement === 'object')
+                            ? (npc_any as any).movement
+                            : undefined,
+                        body_model_id: typeof (npc_any as any)?.body_model_id === 'string'
+                            ? String((npc_any as any).body_model_id)
                             : (typeof (kind_def as any)?.body_model_id === 'string'
                                 ? String((kind_def as any).body_model_id)
                                 : resolve_character_body_model_id(kind_id)),
-                        body_slot_representation: ((npc_res.npc as any)?.body_slot_representation && typeof (npc_res.npc as any).body_slot_representation === 'object')
-                            ? (npc_res.npc as any).body_slot_representation
+                        body_slot_representation: ((npc_any as any)?.body_slot_representation && typeof (npc_any as any).body_slot_representation === 'object')
+                            ? (npc_any as any).body_slot_representation
                             : (((kind_def as any)?.body_slot_representation && typeof (kind_def as any).body_slot_representation === 'object')
                                 ? (kind_def as any).body_slot_representation
                                 : DEFAULT_CHARACTER_BODY_SLOT_REPRESENTATION),
-                        elevation: typeof location?.elevation === 'number' && Number.isFinite(location.elevation)
-                            ? location.elevation
+                        elevation: ez,
+                        breath_index: (typeof (npc_any as any)?.breath_index === 'number' && Number.isFinite((npc_any as any).breath_index))
+                            ? Math.floor((npc_any as any).breath_index)
                             : 0,
+                        breath_last_processed: (typeof (npc_any as any)?.breath_last_processed === 'number' && Number.isFinite((npc_any as any).breath_last_processed))
+                            ? Math.floor((npc_any as any).breath_last_processed)
+                            : 0,
+                        breath_last_processed_ms: (typeof (npc_any as any)?.breath_last_processed_ms === 'number' && Number.isFinite((npc_any as any).breath_last_processed_ms))
+                            ? Math.floor((npc_any as any).breath_last_processed_ms)
+                            : 0,
+                        movement_schedule: ((npc_any as any)?.movement_schedule && typeof (npc_any as any).movement_schedule === 'object')
+                            ? (npc_any as any).movement_schedule
+                            : undefined,
                         status: npc_status,
                         activity: "standing here",
-                        tags: (npc_res.npc as any).tags || [],
-                        body_slots: (npc_res.npc as any).body_slots || {}
-                    });
+                        tags: (npc_any as any).tags || [],
+                        body_slots: (npc_any as any).body_slots || {}
+                    } as any);
+
+                    try {
+                        (place.contents.npcs_present[place.contents.npcs_present.length - 1] as any).move_seq =
+                            (typeof (npc_any as any).move_seq === 'number' && Number.isFinite((npc_any as any).move_seq))
+                                ? Math.floor((npc_any as any).move_seq)
+                                : 0;
+                    } catch {
+                        // ignore
+                    }
                 }
 
-                // Load Actor data
+                // Load Actor data (prefer cache: server-authoritative movement updates caches before disk)
                 for (const actor_ref of entity_refs.actors) {
                     const actor_id = actor_ref.replace("actor.", "");
-                    const actor_res = load_actor(slot, actor_id);
-                    if (!actor_res.ok) {
-                        debug_warn("API", `Failed to load actor ${actor_id} for place ${place_id}`, { error: actor_res.error });
+                    const actor_any = get_entity_any_cached_or_load(slot, actor_ref) as any;
+                    if (!actor_any) {
+                        debug_warn("API", `Failed to load actor ${actor_id} for place ${place_id}`, { error: 'actor_not_found' });
                         continue;
                     }
 
-                    const actor = actor_res.actor;
+                    const actor = actor_any;
                     const actor_loc_any = (actor.location as any) || {};
                     const location = (actor_loc_any as { tile?: { x: number; y: number } })?.tile;
                     if (!location) {
@@ -2323,6 +3436,19 @@ function start_http_server(log_path: string): void {
                         x: Math.max(bx0, Math.min(location.x, bx1)),
                         y: Math.max(by0, Math.min(location.y, by1))
                     };
+
+                    // Clamp elevation to place z bounds.
+                    const ez0 = (typeof actor_loc_any?.elevation === 'number' && Number.isFinite(actor_loc_any.elevation))
+                        ? Math.floor(actor_loc_any.elevation)
+                        : 0;
+                    const ez = Math.max(place_zb.min_z, Math.min(place_zb.max_z, ez0));
+                    if (ez !== ez0) {
+                        actor_loc_any.elevation = ez;
+                        (actor as any).location = actor_loc_any;
+                        actor_cache.set(entity_key(slot, actor_id), actor);
+                        queue_save_actor(slot, actor_id);
+                        debug_log('MOVE_UNIFY_TEST', 'clamped actor elevation to place z bounds', { actor_ref, from: ez0, to: ez, bounds: place_zb });
+                    }
                     
                     if (clamped_location.x !== location.x || clamped_location.y !== location.y) {
                         debug_warn("API", `Actor ${actor_id} position clamped from (${location.x},${location.y}) to (${clamped_location.x},${clamped_location.y})`, {
@@ -2337,7 +3463,11 @@ function start_http_server(log_path: string): void {
                     place.contents.actors_present.push({
                         actor_ref,
                         tile_position: clamped_location,
+                        facing: get_facing(actor_ref),
                         kind_id,
+                        movement: ((actor as any)?.movement && typeof (actor as any).movement === 'object')
+                            ? (actor as any).movement
+                            : undefined,
                         body_model_id: typeof (actor as any)?.body_model_id === 'string'
                             ? String((actor as any).body_model_id)
                             : (typeof (kind_def as any)?.body_model_id === 'string'
@@ -2348,12 +3478,31 @@ function start_http_server(log_path: string): void {
                             : (((kind_def as any)?.body_slot_representation && typeof (kind_def as any).body_slot_representation === 'object')
                                 ? (kind_def as any).body_slot_representation
                                 : DEFAULT_CHARACTER_BODY_SLOT_REPRESENTATION),
-                        elevation: (typeof actor_loc_any?.elevation === 'number' && Number.isFinite(actor_loc_any.elevation))
-                            ? actor_loc_any.elevation
+                        elevation: ez,
+                        breath_index: (typeof (actor as any)?.breath_index === 'number' && Number.isFinite((actor as any).breath_index))
+                            ? Math.floor((actor as any).breath_index)
                             : 0,
+                        breath_last_processed: (typeof (actor as any)?.breath_last_processed === 'number' && Number.isFinite((actor as any).breath_last_processed))
+                            ? Math.floor((actor as any).breath_last_processed)
+                            : 0,
+                        breath_last_processed_ms: (typeof (actor as any)?.breath_last_processed_ms === 'number' && Number.isFinite((actor as any).breath_last_processed_ms))
+                            ? Math.floor((actor as any).breath_last_processed_ms)
+                            : 0,
+                        movement_schedule: ((actor as any)?.movement_schedule && typeof (actor as any).movement_schedule === 'object')
+                            ? (actor as any).movement_schedule
+                            : undefined,
                         status: "present",
                         tags: (actor as any).tags || []
-                    });
+                    } as any);
+
+                    try {
+                        (place.contents.actors_present[place.contents.actors_present.length - 1] as any).move_seq =
+                            (typeof (actor as any).move_seq === 'number' && Number.isFinite((actor as any).move_seq))
+                                ? Math.floor((actor as any).move_seq)
+                                : 0;
+                    } catch {
+                        // ignore
+                    }
                 }
 
                 // Devlog test: multi-voxel character occupies head voxel.
@@ -2363,7 +3512,11 @@ function start_http_server(log_path: string): void {
                         const base_z = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
                         const wz0 = (typeof a0.elevation === 'number' && Number.isFinite(a0.elevation)) ? Math.floor(a0.elevation) : base_z;
                         const def = get_body_model_def(a0.body_model_id);
-                        const vox = eval_body_model_voxels(def, { mode: 'physical', facing: null });
+                        const f0 = String((a0 as any)?.facing ?? '').toLowerCase();
+                        const facing = (f0 === 'north' || f0 === 'south' || f0 === 'east' || f0 === 'west' || f0 === 'northeast' || f0 === 'northwest' || f0 === 'southeast' || f0 === 'southwest')
+                            ? (f0 as any)
+                            : null;
+                        const vox = eval_body_model_voxels(def, { mode: 'physical', facing });
                         const any_head = vox.some((v: any) => String(v.part) === 'head' && Math.floor(Number(v.dz ?? 0)) === 1);
                         if (any_head) {
                             debug_log('MULTITILE_TEST', `PASS actor occupies head voxel (actor=${String(a0.actor_ref)} at=${a0.tile_position.x},${a0.tile_position.y},${wz0})`);
@@ -2674,6 +3827,318 @@ function start_http_server(log_path: string): void {
             return;
         }
 
+        if (url.pathname === "/api/place/touch") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const MAX_BYTES = 16 * 1024;
+            let body = "";
+            req.on("data", (chunk) => {
+                body += chunk;
+                if (body.length > MAX_BYTES) {
+                    res.writeHead(413, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "payload_too_large" }));
+                    req.destroy();
+                }
+            });
+
+            req.on("end", () => {
+                let data: any = null;
+                try {
+                    data = body ? JSON.parse(body) : {};
+                } catch {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+                    return;
+                }
+
+                const slot_raw = (data as any)?.slot;
+                const slot = (slot_raw === undefined || slot_raw === null) ? data_slot_number : Number(slot_raw);
+                if (!Number.isFinite(slot) || slot <= 0) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
+                    return;
+                }
+
+                const place_id = String((data as any)?.place_id ?? "");
+                if (!place_id) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "missing_place_id" }));
+                    return;
+                }
+
+                const touched = touch_place_breath_by_id(slot, place_id);
+                if (!touched.ok) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: touched.error ?? "touch_failed" }));
+                    return;
+                }
+
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, slot, place_id, breath_index: touched.breath_index ?? 0 }));
+            });
+
+            return;
+        }
+
+        // -------------------------------------------------------------------
+        // Server-Authoritative Movement
+        // -------------------------------------------------------------------
+
+        // POST /api/movement/intent
+        // Body: { slot?, entity_ref, place_id, dx, dy, mode }
+        // dx/dy are clamped to cardinal -1/0/1. dx=0,dy=0 clears intent.
+        // Held intent overrides click-to-move: setting intent clears any stored path.
+        if (url.pathname === "/api/movement/intent") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const MAX_BYTES = 32 * 1024;
+            let body = "";
+            req.on("data", (chunk) => {
+                body += chunk;
+                if (body.length > MAX_BYTES) {
+                    res.writeHead(413, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "payload_too_large" }));
+                    req.destroy();
+                }
+            });
+
+            req.on("end", () => {
+                let data: any = null;
+                try {
+                    data = body ? JSON.parse(body) : {};
+                } catch {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+                    return;
+                }
+
+                const slot = Number((data as any)?.slot ?? data_slot_number);
+                if (!Number.isFinite(slot) || slot <= 0) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
+                    return;
+                }
+
+                const entity_ref = String((data as any)?.entity_ref ?? "").trim();
+                const place_id = String((data as any)?.place_id ?? "").trim();
+                if (!entity_ref || !place_id) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                    return;
+                }
+
+                const entity_any = get_entity_any_cached(slot, entity_ref);
+                if (!entity_any) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "entity_not_found" }));
+                    return;
+                }
+
+                const loc_place = String(entity_any?.location?.place_id ?? "");
+                if (loc_place && loc_place !== place_id) {
+                    res.writeHead(409, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "entity_not_in_place", at: loc_place }));
+                    return;
+                }
+
+                const dx = clamp_intent((data as any)?.dx);
+                const dy = clamp_intent((data as any)?.dy);
+                const mode = normalize_move_mode((data as any)?.mode);
+
+                // Cardinal only
+                const want_dx = (dx !== 0 && dy !== 0) ? dx : dx;
+                const want_dy = (dx !== 0 && dy !== 0) ? 0 : dy;
+                const want_intent = (want_dx === 0 && want_dy === 0) ? null : { dx: want_dx, dy: want_dy };
+
+                const touched = touch_place_breath_by_id(slot, place_id);
+                if (!touched.ok) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: touched.error ?? "place_not_found" }));
+                    return;
+                }
+                const place_bi = Math.floor(Number(touched.breath_index ?? 0)) || 0;
+
+                const entity_type = infer_entity_type(entity_ref);
+                const key = move_ctl_key(slot, entity_ref);
+                const existing = move_ctl.get(key);
+                const ctl: EntityMoveController = existing ?? {
+                    slot,
+                    entity_ref,
+                    entity_type,
+                    place_id,
+                    mode,
+                    intent: null,
+                    goal: null,
+                    path: null,
+                    path_index: 0,
+                    need_repath: false,
+                    last_plan_breath: 0,
+                    last_brain_breath: 0,
+                    move_accum: 1,
+                    breaths_per_step: 0,
+                    updated_at_ms: Date.now(),
+                    move_seq: 0,
+                };
+
+                const prev_intent_active = !!(ctl.intent && (ctl.intent.dx !== 0 || ctl.intent.dy !== 0));
+
+                ctl.place_id = place_id;
+                ctl.mode = mode;
+                ctl.intent = want_intent;
+                ctl.updated_at_ms = Date.now();
+
+                // Intent updates discard any click-to-move goal/path.
+                // (Held intent wins, and releasing does not resume old goals.)
+                ctl.goal = null;
+                ctl.path = null;
+                ctl.path_index = 0;
+                ctl.need_repath = false;
+
+                // IMPORTANT: intent updates MUST NOT reset cadence.
+                // Only allow immediate stepping on idle -> active.
+                const next_intent_active = !!(ctl.intent && (ctl.intent.dx !== 0 || ctl.intent.dy !== 0));
+                // Cadence is controlled by move_accum refill in the physics tick.
+                move_ctl.set(key, ctl);
+
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, slot, entity_ref, place_id, intent: ctl.intent, mode }));
+            });
+
+            return;
+        }
+
+        // POST /api/movement/move_to
+        // Body: { slot?, entity_ref, place_id, x, y, mode }
+        // Server plans path on think ticks and steps it on physics breaths.
+        // If held intent is active, discard the click-to-move request.
+        if (url.pathname === "/api/movement/move_to") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const MAX_BYTES = 32 * 1024;
+            let body = "";
+            req.on("data", (chunk) => {
+                body += chunk;
+                if (body.length > MAX_BYTES) {
+                    res.writeHead(413, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "payload_too_large" }));
+                    req.destroy();
+                }
+            });
+
+            req.on("end", () => {
+                let data: any = null;
+                try {
+                    data = body ? JSON.parse(body) : {};
+                } catch {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+                    return;
+                }
+
+                const slot = Number((data as any)?.slot ?? data_slot_number);
+                if (!Number.isFinite(slot) || slot <= 0) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
+                    return;
+                }
+
+                const entity_ref = String((data as any)?.entity_ref ?? "").trim();
+                const place_id = String((data as any)?.place_id ?? "").trim();
+                const x = Math.floor(Number((data as any)?.x));
+                const y = Math.floor(Number((data as any)?.y));
+                const mode = normalize_move_mode((data as any)?.mode);
+
+                if (!entity_ref || !place_id || !Number.isFinite(x) || !Number.isFinite(y)) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                    return;
+                }
+
+                const entity_any = get_entity_any_cached(slot, entity_ref);
+                if (!entity_any) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "entity_not_found" }));
+                    return;
+                }
+
+                const loc_place = String(entity_any?.location?.place_id ?? "");
+                if (loc_place && loc_place !== place_id) {
+                    res.writeHead(409, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "entity_not_in_place", at: loc_place }));
+                    return;
+                }
+
+                const key = move_ctl_key(slot, entity_ref);
+                const existing = move_ctl.get(key);
+                const intent_active = !!(existing?.intent && ((existing.intent as any).dx !== 0 || (existing.intent as any).dy !== 0));
+                if (intent_active) {
+                    // Held intent wins - discard click goal.
+                    res.writeHead(409, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "intent_active_discarded" }));
+                    return;
+                }
+
+                const touched = touch_place_breath_by_id(slot, place_id);
+                if (!touched.ok) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: touched.error ?? "place_not_found" }));
+                    return;
+                }
+                const place_bi = Math.floor(Number(touched.breath_index ?? 0)) || 0;
+
+                const entity_type = infer_entity_type(entity_ref);
+                const ctl: EntityMoveController = existing ?? {
+                    slot,
+                    entity_ref,
+                    entity_type,
+                    place_id,
+                    mode,
+                    intent: null,
+                    goal: null,
+                    path: null,
+                    path_index: 0,
+                    need_repath: false,
+                    last_plan_breath: 0,
+                    last_brain_breath: 0,
+                    move_accum: 1,
+                    breaths_per_step: 0,
+                    updated_at_ms: Date.now(),
+                    move_seq: 0,
+                };
+
+                const was_pathing = !!(ctl.path && ctl.path_index < ctl.path.length);
+
+                ctl.place_id = place_id;
+                ctl.mode = mode;
+                ctl.intent = null;
+                ctl.goal = { x, y };
+                ctl.path = null;
+                ctl.path_index = 0;
+                ctl.need_repath = true;
+                ctl.last_plan_breath = 0;
+                // Preserve last_brain_breath; click-to-move is player-driven.
+                ctl.updated_at_ms = Date.now();
+                move_ctl.set(key, ctl);
+
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, queued: true, slot, entity_ref, place_id, to: { x, y } }));
+            });
+
+            return;
+        }
+
         // POST /api/tag/add - Add a tag to an entity (for testing)
         if (url.pathname === "/api/tag/add") {
             if (req.method !== "POST") {
@@ -2706,48 +4171,51 @@ function start_http_server(log_path: string): void {
                     // Determine if actor or NPC
                     const is_npc = entity_ref.startsWith("npc.");
                     const entity_id = entity_ref.replace(/^(npc|actor)\./, "");
+                    const next_mag = (typeof mag === 'number' && Number.isFinite(mag)) ? mag : 1;
+                    const next_meta = Array.isArray(meta) ? meta : [];
 
                     if (is_npc) {
-                        const result = load_npc(slot, entity_id);
-                        if (!result.ok || !result.npc) {
+                        const npc_any = get_npc_any_cached(slot, entity_id);
+                        if (!npc_any) {
                             res.writeHead(404, { "Content-Type": "application/json" });
                             res.end(JSON.stringify({ ok: false, error: "npc_not_found" }));
                             return;
                         }
-                        const npc = result.npc as Record<string, any>;
-                        if (!npc.tags) npc.tags = [];
-                        
+                        const npc = npc_any as Record<string, any>;
+                        if (!Array.isArray(npc.tags)) npc.tags = [];
+                         
                         // Check if tag already exists - update it instead of creating duplicate
                         const existingTagIndex = (npc.tags as any[]).findIndex((t: any) => t.name === tag_name);
                         let isNewTag = false;
                         let oldMag = 0;
-                        
+                         
                         if (existingTagIndex >= 0) {
                             // Update existing tag
                             oldMag = npc.tags[existingTagIndex].mag;
-                            npc.tags[existingTagIndex].mag = mag || 1;
-                            npc.tags[existingTagIndex].meta = meta || [];
+                            npc.tags[existingTagIndex].mag = next_mag;
+                            npc.tags[existingTagIndex].meta = next_meta;
                         } else {
                             // Add new tag
                             isNewTag = true;
                             const tagData = {
                                 name: tag_name,
-                                mag: mag || 1,
-                                meta: meta || []
+                                mag: next_mag,
+                                meta: next_meta
                             };
                             (npc.tags as any[]).push(tagData);
                         }
                         
-                        save_npc(slot, entity_id, npc);
-                        
+                        npc_cache.set(entity_key(slot, entity_id), npc);
+                        queue_save_npc(slot, entity_id);
+                         
                         // Emit appropriate event
                         if (isNewTag) {
                             emitTagChange({
                                 type: 'TAG_ADDED',
                                 entityRef: entity_ref,
                                 tagName: tag_name,
-                                newMag: mag || 1,
-                                meta: meta || [],
+                                newMag: next_mag,
+                                meta: next_meta,
                                 timestamp: Date.now(),
                                 source: 'api'
                             });
@@ -2757,22 +4225,22 @@ function start_http_server(log_path: string): void {
                                 entityRef: entity_ref,
                                 tagName: tag_name,
                                 oldMag,
-                                newMag: mag || 1,
-                                meta: meta || [],
+                                newMag: next_mag,
+                                meta: next_meta,
                                 timestamp: Date.now(),
                                 source: 'api'
                             });
                         }
                     } else {
-                        const result = load_actor(slot, entity_id);
-                        if (!result.ok || !result.actor) {
+                        const actor_any = get_actor_any_cached(slot, entity_id);
+                        if (!actor_any) {
                             res.writeHead(404, { "Content-Type": "application/json" });
                             res.end(JSON.stringify({ ok: false, error: "actor_not_found" }));
                             return;
                         }
-                        const actor = result.actor as Record<string, any>;
-                        if (!actor.tags) actor.tags = [];
-                        
+                        const actor = actor_any as Record<string, any>;
+                        if (!Array.isArray(actor.tags)) actor.tags = [];
+                         
                         // Check if tag already exists - update it instead of creating duplicate
                         const existingTagIndex = (actor.tags as any[]).findIndex((t: any) => t.name === tag_name);
                         let isNewTag = false;
@@ -2781,29 +4249,30 @@ function start_http_server(log_path: string): void {
                         if (existingTagIndex >= 0) {
                             // Update existing tag
                             oldMag = actor.tags[existingTagIndex].mag;
-                            actor.tags[existingTagIndex].mag = mag || 1;
-                            actor.tags[existingTagIndex].meta = meta || [];
+                            actor.tags[existingTagIndex].mag = next_mag;
+                            actor.tags[existingTagIndex].meta = next_meta;
                         } else {
                             // Add new tag
                             isNewTag = true;
                             const tagData = {
                                 name: tag_name,
-                                mag: mag || 1,
-                                meta: meta || []
+                                mag: next_mag,
+                                meta: next_meta
                             };
                             (actor.tags as any[]).push(tagData);
                         }
                         
-                        save_actor(slot, entity_id, actor);
-                        
+                        actor_cache.set(entity_key(slot, entity_id), actor);
+                        queue_save_actor(slot, entity_id);
+                         
                         // Emit appropriate event
                         if (isNewTag) {
                             emitTagChange({
                                 type: 'TAG_ADDED',
                                 entityRef: entity_ref,
                                 tagName: tag_name,
-                                newMag: mag || 1,
-                                meta: meta || [],
+                                newMag: next_mag,
+                                meta: next_meta,
                                 timestamp: Date.now(),
                                 source: 'api'
                             });
@@ -2813,8 +4282,8 @@ function start_http_server(log_path: string): void {
                                 entityRef: entity_ref,
                                 tagName: tag_name,
                                 oldMag,
-                                newMag: mag || 1,
-                                meta: meta || [],
+                                newMag: next_mag,
+                                meta: next_meta,
                                 timestamp: Date.now(),
                                 source: 'api'
                             });
@@ -2823,11 +4292,126 @@ function start_http_server(log_path: string): void {
 
                     debug_log("API", `/api/tag/add: Added ${tag_name} to ${entity_ref}`);
                     res.writeHead(200, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ ok: true, entity_ref, tag_name, mag }));
+                    res.end(JSON.stringify({ ok: true, entity_ref, tag_name, mag: next_mag }));
                 } catch (err: any) {
                     debug_error("API", `/api/tag/add request error`, err);
                     res.writeHead(500, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: err?.message ?? "tag_add_failed" }));
+                }
+            });
+            return;
+        }
+
+        // POST /api/tag/remove - Remove a tag from an entity (for testing)
+        if (url.pathname === "/api/tag/remove") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+            if (!Number.isFinite(slot) || slot <= 0) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+            req.on("end", async () => {
+                try {
+                    const data = body ? JSON.parse(body) : {};
+                    const { entity_ref, tag_name } = data;
+
+                    if (!entity_ref || !tag_name) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                        return;
+                    }
+
+                    const is_npc = String(entity_ref).startsWith("npc.");
+                    const entity_id = String(entity_ref).replace(/^(npc|actor)\./, "");
+                    const want = String(tag_name);
+
+                    if (is_npc) {
+                        const npc_any = get_npc_any_cached(slot, entity_id);
+                        if (!npc_any) {
+                            res.writeHead(404, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: false, error: "npc_not_found" }));
+                            return;
+                        }
+                        const npc = npc_any as Record<string, any>;
+                        if (!Array.isArray(npc.tags)) npc.tags = [];
+
+                        const idx = (npc.tags as any[]).findIndex((t: any) => t && t.name === want);
+                        if (idx < 0) {
+                            res.writeHead(200, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: true, entity_ref, tag_name: want, removed: false }));
+                            return;
+                        }
+
+                        const old = npc.tags[idx];
+                        const oldMag = Number(old?.mag ?? 0) || 0;
+                        const meta = Array.isArray(old?.meta) ? old.meta : [];
+                        (npc.tags as any[]).splice(idx, 1);
+                        npc_cache.set(entity_key(slot, entity_id), npc);
+                        queue_save_npc(slot, entity_id);
+
+                        emitTagChange({
+                            type: 'TAG_REMOVED',
+                            entityRef: entity_ref,
+                            tagName: want,
+                            newMag: 0,
+                            oldMag,
+                            meta,
+                            timestamp: Date.now(),
+                            source: 'api',
+                        });
+                    } else {
+                        const actor_any = get_actor_any_cached(slot, entity_id);
+                        if (!actor_any) {
+                            res.writeHead(404, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: false, error: "actor_not_found" }));
+                            return;
+                        }
+                        const actor = actor_any as Record<string, any>;
+                        if (!Array.isArray(actor.tags)) actor.tags = [];
+
+                        const idx = (actor.tags as any[]).findIndex((t: any) => t && t.name === want);
+                        if (idx < 0) {
+                            res.writeHead(200, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: true, entity_ref, tag_name: want, removed: false }));
+                            return;
+                        }
+
+                        const old = actor.tags[idx];
+                        const oldMag = Number(old?.mag ?? 0) || 0;
+                        const meta = Array.isArray(old?.meta) ? old.meta : [];
+                        (actor.tags as any[]).splice(idx, 1);
+                        actor_cache.set(entity_key(slot, entity_id), actor);
+                        queue_save_actor(slot, entity_id);
+
+                        emitTagChange({
+                            type: 'TAG_REMOVED',
+                            entityRef: entity_ref,
+                            tagName: want,
+                            newMag: 0,
+                            oldMag,
+                            meta,
+                            timestamp: Date.now(),
+                            source: 'api',
+                        });
+                    }
+
+                    debug_log("API", `/api/tag/remove: Removed ${want} from ${entity_ref}`);
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, entity_ref, tag_name: want, removed: true }));
+                } catch (err: any) {
+                    debug_error("API", `/api/tag/remove request error`, err);
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? "tag_remove_failed" }));
                 }
             });
             return;
@@ -3310,76 +4894,14 @@ function start_http_server(log_path: string): void {
         }
 
         if (url.pathname === "/api/actor/move") {
-            if (req.method !== "POST") {
-                res.writeHead(405, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
-                return;
-            }
-
-            const slot_raw = url.searchParams.get("slot");
-            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
-            if (!Number.isFinite(slot) || slot <= 0) {
-                res.writeHead(400, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
-                return;
-            }
-
-            const actor_id = url.searchParams.get("actor_id");
-            if (!actor_id) {
-                res.writeHead(400, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: false, error: "missing_actor_id" }));
-                return;
-            }
-
-            // Collect request body
-            let body = "";
-            req.on("data", (chunk: Buffer) => {
-                body += chunk.toString();
-            });
-            
-            req.on("end", () => {
-                try {
-                    const data = JSON.parse(body) as { x?: number; y?: number };
-                    
-                    if (typeof data.x !== "number" || typeof data.y !== "number") {
-                        res.writeHead(400, { "Content-Type": "application/json" });
-                        res.end(JSON.stringify({ ok: false, error: "invalid_position" }));
-                        return;
-                    }
-
-                    // Load and update actor
-                    const actor_res = load_actor(slot, actor_id);
-                    if (!actor_res.ok) {
-                        res.writeHead(404, { "Content-Type": "application/json" });
-                        res.end(JSON.stringify({ ok: false, error: "actor_not_found" }));
-                        return;
-                    }
-
-                    const actor = actor_res.actor as Record<string, unknown>;
-                    if (!actor.location) {
-                        actor.location = {};
-                    }
-                    (actor.location as Record<string, unknown>).tile = { x: data.x, y: data.y };
-                    
-                    save_actor(slot, actor_id, actor);
-                    
-                    debug_log("API", `Actor ${actor_id} position updated`, { slot, x: data.x, y: data.y });
-                    
-                    res.writeHead(200, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ ok: true, actor_id, position: { x: data.x, y: data.y } }));
-                } catch (err: any) {
-                    debug_error("API", `/api/actor/move failed for ${actor_id}`, err);
-                    res.writeHead(500, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ ok: false, error: err?.message ?? "move_failed" }));
-                }
-            });
-            
-            req.on("error", (err: any) => {
-                debug_error("API", `/api/actor/move request error for ${actor_id}`, err);
-                res.writeHead(500, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: false, error: "request_error" }));
-            });
-            
+            // Deprecated: movement is server-authoritative via /api/movement/*.
+            // Disabled to prevent split-brain / rubberband.
+            res.writeHead(410, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+                ok: false,
+                error: "deprecated",
+                message: "Use /api/movement/intent or /api/movement/move_to (server-authoritative movement)."
+            }));
             return;
         }
 
@@ -3498,6 +5020,192 @@ function start_http_server(log_path: string): void {
                     debug_error("API", "/api/place/spawn error", err);
                     res.writeHead(500, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: "internal_error" }));
+                }
+            });
+            return;
+        }
+
+        // POST /api/place/debug/structure - Spawn a 1-voxel OCCUPIES structure (for movement tests)
+        if (url.pathname === "/api/place/debug/structure") {
+            if (req.method !== 'POST') {
+                res.writeHead(405, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' }));
+                return;
+            }
+
+            let body = '';
+            req.on('data', (chunk) => { body += chunk; });
+            req.on('end', () => {
+                try {
+                    const data = body ? JSON.parse(body) : {};
+                    const slot = Number(data?.slot ?? data_slot_number);
+                    const place_id = String(data?.place_id ?? '');
+                    const x = Number(data?.x);
+                    const y = Number(data?.y);
+                    const z = Number(data?.z);
+                    const id = String(data?.id ?? `debug_occ_${Date.now()}`);
+
+                    if (!Number.isFinite(slot) || slot <= 0) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'invalid_slot' }));
+                        return;
+                    }
+                    if (!place_id) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'missing_place_id' }));
+                        return;
+                    }
+                    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'invalid_xyz' }));
+                        return;
+                    }
+
+                    const place_res = load_place(slot, place_id);
+                    if (!place_res.ok) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'place_not_found' }));
+                        return;
+                    }
+
+                    const place_any: any = place_res.place as any;
+                    if (!Array.isArray(place_any.structures)) place_any.structures = [];
+
+                    const s = {
+                        id,
+                        origin: { x: Math.floor(x), y: Math.floor(y), z: Math.floor(z) },
+                        facing: 'north',
+                        tags: [{ name: 'OCCUPIES', mag: 1, meta: [] }],
+                        body_model: {
+                            physical: [{ part: 'body', dx: 0, dy: 0, dz: 0, tags: [{ name: 'OCCUPIES', mag: 1, meta: [] }] }],
+                        },
+                        __debug: true,
+                    };
+
+                    // Replace same id if present.
+                    place_any.structures = place_any.structures.filter((it: any) => String(it?.id ?? '') !== id);
+                    place_any.structures.push(s);
+
+                    save_place(slot, place_any);
+
+                    debug_log('MOVE_UNIFY_TEST', 'debug structure spawned', { slot, place_id, id, at: { x: Math.floor(x), y: Math.floor(y), z: Math.floor(z) } });
+
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, slot, place_id, id }));
+                } catch (err: any) {
+                    debug_error('API', '/api/place/debug/structure error', err);
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? 'internal_error' }));
+                }
+            });
+            return;
+        }
+
+        // POST /api/place/debug/structure/clear - Remove debug structures
+        if (url.pathname === "/api/place/debug/structure/clear") {
+            if (req.method !== 'POST') {
+                res.writeHead(405, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' }));
+                return;
+            }
+
+            let body = '';
+            req.on('data', (chunk) => { body += chunk; });
+            req.on('end', () => {
+                try {
+                    const data = body ? JSON.parse(body) : {};
+                    const slot = Number(data?.slot ?? data_slot_number);
+                    const place_id = String(data?.place_id ?? '');
+                    if (!Number.isFinite(slot) || slot <= 0) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'invalid_slot' }));
+                        return;
+                    }
+                    if (!place_id) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'missing_place_id' }));
+                        return;
+                    }
+
+                    const place_res = load_place(slot, place_id);
+                    if (!place_res.ok) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'place_not_found' }));
+                        return;
+                    }
+
+                    const place_any: any = place_res.place as any;
+                    const before = Array.isArray(place_any.structures) ? place_any.structures.length : 0;
+                    if (!Array.isArray(place_any.structures)) place_any.structures = [];
+                    place_any.structures = place_any.structures.filter((it: any) => !(it && typeof it === 'object' && (it as any).__debug));
+                    const after = place_any.structures.length;
+                    save_place(slot, place_any);
+
+                    debug_log('MOVE_UNIFY_TEST', 'debug structures cleared', { slot, place_id, removed: Math.max(0, before - after) });
+
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, slot, place_id, removed: Math.max(0, before - after) }));
+                } catch (err: any) {
+                    debug_error('API', '/api/place/debug/structure/clear error', err);
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? 'internal_error' }));
+                }
+            });
+            return;
+        }
+
+        // POST /api/actor/debug/body_model - Set actor body_model_id (for movement tests)
+        if (url.pathname === "/api/actor/debug/body_model") {
+            if (req.method !== 'POST') {
+                res.writeHead(405, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' }));
+                return;
+            }
+
+            let body = '';
+            req.on('data', (chunk) => { body += chunk; });
+            req.on('end', () => {
+                try {
+                    const data = body ? JSON.parse(body) : {};
+                    const slot = Number(data?.slot ?? data_slot_number);
+                    const actor_id = String(data?.actor_id ?? '');
+                    const body_model_id = String(data?.body_model_id ?? '');
+
+                    if (!Number.isFinite(slot) || slot <= 0) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'invalid_slot' }));
+                        return;
+                    }
+                    if (!actor_id) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'missing_actor_id' }));
+                        return;
+                    }
+                    if (!body_model_id) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'missing_body_model_id' }));
+                        return;
+                    }
+
+                    const actor_res = load_actor(slot, actor_id);
+                    if (!actor_res.ok) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'actor_not_found' }));
+                        return;
+                    }
+
+                    const actor_any: any = actor_res.actor as any;
+                    actor_any.body_model_id = body_model_id;
+                    save_actor(slot, actor_id, actor_any);
+
+                    debug_log('MOVE_UNIFY_TEST', 'actor body_model_id set', { slot, actor_id, body_model_id });
+
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, slot, actor_id, body_model_id }));
+                } catch (err: any) {
+                    debug_error('API', '/api/actor/debug/body_model error', err);
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? 'internal_error' }));
                 }
             });
             return;

@@ -199,8 +199,9 @@ function startDev() {
   const processes = [
     {
       name: "event_bridge",
-      cmd: "node",
-      args: ["dist/event_bridge/main.js"],
+      // Use tsx in dev so code changes apply immediately.
+      cmd: "tsx",
+      args: ["src/event_bridge/main.ts"],
     },
     { name: "interface", cmd: "tsx", args: ["src/interface_program/main.ts"] },
     { name: "data_broker", cmd: "tsx", args: ["src/data_broker/main.ts"] },

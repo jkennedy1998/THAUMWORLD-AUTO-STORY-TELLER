@@ -2,6 +2,15 @@
 
 Date: 2026-03-10
 
+## Amendment (2026-03-12): Focus Layers Are UI, Not Movement Gates
+
+The 3-layer `focus_world_z` viewport is a rendering/interaction affordance.
+It must not be used as a hard gate that silently blocks movement.
+
+- Input still resolves clicks/hover at `(x,y,focus_world_z)`.
+- Movement legality remains voxel-based (`OCCUPIES` + support) and is enforced at step-time.
+- Click-to-move may use the focused layer as a *target intent*, but must not teleport the entity to that layer.
+
 ## Intent
 
 Support entities and tiles that occupy multiple voxels in the `(x,y,z)` matrix while remaining:
@@ -158,6 +167,11 @@ Input resolves to `(x,y,focus_world_z)`.
 Camera targeting note:
 
 - When selecting an owner, the camera should use the owner's anchor voxel for pan and focus-z.
+
+Movement note:
+
+- The focused layer affects what you can click/inspect, not whether movement is allowed.
+- Any movement command must be expressed as a sequence of discrete steps and validated via the unified legality helper.
 
 ### E) Multi-Voxel Tiles / Structures
 

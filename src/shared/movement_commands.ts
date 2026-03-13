@@ -229,6 +229,11 @@ export interface NPCPositionUpdateMessage {
   npc_ref: string;
   position: { x: number; y: number };
   place_id: string;
+  facing?: string;
+  movement_schedule?: any;
+  breath_index?: number;
+  breath_last_processed?: number;
+  breath_last_processed_ms?: number;
   timestamp: string;
   sender: "renderer";
   recipient: "npc_ai";

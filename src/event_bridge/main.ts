@@ -13,6 +13,11 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { debug_event } from '../shared/debug_event.js';
 import type { TagChangeEvent } from '../shared/event_emitter.js';
 
+type BridgeMessage = {
+  type: string;
+  data?: any;
+};
+
 const HTTP_PORT = 8788;
 const WS_PORT = 8789;
 
@@ -24,6 +29,8 @@ export class EventBridge {
   private httpServer: http.Server | null = null;
   private wsServer: WebSocketServer | null = null;
   private wsClients: Set<WebSocket> = new Set();
+
+  private breathTickCount: number = 0;
 
   /**
    * Start both HTTP and WebSocket servers
@@ -52,6 +59,8 @@ export class EventBridge {
 
       if (req.method === 'POST' && req.url === '/api/events/emit') {
         this.handleEventPost(req, res);
+      } else if (req.method === 'POST' && req.url === '/api/events/emit_any') {
+        this.handleAnyEventPost(req, res);
       } else {
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Not found' }));
@@ -101,6 +110,57 @@ export class EventBridge {
           type: event.type,
           entityRef: event.entityRef,
           tagName: event.tagName,
+          clientCount: this.wsClients.size
+        });
+
+      } catch (err) {
+        debug_event('EVENT_BRIDGE', 'event_parse_error', { error: (err as Error).message });
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON' }));
+      }
+    });
+  }
+
+  /**
+   * Handle POST request with arbitrary event data
+   */
+  private handleAnyEventPost(req: http.IncomingMessage, res: http.ServerResponse): void {
+    let body = '';
+
+    req.on('data', (chunk) => {
+      body += chunk.toString();
+    });
+
+    req.on('end', () => {
+      try {
+        const msg: BridgeMessage = JSON.parse(body);
+
+        const t = String(msg?.type ?? '');
+        if (!t) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Missing type' }));
+          return;
+        }
+
+        this.broadcastToRendererAny(t, msg?.data);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          success: true,
+          clientsNotified: this.wsClients.size
+        }));
+
+        // Avoid log spam: breath ticks are high-frequency.
+        if (t === 'PLACE_BREATH_TICK') {
+          this.breathTickCount++;
+          if (this.breathTickCount % 60 === 0) {
+            debug_event('EVENT_BRIDGE', 'breath_tick_received', { clientCount: this.wsClients.size });
+          }
+          return;
+        }
+
+        debug_event('EVENT_BRIDGE', 'event_received_and_broadcast_any', {
+          type: t,
           clientCount: this.wsClients.size
         });
 
@@ -167,6 +227,26 @@ export class EventBridge {
     if (sentCount > 0) {
       debug_event('EVENT_BRIDGE', 'broadcast_sent', {
         type: event.type,
+        recipientCount: sentCount
+      });
+    }
+  }
+
+  private broadcastToRendererAny(type: string, data: any): void {
+    const message = JSON.stringify({ type, data });
+
+    let sentCount = 0;
+    this.wsClients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(message);
+        sentCount++;
+      }
+    });
+
+    // Avoid log spam for breath ticks.
+    if (sentCount > 0 && type !== 'PLACE_BREATH_TICK') {
+      debug_event('EVENT_BRIDGE', 'broadcast_sent', {
+        type,
         recipientCount: sentCount
       });
     }

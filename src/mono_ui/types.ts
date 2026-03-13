@@ -163,6 +163,8 @@ export type Module = {
     OnTextInput?(text: string): void;
     // optional global shortcut lane (UI calls first)
     OnGlobalKeyDown?(e: KeyboardEvent): void;
+    // optional global key-up lane (UI calls even when module is not focused)
+    OnGlobalKeyUp?(e: KeyboardEvent): void;
 
     // optional global pointer lane (UI calls for all modules)
     OnGlobalPointerDown?(e: PointerEvent): void;

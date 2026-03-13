@@ -2,6 +2,18 @@
 
 Date: 2026-03-10
 
+## Amendment (2026-03-12): Platformer-Style Single-Axis Steps
+
+New invariant for realtime movement:
+
+- A single step changes exactly one axis group:
+  - Horizontal: cardinal `(dx,dy,0)` (no diagonal XY)
+  - Vertical: `(0,0,dz)` where `dz` is `+1` (jump) or `-1` (fall)
+- No step changes `(x,y)` and `z` at the same time.
+- Per entity per breath: attempt at most one step. Vertical preempts horizontal.
+- Jump uses the same cadence/breath pacing as normal movement (for now).
+- Air control exists: horizontal movement while airborne is allowed but is half speed.
+
 ## Intent
 
 Define a realtime, tile-based movement model that remains deterministic, voxel-aware, and compatible with future turn/action rules.
@@ -16,6 +28,11 @@ Dependency note:
 - Movement legality + pathfinding unification (single source of truth) is specified in:
   - `docs/plans/2026_03_11_movement_unification_plan.md`
   Realtime movement should build on that legality API rather than introducing new tile-walkable logic.
+
+Authority note:
+
+- Server is the authority for breath ticks, stepping, physics, and final positions.
+- Only active places run a breath loop. Inactive places are aged/caught-up on load.
 
 ## Guiding Principles
 
@@ -57,7 +74,8 @@ Dependency note:
 
 - **Realtime step** (WASD / arrows): repeatedly attempt a single-tile step as time allows.
 - **Command move** (click-to-move): compute a path and execute the same step attempts.
-- **Jump/Vault intent** (Space): allow small step sequences (`up -> over -> down`) gated by voxel legality.
+- **Jump intent** (Space): produce vertical-only `dz=+1` steps over multiple breaths.
+  Horizontal motion during/after jump uses air control (cardinal, half speed).
 
 Stealth variant (no sprint)
 
@@ -76,16 +94,22 @@ Authoritative (rules + accounting)
 - Action pipeline owns movement allowance accounting and turn integration.
 - Movement legality is defined by the voxel occupancy rules (tiles + entity body models) and must be shared.
 
-Renderer responsibilities
+Renderer responsibilities (authoritative input state + optional prediction)
 
-- Capture realtime input state (WASD).
-- Request/drive step attempts on a fixed tick cadence.
-- Animate/interpolate between discrete legal positions.
+- Capture realtime input state as stable action-state (no reliance on OS key repeat).
+- Send intent/goal updates to the server (do not advance authoritative tile positions).
+- Optional: predict only the local player actor for responsiveness.
+- Strict reconcile: server position always wins; snap on mismatch.
+- Animate/interpolate between discrete positions (prediction or server updates).
 
 Important constraint
 
-- Realtime step and click-to-move must call the same stepping function so they stay speed-consistent.
-  (Pathfinding changes *which steps*, not *how fast* steps execute.)
+- Keyboard realtime step and click-to-move must share:
+  - the same speed model (breaths_per_step derived from sheet stats)
+  - the same legality checks (unified can_place_volume)
+  - the same server-side stepper cadence (breath-gated)
+
+  Pathfinding changes *which steps*, not *how fast* steps execute.
 
 ## Existing Systems To Reuse (Do Not Rebuild)
 
@@ -175,6 +199,11 @@ Consistency requirement:
 - Manual WASD stepping and click-to-move both use the same TPM for the same entity and mode.
 - Pathfinding cost/weights do not change step pacing; they only choose a step sequence.
 
+Air control pacing rule:
+
+- While airborne, horizontal cadence is half speed:
+  - `breaths_per_step_xy_air = breaths_per_step_xy_ground * 2`
+
 ## World Scale (Tiles -> Feet)
 
 Establish a shared constant for any UI text, tuning, and sense-range conversions:
@@ -235,9 +264,20 @@ Facing note:
 
 We do not rely on OS key-repeat. Instead:
 
-- Track key state (W/A/S/D down/up, and optional last-pressed direction).
-- On each movement tick, decide at most one step intent.
-- If the mover is ready for a new step (based on `ms_per_tile`), attempt the step.
+- Track action-state (move_left/right/up/down, jump), plus last-pressed priority.
+- Input changes produce an intent stream (dx,dy) that the server samples on breath.
+
+Server authority note (current target)
+
+- The server is the only system that advances authoritative positions.
+- Held intent wins over click-to-move.
+- If intent becomes active while a click goal exists, discard the goal.
+- Client prediction may advance the local actor visually, but must strictly reconcile.
+
+Breath scheduling note:
+
+- Under server authority, realtime input is an intent stream sampled each breath.
+  Entities only attempt a substep when scheduled (`next_breath <= place.breath_index`).
 
 This creates Hollow Knight-style responsiveness while remaining deterministic.
 
@@ -246,6 +286,19 @@ Controller behavior:
 - Buffer 1 next direction while a step is in progress (tight, forgiving feel).
 - Priority: newest pressed direction wins.
 - If blocked, keep the buffered direction for a short time window (e.g. 100-150ms) so cornering feels good.
+
+Step selection priority (authoritative):
+
+- Each entity attempts at most one step per breath.
+- If a vertical step is pending/required, it preempts horizontal:
+  1) Jump: if `jump_steps_remaining > 0`, attempt `parameters.step = { dx:0, dy:0, dz:+1 }`
+  2) Gravity: if unsupported and has `GRAVITY`, attempt `parameters.step = { dx:0, dy:0, dz:-1 }`
+  3) Horizontal: if `desired_dir` exists and cadence allows, attempt `parameters.step = { dx, dy, dz:0 }`
+
+Support requirement by locomotion context:
+
+- Grounded horizontal steps require support at destination.
+- Airborne horizontal steps do not require support at destination (collision only).
 
 Integration note (current duplication):
 
@@ -292,6 +345,11 @@ Execution-time rule:
 
 Jump/vault is not free-fly; it is a deterministic sequence of legal placements.
 
+Physics note:
+
+- Falling is physics (gravity), not a movement verb.
+  Gravity applies after controller substeps each breath.
+
 Example vault over a 1-voxel obstacle:
 
 - If forward stance-origin voxel is blocked but `up` and `up+forward` are legal and supported appropriately,
@@ -331,17 +389,47 @@ Legend:
 
 ### Phase 2: Realtime Step Controller (Renderer)
 
-- [ ] Implement key state tracking (W/A/S/D and/or arrows) independent of OS key repeat.
-- [ ] On each movement tick, request at most one step based on `ms_per_tile`.
-- [ ] Add 1-step buffer and last-pressed direction priority.
-- [ ] Remove/replace current WASD camera-pan binding in PlaceModule; keep arrows or modifiers for camera.
+- [~] Implement action-state input tracking independent of OS key repeat (`src/mono_ui/runtime/input_actions.ts`).
+- [~] Last-pressed direction priority (cardinal only).
+- [~] Remove WASD camera-pan binding in PlaceModule; keep pan as Space+drag.
+- [~] Renderer-driven stepping was prototyped but is no longer the authority.
 
-### Phase 3: Make Click-To-Move Use The Same Stepper
+### Phase 2.5: Intent Stream (Renderer -> Server)
 
-- [ ] Ensure click-to-move and realtime stepping call the same step execution path and use the same `speed_tpm`.
-- [ ] Remove remaining ad-hoc pathing walkable checks that diverge from voxel legality.
+- [ ] Send `POST /api/movement/intent` only on intent change (down/up / direction change).
+- [ ] On blur/reset, send intent clear (prevents stuck intent).
+- [ ] MOVE_UNIFY_TEST PASS intent stream stable under key repeat (no spam).
 
-### Phase 4: Movement Accounting Plumbing (Action Pipeline Ready)
+### Phase 3: Server-Authoritative Stepping (Breath)
+
+- [ ] Implement per-entity movement controller state on the server (intent, mode, next_breath, breaths_per_step).
+- [ ] Implement click-to-move goal/path on the server; discard goal when intent becomes active.
+- [ ] Attempt at most 1 step per entity per breath (vertical preempts horizontal).
+- [ ] Broadcast authoritative movement updates to renderer (EventBridge).
+- [ ] MOVE_UNIFY_TEST PASS server stepper advances actor on breath.
+- [ ] MOVE_UNIFY_TEST PASS held intent overrides click (goal discarded).
+
+### Phase 3.5: Client Prediction + Strict Reconcile
+
+- [ ] Predict only local actor positions (optional; start with none if simpler).
+- [ ] Strict reconcile on server movement event: snap on mismatch.
+- [ ] MOVE_UNIFY_TEST PASS strict reconcile snaps to server.
+
+### Phase 3.8: Retire Renderer Steppers (Client -> Server)
+
+- [ ] Remove renderer-authoritative stepping for both click-to-move and WASD.
+- [ ] Click-to-move sends `POST /api/movement/move_to` (server computes path + steps).
+- [ ] WASD sends `POST /api/movement/intent` (server steps on breath).
+- [ ] Ensure both paths use the same `breaths_per_step` (derived from sheet `movement.walk` + mode).
+- [ ] Ensure both paths use unified legality at step-time (`can_place_volume`).
+
+### Phase 4: Server Breath Scheduling
+
+- [x] Implement per-active-place breath loop (`breath_index`, `breath_last_processed`, websocket tick stream)
+- [~] Implement entity scheduling (`breaths_per_step`, `next_breath`) for movement (gravity uses it; movement stepping pending)
+- [x] Add coarse catch-up on load (aging/effects + capped settle)
+
+### Phase 5: Movement Accounting Plumbing (Action Pipeline Ready)
 
 - [ ] Route movement accounting through the existing `MOVE` verb + subtype (`WALK`/`SNEAKWALK`/etc, `REFRESH`).
 - [ ] Route successful steps through action pipeline accounting (decrement pools).
@@ -352,18 +440,18 @@ Testing mode note:
 
 - [ ] In unpaused/free movement tests, allow a feature flag to bypass accounting (infinite movement) while keeping the call sites intact.
 
-### Phase 5: 3D Pathfinding Over Stance Origins (Volume-Aware)
+### Phase 6: 3D Pathfinding Over Stance Origins (Volume-Aware)
 
 - [ ] Implement A*/Dijkstra over `{x,y,z}` nodes using unified legality helper.
 - [ ] Weighted edges for vertical sequences (vault/jump) without implying flight.
 - [ ] Add small deterministic test scenes.
 
-### Phase 6: Jump/Vault Sequences
+### Phase 7: Jump/Vault Sequences
 
 - [ ] Implement intent-gated sequences (`up -> over -> down`) with legality checks at each intermediate step.
 - [ ] Add rejection reasons to logs for tuning.
 
-### Phase 7: Tuning + Feel
+### Phase 8: Tuning + Feel
 
 - [ ] Establish a single speed tuning source for all movers and modes (walk/sneak).
 - [ ] Ensure consistent acceleration feel via buffering, corner forgiveness, and step pacing.

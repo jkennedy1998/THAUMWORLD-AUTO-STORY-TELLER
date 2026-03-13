@@ -14,6 +14,8 @@ import type { Place } from '../types/place.js';
 import { debug_warn, debug_log } from '../shared/debug.js';
 import { resolve_char } from '../render_shaders/resolver.js';
 import { init_npc_movement, stop_place_movement, is_npc_moving } from '../npc_ai/movement_loop.js';
+import { debug_peek_next_step } from '../shared/movement_engine.js';
+import { can_place_volume } from '../place_storage/movement_legality.js';
 import { start_movement_command_handler, set_command_handler_place } from '../mono_ui/modules/movement_command_handler.js';
 import { get_color_by_name } from '../mono_ui/colors.js';
 import { infer_action_verb_hint } from '../shared/intent_hint.js';
@@ -193,6 +195,59 @@ export function create_app_state(): AppState {
             open_npc_modules: new Set<string>(),
         },
     };
+
+    // Keep the current place "active" on the server so breath continues to tick
+    // even when the UI is not polling /api/place.
+    let place_touch_interval_id: number | null = null;
+    let place_touch_place_id: string | null = null;
+
+    function stop_place_touch_heartbeat(): void {
+        if (place_touch_interval_id !== null) {
+            window.clearInterval(place_touch_interval_id);
+            place_touch_interval_id = null;
+        }
+        place_touch_place_id = null;
+    }
+
+    async function send_place_touch_heartbeat(): Promise<void> {
+        const place_id = ui_state.place.current_place_id;
+        if (!place_id) return;
+
+        const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+        try {
+            await fetch(`${base_url}/api/place/touch`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    slot: APP_CONFIG.selected_data_slot,
+                    place_id,
+                }),
+            });
+        } catch {
+            // Ignore transient failures; the next heartbeat will retry.
+        }
+    }
+
+    function ensure_place_touch_heartbeat_running(): void {
+        const place_id = ui_state.place.current_place_id;
+        if (!place_id) {
+            stop_place_touch_heartbeat();
+            return;
+        }
+
+        if (place_touch_interval_id !== null && place_touch_place_id === place_id) {
+            return;
+        }
+
+        stop_place_touch_heartbeat();
+        place_touch_place_id = place_id;
+
+        // Kick immediately, then keep alive every 2s.
+        void send_place_touch_heartbeat();
+        place_touch_interval_id = window.setInterval(() => {
+            void send_place_touch_heartbeat();
+        }, 2000);
+    }
 
     const MODULE_LAYOUT_STORAGE_KEY = 'thaumworld:module_layout:v1';
     const PLACE_FOCUS_Z_STORAGE_KEY = 'thaumworld:place_focus_z:v1';
@@ -640,16 +695,7 @@ export function create_app_state(): AppState {
             
             const actor = actor_data.actor;
 
-            // Track current world-Z center from actor location (3dification viewport window).
-            try {
-                const z = Number((actor as any)?.location?.elevation);
-                if (Number.isFinite(z)) {
-                    ui_state.place.world_z_center = Math.floor(z);
-                    debug_log(`[PlaceZ] world_z_center=${ui_state.place.world_z_center} (from actor.location.elevation)`);
-                }
-            } catch {
-                // ignore
-            }
+            // View centering is derived from the loaded place (not actor elevation).
 
             // Phase 5: Inline body_slots are authoritative
             const body_slots = (actor.body_slots as any) || {};
@@ -1211,6 +1257,7 @@ export function create_app_state(): AppState {
         if (!place_id) {
             ui_state.place.current_place_id = null;
             ui_state.place.current_place = null;
+            stop_place_touch_heartbeat();
             return;
         }
 
@@ -1221,6 +1268,10 @@ export function create_app_state(): AppState {
             // Reset view state for new place
             ui_state.place.current_place = null;
         }
+
+        // Keep server breath ticking for the current place while the player is in it.
+        // (This prevents movement reverting to "one step per click" when /api/place polling stops.)
+        ensure_place_touch_heartbeat_running();
 
         // Fetch place data from API
         try {
@@ -1259,15 +1310,12 @@ export function create_app_state(): AppState {
                 
                 const next_place = data.place;
 
-                // Update world-Z center from the player actor when available.
+                // View centering: keep the 3-plane window anchored to the place base elevation
+                // so the support plane (base_z-1) never "disappears" when the actor stands on z+1.
                 try {
-                    const want_ref = `actor.${APP_CONFIG.input_actor_id}`;
-                    const a = next_place.contents?.actors_present?.find((x: any) => x?.actor_ref === want_ref) ?? null;
-                    const z = Number((a as any)?.elevation);
-                    if (Number.isFinite(z)) {
-                        ui_state.place.world_z_center = Math.floor(z);
-                        debug_log(`[PlaceZ] world_z_center=${ui_state.place.world_z_center} (from /api/place contents)`);
-                    }
+                    const base_z = Math.floor(Number((next_place as any)?.coordinates?.elevation ?? 0)) || 0;
+                    ui_state.place.world_z_center = base_z;
+                    debug_log(`[PlaceZ] world_z_center=${ui_state.place.world_z_center} (from place.coordinates.elevation)`);
                 } catch {
                     // ignore
                 }
@@ -1542,9 +1590,12 @@ export function create_app_state(): AppState {
                 ui_state.controls.region_label = typeof data.region === 'string' ? data.region : null;
                 ui_state.controls.targets_ready = true;
 
-                // Update current place view (skip if NPC movement is active to prevent snap-back)
+                // Update current place view only when the place changes.
+                // Movement is now streamed via websocket; frequent /api/place polling can reintroduce stale snapshots.
                 const place_id = data.place_id ?? null;
-                if (!ui_state.place.npc_movement_active) {
+                if (place_id !== ui_state.place.current_place_id) {
+                    await update_current_place(place_id);
+                } else if (!ui_state.place.current_place && place_id) {
                     await update_current_place(place_id);
                 }
 
@@ -2093,6 +2144,9 @@ export function create_app_state(): AppState {
     const DEBUG_X0 = 98;         // Start from right side (after status text area)
     const DEBUG_X1 = 108;        // Button width
 
+    // Second debug row for movement unification tests.
+    const DEBUG_Y_TEST = DEBUG_Y_TOP - 2;
+
     // Do not seed the log window with placeholder text.
 
     let input_submit: (() => void) | null = null;
@@ -2246,32 +2300,10 @@ export function create_app_state(): AppState {
                 // Target not in available list - could be out of range or not visible
                 return false;
             },
-            on_actor_move: async (actor_ref: string, new_position: { x: number; y: number }): Promise<void> => {
-                // Persist actor position change via API
-                // This prevents the actor from snapping back when place data refreshes
-                const actor_id = actor_ref.replace('actor.', '');
-                const slot = APP_CONFIG.selected_data_slot;
-                
-                try {
-                    const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                    const response = await fetch(
-                        `${base_url}/api/actor/move?slot=${slot}&actor_id=${encodeURIComponent(actor_id)}`,
-                        {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(new_position)
-                        }
-                    );
-                    
-                    if (!response.ok) {
-                        const error = await response.text();
-                        debug_warn('[mono_ui]', `Failed to save actor ${actor_id} position`, error);
-                    } else {
-                        debug_warn('[mono_ui]', `Actor ${actor_id} position saved to`, new_position);
-                    }
-                } catch (err) {
-                    debug_warn('[mono_ui]', `Error saving actor ${actor_id} position`, err);
-                }
+            // Server-authoritative movement: renderer does not persist actor position.
+            // (Movement intent/goal is sent via /api/movement/* and stepping is server-side.)
+            on_actor_move: async () => {
+                return;
             },
             on_inspect: async (target): Promise<void> => {
                 // Inspection from place module (right-click) routes through backend.
@@ -3639,6 +3671,85 @@ export function create_app_state(): AppState {
             },
         }),
 
+        // ================================
+        // MOVE_UNIFY_TEST helpers (Phase 5)
+        // ================================
+        // Note: legacy debug movement buttons that used /api/actor/move were removed.
+        // Movement is now server-authoritative via /api/movement/* only.
+
+        // Toggle GRAVITY tag on the actor (needed for falling tests).
+        make_button_module({
+            id: 'debug_gravity',
+            rect: { x0: DEBUG_X0 + 24, y0: DEBUG_Y_TEST, x1: DEBUG_X1 + 24, y1: DEBUG_Y_TEST + 1 },
+            label: 'GRAV',
+            rgb: get_color_by_name('vivid_cyan').rgb,
+            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
+            async OnPress() {
+                const actor_id = APP_CONFIG.input_actor_id;
+                const slot = APP_CONFIG.selected_data_slot;
+                const actor_ref = `actor.${actor_id}`;
+
+                const actor_res = await fetch(`http://localhost:8787/api/actor?id=${encodeURIComponent(actor_id)}&slot=${slot}`);
+                if (!actor_res.ok) return;
+                const actor_data = await actor_res.json();
+                const tags = Array.isArray(actor_data?.actor?.tags) ? actor_data.actor.tags : [];
+                const has_grav = tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'GRAVITY');
+
+                if (has_grav) {
+                    await fetch(`http://localhost:8787/api/tag/remove?slot=${slot}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ slot, entity_ref: actor_ref, tag_name: 'GRAVITY' }),
+                    });
+                    flash_status(['GRAVITY removed'], 1200);
+                } else {
+                    await fetch(`http://localhost:8787/api/tag/add?slot=${slot}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ slot, entity_ref: actor_ref, tag_name: 'GRAVITY', mag: 1, meta: [] }),
+                    });
+                    flash_status(['GRAVITY added'], 1200);
+                }
+
+                const place = get_current_place();
+                if (place) await update_current_place(place.id);
+            },
+        }),
+
+        // Note: levitate/teleport debug movement was removed with /api/actor/move.
+
+        // Toggle test body model for self-exclusion test.
+        make_button_module({
+            id: 'debug_body',
+            rect: { x0: DEBUG_X0 + 48, y0: DEBUG_Y_TEST, x1: DEBUG_X1 + 48, y1: DEBUG_Y_TEST + 1 },
+            label: 'BOD',
+            rgb: get_color_by_name('vivid_yellow').rgb,
+            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
+            async OnPress() {
+                const place = get_current_place();
+                if (!place) return;
+                const actor_id = APP_CONFIG.input_actor_id;
+                const actor_ref = `actor.${actor_id}`;
+                const actor = place.contents.actors_present.find((a: any) => a.actor_ref === actor_ref) as any;
+                if (!actor) return;
+
+                const cur = String(actor.body_model_id ?? '');
+                const next = cur === 'test.self_exclusion_y2' ? 'character.biped_2z' : 'test.self_exclusion_y2';
+                const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+                await fetch(`${base_url}/api/actor/debug/body_model`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ slot: APP_CONFIG.selected_data_slot, actor_id, body_model_id: next }),
+                });
+                flash_status([`Body model: ${next}`], 1500);
+                await update_current_place(place.id);
+            },
+        }),
+
+        // Note: support-from-occupant test is now handled by LIFT onto existing structures.
+
         make_roller_module({
             id: 'roller',
             rect: { x0: ROLL_X0, y0: BTN_Y0, x1: ROLL_X1, y1: BTN_Y1 },
@@ -4672,7 +4783,6 @@ export function create_app_state(): AppState {
             Focusable: false,
             Draw() {}, // No rendering
             OnGlobalKeyDown(e: KeyboardEvent) {
-                debug_log(`[GlobalKeyHandler] Key pressed: ${e.key}`);
                 if (e.key === 'i' || e.key === 'I') {
                     debug_log('[GlobalKeyHandler] I key detected, handling...');
                     e.preventDefault();
@@ -4747,19 +4857,9 @@ export function create_app_state(): AppState {
     // Seed debug window
     set_text_window_messages('debug', ['[debug] off | overlays:off', '[volume] NORMAL', '[move] WALK', '', '[region] (loading...)', 'Targets will appear here.']);
 
-    // Initialize NPC movement system
-    init_npc_movement((updated_place: Place) => {
-        // Update the current place data so the renderer shows NPC movement
-        if (ui_state.place.current_place && ui_state.place.current_place.id === updated_place.id) {
-            ui_state.place.current_place = updated_place;
-            // Keep movement active since we're updating from movement system
-            ui_state.place.npc_movement_active = true;
-        }
-    });
-
-    // Phase 8: Unified Movement Authority
-    // Start listening for movement commands from NPC_AI backend
-    const stop_command_handler = start_movement_command_handler(100);
+    // Server-authoritative movement: disable legacy NPC movement loops.
+    // NPC wandering and movement are now driven by the interface server breath+brain ticks.
+    ui_state.place.npc_movement_active = false;
 
     // Initial load of character data
     void refresh_character_data();

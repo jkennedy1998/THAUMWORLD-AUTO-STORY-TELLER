@@ -1458,6 +1458,11 @@ async function process_npc_position_updates(inbox_path: string): Promise<void> {
                     npc_ref: string;
                     position: { x: number; y: number };
                     place_id: string;
+                    facing?: string;
+                    movement_schedule?: any;
+                    breath_index?: number;
+                    breath_last_processed?: number;
+                    breath_last_processed_ms?: number;
                 };
                 
                 const npc_id = update.npc_ref.replace("npc.", "");
@@ -1491,6 +1496,23 @@ async function process_npc_position_updates(inbox_path: string): Promise<void> {
                     y: update.position.y
                 };
                 npc.location.place_id = update.place_id;
+
+                // Optional scheduling sync from renderer.
+                if (typeof update.facing === "string" && update.facing.trim()) {
+                    (npc as any).facing = String(update.facing).toLowerCase();
+                }
+                if (update.movement_schedule && typeof update.movement_schedule === "object") {
+                    (npc as any).movement_schedule = update.movement_schedule;
+                }
+                if (typeof update.breath_index === "number" && Number.isFinite(update.breath_index)) {
+                    (npc as any).breath_index = Math.floor(update.breath_index);
+                }
+                if (typeof update.breath_last_processed === "number" && Number.isFinite(update.breath_last_processed)) {
+                    (npc as any).breath_last_processed = Math.floor(update.breath_last_processed);
+                }
+                if (typeof update.breath_last_processed_ms === "number" && Number.isFinite(update.breath_last_processed_ms)) {
+                    (npc as any).breath_last_processed_ms = Math.floor(update.breath_last_processed_ms);
+                }
                 
                 // Save to storage
                 save_npc(data_slot_number, npc_id, npc);
@@ -1499,7 +1521,8 @@ async function process_npc_position_updates(inbox_path: string): Promise<void> {
                     x: update.position.x,
                     y: update.position.y,
                     place_id: update.place_id,
-                    moved_from: old_pos ? `(${old_pos.x}, ${old_pos.y})` : "(unknown)"
+                    moved_from: old_pos ? `(${old_pos.x}, ${old_pos.y})` : "(unknown)",
+                    facing: (npc as any).facing,
                 });
                 
                 // Mark as processed

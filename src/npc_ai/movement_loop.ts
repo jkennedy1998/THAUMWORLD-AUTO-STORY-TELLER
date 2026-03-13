@@ -16,7 +16,7 @@ import {
   unregister_place,
   type MovementGoal,
 } from "../shared/movement_engine.js";
-import { find_path } from "./pathfinding_node.js";
+import { find_path } from "../shared/pathfinding.js";
 import { is_in_conversation } from "./conversation_state.js";
 import { send_wander_command, send_stop_command } from "./movement_command_sender.js";
 
@@ -143,6 +143,10 @@ function start_npc_wandering(place_id: string, npc_ref: string): void {
   };
 
   // Check if path exists
+  if (!(start_npc_wandering as any).__move_unify_path_marker) {
+    (start_npc_wandering as any).__move_unify_path_marker = true;
+    debug_log('MOVE_UNIFY_TEST', 'npc wandering uses shared pathfinding', { place_id, npc_ref });
+  }
   const path_result = find_path(place, npc.tile_position, target, {
     exclude_entity: npc_ref,
   });

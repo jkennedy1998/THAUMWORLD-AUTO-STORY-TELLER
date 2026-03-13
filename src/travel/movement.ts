@@ -9,7 +9,7 @@
  */
 
 import type { Place, TilePosition } from "../types/place.js";
-import { get_voxel_occupants, place_tile_blocks_movement } from "../place_storage/occupancy_index.js";
+import { find_path, is_tile_walkable } from "../shared/pathfinding.js";
 import type { GameTime } from "../time_system/tracker.js";
 import { load_place, save_place, get_default_place_for_region } from "../place_storage/store.js";
 import { 
@@ -153,6 +153,44 @@ export async function move_within_place(
   // Validate target position
   if (!is_valid_tile_position(place, target_tile)) {
     return { ok: false, error: "target_out_of_bounds" };
+  }
+
+  // Unified legality + reservations (server-side travel semantics).
+  // Travel/movement in this module is still coarse (it teleports to target),
+  // but we must never move into blocked/reserved stance origins.
+  {
+    const pk = reservation_place_key(slot, place.id);
+    const reserved = get_reserved_stance_origins(pk, entity_ref);
+
+    const ok = is_tile_walkable(place, target_tile, {
+      exclude_entity: entity_ref,
+      treat_occupied_as_wall: true,
+      movement_mode: "WALK",
+      reserved_stance_origins: reserved,
+    });
+
+    if (!ok) {
+      return { ok: false, error: "tile_blocked" };
+    }
+
+    // Reserve destination stance origin briefly to reduce multi-NPC contention.
+    // (Reservations expire automatically; release is best-effort.)
+    if (is_npc) {
+      const z0 = Number((current_location as any)?.elevation);
+      const z = Number.isFinite(z0) ? Math.floor(z0) : base_z(place);
+      const reserved_ok = reserve_tile(place.id, target_tile, entity_ref, { slot, world_z: z, ttl_ms: 3000 });
+      if (!reserved_ok) {
+        return { ok: false, error: "tile_reserved" };
+      }
+      try {
+        const cur = (current_location as any)?.tile;
+        if (cur && typeof cur.x === "number" && typeof cur.y === "number") {
+          release_tile(place.id, { x: cur.x, y: cur.y }, entity_ref, { slot, world_z: z });
+        }
+      } catch {
+        // ignore
+      }
+    }
   }
   
   // Calculate distance and time
@@ -500,12 +538,51 @@ export async function update_npc_position_for_schedule(
 // NPC FREE MOVEMENT PATHFINDING
 // ============================================================================
 
-// Tile reservation system to prevent NPC collision
-// Map<place_id, Map<tile_key, npc_ref>>
-const tile_reservations = new Map<string, Map<string, string>>();
+type Reservation = { holder: string; expires_at_ms: number };
 
-function get_tile_key(x: number, y: number): string {
-  return `${x},${y}`;
+// Tile reservation system to prevent NPC collision.
+// Reservations are stance-origin scoped: key format `x_y_z`.
+// Keyed by `slot:place_id` to avoid cross-slot bleed.
+const tile_reservations = new Map<string, Map<string, Reservation>>();
+
+function reservation_place_key(slot: number, place_id: string): string {
+  return `${slot}:${place_id}`;
+}
+
+function reservation_key(tile: TilePosition, world_z: number): string {
+  return `${Math.floor(tile.x)}_${Math.floor(tile.y)}_${Math.floor(world_z)}`;
+}
+
+function base_z(place: Place): number {
+  try {
+    const z = Number((place as any)?.coordinates?.elevation);
+    return Number.isFinite(z) ? Math.floor(z) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function cleanup_expired_reservations(place_key: string): void {
+  const m = tile_reservations.get(place_key);
+  if (!m) return;
+  const now = Date.now();
+  for (const [k, r] of m) {
+    if (!r || r.expires_at_ms <= now) m.delete(k);
+  }
+  if (m.size === 0) tile_reservations.delete(place_key);
+}
+
+function get_reserved_stance_origins(place_key: string, exclude_holder?: string): Set<string> {
+  cleanup_expired_reservations(place_key);
+  const m = tile_reservations.get(place_key);
+  const out = new Set<string>();
+  if (!m) return out;
+  for (const [k, r] of m) {
+    if (!r) continue;
+    if (exclude_holder && r.holder === exclude_holder) continue;
+    out.add(k);
+  }
+  return out;
 }
 
 /**
@@ -514,21 +591,29 @@ function get_tile_key(x: number, y: number): string {
 export function reserve_tile(
   place_id: string,
   tile: TilePosition,
-  npc_ref: string
+  npc_ref: string,
+  opts?: { slot?: number; world_z?: number; ttl_ms?: number }
 ): boolean {
-  if (!tile_reservations.has(place_id)) {
-    tile_reservations.set(place_id, new Map());
+  const slot = Number(opts?.slot ?? 1);
+  const z = Math.floor(Number(opts?.world_z ?? 0));
+  const ttl_ms = Math.max(250, Math.floor(Number(opts?.ttl_ms ?? 3000)));
+
+  const pk = reservation_place_key(slot, place_id);
+  cleanup_expired_reservations(pk);
+
+  if (!tile_reservations.has(pk)) {
+    tile_reservations.set(pk, new Map());
   }
-  
-  const place_reservations = tile_reservations.get(place_id)!;
-  const key = get_tile_key(tile.x, tile.y);
-  
-  // Already reserved by someone else
-  if (place_reservations.has(key) && place_reservations.get(key) !== npc_ref) {
+
+  const place_reservations = tile_reservations.get(pk)!;
+  const key = reservation_key(tile, z);
+
+  const existing = place_reservations.get(key);
+  if (existing && existing.holder !== npc_ref && existing.expires_at_ms > Date.now()) {
     return false;
   }
-  
-  place_reservations.set(key, npc_ref);
+
+  place_reservations.set(key, { holder: npc_ref, expires_at_ms: Date.now() + ttl_ms });
   return true;
 }
 
@@ -538,23 +623,24 @@ export function reserve_tile(
 export function release_tile(
   place_id: string,
   tile: TilePosition,
-  npc_ref: string
+  npc_ref: string,
+  opts?: { slot?: number; world_z?: number }
 ): void {
-  const place_reservations = tile_reservations.get(place_id);
+  const slot = Number(opts?.slot ?? 1);
+  const z = Math.floor(Number(opts?.world_z ?? 0));
+  const pk = reservation_place_key(slot, place_id);
+  cleanup_expired_reservations(pk);
+
+  const place_reservations = tile_reservations.get(pk);
   if (!place_reservations) return;
-  
-  const key = get_tile_key(tile.x, tile.y);
-  const current_holder = place_reservations.get(key);
-  
-  // Only release if we hold the reservation
-  if (current_holder === npc_ref) {
+
+  const key = reservation_key(tile, z);
+  const r = place_reservations.get(key);
+  if (r && r.holder === npc_ref) {
     place_reservations.delete(key);
   }
-  
-  // Clean up empty maps
-  if (place_reservations.size === 0) {
-    tile_reservations.delete(place_id);
-  }
+
+  if (place_reservations.size === 0) tile_reservations.delete(pk);
 }
 
 /**
@@ -562,12 +648,25 @@ export function release_tile(
  */
 export function get_tile_reservation(
   place_id: string,
-  tile: TilePosition
+  tile: TilePosition,
+  opts?: { slot?: number; world_z?: number }
 ): string | null {
-  const place_reservations = tile_reservations.get(place_id);
+  const slot = Number(opts?.slot ?? 1);
+  const z = Math.floor(Number(opts?.world_z ?? 0));
+  const pk = reservation_place_key(slot, place_id);
+  cleanup_expired_reservations(pk);
+
+  const place_reservations = tile_reservations.get(pk);
   if (!place_reservations) return null;
-  
-  return place_reservations.get(get_tile_key(tile.x, tile.y)) ?? null;
+
+  const key = reservation_key(tile, z);
+  const r = place_reservations.get(key);
+  if (!r) return null;
+  if (r.expires_at_ms <= Date.now()) {
+    place_reservations.delete(key);
+    return null;
+  }
+  return r.holder;
 }
 
 /**
@@ -579,52 +678,17 @@ export async function is_tile_blocked(
   tile: TilePosition,
   exclude_npc_ref?: string
 ): Promise<boolean> {
-  // Check bounds
-  if (tile.x < 0 || tile.x >= place.tile_grid.width ||
-      tile.y < 0 || tile.y >= place.tile_grid.height) {
-    return true;
-  }
+  const pk = reservation_place_key(slot, place.id);
+  const reserved = get_reserved_stance_origins(pk, exclude_npc_ref);
 
-  // Walking movement rule (3dification test room):
-  // - z=1 must be empty or non-occupying
-  // - z=0 beneath must exist and be OCCUPIES (support)
-  {
-    if (place_tile_blocks_movement(place, tile.x, tile.y)) return true;
-  }
+  const walkable = is_tile_walkable(place, tile, {
+    exclude_entity: exclude_npc_ref,
+    treat_occupied_as_wall: true,
+    movement_mode: "WALK",
+    reserved_stance_origins: reserved,
+  });
 
-  // Multi-voxel entity occupancy (body models).
-  // Only consider the walking plane for now (base_z).
-  try {
-    const base_z = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
-    const occ = get_voxel_occupants(place, tile.x, tile.y, base_z);
-    for (const o of occ) {
-      if (exclude_npc_ref && o.owner_id === exclude_npc_ref) continue;
-      if (Array.isArray(o.tags) && o.tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'OCCUPIES')) {
-        return true;
-      }
-    }
-  } catch {
-    // ignore
-  }
-  
-  // Check for obstacle features
-  for (const feature of place.contents.features) {
-    if (feature.is_obstacle) {
-      for (const pos of feature.tile_positions) {
-        if (pos.x === tile.x && pos.y === tile.y) {
-          return true;
-        }
-      }
-    }
-  }
-  
-  // Check reservations
-  const reserved_by = get_tile_reservation(place.id, tile);
-  if (reserved_by && reserved_by !== exclude_npc_ref) {
-    return true;
-  }
-  
-  return false;
+  return !walkable;
 }
 
 /**
@@ -637,64 +701,26 @@ export async function find_path_for_npc(
   goal: TilePosition,
   npc_ref: string
 ): Promise<TilePosition[] | null> {
-  // Quick check: already there?
-  if (start.x === goal.x && start.y === goal.y) {
-    return [];
+  if (!(find_path_for_npc as any).__move_unify_path_marker) {
+    (find_path_for_npc as any).__move_unify_path_marker = true;
+    // travel module runs in Node; still uses shared pathfinding.
+    // This marker is meant for dev:logs verification.
+    console.log('[MOVE_UNIFY_TEST]', 'travel find_path_for_npc uses shared pathfinding', { slot, place_id: place.id });
   }
-  
-  // BFS
-  const queue: Array<{ pos: TilePosition; path: TilePosition[] }> = [
-    { pos: start, path: [] }
-  ];
-  const visited = new Set<string>();
-  visited.add(get_tile_key(start.x, start.y));
-  
-  // 4-directional movement (cardinal directions only, like actors)
-  const directions = [
-    { x: 0, y: 1 },   // North
-    { x: 0, y: -1 },  // South
-    { x: 1, y: 0 },   // East
-    { x: -1, y: 0 },  // West
-  ];
-  
-  let iterations = 0;
-  const max_iterations = 1000; // Prevent infinite loops
-  
-  while (queue.length > 0 && iterations < max_iterations) {
-    iterations++;
-    const current = queue.shift()!;
-    
-    for (const dir of directions) {
-      const next: TilePosition = {
-        x: current.pos.x + dir.x,
-        y: current.pos.y + dir.y,
-      };
-      
-      const key = get_tile_key(next.x, next.y);
-      
-      // Skip if visited
-      if (visited.has(key)) continue;
-      visited.add(key);
-      
-      // Check if this is the goal
-      if (next.x === goal.x && next.y === goal.y) {
-        return [...current.path, next];
-      }
-      
-      // Check if blocked
-      const blocked = await is_tile_blocked(slot, place, next, npc_ref);
-      if (blocked) continue;
-      
-      // Add to queue
-      queue.push({
-        pos: next,
-        path: [...current.path, next],
-      });
-    }
-  }
-  
-  // No path found
-  return null;
+  const pk = reservation_place_key(slot, place.id);
+  const reserved = get_reserved_stance_origins(pk, npc_ref);
+
+  const res = find_path(place, start, goal, {
+    exclude_entity: npc_ref,
+    allow_diagonal: false,
+    max_iterations: 1000,
+    treat_occupied_as_wall: true,
+    movement_mode: "WALK",
+    reserved_stance_origins: reserved,
+  });
+
+  if (res.blocked) return null;
+  return res.path;
 }
 
 // TODO: Add obstacle avoidance

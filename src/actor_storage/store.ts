@@ -72,6 +72,39 @@ export function load_actor(slot: number, actor_id: string): ActorLookupResult {
     }
 
     const actor = read_jsonc(actor_path);
+
+    // Breath timekeeping defaults (movement + inventory aging).
+    // Persist once so downstream systems can rely on the fields existing.
+    let dirty = false;
+    try {
+        if (typeof (actor as any).breath_index !== 'number' || !Number.isFinite((actor as any).breath_index)) {
+            (actor as any).breath_index = 0;
+            dirty = true;
+        }
+        if (typeof (actor as any).breath_last_processed !== 'number' || !Number.isFinite((actor as any).breath_last_processed)) {
+            (actor as any).breath_last_processed = Number((actor as any).breath_index ?? 0) || 0;
+            dirty = true;
+        }
+        if (typeof (actor as any).breath_last_processed_ms !== 'number' || !Number.isFinite((actor as any).breath_last_processed_ms)) {
+            (actor as any).breath_last_processed_ms = Date.now();
+            dirty = true;
+        }
+        if (!(actor as any).movement_schedule || typeof (actor as any).movement_schedule !== 'object') {
+            (actor as any).movement_schedule = {
+                walk: { breaths_per_step: 1, next_breath: 0 },
+                climb: { breaths_per_step: 1, next_breath: 0 },
+                swim: { breaths_per_step: 1, next_breath: 0 },
+                fly: { breaths_per_step: 1, next_breath: 0 },
+            };
+            dirty = true;
+        }
+    } catch {
+        // ignore
+    }
+    if (dirty) {
+        save_actor(slot, actor_id, actor);
+    }
+
     return { ok: true, actor, path: actor_path };
 }
 
@@ -161,6 +194,18 @@ export function create_actor_from_kind(slot: number, input: CreateActorFromKindI
 
     const actor_id = input.actor_id ?? make_actor_id(input.name);
     const actor = { ...template.actor, id: actor_id, name: input.name } as Record<string, unknown>;
+
+    // Breath timekeeping + scheduling (server authoritative).
+    // Used for movement cadence and for aging inventory items without per-item trackers.
+    (actor as any).breath_index = 0;
+    (actor as any).breath_last_processed = 0;
+    (actor as any).breath_last_processed_ms = Date.now();
+    (actor as any).movement_schedule = {
+        walk: { breaths_per_step: 1, next_breath: 0 },
+        climb: { breaths_per_step: 1, next_breath: 0 },
+        swim: { breaths_per_step: 1, next_breath: 0 },
+        fly: { breaths_per_step: 1, next_breath: 0 },
+    };
 
     actor.kind = kind.id;
     // Multi-tile rendering: body model + body slot representation are kind-driven.

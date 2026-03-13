@@ -20,6 +20,13 @@ export type Place = {
   id: string;                    // Unique ID: "eden_crossroads_tavern_common"
   name: string;                  // Display name: "The Singing Sword - Common Room"
   region_id: string;             // Parent region: "eden_crossroads"
+
+  // Timekeeping (server authoritative).
+  // Active places increment breath_index; inactive places use breath_last_processed for catch-up aging.
+  breath_index?: number;
+  breath_last_processed?: number;
+  // Wallclock reference for catch-up: used to compute delta breaths when reactivating a place.
+  breath_last_processed_ms?: number;
   
   // Position in the world
   coordinates: PlaceCoordinates;
@@ -220,12 +227,24 @@ export type PlaceContents = {
 export type PlaceNPC = {
   npc_ref: string;               // "npc.gunther"
   tile_position: TilePosition;
+  // Optional current facing in place state.
+  // Kept in the place snapshot so legality/rendering/interaction can consult it.
+  facing?: string;
   kind_id?: string;              // Kind id (used for body models + rendering)
+  // Existing sheet movement speeds (voluntary locomotion).
+  // Higher values are faster.
+  movement?: { walk?: number; climb?: number; swim?: number; fly?: number };
   body_model_id?: string;        // Body model id for multi-voxel occupancy/render
   body_slot_representation?: Record<string, any>; // Kind-driven body slot mapping (optional)
   // 3Dification: vertical position in place/world space.
   // For now this is sourced from npc.location.elevation when available.
   elevation?: number;
+  // Breath timekeeping (used for catch-up aging and movement scheduling).
+  breath_index?: number;
+  breath_last_processed?: number;
+  breath_last_processed_ms?: number;
+  // Movement cadence scheduling (per locomotion mode).
+  movement_schedule?: any;
   status: "present" | "moving" | "busy" | "sleeping";
   activity: string;              // "sitting at the bar", "whittling by the fire"
   tags?: Array<{ name: string; mag: number; meta: string[] }>;  // Optional tags for visual effects
@@ -238,12 +257,24 @@ export type PlaceNPC = {
 export type PlaceActor = {
   actor_ref: string;             // "actor.henry_actor"
   tile_position: TilePosition;
+  // Optional current facing in place state.
+  // Kept in the place snapshot so legality/rendering/interaction can consult it.
+  facing?: string;
   kind_id?: string;              // Kind id (used for body models + rendering)
+  // Existing sheet movement speeds (voluntary locomotion).
+  // Higher values are faster.
+  movement?: { walk?: number; climb?: number; swim?: number; fly?: number };
   body_model_id?: string;        // Body model id for multi-voxel occupancy/render
   body_slot_representation?: Record<string, any>; // Kind-driven body slot mapping (optional)
   // 3Dification: vertical position in place/world space.
   // For now this is sourced from actor.location.elevation when available.
   elevation?: number;
+  // Breath timekeeping (used for catch-up aging and movement scheduling).
+  breath_index?: number;
+  breath_last_processed?: number;
+  breath_last_processed_ms?: number;
+  // Movement cadence scheduling (per locomotion mode).
+  movement_schedule?: any;
   status: "present" | "moving" | "busy";
   tags?: Array<{ name: string; mag: number; meta: string[] }>;  // Optional tags for visual effects
 };

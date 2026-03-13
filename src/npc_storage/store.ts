@@ -58,6 +58,35 @@ export function load_npc(slot: number, npc_id: string): NpcLookupResult {
     }
 
     const npc = read_jsonc(npc_path);
+
+    // Breath timekeeping defaults (movement + inventory aging).
+    // Persist once so downstream systems can rely on the fields existing.
+    let dirty = false;
+    try {
+        if (typeof (npc as any).breath_index !== 'number' || !Number.isFinite((npc as any).breath_index)) {
+            (npc as any).breath_index = 0;
+            dirty = true;
+        }
+        if (typeof (npc as any).breath_last_processed !== 'number' || !Number.isFinite((npc as any).breath_last_processed)) {
+            (npc as any).breath_last_processed = Number((npc as any).breath_index ?? 0) || 0;
+            dirty = true;
+        }
+        if (!(npc as any).movement_schedule || typeof (npc as any).movement_schedule !== 'object') {
+            (npc as any).movement_schedule = {
+                walk: { breaths_per_step: 1, next_breath: 0 },
+                climb: { breaths_per_step: 1, next_breath: 0 },
+                swim: { breaths_per_step: 1, next_breath: 0 },
+                fly: { breaths_per_step: 1, next_breath: 0 },
+            };
+            dirty = true;
+        }
+    } catch {
+        // ignore
+    }
+    if (dirty) {
+        save_npc(slot, npc_id, npc);
+    }
+
     return { ok: true, npc, path: npc_path };
 }
 
@@ -199,6 +228,18 @@ export function create_npc_from_kind(slot: number, input: CreateNpcFromKindInput
 
     const npc_id = make_npc_id(input.name);
     const npc = { ...template.npc, id: npc_id, name: input.name } as Record<string, unknown>;
+
+    // Breath timekeeping + scheduling (server authoritative).
+    // Used for movement cadence and for aging inventory items without per-item trackers.
+    (npc as any).breath_index = 0;
+    (npc as any).breath_last_processed = 0;
+    (npc as any).breath_last_processed_ms = Date.now();
+    (npc as any).movement_schedule = {
+        walk: { breaths_per_step: 1, next_breath: 0 },
+        climb: { breaths_per_step: 1, next_breath: 0 },
+        swim: { breaths_per_step: 1, next_breath: 0 },
+        fly: { breaths_per_step: 1, next_breath: 0 },
+    };
 
     npc.kind = kind.id;
     // Multi-tile rendering: body model + body slot representation are kind-driven.

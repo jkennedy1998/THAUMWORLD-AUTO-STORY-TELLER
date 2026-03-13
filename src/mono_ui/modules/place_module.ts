@@ -3,7 +3,7 @@ import { rect_width, rect_height } from "../types.js";
 import { draw_module_border, BORDER_STYLES } from "../module_borders.js";
 import { get_color_by_name } from "../colors.js";
 import type { Place, PlaceNPC, PlaceActor, PlaceConnection, TilePosition, PlaceTile } from "../../types/place.js";
-import { get_entity_path, start_entity_movement, register_place, unregister_place } from "../../shared/movement_engine.js";
+import { get_entity_path, start_entity_movement, start_entity_vertical_steps, is_entity_moving, stop_entity_movement, set_entity_realtime_movement, update_realtime_intent, get_movement_state, register_place, unregister_place } from "../../shared/movement_engine.js";
 import { type TagChangeEvent } from "../../shared/event_emitter.js";
 import { initWebSocketClient, type WebSocketClient } from "../websocket_client.js";
 import type { TagInstance } from "../../tag_system/registry.js";
@@ -17,7 +17,9 @@ import { get_sense_profile } from "../../action_system/sense_broadcast.js";
 import { get_facing } from "../../npc_ai/facing_system.js";
 import { compute_anchor_world_voxel, eval_body_model_voxels, get_body_model_def } from "../../shared/body_model.js";
 import { get_body_slots_for_character_hit } from "../../shared/body_slot_representation.js";
-import { place_voxel_blocks_los, place_voxel_blocks_movement } from "../../place_storage/occupancy_index.js";
+import { place_voxel_blocks_los } from "../../place_storage/occupancy_index.js";
+import { can_place_volume } from "../../place_storage/movement_legality.js";
+import { find_path as shared_find_path } from "../../shared/pathfinding.js";
 import { update_actor_position_in_place, set_npc_tracked_position, get_npc_visual_status } from "./movement_command_handler.js";
 import { play_sfx } from "../sfx/sfx_player.js";
 import { make_entity_payload, make_ground_items_tile_payload, make_item_like_payload, make_pile_payload, make_simple_tile_payload } from "../../render_shaders/payload_builders.js";
@@ -29,6 +31,7 @@ import { create_canvas } from "../canvas.js";
 import { touch_world_layers_owner } from "../world_layers_owner.js";
 import { compute_dom_viewport_for_rect } from "../runtime/dom_viewport.js";
 import { create_place_camera_controller } from "../runtime/place_camera_controller.js";
+import { get_move_intent, is_jump_down } from "../runtime/input_actions.js";
 
 /**
  * Convert hex color string to RGB object
@@ -127,7 +130,7 @@ export type PlaceModuleConfig = {
 
   // Actor movement callback - called when actor completes movement to a new tile
   // Allows persisting position change to storage
-  on_actor_move?: (actor_ref: string, new_position: TilePosition) => Promise<void> | void;
+  on_actor_move?: (actor_ref: string, new_position: TilePosition & { z?: number }) => Promise<void> | void;
 
   // Inspection callback - called when user right-clicks to inspect
   // Right-click cycles: Characters -> Items -> Tile
@@ -279,6 +282,10 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   let targeted: TargetedEntity = null; // Track selected target for communication (follows entity)
   let last_pointer_x = 0;
   let last_pointer_y = 0;
+
+  // Movement engine place registration should track the latest place snapshot.
+  // `/api/place` returns a new object frequently; the movement engine must not hold a stale reference.
+  let last_registered_place_obj: Place | null = null;
 
   // Tile cycling state for multiple entities
   type EntityCycleState = {
@@ -447,7 +454,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   let current_place_id: string | null = null;
   
   // Track previous entity positions to detect movement and spawn footsteps
-  const previous_positions = new Map<string, TilePosition>();
+  const previous_positions = new Map<string, TilePosition & { z?: number }>();
   // Track previous movement state to detect when movement starts
   const previous_moving_state = new Map<string, boolean>();
   // Throttle movement sound/broadcasts per entity
@@ -1025,87 +1032,58 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     return entities[cycle.current_index] ?? null;
   }
 
-  // Check if a tile is walkable (not occupied, in bounds)
-  function is_tile_walkable(tile_x: number, tile_y: number, place: Place): boolean {
-    const base_z = get_place_base_z(place);
-    return !place_voxel_blocks_movement(place as any, tile_x, tile_y, base_z);
-  }
-
   // Get actor walk speed from their data
   // Uses the unified movement engine's default if actor data unavailable
   function get_actor_walk_speed(actor_ref: string): number {
-    // NOTE: Actor movement speed is not available in renderer context
-    // This would need to be included in place data from API
-    // For now, return default speed
-    
-    // Default: 300 tiles per minute (5 tiles per second)
-    return 300;
+    try {
+      const place = config.get_place();
+      const actor: any = place?.contents?.actors_present?.find((a: any) => a.actor_ref === actor_ref) ?? null;
+      const v = Number(actor?.movement?.walk);
+      if (Number.isFinite(v)) return Math.floor(v);
+    } catch {
+      // ignore
+    }
+    return 0;
   }
 
-  // Simple BFS pathfinding
-  function find_path(
-    start_x: number,
-    start_y: number,
-    end_x: number,
-    end_y: number,
-    place: Place
-  ): TilePosition[] {
-    // If start == end, no path needed
-    if (start_x === end_x && start_y === end_y) {
-      return [];
-    }
-    
-    // If target not walkable, can't move there
-    if (!is_tile_walkable(end_x, end_y, place)) {
-      return [];
-    }
-    
-    // BFS
-    const queue: Array<{x: number; y: number; path: TilePosition[]}> = [
-      { x: start_x, y: start_y, path: [{ x: start_x, y: start_y }] }
-    ];
-    const visited = new Set<string>([`${start_x},${start_y}`]);
-    
-    const directions = [
-      { dx: 0, dy: 1 },   // North
-      { dx: 0, dy: -1 },  // South
-      { dx: 1, dy: 0 },   // East
-      { dx: -1, dy: 0 }   // West
-    ];
-    
-    while (queue.length > 0) {
-      const current = queue.shift()!;
-      
-      if (current.x === end_x && current.y === end_y) {
-        // Return path excluding start position
-        return current.path.slice(1);
-      }
-      
-      for (const dir of directions) {
-        const next_x = current.x + dir.dx;
-        const next_y = current.y + dir.dy;
-        const key = `${next_x},${next_y}`;
-        
-        if (visited.has(key)) continue;
-        
-        // Check if walkable OR if it's the target (target might have entity)
-        const is_target = (next_x === end_x && next_y === end_y);
-        const is_walkable = is_tile_walkable(next_x, next_y, place);
-        
-        if (!is_walkable && !is_target) continue;
-        
-        visited.add(key);
-        queue.push({
-          x: next_x,
-          y: next_y,
-          path: [...current.path, { x: next_x, y: next_y }]
-        });
-      }
-    }
-    
-    // No path found
-    return [];
+  const input_state = {
+    held_keys: new Set<string>(),
+    held_order: [] as string[],
+    wasd_next_breath: 0,
+    space_down_ms: null as number | null,
+    self_exclusion_logged: false,
+    // Track last polled intent to detect changes
+    last_polled_intent: null as { dx: number; dy: number } | null,
+  };
+
+  function stat_to_bps(speed: number): number | null {
+    const s = Math.floor(Number(speed));
+    if (!Number.isFinite(s) || s <= 0) return null;
+    if (s >= 8) return 1;
+    return 9 - s;
   }
+
+  function bps_to_tpm(bps: number): number {
+    const breaths = Math.max(1, Math.floor(Number(bps) || 1));
+    const mspt = breaths * 33;
+    return 60000 / mspt;
+  }
+
+  function get_actor_walk_bps(actor_ref: string, mode: string): number | null {
+    const base_stat = get_actor_walk_speed(actor_ref);
+    const bps0 = stat_to_bps(base_stat);
+    if (!bps0) return null;
+    const mult = mode === 'SPRINT' ? 1.8 : mode === 'SNEAK' ? 0.6 : 1.0;
+    return Math.max(1, Math.round(bps0 / mult));
+  }
+
+  function get_actor_walk_speed_tpm(actor_ref: string, mode: string): number {
+    const bps = get_actor_walk_bps(actor_ref, mode);
+    if (!bps) return 0;
+    return bps_to_tpm(bps);
+  }
+
+  // Held input stepping now lives in MovementEngine as a realtime controller.
 
   // Spawn particles along a path (pale yellow)
   function spawn_path_particles(path: TilePosition[]) {
@@ -1216,9 +1194,12 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
       
       // Check if moved to new tile
-      if (prev && (prev.x !== actor.tile_position.x || prev.y !== actor.tile_position.y)) {
+      const az = get_entity_world_z(actor as any, center_world_z);
+      if (prev && (prev.x !== actor.tile_position.x || prev.y !== actor.tile_position.y || (prev.z ?? 0) !== az)) {
         // Actor moved, spawn movement particle
         spawn_movement_particle(actor.tile_position);
+
+        // Server-authoritative movement: do not persist actor position from renderer.
 
         // Movement should create pressure broadcasts (footsteps)
         const n = (movement_sound_step.get(actor.actor_ref) ?? 0) + 1;
@@ -1242,7 +1223,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
       
       // Update stored state
-      previous_positions.set(actor.actor_ref, { ...actor.tile_position });
+      previous_positions.set(actor.actor_ref, { ...actor.tile_position, z: az });
       previous_moving_state.set(actor.actor_ref, is_moving);
 
       if (!is_moving) {
@@ -1264,7 +1245,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
       
       // Check if moved to new tile
-      if (prev && (prev.x !== npc.tile_position.x || prev.y !== npc.tile_position.y)) {
+      const nz = get_entity_world_z(npc as any, center_world_z);
+      if (prev && (prev.x !== npc.tile_position.x || prev.y !== npc.tile_position.y || (prev.z ?? 0) !== nz)) {
         // NPC moved, spawn movement particle
         spawn_movement_particle(npc.tile_position);
 
@@ -1290,7 +1272,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
       
       // Update stored state
-      previous_positions.set(npc.npc_ref, { ...npc.tile_position });
+      previous_positions.set(npc.npc_ref, { ...npc.tile_position, z: nz });
       previous_moving_state.set(npc.npc_ref, is_moving);
 
       if (!is_moving) {
@@ -2093,6 +2075,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   // Subscribe to tag change events via WebSocket (replaces broken EventEmitter)
   // WebSocket works across Electron process boundaries, EventEmitter doesn't
   const wsClient = initWebSocketClient();
+
+  let place_breath_tick_applied_count = 0;
   
   wsClient.on('TAG_CHANGED', (event: TagChangeEvent) => {
     debug_log_place('WebSocket TAG_CHANGED:', event.entityRef, event.tagName, 'mag:', event.oldMag, '->', event.newMag);
@@ -2112,6 +2096,94 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   wsClient.on('TAG_DISPERSING', (event: TagChangeEvent) => {
     debug_log_place('WebSocket TAG_DISPERSING:', event.entityRef, event.tagName, 'mag:', event.oldMag, '->', event.newMag);
     updateCacheFromEvent(event);
+  });
+
+  wsClient.on('PLACE_BREATH_TICK', (msg: any) => {
+    try {
+      const place = config.get_place();
+      if (!place) return;
+      const ticks: any[] = Array.isArray(msg?.ticks) ? msg.ticks : [];
+      const hit = ticks.find((t: any) => String(t?.place_id ?? '') === String(place.id));
+      if (!hit) return;
+
+      const bi = Number(hit?.breath_index);
+      if (!Number.isFinite(bi)) return;
+      (place as any).breath_index = Math.floor(bi);
+      (place as any).breath_last_processed = Math.floor(bi);
+      (place as any).breath_last_processed_ms = Date.now();
+
+      place_breath_tick_applied_count++;
+      if (place_breath_tick_applied_count % 60 === 0) {
+        // eslint-disable-next-line no-console
+        console.log(
+          '[MOVE_UNIFY_TEST] renderer applied PLACE_BREATH_TICK ' +
+            JSON.stringify({
+              place_id: place.id,
+              breath_index: (place as any).breath_index,
+              applied_count: place_breath_tick_applied_count,
+            })
+        );
+      }
+    } catch {
+      // ignore
+    }
+  });
+
+  // Server-authoritative movement updates (batched)
+  wsClient.on('ENTITY_MOVED_BATCH', (msg: any) => {
+    try {
+      const place = config.get_place();
+      if (!place) return;
+      const updates: any[] = Array.isArray(msg?.updates) ? msg.updates : [];
+      if (updates.length === 0) return;
+
+      const seq_map: Map<string, number> = ((mod as any).__move_seq_by_ref ??= new Map());
+
+      for (const u of updates) {
+        const pid = String(u?.place_id ?? '');
+        if (!pid || pid !== String(place.id)) continue;
+        const ref = String(u?.entity_ref ?? '');
+        if (!ref) continue;
+        const x = Math.floor(Number(u?.x));
+        const y = Math.floor(Number(u?.y));
+        const z = (typeof u?.z === 'number' && Number.isFinite(u.z)) ? Math.floor(u.z) : undefined;
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+
+        if (ref.startsWith('actor.')) {
+          const a: any = place.contents.actors_present.find((a0: any) => a0.actor_ref === ref);
+          if (!a) continue;
+          const seq = (typeof u?.seq === 'number' && Number.isFinite(u.seq)) ? Math.floor(u.seq) : null;
+          const last = seq_map.get(ref) ?? 0;
+          if (seq !== null && seq < last) continue;
+          if (seq !== null) {
+            seq_map.set(ref, seq);
+            (a as any).move_seq = seq;
+          }
+          a.tile_position = { x, y };
+          if (typeof z === 'number') (a as any).elevation = z;
+          set_npc_tracked_position(ref, { x, y });
+          continue;
+        }
+
+        if (ref.startsWith('npc.')) {
+          const n: any = place.contents.npcs_present.find((n0: any) => n0.npc_ref === ref);
+          if (!n) continue;
+          const seq = (typeof u?.seq === 'number' && Number.isFinite(u.seq)) ? Math.floor(u.seq) : null;
+          const last = seq_map.get(ref) ?? 0;
+          if (seq !== null && seq < last) continue;
+          if (seq !== null) {
+            seq_map.set(ref, seq);
+            (n as any).move_seq = seq;
+          }
+          n.tile_position = { x, y };
+          if (typeof z === 'number') (n as any).elevation = z;
+          set_npc_tracked_position(ref, { x, y });
+          continue;
+        }
+      }
+    } catch {
+      // ignore
+    }
   });
 
   // Helper function to update cache from WebSocket events
@@ -2213,8 +2285,73 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         if (current_place_id) {
           unregister_place(current_place_id);
         }
-        register_place(place.id, place);
         current_place_id = place.id;
+        last_registered_place_obj = null;
+      }
+
+      // Always ensure the engine has the latest snapshot for this place id.
+      if (place !== last_registered_place_obj) {
+        register_place(place.id, place);
+        last_registered_place_obj = place;
+      }
+
+      // Poll input actions and update movement intent every frame.
+      // This removes reliance on event timing for movement.
+      const intent = get_move_intent();
+      const actor = place.contents.actors_present[0];
+      if (actor) {
+        const has_movement = intent !== null;
+        const last_intent = input_state.last_polled_intent;
+        const intent_changed = has_movement && (
+          !last_intent || 
+          intent.dx !== last_intent.dx || 
+          intent.dy !== last_intent.dy
+        );
+
+        if (has_movement && intent_changed) {
+          const mode = get_move_mode();
+          // Server-authoritative: send intent update to backend (held intent wins).
+          void fetch('http://localhost:8787/api/movement/intent', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              entity_ref: actor.actor_ref,
+              place_id: place.id,
+              dx: intent.dx,
+              dy: intent.dy,
+              mode,
+            }),
+          }).catch(() => { /* ignore */ });
+        } else if (!has_movement && last_intent) {
+          // No movement intent - stop realtime movement
+          try {
+            const ae: any = (typeof document !== 'undefined') ? (document as any).activeElement : null;
+            const payload = {
+              actor_ref: actor.actor_ref,
+              place_id: place.id,
+              stop_reason: 'no_move_intent',
+              last_intent,
+              active_element: ae ? { tag: String(ae.tagName || ''), id: String(ae.id || ''), cls: String(ae.className || '') } : null,
+            };
+            debug_log_place('MOVE_UNIFY_TEST realtime stop requested', payload);
+          } catch {
+            // ignore
+          }
+          void fetch('http://localhost:8787/api/movement/intent', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              entity_ref: actor.actor_ref,
+              place_id: place.id,
+              dx: 0,
+              dy: 0,
+              mode: get_move_mode(),
+            }),
+          }).catch(() => { /* ignore */ });
+        }
+
+        // Track last intent
+        input_state.last_polled_intent = intent ? { dx: intent.dx, dy: intent.dy } : null;
       }
 
       // Populate tag cache from place data ONLY when place changes
@@ -2610,16 +2747,27 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         return;
       }
 
-      // Tile targeting (not on walking/structure plane) - no movement.
-      if (focus_world_z !== base_z) {
-        set_target({ x: tile.x, y: tile.y });
-        return;
-      }
+      // Tile targeting (not on actor's current layer) - no movement (temporary until jump/path planner exists).
+      // Do not silently gate on base_z.
+      {
+        const actor = place.contents.actors_present[0];
+        const actor_z = (() => {
+          if (actor && typeof (actor as any).elevation === 'number' && Number.isFinite((actor as any).elevation)) {
+            return Math.floor((actor as any).elevation);
+          }
+          return base_z;
+        })();
 
-      // Check if tile is walkable
-      if (!is_tile_walkable(tile.x, tile.y, place)) {
-        debug_log_place("Click-to-move: Tile not walkable", { x: tile.x, y: tile.y });
-        return;
+        if (focus_world_z !== actor_z) {
+          set_target({ x: tile.x, y: tile.y });
+          debug_log_place('MOVE_UNIFY_TEST click-to-move cross-layer temporary_not_supported', {
+            actor_z,
+            focus_world_z,
+            base_z,
+            to: { x: tile.x, y: tile.y, z: focus_world_z },
+          });
+          return;
+        }
       }
 
       // Find the actor (player) to move
@@ -2638,74 +2786,31 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         return;
       }
 
-      // Find path
-      const path = find_path(start_x, start_y, tile.x, tile.y, place);
-      
-      if (path.length === 0) {
-        debug_log_place("Click-to-move: No path found", { 
-          from: { x: start_x, y: start_y }, 
-          to: { x: tile.x, y: tile.y } 
-        });
-        return;
-      }
+       const mode = get_move_mode();
 
-      // Use unified movement engine
-      // Get actor walk speed from their data
-      const tiles_per_minute = get_actor_walk_speed(actor.actor_ref);
-
-      const mode = get_move_mode();
-      const speed_mult = mode === "SPRINT" ? 1.8 : mode === "SNEAK" ? 0.6 : 1.0;
-      const speed_tpm = Math.max(60, Math.round(tiles_per_minute * speed_mult));
-      const move_subtype = mode === "SPRINT" ? "SPRINT" : mode === "SNEAK" ? "SNEAK" : "WALK";
-
-      
-      const started = start_entity_movement(
-        actor.actor_ref,
-        "actor",
-        place,
-        {
-          type: "move_to",
-          target_position: { x: tile.x, y: tile.y },
-          priority: 10,
-          reason: "Player commanded movement"
-        },
-        speed_tpm,
-        (_final_position) => {
-          // On complete callback - receives final position from movement engine
-          debug_log_place("Movement complete", { actor_ref: actor.actor_ref, final_position: _final_position });
-          
-          // Track actor position for facing calculations
-          // Store in npc_actual_positions map (works for both NPCs and actors)
-          set_npc_tracked_position(actor.actor_ref, _final_position);
-          
-          if (config.on_actor_move) {
-            Promise.resolve(config.on_actor_move(actor.actor_ref, _final_position)).catch(err => {
-              debug_log_place("Error saving position:", err);
-            });
-          }
-        },
-        (path) => {
-          // On start callback - spawn path particles
-          spawn_path_particles(path);
-          
-          debug_log_place("Click-to-move: Path found, starting movement", {
-            from: { x: start_x, y: start_y },
-            to: { x: tile.x, y: tile.y },
-            path_length: path.length,
-            speed: speed_tpm,
-            move_mode: mode,
-          });
-        },
-        (current_position) => {
-          // On step callback - track position for facing calculations during movement
-          set_npc_tracked_position(actor.actor_ref, current_position);
-          play_sfx('footstep_blip', { emitter_ref: actor.actor_ref, channel: 'sfx', cooldown_ms: footstep_cooldown_ms(speed_tpm) });
-        }
-      );
-      
-      if (!started) {
-        debug_log_place("Click-to-move: Path blocked", { x: tile.x, y: tile.y });
-      }
+       // Server-authoritative click-to-move: send goal to backend (server computes path + steps).
+       void fetch('http://localhost:8787/api/movement/move_to', {
+         method: 'POST',
+         headers: { 'Content-Type': 'application/json' },
+         body: JSON.stringify({
+           entity_ref: actor.actor_ref,
+           place_id: place.id,
+           x: tile.x,
+           y: tile.y,
+           mode,
+         }),
+       })
+         .then(async (r) => {
+           const j = await r.json().catch(() => null);
+           if (!r.ok) {
+             debug_log_place('Click-to-move rejected (server)', { status: r.status, body: j });
+             return;
+           }
+           debug_log_place('Click-to-move accepted (server)', j);
+         })
+         .catch(() => {
+           // ignore
+         });
     },
 
     OnPointerLeave(): void {
@@ -2832,55 +2937,59 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
     },
 
+    // Realtime key-up support (used for jump press duration + held-key movement).
+    // Movement is now driven by polling get_move_intent() in Draw - this handler only handles jump.
+    OnKeyUp(e: KeyboardEvent): void {
+      const place = config.get_place();
+      if (!place) return;
+
+      const k = String(e.key ?? '');
+      const kl = k.toLowerCase();
+
+      // Jump handling on keyup
+      if (kl === ' ') {
+        // Server-authoritative movement: jump is not yet implemented on server.
+        // Avoid local-only vertical stepping (it would rubberband on place refresh).
+        debug_log_place('MOVE_UNIFY_TEST jump disabled (server-authoritative movement)', { actor_ref: place.contents.actors_present?.[0]?.actor_ref ?? null });
+        input_state.space_down_ms = null;
+        return;
+      }
+    },
+
+    // Release held-movement if focus leaves the place.
+    OnBlur(): void {
+      try {
+        const place = config.get_place();
+        input_state.held_keys.clear();
+        input_state.held_order = [];
+        input_state.space_down_ms = null;
+      } catch {
+        // ignore
+      }
+    },
+
+    // Key-up should work even when focus shifts mid-press.
+    OnGlobalKeyUp(e: KeyboardEvent): void {
+      // Delegate to the same release logic.
+      mod.OnKeyUp?.(e);
+    },
+
     OnKeyDown(e: KeyboardEvent): void {
       const place = config.get_place();
       if (!place) return;
+
+      // Jump intent: record key-down time; resolution happens on key-up.
+      // (Movement is now driven by polling get_move_intent() in Draw)
+      if (e.key === ' ') {
+        // Disabled under server-authoritative movement.
+        return;
+      }
 
       const scroll_step = Math.max(1, view.scale);
       const { width: inner_w, height: inner_h } = inner_size();
       const bounds = camera.get_bounds(place, inner_w, inner_h);
 
       switch (e.key) {
-        case "ArrowUp":
-        case "w":
-        case "W":
-          view.offset_y = clamp(
-            view.offset_y + scroll_step,
-            bounds.min_y,
-            bounds.max_y
-          );
-          camera.schedule_save(place);
-          break;
-        case "ArrowDown":
-        case "s":
-        case "S":
-          view.offset_y = clamp(
-            view.offset_y - scroll_step,
-            bounds.min_y,
-            bounds.max_y
-          );
-          camera.schedule_save(place);
-          break;
-        case "ArrowLeft":
-        case "a":
-        case "A":
-          view.offset_x = clamp(
-            view.offset_x - scroll_step,
-            bounds.min_x,
-            bounds.max_x
-          );
-          camera.schedule_save(place);
-          break;
-        case "ArrowRight":
-        case "d":
-        case "D":
-          view.offset_x = clamp(
-            view.offset_x + scroll_step,
-            bounds.min_x,
-            bounds.max_x
-          );
-          camera.schedule_save(place);
-          break;
         case "Home":
           // Center on actor when available; otherwise default entry.
           {

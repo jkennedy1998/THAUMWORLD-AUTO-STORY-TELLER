@@ -58,6 +58,37 @@ export async function emitToBridge(event: TagChangeEvent): Promise<void> {
 }
 
 /**
+ * Send a generic message to the event bridge.
+ * Used for non-tag high-frequency events like breath ticks.
+ */
+export async function emitBridgeMessage(type: string, data?: any): Promise<void> {
+  const t = String(type ?? '').trim();
+  if (!t) return;
+  try {
+    const response = await fetch(`${BRIDGE_URL}/api/events/emit_any`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: t, data }),
+    });
+
+    // Avoid per-tick spam; only log errors.
+    if (!response.ok) {
+      const errorText = await response.text();
+      debug_event('EVENT_BRIDGE_CLIENT', 'emit_any_failed', {
+        type: t,
+        status: response.status,
+        error: errorText,
+      });
+    }
+  } catch (err) {
+    debug_event('EVENT_BRIDGE_CLIENT', 'emit_any_error', {
+      type: t,
+      error: (err as Error).message,
+    });
+  }
+}
+
+/**
  * Check if event bridge is available
  */
 export async function isBridgeAvailable(): Promise<boolean> {

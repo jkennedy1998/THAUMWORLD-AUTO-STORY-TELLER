@@ -92,6 +92,15 @@
     "swim": 0,
     "fly": 0
   },
+  "breath_index": 0,
+  "breath_last_processed": 0,
+  "breath_last_processed_ms": 0,
+  "movement_schedule": {
+    "walk": { "breaths_per_step": 1, "next_breath": 0 },
+    "climb": { "breaths_per_step": 1, "next_breath": 0 },
+    "swim": { "breaths_per_step": 1, "next_breath": 0 },
+    "fly": { "breaths_per_step": 1, "next_breath": 0 }
+  },
   "location": {
     "world_tile": { "x": 0, "y": 0 },
     "region_tile": { "x": 0, "y": 0 },

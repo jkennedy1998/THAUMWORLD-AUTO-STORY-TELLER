@@ -31,6 +31,18 @@ export const BODY_MODEL_CHARACTER_BIPED_2Z: BodyModelDef = {
   ],
 };
 
+// Test-only body model used for verifying self-exclusion in legality.
+// Head + feet occupy the same z plane but different y so moving in y would self-collide
+// if exclude_owner were not applied.
+export const BODY_MODEL_TEST_SELF_EXCLUSION_Y2: BodyModelDef = {
+  id: "test.self_exclusion_y2",
+  anchor_part: "feet",
+  physical: [
+    { part: "feet", dx: 0, dy: 0, dz: 0, tags: [{ name: "OCCUPIES", mag: 1, meta: [] }] },
+    { part: "head", dx: 0, dy: 1, dz: 0, tags: [{ name: "OCCUPIES", mag: 1, meta: [] }] },
+  ],
+};
+
 export function resolve_character_body_model_id(_kind_id: string | null | undefined): string {
   // For now, all current kinds render/occupy as a 2-voxel vertical stack.
   // Later: derive from kind definition.
@@ -40,6 +52,7 @@ export function resolve_character_body_model_id(_kind_id: string | null | undefi
 export function get_body_model_def(body_model_id: string | null | undefined): BodyModelDef {
   const id = String(body_model_id ?? "");
   if (id === DEFAULT_CHARACTER_BODY_MODEL_ID) return BODY_MODEL_CHARACTER_BIPED_2Z;
+  if (id === BODY_MODEL_TEST_SELF_EXCLUSION_Y2.id) return BODY_MODEL_TEST_SELF_EXCLUSION_Y2;
   // Fallback: treat unknown as the default character model.
   return BODY_MODEL_CHARACTER_BIPED_2Z;
 }

@@ -286,6 +286,16 @@ export function set_npc_tracked_position(
   }
 }
 
+// Server-authoritative movement: monotonic seq helps ignore stale snapshots.
+export function set_entity_move_seq(entity_ref: string, seq: number): void {
+  try {
+    const m: Map<string, number> = ((globalThis as any).__move_seq_by_ref ??= new Map());
+    m.set(String(entity_ref), Math.floor(Number(seq)) || 0);
+  } catch {
+    // ignore
+  }
+}
+
 /**
  * Mark all existing movement commands in outbox as processed
  * This clears the backlog from previous sessions
@@ -782,6 +792,7 @@ async function save_npc_position_on_complete(npc_ref: string, final_position: Ti
       const inboxPath = `${dataSlotDir}/inbox.jsonc`;
       
       // Create position update message
+      const npc_snapshot: any = place?.contents?.npcs_present?.find((n: any) => n.npc_ref === npc_ref) ?? null;
       const positionMsg: NPCPositionUpdateMessage = {
         id: `pos_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
         type: "npc_position_update",
@@ -791,6 +802,11 @@ async function save_npc_position_on_complete(npc_ref: string, final_position: Ti
           y: final_position.y
         },
         place_id: place.id,
+        facing: npc_snapshot?.facing,
+        movement_schedule: npc_snapshot?.movement_schedule,
+        breath_index: npc_snapshot?.breath_index,
+        breath_last_processed: npc_snapshot?.breath_last_processed,
+        breath_last_processed_ms: npc_snapshot?.breath_last_processed_ms,
         timestamp: new Date().toISOString(),
         sender: "renderer",
         recipient: "npc_ai"

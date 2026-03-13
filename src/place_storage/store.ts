@@ -79,17 +79,37 @@ export function load_place(slot: number, place_id: string): PlaceResult {
       };
     }
     
+    // defs+deltas migration: scrub any persisted derived/legacy inline fields on load.
+    // This keeps places authoritative and stable even if older files had embedded display/tags.
+    let dirty = false;
+
     // Ensure ground storage is initialized (Phase 5)
     if (!place.ground) {
       place.ground = {
         main: [],
         scattered: {}
       };
+      dirty = true;
     }
 
-    // defs+deltas migration: scrub any persisted derived/legacy inline fields on load.
-    // This keeps places authoritative and stable even if older files had embedded display/tags.
-    let dirty = false;
+    // Breath timekeeping defaults (movement + aging).
+    // These fields are server-authoritative and are safe to persist.
+    try {
+      if (typeof (place as any).breath_index !== 'number' || !Number.isFinite((place as any).breath_index)) {
+        (place as any).breath_index = 0;
+        dirty = true;
+      }
+      if (typeof (place as any).breath_last_processed !== 'number' || !Number.isFinite((place as any).breath_last_processed)) {
+        (place as any).breath_last_processed = Number((place as any).breath_index ?? 0) || 0;
+        dirty = true;
+      }
+      if (typeof (place as any).breath_last_processed_ms !== 'number' || !Number.isFinite((place as any).breath_last_processed_ms)) {
+        (place as any).breath_last_processed_ms = Date.now();
+        dirty = true;
+      }
+    } catch {
+      // ignore
+    }
     try {
       const scrubbed = sanitize_place_for_save(place as any);
       if (scrubbed) dirty = true;
@@ -352,6 +372,8 @@ export function create_basic_place(
     id: place_id,
     name: name,
     region_id: region_id,
+    breath_index: 0,
+    breath_last_processed: 0,
     coordinates: {
       world_tile: { x: 0, y: 0 }, // Will be updated from region
       region_tile: { x: 0, y: 0 },
