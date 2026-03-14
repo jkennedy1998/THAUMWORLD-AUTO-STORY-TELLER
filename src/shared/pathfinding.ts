@@ -6,7 +6,7 @@
  */
 
 import type { Place, TilePosition } from "../types/place.js";
-import { can_place_volume, type OwnerRef, type MovementMode, type MoveCheck } from "../place_storage/movement_legality.js";
+import { can_place_volume, get_place_world_z_bounds, type OwnerRef, type MovementMode, type MoveCheck } from "../place_storage/movement_legality.js";
 
 export type PathfindingOptions = {
   exclude_entity?: string; // Entity ref used as the moving owner
@@ -24,6 +24,81 @@ export type PathResult = {
   blocked_check?: MoveCheck;
 };
 
+type StanceNode = { x: number; y: number; z: number };
+
+function get_owner_for_pathfinding(exclude_entity: string | undefined): OwnerRef {
+  const owner_kind: OwnerRef["kind"] = (() => {
+    const ref = String(exclude_entity ?? "");
+    if (ref.startsWith("npc.")) return "npc";
+    if (ref.startsWith("actor.")) return "actor";
+    return "actor";
+  })();
+  const owner_id = String(exclude_entity ?? "actor.unknown");
+  return { kind: owner_kind, id: owner_id };
+}
+
+function get_owner_start_z(place: Place, owner: OwnerRef): number {
+  const bz = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
+  if (owner.kind === "npc") {
+    const n = place.contents.npcs_present.find((n0) => n0.npc_ref === owner.id) as any;
+    if (n && typeof n.elevation === "number" && Number.isFinite(n.elevation)) return Math.floor(n.elevation);
+  }
+  if (owner.kind === "actor") {
+    const a = place.contents.actors_present.find((a0) => a0.actor_ref === owner.id) as any;
+    if (a && typeof a.elevation === "number" && Number.isFinite(a.elevation)) return Math.floor(a.elevation);
+  }
+  return bz;
+}
+
+function is_stance_walkable(
+  place: Place,
+  owner: OwnerRef,
+  stance: StanceNode,
+  options: PathfindingOptions = {}
+): MoveCheck {
+  const mode: MovementMode = options.movement_mode ?? "WALK";
+  return can_place_volume(
+    place,
+    owner,
+    { x: stance.x, y: stance.y, z: stance.z },
+    mode,
+    {
+      exclude_owner: owner,
+      support_policy: "any_footprint",
+      ignore_occupants: !options.treat_occupied_as_wall,
+      reserved_stance_origins: options.reserved_stance_origins,
+    }
+  );
+}
+
+function get_adjacent_reachable_stances(
+  place: Place,
+  current: StanceNode,
+  dir: { x: number; y: number },
+  owner: OwnerRef,
+  options: PathfindingOptions = {}
+): StanceNode[] {
+  const nx = current.x + dir.x;
+  const ny = current.y + dir.y;
+  const w = Math.max(1, Math.floor(Number(place.tile_grid.width) || 1));
+  const h = Math.max(1, Math.floor(Number(place.tile_grid.height) || 1));
+  if (nx < 0 || ny < 0 || nx >= w || ny >= h) return [];
+
+  const zb = get_place_world_z_bounds(place);
+  const candidates = [current.z, current.z + 1, current.z - 1];
+  const out: StanceNode[] = [];
+  const seen = new Set<string>();
+  for (const z of candidates) {
+    if (z < zb.min_z || z > zb.max_z) continue;
+    const key = `${nx},${ny},${z}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const ok = is_stance_walkable(place, owner, { x: nx, y: ny, z }, options);
+    if (ok.ok) out.push({ x: nx, y: ny, z });
+  }
+  return out;
+}
+
 /**
  * Check if a tile is walkable
  */
@@ -32,7 +107,7 @@ export function is_tile_walkable(
   tile: TilePosition,
   options: PathfindingOptions = {}
 ): boolean {
-  const { exclude_entity, treat_occupied_as_wall = true } = options;
+  const { exclude_entity } = options;
   
   // Check bounds
   if (tile.x < 0 || tile.x >= place.tile_grid.width ||
@@ -40,43 +115,9 @@ export function is_tile_walkable(
     return false;
   }
 
-  const mode: MovementMode = options.movement_mode ?? "WALK";
-  const owner_kind: OwnerRef["kind"] = (() => {
-    const ref = String(exclude_entity ?? "");
-    if (ref.startsWith("npc.")) return "npc";
-    if (ref.startsWith("actor.")) return "actor";
-    // Default to actor for legacy callsites.
-    return "actor";
-  })();
-  const owner_id = String(exclude_entity ?? "actor.unknown");
-  const owner: OwnerRef = { kind: owner_kind, id: owner_id };
-
-  const bz = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
-  const z0 = (() => {
-    // Prefer entity elevation if present in place snapshot.
-    if (owner_kind === "npc") {
-      const n = place.contents.npcs_present.find((n0) => n0.npc_ref === owner_id) as any;
-      if (n && typeof n.elevation === "number" && Number.isFinite(n.elevation)) return Math.floor(n.elevation);
-    }
-    if (owner_kind === "actor") {
-      const a = place.contents.actors_present.find((a0) => a0.actor_ref === owner_id) as any;
-      if (a && typeof a.elevation === "number" && Number.isFinite(a.elevation)) return Math.floor(a.elevation);
-    }
-    return bz;
-  })();
-
-  const ok = can_place_volume(
-    place,
-    owner,
-    { x: tile.x, y: tile.y, z: z0 },
-    mode,
-    {
-      exclude_owner: owner,
-      support_policy: "any_footprint",
-      ignore_occupants: !treat_occupied_as_wall,
-      reserved_stance_origins: options.reserved_stance_origins,
-    }
-  );
+  const owner = get_owner_for_pathfinding(exclude_entity);
+  const z0 = (typeof tile.z === 'number' && Number.isFinite(tile.z)) ? Math.floor(tile.z) : get_owner_start_z(place, owner);
+  const ok = is_stance_walkable(place, owner, { x: tile.x, y: tile.y, z: z0 }, options);
 
   return ok.ok;
 }
@@ -98,54 +139,20 @@ export function find_path(
     movement_mode,
   } = options;
   
-  // Already there
+  const owner = get_owner_for_pathfinding(exclude_entity);
+  const start_z = (typeof start.z === 'number' && Number.isFinite(start.z)) ? Math.floor(start.z) : get_owner_start_z(place, owner);
+
+  // Already there in XY terms.
   if (start.x === goal.x && start.y === goal.y) {
     return { path: [], blocked: false };
   }
   
-  // Check if goal is walkable
-  const goal_check = (() => {
-    const mode: MovementMode = movement_mode ?? "WALK";
-    const owner_kind: OwnerRef["kind"] = (() => {
-      const ref = String(exclude_entity ?? "");
-      if (ref.startsWith("npc.")) return "npc";
-      if (ref.startsWith("actor.")) return "actor";
-      return "actor";
-    })();
-    const owner_id = String(exclude_entity ?? "actor.unknown");
-    const owner: OwnerRef = { kind: owner_kind, id: owner_id };
-
-    const bz = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
-    const z0 = (() => {
-      if (owner_kind === "npc") {
-        const n = place.contents.npcs_present.find((n0) => n0.npc_ref === owner_id) as any;
-        if (n && typeof n.elevation === "number" && Number.isFinite(n.elevation)) return Math.floor(n.elevation);
-      }
-      if (owner_kind === "actor") {
-        const a = place.contents.actors_present.find((a0) => a0.actor_ref === owner_id) as any;
-        if (a && typeof a.elevation === "number" && Number.isFinite(a.elevation)) return Math.floor(a.elevation);
-      }
-      return bz;
-    })();
-
-    return can_place_volume(place, owner, { x: goal.x, y: goal.y, z: z0 }, mode, {
-      exclude_owner: owner,
-      support_policy: "any_footprint",
-      ignore_occupants: !treat_occupied_as_wall,
-      reserved_stance_origins: options.reserved_stance_origins,
-    });
-  })();
-
-  if (!goal_check.ok) {
-    return { path: [], blocked: true, blocked_at: goal, blocked_check: goal_check };
-  }
-  
   // BFS
-  const queue: Array<{ pos: TilePosition; path: TilePosition[] }> = [
-    { pos: start, path: [] }
+  const queue: Array<{ pos: StanceNode; path: TilePosition[] }> = [
+    { pos: { x: start.x, y: start.y, z: start_z }, path: [] }
   ];
   const visited = new Set<string>();
-  visited.add(`${start.x},${start.y}`);
+  visited.add(`${start.x},${start.y},${start_z}`);
   
   // 4-directional movement
   const directions = [
@@ -172,40 +179,29 @@ export function find_path(
     const current = queue.shift()!;
     
     for (const dir of directions) {
-      const next: TilePosition = {
-        x: current.pos.x + dir.x,
-        y: current.pos.y + dir.y,
-      };
-      
-      const key = `${next.x},${next.y}`;
-      
-      if (visited.has(key)) continue;
-      visited.add(key);
-      
-      // Check if this is the goal
-      if (next.x === goal.x && next.y === goal.y) {
-        return { path: [...current.path, next], blocked: false };
-      }
-      
-      // Check if walkable
-      const walkable = is_tile_walkable(place, next, {
-        exclude_entity,
-        treat_occupied_as_wall,
-        movement_mode,
-      });
-      
-      if (!walkable) continue;
-      
-      // Add to queue
-      queue.push({
-        pos: next,
-        path: [...current.path, next],
-      });
-    }
+        const next_stances = get_adjacent_reachable_stances(place, current.pos, dir, owner, options);
+        for (const next of next_stances) {
+          const key = `${next.x},${next.y},${next.z}`;
+          if (visited.has(key)) continue;
+          visited.add(key);
+
+          const next_tile: TilePosition = { x: next.x, y: next.y, z: next.z };
+
+          // Reaching target XY at any reachable z counts as success.
+          if (next.x === goal.x && next.y === goal.y) {
+            return { path: [...current.path, next_tile], blocked: false };
+          }
+
+          queue.push({
+            pos: next,
+            path: [...current.path, next_tile],
+          });
+        }
+     }
   }
   
   // No path found
-  return { path: [], blocked: true };
+  return { path: [], blocked: true, blocked_at: goal };
 }
 
 /**

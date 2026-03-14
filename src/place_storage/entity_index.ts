@@ -17,6 +17,7 @@ import { find_actors, load_actor } from "../actor_storage/store.js";
 import { get_npc_location } from "../npc_storage/location.js";
 
 const INDEX_FILE = "place_entity_index.jsonc";
+const get_entities_log_count = new Map<string, number>();
 
 // Index structure: place_id -> { npcs: [...], actors: [...], last_updated }
 export type PlaceEntityEntry = {
@@ -112,12 +113,18 @@ export function get_entities_in_place(slot: number, place_id: string): { npcs: s
     return { npcs: [], actors: [] };
   }
   
-  debug_log("PlaceEntityIndex", `Retrieved entities for place ${place_id}`, {
-    slot,
-    npc_count: entry.npcs.length,
-    actor_count: entry.actors.length,
-    last_updated: entry.last_updated
-  });
+  const key = `${slot}:${place_id}`;
+  const n = (get_entities_log_count.get(key) ?? 0) + 1;
+  get_entities_log_count.set(key, n);
+  if (n % 60 === 0) {
+    debug_log("PlaceEntityIndex", `Retrieved entities for place ${place_id}`, {
+      slot,
+      npc_count: entry.npcs.length,
+      actor_count: entry.actors.length,
+      last_updated: entry.last_updated,
+      sample_count: n,
+    });
+  }
   
   return {
     npcs: [...entry.npcs],

@@ -28,6 +28,7 @@ import { advance_time } from "../time_system/tracker.js";
 import { move_entity_in_index } from "../place_storage/entity_index.js";
 import { end_conversations_involving_entity } from "../npc_ai/witness_handler.js";
 import { MetaTagProcessor } from "../tag_system/meta_processor.js";
+import { debug_log } from "../shared/debug.js";
 
 /**
  * Calculate the entry position (door position) based on direction
@@ -77,6 +78,67 @@ function calculate_door_position(place: Place, direction: string): TilePosition 
     // Default: use the place's default entry
     return place.tile_grid.default_entry;
   }
+}
+
+function calculate_interior_entry_position(place: Place, direction: string): TilePosition {
+  const dir = direction.toLowerCase();
+  const width = place.tile_grid.width;
+  const height = place.tile_grid.height;
+
+  if (dir.includes("north") || dir.includes("up") || dir.includes("forward")) {
+    return { x: Math.floor(width / 2), y: Math.max(1, height - 2) };
+  } else if (dir.includes("south") || dir.includes("down") || dir.includes("backward")) {
+    return { x: Math.floor(width / 2), y: Math.min(Math.max(0, height - 1), 1) };
+  } else if (dir.includes("east") || dir.includes("right")) {
+    return { x: Math.max(1, width - 2), y: Math.floor(height / 2) };
+  } else if (dir.includes("west") || dir.includes("left")) {
+    return { x: Math.min(Math.max(0, width - 1), 1), y: Math.floor(height / 2) };
+  }
+
+  return place.tile_grid.default_entry;
+}
+
+function find_valid_entry_tile(place: Place, entity_ref: string, preferred: TilePosition): TilePosition {
+  const width = Math.max(1, Math.floor(Number(place.tile_grid.width) || 1));
+  const height = Math.max(1, Math.floor(Number(place.tile_grid.height) || 1));
+  const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+  const start: TilePosition = {
+    x: clamp(Math.floor(Number(preferred.x) || 0), width > 2 ? 1 : 0, width > 2 ? width - 2 : width - 1),
+    y: clamp(Math.floor(Number(preferred.y) || 0), height > 2 ? 1 : 0, height > 2 ? height - 2 : height - 1),
+    z: typeof preferred.z === 'number' && Number.isFinite(preferred.z)
+      ? Math.floor(preferred.z)
+      : (Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0),
+  };
+
+  const ok0 = is_tile_walkable(place, start, {
+    exclude_entity: entity_ref,
+    treat_occupied_as_wall: true,
+    movement_mode: 'WALK',
+  });
+  if (ok0) return start;
+
+  const maxRadius = Math.max(width, height);
+  for (let r = 1; r <= maxRadius; r += 1) {
+    for (let dy = -r; dy <= r; dy += 1) {
+      for (let dx = -r; dx <= r; dx += 1) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const cand: TilePosition = {
+          x: clamp(start.x + dx, width > 2 ? 1 : 0, width > 2 ? width - 2 : width - 1),
+          y: clamp(start.y + dy, height > 2 ? 1 : 0, height > 2 ? height - 2 : height - 1),
+          z: start.z,
+        };
+        if (is_tile_walkable(place, cand, {
+          exclude_entity: entity_ref,
+          treat_occupied_as_wall: true,
+          movement_mode: 'WALK',
+        })) {
+          return cand;
+        }
+      }
+    }
+  }
+
+  return start;
 }
 
 // Movement speeds (tiles per minute)
@@ -302,9 +364,18 @@ export async function travel_between_places(
   
   // Calculate entry position based on the return connection's direction
   // If no return connection found, fall back to default entry
-  const entry_tile = return_connection 
-    ? calculate_door_position(to_place, return_connection.direction)
+  const preferred_entry = return_connection
+    ? calculate_interior_entry_position(to_place, return_connection.direction)
     : to_place.tile_grid.default_entry;
+  const entry_tile = find_valid_entry_tile(to_place, entity_ref, preferred_entry);
+  debug_log('MOVE_VEL_TEST', 'travel destination placement resolved', {
+    entity_ref,
+    from_place_id,
+    to_place_id: target_place_id,
+    via_direction: return_connection?.direction ?? null,
+    preferred_entry,
+    entry_tile,
+  });
   
   // Remove from current place
   if (is_npc) {

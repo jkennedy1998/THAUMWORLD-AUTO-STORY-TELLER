@@ -37,6 +37,38 @@ function base_z(place: Place): number {
   }
 }
 
+function get_authored_tile_layer_offsets(place: Place): number[] {
+  const offsets = new Set<number>([0]);
+  try {
+    const rec = place as any;
+    if (rec?.tiles_z0?.cells) offsets.add(-1);
+    if (rec?.tiles_z1?.cells) offsets.add(1);
+    for (const key of Object.keys(rec ?? {})) {
+      const m = /^tiles_z(-?\d+)$/.exec(String(key));
+      if (!m) continue;
+      const raw = Number(m[1]);
+      if (!Number.isFinite(raw)) continue;
+      if (raw === 0) offsets.add(-1);
+      else offsets.add(Math.floor(raw));
+    }
+  } catch {
+    // ignore
+  }
+  return Array.from(offsets.values()).sort((a, b) => a - b);
+}
+
+function get_tile_layer_for_offset(place: Place, z_offset: number): any | null {
+  try {
+    const rec = place as any;
+    if (z_offset === 0) return rec?.tiles ?? null;
+    if (z_offset === -1) return rec?.tiles_z0 ?? null;
+    if (z_offset === 1) return rec?.tiles_z1 ?? null;
+    return rec?.[`tiles_z${Math.floor(z_offset)}`] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function get_place_world_z_bounds(place: Place): { min_z: number; max_z: number } {
   const bz = base_z(place);
 
@@ -44,8 +76,10 @@ export function get_place_world_z_bounds(place: Place): { min_z: number; max_z: 
   let max_z = bz;
 
   try {
-    if ((place as any)?.tiles_z0?.cells) min_z = Math.min(min_z, bz - 1);
-    if ((place as any)?.tiles_z1?.cells) max_z = Math.max(max_z, bz + 1);
+    for (const offset of get_authored_tile_layer_offsets(place)) {
+      min_z = Math.min(min_z, bz + offset);
+      max_z = Math.max(max_z, bz + offset);
+    }
   } catch {
     // ignore
   }
@@ -110,9 +144,8 @@ function get_tile_at_world_z(place: Place, x: number, y: number, world_z: number
     const bz = base_z(place);
     const wz = Math.floor(Number(world_z));
     if (!Number.isFinite(wz)) return null;
-    if (wz === bz - 1) return ((place as any)?.tiles_z0?.cells?.[y]?.[x] ?? null) as any;
-    if (wz === bz) return ((place as any)?.tiles?.cells?.[y]?.[x] ?? null) as any;
-    if (wz === bz + 1) return ((place as any)?.tiles_z1?.cells?.[y]?.[x] ?? null) as any;
+    const layer = get_tile_layer_for_offset(place, wz - bz);
+    if (layer?.cells?.[y]?.[x] !== undefined) return (layer.cells[y][x] ?? null) as any;
     return null;
   } catch {
     return null;

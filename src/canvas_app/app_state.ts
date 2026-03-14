@@ -60,6 +60,8 @@ export const APP_CONFIG = {
     input_actor_id: 'henry_actor',
 } as const;
 
+const APP_PLACE_TIMING_VERSION = '2026-03-14-visible-pulse-v1';
+
 export type AppState = {
     modules: readonly Module[];
     start_window_feed_polling: (interval_ms: number) => void;
@@ -1276,11 +1278,16 @@ export function create_app_state(): AppState {
         // Fetch place data from API
         try {
             const url = `${APP_CONFIG.place_endpoint}?slot=${APP_CONFIG.selected_data_slot}&place_id=${encodeURIComponent(place_id)}`;
+            const fetch_started_ms = Date.now();
             const res = await fetch(url);
             if (!res.ok) {
                 throw new Error(`HTTP ${res.status}`);
             }
             const data = (await res.json()) as { ok: boolean; place?: Place };
+            const fetch_elapsed_ms = Math.max(0, Date.now() - fetch_started_ms);
+            if (fetch_elapsed_ms > 150) {
+                debug_log(`[MOVE_VEL_TEST] current place fetch slow ${JSON.stringify({ place_id, fetch_elapsed_ms })}`);
+            }
             if (data.ok && data.place) {
                 // Preserve current entity positions if they're moving
                 // This prevents snap-back when place data is refreshed during movement
@@ -1685,6 +1692,7 @@ export function create_app_state(): AppState {
     }
 
     function start_window_feed_polling(interval_ms: number): void {
+        debug_log(`[MOVE_VEL_TEST] app place timing version ${JSON.stringify({ version: APP_PLACE_TIMING_VERSION, poll_interval_ms: interval_ms })}`);
         void poll_window_feeds();
         setInterval(() => {
             void poll_window_feeds();
@@ -4197,38 +4205,39 @@ export function create_app_state(): AppState {
                 },
             },
             // Container sidebar: Show equipped containers only (NEW INLINE SYSTEM)
-            get_equipped_containers: () => {
-                debug_log(`[get_equipped_containers] === SCANNING FOR INLINE CONTAINERS ===`);
-                
+            get_equipped_containers: (() => {
+                let last_body_slots_ref: any = null;
+                let last_result: Array<{
+                    slot_name: string;
+                    item_instance: ItemInstance;
+                    item_definition: ItemDefinition;
+                    container_id: string;
+                }> = [];
+
+                return () => {
                 const containers: Array<{
                     slot_name: string;
                     item_instance: ItemInstance;
                     item_definition: ItemDefinition;
                     container_id: string;
                 }> = [];
-                
+
                 // Walk body_slots directly to find containers (inline system)
                 const body_slots = ui_state.character.body_slots as any;
                 if (!body_slots) {
-                    debug_log(`[get_equipped_containers] WARNING: No body_slots found`);
+                    last_body_slots_ref = body_slots;
+                    last_result = containers;
                     return containers;
                 }
-                
-                debug_log(`[get_equipped_containers] Body slots: ${Object.keys(body_slots).join(', ')}`);
+                if (body_slots === last_body_slots_ref) return last_result;
                 
                 for (const [slot_name, slot_data] of Object.entries(body_slots)) {
                     const slot = slot_data as any;
-                    if (!slot) {
-                        debug_log(`[get_equipped_containers] Slot ${slot_name} is empty`);
-                        continue;
-                    }
-                    
-                    debug_log(`[get_equipped_containers] Checking slot: ${slot_name}`);
+                    if (!slot) continue;
                     
                     // Check armor slot
                     if (slot.armor) {
                         const is_container = has_tag(slot.armor.tags, 'CONTAINER');
-                        debug_log(`[get_equipped_containers]   ${slot_name}.armor: ${slot.armor.name}, is_container=${is_container}`);
                         if (is_container) {
                             containers.push({
                                 slot_name: `${slot_name}.armor`,
@@ -4236,14 +4245,12 @@ export function create_app_state(): AppState {
                                 item_definition: { name: slot.armor.name, tags: slot.armor.tags } as ItemDefinition,
                                 container_id: `body_slots.${slot_name}.armor`,
                             });
-                            debug_log(`[get_equipped_containers]   ✓ ADDED: body_slots.${slot_name}.armor`);
                         }
                     }
                     
                     // Check tool slot  
                     if (slot.tool) {
                         const is_container = has_tag(slot.tool.tags, 'CONTAINER');
-                        debug_log(`[get_equipped_containers]   ${slot_name}.tool: ${slot.tool.name}, is_container=${is_container}`);
                         if (is_container) {
                             containers.push({
                                 slot_name: `${slot_name}.tool`,
@@ -4251,16 +4258,13 @@ export function create_app_state(): AppState {
                                 item_definition: { name: slot.tool.name, tags: slot.tool.tags } as ItemDefinition,
                                 container_id: `body_slots.${slot_name}.tool`,
                             });
-                            debug_log(`[get_equipped_containers]   ✓ ADDED: body_slots.${slot_name}.tool`);
                         }
                     }
                     
                     // Check garb slots
                     if (slot.garb && Array.isArray(slot.garb)) {
-                        debug_log(`[get_equipped_containers]   ${slot_name}.garb: ${slot.garb.length} items`);
                         slot.garb.forEach((item: any, index: number) => {
                             const is_container = has_tag(item.tags, 'CONTAINER');
-                            debug_log(`[get_equipped_containers]     ${slot_name}.garb.${index}: ${item.name}, is_container=${is_container}`);
                             if (is_container) {
                                 containers.push({
                                     slot_name: `${slot_name}.garb.${index}`,
@@ -4268,19 +4272,16 @@ export function create_app_state(): AppState {
                                     item_definition: { name: item.name, tags: item.tags } as ItemDefinition,
                                     container_id: `body_slots.${slot_name}.garb.${index}`,
                                 });
-                                debug_log(`[get_equipped_containers]     ✓ ADDED: body_slots.${slot_name}.garb.${index}`);
                             }
                         });
                     }
                 }
-                
-                debug_log(`[get_equipped_containers] === FOUND ${containers.length} INLINE CONTAINERS ===`);
-                containers.forEach((c, i) => {
-                    debug_log(`[get_equipped_containers]   ${i + 1}. ${c.container_id} (${c.item_definition.name})`);
-                });
-                
+
+                last_body_slots_ref = body_slots;
+                last_result = containers;
                 return containers;
-            },
+                };
+            })(),
             get_default_container_id: () => ui_state.character.default_container_id,
             on_set_default_container: (container_id: string) => {
                 ui_state.character.default_container_id = container_id;
@@ -6288,28 +6289,37 @@ export function create_app_state(): AppState {
                 },
             },
             // Container sidebar: Show equipped containers only (NEW INLINE SYSTEM)
-            get_equipped_containers: () => {
+            get_equipped_containers: (() => {
+                let last_body_slots_ref: any = null;
+                let last_result: Array<{
+                    slot_name: string;
+                    item_instance: ItemInstance;
+                    item_definition: ItemDefinition;
+                    container_id: string;
+                }> = [];
+
+                return () => {
                 const containers: Array<{
                     slot_name: string;
                     item_instance: ItemInstance;
                     item_definition: ItemDefinition;
                     container_id: string;
                 }> = [];
-                
-                debug_log(`[NPC get_equipped_containers] === SCANNING FOR INLINE CONTAINERS ===`);
-                debug_log(`[NPC get_equipped_containers] NPC: ${npc_id}, Body slots: ${Object.keys(body_slots).length}`);
+                if (!body_slots) {
+                    last_body_slots_ref = body_slots;
+                    last_result = containers;
+                    return containers;
+                }
+                if (body_slots === last_body_slots_ref) return last_result;
                 
                 // NEW INLINE SYSTEM: Walk body_slots directly to find containers
                 for (const [slot_name, slot_data] of Object.entries(body_slots)) {
                     const slot = slot_data as any;
                     if (!slot) continue;
                     
-                    debug_log(`[NPC get_equipped_containers] Checking slot: ${slot_name}`);
-                    
                     // Check armor slot for CONTAINER tag
                     if (slot.armor) {
                         const is_container = has_tag(slot.armor.tags, 'CONTAINER');
-                        debug_log(`[NPC get_equipped_containers]   ${slot_name}.armor: ${slot.armor.name}, is_container=${is_container}`);
                         if (is_container) {
                             containers.push({
                                 slot_name: `${slot_name}.armor`,
@@ -6317,14 +6327,12 @@ export function create_app_state(): AppState {
                                 item_definition: { name: slot.armor.name, tags: slot.armor.tags } as ItemDefinition,
                                 container_id: `body_slots.${slot_name}.armor`,
                             });
-                            debug_log(`[NPC get_equipped_containers]   ✓ ADDED: body_slots.${slot_name}.armor`);
                         }
                     }
                     
                     // Check tool slot for CONTAINER tag
                     if (slot.tool) {
                         const is_container = has_tag(slot.tool.tags, 'CONTAINER');
-                        debug_log(`[NPC get_equipped_containers]   ${slot_name}.tool: ${slot.tool.name}, is_container=${is_container}`);
                         if (is_container) {
                             containers.push({
                                 slot_name: `${slot_name}.tool`,
@@ -6332,7 +6340,6 @@ export function create_app_state(): AppState {
                                 item_definition: { name: slot.tool.name, tags: slot.tool.tags } as ItemDefinition,
                                 container_id: `body_slots.${slot_name}.tool`,
                             });
-                            debug_log(`[NPC get_equipped_containers]   ✓ ADDED: body_slots.${slot_name}.tool`);
                         }
                     }
                     
@@ -6341,7 +6348,6 @@ export function create_app_state(): AppState {
                         for (let i = 0; i < slot.garb.length; i++) {
                             const garb_item = slot.garb[i];
                             const is_container = has_tag(garb_item.tags, 'CONTAINER');
-                            debug_log(`[NPC get_equipped_containers]   ${slot_name}.garb.${i}: ${garb_item.name}, is_container=${is_container}`);
                             if (is_container) {
                                 containers.push({
                                     slot_name: `${slot_name}.garb.${i}`,
@@ -6349,16 +6355,16 @@ export function create_app_state(): AppState {
                                     item_definition: { name: garb_item.name, tags: garb_item.tags } as ItemDefinition,
                                     container_id: `body_slots.${slot_name}.garb.${i}`,
                                 });
-                                debug_log(`[NPC get_equipped_containers]   ✓ ADDED: body_slots.${slot_name}.garb.${i}`);
                             }
                         }
                     }
                 }
-                
-                debug_log(`[NPC get_equipped_containers] === FOUND ${containers.length} INLINE CONTAINERS ===`);
-                
+
+                last_body_slots_ref = body_slots;
+                last_result = containers;
                 return containers;
-            },
+                };
+            })(),
             on_container_click: (container_id: string) => {
                 debug_log(`[NPC Module] Container clicked: ${container_id}`);
                 // Phase 7: Open container in new ContainerModule

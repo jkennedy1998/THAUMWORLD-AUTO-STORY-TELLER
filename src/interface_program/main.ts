@@ -90,7 +90,11 @@ type PlaceBreathState = {
     breath_index: number;
     breath_last_processed: number;
     last_seen_ms: number;
+    last_tick_ms: number;
     last_persist_ms: number;
+    realtime_visible: boolean;
+    last_visible_pulse_ms: number;
+    last_visible_pulse_duration_ms: number;
 
     // Base place snapshot for breath processing.
     // Must NOT include `/api/place` derived entity lists.
@@ -103,6 +107,9 @@ const ACTIVE_PLACE_TIMEOUT_MS = 10_000;
 const PLACE_PERSIST_COOLDOWN_MS = 5_000;
 const CATCHUP_MAX_BREATHS = 300;
 const CATCHUP_MAX_GRAVITY_STEPS = 64;
+const MOVE_TIMING_INVESTIGATION_VERSION = '2026-03-14-visible-pulse-v1';
+let last_breath_interval_started_ms = 0;
+let breath_interval_sample_count = 0;
 
 const place_breath = new Map<string, PlaceBreathState>();
 
@@ -111,6 +118,22 @@ const place_breath = new Map<string, PlaceBreathState>();
 // ---------------------------------------------------------------------------
 
 type MoveMode = "WALK" | "SNEAK" | "SPRINT";
+type MoveModality = "walk" | "climb" | "swim" | "fly";
+
+type MovementBudgetState = Record<MoveModality, number>;
+
+type PersistedMovementPhysicsState = {
+    velocity: { vx: number; vy: number; vz: number };
+    move_budget: MovementBudgetState;
+    move_debt: MovementBudgetState;
+    last_intent: { dx: number; dy: number; modality: MoveModality; mode: MoveMode };
+    transient_selection?: {
+        movement_verb: "move" | null;
+        movement_subtype: string | null;
+        modality: MoveModality | null;
+    } | null;
+    last_breath_processed: number;
+};
 
 type EntityMoveController = {
     slot: number;
@@ -121,17 +144,39 @@ type EntityMoveController = {
     intent: { dx: number; dy: number } | null;
     // Click-to-move goal (renderer sends a tile; server plans path on think ticks).
     goal: { x: number; y: number } | null;
-    path: Array<{ x: number; y: number }> | null;
+    path: Array<{ x: number; y: number; z?: number }> | null;
     path_index: number;
     need_repath: boolean;
     last_plan_breath: number;
     last_brain_breath: number;
-    // Physics scheduler (grid step budget). Accumulates toward 1.0 step.
-    // This MUST NOT be reset by input spam.
-    move_accum: number;
-    breaths_per_step: number; // derived from sheet stats; for diagnostics
     updated_at_ms: number;
     move_seq: number;
+};
+
+type MovementPhysicsRuntimeState = {
+    entity_ref: string;
+    entity_type: "actor" | "npc";
+    place_id: string;
+    velocity: { vx: number; vy: number; vz: number };
+    latest_intent: {
+        dx: number;
+        dy: number;
+        modality: MoveModality;
+        mode: MoveMode;
+        updated_breath: number;
+    } | null;
+    move_budget: MovementBudgetState;
+    move_debt: MovementBudgetState;
+    goal: { x: number; y: number } | null;
+    advisory_path: Array<{ x: number; y: number; z?: number }> | null;
+    advisory_path_index: number;
+    transient_selection: {
+        movement_verb: "move" | null;
+        movement_subtype: string | null;
+        modality: MoveModality | null;
+    } | null;
+    input_goal_queued_at_ms: number | null;
+    last_breath_processed: number;
 };
 
 const move_ctl = new Map<string, EntityMoveController>(); // key `${slot}:${entity_ref}`
@@ -154,19 +199,328 @@ function move_ctl_key(slot: number, entity_ref: string): string {
     return `${slot}:${String(entity_ref ?? "").trim()}`;
 }
 
-function stat_to_bps(speed: number): number | null {
-    const s = Math.floor(Number(speed));
-    if (!Number.isFinite(s) || s <= 0) return null;
-    if (s >= 8) return 1;
-    return 9 - s;
+function normalize_movement_physics_state(any_entity: any): PersistedMovementPhysicsState {
+    const mp = (any_entity && typeof any_entity.movement_physics === 'object' && any_entity.movement_physics)
+        ? any_entity.movement_physics
+        : {};
+    const velocity = (mp && typeof mp.velocity === 'object') ? mp.velocity : {};
+    const move_budget = (mp && typeof mp.move_budget === 'object') ? mp.move_budget : {};
+    const move_debt = (mp && typeof mp.move_debt === 'object') ? mp.move_debt : {};
+    const last_intent = (mp && typeof mp.last_intent === 'object') ? mp.last_intent : {};
+    const out: PersistedMovementPhysicsState = {
+        velocity: {
+            vx: Math.floor(Number((velocity as any).vx ?? 0)) || 0,
+            vy: Math.floor(Number((velocity as any).vy ?? 0)) || 0,
+            vz: Math.floor(Number((velocity as any).vz ?? 0)) || 0,
+        },
+        move_budget: {
+            walk: Number((move_budget as any).walk ?? 0) || 0,
+            climb: Number((move_budget as any).climb ?? 0) || 0,
+            swim: Number((move_budget as any).swim ?? 0) || 0,
+            fly: Number((move_budget as any).fly ?? 0) || 0,
+        },
+        move_debt: {
+            walk: Math.floor(Number((move_debt as any).walk ?? 0)) || 0,
+            climb: Math.floor(Number((move_debt as any).climb ?? 0)) || 0,
+            swim: Math.floor(Number((move_debt as any).swim ?? 0)) || 0,
+            fly: Math.floor(Number((move_debt as any).fly ?? 0)) || 0,
+        },
+        last_intent: {
+            dx: clamp_intent((last_intent as any).dx),
+            dy: clamp_intent((last_intent as any).dy),
+            modality: ((): MoveModality => {
+                const m = String((last_intent as any).modality ?? 'walk').toLowerCase();
+                if (m === 'climb' || m === 'swim' || m === 'fly') return m;
+                return 'walk';
+            })(),
+            mode: normalize_move_mode((last_intent as any).mode),
+        },
+        transient_selection: (mp && typeof mp.transient_selection === 'object' && mp.transient_selection)
+            ? {
+                movement_verb: String((mp.transient_selection as any).movement_verb ?? '') === 'move' ? 'move' : null,
+                movement_subtype: typeof (mp.transient_selection as any).movement_subtype === 'string' ? String((mp.transient_selection as any).movement_subtype) : null,
+                modality: (() => {
+                    const m = String((mp.transient_selection as any).modality ?? '').toLowerCase();
+                    if (m === 'climb' || m === 'swim' || m === 'fly') return m as MoveModality;
+                    if (m === 'walk') return 'walk' as MoveModality;
+                    return null;
+                })(),
+            }
+            : null,
+        last_breath_processed: Math.floor(Number(mp.last_breath_processed ?? any_entity?.breath_last_processed ?? any_entity?.breath_index ?? 0)) || 0,
+    };
+    any_entity.movement_physics = out;
+    return out;
 }
 
-function get_bps_for_walk(any_entity: any, mode: MoveMode): number | null {
-    const base_stat = Math.floor(Number(any_entity?.movement?.walk));
-    const bps0 = stat_to_bps(base_stat);
-    if (!bps0) return null;
+function get_or_init_movement_physics_state(entity_ref: string, place_id: string, any_entity: any, ctl: EntityMoveController | null, breath_index: number): MovementPhysicsRuntimeState {
+    const persisted = normalize_movement_physics_state(any_entity);
+    return {
+        entity_ref,
+        entity_type: infer_entity_type(entity_ref),
+        place_id,
+        velocity: { ...persisted.velocity },
+        latest_intent: ctl && ctl.intent ? {
+            dx: clamp_intent(ctl.intent.dx),
+            dy: clamp_intent(ctl.intent.dy),
+            modality: 'walk',
+            mode: ctl.mode,
+            updated_breath: breath_index,
+        } : null,
+        move_budget: { ...persisted.move_budget },
+        move_debt: { ...persisted.move_debt },
+        goal: ctl?.goal ? { ...ctl.goal } : null,
+        advisory_path: ctl?.path ? ctl.path.map((p) => ({ ...p })) : null,
+        advisory_path_index: Math.max(0, Math.floor(Number(ctl?.path_index ?? 0)) || 0),
+        transient_selection: persisted.transient_selection ?? null,
+        input_goal_queued_at_ms: (typeof (any_entity?.movement_physics?.input_goal_queued_at_ms) === 'number' && Number.isFinite(any_entity.movement_physics.input_goal_queued_at_ms)) ? any_entity.movement_physics.input_goal_queued_at_ms : null,
+        last_breath_processed: persisted.last_breath_processed,
+    };
+}
+
+function persist_entity_movement_state(any_entity: any, runtime: MovementPhysicsRuntimeState, breath_index: number): void {
+    const persisted = normalize_movement_physics_state(any_entity);
+    persisted.velocity = { ...runtime.velocity };
+    persisted.move_budget = { ...runtime.move_budget };
+    persisted.move_debt = { ...runtime.move_debt };
+    if (runtime.latest_intent) {
+        persisted.last_intent = {
+            dx: clamp_intent(runtime.latest_intent.dx),
+            dy: clamp_intent(runtime.latest_intent.dy),
+            modality: runtime.latest_intent.modality,
+            mode: runtime.latest_intent.mode,
+        };
+    }
+    persisted.transient_selection = runtime.transient_selection
+        ? {
+            movement_verb: runtime.transient_selection.movement_verb,
+            movement_subtype: runtime.transient_selection.movement_subtype,
+            modality: runtime.transient_selection.modality,
+        }
+        : null;
+    (persisted as any).input_goal_queued_at_ms = runtime.input_goal_queued_at_ms;
+    persisted.last_breath_processed = Math.floor(Number(breath_index)) || 0;
+    any_entity.movement_physics = persisted;
+}
+
+function refill_move_budget_and_apply_debt(runtime: MovementPhysicsRuntimeState, modality: MoveModality, accel_per_breath: number): { can_spend: boolean; debt_suppressed: boolean } {
+    const inc = Math.max(0, Number(accel_per_breath) || 0);
+    const current_budget = Number(runtime.move_budget[modality]);
+    runtime.move_budget[modality] = Math.max(0, (Number.isFinite(current_budget) ? current_budget : 0) + inc);
+
+    const current_debt = Math.max(0, Math.floor(Number(runtime.move_debt[modality])) || 0);
+    if (current_debt > 0) {
+        runtime.move_debt[modality] = current_debt - 1;
+        return { can_spend: false, debt_suppressed: true };
+    }
+
+    return { can_spend: runtime.move_budget[modality] >= 1, debt_suppressed: false };
+}
+
+function spend_move_budget(runtime: MovementPhysicsRuntimeState, modality: MoveModality, amount: number): void {
+    const spend = Math.max(0, Number(amount) || 0);
+    const current_budget = Number(runtime.move_budget[modality]);
+    const next_budget = (Number.isFinite(current_budget) ? current_budget : 0) - spend;
+    if (next_budget >= 0) {
+        runtime.move_budget[modality] = next_budget;
+        return;
+    }
+
+    const overspent = Math.ceil(Math.abs(next_budget));
+    runtime.move_budget[modality] = 0;
+    runtime.move_debt[modality] = Math.max(0, Math.floor(Number(runtime.move_debt[modality])) || 0) + overspent;
+}
+
+function hash_entity_ref(entity_ref: string): number {
+    let h = 0;
+    const s = String(entity_ref ?? '');
+    for (let i = 0; i < s.length; i += 1) {
+        h = ((h * 31) + s.charCodeAt(i)) | 0;
+    }
+    return Math.abs(h);
+}
+
+function desired_step_from_controller(ctl: EntityMoveController, cur_x: number, cur_y: number): { dx: number; dy: number } | null {
+    const intent_active = !!(ctl.intent && (ctl.intent.dx !== 0 || ctl.intent.dy !== 0));
+    if (intent_active && ctl.intent) {
+        return { dx: clamp_intent(ctl.intent.dx), dy: clamp_intent(ctl.intent.dy) };
+    }
+
+    if (ctl.path && ctl.path_index < ctl.path.length) {
+        const next = ctl.path[ctl.path_index];
+        if (!next) return null;
+        const dx = clamp_intent(Math.floor(Number(next.x)) - cur_x);
+        const dy = clamp_intent(Math.floor(Number(next.y)) - cur_y);
+        if (dx !== 0 && dy !== 0) {
+            return { dx, dy: 0 };
+        }
+        if (dx !== 0 || dy !== 0) {
+            return { dx, dy };
+        }
+    }
+
+    return null;
+}
+
+function try_select_walk_incline(place_any: any, entity_ref: string, entity_type: 'actor' | 'npc', cur_x: number, cur_y: number, cur_z: number, desired: { dx: number; dy: number } | null): { subtype: 'incline_up' | 'incline_down'; dz: 1 | -1 } | null {
+  if (!desired || (desired.dx === 0 && desired.dy === 0)) return null;
+  const owner = { kind: entity_type as any, id: entity_ref };
+  const forward = can_place_volume(place_any as any, owner as any, { x: cur_x + desired.dx, y: cur_y + desired.dy, z: cur_z }, 'WALK' as any, {
+        exclude_owner: owner as any,
+        support_policy: 'any_footprint' as any,
+    });
+    if (forward.ok) return null;
+
+    if (forward.reason === 'blocked') {
+        const up = can_place_volume(place_any as any, owner as any, { x: cur_x, y: cur_y, z: cur_z + 1 }, 'WALK' as any, {
+            exclude_owner: owner as any,
+            support_policy: 'any_footprint' as any,
+            allow_unsupported: true,
+        });
+        const up_forward = can_place_volume(place_any as any, owner as any, { x: cur_x + desired.dx, y: cur_y + desired.dy, z: cur_z + 1 }, 'WALK' as any, {
+            exclude_owner: owner as any,
+            support_policy: 'any_footprint' as any,
+        });
+    debug_log('MOVE_VEL_TEST', 'incline check blocked->up', {
+        entity_ref,
+        at: { x: cur_x, y: cur_y, z: cur_z },
+        desired,
+        forward,
+        up,
+        up_forward,
+    });
+    if (up.ok && up_forward.ok) return { subtype: 'incline_up', dz: 1 };
+    return null;
+  }
+
+    if (forward.reason === 'no_support') {
+        const down = can_place_volume(place_any as any, owner as any, { x: cur_x, y: cur_y, z: cur_z - 1 }, 'WALK' as any, {
+            exclude_owner: owner as any,
+            support_policy: 'any_footprint' as any,
+            allow_unsupported: true,
+        });
+        const down_forward = can_place_volume(place_any as any, owner as any, { x: cur_x + desired.dx, y: cur_y + desired.dy, z: cur_z - 1 }, 'WALK' as any, {
+            exclude_owner: owner as any,
+            support_policy: 'any_footprint' as any,
+        });
+        debug_log('MOVE_VEL_TEST', 'incline check no_support->down', {
+            entity_ref,
+            at: { x: cur_x, y: cur_y, z: cur_z },
+            desired,
+            forward,
+            down,
+            down_forward,
+            transient_down_ok: is_transient_incline_down_selection_ok(cur_z, down as any),
+            down_blocked_by: (down as any)?.detail?.blocked_by ?? null,
+            down_blocked_voxel: (down as any)?.detail?.blocked_voxel ?? null,
+        });
+        if (is_transient_incline_down_selection_ok(cur_z, down as any) && down_forward.ok) return { subtype: 'incline_down', dz: -1 };
+    }
+
+  return null;
+}
+
+function apply_move_acceleration(runtime: MovementPhysicsRuntimeState, desired: { dx: number; dy: number } | null): void {
+    if (!desired) return;
+    if (desired.dx !== 0) {
+        runtime.velocity.vx += clamp_intent(desired.dx);
+        return;
+    }
+    if (desired.dy !== 0) {
+        runtime.velocity.vy += clamp_intent(desired.dy);
+    }
+}
+
+function apply_friction_to_axis(runtime: MovementPhysicsRuntimeState, axis: 'x' | 'y' | 'z' | 'none'): void {
+    if (axis === 'none') return;
+    const key = axis === 'x' ? 'vx' : axis === 'y' ? 'vy' : 'vz';
+    const value = Math.floor(Number(runtime.velocity[key]) || 0);
+    if (value > 0) runtime.velocity[key] = value - 1;
+    else if (value < 0) runtime.velocity[key] = value + 1;
+}
+
+function get_entity_gravity_delta(place_any: any, entity_ref: string, entity_type: 'actor' | 'npc', any_entity: any, x: number, y: number, z: number): number {
+    if (!has_simple_tag(any_entity?.tags, 'GRAVITY')) return 0;
+
+    const owner = { kind: entity_type as any, id: entity_ref };
+    const supported = can_place_volume(place_any as any, owner as any, { x, y, z }, 'WALK' as any, {
+        exclude_owner: owner as any,
+        support_policy: 'any_footprint' as any,
+    });
+    if (supported.ok || supported.reason !== 'no_support') return 0;
+
+    const weight = Number(any_entity?.weight ?? 1);
+    if (!Number.isFinite(weight) || weight > 0) return -1;
+    if (weight < 0) return 1;
+    return 0;
+}
+
+function resolve_velocity_step_target(runtime: MovementPhysicsRuntimeState, cur_x: number, cur_y: number, cur_z: number, breath_index: number): Array<{ axis: 'x' | 'y' | 'z'; x: number; y: number; z: number }> {
+    const vx = Math.floor(Number(runtime.velocity.vx) || 0);
+    const vy = Math.floor(Number(runtime.velocity.vy) || 0);
+    const vz = Math.floor(Number(runtime.velocity.vz) || 0);
+    const mags = [
+        { axis: 'x' as const, mag: Math.abs(vx), sign: Math.sign(vx) },
+        { axis: 'y' as const, mag: Math.abs(vy), sign: Math.sign(vy) },
+        { axis: 'z' as const, mag: Math.abs(vz), sign: Math.sign(vz) },
+    ].filter((p) => p.mag > 0);
+    if (mags.length === 0) return [];
+
+    const rot = (hash_entity_ref(runtime.entity_ref) + (Math.floor(Number(breath_index)) || 0)) % 3;
+    const order: Array<'x' | 'y' | 'z'> = ['x', 'y', 'z'];
+    const axis_order = order.slice(rot).concat(order.slice(0, rot));
+    mags.sort((a, b) => {
+        if (b.mag !== a.mag) return b.mag - a.mag;
+        return axis_order.indexOf(a.axis) - axis_order.indexOf(b.axis);
+    });
+
+    return mags.map((p) => {
+        if (p.axis === 'x') return { axis: 'x' as const, x: cur_x + p.sign, y: cur_y, z: cur_z };
+        if (p.axis === 'y') return { axis: 'y' as const, x: cur_x, y: cur_y + p.sign, z: cur_z };
+        return { axis: 'z' as const, x: cur_x, y: cur_y, z: cur_z + p.sign };
+    });
+}
+
+function can_use_incline_transient_vertical_override(
+    runtime: MovementPhysicsRuntimeState,
+    attempt: { axis: 'x' | 'y' | 'z'; x: number; y: number; z: number },
+    cur_z: number,
+    check: { ok: false; reason: string; detail?: any },
+): boolean {
+    if (attempt.axis !== 'z') return false;
+    if (runtime.transient_selection?.movement_verb !== 'move') return false;
+    const subtype = runtime.transient_selection?.movement_subtype;
+    if (check.reason !== 'blocked') return false;
+    const blocked_by = String(check.detail?.blocked_by ?? '');
+    const blocked_voxel_z = Number(check.detail?.blocked_voxel?.z);
+    if (!Number.isFinite(blocked_voxel_z)) return false;
+    if (subtype === 'move.walk.incline_up') {
+        if (blocked_by !== 'tile') return false;
+        return Math.floor(blocked_voxel_z) === Math.floor(cur_z);
+    }
+    if (subtype === 'move.walk.incline_down') {
+        if (blocked_by !== 'tile' && blocked_by !== 'occupant') return false;
+        return Math.floor(blocked_voxel_z) === Math.floor(attempt.z);
+    }
+    return false;
+}
+
+function is_transient_incline_down_selection_ok(cur_z: number, check: { ok: boolean; reason?: string; detail?: any }): boolean {
+    if (check.ok) return true;
+    if (check.reason !== 'blocked') return false;
+    const blocked_by = String(check.detail?.blocked_by ?? '');
+    if (blocked_by !== 'tile' && blocked_by !== 'occupant') return false;
+    const blocked_voxel_z = Number(check.detail?.blocked_voxel?.z);
+    if (!Number.isFinite(blocked_voxel_z)) return true;
+    return Math.floor(blocked_voxel_z) === Math.floor(cur_z - 1);
+}
+
+function get_walk_accel_per_breath(any_entity: any, mode: MoveMode): number | null {
+    const base_stat = Number(any_entity?.movement?.walk);
+    if (!Number.isFinite(base_stat) || base_stat <= 0) return null;
     const mult = mode === "SPRINT" ? 1.8 : mode === "SNEAK" ? 0.6 : 1.0;
-    return Math.max(1, Math.round(bps0 / mult));
+    const accel = base_stat * mult;
+    return Math.max(0.1, accel);
 }
 
 function normalize_move_mode(mode_raw: any): MoveMode {
@@ -239,6 +593,12 @@ function build_place_contents_for_legality(slot: number, place_id: string, place
         const entity_refs = get_entities_in_place(slot, place_id);
         const snap_actors: any[] = [];
         const snap_npcs: any[] = [];
+        const w = Math.floor(Number(place_any?.tile_grid?.width ?? 0)) || 0;
+        const h = Math.floor(Number(place_any?.tile_grid?.height ?? 0)) || 0;
+        const bx0 = w > 2 ? 1 : 0;
+        const bx1 = w > 2 ? (w - 2) : Math.max(0, w - 1);
+        const by0 = h > 2 ? 1 : 0;
+        const by1 = h > 2 ? (h - 2) : Math.max(0, h - 1);
 
         for (const npc_ref of entity_refs.npcs) {
             const npc_id = String(npc_ref).startsWith('npc.') ? String(npc_ref).slice('npc.'.length) : String(npc_ref);
@@ -246,9 +606,17 @@ function build_place_contents_for_legality(slot: number, place_id: string, place
             if (!npc_any) continue;
             const loc = npc_any?.location;
             if (!loc?.tile || typeof loc.tile.x !== 'number' || typeof loc.tile.y !== 'number') continue;
+            const clamped_x = Math.max(bx0, Math.min(Math.floor(loc.tile.x), bx1));
+            const clamped_y = Math.max(by0, Math.min(Math.floor(loc.tile.y), by1));
+            if (clamped_x !== Math.floor(loc.tile.x) || clamped_y !== Math.floor(loc.tile.y)) {
+                loc.tile.x = clamped_x;
+                loc.tile.y = clamped_y;
+                npc_cache.set(entity_key(slot, npc_id), npc_any);
+                queue_save_npc(slot, npc_id);
+            }
             snap_npcs.push({
                 npc_ref: String(npc_ref).startsWith('npc.') ? String(npc_ref) : `npc.${npc_id}`,
-                tile_position: { x: Math.floor(loc.tile.x), y: Math.floor(loc.tile.y) },
+                tile_position: { x: clamped_x, y: clamped_y },
                 elevation: (typeof loc.elevation === 'number' && Number.isFinite(loc.elevation)) ? Math.floor(loc.elevation) : Math.floor(Number(place_any?.coordinates?.elevation ?? 0)) || 0,
                 facing: typeof npc_any?.facing === 'string' ? String(npc_any.facing).toLowerCase() : get_facing(`npc.${npc_id}`),
                 body_model_id: typeof npc_any?.body_model_id === 'string' ? String(npc_any.body_model_id) : undefined,
@@ -264,9 +632,17 @@ function build_place_contents_for_legality(slot: number, place_id: string, place
             if (!actor_any) continue;
             const loc = actor_any?.location;
             if (!loc?.tile || typeof loc.tile.x !== 'number' || typeof loc.tile.y !== 'number') continue;
+            const clamped_x = Math.max(bx0, Math.min(Math.floor(loc.tile.x), bx1));
+            const clamped_y = Math.max(by0, Math.min(Math.floor(loc.tile.y), by1));
+            if (clamped_x !== Math.floor(loc.tile.x) || clamped_y !== Math.floor(loc.tile.y)) {
+                loc.tile.x = clamped_x;
+                loc.tile.y = clamped_y;
+                actor_cache.set(entity_key(slot, actor_id), actor_any);
+                queue_save_actor(slot, actor_id);
+            }
             snap_actors.push({
                 actor_ref: String(actor_ref).startsWith('actor.') ? String(actor_ref) : `actor.${actor_id}`,
-                tile_position: { x: Math.floor(loc.tile.x), y: Math.floor(loc.tile.y) },
+                tile_position: { x: clamped_x, y: clamped_y },
                 elevation: (typeof loc.elevation === 'number' && Number.isFinite(loc.elevation)) ? Math.floor(loc.elevation) : Math.floor(Number(place_any?.coordinates?.elevation ?? 0)) || 0,
                 facing: typeof actor_any?.facing === 'string' ? String(actor_any.facing).toLowerCase() : get_facing(`actor.${actor_id}`),
                 body_model_id: typeof actor_any?.body_model_id === 'string' ? String(actor_any.body_model_id) : undefined,
@@ -282,6 +658,263 @@ function build_place_contents_for_legality(slot: number, place_id: string, place
     } catch {
         // ignore
     }
+}
+
+function apply_movement_action_phase_one_breath(state: PlaceBreathState): void {
+    const place_any: any = state.place_base;
+    if (!place_any) return;
+
+    build_place_contents_for_legality(state.slot, state.place_id, place_any);
+
+    const place_bi = Math.floor(Number(state.breath_index ?? 0)) || 0;
+    const actors: any[] = Array.isArray(place_any?.contents?.actors_present) ? place_any.contents.actors_present : [];
+    const npcs: any[] = Array.isArray(place_any?.contents?.npcs_present) ? place_any.contents.npcs_present : [];
+
+    const touch_entity = (entity_ref: string): void => {
+        const key = move_ctl_key(state.slot, entity_ref);
+        const ctl = move_ctl.get(key);
+        if (!ctl || ctl.place_id !== state.place_id) return;
+
+        const any_entity = get_entity_any_cached_or_load(state.slot, entity_ref);
+        if (!any_entity) return;
+        const runtime = get_or_init_movement_physics_state(entity_ref, state.place_id, any_entity, ctl, place_bi);
+        const walk_accel = get_walk_accel_per_breath(any_entity, ctl.mode);
+        runtime.latest_intent = ctl.intent ? {
+            dx: clamp_intent(ctl.intent.dx),
+            dy: clamp_intent(ctl.intent.dy),
+            modality: 'walk',
+            mode: ctl.mode,
+            updated_breath: place_bi,
+        } : null;
+        const cur_x = Math.floor(Number(any_entity?.location?.tile?.x ?? 0)) || 0;
+        const cur_y = Math.floor(Number(any_entity?.location?.tile?.y ?? 0)) || 0;
+        const cur_z = Math.floor(Number(any_entity?.location?.elevation ?? any_entity?.location?.tile?.elevation ?? place_any?.coordinates?.elevation ?? 0)) || 0;
+        const desired = desired_step_from_controller(ctl, cur_x, cur_y);
+        const incline = try_select_walk_incline(place_any, entity_ref, runtime.entity_type, cur_x, cur_y, cur_z, desired);
+
+        if (walk_accel) {
+            const spend_gate = refill_move_budget_and_apply_debt(runtime, 'walk', walk_accel);
+            if (spend_gate.debt_suppressed && (place_bi % 15 === 0)) {
+                debug_log('MOVE_VEL_TEST', 'PASS move_debt suppresses MOVE spending while intent persists', {
+                    entity_ref,
+                    place_id: state.place_id,
+                    breath_index: place_bi,
+                    latest_intent: runtime.latest_intent,
+                    move_budget: runtime.move_budget.walk,
+                    move_debt: runtime.move_debt.walk,
+                });
+            }
+            if (spend_gate.can_spend && desired) {
+                let moves_applied = 0;
+                if (incline) {
+                    runtime.velocity.vz += incline.dz;
+                    apply_move_acceleration(runtime, desired);
+                    spend_move_budget(runtime, 'walk', 2);
+                    moves_applied = 2;
+                } else {
+                    let loop_guard = 0;
+                    while ((Number(runtime.move_budget.walk) || 0) >= 1 && loop_guard < 32) {
+                        apply_move_acceleration(runtime, desired);
+                        spend_move_budget(runtime, 'walk', 1);
+                        moves_applied += 1;
+                        loop_guard += 1;
+                    }
+                }
+                runtime.transient_selection = {
+                    movement_verb: 'move',
+                    movement_subtype: incline ? `move.walk.${incline.subtype}` : ctl.mode,
+                    modality: 'walk',
+                };
+                debug_log('MOVE_VEL_TEST', 'action phase move acceleration', {
+                    entity_ref,
+                    place_id: state.place_id,
+                    breath_index: place_bi,
+                    desired,
+                    incline,
+                    moves_applied,
+                    velocity: runtime.velocity,
+                    move_budget: runtime.move_budget.walk,
+                    move_debt: runtime.move_debt.walk,
+                });
+            } else {
+                runtime.transient_selection = null;
+            }
+        }
+        persist_entity_movement_state(any_entity, runtime, place_bi);
+        move_ctl.set(key, ctl);
+    };
+
+    for (const a of actors) {
+        const ref = String(a?.actor_ref ?? '');
+        if (ref) touch_entity(ref);
+    }
+    for (const n of npcs) {
+        const ref = String(n?.npc_ref ?? '');
+        if (ref) touch_entity(ref);
+    }
+}
+
+function apply_movement_physics_phase_one_breath(state: PlaceBreathState, movement_updates: any[]): void {
+    apply_server_movement_one_breath(state, movement_updates);
+}
+
+function run_place_breaths(state: PlaceBreathState, ticks_to_run: number, now: number, movement_updates: any[], cause?: string): Array<{ slot: number; place_id: string; breath_index: number }> {
+    const breath_ticks: Array<{ slot: number; place_id: string; breath_index: number }> = [];
+    const ticks = Math.max(0, Math.floor(Number(ticks_to_run)) || 0);
+    const pulse_started_ms = Date.now();
+    if (state.realtime_visible) {
+        const last_visible = Math.max(0, Number(state.last_visible_pulse_ms) || 0);
+        const delta_ms = last_visible > 0 ? Math.max(0, now - last_visible) : 0;
+        if (state.breath_index % 30 === 0) {
+            debug_log('MOVE_VEL_TEST', 'visible place pulse timing', {
+                slot: state.slot,
+                place_id: state.place_id,
+                breath_index: state.breath_index,
+                cause: cause ?? 'interval',
+                delta_ms,
+                ticks,
+            });
+        }
+        state.last_visible_pulse_ms = now;
+    }
+    for (let i = 0; i < ticks; i += 1) {
+        state.breath_index += 1;
+        state.breath_last_processed = state.breath_index;
+
+        breath_ticks.push({ slot: state.slot, place_id: state.place_id, breath_index: state.breath_index });
+
+        if (state.breath_index % 60 === 0) {
+            debug_log('MOVE_UNIFY_TEST', 'breath tick', {
+                slot: state.slot,
+                place_id: state.place_id,
+                breath_index: state.breath_index,
+                ticks_to_run: ticks,
+                cause: cause ?? 'interval',
+            });
+        }
+
+        if (state.place_base) {
+            (state.place_base as any).breath_index = state.breath_index;
+            (state.place_base as any).breath_last_processed = state.breath_last_processed;
+
+            if ((state.breath_index % BRAIN_EVERY_BREATHS) === 0) {
+                apply_server_brain_one_breath(state);
+            }
+            if ((state.breath_index % THINK_EVERY_BREATHS) === 0) {
+                apply_server_thinking_one_breath(state);
+            }
+
+            apply_movement_action_phase_one_breath(state);
+            apply_movement_physics_phase_one_breath(state, movement_updates);
+            apply_gravity_to_place_ground(state);
+        }
+    }
+    const pulse_duration_ms = Math.max(0, Date.now() - pulse_started_ms);
+    state.last_visible_pulse_duration_ms = pulse_duration_ms;
+    if (state.realtime_visible && (state.breath_index % 30 === 0)) {
+        debug_log('MOVE_VEL_TEST', 'visible place pulse duration', {
+            slot: state.slot,
+            place_id: state.place_id,
+            breath_index: state.breath_index,
+            cause: cause ?? 'interval',
+            duration_ms: pulse_duration_ms,
+            ticks,
+        });
+    }
+    state.last_tick_ms = now;
+    return breath_ticks;
+}
+
+function flush_place_breath_outputs(now: number, breath_ticks: Array<{ slot: number; place_id: string; breath_index: number }>, movement_updates: any[]): void {
+    if (breath_ticks.length > 0) {
+        void emitBridgeMessage('PLACE_BREATH_TICK', {
+            breath_ms: BREATH_MS,
+            sent_at_ms: now,
+            ticks: breath_ticks,
+        });
+    }
+
+    if (movement_updates.length > 0) {
+        void emitBridgeMessage('ENTITY_MOVED_BATCH', {
+            sent_at_ms: now,
+            updates: movement_updates,
+        });
+    }
+}
+
+function maybe_run_immediate_visible_place_pulse(slot: number, place_id: string, cause: 'intent' | 'move_to'): void {
+    const key = place_breath_key(slot, place_id);
+    const state = place_breath.get(key);
+    if (!state?.realtime_visible || !state.place_base) return;
+    const now = Date.now();
+    const elapsed_ms = Math.max(0, now - Math.max(0, Number(state.last_tick_ms) || now));
+    if (elapsed_ms < Math.max(8, Math.floor(BREATH_MS / 3))) return;
+
+    const movement_updates: any[] = [];
+    const breath_ticks = run_place_breaths(state, 1, now, movement_updates, `immediate_${cause}`);
+    debug_log('MOVE_VEL_TEST', 'immediate visible place pulse', {
+        slot,
+        place_id,
+        cause,
+        breath_index: state.breath_index,
+        elapsed_ms_since_last_tick: elapsed_ms,
+        has_goal: Array.from(move_ctl.values()).some((ctl) => ctl.slot === slot && ctl.place_id === place_id && !!ctl.goal),
+        movement_updates: movement_updates.length,
+    });
+    flush_place_breath_outputs(now, breath_ticks, movement_updates);
+}
+
+function plan_path_for_controller(state: PlaceBreathState, ctl0: EntityMoveController, any_entity: any, place_bi: number): { planned: boolean; blocked: boolean; blocked_reason?: string | null; path_len?: number } {
+    const place_any: any = state.place_base;
+    if (!place_any) return { planned: false, blocked: false, blocked_reason: null, path_len: 0 };
+    if (!(ctl0.goal && Number.isFinite(ctl0.goal.x) && Number.isFinite(ctl0.goal.y))) return { planned: false, blocked: false, blocked_reason: null, path_len: 0 };
+
+    const sx = Math.floor(Number(any_entity?.location?.tile?.x ?? 0)) || 0;
+    const sy = Math.floor(Number(any_entity?.location?.tile?.y ?? 0)) || 0;
+    const sz = Math.floor(Number(any_entity?.location?.elevation ?? place_any?.coordinates?.elevation ?? 0)) || 0;
+    const gx = Math.floor(Number((ctl0.goal as any).x));
+    const gy = Math.floor(Number((ctl0.goal as any).y));
+    const gz_raw = Number((ctl0.goal as any)?.z);
+    const goalTile: any = Number.isFinite(gz_raw) ? { x: gx, y: gy, z: Math.floor(gz_raw) } : { x: gx, y: gy };
+
+    const path_res = shared_find_path(
+        place_any as any,
+        { x: sx, y: sy, z: sz },
+        goalTile,
+        { exclude_entity: ctl0.entity_ref, treat_occupied_as_wall: true }
+    );
+
+    debug_log('MOVE_VEL_TEST', 'path planning evaluated', {
+        entity_ref: ctl0.entity_ref,
+        place_id: state.place_id,
+        breath_index: place_bi,
+        start: { x: sx, y: sy, z: sz },
+        goal: goalTile,
+        blocked: path_res.blocked,
+        blocked_at: path_res.blocked_at ?? null,
+        blocked_reason: (path_res.blocked_check && !path_res.blocked_check.ok) ? path_res.blocked_check.reason : null,
+        path_len: Array.isArray(path_res.path) ? path_res.path.length : 0,
+        path_preview: Array.isArray(path_res.path) ? path_res.path.slice(0, 6) : [],
+    });
+
+    ctl0.last_plan_breath = place_bi;
+
+    if (path_res.blocked || !Array.isArray(path_res.path) || path_res.path.length === 0) {
+        ctl0.goal = null;
+        ctl0.path = null;
+        ctl0.path_index = 0;
+        ctl0.need_repath = false;
+        return { planned: true, blocked: true, blocked_reason: (path_res.blocked_check && !path_res.blocked_check.ok) ? path_res.blocked_check.reason : null, path_len: 0 };
+    }
+
+    ctl0.path = path_res.path.map((p: any) => ({
+        x: Math.floor(p.x),
+        y: Math.floor(p.y),
+        ...(typeof p?.z === 'number' && Number.isFinite(p.z) ? { z: Math.floor(p.z) } : {}),
+    }));
+    ctl0.path_index = 0;
+    ctl0.need_repath = false;
+    return { planned: true, blocked: false, blocked_reason: null, path_len: ctl0.path.length };
 }
 
 function apply_server_movement_one_breath(state: PlaceBreathState, movement_updates: any[]): void {
@@ -318,63 +951,100 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
 
         const any_entity = get_entity_any_cached_or_load(state.slot, entity_ref);
         if (!any_entity) return;
-
-        const bps = get_bps_for_walk(any_entity, ctl.mode);
-        if (!bps) {
-            // Cannot move; clear controller.
-            ctl.intent = null;
-            ctl.path = null;
-            ctl.path_index = 0;
-            move_ctl.set(key, ctl);
-            return;
-        }
-        ctl.breaths_per_step = bps;
-
-        // Physics scheduler: accumulate toward one grid step.
-        // Recharge at a rate of 1 step per `bps` breaths.
-        const inc = 1 / Math.max(1, bps);
-        const cur_acc = Number(ctl.move_accum);
-        ctl.move_accum = Math.min(1, (Number.isFinite(cur_acc) ? cur_acc : 0) + inc);
-
-        // Only attempt a step when budget allows.
-        if (ctl.move_accum < 1) {
-            move_ctl.set(key, ctl);
-            return;
-        }
+        const runtime = get_or_init_movement_physics_state(entity_ref, state.place_id, any_entity, ctl, place_bi);
 
         const cur_x = Math.floor(Number(ent_snap?.tile_position?.x ?? 0)) || 0;
         const cur_y = Math.floor(Number(ent_snap?.tile_position?.y ?? 0)) || 0;
         const cur_z = (typeof ent_snap?.elevation === 'number' && Number.isFinite(ent_snap.elevation)) ? Math.floor(ent_snap.elevation) : bz;
 
-        const target = (() => {
-            if (intent_active && ctl.intent) {
-                return { x: cur_x + ctl.intent.dx, y: cur_y + ctl.intent.dy };
-            }
-            if (ctl.path && ctl.path_index < ctl.path.length) {
-                const p = ctl.path[ctl.path_index];
-                if (!p) return null;
-                return { x: Math.floor(p.x), y: Math.floor(p.y) };
-            }
-            return null;
-        })();
+        const gravity_delta = get_entity_gravity_delta(place_any, entity_ref, entity_type, any_entity, cur_x, cur_y, cur_z);
+        if (gravity_delta !== 0) {
+            runtime.velocity.vz += gravity_delta;
+            debug_log('MOVE_VEL_TEST', 'physics gravity acceleration', {
+                entity_ref,
+                place_id: state.place_id,
+                breath_index: place_bi,
+                at: { x: cur_x, y: cur_y, z: cur_z },
+                gravity_delta,
+                velocity: runtime.velocity,
+            });
+        }
 
-        if (!target) return;
+        const attempts = resolve_velocity_step_target(runtime, cur_x, cur_y, cur_z, place_bi);
+        if (attempts.length === 0) {
+            persist_entity_movement_state(any_entity, runtime, place_bi);
+            move_ctl.set(key, ctl);
+            return;
+        }
 
         const owner = { kind: entity_type as any, id: entity_ref };
-        const ok = can_place_volume(place_any as any, owner as any, { x: target.x, y: target.y, z: cur_z }, 'WALK' as any, {
-            exclude_owner: owner as any,
-            support_policy: 'any_footprint' as any,
-        });
+        let target: { axis: 'x' | 'y' | 'z'; x: number; y: number; z: number } | null = null;
+        const failed_attempts: Array<{ axis: 'x' | 'y' | 'z'; target: { x: number; y: number; z: number }; reason: string; detail: any }> = [];
+        for (const attempt of attempts) {
+            const allow_unsupported = !!(
+                attempt.axis === 'z' &&
+                runtime.transient_selection?.movement_verb === 'move' &&
+                (runtime.transient_selection?.movement_subtype === 'move.walk.incline_up' || runtime.transient_selection?.movement_subtype === 'move.walk.incline_down')
+            );
+            const ok = can_place_volume(place_any as any, owner as any, { x: attempt.x, y: attempt.y, z: attempt.z }, 'WALK' as any, {
+                exclude_owner: owner as any,
+                support_policy: 'any_footprint' as any,
+                allow_unsupported,
+            });
+            const vertical_override_ok = !ok.ok && can_use_incline_transient_vertical_override(runtime, attempt, cur_z, ok as any);
+            const override_ok = vertical_override_ok;
+            if (override_ok) {
+                debug_log('MOVE_VEL_TEST', 'incline transient vertical override', {
+                    entity_ref,
+                    place_id: state.place_id,
+                    breath_index: place_bi,
+                    at: { x: cur_x, y: cur_y, z: cur_z },
+                    attempt,
+                    legality: ok,
+                    subtype: runtime.transient_selection?.movement_subtype,
+                    override_kind: 'vertical',
+                });
+            }
+            if (ok.ok || override_ok) {
+                target = attempt;
+                break;
+            }
+            failed_attempts.push({
+                axis: attempt.axis,
+                target: { x: attempt.x, y: attempt.y, z: attempt.z },
+                reason: ok.reason,
+                detail: ok.detail,
+            });
+        }
 
-        if (!ok.ok) {
-            // Blocked; path stops, intent keeps trying.
+        if (!target) {
+            if (runtime.velocity.vx !== 0) runtime.velocity.vx = 0;
+            if (runtime.velocity.vy !== 0) runtime.velocity.vy = 0;
+            if (runtime.velocity.vz !== 0) runtime.velocity.vz = 0;
+            runtime.transient_selection = null;
+            debug_log('MOVE_VEL_TEST', 'physics stuck collision', {
+                entity_ref,
+                place_id: state.place_id,
+                breath_index: place_bi,
+                at: { x: cur_x, y: cur_y, z: cur_z },
+                attempts: failed_attempts,
+            });
             if (!intent_active) {
                 ctl.goal = null;
                 ctl.path = null;
                 ctl.path_index = 0;
                 ctl.need_repath = false;
             }
+            const reasons = Array.from(new Set(failed_attempts.map((a) => String(a.reason ?? 'unknown'))));
+            persist_entity_movement_state(any_entity, runtime, place_bi);
             move_ctl.set(key, ctl);
+            debug_log('MOVE_VEL_TEST', 'PASS collision only when stuck (no legal step)', {
+                entity_ref,
+                place_id: state.place_id,
+                breath_index: place_bi,
+                reasons,
+                attempts: failed_attempts.length,
+            });
             return;
         }
 
@@ -385,7 +1055,7 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
             const from = { x: Math.floor(any_entity.location.tile.x ?? cur_x), y: Math.floor(any_entity.location.tile.y ?? cur_y) };
             any_entity.location.tile.x = target.x;
             any_entity.location.tile.y = target.y;
-            any_entity.location.elevation = cur_z;
+            any_entity.location.elevation = target.z;
 
             const next_seq = (typeof (any_entity as any).move_seq === 'number' && Number.isFinite((any_entity as any).move_seq))
                 ? Math.floor((any_entity as any).move_seq) + 1
@@ -395,10 +1065,11 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
             any_entity.breath_index = place_bi;
             any_entity.breath_last_processed = place_bi;
             any_entity.breath_last_processed_ms = Date.now();
+            runtime.last_breath_processed = place_bi;
 
             // Facing follows movement.
             try {
-                const dir = calculate_direction(from as any, target as any, entity_ref);
+                const dir = calculate_direction(from as any, { x: target.x, y: target.y } as any, entity_ref);
                 any_entity.facing = dir;
                 set_facing(entity_ref, dir);
             } catch {
@@ -407,7 +1078,7 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
 
             // Update in-place legality snapshot for subsequent moves this breath.
             ent_snap.tile_position = { x: target.x, y: target.y };
-            ent_snap.elevation = cur_z;
+            ent_snap.elevation = target.z;
 
             queue_save_entity(state.slot, entity_ref);
         } catch {
@@ -416,7 +1087,10 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
 
         // Advance controller.
         if (!intent_active) {
-            ctl.path_index += 1;
+            const next = ctl.path && ctl.path_index < ctl.path.length ? ctl.path[ctl.path_index] : null;
+            if (next && Math.floor(next.x) === target.x && Math.floor(next.y) === target.y) {
+                ctl.path_index += 1;
+            }
             if (ctl.path && ctl.path_index >= ctl.path.length) {
                 // Arrived.
                 ctl.goal = null;
@@ -425,9 +1099,45 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
                 ctl.need_repath = false;
             }
         }
-        // Consume one step of budget.
-        ctl.move_accum = Math.max(0, Number(ctl.move_accum) - 1);
+        const resolved_transient_subtype = runtime.transient_selection?.movement_subtype ?? null;
+        apply_friction_to_axis(runtime, target.axis);
+        runtime.transient_selection = null;
         ctl.updated_at_ms = Date.now();
+        debug_log('MOVE_VEL_TEST', 'physics resolved step', {
+            entity_ref,
+            place_id: state.place_id,
+            breath_index: place_bi,
+            to: { x: target.x, y: target.y, z: target.z },
+            axis: target.axis,
+            velocity: runtime.velocity,
+        });
+        if (runtime.input_goal_queued_at_ms !== null) {
+            debug_log('MOVE_VEL_TEST', 'click-to-first-step latency', {
+                entity_ref,
+                place_id: state.place_id,
+                breath_index: place_bi,
+                latency_ms: Math.max(0, Date.now() - runtime.input_goal_queued_at_ms),
+                to: { x: target.x, y: target.y, z: target.z },
+            });
+            runtime.input_goal_queued_at_ms = null;
+        }
+        if (target.axis === 'z' && resolved_transient_subtype === 'move.walk.incline_up') {
+            debug_log('MOVE_VEL_TEST', 'PASS incline up selected and resolved vertically', {
+                entity_ref,
+                place_id: state.place_id,
+                breath_index: place_bi,
+                to: { x: target.x, y: target.y, z: target.z },
+            });
+        }
+        if (target.axis === 'z' && resolved_transient_subtype === 'move.walk.incline_down') {
+            debug_log('MOVE_VEL_TEST', 'PASS incline down selected and resolved vertically', {
+                entity_ref,
+                place_id: state.place_id,
+                breath_index: place_bi,
+                to: { x: target.x, y: target.y, z: target.z },
+            });
+        }
+        persist_entity_movement_state(any_entity, runtime, place_bi);
         move_ctl.set(key, ctl);
 
         movement_updates.push({
@@ -436,7 +1146,7 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
             entity_ref,
             x: target.x,
             y: target.y,
-            z: cur_z,
+            z: target.z,
             breath_index: place_bi,
             seq: ctl.move_seq,
         });
@@ -481,33 +1191,7 @@ function apply_server_thinking_one_breath(state: PlaceBreathState): void {
         const any_entity = get_entity_any_cached_or_load(state.slot, ctl0.entity_ref);
         if (!any_entity) continue;
 
-        const sx = Math.floor(Number(any_entity?.location?.tile?.x ?? 0)) || 0;
-        const sy = Math.floor(Number(any_entity?.location?.tile?.y ?? 0)) || 0;
-        const gx = Math.floor(Number((ctl0.goal as any).x));
-        const gy = Math.floor(Number((ctl0.goal as any).y));
-
-        const path_res = shared_find_path(
-            place_any as any,
-            { x: sx, y: sy },
-            { x: gx, y: gy },
-            { exclude_entity: ctl0.entity_ref, treat_occupied_as_wall: true }
-        );
-
-        ctl0.last_plan_breath = place_bi;
-
-        if (path_res.blocked || !Array.isArray(path_res.path) || path_res.path.length === 0) {
-            // Can't reach goal; clear it.
-            ctl0.goal = null;
-            ctl0.path = null;
-            ctl0.path_index = 0;
-            ctl0.need_repath = false;
-            move_ctl.set(k, ctl0);
-            continue;
-        }
-
-        ctl0.path = path_res.path.map((p: any) => ({ x: Math.floor(p.x), y: Math.floor(p.y) }));
-        ctl0.path_index = 0;
-        ctl0.need_repath = false;
+        plan_path_for_controller(state, ctl0, any_entity, place_bi);
         move_ctl.set(k, ctl0);
     }
 }
@@ -558,8 +1242,6 @@ function apply_server_brain_one_breath(state: PlaceBreathState): void {
             need_repath: false,
             last_plan_breath: 0,
             last_brain_breath: 0,
-            move_accum: 1,
-            breaths_per_step: 0,
             updated_at_ms: Date.now(),
             move_seq: 0,
         };
@@ -584,9 +1266,11 @@ function apply_server_brain_one_breath(state: PlaceBreathState): void {
             ? Math.floor(any_entity.location.elevation)
             : (typeof n?.elevation === 'number' && Number.isFinite(n.elevation) ? Math.floor(n.elevation) : Math.floor(Number(place_any?.coordinates?.elevation ?? 0)) || 0);
 
-        // Pick a random nearby reachable-ish goal. We only do local legality checks here;
-        // full path planning is handled by the think tick.
+        // Pick a random nearby reachable goal.
+        // Use shared pathfinding here so NPC goal selection respects z transitions and
+        // does not trap NPCs in pits/holes that require incline movement to escape.
         let picked: { x: number; y: number } | null = null;
+        let picked_path_len = 0;
         const tries = 12;
         for (let i = 0; i < tries; i++) {
             const rx = (Math.floor(Math.random() * (NPC_WANDER_RADIUS_TILES * 2 + 1)) - NPC_WANDER_RADIUS_TILES);
@@ -596,13 +1280,26 @@ function apply_server_brain_one_breath(state: PlaceBreathState): void {
             if (gx === cx && gy === cy) continue;
             if (gx < 0 || gy < 0 || gx >= w || gy >= h) continue;
 
-            const owner = { kind: 'npc' as any, id: npc_ref };
-            const ok = can_place_volume(place_any as any, owner as any, { x: gx, y: gy, z: cz }, 'WALK' as any, {
-                exclude_owner: owner as any,
-                support_policy: 'any_footprint' as any,
-            });
-            if (!ok.ok) continue;
+            const path_res = shared_find_path(
+                place_any as any,
+                { x: cx, y: cy, z: cz },
+                { x: gx, y: gy },
+                { exclude_entity: npc_ref, treat_occupied_as_wall: true }
+            );
+            if (path_res.blocked || !Array.isArray(path_res.path) || path_res.path.length === 0) {
+                debug_log('MOVE_VEL_TEST', 'npc brain rejected wander goal', {
+                    npc_ref,
+                    place_id: state.place_id,
+                    breath_index: place_bi,
+                    from: { x: cx, y: cy, z: cz },
+                    candidate: { x: gx, y: gy },
+                    blocked_at: path_res.blocked_at ?? null,
+                    blocked_reason: (path_res.blocked_check && !path_res.blocked_check.ok) ? path_res.blocked_check.reason : null,
+                });
+                continue;
+            }
             picked = { x: gx, y: gy };
+            picked_path_len = path_res.path.length;
             break;
         }
 
@@ -618,6 +1315,14 @@ function apply_server_brain_one_breath(state: PlaceBreathState): void {
         ctl.last_brain_breath = place_bi;
         ctl.updated_at_ms = Date.now();
         move_ctl.set(key, ctl);
+        debug_log('MOVE_VEL_TEST', 'npc brain selected wander goal', {
+            npc_ref,
+            place_id: state.place_id,
+            breath_index: place_bi,
+            from: { x: cx, y: cy, z: cz },
+            goal: picked,
+            path_len: picked_path_len,
+        });
     }
 }
 
@@ -700,16 +1405,25 @@ function place_breath_key(slot: number, place_id: string): string {
     return `${slot}:${place_id}`;
 }
 
-function touch_place_breath(slot: number, place_any: any): void {
+function touch_place_breath(slot: number, place_any: any, opts?: { realtime_visible?: boolean }): void {
     try {
         const place_id = String(place_any?.id ?? '');
         if (!place_id) return;
         const key = place_breath_key(slot, place_id);
         const now = Date.now();
+        const realtime_visible = opts?.realtime_visible === true;
 
         const existing = place_breath.get(key);
         if (existing) {
             existing.last_seen_ms = now;
+            if (realtime_visible && !existing.realtime_visible) {
+                existing.realtime_visible = true;
+                existing.last_tick_ms = now;
+                debug_log('MOVE_VEL_TEST', 'visible place activated on realtime pulse', {
+                    slot,
+                    place_id,
+                });
+            }
             // Keep place snapshot in sync with authoritative in-memory breath.
             place_any.breath_index = existing.breath_index;
             place_any.breath_last_processed = existing.breath_last_processed;
@@ -729,14 +1443,19 @@ function touch_place_breath(slot: number, place_any: any): void {
         const bl = Number.isFinite(bl0) ? Math.floor(bl0) : bi;
 
         // Catch-up: advance breath index based on wallclock elapsed while inactive.
+        // Realtime-visible places resume on the live pulse instead of replaying a visible backlog.
         let catchup_breaths = 0;
         try {
-            const last_ms0 = Number(place_any?.breath_last_processed_ms);
-            const last_ms = Number.isFinite(last_ms0) ? Math.floor(last_ms0) : now;
-            const delta_ms = Math.max(0, now - last_ms);
-            catchup_breaths = Math.floor(delta_ms / BREATH_MS);
-            if (!Number.isFinite(catchup_breaths) || catchup_breaths < 0) catchup_breaths = 0;
-            catchup_breaths = Math.min(catchup_breaths, CATCHUP_MAX_BREATHS);
+            if (!realtime_visible) {
+                const last_ms0 = Number(place_any?.breath_last_processed_ms);
+                const last_ms = Number.isFinite(last_ms0) ? Math.floor(last_ms0) : now;
+                const delta_ms = Math.max(0, now - last_ms);
+                catchup_breaths = Math.floor(delta_ms / BREATH_MS);
+                if (!Number.isFinite(catchup_breaths) || catchup_breaths < 0) catchup_breaths = 0;
+                catchup_breaths = Math.min(catchup_breaths, CATCHUP_MAX_BREATHS);
+            } else {
+                catchup_breaths = 0;
+            }
         } catch {
             catchup_breaths = 0;
         }
@@ -747,7 +1466,11 @@ function touch_place_breath(slot: number, place_any: any): void {
             breath_index: bi + catchup_breaths,
             breath_last_processed: (bi + catchup_breaths),
             last_seen_ms: now,
+            last_tick_ms: now,
             last_persist_ms: 0,
+            realtime_visible,
+            last_visible_pulse_ms: 0,
+            last_visible_pulse_duration_ms: 0,
             place_base: null,
             place_dirty: false,
         };
@@ -767,6 +1490,14 @@ function touch_place_breath(slot: number, place_any: any): void {
             }
         }
 
+        if (realtime_visible && catchup_breaths > 0) {
+            debug_log('MOVE_VEL_TEST', 'visible place catch-up suppressed on activation', {
+                slot,
+                place_id,
+                catchup_breaths_suppressed: catchup_breaths,
+            });
+        }
+
         place_any.breath_index = state.breath_index;
         place_any.breath_last_processed = state.breath_last_processed;
     } catch {
@@ -774,7 +1505,7 @@ function touch_place_breath(slot: number, place_any: any): void {
     }
 }
 
-function touch_place_breath_by_id(slot: number, place_id: string): { ok: boolean; error?: string; breath_index?: number } {
+function touch_place_breath_by_id(slot: number, place_id: string, opts?: { realtime_visible?: boolean }): { ok: boolean; error?: string; breath_index?: number } {
     const pid = String(place_id ?? '');
     if (!pid) return { ok: false, error: 'missing_place_id' };
 
@@ -784,6 +1515,14 @@ function touch_place_breath_by_id(slot: number, place_id: string): { ok: boolean
     const existing = place_breath.get(key);
     if (existing) {
         existing.last_seen_ms = now;
+        if (opts?.realtime_visible === true && !existing.realtime_visible) {
+            existing.realtime_visible = true;
+            existing.last_tick_ms = now;
+            debug_log('MOVE_VEL_TEST', 'visible place activated on realtime pulse', {
+                slot,
+                place_id: pid,
+            });
+        }
 
         // Devlog marker: only once per minute per place (heartbeat is 2s).
         const n = (place_touch_heartbeat_count.get(key) ?? 0) + 1;
@@ -800,7 +1539,7 @@ function touch_place_breath_by_id(slot: number, place_id: string): { ok: boolean
         return { ok: false, error: 'place_not_found' };
     }
 
-    touch_place_breath(slot, place_res.place as any);
+    touch_place_breath(slot, place_res.place as any, opts);
     const created = place_breath.get(key);
     return { ok: true, breath_index: created?.breath_index ?? 0 };
 }
@@ -927,6 +1666,10 @@ function has_simple_tag(tags: any, name: string): boolean {
 }
 
 function apply_gravity_to_place_characters(state: PlaceBreathState): void {
+    // Legacy gravity settle path for actors/NPCs.
+    // Character gravity authority now lives in the movement physics phase.
+    return;
+
     const place_any: any = state.place_base;
     if (!place_any) return;
 
@@ -1079,44 +1822,36 @@ function apply_gravity_to_place_characters(state: PlaceBreathState): void {
 }
 
 setInterval(() => {
-    const now = Date.now();
+    const interval_started_ms = Date.now();
+    const now = interval_started_ms;
+    const interval_delta_ms = last_breath_interval_started_ms > 0 ? Math.max(0, interval_started_ms - last_breath_interval_started_ms) : 0;
+    last_breath_interval_started_ms = interval_started_ms;
     const breath_ticks: Array<{ slot: number; place_id: string; breath_index: number }> = [];
     const movement_updates: any[] = [];
+    let active_places_processed = 0;
+    let visible_places_processed = 0;
     for (const [key, state] of place_breath) {
         const active = (now - state.last_seen_ms) <= ACTIVE_PLACE_TIMEOUT_MS;
         if (active) {
-            state.breath_index += 1;
-            state.breath_last_processed = state.breath_index;
-
-            breath_ticks.push({ slot: state.slot, place_id: state.place_id, breath_index: state.breath_index });
-
-            // Lightweight devlog marker to confirm breath is ticking.
-            if (state.breath_index % 60 === 0) {
-                debug_log('MOVE_UNIFY_TEST', 'breath tick', {
-                    slot: state.slot,
-                    place_id: state.place_id,
-                    breath_index: state.breath_index,
-                });
-            }
-
-            if (state.place_base) {
-                (state.place_base as any).breath_index = state.breath_index;
-                (state.place_base as any).breath_last_processed = state.breath_last_processed;
-
-                // Thinking: path planning / heavy decisions at a lower frequency than physics.
-                if ((state.breath_index % BRAIN_EVERY_BREATHS) === 0) {
-                    apply_server_brain_one_breath(state);
+            active_places_processed += 1;
+            if (state.realtime_visible) visible_places_processed += 1;
+            const elapsed_ms = Math.max(0, now - Math.max(0, Number(state.last_tick_ms) || now));
+            let ticks_to_run = Math.floor(elapsed_ms / BREATH_MS);
+            if (!Number.isFinite(ticks_to_run) || ticks_to_run < 1) ticks_to_run = 1;
+            ticks_to_run = Math.min(ticks_to_run, CATCHUP_MAX_BREATHS);
+            if (state.realtime_visible) {
+                const suppressed = Math.max(0, ticks_to_run - 1);
+                ticks_to_run = 1;
+                if (suppressed > 0 && (state.breath_index % 30 === 0)) {
+                    debug_log('MOVE_VEL_TEST', 'visible place running steady pulse', {
+                        slot: state.slot,
+                        place_id: state.place_id,
+                        breath_index: state.breath_index,
+                        suppressed_ticks: suppressed,
+                    });
                 }
-                if ((state.breath_index % THINK_EVERY_BREATHS) === 0) {
-                    apply_server_thinking_one_breath(state);
-                }
-
-                // Controller stepping is authoritative and runs before gravity.
-                apply_server_movement_one_breath(state, movement_updates);
-
-                apply_gravity_to_place_ground(state);
-                apply_gravity_to_place_characters(state);
             }
+            breath_ticks.push(...run_place_breaths(state, ticks_to_run, now, movement_updates, 'interval'));
             continue;
         }
 
@@ -1125,19 +1860,19 @@ setInterval(() => {
         place_breath.delete(key);
     }
 
-    if (breath_ticks.length > 0) {
-        void emitBridgeMessage('PLACE_BREATH_TICK', {
-            breath_ms: BREATH_MS,
-            sent_at_ms: now,
-            ticks: breath_ticks,
-        });
-    }
+    flush_place_breath_outputs(now, breath_ticks, movement_updates);
 
-    if (movement_updates.length > 0) {
-        // Batch movement updates to avoid per-step WS spam.
-        void emitBridgeMessage('ENTITY_MOVED_BATCH', {
-            sent_at_ms: now,
-            updates: movement_updates,
+    const interval_duration_ms = Math.max(0, Date.now() - interval_started_ms);
+    breath_interval_sample_count += 1;
+    if (breath_interval_sample_count % 30 === 0) {
+        debug_log('MOVE_VEL_TEST', 'server breath interval profiling', {
+            version: MOVE_TIMING_INVESTIGATION_VERSION,
+            interval_delta_ms,
+            interval_duration_ms,
+            active_places_processed,
+            visible_places_processed,
+            emitted_breath_ticks: breath_ticks.length,
+            emitted_movement_updates: movement_updates.length,
         });
     }
 }, BREATH_MS);
@@ -3108,7 +3843,7 @@ function start_http_server(log_path: string): void {
                 const place = place_res.place;
 
                 // Mark place as active for breath ticking and sync returned snapshot.
-                touch_place_breath(slot, place as any);
+                touch_place_breath(slot, place as any, { realtime_visible: true });
 
                 // Kind lookup cache (kind-driven body_model / slot representation).
                 const kind_defs = load_kind_definitions();
@@ -3345,6 +4080,19 @@ function start_http_server(log_path: string): void {
                     }
                     
                     if (clamped_location.x !== location.tile.x || clamped_location.y !== location.tile.y) {
+                        try {
+                            const npc_any: any = get_npc_any_cached(slot, npc_id);
+                            if (npc_any) {
+                                if (!npc_any.location) npc_any.location = {};
+                                if (!npc_any.location.tile) npc_any.location.tile = { x: clamped_location.x, y: clamped_location.y };
+                                npc_any.location.tile.x = clamped_location.x;
+                                npc_any.location.tile.y = clamped_location.y;
+                                npc_cache.set(entity_key(slot, npc_id), npc_any);
+                                queue_save_npc(slot, npc_id);
+                            }
+                        } catch {
+                            // ignore
+                        }
                         debug_warn("API", `NPC ${npc_id} position clamped from (${location.tile.x},${location.tile.y}) to (${clamped_location.x},${clamped_location.y})`, {
                             npc_ref,
                             place_bounds: { w: place.tile_grid.width, h: place.tile_grid.height }
@@ -3451,6 +4199,10 @@ function start_http_server(log_path: string): void {
                     }
                     
                     if (clamped_location.x !== location.x || clamped_location.y !== location.y) {
+                        actor_loc_any.tile = { x: clamped_location.x, y: clamped_location.y };
+                        (actor as any).location = actor_loc_any;
+                        actor_cache.set(entity_key(slot, actor_id), actor);
+                        queue_save_actor(slot, actor_id);
                         debug_warn("API", `Actor ${actor_id} position clamped from (${location.x},${location.y}) to (${clamped_location.x},${clamped_location.y})`, {
                             actor_ref,
                             place_bounds: { w: place.tile_grid.width, h: place.tile_grid.height }
@@ -3870,7 +4622,7 @@ function start_http_server(log_path: string): void {
                     return;
                 }
 
-                const touched = touch_place_breath_by_id(slot, place_id);
+                const touched = touch_place_breath_by_id(slot, place_id, { realtime_visible: true });
                 if (!touched.ok) {
                     res.writeHead(404, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: touched.error ?? "touch_failed" }));
@@ -3958,7 +4710,7 @@ function start_http_server(log_path: string): void {
                 const want_dy = (dx !== 0 && dy !== 0) ? 0 : dy;
                 const want_intent = (want_dx === 0 && want_dy === 0) ? null : { dx: want_dx, dy: want_dy };
 
-                const touched = touch_place_breath_by_id(slot, place_id);
+                const touched = touch_place_breath_by_id(slot, place_id, { realtime_visible: true });
                 if (!touched.ok) {
                     res.writeHead(404, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: touched.error ?? "place_not_found" }));
@@ -3982,8 +4734,6 @@ function start_http_server(log_path: string): void {
                     need_repath: false,
                     last_plan_breath: 0,
                     last_brain_breath: 0,
-                    move_accum: 1,
-                    breaths_per_step: 0,
                     updated_at_ms: Date.now(),
                     move_seq: 0,
                 };
@@ -4002,11 +4752,26 @@ function start_http_server(log_path: string): void {
                 ctl.path_index = 0;
                 ctl.need_repath = false;
 
-                // IMPORTANT: intent updates MUST NOT reset cadence.
-                // Only allow immediate stepping on idle -> active.
-                const next_intent_active = !!(ctl.intent && (ctl.intent.dx !== 0 || ctl.intent.dy !== 0));
-                // Cadence is controlled by move_accum refill in the physics tick.
+                // IMPORTANT: intent updates MUST NOT reset movement budget/debt state.
                 move_ctl.set(key, ctl);
+                try {
+                    const any_entity2 = get_entity_any_cached_or_load(slot, entity_ref);
+                    if (any_entity2) {
+                        const runtime = get_or_init_movement_physics_state(entity_ref, place_id, any_entity2, ctl, place_bi);
+                        runtime.input_goal_queued_at_ms = Date.now();
+                        persist_entity_movement_state(any_entity2, runtime, place_bi);
+                        debug_log('MOVE_VEL_TEST', 'input queued timing anchor', {
+                            slot,
+                            entity_ref,
+                            place_id,
+                            queued_at_ms: runtime.input_goal_queued_at_ms,
+                            cause: 'intent',
+                        });
+                    }
+                } catch {
+                    // ignore
+                }
+                maybe_run_immediate_visible_place_pulse(slot, place_id, 'intent');
 
                 res.writeHead(200, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ ok: true, slot, entity_ref, place_id, intent: ctl.intent, mode }));
@@ -4058,6 +4823,8 @@ function start_http_server(log_path: string): void {
                 const place_id = String((data as any)?.place_id ?? "").trim();
                 const x = Math.floor(Number((data as any)?.x));
                 const y = Math.floor(Number((data as any)?.y));
+                const z_raw = Number((data as any)?.z);
+                const z = Number.isFinite(z_raw) ? Math.floor(z_raw) : undefined;
                 const mode = normalize_move_mode((data as any)?.mode);
 
                 if (!entity_ref || !place_id || !Number.isFinite(x) || !Number.isFinite(y)) {
@@ -4090,7 +4857,19 @@ function start_http_server(log_path: string): void {
                     return;
                 }
 
-                const touched = touch_place_breath_by_id(slot, place_id);
+                const existing_goal: any = existing?.goal ?? null;
+                const duplicate_goal = !!existing_goal
+                    && Math.floor(Number(existing_goal.x)) === x
+                    && Math.floor(Number(existing_goal.y)) === y
+                    && ((typeof existing_goal.z === 'number' && Number.isFinite(existing_goal.z)) ? Math.floor(existing_goal.z) : undefined) === z
+                    && ((Date.now() - Math.max(0, Math.floor(Number(existing?.updated_at_ms ?? 0)) || 0)) < 150);
+                if (duplicate_goal) {
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, queued: false, duplicate_ignored: true, slot, entity_ref, place_id, to: existing_goal }));
+                    return;
+                }
+
+                const touched = touch_place_breath_by_id(slot, place_id, { realtime_visible: true });
                 if (!touched.ok) {
                     res.writeHead(404, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: touched.error ?? "place_not_found" }));
@@ -4112,8 +4891,6 @@ function start_http_server(log_path: string): void {
                     need_repath: false,
                     last_plan_breath: 0,
                     last_brain_breath: 0,
-                    move_accum: 1,
-                    breaths_per_step: 0,
                     updated_at_ms: Date.now(),
                     move_seq: 0,
                 };
@@ -4123,17 +4900,61 @@ function start_http_server(log_path: string): void {
                 ctl.place_id = place_id;
                 ctl.mode = mode;
                 ctl.intent = null;
-                ctl.goal = { x, y };
+                const requested_goal = (typeof z === 'number') ? { x, y, z } as any : { x, y };
+                ctl.goal = requested_goal;
                 ctl.path = null;
                 ctl.path_index = 0;
                 ctl.need_repath = true;
                 ctl.last_plan_breath = 0;
                 // Preserve last_brain_breath; click-to-move is player-driven.
                 ctl.updated_at_ms = Date.now();
+                try {
+                    const any_entity = get_entity_any_cached_or_load(slot, entity_ref);
+                    if (any_entity) {
+                        const runtime = get_or_init_movement_physics_state(entity_ref, place_id, any_entity, ctl, place_bi);
+                        runtime.input_goal_queued_at_ms = Date.now();
+                        persist_entity_movement_state(any_entity, runtime, place_bi);
+                        debug_log('MOVE_VEL_TEST', 'input queued timing anchor', {
+                            slot,
+                            entity_ref,
+                            place_id,
+                            queued_at_ms: runtime.input_goal_queued_at_ms,
+                            cause: 'move_to',
+                            requested_goal,
+                        });
+                    }
+                    const touched_key = place_breath_key(slot, place_id);
+                    const state = place_breath.get(touched_key);
+                    if (any_entity && state?.place_base) {
+                        build_place_contents_for_legality(slot, place_id, state.place_base);
+                        const place_bi_now = Math.floor(Number(state.breath_index ?? 0)) || 0;
+                        const planned = plan_path_for_controller(state, ctl, any_entity, place_bi_now);
+                        debug_log('MOVE_VEL_TEST', 'click-to-move immediate planning', {
+                            slot,
+                            entity_ref,
+                            place_id,
+                            requested_goal,
+                            active_goal: ctl.goal,
+                            planned,
+                        });
+                    }
+                } catch {
+                    // ignore
+                }
                 move_ctl.set(key, ctl);
+                maybe_run_immediate_visible_place_pulse(slot, place_id, 'move_to');
+
+                debug_log('MOVE_VEL_TEST', 'click-to-move goal queued', {
+                    slot,
+                    entity_ref,
+                    place_id,
+                    requested_goal,
+                    active_goal: ctl.goal,
+                    mode,
+                });
 
                 res.writeHead(200, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: true, queued: true, slot, entity_ref, place_id, to: { x, y } }));
+                res.end(JSON.stringify({ ok: true, queued: true, slot, entity_ref, place_id, to: requested_goal }));
             });
 
             return;
@@ -10454,6 +11275,10 @@ function start_http_server(log_path: string): void {
 
     server.listen(HTTP_PORT, () => {
         debug_log(`HTTP bridge listening on http://localhost:${HTTP_PORT}/api/input`);
+        debug_log('MOVE_VEL_TEST', 'interface timing instrumentation version', {
+            version: MOVE_TIMING_INVESTIGATION_VERSION,
+            breath_ms: BREATH_MS,
+        });
     });
 }
 

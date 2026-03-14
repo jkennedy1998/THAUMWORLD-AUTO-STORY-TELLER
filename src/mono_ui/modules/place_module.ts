@@ -60,7 +60,31 @@ function footstep_cooldown_ms(speed_tpm: number): number {
   return Math.max(55, Math.min(260, Math.round(ms_per_tile * 0.75)));
 }
 // Debug logging helper - re-enabled with balanced output
+const place_debug_sample_counts = new Map<string, number>();
+const PLACE_MODULE_TIMING_VERSION = '2026-03-14-visible-pulse-v1';
+function should_sample_place_debug(prefix: string, sampleEvery: number): boolean {
+  const next = (place_debug_sample_counts.get(prefix) ?? 0) + 1;
+  place_debug_sample_counts.set(prefix, next);
+  return next % sampleEvery === 0;
+}
+
 function debug_log_place(...args: any[]) {
+  const msg = args.map((a: any) => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+  const always =
+    msg.includes('MOVE_VEL_TEST') ||
+    msg.includes('MOVE_UNIFY_TEST') ||
+    msg.includes('Click-to-move accepted') ||
+    msg.includes('Click-to-move rejected') ||
+    msg.includes('DOOR:') ||
+    msg.includes('MULTITILE_TEST');
+  if (!always) {
+    if (msg.includes('[GroundItems] Rendering') && !should_sample_place_debug('grounditems', 60)) return;
+    if (msg.includes('CACHE CLEARED') && !should_sample_place_debug('cache-cleared', 10)) return;
+    if (msg.includes('CACHE POPULATED') && !should_sample_place_debug('cache-populated', 10)) return;
+    if (msg.includes('Cached NPC') && !should_sample_place_debug('cached-npc', 120)) return;
+    if (msg.includes('Cached Actor') && !should_sample_place_debug('cached-actor', 120)) return;
+    if (msg.includes('WebSocket TAG_') && !should_sample_place_debug('tag-events', 120)) return;
+  }
   // eslint-disable-next-line no-console
   console.log("[PlaceModule]", ...args.map((a: any) => typeof a === 'object' ? JSON.stringify(a) : a));
 }
@@ -268,6 +292,8 @@ function is_power_of_2(n: number): boolean {
 const PADDING_TILES = 25;
 
 export function make_place_module(config: PlaceModuleConfig): Module {
+  // eslint-disable-next-line no-console
+  console.log('[MOVE_VEL_TEST] renderer place module version ' + JSON.stringify({ version: PLACE_MODULE_TIMING_VERSION }));
   const border_rgb = config.border_rgb ?? get_color_by_name("light_gray").rgb;
   const bg_rgb = config.bg_rgb ?? get_color_by_name("off_black").rgb;
   const npc_rgb = config.npc_rgb ?? get_color_by_name("pale_yellow").rgb;
@@ -2077,6 +2103,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   const wsClient = initWebSocketClient();
 
   let place_breath_tick_applied_count = 0;
+  let last_place_breath_tick_applied_ms = 0;
+  let last_local_move_batch_applied_ms = 0;
   
   wsClient.on('TAG_CHANGED', (event: TagChangeEvent) => {
     debug_log_place('WebSocket TAG_CHANGED:', event.entityRef, event.tagName, 'mag:', event.oldMag, '->', event.newMag);
@@ -2113,6 +2141,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       (place as any).breath_last_processed_ms = Date.now();
 
       place_breath_tick_applied_count++;
+      const nowMs = Date.now();
       if (place_breath_tick_applied_count % 60 === 0) {
         // eslint-disable-next-line no-console
         console.log(
@@ -2121,9 +2150,11 @@ export function make_place_module(config: PlaceModuleConfig): Module {
               place_id: place.id,
               breath_index: (place as any).breath_index,
               applied_count: place_breath_tick_applied_count,
+              delta_ms: last_place_breath_tick_applied_ms > 0 ? Math.max(0, nowMs - last_place_breath_tick_applied_ms) : 0,
             })
         );
       }
+      last_place_breath_tick_applied_ms = nowMs;
     } catch {
       // ignore
     }
@@ -2138,6 +2169,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       if (updates.length === 0) return;
 
       const seq_map: Map<string, number> = ((mod as any).__move_seq_by_ref ??= new Map());
+      let localActorApplied = 0;
 
       for (const u of updates) {
         const pid = String(u?.place_id ?? '');
@@ -2162,6 +2194,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           a.tile_position = { x, y };
           if (typeof z === 'number') (a as any).elevation = z;
           set_npc_tracked_position(ref, { x, y });
+          localActorApplied += 1;
           continue;
         }
 
@@ -2180,6 +2213,21 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           set_npc_tracked_position(ref, { x, y });
           continue;
         }
+      }
+
+      if (localActorApplied > 0) {
+        const nowMs = Date.now();
+        // eslint-disable-next-line no-console
+        console.log(
+          '[MOVE_VEL_TEST] renderer applied local move batch ' +
+            JSON.stringify({
+              place_id: place.id,
+              local_actor_updates: localActorApplied,
+              total_updates: updates.length,
+              delta_ms: last_local_move_batch_applied_ms > 0 ? Math.max(0, nowMs - last_local_move_batch_applied_ms) : 0,
+            })
+        );
+        last_local_move_batch_applied_ms = nowMs;
       }
     } catch {
       // ignore
@@ -2747,29 +2795,6 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         return;
       }
 
-      // Tile targeting (not on actor's current layer) - no movement (temporary until jump/path planner exists).
-      // Do not silently gate on base_z.
-      {
-        const actor = place.contents.actors_present[0];
-        const actor_z = (() => {
-          if (actor && typeof (actor as any).elevation === 'number' && Number.isFinite((actor as any).elevation)) {
-            return Math.floor((actor as any).elevation);
-          }
-          return base_z;
-        })();
-
-        if (focus_world_z !== actor_z) {
-          set_target({ x: tile.x, y: tile.y });
-          debug_log_place('MOVE_UNIFY_TEST click-to-move cross-layer temporary_not_supported', {
-            actor_z,
-            focus_world_z,
-            base_z,
-            to: { x: tile.x, y: tile.y, z: focus_world_z },
-          });
-          return;
-        }
-      }
-
       // Find the actor (player) to move
       // For now, move the first actor found
       const actor = place.contents.actors_present[0];
@@ -2797,6 +2822,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
            place_id: place.id,
            x: tile.x,
            y: tile.y,
+           z: focus_world_z,
            mode,
          }),
        })

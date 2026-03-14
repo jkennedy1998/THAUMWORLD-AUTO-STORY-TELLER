@@ -309,6 +309,7 @@ export type PlaceFeature = {
 export type TilePosition = {
   x: number;                     // 0 to tile_grid.width - 1
   y: number;                     // 0 to tile_grid.height - 1
+  z?: number;                    // Optional stance origin z for multi-layer navigation
 };
 
 /**

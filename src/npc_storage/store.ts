@@ -80,6 +80,38 @@ export function load_npc(slot: number, npc_id: string): NpcLookupResult {
             };
             dirty = true;
         }
+        if (!(npc as any).movement_physics || typeof (npc as any).movement_physics !== 'object') {
+            (npc as any).movement_physics = {
+                velocity: { vx: 0, vy: 0, vz: 0 },
+                move_budget: { walk: 0, climb: 0, swim: 0, fly: 0 },
+                move_debt: { walk: 0, climb: 0, swim: 0, fly: 0 },
+                last_intent: { dx: 0, dy: 0, modality: 'walk', mode: 'WALK' },
+                last_breath_processed: Number((npc as any).breath_last_processed ?? (npc as any).breath_index ?? 0) || 0,
+            };
+            dirty = true;
+        } else {
+            const mp = (npc as any).movement_physics;
+            if (!mp.velocity || typeof mp.velocity !== 'object') {
+                mp.velocity = { vx: 0, vy: 0, vz: 0 };
+                dirty = true;
+            }
+            if (!mp.move_budget || typeof mp.move_budget !== 'object') {
+                mp.move_budget = { walk: 0, climb: 0, swim: 0, fly: 0 };
+                dirty = true;
+            }
+            if (!mp.move_debt || typeof mp.move_debt !== 'object') {
+                mp.move_debt = { walk: 0, climb: 0, swim: 0, fly: 0 };
+                dirty = true;
+            }
+            if (!mp.last_intent || typeof mp.last_intent !== 'object') {
+                mp.last_intent = { dx: 0, dy: 0, modality: 'walk', mode: 'WALK' };
+                dirty = true;
+            }
+            if (typeof mp.last_breath_processed !== 'number' || !Number.isFinite(mp.last_breath_processed)) {
+                mp.last_breath_processed = Number((npc as any).breath_last_processed ?? (npc as any).breath_index ?? 0) || 0;
+                dirty = true;
+            }
+        }
     } catch {
         // ignore
     }
@@ -239,6 +271,13 @@ export function create_npc_from_kind(slot: number, input: CreateNpcFromKindInput
         climb: { breaths_per_step: 1, next_breath: 0 },
         swim: { breaths_per_step: 1, next_breath: 0 },
         fly: { breaths_per_step: 1, next_breath: 0 },
+    };
+    (npc as any).movement_physics = {
+        velocity: { vx: 0, vy: 0, vz: 0 },
+        move_budget: { walk: 0, climb: 0, swim: 0, fly: 0 },
+        move_debt: { walk: 0, climb: 0, swim: 0, fly: 0 },
+        last_intent: { dx: 0, dy: 0, modality: 'walk', mode: 'WALK' },
+        last_breath_processed: 0,
     };
 
     npc.kind = kind.id;
