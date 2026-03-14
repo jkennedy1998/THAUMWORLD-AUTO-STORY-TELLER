@@ -34,6 +34,19 @@ export type PlaceEntityIndex = {
 
 const SCHEMA_VERSION = 1;
 
+// In-memory cache: slot -> PlaceEntityIndex
+// Populated on first read, kept in sync by all mutation functions via save_index.
+// Never reads disk mid-session after the first load.
+const index_cache = new Map<number, PlaceEntityIndex>();
+
+/**
+ * Invalidate the in-memory cache for a slot (forces a disk reload on next access).
+ * Call this if the index file is modified externally.
+ */
+export function invalidate_place_entity_cache(slot: number): void {
+  index_cache.delete(slot);
+}
+
 /**
  * Get path to index file for a data slot
  */
@@ -42,11 +55,18 @@ function get_index_path(slot: number): string {
 }
 
 /**
- * Ensure index file exists with valid structure
+ * Ensure index file exists with valid structure.
+ * Returns the in-memory cached index if available (no disk read).
+ * On cache miss, reads disk once and populates the cache.
  */
 function ensure_index_file(slot: number): PlaceEntityIndex {
+  // Fast path: return cached index (zero disk IO)
+  const cached = index_cache.get(slot);
+  if (cached) return cached;
+
+  // Cache miss: read from disk
   const file_path = get_index_path(slot);
-  
+
   if (!fs.existsSync(file_path)) {
     debug_log("PlaceEntityIndex", `Creating new index file for slot ${slot}`, { file_path });
     const empty_index: PlaceEntityIndex = {
@@ -73,7 +93,9 @@ function ensure_index_file(slot: number): PlaceEntityIndex {
       save_index(slot, empty_index);
       return empty_index;
     }
-    
+
+    // Populate cache from the disk read
+    index_cache.set(slot, index);
     return index;
   } catch (err) {
     debug_error("PlaceEntityIndex", `Failed to parse index file ${file_path}`, err);
@@ -88,12 +110,14 @@ function ensure_index_file(slot: number): PlaceEntityIndex {
 }
 
 /**
- * Save index to disk
+ * Save index to disk and update the in-memory cache.
  */
 function save_index(slot: number, index: PlaceEntityIndex): boolean {
   const file_path = get_index_path(slot);
   try {
     fs.writeFileSync(file_path, JSON.stringify(index, null, 2), "utf-8");
+    // Keep the in-memory cache in sync with the persisted data.
+    index_cache.set(slot, index);
     return true;
   } catch (err) {
     debug_error("PlaceEntityIndex", `Failed to save index to ${file_path}`, err);

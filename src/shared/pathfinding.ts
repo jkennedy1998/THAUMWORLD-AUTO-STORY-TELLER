@@ -85,16 +85,49 @@ function get_adjacent_reachable_stances(
   if (nx < 0 || ny < 0 || nx >= w || ny >= h) return [];
 
   const zb = get_place_world_z_bounds(place);
-  const candidates = [current.z, current.z + 1, current.z - 1];
   const out: StanceNode[] = [];
   const seen = new Set<string>();
-  for (const z of candidates) {
-    if (z < zb.min_z || z > zb.max_z) continue;
-    const key = `${nx},${ny},${z}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const ok = is_stance_walkable(place, owner, { x: nx, y: ny, z }, options);
-    if (ok.ok) out.push({ x: nx, y: ny, z });
+
+  const forward = is_stance_walkable(place, owner, { x: nx, y: ny, z: current.z }, options);
+  if (forward.ok) {
+    out.push({ x: nx, y: ny, z: current.z });
+    return out;
+  }
+
+  if (forward.reason === 'blocked') {
+    const up_z = current.z + 1;
+    if (up_z >= zb.min_z && up_z <= zb.max_z) {
+      const key = `${nx},${ny},${up_z}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        const up = can_place_volume(place, owner, { x: current.x, y: current.y, z: up_z }, options.movement_mode ?? 'WALK', {
+          exclude_owner: owner,
+          support_policy: 'any_footprint',
+          ignore_occupants: !options.treat_occupied_as_wall,
+          reserved_stance_origins: options.reserved_stance_origins,
+          allow_unsupported: true,
+        });
+        const up_forward = is_stance_walkable(place, owner, { x: nx, y: ny, z: up_z }, options);
+        if (up.ok && up_forward.ok) {
+          out.push({ x: nx, y: ny, z: up_z });
+        }
+      }
+    }
+    return out;
+  }
+
+  if (forward.reason === 'no_support') {
+    const down_z = current.z - 1;
+    if (down_z >= zb.min_z && down_z <= zb.max_z) {
+      const key = `${nx},${ny},${down_z}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        const down_forward = is_stance_walkable(place, owner, { x: nx, y: ny, z: down_z }, options);
+        if (down_forward.ok) {
+          out.push({ x: nx, y: ny, z: down_z });
+        }
+      }
+    }
   }
   return out;
 }

@@ -96,6 +96,15 @@ type PlaceBreathState = {
     last_visible_pulse_ms: number;
     last_visible_pulse_duration_ms: number;
 
+    // Fixed-step simulation accumulator.
+    // Tracks fractional time that hasn't yet made a full BREATH_MS tick.
+    // Drained by ticks_to_run * BREATH_MS each outer loop.
+    sim_accum_ms: number;
+
+    // Simulation time scale. 1 = normal, 0 = paused (no ticks run).
+    // Future hook for pause / turn-based mode.
+    time_scale: number;
+
     // Base place snapshot for breath processing.
     // Must NOT include `/api/place` derived entity lists.
     place_base: any | null;
@@ -107,7 +116,19 @@ const ACTIVE_PLACE_TIMEOUT_MS = 10_000;
 const PLACE_PERSIST_COOLDOWN_MS = 5_000;
 const CATCHUP_MAX_BREATHS = 300;
 const CATCHUP_MAX_GRAVITY_STEPS = 64;
-const MOVE_TIMING_INVESTIGATION_VERSION = '2026-03-14-visible-pulse-v1';
+const MOVE_TIMING_INVESTIGATION_VERSION = '2026-03-14-visible-pulse-v2';
+const MOVE_INTERVAL_HOT_THRESHOLD_MS = 25;
+const MOVE_PLACE_HOT_THRESHOLD_MS = 12;
+const MOVE_PHASE_HOT_THRESHOLD_MS = 6;
+const WALK_MOVE_BUDGET_CAP = 2;
+const WALK_MOVE_SPEND_CAP_PER_BREATH = 2;
+
+function log_move_hotspot(message: string, payload: Record<string, any>): void {
+    debug_log('MOVE_VEL_TEST', message, {
+        version: MOVE_TIMING_INVESTIGATION_VERSION,
+        ...payload,
+    });
+}
 let last_breath_interval_started_ms = 0;
 let breath_interval_sample_count = 0;
 
@@ -131,6 +152,9 @@ type PersistedMovementPhysicsState = {
         movement_verb: "move" | null;
         movement_subtype: string | null;
         modality: MoveModality | null;
+        selected_breath?: number;
+        preferred_axes?: Array<'x' | 'y' | 'z'>;
+        composite_target?: { x: number; y: number; z: number } | null;
     } | null;
     last_breath_processed: number;
 };
@@ -174,6 +198,9 @@ type MovementPhysicsRuntimeState = {
         movement_verb: "move" | null;
         movement_subtype: string | null;
         modality: MoveModality | null;
+        selected_breath?: number;
+        preferred_axes?: Array<'x' | 'y' | 'z'>;
+        composite_target?: { x: number; y: number; z: number } | null;
     } | null;
     input_goal_queued_at_ms: number | null;
     last_breath_processed: number;
@@ -245,6 +272,21 @@ function normalize_movement_physics_state(any_entity: any): PersistedMovementPhy
                     if (m === 'walk') return 'walk' as MoveModality;
                     return null;
                 })(),
+                selected_breath: Number.isFinite(Number((mp.transient_selection as any).selected_breath))
+                    ? Math.floor(Number((mp.transient_selection as any).selected_breath))
+                    : undefined,
+                preferred_axes: Array.isArray((mp.transient_selection as any).preferred_axes)
+                    ? ((mp.transient_selection as any).preferred_axes as any[])
+                        .map((axis) => String(axis))
+                        .filter((axis): axis is 'x' | 'y' | 'z' => axis === 'x' || axis === 'y' || axis === 'z')
+                    : undefined,
+                composite_target: ((mp.transient_selection as any).composite_target && typeof (mp.transient_selection as any).composite_target === 'object')
+                    ? {
+                        x: Math.floor(Number((mp.transient_selection as any).composite_target.x ?? 0)) || 0,
+                        y: Math.floor(Number((mp.transient_selection as any).composite_target.y ?? 0)) || 0,
+                        z: Math.floor(Number((mp.transient_selection as any).composite_target.z ?? 0)) || 0,
+                    }
+                    : undefined,
             }
             : null,
         last_breath_processed: Math.floor(Number(mp.last_breath_processed ?? any_entity?.breath_last_processed ?? any_entity?.breath_index ?? 0)) || 0,
@@ -296,6 +338,9 @@ function persist_entity_movement_state(any_entity: any, runtime: MovementPhysics
             movement_verb: runtime.transient_selection.movement_verb,
             movement_subtype: runtime.transient_selection.movement_subtype,
             modality: runtime.transient_selection.modality,
+            selected_breath: runtime.transient_selection.selected_breath,
+            preferred_axes: runtime.transient_selection.preferred_axes,
+            composite_target: runtime.transient_selection.composite_target,
         }
         : null;
     (persisted as any).input_goal_queued_at_ms = runtime.input_goal_queued_at_ms;
@@ -306,7 +351,10 @@ function persist_entity_movement_state(any_entity: any, runtime: MovementPhysics
 function refill_move_budget_and_apply_debt(runtime: MovementPhysicsRuntimeState, modality: MoveModality, accel_per_breath: number): { can_spend: boolean; debt_suppressed: boolean } {
     const inc = Math.max(0, Number(accel_per_breath) || 0);
     const current_budget = Number(runtime.move_budget[modality]);
-    runtime.move_budget[modality] = Math.max(0, (Number.isFinite(current_budget) ? current_budget : 0) + inc);
+    runtime.move_budget[modality] = Math.min(
+        max_move_budget_for_modality(modality),
+        Math.max(0, (Number.isFinite(current_budget) ? current_budget : 0) + inc),
+    );
 
     const current_debt = Math.max(0, Math.floor(Number(runtime.move_debt[modality])) || 0);
     if (current_debt > 0) {
@@ -394,11 +442,6 @@ function try_select_walk_incline(place_any: any, entity_ref: string, entity_type
   }
 
     if (forward.reason === 'no_support') {
-        const down = can_place_volume(place_any as any, owner as any, { x: cur_x, y: cur_y, z: cur_z - 1 }, 'WALK' as any, {
-            exclude_owner: owner as any,
-            support_policy: 'any_footprint' as any,
-            allow_unsupported: true,
-        });
         const down_forward = can_place_volume(place_any as any, owner as any, { x: cur_x + desired.dx, y: cur_y + desired.dy, z: cur_z - 1 }, 'WALK' as any, {
             exclude_owner: owner as any,
             support_policy: 'any_footprint' as any,
@@ -408,13 +451,12 @@ function try_select_walk_incline(place_any: any, entity_ref: string, entity_type
             at: { x: cur_x, y: cur_y, z: cur_z },
             desired,
             forward,
-            down,
             down_forward,
-            transient_down_ok: is_transient_incline_down_selection_ok(cur_z, down as any),
-            down_blocked_by: (down as any)?.detail?.blocked_by ?? null,
-            down_blocked_voxel: (down as any)?.detail?.blocked_voxel ?? null,
+            landing_ok: down_forward.ok,
+            landing_blocked_by: (down_forward as any)?.detail?.blocked_by ?? null,
+            landing_blocked_voxel: (down_forward as any)?.detail?.blocked_voxel ?? null,
         });
-        if (is_transient_incline_down_selection_ok(cur_z, down as any) && down_forward.ok) return { subtype: 'incline_down', dz: -1 };
+        if (down_forward.ok) return { subtype: 'incline_down', dz: -1 };
     }
 
   return null;
@@ -474,7 +516,43 @@ function resolve_velocity_step_target(runtime: MovementPhysicsRuntimeState, cur_
         return axis_order.indexOf(a.axis) - axis_order.indexOf(b.axis);
     });
 
-    return mags.map((p) => {
+    let ordered_axes = mags.map((p) => p.axis);
+    const preferred_axes = runtime.transient_selection?.preferred_axes ?? [];
+    const selected_breath = Math.floor(Number(runtime.transient_selection?.selected_breath ?? -1));
+    const incline_priority_active = runtime.entity_type === 'actor'
+        && selected_breath === (Math.floor(Number(breath_index)) || 0)
+        && (
+            runtime.transient_selection?.movement_subtype === 'move.walk.incline_up' ||
+            runtime.transient_selection?.movement_subtype === 'move.walk.incline_down' ||
+            runtime.transient_selection?.movement_subtype === 'move.walk.incline_up_followthrough' ||
+            runtime.transient_selection?.movement_subtype === 'move.walk.incline_down_followthrough'
+        )
+        && preferred_axes.length > 0;
+    if (incline_priority_active) {
+        const prioritized: Array<'x' | 'y' | 'z'> = [];
+        for (const axis of preferred_axes) {
+            if (ordered_axes.includes(axis) && !prioritized.includes(axis)) prioritized.push(axis);
+        }
+        for (const axis of ordered_axes) {
+            if (!prioritized.includes(axis)) prioritized.push(axis);
+        }
+        if (prioritized.length > 0 && prioritized[0] !== ordered_axes[0]) {
+            debug_log('MOVE_VEL_TEST', 'incline resolver priority applied', {
+                entity_ref: runtime.entity_ref,
+                place_id: runtime.place_id,
+                breath_index,
+                subtype: runtime.transient_selection?.movement_subtype,
+                preferred_axes,
+                raw_axes: ordered_axes,
+                prioritized_axes: prioritized,
+                velocity: runtime.velocity,
+            });
+        }
+        ordered_axes = prioritized;
+    }
+
+    return ordered_axes.map((axis) => {
+        const p = mags.find((entry) => entry.axis === axis)!;
         if (p.axis === 'x') return { axis: 'x' as const, x: cur_x + p.sign, y: cur_y, z: cur_z };
         if (p.axis === 'y') return { axis: 'y' as const, x: cur_x, y: cur_y + p.sign, z: cur_z };
         return { axis: 'z' as const, x: cur_x, y: cur_y, z: cur_z + p.sign };
@@ -505,14 +583,85 @@ function can_use_incline_transient_vertical_override(
     return false;
 }
 
+function preferred_forward_axis(desired: { dx: number; dy: number } | null): 'x' | 'y' | null {
+    if (!desired) return null;
+    if (desired.dx !== 0) return 'x';
+    if (desired.dy !== 0) return 'y';
+    return null;
+}
+
+function derive_facing_direction(
+    entity_ref: string,
+    from: { x: number; y: number },
+    to: { x: number; y: number },
+    latest_intent: { dx: number; dy: number } | null,
+    next_path_step: { x: number; y: number } | null,
+): ReturnType<typeof calculate_direction> | null {
+    try {
+        if (latest_intent && (latest_intent.dx !== 0 || latest_intent.dy !== 0)) {
+            return calculate_direction(
+                { x: 0, y: 0 } as any,
+                { x: clamp_intent(latest_intent.dx), y: clamp_intent(latest_intent.dy) } as any,
+                entity_ref,
+            );
+        }
+        if (next_path_step && (Math.floor(next_path_step.x) !== Math.floor(from.x) || Math.floor(next_path_step.y) !== Math.floor(from.y))) {
+            return calculate_direction(from as any, next_path_step as any, entity_ref);
+        }
+        if (Math.floor(to.x) !== Math.floor(from.x) || Math.floor(to.y) !== Math.floor(from.y)) {
+            return calculate_direction(from as any, to as any, entity_ref);
+        }
+    } catch {
+        // ignore
+    }
+    return null;
+}
+
+function max_move_budget_for_modality(modality: MoveModality): number {
+    if (modality === 'walk') return WALK_MOVE_BUDGET_CAP;
+    return 3;
+}
+
+function max_move_spend_per_breath(modality: MoveModality): number {
+    if (modality === 'walk') return WALK_MOVE_SPEND_CAP_PER_BREATH;
+    return 3;
+}
+
+function apply_actor_control_steering(runtime: MovementPhysicsRuntimeState, desired: { dx: number; dy: number } | null, incline: { subtype: 'incline_up' | 'incline_down'; dz: 1 | -1 } | null): void {
+    if (runtime.entity_type !== 'actor' || !desired) return;
+    const before = { ...runtime.velocity };
+    if (desired.dx !== 0) {
+        if (Math.sign(runtime.velocity.vx) === -Math.sign(desired.dx)) {
+            runtime.velocity.vx = 0;
+        }
+        if (incline || runtime.latest_intent?.updated_breath === runtime.last_breath_processed + 1) {
+            runtime.velocity.vy = 0;
+        }
+    } else if (desired.dy !== 0) {
+        if (Math.sign(runtime.velocity.vy) === -Math.sign(desired.dy)) {
+            runtime.velocity.vy = 0;
+        }
+        if (incline || runtime.latest_intent?.updated_breath === runtime.last_breath_processed + 1) {
+            runtime.velocity.vx = 0;
+        }
+    }
+    if (before.vx !== runtime.velocity.vx || before.vy !== runtime.velocity.vy) {
+        debug_log('MOVE_VEL_TEST', 'actor control steering applied', {
+            entity_ref: runtime.entity_ref,
+            place_id: runtime.place_id,
+            desired,
+            incline,
+            before,
+            after: runtime.velocity,
+            updated_breath: runtime.latest_intent?.updated_breath ?? null,
+            last_breath_processed: runtime.last_breath_processed,
+        });
+    }
+}
+
 function is_transient_incline_down_selection_ok(cur_z: number, check: { ok: boolean; reason?: string; detail?: any }): boolean {
-    if (check.ok) return true;
-    if (check.reason !== 'blocked') return false;
-    const blocked_by = String(check.detail?.blocked_by ?? '');
-    if (blocked_by !== 'tile' && blocked_by !== 'occupant') return false;
-    const blocked_voxel_z = Number(check.detail?.blocked_voxel?.z);
-    if (!Number.isFinite(blocked_voxel_z)) return true;
-    return Math.floor(blocked_voxel_z) === Math.floor(cur_z - 1);
+    void cur_z;
+    return check.ok;
 }
 
 function get_walk_accel_per_breath(any_entity: any, mode: MoveMode): number | null {
@@ -528,6 +677,15 @@ function normalize_move_mode(mode_raw: any): MoveMode {
     if (m === "SNEAK") return "SNEAK";
     if (m === "SPRINT") return "SPRINT";
     return "WALK";
+}
+
+function normalize_intent_reason(reason_raw: any): 'change' | 'resend' | 'release' | 'move_to' | 'unknown' {
+    const r = String(reason_raw ?? '').toLowerCase();
+    if (r === 'change') return 'change';
+    if (r === 'resend') return 'resend';
+    if (r === 'release') return 'release';
+    if (r === 'move_to') return 'move_to';
+    return 'unknown';
 }
 
 function clamp_intent(v: any): number {
@@ -678,6 +836,13 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState): void {
         const any_entity = get_entity_any_cached_or_load(state.slot, entity_ref);
         if (!any_entity) return;
         const runtime = get_or_init_movement_physics_state(entity_ref, state.place_id, any_entity, ctl, place_bi);
+        const pending_followthrough = !!(
+            (
+                runtime.transient_selection?.movement_subtype === 'move.walk.incline_up_followthrough' ||
+                runtime.transient_selection?.movement_subtype === 'move.walk.incline_down_followthrough'
+            ) &&
+            Math.floor(Number(runtime.transient_selection?.selected_breath ?? -1)) === place_bi
+        );
         const walk_accel = get_walk_accel_per_breath(any_entity, ctl.mode);
         runtime.latest_intent = ctl.intent ? {
             dx: clamp_intent(ctl.intent.dx),
@@ -705,26 +870,38 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState): void {
                 });
             }
             if (spend_gate.can_spend && desired) {
+                apply_actor_control_steering(runtime, desired, incline);
                 let moves_applied = 0;
                 if (incline) {
+                    const incline_preferred_axis = preferred_forward_axis(desired);
                     runtime.velocity.vz += incline.dz;
                     apply_move_acceleration(runtime, desired);
                     spend_move_budget(runtime, 'walk', 2);
                     moves_applied = 2;
+                    runtime.transient_selection = {
+                        movement_verb: 'move',
+                        movement_subtype: `move.walk.${incline.subtype}`,
+                        modality: 'walk',
+                        selected_breath: place_bi,
+                        preferred_axes: incline_preferred_axis ? ['z', incline_preferred_axis] : ['z'],
+                        composite_target: null,
+                    };
                 } else {
                     let loop_guard = 0;
-                    while ((Number(runtime.move_budget.walk) || 0) >= 1 && loop_guard < 32) {
+                    const spend_cap = max_move_spend_per_breath('walk');
+                    while ((Number(runtime.move_budget.walk) || 0) >= 1 && loop_guard < spend_cap) {
                         apply_move_acceleration(runtime, desired);
                         spend_move_budget(runtime, 'walk', 1);
                         moves_applied += 1;
                         loop_guard += 1;
                     }
+                    runtime.transient_selection = {
+                        movement_verb: 'move',
+                        movement_subtype: ctl.mode,
+                        modality: 'walk',
+                        composite_target: null,
+                    };
                 }
-                runtime.transient_selection = {
-                    movement_verb: 'move',
-                    movement_subtype: incline ? `move.walk.${incline.subtype}` : ctl.mode,
-                    modality: 'walk',
-                };
                 debug_log('MOVE_VEL_TEST', 'action phase move acceleration', {
                     entity_ref,
                     place_id: state.place_id,
@@ -735,8 +912,10 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState): void {
                     velocity: runtime.velocity,
                     move_budget: runtime.move_budget.walk,
                     move_debt: runtime.move_debt.walk,
+                    preferred_axes: runtime.transient_selection?.preferred_axes ?? null,
+                    composite_target: runtime.transient_selection?.composite_target ?? null,
                 });
-            } else {
+            } else if (!pending_followthrough) {
                 runtime.transient_selection = null;
             }
         }
@@ -762,6 +941,11 @@ function run_place_breaths(state: PlaceBreathState, ticks_to_run: number, now: n
     const breath_ticks: Array<{ slot: number; place_id: string; breath_index: number }> = [];
     const ticks = Math.max(0, Math.floor(Number(ticks_to_run)) || 0);
     const pulse_started_ms = Date.now();
+    let brain_duration_ms = 0;
+    let think_duration_ms = 0;
+    let action_duration_ms = 0;
+    let physics_duration_ms = 0;
+    let gravity_duration_ms = 0;
     if (state.realtime_visible) {
         const last_visible = Math.max(0, Number(state.last_visible_pulse_ms) || 0);
         const delta_ms = last_visible > 0 ? Math.max(0, now - last_visible) : 0;
@@ -798,19 +982,45 @@ function run_place_breaths(state: PlaceBreathState, ticks_to_run: number, now: n
             (state.place_base as any).breath_last_processed = state.breath_last_processed;
 
             if ((state.breath_index % BRAIN_EVERY_BREATHS) === 0) {
+                const started_ms = Date.now();
                 apply_server_brain_one_breath(state);
+                brain_duration_ms += Math.max(0, Date.now() - started_ms);
             }
             if ((state.breath_index % THINK_EVERY_BREATHS) === 0) {
+                const started_ms = Date.now();
                 apply_server_thinking_one_breath(state);
+                think_duration_ms += Math.max(0, Date.now() - started_ms);
             }
 
+            const action_started_ms = Date.now();
             apply_movement_action_phase_one_breath(state);
+            action_duration_ms += Math.max(0, Date.now() - action_started_ms);
+            const physics_started_ms = Date.now();
             apply_movement_physics_phase_one_breath(state, movement_updates);
+            physics_duration_ms += Math.max(0, Date.now() - physics_started_ms);
+            const gravity_started_ms = Date.now();
             apply_gravity_to_place_ground(state);
+            gravity_duration_ms += Math.max(0, Date.now() - gravity_started_ms);
         }
     }
     const pulse_duration_ms = Math.max(0, Date.now() - pulse_started_ms);
     state.last_visible_pulse_duration_ms = pulse_duration_ms;
+    if (pulse_duration_ms >= MOVE_PLACE_HOT_THRESHOLD_MS || brain_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS || think_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS || action_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS || physics_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS || gravity_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS) {
+        log_move_hotspot('place breath hotspot', {
+            slot: state.slot,
+            place_id: state.place_id,
+            breath_index: state.breath_index,
+            cause: cause ?? 'interval',
+            ticks,
+            pulse_duration_ms,
+            brain_duration_ms,
+            think_duration_ms,
+            action_duration_ms,
+            physics_duration_ms,
+            gravity_duration_ms,
+            realtime_visible: state.realtime_visible,
+        });
+    }
     if (state.realtime_visible && (state.breath_index % 30 === 0)) {
         debug_log('MOVE_VEL_TEST', 'visible place pulse duration', {
             slot: state.slot,
@@ -825,19 +1035,63 @@ function run_place_breaths(state: PlaceBreathState, ticks_to_run: number, now: n
     return breath_ticks;
 }
 
+/**
+ * Coalesce movement updates for offscreen/catch-up places only.
+ * Visible realtime places preserve ordered per-breath updates so the renderer
+ * can show actual step cadence instead of burst-end snaps.
+ */
+function coalesce_movement_updates(updates: any[], visible_place_keys: Set<string>): any[] {
+    if (updates.length <= 1) return updates;
+    const last_by_key = new Map<string, any>();
+    const ordered_visible: any[] = [];
+    for (const u of updates) {
+        const place_key = place_breath_key(Number(u?.slot ?? 0), String(u?.place_id ?? ''));
+        if (visible_place_keys.has(place_key)) {
+            ordered_visible.push(u);
+            continue;
+        }
+        const k = `${String(u?.place_id ?? '')}:${String(u?.entity_ref ?? '')}`;
+        // Always overwrite — later entries have higher seq and are the final position.
+        last_by_key.set(k, u);
+    }
+    return [...ordered_visible, ...Array.from(last_by_key.values())];
+}
+
 function flush_place_breath_outputs(now: number, breath_ticks: Array<{ slot: number; place_id: string; breath_index: number }>, movement_updates: any[]): void {
+    const flush_started_ms = Date.now();
+    let breath_emit_duration_ms = 0;
+    let movement_emit_duration_ms = 0;
     if (breath_ticks.length > 0) {
+        const emit_started_ms = Date.now();
         void emitBridgeMessage('PLACE_BREATH_TICK', {
             breath_ms: BREATH_MS,
             sent_at_ms: now,
             ticks: breath_ticks,
         });
+        breath_emit_duration_ms = Math.max(0, Date.now() - emit_started_ms);
     }
 
     if (movement_updates.length > 0) {
+        const emit_started_ms = Date.now();
+        const visible_place_keys = new Set<string>();
+        for (const [key, state] of place_breath) {
+            if (state.realtime_visible) visible_place_keys.add(key);
+        }
         void emitBridgeMessage('ENTITY_MOVED_BATCH', {
             sent_at_ms: now,
-            updates: movement_updates,
+            updates: coalesce_movement_updates(movement_updates, visible_place_keys),
+        });
+        movement_emit_duration_ms = Math.max(0, Date.now() - emit_started_ms);
+    }
+
+    const flush_duration_ms = Math.max(0, Date.now() - flush_started_ms);
+    if (flush_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS || breath_emit_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS || movement_emit_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS) {
+        log_move_hotspot('place breath flush hotspot', {
+            breath_ticks: breath_ticks.length,
+            movement_updates: movement_updates.length,
+            flush_duration_ms,
+            breath_emit_duration_ms,
+            movement_emit_duration_ms,
         });
     }
 }
@@ -936,10 +1190,21 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
         if (!ctl) return;
         if (ctl.place_id !== state.place_id) return;
 
+        const any_entity = get_entity_any_cached_or_load(state.slot, entity_ref);
+        if (!any_entity) return;
+        const runtime = get_or_init_movement_physics_state(entity_ref, state.place_id, any_entity, ctl, place_bi);
+        const pending_followthrough = !!(
+            (
+                runtime.transient_selection?.movement_subtype === 'move.walk.incline_up_followthrough' ||
+                runtime.transient_selection?.movement_subtype === 'move.walk.incline_down_followthrough'
+            ) &&
+            Math.floor(Number(runtime.transient_selection?.selected_breath ?? -1)) === place_bi
+        );
+
         const intent_active = !!(ctl.intent && (ctl.intent.dx !== 0 || ctl.intent.dy !== 0));
         const has_path = !!(ctl.path && ctl.path_index < ctl.path.length);
         const has_goal = !!(ctl.goal && Number.isFinite(ctl.goal.x) && Number.isFinite(ctl.goal.y));
-        if (!intent_active && !has_path && !has_goal) return;
+        if (!intent_active && !has_path && !has_goal && !pending_followthrough) return;
 
         // Held intent overrides click-to-move.
         if (intent_active) {
@@ -948,10 +1213,6 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
             ctl.path_index = 0;
             ctl.need_repath = false;
         }
-
-        const any_entity = get_entity_any_cached_or_load(state.slot, entity_ref);
-        if (!any_entity) return;
-        const runtime = get_or_init_movement_physics_state(entity_ref, state.place_id, any_entity, ctl, place_bi);
 
         const cur_x = Math.floor(Number(ent_snap?.tile_position?.x ?? 0)) || 0;
         const cur_y = Math.floor(Number(ent_snap?.tile_position?.y ?? 0)) || 0;
@@ -981,6 +1242,7 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
         let target: { axis: 'x' | 'y' | 'z'; x: number; y: number; z: number } | null = null;
         const failed_attempts: Array<{ axis: 'x' | 'y' | 'z'; target: { x: number; y: number; z: number }; reason: string; detail: any }> = [];
         for (const attempt of attempts) {
+            if (target) break;
             const allow_unsupported = !!(
                 attempt.axis === 'z' &&
                 runtime.transient_selection?.movement_verb === 'move' &&
@@ -1067,11 +1329,22 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
             any_entity.breath_last_processed_ms = Date.now();
             runtime.last_breath_processed = place_bi;
 
-            // Facing follows movement.
+            // Facing follows latest intent first, then path, then actual movement.
             try {
-                const dir = calculate_direction(from as any, { x: target.x, y: target.y } as any, entity_ref);
-                any_entity.facing = dir;
-                set_facing(entity_ref, dir);
+                const next_path_step = ctl.path && ctl.path_index < ctl.path.length
+                    ? { x: Math.floor(ctl.path[ctl.path_index]!.x), y: Math.floor(ctl.path[ctl.path_index]!.y) }
+                    : null;
+                const dir = derive_facing_direction(
+                    entity_ref,
+                    from,
+                    { x: target.x, y: target.y },
+                    runtime.latest_intent ? { dx: runtime.latest_intent.dx, dy: runtime.latest_intent.dy } : null,
+                    next_path_step,
+                );
+                if (dir) {
+                    any_entity.facing = dir;
+                    set_facing(entity_ref, dir);
+                }
             } catch {
                 // ignore
             }
@@ -1088,7 +1361,8 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
         // Advance controller.
         if (!intent_active) {
             const next = ctl.path && ctl.path_index < ctl.path.length ? ctl.path[ctl.path_index] : null;
-            if (next && Math.floor(next.x) === target.x && Math.floor(next.y) === target.y) {
+            const next_z = (typeof next?.z === 'number' && Number.isFinite(next.z)) ? Math.floor(next.z) : null;
+            if (next && Math.floor(next.x) === target.x && Math.floor(next.y) === target.y && (next_z === null || next_z === target.z)) {
                 ctl.path_index += 1;
             }
             if (ctl.path && ctl.path_index >= ctl.path.length) {
@@ -1100,8 +1374,8 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
             }
         }
         const resolved_transient_subtype = runtime.transient_selection?.movement_subtype ?? null;
+        const resolved_preferred_axes = runtime.transient_selection?.preferred_axes ?? null;
         apply_friction_to_axis(runtime, target.axis);
-        runtime.transient_selection = null;
         ctl.updated_at_ms = Date.now();
         debug_log('MOVE_VEL_TEST', 'physics resolved step', {
             entity_ref,
@@ -1122,19 +1396,84 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
             runtime.input_goal_queued_at_ms = null;
         }
         if (target.axis === 'z' && resolved_transient_subtype === 'move.walk.incline_up') {
-            debug_log('MOVE_VEL_TEST', 'PASS incline up selected and resolved vertically', {
+            const followthrough_desired = desired_step_from_controller(ctl, target.x, target.y);
+            const followthrough_axis = preferred_forward_axis(followthrough_desired);
+            if (followthrough_axis) {
+                runtime.transient_selection = {
+                    movement_verb: 'move',
+                    movement_subtype: 'move.walk.incline_up_followthrough',
+                    modality: 'walk',
+                    selected_breath: place_bi + 1,
+                    preferred_axes: [followthrough_axis],
+                    composite_target: null,
+                };
+                debug_log('MOVE_VEL_TEST', 'incline up followthrough armed', {
+                    entity_ref,
+                    place_id: state.place_id,
+                    breath_index: place_bi,
+                    next_breath: place_bi + 1,
+                    preferred_axes: [followthrough_axis],
+                    desired: followthrough_desired,
+                });
+            } else {
+                runtime.transient_selection = null;
+            }
+            debug_log('MOVE_VEL_TEST', 'PASS incline up selected and resolved', {
                 entity_ref,
                 place_id: state.place_id,
                 breath_index: place_bi,
                 to: { x: target.x, y: target.y, z: target.z },
+                preferred_axes: resolved_preferred_axes,
+            });
+        } else if (target.axis === 'z' && resolved_transient_subtype === 'move.walk.incline_down') {
+            const followthrough_desired = desired_step_from_controller(ctl, target.x, target.y);
+            const followthrough_axis = preferred_forward_axis(followthrough_desired);
+            if (followthrough_axis) {
+                runtime.transient_selection = {
+                    movement_verb: 'move',
+                    movement_subtype: 'move.walk.incline_down_followthrough',
+                    modality: 'walk',
+                    selected_breath: place_bi + 1,
+                    preferred_axes: [followthrough_axis],
+                    composite_target: null,
+                };
+                debug_log('MOVE_VEL_TEST', 'incline down followthrough armed', {
+                    entity_ref,
+                    place_id: state.place_id,
+                    breath_index: place_bi,
+                    next_breath: place_bi + 1,
+                    preferred_axes: [followthrough_axis],
+                    desired: followthrough_desired,
+                });
+            } else {
+                runtime.transient_selection = null;
+            }
+            debug_log('MOVE_VEL_TEST', 'PASS incline down selected and resolved', {
+                entity_ref,
+                place_id: state.place_id,
+                breath_index: place_bi,
+                to: { x: target.x, y: target.y, z: target.z },
+                preferred_axes: resolved_preferred_axes,
+            });
+        } else {
+            runtime.transient_selection = null;
+        }
+        if (target.axis !== 'z' && resolved_transient_subtype === 'move.walk.incline_up_followthrough') {
+            debug_log('MOVE_VEL_TEST', 'PASS incline up followthrough resolved', {
+                entity_ref,
+                place_id: state.place_id,
+                breath_index: place_bi,
+                to: { x: target.x, y: target.y, z: target.z },
+                preferred_axes: resolved_preferred_axes,
             });
         }
-        if (target.axis === 'z' && resolved_transient_subtype === 'move.walk.incline_down') {
-            debug_log('MOVE_VEL_TEST', 'PASS incline down selected and resolved vertically', {
+        if (target.axis !== 'z' && resolved_transient_subtype === 'move.walk.incline_down_followthrough') {
+            debug_log('MOVE_VEL_TEST', 'PASS incline down followthrough resolved', {
                 entity_ref,
                 place_id: state.place_id,
                 breath_index: place_bi,
                 to: { x: target.x, y: target.y, z: target.z },
+                preferred_axes: resolved_preferred_axes,
             });
         }
         persist_entity_movement_state(any_entity, runtime, place_bi);
@@ -1401,8 +1740,192 @@ function queue_save_npc(slot: number, npc_id: string): void {
 // Lightweight counters for /api/place/touch heartbeats (debuggable, low-volume).
 const place_touch_heartbeat_count = new Map<string, number>();
 
+type CachedKindDefs = {
+    loaded_at_ms: number;
+    kind_by_id: Map<string, any>;
+};
+
+let cached_kind_defs: CachedKindDefs | null = null;
+
 function place_breath_key(slot: number, place_id: string): string {
     return `${slot}:${place_id}`;
+}
+
+function get_cached_kind_definitions(): Map<string, any> {
+    if (cached_kind_defs) return cached_kind_defs.kind_by_id;
+    const kind_defs = load_kind_definitions();
+    const kind_by_id = new Map<string, any>();
+    for (const k of (kind_defs?.kinds ?? [])) {
+        const id = String((k as any)?.id ?? '').toLowerCase();
+        if (!id) continue;
+        kind_by_id.set(id, k);
+    }
+    cached_kind_defs = {
+        loaded_at_ms: Date.now(),
+        kind_by_id,
+    };
+    return kind_by_id;
+}
+
+function get_cached_kind_def(kind_id: any): any | null {
+    const id = String(kind_id ?? '').toLowerCase();
+    if (!id) return null;
+    return get_cached_kind_definitions().get(id) ?? null;
+}
+
+function get_active_place_breath_state(slot: number, place_id: string): PlaceBreathState | null {
+    const key = place_breath_key(slot, place_id);
+    return place_breath.get(key) ?? null;
+}
+
+function clone_for_api<T>(value: T): T {
+    return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function ensure_place_runtime_augmented(place_any: any, place_id: string): void {
+    if (!place_any || typeof place_any !== 'object') return;
+    if ((place_any as any).__api_runtime_augmented === true) return;
+
+    try {
+        const augment_grid = (tiles_obj: any, label: string) => {
+            const tiles = tiles_obj;
+            if (!tiles?.cells) return;
+            let totalTiles = 0;
+            let augmentedTiles = 0;
+            let failedTiles = 0;
+            const failedKinds = new Set<string>();
+
+            for (const row of tiles.cells) {
+                if (!Array.isArray(row)) continue;
+                for (const tile of row) {
+                    if (!tile?.kind) continue;
+                    totalTiles++;
+                    const already_augmented = (tile as any).__derived_runtime === true
+                        && typeof (tile as any).display_char === 'string'
+                        && typeof (tile as any).display_color === 'string'
+                        && Array.isArray((tile as any).tags);
+                    if (already_augmented) {
+                        augmentedTiles++;
+                        continue;
+                    }
+                    const resolved = resolve_place_tile(tile.kind, tile);
+                    if (resolved) {
+                        tile.display_char = resolved.display_char;
+                        tile.display_color = resolved.display_color;
+                        tile.tags = resolved.effective_tags;
+                        tile.__derived_runtime = true;
+                        augmentedTiles++;
+                        if (resolved.container_glyphs) {
+                            tile.container_glyphs = resolved.container_glyphs;
+                        }
+                    } else {
+                        failedTiles++;
+                        failedKinds.add(tile.kind);
+                    }
+                }
+            }
+
+            if (failedTiles > 0) {
+                debug_warn("TILE_DEBUG", `Augmented ${augmentedTiles}/${totalTiles} ${label} tiles for ${place_id}`, {
+                    failed: failedTiles,
+                    failedKinds: Array.from(failedKinds),
+                });
+            } else {
+                debug_log("TILE_DEBUG", `Augmented ${augmentedTiles}/${totalTiles} ${label} tiles for ${place_id}`);
+            }
+        };
+
+        augment_grid((place_any as any)?.tiles_z0, "z0");
+        augment_grid((place_any as any)?.tiles, "z1");
+    } catch (err) {
+        debug_warn("API", `Failed to augment tile display properties for ${place_id}`, err);
+    }
+
+    try {
+        const structs: any[] = Array.isArray((place_any as any)?.structures) ? (place_any as any).structures : [];
+        const base_z = get_place_base_z(place_any as any);
+        for (const s of structs) {
+            if (!s || typeof s !== 'object') continue;
+            if ((s as any).__derived_runtime === true && (s as any).body_model) continue;
+            const def_id = String((s as any)?.def_id ?? '');
+            if (!def_id) continue;
+
+            const resolved = resolve_place_tile(def_id, {
+                kind: def_id,
+                tag_add: (s as any).tag_add,
+                tag_remove: (s as any).tag_remove,
+            } as any);
+            if (!resolved) continue;
+
+            (s as any).display_char = resolved.display_char;
+            (s as any).display_color = resolved.display_color;
+            (s as any).tags = resolved.effective_tags;
+            (s as any).container_glyphs = resolved.container_glyphs ?? null;
+
+            const bm = (resolved.def as any)?.body_model;
+            const raw = Array.isArray(bm?.physical) ? bm.physical : null;
+            const facing = (() => {
+                const f = String((s as any)?.facing ?? '').toLowerCase();
+                if (f === 'north' || f === 'east' || f === 'south' || f === 'west') return f;
+                return null;
+            })();
+            const effective_tags = Array.isArray(resolved.effective_tags) ? resolved.effective_tags : [];
+            const phys = (raw && raw.length > 0)
+                ? raw
+                : [{ part: 'body', dx: 0, dy: 0, dz: 0 }];
+
+            (s as any).body_model = {
+                anchor_part: typeof bm?.anchor_part === 'string' ? String(bm.anchor_part) : undefined,
+                physical: phys.map((v: any) => {
+                    const o = rotate_offset_xy(Number(v?.dx ?? 0), Number(v?.dy ?? 0), facing as any);
+                    return {
+                        part: String(v?.part ?? 'body'),
+                        dx: o.dx,
+                        dy: o.dy,
+                        dz: Number(v?.dz ?? 0),
+                        tags: [...effective_tags, ...(Array.isArray(v?.tags) ? v.tags : [])],
+                    };
+                }),
+            };
+            (s as any).__derived_runtime = true;
+
+            if ((s as any).origin && typeof (s as any).origin === 'object') {
+                const z0 = Number((s as any).origin.z);
+                if (!Number.isFinite(z0)) (s as any).origin.z = base_z;
+            }
+        }
+    } catch {
+        // ignore
+    }
+
+    (place_any as any).__api_runtime_augmented = true;
+}
+
+function sync_active_place_base(slot: number, place_any: any): void {
+    const place_id = String((place_any as any)?.id ?? '');
+    if (!place_id) return;
+    const state = get_active_place_breath_state(slot, place_id);
+    if (!state) return;
+    try {
+        state.place_base = clone_for_api(place_any);
+        state.place_dirty = false;
+    } catch {
+        // ignore
+    }
+}
+
+function save_place_and_sync_active(slot: number, place_any: any): string {
+    const out = save_place(slot, place_any as any);
+    sync_active_place_base(slot, place_any);
+    return out;
+}
+
+function save_place_with_ground_and_sync_active(slot: number, place_id: string, place_any: any): any {
+    const out = save_place_with_ground(slot, place_id, place_any as any);
+    if (out?.ok) {
+        sync_active_place_base(slot, place_any);
+    }
+    return out;
 }
 
 function touch_place_breath(slot: number, place_any: any, opts?: { realtime_visible?: boolean }): void {
@@ -1471,6 +1994,8 @@ function touch_place_breath(slot: number, place_any: any, opts?: { realtime_visi
             realtime_visible,
             last_visible_pulse_ms: 0,
             last_visible_pulse_duration_ms: 0,
+            sim_accum_ms: 0,
+            time_scale: 1,
             place_base: null,
             place_dirty: false,
         };
@@ -1569,7 +2094,7 @@ function persist_place_breath_if_needed(state: PlaceBreathState): void {
             }
         }
 
-        save_place(state.slot, place_any);
+        save_place_and_sync_active(state.slot, place_any);
     } catch {
         // ignore
     }
@@ -1830,39 +2355,104 @@ setInterval(() => {
     const movement_updates: any[] = [];
     let active_places_processed = 0;
     let visible_places_processed = 0;
+    const hot_places: Array<Record<string, any>> = [];
     for (const [key, state] of place_breath) {
+        const place_started_ms = Date.now();
         const active = (now - state.last_seen_ms) <= ACTIVE_PLACE_TIMEOUT_MS;
         if (active) {
             active_places_processed += 1;
             if (state.realtime_visible) visible_places_processed += 1;
-            const elapsed_ms = Math.max(0, now - Math.max(0, Number(state.last_tick_ms) || now));
-            let ticks_to_run = Math.floor(elapsed_ms / BREATH_MS);
-            if (!Number.isFinite(ticks_to_run) || ticks_to_run < 1) ticks_to_run = 1;
-            ticks_to_run = Math.min(ticks_to_run, CATCHUP_MAX_BREATHS);
+
+            // Fixed-step simulation with catch-up.
+            // Accumulate wall-clock time scaled by time_scale (0=paused, 1=normal).
+            const elapsed_wall_ms = Math.max(0, now - Math.max(0, Number(state.last_tick_ms) || now));
+            const ts = (typeof state.time_scale === 'number' && Number.isFinite(state.time_scale)) ? state.time_scale : 1;
+            state.sim_accum_ms = Math.max(0, (state.sim_accum_ms ?? 0) + elapsed_wall_ms * ts);
             if (state.realtime_visible) {
-                const suppressed = Math.max(0, ticks_to_run - 1);
-                ticks_to_run = 1;
-                if (suppressed > 0 && (state.breath_index % 30 === 0)) {
-                    debug_log('MOVE_VEL_TEST', 'visible place running steady pulse', {
+                state.sim_accum_ms = Math.min(state.sim_accum_ms, BREATH_MS);
+            }
+
+            let ticks_to_run = Math.floor(state.sim_accum_ms / BREATH_MS);
+            const requested_ticks = ticks_to_run;
+            if (state.realtime_visible) {
+                if (requested_ticks > 1) {
+                    debug_log('MOVE_VEL_TEST', 'visible catch-up clamp applied', {
                         slot: state.slot,
                         place_id: state.place_id,
                         breath_index: state.breath_index,
-                        suppressed_ticks: suppressed,
+                        requested_ticks,
+                        sim_accum_ms: state.sim_accum_ms,
+                        elapsed_wall_ms,
                     });
                 }
+                ticks_to_run = Math.min(ticks_to_run, 1);
+            } else {
+                ticks_to_run = Math.min(ticks_to_run, CATCHUP_MAX_BREATHS);
             }
-            breath_ticks.push(...run_place_breaths(state, ticks_to_run, now, movement_updates, 'interval'));
+            // Allow ticks_to_run = 0: skip this callback if not enough sim time has accumulated.
+            // This keeps timing strict — no extra ticks when the interval fires early.
+            if (ticks_to_run > 0) {
+                state.sim_accum_ms -= ticks_to_run * BREATH_MS;
+                breath_ticks.push(...run_place_breaths(state, ticks_to_run, now, movement_updates, 'interval'));
+            } else {
+                // Nothing to run this callback; still update last_tick_ms so elapsed_wall_ms
+                // doesn't stale-accumulate on the next callback.
+                state.last_tick_ms = now;
+            }
+            const place_duration_ms = Math.max(0, Date.now() - place_started_ms);
+            if (place_duration_ms >= MOVE_PLACE_HOT_THRESHOLD_MS) {
+                hot_places.push({
+                    slot: state.slot,
+                    place_id: state.place_id,
+                    active,
+                    realtime_visible: state.realtime_visible,
+                    requested_ticks,
+                    ticks_to_run,
+                    elapsed_wall_ms,
+                    sim_accum_ms: state.sim_accum_ms,
+                    place_duration_ms,
+                });
+            }
             continue;
         }
 
         // Place is inactive; persist and drop state.
         persist_place_breath_if_needed(state);
         place_breath.delete(key);
+        const place_duration_ms = Math.max(0, Date.now() - place_started_ms);
+        if (place_duration_ms >= MOVE_PLACE_HOT_THRESHOLD_MS) {
+            hot_places.push({
+                slot: state.slot,
+                place_id: state.place_id,
+                active,
+                realtime_visible: state.realtime_visible,
+                requested_ticks: 0,
+                ticks_to_run: 0,
+                elapsed_wall_ms: 0,
+                sim_accum_ms: state.sim_accum_ms,
+                place_duration_ms,
+                cleanup: true,
+            });
+        }
     }
 
+    const flush_started_ms = Date.now();
     flush_place_breath_outputs(now, breath_ticks, movement_updates);
+    const flush_duration_ms = Math.max(0, Date.now() - flush_started_ms);
 
     const interval_duration_ms = Math.max(0, Date.now() - interval_started_ms);
+    if (interval_duration_ms >= MOVE_INTERVAL_HOT_THRESHOLD_MS || hot_places.length > 0) {
+        log_move_hotspot('server breath interval hotspot', {
+            interval_delta_ms,
+            interval_duration_ms,
+            active_places_processed,
+            visible_places_processed,
+            emitted_breath_ticks: breath_ticks.length,
+            emitted_movement_updates: movement_updates.length,
+            flush_duration_ms,
+            hot_places,
+        });
+    }
     breath_interval_sample_count += 1;
     if (breath_interval_sample_count % 30 === 0) {
         debug_log('MOVE_VEL_TEST', 'server breath interval profiling', {
@@ -2114,7 +2704,7 @@ function resolve_tile_container_target(place_any: any, place_id: string, tx: num
             const tags = (resolve_place_tile(String(tile.kind ?? ''), tile) ?? null)?.effective_tags ?? (Array.isArray(tile.tags) ? tile.tags : []);
             const is_container = tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER') || Array.isArray(tile.contents);
             if (is_container) {
-                return { kind: 'tile', tile, save: () => save_place(data_slot_number, place_any as any) };
+                return { kind: 'tile', tile, save: () => save_place_and_sync_active(data_slot_number, place_any as any) };
             }
         }
     } catch {
@@ -2129,7 +2719,7 @@ function resolve_tile_container_target(place_any: any, place_id: string, tx: num
         const tags = Array.isArray(s?.tags) ? s.tags : [];
         const is_container = tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER') || Array.isArray(s.contents);
         if (!is_container) return null;
-        return { kind: 'structure', structure: s, save: () => save_place(data_slot_number, place_any as any) };
+        return { kind: 'structure', structure: s, save: () => save_place_and_sync_active(data_slot_number, place_any as any) };
     } catch {
         return null;
     }
@@ -2813,7 +3403,7 @@ function ensure_eden_crossroads_places(slot: number): void {
                     result.place.connections = place_connections;
                 }
                 
-                save_place(slot, result.place);
+                save_place_and_sync_active(slot, result.place);
                 debug_log("Boot: created place", { id: config.id, name: config.name });
             } else {
                 debug_warn("Boot: failed to create place", { id: config.id, error: "creation failed" });
@@ -2846,7 +3436,7 @@ function ensure_eden_crossroads_places(slot: number): void {
             }
             
             if (needs_save) {
-                save_place(slot, place);
+                save_place_and_sync_active(slot, place);
             }
         }
     }
@@ -3832,31 +4422,27 @@ function start_http_server(log_path: string): void {
             }
 
             try {
-                // Load base place data
-                const place_res = load_place(slot, place_id);
-                if (!place_res.ok) {
-                    res.writeHead(404, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ ok: false, error: "place_not_found", details: place_res.error }));
-                    return;
+                let active_state = get_active_place_breath_state(slot, place_id);
+                let source_place_any: any | null = active_state?.place_base ?? null;
+                if (!source_place_any) {
+                    const place_res = load_place(slot, place_id);
+                    if (!place_res.ok) {
+                        res.writeHead(404, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "place_not_found", details: place_res.error }));
+                        return;
+                    }
+                    source_place_any = place_res.place as any;
+                    touch_place_breath(slot, source_place_any, { realtime_visible: true });
+                    active_state = get_active_place_breath_state(slot, place_id);
+                    source_place_any = active_state?.place_base ?? source_place_any;
+                } else {
+                    touch_place_breath_by_id(slot, place_id, { realtime_visible: true });
                 }
 
-                const place = place_res.place;
+                ensure_place_runtime_augmented(source_place_any, place_id);
+                const place = clone_for_api(source_place_any);
 
-                // Mark place as active for breath ticking and sync returned snapshot.
-                touch_place_breath(slot, place as any, { realtime_visible: true });
-
-                // Kind lookup cache (kind-driven body_model / slot representation).
-                const kind_defs = load_kind_definitions();
-                const kind_by_id = new Map<string, any>();
-                for (const k of (kind_defs?.kinds ?? [])) {
-                    const id = String((k as any)?.id ?? '').toLowerCase();
-                    if (!id) continue;
-                    kind_by_id.set(id, k);
-                }
-                const get_kind_def = (kind_id: any): any | null => {
-                    const id = String(kind_id ?? '').toLowerCase();
-                    return id ? (kind_by_id.get(id) ?? null) : null;
-                };
+                const get_kind_def = (kind_id: any): any | null => get_cached_kind_def(kind_id);
 
                 // Tile growth processing (Phase: tiles-as-entities).
                 // Run BEFORE we repopulate place.contents so persistence does not capture derived entity lists.
@@ -3997,7 +4583,7 @@ function start_http_server(log_path: string): void {
                     }
 
                     if (dirty_tiles) {
-                        save_place(slot, place);
+                        save_place_and_sync_active(slot, place);
                     }
                 } catch (err) {
                     debug_warn('API', `[GROW] tile growth processing failed for ${place_id}`, err);
@@ -4300,7 +4886,7 @@ function start_http_server(log_path: string): void {
                         const base_z = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
                         const fallback_z = Number.isFinite(key_z) ? Math.floor(key_z) : base_z;
                         
-                        for (const item of items) {
+                        for (const item of (Array.isArray(items) ? items : []) as any[]) {
                             const place_item: PlaceItem = {
                                 item_ref: item.id,
                                 quantity: item.qty,
@@ -4362,12 +4948,12 @@ function start_http_server(log_path: string): void {
 
                 // Debug: Log ALL entities with their tags (even empty) to track changes
                 debug_log("API", `/api/place: All entities with tags in ${place_id}`, {
-                    npcs: place.contents.npcs_present.map(n => ({ 
+                    npcs: place.contents.npcs_present.map((n: any) => ({ 
                         ref: n.npc_ref, 
                         tagCount: n.tags?.length || 0,
                         tags: n.tags?.map((t: any) => `${t.name}:${t.mag}`).join(', ') || 'none'
                     })),
-                    actors: place.contents.actors_present.map(a => ({ 
+                    actors: place.contents.actors_present.map((a: any) => ({ 
                         ref: a.actor_ref, 
                         tagCount: a.tags?.length || 0,
                         tags: a.tags?.map((t: any) => `${t.name}:${t.mag}`).join(', ') || 'none'
@@ -4379,114 +4965,6 @@ function start_http_server(log_path: string): void {
                     populated_npcs: place.contents.npcs_present.length,
                     populated_actors: place.contents.actors_present.length
                 });
-
-                // Augment tiles with display properties from definitions.
-                // Client needs display_char, display_color, and container_glyphs for rendering.
-                try {
-                    const augment_grid = (tiles_obj: any, label: string) => {
-                        const tiles = tiles_obj;
-                        if (!tiles?.cells) return;
-                        let totalTiles = 0;
-                        let augmentedTiles = 0;
-                        let failedTiles = 0;
-                        const failedKinds = new Set<string>();
-
-                        for (const row of tiles.cells) {
-                            if (!Array.isArray(row)) continue;
-                            for (const tile of row) {
-                                if (!tile?.kind) continue;
-                                totalTiles++;
-                                const resolved = resolve_place_tile(tile.kind, tile);
-                                if (resolved) {
-                                    tile.display_char = resolved.display_char;
-                                    tile.display_color = resolved.display_color;
-                                    tile.tags = resolved.effective_tags;
-                                    tile.__derived_runtime = true;
-                                    augmentedTiles++;
-                                    if (resolved.container_glyphs) {
-                                        tile.container_glyphs = resolved.container_glyphs;
-                                    }
-                                } else {
-                                    failedTiles++;
-                                    failedKinds.add(tile.kind);
-                                }
-                            }
-                        }
-
-                        if (failedTiles > 0) {
-                            debug_warn("TILE_DEBUG", `Augmented ${augmentedTiles}/${totalTiles} ${label} tiles for ${place_id}`, {
-                                failed: failedTiles,
-                                failedKinds: Array.from(failedKinds),
-                            });
-                        } else {
-                            debug_log("TILE_DEBUG", `Augmented ${augmentedTiles}/${totalTiles} ${label} tiles for ${place_id}`);
-                        }
-                    };
-
-                    augment_grid((place as any)?.tiles_z0, "z0");
-                    augment_grid((place as any)?.tiles, "z1");
-                } catch (err) {
-                    debug_warn("API", `Failed to augment tile display properties for ${place_id}`, err);
-                }
-
-                // Augment structures with derived display/tags/body_model for client rendering + occupancy.
-                // (Do NOT persist these fields; save_place sanitizes them.)
-                try {
-                    const structs: any[] = Array.isArray((place as any)?.structures) ? (place as any).structures : [];
-                    const base_z = get_place_base_z(place as any);
-                    for (const s of structs) {
-                        if (!s || typeof s !== 'object') continue;
-                        const def_id = String((s as any)?.def_id ?? '');
-                        if (!def_id) continue;
-
-                        const resolved = resolve_place_tile(def_id, {
-                            kind: def_id,
-                            tag_add: (s as any).tag_add,
-                            tag_remove: (s as any).tag_remove,
-                        } as any);
-                        if (!resolved) continue;
-
-                        (s as any).display_char = resolved.display_char;
-                        (s as any).display_color = resolved.display_color;
-                        (s as any).tags = resolved.effective_tags;
-                        (s as any).container_glyphs = resolved.container_glyphs ?? null;
-
-                        const bm = (resolved.def as any)?.body_model;
-                        const raw = Array.isArray(bm?.physical) ? bm.physical : null;
-                        const facing = (() => {
-                            const f = String((s as any)?.facing ?? '').toLowerCase();
-                            if (f === 'north' || f === 'east' || f === 'south' || f === 'west') return f;
-                            return null;
-                        })();
-                        const effective_tags = Array.isArray(resolved.effective_tags) ? resolved.effective_tags : [];
-                        const phys = (raw && raw.length > 0)
-                            ? raw
-                            : [{ part: 'body', dx: 0, dy: 0, dz: 0 }];
-
-                        (s as any).body_model = {
-                            anchor_part: typeof bm?.anchor_part === 'string' ? String(bm.anchor_part) : undefined,
-                            physical: phys.map((v: any) => {
-                                const o = rotate_offset_xy(Number(v?.dx ?? 0), Number(v?.dy ?? 0), facing as any);
-                                return {
-                                    part: String(v?.part ?? 'body'),
-                                    dx: o.dx,
-                                    dy: o.dy,
-                                    dz: Number(v?.dz ?? 0),
-                                    tags: [...effective_tags, ...(Array.isArray(v?.tags) ? v.tags : [])],
-                                };
-                            }),
-                        };
-                        (s as any).__derived_runtime = true;
-
-                        // Normalize origin.z to base_z in runtime view.
-                        if ((s as any).origin && typeof (s as any).origin === 'object') {
-                            const z0 = Number((s as any).origin.z);
-                            if (!Number.isFinite(z0)) (s as any).origin.z = base_z;
-                        }
-                    }
-                } catch {
-                    // ignore
-                }
 
                 // Add timed event status to response
                 const timed_event = get_timed_event_state(slot);
@@ -4704,6 +5182,7 @@ function start_http_server(log_path: string): void {
                 const dx = clamp_intent((data as any)?.dx);
                 const dy = clamp_intent((data as any)?.dy);
                 const mode = normalize_move_mode((data as any)?.mode);
+                const intent_reason = normalize_intent_reason((data as any)?.reason);
 
                 // Cardinal only
                 const want_dx = (dx !== 0 && dy !== 0) ? dx : dx;
@@ -4756,7 +5235,7 @@ function start_http_server(log_path: string): void {
                 move_ctl.set(key, ctl);
                 try {
                     const any_entity2 = get_entity_any_cached_or_load(slot, entity_ref);
-                    if (any_entity2) {
+                    if (any_entity2 && intent_reason !== 'resend') {
                         const runtime = get_or_init_movement_physics_state(entity_ref, place_id, any_entity2, ctl, place_bi);
                         runtime.input_goal_queued_at_ms = Date.now();
                         persist_entity_movement_state(any_entity2, runtime, place_bi);
@@ -4765,16 +5244,18 @@ function start_http_server(log_path: string): void {
                             entity_ref,
                             place_id,
                             queued_at_ms: runtime.input_goal_queued_at_ms,
-                            cause: 'intent',
+                            cause: intent_reason === 'unknown' ? 'intent' : intent_reason,
                         });
                     }
                 } catch {
                     // ignore
                 }
-                maybe_run_immediate_visible_place_pulse(slot, place_id, 'intent');
+                if (intent_reason === 'change') {
+                    maybe_run_immediate_visible_place_pulse(slot, place_id, 'intent');
+                }
 
                 res.writeHead(200, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: true, slot, entity_ref, place_id, intent: ctl.intent, mode }));
+                res.end(JSON.stringify({ ok: true, slot, entity_ref, place_id, intent: ctl.intent, mode, reason: intent_reason }));
             });
 
             return;
@@ -4910,6 +5391,7 @@ function start_http_server(log_path: string): void {
                 ctl.updated_at_ms = Date.now();
                 try {
                     const any_entity = get_entity_any_cached_or_load(slot, entity_ref);
+                    let planned: { planned: boolean; blocked: boolean; blocked_reason?: string | null; path_len?: number } | null = null;
                     if (any_entity) {
                         const runtime = get_or_init_movement_physics_state(entity_ref, place_id, any_entity, ctl, place_bi);
                         runtime.input_goal_queued_at_ms = Date.now();
@@ -4928,7 +5410,7 @@ function start_http_server(log_path: string): void {
                     if (any_entity && state?.place_base) {
                         build_place_contents_for_legality(slot, place_id, state.place_base);
                         const place_bi_now = Math.floor(Number(state.breath_index ?? 0)) || 0;
-                        const planned = plan_path_for_controller(state, ctl, any_entity, place_bi_now);
+                        planned = plan_path_for_controller(state, ctl, any_entity, place_bi_now);
                         debug_log('MOVE_VEL_TEST', 'click-to-move immediate planning', {
                             slot,
                             entity_ref,
@@ -4937,6 +5419,32 @@ function start_http_server(log_path: string): void {
                             active_goal: ctl.goal,
                             planned,
                         });
+                    }
+
+                    const blocked_goal = !!(planned && (planned.blocked || !planned.path_len || planned.path_len <= 0));
+                    move_ctl.set(key, ctl);
+                    if (blocked_goal) {
+                        debug_log('MOVE_VEL_TEST', 'click-to-move goal rejected', {
+                            slot,
+                            entity_ref,
+                            place_id,
+                            requested_goal,
+                            active_goal: ctl.goal,
+                            mode,
+                            planned,
+                        });
+                        res.writeHead(200, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({
+                            ok: true,
+                            queued: false,
+                            rejected: true,
+                            reason: planned?.blocked_reason ?? 'blocked_goal',
+                            slot,
+                            entity_ref,
+                            place_id,
+                            to: requested_goal,
+                        }));
+                        return;
                     }
                 } catch {
                     // ignore
@@ -5819,7 +6327,7 @@ function start_http_server(log_path: string): void {
                     }
 
                     // Save place
-                    const save_result = save_place_with_ground(data_slot_number, place_id, place_result.place);
+                    const save_result = save_place_with_ground_and_sync_active(data_slot_number, place_id, place_result.place);
                     if (!save_result.ok) {
                         res.writeHead(500, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: save_result.error }));
@@ -5907,7 +6415,7 @@ function start_http_server(log_path: string): void {
                     place_any.structures = place_any.structures.filter((it: any) => String(it?.id ?? '') !== id);
                     place_any.structures.push(s);
 
-                    save_place(slot, place_any);
+                    save_place_and_sync_active(slot, place_any);
 
                     debug_log('MOVE_UNIFY_TEST', 'debug structure spawned', { slot, place_id, id, at: { x: Math.floor(x), y: Math.floor(y), z: Math.floor(z) } });
 
@@ -5960,7 +6468,7 @@ function start_http_server(log_path: string): void {
                     if (!Array.isArray(place_any.structures)) place_any.structures = [];
                     place_any.structures = place_any.structures.filter((it: any) => !(it && typeof it === 'object' && (it as any).__debug));
                     const after = place_any.structures.length;
-                    save_place(slot, place_any);
+                    save_place_and_sync_active(slot, place_any);
 
                     debug_log('MOVE_UNIFY_TEST', 'debug structures cleared', { slot, place_id, removed: Math.max(0, before - after) });
 
@@ -6316,7 +6824,7 @@ function start_http_server(log_path: string): void {
                         } else {
                             add_item_to_main_ground(place_result.place, remove_result.item);
                         }
-                        save_place_with_ground(data_slot_number, place_id, place_result.place);
+                        save_place_with_ground_and_sync_active(data_slot_number, place_id, place_result.place);
                         res.writeHead(500, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: add_result.error }));
                         return;
@@ -6330,7 +6838,7 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    const save_place_result = save_place_with_ground(data_slot_number, place_id, place_result.place);
+                    const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, place_id, place_result.place);
                     if (!save_place_result.ok) {
                         const rollback = save_actor_with_items(data_slot_number, actor_id, actor_before);
                         if (!rollback.ok) {
@@ -6607,7 +7115,7 @@ function start_http_server(log_path: string): void {
                         } else {
                             add_item_to_main_ground(place_result.place, remove_result.item);
                         }
-                        save_place_with_ground(data_slot_number, place_id, place_result.place);
+                        save_place_with_ground_and_sync_active(data_slot_number, place_id, place_result.place);
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: add_ok.error }));
                         return;
@@ -6620,7 +7128,7 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    const save_place_result = save_place_with_ground(data_slot_number, place_id, place_result.place);
+                    const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, place_id, place_result.place);
                     if (!save_place_result.ok) {
                         // Roll back actor to avoid item loss/duplication
                         const rollback = save_actor_with_items(data_slot_number, actor_id, actor_before);
@@ -6730,7 +7238,7 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    const save_place_result = save_place_with_ground(data_slot_number, place_id, place_result.place);
+                    const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, place_id, place_result.place);
                     if (!save_place_result.ok) {
                         const rollback = save_actor_with_items(data_slot_number, actor_id, actor_before);
                         if (!rollback.ok) {
@@ -6949,7 +7457,7 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    const save_place_result = save_place_with_ground(data_slot_number, place_id, place_result.place);
+                    const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, place_id, place_result.place);
                     if (!save_place_result.ok) {
                         const rollback = save_actor_with_items(data_slot_number, actor_id, actor_before);
                         if (!rollback.ok) {
@@ -7075,7 +7583,7 @@ function start_http_server(log_path: string): void {
                     }
 
                     try {
-                        save_place(data_slot_number, place as any);
+                        save_place_and_sync_active(data_slot_number, place as any);
                     } catch (err) {
                         // Roll back actor best-effort
                         save_actor_with_items(data_slot_number, actor_id, actor_before);
@@ -7202,7 +7710,7 @@ function start_http_server(log_path: string): void {
                         it.grid_y = c.y;
                     }
 
-                    save_place(data_slot_number, place_any);
+                    save_place_and_sync_active(data_slot_number, place_any);
                     res.writeHead(200, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: true }));
                 } catch (err) {
@@ -7331,7 +7839,7 @@ function start_http_server(log_path: string): void {
                         if (c) { (it as any).grid_x = c.x; (it as any).grid_y = c.y; }
                     }
 
-                    save_place(data_slot_number, place_any);
+                    save_place_and_sync_active(data_slot_number, place_any);
                     res.writeHead(200, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: true }));
                 } catch (err) {
@@ -7466,7 +7974,7 @@ function start_http_server(log_path: string): void {
                         if (c) { (it as any).grid_x = c.x; (it as any).grid_y = c.y; }
                     }
 
-                    const save_place_result = save_place_with_ground(data_slot_number, place_id, place_any);
+                    const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, place_id, place_any);
                     if (!save_place_result.ok) {
                         res.writeHead(500, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: save_place_result.error }));
@@ -7608,7 +8116,7 @@ function start_http_server(log_path: string): void {
                         if (c) { (it as any).grid_x = c.x; (it as any).grid_y = c.y; }
                     }
 
-                    const save_place_result = save_place_with_ground(data_slot_number, place_id, place_any);
+                    const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, place_id, place_any);
                     if (!save_place_result.ok) {
                         res.writeHead(500, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: save_place_result.error }));
@@ -7745,7 +8253,7 @@ function start_http_server(log_path: string): void {
                     moving.grid_x = grid_target.x;
                     moving.grid_y = grid_target.y;
 
-                    const save_place_result = save_place_with_ground(data_slot_number, place_id, place_result.place);
+                    const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, place_id, place_result.place);
                     if (!save_place_result.ok) {
                         res.writeHead(500, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: save_place_result.error }));
@@ -8010,7 +8518,7 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    const save_place_result = save_place_with_ground(data_slot_number, place_id, place_result.place);
+                    const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, place_id, place_result.place);
                     if (!save_place_result.ok) {
                         const rollback = save_actor_with_items(data_slot_number, actor_id, actor_before);
                         if (!rollback.ok) {
@@ -8149,7 +8657,7 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    const save_place_result = save_place_with_ground(data_slot_number, place_id, place_result.place);
+                    const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, place_id, place_result.place);
                     if (!save_place_result.ok) {
                         // Best-effort rollback
                         const pos_items = get_items_at_position(place_result.place, x, y);
@@ -8368,7 +8876,7 @@ function start_http_server(log_path: string): void {
                     removed.grid_y = chosen_y;
                     to_container.contents.push(removed);
 
-                    const save_place_result = save_place_with_ground(data_slot_number, place_id, place_result.place);
+                    const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, place_id, place_result.place);
                     if (!save_place_result.ok) {
                         // Best-effort rollback
                         const to_idx = to_container.contents.findIndex((it: any) => String(it?.id ?? '') === String(removed.id));
@@ -8603,7 +9111,7 @@ function start_http_server(log_path: string): void {
                     removed.grid_y = chosen_y;
                     dest_container_item.contents.push(removed);
 
-                    const save_place_result = save_place_with_ground(data_slot_number, actual_place_id, place_result.place);
+                    const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, actual_place_id, place_result.place);
                     if (!save_place_result.ok) {
                         // Best-effort rollback.
                         const back_idx = dest_container_item.contents.findIndex((it: any) => String(it?.id ?? '') === String(removed.id));
@@ -8732,7 +9240,7 @@ function start_http_server(log_path: string): void {
                     list.splice(to_index, 0, removed);
                     place_any.ground.scattered[norm.key] = list;
 
-                    const save_place_result = save_place_with_ground(data_slot_number, actual_place_id, place_result.place);
+                    const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, actual_place_id, place_result.place);
                     if (!save_place_result.ok) {
                         res.writeHead(500, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: save_place_result.error }));
@@ -8882,7 +9390,7 @@ function start_http_server(log_path: string): void {
                     moving.grid_x = grid_target.x;
                     moving.grid_y = grid_target.y;
 
-                    const save_place_result = save_place_with_ground(data_slot_number, actual_place_id, place_result.place);
+                    const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, actual_place_id, place_result.place);
                     if (!save_place_result.ok) {
                         res.writeHead(500, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: save_place_result.error }));
@@ -9075,7 +9583,7 @@ function start_http_server(log_path: string): void {
                         placed_items.push({ id: String(it?.id ?? ''), placed: placed.placed });
                     }
 
-                    const save_place_result = save_place_with_ground(data_slot_number, actual_place_id, place_result.place);
+                    const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, actual_place_id, place_result.place);
                     if (!save_place_result.ok) {
                         res.writeHead(500, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: save_place_result.error }));
@@ -9503,7 +10011,7 @@ function start_http_server(log_path: string): void {
                             (moving as any).grid_x = Math.floor(tx);
                             (moving as any).grid_y = Math.floor(ty);
 
-                            const save_place_result = save_place_with_ground(data_slot_number, from_place.place_id, place_any);
+                            const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, from_place.place_id, place_any);
                             if (!save_place_result.ok) {
                                 res.writeHead(500, { "Content-Type": "application/json" });
                                 res.end(JSON.stringify({ ok: false, error: save_place_result.error }));
@@ -9826,7 +10334,7 @@ function start_http_server(log_path: string): void {
                                         (moving as any).grid_x = tx;
                                         (moving as any).grid_y = ty;
 
-                                        const save_place_result = save_place_with_ground(data_slot_number, pp.place_id, place_any);
+                                        const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, pp.place_id, place_any);
                                         if (!save_place_result.ok) {
                                             res.writeHead(500, { "Content-Type": "application/json" });
                                             res.end(JSON.stringify({ ok: false, error: save_place_result.error }));
@@ -9899,7 +10407,7 @@ function start_http_server(log_path: string): void {
                                         (moving as any).grid_x = tx;
                                         (moving as any).grid_y = ty;
 
-                                        const save_place_result = save_place_with_ground(data_slot_number, pp.place_id, place_any);
+                                        const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, pp.place_id, place_any);
                                         if (!save_place_result.ok) {
                                             res.writeHead(500, { "Content-Type": "application/json" });
                                             res.end(JSON.stringify({ ok: false, error: save_place_result.error }));
@@ -10128,7 +10636,7 @@ function start_http_server(log_path: string): void {
                             placed_items.push({ id: String(it?.id ?? ''), placed: placed.placed });
                         }
 
-                        const save_place_result = save_place_with_ground(data_slot_number, to_place.place_id, place_any);
+                        const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, to_place.place_id, place_any);
                         if (!save_place_result.ok) {
                             if (rollback_source) rollback_source();
                             rollback_actor();
@@ -10363,7 +10871,7 @@ function start_http_server(log_path: string): void {
                     // - If both actor+place change: save place first; then actor.
                     //   If actor save fails, roll back place to the pre-transfer snapshot.
                     if (need_place_save && actor_dirty) {
-                        const save_place_result = save_place_with_ground(data_slot_number, String(pid), place_any);
+                        const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, String(pid), place_any);
                         if (!save_place_result.ok) {
                             rollback_actor();
                             res.writeHead(500, { "Content-Type": "application/json" });
@@ -10376,7 +10884,7 @@ function start_http_server(log_path: string): void {
                             // Best-effort rollback: restore place snapshot.
                             if (place_before) {
                                 try {
-                                    save_place_with_ground(data_slot_number, String(pid), place_before);
+                                    save_place_with_ground_and_sync_active(data_slot_number, String(pid), place_before);
                                 } catch {
                                     // ignore
                                 }
@@ -10387,7 +10895,7 @@ function start_http_server(log_path: string): void {
                         }
                     } else {
                         if (need_place_save) {
-                            const save_place_result = save_place_with_ground(data_slot_number, String(pid), place_any);
+                            const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, String(pid), place_any);
                             if (!save_place_result.ok) {
                                 rollback_actor();
                                 res.writeHead(500, { "Content-Type": "application/json" });
@@ -10424,6 +10932,14 @@ function start_http_server(log_path: string): void {
                 return;
             }
 
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+            if (!Number.isFinite(slot) || slot <= 0) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
+                return;
+            }
+
             const place_id = url.searchParams.get("place_id");
             if (!place_id) {
                 res.writeHead(400, { "Content-Type": "application/json" });
@@ -10432,29 +10948,43 @@ function start_http_server(log_path: string): void {
             }
 
             try {
-                const result = load_place_with_ground(data_slot_number, place_id);
-                if (!result.ok) {
+                let place_any = get_active_place_breath_state(slot, place_id)?.place_base ?? null;
+                if (place_any) {
+                    touch_place_breath_by_id(slot, place_id, { realtime_visible: true });
+                } else {
+                    const result = load_place_with_ground(slot, place_id);
+                    if (!result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: result.error }));
+                        return;
+                    }
+                    place_any = result.place as any;
+                    touch_place_breath(slot, place_any, { realtime_visible: true });
+                    place_any = get_active_place_breath_state(slot, place_id)?.place_base ?? place_any;
+                }
+
+                if (!place_any) {
                     res.writeHead(400, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ ok: false, error: result.error }));
+                    res.end(JSON.stringify({ ok: false, error: 'place_not_found' }));
                     return;
                 }
 
-                const items: Array<{ item: InlineItem; position?: { x: number; y: number }; position_key?: string }> = get_all_ground_items(result.place);
+                const items: Array<{ item: InlineItem; position?: { x: number; y: number }; position_key?: string }> = get_all_ground_items(place_any);
 
                 // Resolve item display + tags from database definitions.
                 
                 res.writeHead(200, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ 
-                        ok: true, 
-                        place_id,
-                        items: items.map(({ item, position, position_key }: { item: InlineItem; position?: { x: number; y: number }; position_key?: string }) => {
+                     res.end(JSON.stringify({ 
+                         ok: true, 
+                         place_id,
+                          items: items.map(({ item, position, position_key }: { item: InlineItem; position?: { x: number; y: number }; position_key?: string }) => {
                             const resolved = resolve_inline_item(String(item.def_id ?? ''), item);
                             const display_char = resolved?.display_char ?? '·';
                             const display_color = resolved?.display_color ?? '#9da5ae';
                             const name = resolved?.name ?? String(item.def_id ?? '');
                             const weight = resolved?.unit_weight ?? 0;
                             const tags = resolved?.effective_tags ?? [];
-                             const base_z = Math.floor(Number((result.place as any)?.coordinates?.elevation ?? 0)) || 0;
+                             const base_z = Math.floor(Number((place_any as any)?.coordinates?.elevation ?? 0)) || 0;
                              const elevation = (typeof (item as any)?.elevation === 'number' && Number.isFinite((item as any).elevation))
                                  ? Math.floor((item as any).elevation)
                                  : base_z;
@@ -10477,7 +11007,7 @@ function start_http_server(log_path: string): void {
                  // Devlog test: ensure elevated ground item can be surfaced by the items endpoint.
                  try {
                      if (place_id === 'eden_crossroads_tavern') {
-                         const base_z = Math.floor(Number((result.place as any)?.coordinates?.elevation ?? 0)) || 0;
+                         const base_z = Math.floor(Number((place_any as any)?.coordinates?.elevation ?? 0)) || 0;
                          const want_z = base_z + 1;
                          const any_wall_top = items.some(({ item }: any) => Math.floor(Number((item as any)?.elevation ?? base_z)) === want_z);
                          if (any_wall_top) {
@@ -10610,7 +11140,7 @@ function start_http_server(log_path: string): void {
                     }
                 }
                 if (repaired > 0) {
-                    const save_res = save_place_with_ground(data_slot_number, place_id, place_result.place);
+                    const save_res = save_place_with_ground_and_sync_active(data_slot_number, place_id, place_result.place);
                     if (!save_res.ok) {
                         debug_error('API', `[GRID_SANITY] failed to save pile repair ${place_id}:${norm.key}`, save_res.error);
                     }
@@ -10710,7 +11240,7 @@ function start_http_server(log_path: string): void {
                     }
                 }
                 if (cap_res.patched || repaired > 0) {
-                    const save_place_res = save_place_with_ground(data_slot_number, place_id, place_result.place);
+                    const save_place_res = save_place_with_ground_and_sync_active(data_slot_number, place_id, place_result.place);
                     if (!save_place_res.ok) {
                         debug_error('API', `[CAPACITY_SANITY] failed to save place after patch ${place_id}`, save_place_res.error);
                     }
@@ -11220,7 +11750,7 @@ function start_http_server(log_path: string): void {
                     }
                 }
                 if (cap_res.patched || repaired > 0) {
-                    const save_place_res = save_place_with_ground(data_slot_number, place_id, place_result.place);
+                    const save_place_res = save_place_with_ground_and_sync_active(data_slot_number, place_id, place_result.place);
                     if (!save_place_res.ok) {
                         debug_error('API', `[CAPACITY_SANITY] failed to save place after patch ${place_id}`, save_place_res.error);
                     }

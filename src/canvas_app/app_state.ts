@@ -31,6 +31,7 @@ import { set_ui_debug_enabled, UI_DEBUG } from '../mono_ui/runtime/ui_debug.js';
 import { get_senses_for_action } from '../action_system/sense_broadcast.js';
 import { get_facing } from '../npc_ai/facing_system.js';
 import { play_sfx } from '../mono_ui/sfx/sfx_player.js';
+import { format_interval_avg, format_interval_min, get_movement_debug_snapshot } from '../shared/movement_debug_state.js';
 import {
     api_transfer_inline,
 } from './transfer_api.js';
@@ -202,6 +203,90 @@ export function create_app_state(): AppState {
     // even when the UI is not polling /api/place.
     let place_touch_interval_id: number | null = null;
     let place_touch_place_id: string | null = null;
+    let poll_window_feeds_in_flight = false;
+    let refresh_character_data_in_flight = false;
+    let last_transcript_poll_ms = 0;
+    let last_targets_poll_ms = 0;
+    let last_roller_poll_ms = 0;
+    let last_character_refresh_ms = 0;
+
+    const renderer_debug = {
+        render_count: 0,
+        last_render_ms: 0,
+        last_render_delta_ms: 0,
+        last_render_fps: 0,
+        render_window_started_ms: 0,
+        render_window_samples: 0,
+        render_window_dt_sum_ms: 0,
+        render_window_dt_max_ms: 0,
+        render_window_hitch_33_count: 0,
+        render_window_hitch_50_count: 0,
+        render_window_hitch_100_count: 0,
+        render_window_avg_fps: 0,
+        place_fetch_count: 0,
+        last_place_fetch_started_ms: 0,
+        last_place_fetch_completed_ms: 0,
+        last_place_fetch_elapsed_ms: 0,
+        last_place_fetch_place_id: null as string | null,
+        last_place_fetch_breath_index: 0,
+        breath_observed_count: 0,
+        last_place_breath_index: 0,
+        last_place_breath_changed_ms: 0,
+        actor_pos_change_count: 0,
+        last_actor_pos_key: null as string | null,
+        last_actor_pos_changed_ms: 0,
+    };
+
+    function age_ms_string(ts: number): string {
+        if (!Number.isFinite(ts) || ts <= 0) return '-';
+        return `${Math.max(0, Math.round(Date.now() - ts))}ms ago`;
+    }
+
+    function avg_to_fps(avg_dt_ms: number): number {
+        return avg_dt_ms > 0 ? Math.max(0, Math.round(1000 / avg_dt_ms)) : 0;
+    }
+
+    function interval_stats_string(stats: { count: number; last_ms: number; max_ms: number; sum_ms: number; min_ms: number }): string {
+        const avg = format_interval_avg(stats as any);
+        const min = format_interval_min(stats as any);
+        return `last:${stats.last_ms} avg:${avg} min:${min} max:${stats.max_ms}`;
+    }
+
+    function intent_string(intent: { dx: number; dy: number } | null): string {
+        if (!intent) return 'none';
+        if (intent.dx === 1) return 'E';
+        if (intent.dx === -1) return 'W';
+        if (intent.dy === 1) return 'N';
+        if (intent.dy === -1) return 'S';
+        return `${intent.dx},${intent.dy}`;
+    }
+
+    function classify_movement_stage(snapshot: ReturnType<typeof get_movement_debug_snapshot>): string {
+        const now = Date.now();
+        const input_age = snapshot.last_input_changed_ms > 0 ? now - snapshot.last_input_changed_ms : Number.POSITIVE_INFINITY;
+        const intent_age = snapshot.last_intent_observed_ms > 0 ? now - snapshot.last_intent_observed_ms : Number.POSITIVE_INFINITY;
+        const post_age = snapshot.last_intent_post_ok_ms > 0 ? now - snapshot.last_intent_post_ok_ms : Number.POSITIVE_INFINITY;
+        const breath_age = snapshot.last_breath_rx_ms > 0 ? now - snapshot.last_breath_rx_ms : Number.POSITIVE_INFINITY;
+        const batch_age = snapshot.last_move_batch_rx_ms > 0 ? now - snapshot.last_move_batch_rx_ms : Number.POSITIVE_INFINITY;
+        const step_age = snapshot.last_visible_step_ms > 0 ? now - snapshot.last_visible_step_ms : Number.POSITIVE_INFINITY;
+        if (snapshot.last_intent_post_failed_ms > snapshot.last_intent_post_ok_ms) return 'intent_post_fail';
+        if (snapshot.current_intent && input_age < 1000 && intent_age > 200) return 'intent_sample_gap';
+        if (snapshot.current_intent && intent_age < 500 && post_age > 400) return 'intent_send_gap';
+        if (snapshot.current_intent && post_age < 1000 && breath_age > 250) return 'server_breath_gap';
+        if (snapshot.current_intent && breath_age < 250 && batch_age > 250) return 'bridge_move_gap';
+        if (snapshot.current_intent && batch_age < 250 && step_age > 250) return 'visible_step_gap';
+        if (!snapshot.current_intent) return 'idle';
+        return 'flowing';
+    }
+
+    function is_movement_activity_high(): boolean {
+        const snapshot = get_movement_debug_snapshot();
+        const now = Date.now();
+        if (snapshot.current_intent) return true;
+        if (snapshot.last_visible_step_ms > 0 && (now - snapshot.last_visible_step_ms) < 1500) return true;
+        if (snapshot.last_intent_changed_ms > 0 && (now - snapshot.last_intent_changed_ms) < 1500) return true;
+        return false;
+    }
 
     function stop_place_touch_heartbeat(): void {
         if (place_touch_interval_id !== null) {
@@ -684,6 +769,12 @@ export function create_app_state(): AppState {
 
     // Load character data (body slots, equipped items, weight) - Phase 5 Inline System
     async function refresh_character_data(): Promise<void> {
+        if (refresh_character_data_in_flight) return;
+        const now = Date.now();
+        if (is_movement_activity_high() && (now - last_character_refresh_ms) < 15000) {
+            return;
+        }
+        refresh_character_data_in_flight = true;
         try {
             const actor_id = APP_CONFIG.input_actor_id;
             const slot = APP_CONFIG.selected_data_slot;
@@ -795,9 +886,12 @@ export function create_app_state(): AppState {
             
             debug_log(`[Character] Total equipped items loaded: ${ui_state.character.equipped_items.size}`);
             debug_log(`[LOAD_EQUIPPED] === END LOADING INLINE ITEMS ===`);
+            last_character_refresh_ms = Date.now();
             
         } catch (err) {
             console.error('[Character] Error refreshing character data:', err);
+        } finally {
+            refresh_character_data_in_flight = false;
         }
     }
 
@@ -1249,6 +1343,59 @@ export function create_app_state(): AppState {
         return ui_state.place.current_place;
     }
 
+    function refresh_debug_window_messages(): void {
+        try {
+            const dbg: string[] = [];
+            const movement_debug = get_movement_debug_snapshot();
+            const current_place = get_current_place();
+            const current_actor = current_place?.contents?.actors_present?.[0] ?? null;
+            const current_actor_tile = current_actor?.tile_position ?? null;
+            const current_actor_z = (typeof current_actor?.elevation === 'number' && Number.isFinite(current_actor.elevation))
+                ? Math.floor(current_actor.elevation)
+                : Math.floor(Number((current_place as any)?.coordinates?.elevation ?? 0)) || 0;
+            const current_breath_index = Math.floor(Number((current_place as any)?.breath_index ?? 0)) || 0;
+            const breath_age = age_ms_string(renderer_debug.last_place_breath_changed_ms);
+            const fetch_age = age_ms_string(renderer_debug.last_place_fetch_completed_ms);
+            const actor_age = age_ms_string(renderer_debug.last_actor_pos_changed_ms);
+            const input_age = age_ms_string(movement_debug.last_input_changed_ms);
+            const intent_age = age_ms_string(movement_debug.last_intent_changed_ms || movement_debug.last_intent_observed_ms);
+            const post_ok_age = age_ms_string(movement_debug.last_intent_post_ok_ms);
+            const breath_rx_age = age_ms_string(movement_debug.last_breath_rx_ms);
+            const batch_age = age_ms_string(movement_debug.last_move_batch_rx_ms);
+            const step_age = age_ms_string(movement_debug.last_visible_step_ms);
+            const breaths_since_step = (movement_debug.last_visible_step_breath_index > 0 && current_breath_index >= movement_debug.last_visible_step_breath_index)
+                ? (current_breath_index - movement_debug.last_visible_step_breath_index)
+                : 0;
+            dbg.push(`[debug] ${UI_DEBUG.enabled ? 'ON' : 'off'} | overlays:${DEBUG_VISION.enabled ? 'ON' : 'off'}`);
+            dbg.push(`[place] ${current_place?.id ?? '(none)'} | region:${ui_state.controls.region_label ?? 'unknown'}`);
+            dbg.push(`[render] fps:${renderer_debug.render_window_avg_fps}/${renderer_debug.last_render_fps} dt:${renderer_debug.last_render_delta_ms}ms max:${renderer_debug.render_window_dt_max_ms} h33:${renderer_debug.render_window_hitch_33_count} h50:${renderer_debug.render_window_hitch_50_count} h100:${renderer_debug.render_window_hitch_100_count}`);
+            dbg.push(`[breath] now:${current_breath_index} fetch:${renderer_debug.last_place_fetch_breath_index} local_age:${breath_age} rx_age:${breath_rx_age} ${interval_stats_string(movement_debug.breath_rx)}`);
+            dbg.push(`[fetch] count:${renderer_debug.place_fetch_count} last:${renderer_debug.last_place_fetch_elapsed_ms}ms age:${fetch_age}`);
+            dbg.push(`[visible_step] age:${step_age} breaths_since:${breaths_since_step} ${interval_stats_string(movement_debug.visible_step)}`);
+            dbg.push(`[intent] ${intent_string(movement_debug.current_intent)} mode:${movement_debug.current_intent_mode ?? '-'} input:${input_age} intent:${intent_age} post_ok:${post_ok_age} reason:${movement_debug.last_intent_post_reason ?? '-'}`);
+            dbg.push(`[pipeline] stage:${classify_movement_stage(movement_debug)} batch_age:${batch_age} actor_age:${actor_age} posts:${movement_debug.intent_posts_ok}/${movement_debug.intent_posts_failed} resend:${movement_debug.intent_post_resend_count}`);
+            dbg.push(`[bridge] breath_latency:${movement_debug.last_breath_bridge_latency_ms}ms move_latency:${movement_debug.last_move_batch_bridge_latency_ms}ms move_batch:${interval_stats_string(movement_debug.move_batch_rx)}`);
+            dbg.push(`[actor_updates] draw:${renderer_debug.actor_pos_change_count} applied:${movement_debug.last_move_batch_local_actor_updates} seq:${movement_debug.last_visible_step_seq ?? '-'} step_at:${movement_debug.last_visible_step_position ? `${movement_debug.last_visible_step_position.x},${movement_debug.last_visible_step_position.y},${movement_debug.last_visible_step_position.z ?? current_actor_z}` : '-'}`);
+            if (current_actor_tile) {
+                dbg.push(`[actor] ${current_actor?.actor_ref ?? '(none)'} @ ${current_actor_tile.x},${current_actor_tile.y},${current_actor_z} age:${actor_age}`);
+            } else {
+                dbg.push('[actor] (none)');
+            }
+            dbg.push(`[volume] ${ui_state.controls.volume}`);
+            dbg.push(`[move] ${ui_state.controls.move_mode}`);
+            dbg.push(`[intent] ${ui_state.controls.override_intent ?? ui_state.controls.suggested_intent ?? '(none)'}`);
+            dbg.push(`[cost] ${ui_state.controls.override_cost ?? '(auto)'}`);
+            dbg.push(`[target] ${ui_state.controls.selected_target ?? '(none)'}`);
+            if (ui_state.controls.last_sent_input_id) dbg.push(`[last_input] ${ui_state.controls.last_sent_input_id}`);
+            if (ui_state.character.hovered_item) {
+                dbg.push(`[hover] ${ui_state.character.hovered_item.name} (${ui_state.character.hovered_item.source})`);
+            }
+            set_text_window_messages('debug', dbg);
+        } catch {
+            // ignore
+        }
+    }
+
     async function update_current_place(place_id: string | null): Promise<void> {
         // Stop movement for previous place if leaving
         if (place_id !== ui_state.place.current_place_id && ui_state.place.current_place_id) {
@@ -1279,16 +1426,22 @@ export function create_app_state(): AppState {
         try {
             const url = `${APP_CONFIG.place_endpoint}?slot=${APP_CONFIG.selected_data_slot}&place_id=${encodeURIComponent(place_id)}`;
             const fetch_started_ms = Date.now();
+            renderer_debug.last_place_fetch_started_ms = fetch_started_ms;
+            renderer_debug.last_place_fetch_place_id = place_id;
             const res = await fetch(url);
             if (!res.ok) {
                 throw new Error(`HTTP ${res.status}`);
             }
             const data = (await res.json()) as { ok: boolean; place?: Place };
             const fetch_elapsed_ms = Math.max(0, Date.now() - fetch_started_ms);
+            renderer_debug.place_fetch_count += 1;
+            renderer_debug.last_place_fetch_completed_ms = Date.now();
+            renderer_debug.last_place_fetch_elapsed_ms = fetch_elapsed_ms;
             if (fetch_elapsed_ms > 150) {
                 debug_log(`[MOVE_VEL_TEST] current place fetch slow ${JSON.stringify({ place_id, fetch_elapsed_ms })}`);
             }
             if (data.ok && data.place) {
+                renderer_debug.last_place_fetch_breath_index = Math.floor(Number((data.place as any)?.breath_index ?? 0)) || 0;
                 // Preserve current entity positions if they're moving
                 // This prevents snap-back when place data is refreshed during movement
                 const current_place = ui_state.place.current_place;
@@ -1551,10 +1704,20 @@ export function create_app_state(): AppState {
     }
 
     async function poll_window_feeds(): Promise<void> {
+        if (poll_window_feeds_in_flight) return;
+        poll_window_feeds_in_flight = true;
+        const now = Date.now();
+        const movement_active = is_movement_activity_high();
         const tasks = window_feeds.map(async (feed) => {
             try {
+                if (movement_active && feed.window_id === 'transcript' && (now - last_transcript_poll_ms) < 2400) {
+                    return;
+                }
                 const messages = await feed.fetch_messages();
                 set_text_window_messages(feed.window_id, messages);
+                if (feed.window_id === 'transcript') {
+                    last_transcript_poll_ms = Date.now();
+                }
             } catch (err) {
                 debug_warn('[mono_ui] failed to refresh window feed', feed.window_id, err);
             }
@@ -1562,6 +1725,7 @@ export function create_app_state(): AppState {
 
         tasks.push((async () => {
             try {
+                if (movement_active && (now - last_roller_poll_ms) < 2400) return;
                 const res = await fetch(APP_CONFIG.roller_status_endpoint);
                 if (!res.ok) return;
                 const data = (await res.json()) as { ok: boolean; status?: any };
@@ -1571,6 +1735,7 @@ export function create_app_state(): AppState {
                 ui_state.roller.dice_label = String(data.status.dice_label ?? "D20");
                 ui_state.roller.disabled = Boolean(data.status.disabled ?? true);
                 ui_state.roller.roll_id = data.status.roll_id ?? null;
+                last_roller_poll_ms = Date.now();
             } catch {
                 // ignore
             }
@@ -1579,6 +1744,10 @@ export function create_app_state(): AppState {
         // Fetch target list (nearby NPCs / region)
         tasks.push((async () => {
             try {
+                if (movement_active && (now - last_targets_poll_ms) < 2400) {
+                    refresh_debug_window_messages();
+                    return;
+                }
                 const url = `${APP_CONFIG.interpreter_targets_endpoint}?slot=${APP_CONFIG.selected_data_slot}&actor_id=${APP_CONFIG.input_actor_id}`;
                 const res = await fetch(url);
                 if (!res.ok) return;
@@ -1596,6 +1765,7 @@ export function create_app_state(): AppState {
                 ui_state.controls.targets = Array.isArray(data.targets) ? data.targets : [];
                 ui_state.controls.region_label = typeof data.region === 'string' ? data.region : null;
                 ui_state.controls.targets_ready = true;
+                last_targets_poll_ms = Date.now();
 
                 // Update current place view only when the place changes.
                 // Movement is now streamed via websocket; frequent /api/place polling can reintroduce stale snapshots.
@@ -1616,79 +1786,17 @@ export function create_app_state(): AppState {
                 }
 
                 // Debug reader text (always visible)
-                const targets_lines: string[] = [];
-                const placeName = data.place ?? 'Wilderness';
-                const worldX = data.world_coords?.x ?? 0;
-                const worldY = data.world_coords?.y ?? 0;
-                targets_lines.push(`[place] ${placeName}`);
-                targets_lines.push(`[world] ${worldX}, ${worldY}`);
-                targets_lines.push(`[region] ${ui_state.controls.region_label ?? 'unknown'}`);
-                const verb = ui_state.controls.override_intent ?? ui_state.controls.suggested_intent;
-                if (verb) {
-                    targets_lines.push(`[intent] ${verb}`);
-                } else {
-                    targets_lines.push(`[intent] (none)`);
-                }
-                const cost = ui_state.controls.override_cost;
-                targets_lines.push(`[cost] ${cost ?? '(auto)'}`);
-
-                if (ui_state.controls.selected_target) {
-                    targets_lines.push(`[target] ${ui_state.controls.selected_target}`);
-                } else {
-                    targets_lines.push(`[target] (none)`);
-                }
-                targets_lines.push('');
-                targets_lines.push('Places in region (type /target name):');
-                const places = data.places ?? [];
-                if (places.length === 0) {
-                    targets_lines.push('- (none nearby)');
-                } else {
-                    for (const p of places) {
-                        const is_current = p.id === data.place_id ? ' [here]' : '';
-                        targets_lines.push(`- ${p.label}${is_current}`);
-                    }
-                }
-                targets_lines.push('');
-                targets_lines.push('Targets (type @name or /target name):');
-                const npc_targets = ui_state.controls.targets.filter(t => t.type === 'npc');
-                if (npc_targets.length === 0) {
-                    targets_lines.push('- (none visible)');
-                } else {
-                    for (const t of npc_targets) {
-                        targets_lines.push(`- ${t.label} (${t.ref})`);
-                    }
-                }
-                const dbg: string[] = [];
-                dbg.push(`[debug] ${UI_DEBUG.enabled ? 'ON' : 'off'} | overlays:${DEBUG_VISION.enabled ? 'ON' : 'off'}`);
-                dbg.push(`[volume] ${ui_state.controls.volume}`);
-                dbg.push(`[move] ${ui_state.controls.move_mode}`);
-                if (ui_state.character.hovered_item) {
-                    dbg.push(`[hover] ${ui_state.character.hovered_item.name} (${ui_state.character.hovered_item.source})`);
-                } else {
-                    dbg.push(`[hover] (none)`);
-                }
-                if (last_sfx_label) {
-                    const age_ms = Math.max(0, Date.now() - last_sfx_at_ms);
-                    dbg.push(`[sfx] ${last_sfx_label} (${Math.round(age_ms)}ms ago)`);
-                }
-                if (pending_speech_sfx) {
-                    const left_ms = Math.max(0, pending_speech_sfx.expires_at_ms - Date.now());
-                    dbg.push(`[sfx_pending] speech_blip.${pending_speech_sfx.loudness} ${Math.round(left_ms)}ms id=${pending_speech_sfx.id}`);
-                }
-                if (ui_state.controls.last_sent_input_id) dbg.push(`[last_input] ${ui_state.controls.last_sent_input_id}`);
-                // Keep target line near the top for quick trust checks.
-                const target_line_index = targets_lines.findIndex(l => l.startsWith('[target] '));
-                const target_line = target_line_index >= 0 ? targets_lines.splice(target_line_index, 1)[0] : null;
-                if (target_line) dbg.push(target_line);
-                dbg.push('');
-
-                set_text_window_messages('debug', [...dbg, ...targets_lines]);
+                refresh_debug_window_messages();
             } catch {
                 // ignore
             }
         })());
 
-        await Promise.all(tasks);
+        try {
+            await Promise.all(tasks);
+        } finally {
+            poll_window_feeds_in_flight = false;
+        }
     }
 
     function start_window_feed_polling(interval_ms: number): void {
@@ -4856,7 +4964,10 @@ export function create_app_state(): AppState {
     start_window_feed_polling(800);
 
     // Seed debug window
-    set_text_window_messages('debug', ['[debug] off | overlays:off', '[volume] NORMAL', '[move] WALK', '', '[region] (loading...)', 'Targets will appear here.']);
+    set_text_window_messages('debug', ['[debug] off | overlays:off', '[render] fps:- dt:- max:-', '[breath] now:0 rx_age:-', '[visible_step] age:-', '[intent] none', '[pipeline] stage:idle']);
+    window.setInterval(() => {
+        refresh_debug_window_messages();
+    }, 120);
 
     // Server-authoritative movement: disable legacy NPC movement loops.
     // NPC wandering and movement are now driven by the interface server breath+brain ticks.
@@ -6472,6 +6583,71 @@ export function create_app_state(): AppState {
         // Overlay hook (after compose) used by CanvasRuntime.
         on_after_compose: (canvas: any) => {
             drag_state.render_drag_ghost(canvas);
+
+            try {
+                const now_wall = Date.now();
+                const now = performance.now();
+                renderer_debug.render_count += 1;
+                if (renderer_debug.last_render_ms > 0) {
+                    renderer_debug.last_render_delta_ms = Math.max(0, now - renderer_debug.last_render_ms);
+                    renderer_debug.last_render_fps = renderer_debug.last_render_delta_ms > 0
+                        ? Math.max(0, Math.round(1000 / renderer_debug.last_render_delta_ms))
+                        : 0;
+
+                    if (renderer_debug.render_window_started_ms <= 0) {
+                        renderer_debug.render_window_started_ms = now;
+                    }
+                    renderer_debug.render_window_samples += 1;
+                    renderer_debug.render_window_dt_sum_ms += renderer_debug.last_render_delta_ms;
+                    renderer_debug.render_window_dt_max_ms = Math.max(renderer_debug.render_window_dt_max_ms, renderer_debug.last_render_delta_ms);
+                    if (renderer_debug.last_render_delta_ms >= 33) renderer_debug.render_window_hitch_33_count += 1;
+                    if (renderer_debug.last_render_delta_ms >= 50) renderer_debug.render_window_hitch_50_count += 1;
+                    if (renderer_debug.last_render_delta_ms >= 100) renderer_debug.render_window_hitch_100_count += 1;
+                    renderer_debug.render_window_avg_fps = avg_to_fps(
+                        renderer_debug.render_window_samples > 0
+                            ? (renderer_debug.render_window_dt_sum_ms / renderer_debug.render_window_samples)
+                            : 0,
+                    );
+
+                    const window_elapsed_ms = Math.max(0, now - renderer_debug.render_window_started_ms);
+                    if (window_elapsed_ms >= 1500) {
+                        const avg_dt = renderer_debug.render_window_samples > 0
+                            ? renderer_debug.render_window_dt_sum_ms / renderer_debug.render_window_samples
+                            : 0;
+                        renderer_debug.render_window_avg_fps = avg_to_fps(avg_dt);
+                        renderer_debug.render_window_started_ms = now;
+                        renderer_debug.render_window_samples = 0;
+                        renderer_debug.render_window_dt_sum_ms = 0;
+                        renderer_debug.render_window_dt_max_ms = 0;
+                        renderer_debug.render_window_hitch_33_count = 0;
+                        renderer_debug.render_window_hitch_50_count = 0;
+                        renderer_debug.render_window_hitch_100_count = 0;
+                    }
+                }
+                renderer_debug.last_render_ms = now;
+
+                const place = get_current_place();
+                const breath_index = Math.floor(Number((place as any)?.breath_index ?? 0)) || 0;
+                if (breath_index > 0 && breath_index !== renderer_debug.last_place_breath_index) {
+                    renderer_debug.last_place_breath_index = breath_index;
+                    renderer_debug.breath_observed_count += 1;
+                    renderer_debug.last_place_breath_changed_ms = now_wall;
+                }
+
+                const actor = place?.contents?.actors_present?.[0] ?? null;
+                const actor_tile = actor?.tile_position ?? null;
+                const actor_z = (typeof actor?.elevation === 'number' && Number.isFinite(actor.elevation))
+                    ? Math.floor(actor.elevation)
+                    : Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
+                const actor_key = (actor && actor_tile) ? `${actor.actor_ref}:${actor_tile.x},${actor_tile.y},${actor_z}` : null;
+                if (actor_key && actor_key !== renderer_debug.last_actor_pos_key) {
+                    renderer_debug.last_actor_pos_key = actor_key;
+                    renderer_debug.actor_pos_change_count += 1;
+                    renderer_debug.last_actor_pos_changed_ms = now_wall;
+                }
+            } catch {
+                // ignore
+            }
 
             // Place DOM world layers live outside the mono canvas.
             // CanvasRuntime stops drawing invisible modules, so we must hide/show the DOM layers

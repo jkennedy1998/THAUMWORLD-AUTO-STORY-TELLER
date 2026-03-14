@@ -31,7 +31,15 @@ import { create_canvas } from "../canvas.js";
 import { touch_world_layers_owner } from "../world_layers_owner.js";
 import { compute_dom_viewport_for_rect } from "../runtime/dom_viewport.js";
 import { create_place_camera_controller } from "../runtime/place_camera_controller.js";
-import { get_move_intent, is_jump_down } from "../runtime/input_actions.js";
+import { get_move_intent, is_jump_down, subscribe_move_intent_changes, type MoveIntent, type MoveIntentChangeMeta } from "../runtime/input_actions.js";
+import {
+  record_intent_observed,
+  record_intent_post_result,
+  record_intent_post_started,
+  record_local_actor_step_applied,
+  record_move_batch_received,
+  record_place_breath_tick,
+} from "../../shared/movement_debug_state.js";
 
 /**
  * Convert hex color string to RGB object
@@ -1080,7 +1088,90 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     self_exclusion_logged: false,
     // Track last polled intent to detect changes
     last_polled_intent: null as { dx: number; dy: number } | null,
+    // Timestamp of the last successful intent POST (for periodic resend while held)
+    last_intent_sent_ms: 0,
   };
+
+  async function post_intent_update(meta: {
+    actor_ref: string;
+    place_id: string;
+    dx: number;
+    dy: number;
+    mode: MoveMode;
+    reason: 'change' | 'resend' | 'release';
+  }): Promise<void> {
+    record_intent_post_started(meta);
+    try {
+      const response = await fetch('http://localhost:8787/api/movement/intent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          entity_ref: meta.actor_ref,
+          place_id: meta.place_id,
+          dx: meta.dx,
+          dy: meta.dy,
+          mode: meta.mode,
+          reason: meta.reason,
+        }),
+      });
+      if (!response.ok) {
+        record_intent_post_result(false, { status: response.status, error: `HTTP ${response.status}` });
+        console.warn('[PlaceModule] intent POST non-2xx', response.status, meta.actor_ref);
+        return;
+      }
+      record_intent_post_result(true, { status: response.status });
+    } catch (err: any) {
+      record_intent_post_result(false, { error: err?.message ?? String(err) });
+      console.warn('[PlaceModule] intent POST failed', err?.message ?? String(err));
+    }
+  }
+
+  function dispatch_transition_intent(intent: MoveIntent, meta: MoveIntentChangeMeta): void {
+    const place = config.get_place();
+    if (!place) return;
+    const actor = place.contents.actors_present[0];
+    if (!actor) return;
+    const mode = get_move_mode();
+    const now_ms = Date.now();
+    const is_release = intent === null;
+    const reason = is_release ? 'release' : 'change';
+    const dx = intent?.dx ?? 0;
+    const dy = intent?.dy ?? 0;
+
+    record_intent_observed(intent, { mode, place_id: place.id, actor_ref: actor.actor_ref });
+    input_state.last_polled_intent = intent ? { dx: intent.dx, dy: intent.dy } : null;
+    if (!is_release) {
+      input_state.last_intent_sent_ms = now_ms;
+    } else {
+      input_state.last_intent_sent_ms = 0;
+    }
+
+    debug_log_place('MOVE_VEL_TEST immediate input intent dispatch', {
+      version: PLACE_MODULE_TIMING_VERSION,
+      source: meta.source,
+      action: meta.action,
+      code: meta.code,
+      actor_ref: actor.actor_ref,
+      place_id: place.id,
+      dx,
+      dy,
+      mode,
+      reason,
+    });
+
+    void post_intent_update({
+      actor_ref: actor.actor_ref,
+      place_id: place.id,
+      dx,
+      dy,
+      mode,
+      reason,
+    });
+  }
+
+  subscribe_move_intent_changes((intent, meta) => {
+    dispatch_transition_intent(intent, meta);
+  });
 
   function stat_to_bps(speed: number): number | null {
     const s = Math.floor(Number(speed));
@@ -2139,6 +2230,11 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       (place as any).breath_index = Math.floor(bi);
       (place as any).breath_last_processed = Math.floor(bi);
       (place as any).breath_last_processed_ms = Date.now();
+      record_place_breath_tick({
+        place_id: place.id,
+        breath_index: Math.floor(bi),
+        sent_at_ms: Number(msg?.sent_at_ms),
+      });
 
       place_breath_tick_applied_count++;
       const nowMs = Date.now();
@@ -2170,6 +2266,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
       const seq_map: Map<string, number> = ((mod as any).__move_seq_by_ref ??= new Map());
       let localActorApplied = 0;
+      let lastLocalActorStep: { actor_ref: string; x: number; y: number; z: number | null; seq: number | null } | null = null;
 
       for (const u of updates) {
         const pid = String(u?.place_id ?? '');
@@ -2195,6 +2292,13 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           if (typeof z === 'number') (a as any).elevation = z;
           set_npc_tracked_position(ref, { x, y });
           localActorApplied += 1;
+          lastLocalActorStep = {
+            actor_ref: ref,
+            x,
+            y,
+            z: typeof z === 'number' ? z : null,
+            seq,
+          };
           continue;
         }
 
@@ -2215,7 +2319,25 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         }
       }
 
+      record_move_batch_received({
+        place_id: place.id,
+        total_updates: updates.length,
+        local_actor_updates: localActorApplied,
+        sent_at_ms: Number(msg?.sent_at_ms),
+      });
+
       if (localActorApplied > 0) {
+        if (lastLocalActorStep) {
+          record_local_actor_step_applied({
+            actor_ref: lastLocalActorStep.actor_ref,
+            place_id: place.id,
+            breath_index: Math.floor(Number((place as any)?.breath_index ?? 0)) || 0,
+            x: lastLocalActorStep.x,
+            y: lastLocalActorStep.y,
+            z: lastLocalActorStep.z,
+            seq: lastLocalActorStep.seq,
+          });
+        }
         const nowMs = Date.now();
         // eslint-disable-next-line no-console
         console.log(
@@ -2345,9 +2467,12 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
       // Poll input actions and update movement intent every frame.
       // This removes reliance on event timing for movement.
+      const INTENT_RESEND_INTERVAL_MS = 750;
       const intent = get_move_intent();
       const actor = place.contents.actors_present[0];
       if (actor) {
+        const mode = get_move_mode();
+        record_intent_observed(intent, { mode, place_id: place.id, actor_ref: actor.actor_ref });
         const has_movement = intent !== null;
         const last_intent = input_state.last_polled_intent;
         const intent_changed = has_movement && (
@@ -2355,21 +2480,22 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           intent.dx !== last_intent.dx || 
           intent.dy !== last_intent.dy
         );
+        const now_ms = Date.now();
+        // Resend periodically while a direction is held (survives server restarts / silent failures).
+        const intent_stale = has_movement && (now_ms - input_state.last_intent_sent_ms) >= INTENT_RESEND_INTERVAL_MS;
 
-        if (has_movement && intent_changed) {
-          const mode = get_move_mode();
+        if (has_movement && (intent_changed || intent_stale)) {
+          const reason = intent_changed ? 'change' : 'resend';
           // Server-authoritative: send intent update to backend (held intent wins).
-          void fetch('http://localhost:8787/api/movement/intent', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              entity_ref: actor.actor_ref,
-              place_id: place.id,
-              dx: intent.dx,
-              dy: intent.dy,
-              mode,
-            }),
-          }).catch(() => { /* ignore */ });
+          void post_intent_update({
+            actor_ref: actor.actor_ref,
+            place_id: place.id,
+            dx: intent.dx,
+            dy: intent.dy,
+            mode,
+            reason,
+          });
+          input_state.last_intent_sent_ms = now_ms;
         } else if (!has_movement && last_intent) {
           // No movement intent - stop realtime movement
           try {
@@ -2385,17 +2511,15 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           } catch {
             // ignore
           }
-          void fetch('http://localhost:8787/api/movement/intent', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              entity_ref: actor.actor_ref,
-              place_id: place.id,
-              dx: 0,
-              dy: 0,
-              mode: get_move_mode(),
-            }),
-          }).catch(() => { /* ignore */ });
+          void post_intent_update({
+            actor_ref: actor.actor_ref,
+            place_id: place.id,
+            dx: 0,
+            dy: 0,
+            mode,
+            reason: 'release',
+          });
+          input_state.last_intent_sent_ms = 0;
         }
 
         // Track last intent
@@ -2826,14 +2950,18 @@ export function make_place_module(config: PlaceModuleConfig): Module {
            mode,
          }),
        })
-         .then(async (r) => {
-           const j = await r.json().catch(() => null);
-           if (!r.ok) {
-             debug_log_place('Click-to-move rejected (server)', { status: r.status, body: j });
-             return;
-           }
-           debug_log_place('Click-to-move accepted (server)', j);
-         })
+        .then(async (r) => {
+          const j = await r.json().catch(() => null);
+          if (!r.ok) {
+            debug_log_place('Click-to-move rejected (server)', { status: r.status, body: j });
+            return;
+          }
+          if (j?.queued === false || j?.rejected === true) {
+            debug_log_place('Click-to-move not queued (server)', j);
+            return;
+          }
+          debug_log_place('Click-to-move accepted (server)', j);
+        })
          .catch(() => {
            // ignore
          });

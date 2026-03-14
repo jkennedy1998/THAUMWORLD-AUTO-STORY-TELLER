@@ -10,6 +10,7 @@
  */
 
 import { debug_log, DEBUG_LEVEL } from '../../shared/debug.js';
+import { record_input_reset, record_input_transition } from '../../shared/movement_debug_state.js';
 
 export type ActionName = 
   | 'move_up' 
@@ -27,6 +28,13 @@ export type ActionStateSnapshot = Record<ActionName, ActionState>;
 
 export type InputContext = {
   typing: boolean;
+};
+
+export type MoveIntent = { dx: number; dy: number } | null;
+export type MoveIntentChangeMeta = {
+  source: 'keydown' | 'keyup' | 'reset';
+  action: ActionName | null;
+  code: string | null;
 };
 
 type KeyMapping = Record<string, ActionName>;
@@ -51,6 +59,8 @@ const action_states: Record<ActionName, ActionState> = {
 };
 
 let global_seq = 0;
+let last_emitted_intent_key = 'none';
+const move_intent_listeners = new Set<(intent: MoveIntent, meta: MoveIntentChangeMeta) => void>();
 
 let last_transition_log_ms = 0;
 
@@ -62,6 +72,32 @@ function snapshot_move_actions(): any {
     move_left: { down: action_states.move_left.down, down_seq: action_states.move_left.down_seq },
     move_right: { down: action_states.move_right.down, down_seq: action_states.move_right.down_seq },
     jump: { down: action_states.jump.down, down_seq: action_states.jump.down_seq },
+  };
+}
+
+function intent_key(intent: MoveIntent): string {
+  if (!intent) return 'none';
+  return `${intent.dx},${intent.dy}`;
+}
+
+function emit_move_intent_if_changed(meta: MoveIntentChangeMeta): void {
+  const intent = get_move_intent();
+  const next_key = intent_key(intent);
+  if (next_key === last_emitted_intent_key) return;
+  last_emitted_intent_key = next_key;
+  for (const listener of move_intent_listeners) {
+    try {
+      listener(intent, meta);
+    } catch {
+      // ignore listener failures
+    }
+  }
+}
+
+export function subscribe_move_intent_changes(listener: (intent: MoveIntent, meta: MoveIntentChangeMeta) => void): () => void {
+  move_intent_listeners.add(listener);
+  return () => {
+    move_intent_listeners.delete(listener);
   };
 }
 
@@ -85,6 +121,11 @@ export function handle_keydown(ev: KeyboardEvent, ctx: InputContext): void {
   }
   
   state.down = true;
+
+  if (!was_down) {
+    record_input_transition(action, ev.code, true, ctx.typing);
+    emit_move_intent_if_changed({ source: 'keydown', action, code: ev.code });
+  }
 
   if (!was_down && DEBUG_LEVEL >= 3) {
     const now = Date.now();
@@ -112,6 +153,11 @@ export function handle_keyup(ev: KeyboardEvent, ctx: InputContext): void {
   const was_down = state.down;
   state.down = false;
 
+  if (was_down) {
+    record_input_transition(action, ev.code, false, ctx.typing);
+    emit_move_intent_if_changed({ source: 'keyup', action, code: ev.code });
+  }
+
   if (was_down && DEBUG_LEVEL >= 3) {
     const now = Date.now();
     if (now - last_transition_log_ms > 25) {
@@ -129,6 +175,7 @@ export function handle_keyup(ev: KeyboardEvent, ctx: InputContext): void {
  * Reset all action states (call on window blur/visibilitychange)
  */
 export function reset_all(): void {
+  record_input_reset();
   if (DEBUG_LEVEL >= 3) {
     try {
       debug_log('MOVE_UNIFY_TEST', `input reset_all ${JSON.stringify({ actions: snapshot_move_actions() })}`);
@@ -140,6 +187,7 @@ export function reset_all(): void {
     action_states[action].down = false;
     action_states[action].down_seq = 0;
   }
+  emit_move_intent_if_changed({ source: 'reset', action: null, code: null });
 }
 
 /**

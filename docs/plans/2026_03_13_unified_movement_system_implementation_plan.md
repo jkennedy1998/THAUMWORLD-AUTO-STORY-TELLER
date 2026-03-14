@@ -94,7 +94,43 @@ Current migration verification notes:
 - `eden_crossroads_square` has been corrected to include a full `tiles_z0` support floor so travel from the tavern and NPC wandering are testable under the unified movement system.
 - Current blocker is no longer data format; it is remaining runtime authority cleanup for NPC-side movement systems.
 - Click-to-move now performs immediate server-side path planning on goal queue instead of waiting for the lower-frequency think phase, reducing initial click latency.
-- Visible player places now run on a steady realtime pulse (one breath per scheduled interval) instead of replaying large visible catch-up bursts, while offscreen places retain catch-up behavior.
+- Intended visible-place behavior is a steady realtime pulse (one breath per scheduled interval) while offscreen places retain catch-up behavior.
+- Current observed drift in logs: visible places are still sometimes executing multi-breath interval pulses, visible movement updates are still being coalesced into final-position snaps, and repeated same-target steps suggest stale authoritative state is being reused inside visible bursts.
+
+## Immediate Alignment Priorities (March 2026)
+
+These priorities are the next implementation focus so the runtime moves back toward the design doc while keeping latency low enough for live testing.
+
+### Priority 1: Restore visible-place realtime pacing
+
+- In `src/interface_program/main.ts`, visible places must execute at most one breath per scheduled interval tick.
+- Offscreen places may continue to use bounded catch-up.
+- Immediate visible pulses for `intent` / `move_to` remain allowed, but they must not create later visible burst repayment.
+- Development target: visible-place logs should never show `ticks > 1` for ordinary interval pulses.
+
+### Priority 2: Re-establish per-breath authoritative freshness
+
+- Every breath must read the authoritative entity position/state produced by the previous breath before action-phase legality or physics-phase resolution runs again.
+- The action phase and physics phase in `src/interface_program/main.ts` must not reuse stale snapshots across visible multi-step processing.
+- Development target: no repeated `physics resolved step` entries that keep resolving the same destination from the same source across successive breaths unless an entity is intentionally blocked.
+
+### Priority 3: Stop hiding visible step cadence from the renderer
+
+- Visible-place movement updates must preserve ordered per-breath player steps instead of coalescing everything to the final position of a burst.
+- Offscreen catch-up may still coalesce if needed for efficiency.
+- Development target: local-player renderer logs should show visible-step intervals that track server breath cadence instead of long gaps followed by snaps.
+
+### Priority 4: Retune acceleration for debuggability
+
+- The current action-phase MOVE spending is too aggressive for validation; velocity grows too quickly to reason about cadence and resolver behavior.
+- Keep the design-doc MOVE -> velocity model, but lower/tighten the practical tuning while verification is in progress.
+- Development target: per-breath acceleration, budget spend, and resulting velocity should stay readable enough that one-step-per-breath behavior can be inspected directly in logs.
+
+### Priority 5: Validate incline and dominant-axis interaction
+
+- Incline selection should remain an action-phase choice, but the resulting velocity and resolver candidate ordering must still produce believable per-breath movement.
+- The physics resolver must continue to attempt at most one successful step per breath while respecting deterministic axis selection and fallback rules from the design doc.
+- Development target: incline-up/down tests produce understandable step sequences without unrelated stored velocity causing confusing sideways movement.
 
 ## Architecture Mapping (Current -> Target)
 
@@ -652,6 +688,25 @@ Success criterion for sequencing:
 
 - Do not advance to the next major behavior change until the previous one is stable enough to keep the dev place playable and debuggable.
 
+## Current Remediation Sequence
+
+This is the recommended near-term order for fixing the observed movement weirdness while converging on the design doc.
+
+1) Split visible-place pacing from offscreen catch-up in `src/interface_program/main.ts`.
+2) Verify that each breath re-reads authoritative current state before action/physics processing.
+3) Disable visible-place movement coalescing so ordered local-player steps are emitted to the renderer.
+4) Retune walk acceleration and MOVE budget spending for inspectable, test-friendly values.
+5) Re-verify axis resolver and incline transient behavior under the lower-velocity tuning.
+6) Keep renderer-side systems passive and focused on telemetry/reconciliation only.
+
+Near-term success criteria:
+
+- visible interval pulses never execute `ticks > 1`
+- one successful visible player step maps to one server breath
+- local-player visible updates are not collapsed into burst-end snaps
+- no duplicate same-position move batches are emitted for visible realtime stepping
+- click-to-first-step latency remains low without sacrificing steady follow-up cadence
+
 ## Verification / Acceptance Tests
 
 Add new devlog markers for the velocity system (example): `MOVE_VEL_TEST`.
@@ -665,6 +720,14 @@ Minimum acceptance checks (run via `npm run dev:logs`):
 - `MOVE_VEL_TEST PASS friction decays moved axis only; moved_axis=none => no decay`
 - `MOVE_VEL_TEST PASS move_debt suppresses MOVE spending but facing/intent still updates`
 - `MOVE_VEL_TEST PASS incline injects vz+forward and resolves over time without forcing axis`
+
+Additional acceptance checks for the current remediation pass:
+
+- `MOVE_VEL_TEST PASS visible interval pulse never exceeds one breath`
+- `MOVE_VEL_TEST PASS visible player updates preserve ordered per-breath steps`
+- `MOVE_VEL_TEST PASS no repeated same-source same-target step across successive breaths`
+- `MOVE_VEL_TEST PASS no duplicate same-position local move batch during visible realtime stepping`
+- `MOVE_VEL_TEST PASS click-to-first-step latency remains low without bursty follow-up movement`
 
 ## Development Test World Plan
 
