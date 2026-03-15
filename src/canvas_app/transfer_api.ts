@@ -31,5 +31,17 @@ export async function api_transfer_inline(args: TransferArgs): Promise<ApiResult
   });
   const out = await res.json().catch(() => null as any);
   if (res.ok && out?.ok) return { ok: true };
+  try {
+    console.log('[api_transfer_inline] transfer failed', JSON.stringify({
+      from_container: args.from_container,
+      to_container: args.to_container,
+      item_instance_id: args.item_instance_id,
+      error: out?.error || `HTTP ${res.status}`,
+      detail: out?.detail,
+      http_status: res.status,
+    }));
+  } catch {
+    // ignore
+  }
   return { ok: false, error: out?.error || `HTTP ${res.status}`, http_status: res.status, detail: out?.detail };
 }

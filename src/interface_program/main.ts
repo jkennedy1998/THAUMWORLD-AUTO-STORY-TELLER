@@ -410,10 +410,10 @@ function desired_step_from_controller(ctl: EntityMoveController, cur_x: number, 
     return null;
 }
 
-function try_select_walk_incline(place_any: any, entity_ref: string, entity_type: 'actor' | 'npc', cur_x: number, cur_y: number, cur_z: number, desired: { dx: number; dy: number } | null): { subtype: 'incline_up' | 'incline_down'; dz: 1 | -1 } | null {
-  if (!desired || (desired.dx === 0 && desired.dy === 0)) return null;
-  const owner = { kind: entity_type as any, id: entity_ref };
-  const forward = can_place_volume(place_any as any, owner as any, { x: cur_x + desired.dx, y: cur_y + desired.dy, z: cur_z }, 'WALK' as any, {
+function try_select_walk_incline_for_direction(place_any: any, entity_ref: string, entity_type: 'actor' | 'npc', cur_x: number, cur_y: number, cur_z: number, desired: { dx: number; dy: number }): { subtype: 'incline_up' | 'incline_down'; dz: 1 | -1; axis: 'x' | 'y' } | null {
+    const owner = { kind: entity_type as any, id: entity_ref };
+    const axis: 'x' | 'y' = desired.dx !== 0 ? 'x' : 'y';
+    const forward = can_place_volume(place_any as any, owner as any, { x: cur_x + desired.dx, y: cur_y + desired.dy, z: cur_z }, 'WALK' as any, {
         exclude_owner: owner as any,
         support_policy: 'any_footprint' as any,
     });
@@ -437,7 +437,7 @@ function try_select_walk_incline(place_any: any, entity_ref: string, entity_type
         up,
         up_forward,
     });
-    if (up.ok && up_forward.ok) return { subtype: 'incline_up', dz: 1 };
+    if (up.ok && up_forward.ok) return { subtype: 'incline_up', dz: 1, axis };
     return null;
   }
 
@@ -456,20 +456,57 @@ function try_select_walk_incline(place_any: any, entity_ref: string, entity_type
             landing_blocked_by: (down_forward as any)?.detail?.blocked_by ?? null,
             landing_blocked_voxel: (down_forward as any)?.detail?.blocked_voxel ?? null,
         });
-        if (down_forward.ok) return { subtype: 'incline_down', dz: -1 };
+        if (down_forward.ok) return { subtype: 'incline_down', dz: -1, axis };
     }
 
   return null;
 }
 
+function try_select_walk_incline(place_any: any, entity_ref: string, entity_type: 'actor' | 'npc', cur_x: number, cur_y: number, cur_z: number, desired: { dx: number; dy: number } | null, preferred_axis?: 'x' | 'y' | null): { subtype: 'incline_up' | 'incline_down'; dz: 1 | -1; axis: 'x' | 'y' } | null {
+    if (!desired || (desired.dx === 0 && desired.dy === 0)) return null;
+    if (desired.dx !== 0 && desired.dy !== 0) {
+        const dirs: Array<{ dx: number; dy: number; axis: 'x' | 'y' }> = [];
+        if (preferred_axis === 'x') {
+            dirs.push({ dx: desired.dx, dy: 0, axis: 'x' }, { dx: 0, dy: desired.dy, axis: 'y' });
+        } else if (preferred_axis === 'y') {
+            dirs.push({ dx: 0, dy: desired.dy, axis: 'y' }, { dx: desired.dx, dy: 0, axis: 'x' });
+        } else {
+            dirs.push({ dx: desired.dx, dy: 0, axis: 'x' }, { dx: 0, dy: desired.dy, axis: 'y' });
+        }
+        for (const dir of dirs) {
+            const candidate = try_select_walk_incline_for_direction(place_any, entity_ref, entity_type, cur_x, cur_y, cur_z, { dx: dir.dx, dy: dir.dy });
+            if (candidate) {
+                debug_log('MOVE_VEL_TEST', 'incline selected from diagonal desired', {
+                    entity_ref,
+                    at: { x: cur_x, y: cur_y, z: cur_z },
+                    desired,
+                    preferred_axis: preferred_axis ?? null,
+                    chosen_axis: candidate.axis,
+                    subtype: candidate.subtype,
+                });
+                return candidate;
+            }
+        }
+        debug_log('MOVE_VEL_TEST', 'incline skipped for diagonal desired', {
+            entity_ref,
+            at: { x: cur_x, y: cur_y, z: cur_z },
+            desired,
+            preferred_axis: preferred_axis ?? null,
+        });
+        return null;
+    }
+    return try_select_walk_incline_for_direction(place_any, entity_ref, entity_type, cur_x, cur_y, cur_z, desired);
+}
+
 function apply_move_acceleration(runtime: MovementPhysicsRuntimeState, desired: { dx: number; dy: number } | null): void {
     if (!desired) return;
+    const diagonal = desired.dx !== 0 && desired.dy !== 0;
+    const scale = diagonal ? 0.5 : 1;
     if (desired.dx !== 0) {
-        runtime.velocity.vx += clamp_intent(desired.dx);
-        return;
+        runtime.velocity.vx += clamp_intent(desired.dx) * scale;
     }
     if (desired.dy !== 0) {
-        runtime.velocity.vy += clamp_intent(desired.dy);
+        runtime.velocity.vy += clamp_intent(desired.dy) * scale;
     }
 }
 
@@ -481,20 +518,44 @@ function apply_friction_to_axis(runtime: MovementPhysicsRuntimeState, axis: 'x' 
     else if (value < 0) runtime.velocity[key] = value + 1;
 }
 
-function get_entity_gravity_delta(place_any: any, entity_ref: string, entity_type: 'actor' | 'npc', any_entity: any, x: number, y: number, z: number): number {
-    if (!has_simple_tag(any_entity?.tags, 'GRAVITY')) return 0;
+function gravity_delta_for_weight(weight_raw: any, supported: boolean): number {
+    if (supported) return 0;
+    const weight = Number(weight_raw ?? 1);
+    if (!Number.isFinite(weight) || weight > 0) return -1;
+    if (weight < 0) return 1;
+    return 0;
+}
 
+function get_entity_support_state(place_any: any, entity_ref: string, entity_type: 'actor' | 'npc', x: number, y: number, z: number): { supported: boolean; reason: string | null } {
     const owner = { kind: entity_type as any, id: entity_ref };
     const supported = can_place_volume(place_any as any, owner as any, { x, y, z }, 'WALK' as any, {
         exclude_owner: owner as any,
         support_policy: 'any_footprint' as any,
     });
-    if (supported.ok || supported.reason !== 'no_support') return 0;
+    return {
+        supported: !!supported.ok,
+        reason: supported.ok ? null : String(supported.reason ?? 'unknown'),
+    };
+}
 
-    const weight = Number(any_entity?.weight ?? 1);
-    if (!Number.isFinite(weight) || weight > 0) return -1;
-    if (weight < 0) return 1;
-    return 0;
+function is_vertical_motion_active(runtime: MovementPhysicsRuntimeState, unsupported: boolean, debug_vertical_impulse: boolean): boolean {
+    return Math.abs(Number(runtime.velocity.vz) || 0) > 0 || debug_vertical_impulse || unsupported;
+}
+
+function get_entity_gravity_delta(place_any: any, entity_ref: string, entity_type: 'actor' | 'npc', any_entity: any, x: number, y: number, z: number): number {
+    if (!has_simple_tag(any_entity?.tags, 'GRAVITY')) return 0;
+    const support = get_entity_support_state(place_any, entity_ref, entity_type, x, y, z);
+    if (support.supported || support.reason !== 'no_support') return 0;
+    return gravity_delta_for_weight(any_entity?.weight ?? 1, false);
+}
+
+function is_entity_unsupported(place_any: any, entity_ref: string, entity_type: 'actor' | 'npc', x: number, y: number, z: number): boolean {
+    const support = get_entity_support_state(place_any, entity_ref, entity_type, x, y, z);
+    return !support.supported && support.reason === 'no_support';
+}
+
+function should_allow_airborne_horizontal_control(entity_ref: string, breath_index: number): boolean {
+    return ((hash_entity_ref(entity_ref) + Math.floor(Number(breath_index) || 0)) % 2) === 0;
 }
 
 function resolve_velocity_step_target(runtime: MovementPhysicsRuntimeState, cur_x: number, cur_y: number, cur_z: number, breath_index: number): Array<{ axis: 'x' | 'y' | 'z'; x: number; y: number; z: number }> {
@@ -585,9 +646,20 @@ function can_use_incline_transient_vertical_override(
 
 function preferred_forward_axis(desired: { dx: number; dy: number } | null): 'x' | 'y' | null {
     if (!desired) return null;
+    if (desired.dx !== 0 && desired.dy !== 0) return null;
     if (desired.dx !== 0) return 'x';
     if (desired.dy !== 0) return 'y';
     return null;
+}
+
+function resolve_followthrough_axis(
+    desired: { dx: number; dy: number } | null,
+    preferred_axes: Array<'x' | 'y' | 'z'> | null | undefined,
+): 'x' | 'y' | null {
+    const direct = preferred_forward_axis(desired);
+    if (direct) return direct;
+    const hinted = (preferred_axes ?? []).find((axis) => axis === 'x' || axis === 'y');
+    return hinted ?? null;
 }
 
 function derive_facing_direction(
@@ -634,14 +706,15 @@ function apply_actor_control_steering(runtime: MovementPhysicsRuntimeState, desi
         if (Math.sign(runtime.velocity.vx) === -Math.sign(desired.dx)) {
             runtime.velocity.vx = 0;
         }
-        if (incline || runtime.latest_intent?.updated_breath === runtime.last_breath_processed + 1) {
+        if ((incline || runtime.latest_intent?.updated_breath === runtime.last_breath_processed + 1) && desired.dy === 0) {
             runtime.velocity.vy = 0;
         }
-    } else if (desired.dy !== 0) {
+    }
+    if (desired.dy !== 0) {
         if (Math.sign(runtime.velocity.vy) === -Math.sign(desired.dy)) {
             runtime.velocity.vy = 0;
         }
-        if (incline || runtime.latest_intent?.updated_breath === runtime.last_breath_processed + 1) {
+        if ((incline || runtime.latest_intent?.updated_breath === runtime.last_breath_processed + 1) && desired.dx === 0) {
             runtime.velocity.vx = 0;
         }
     }
@@ -657,6 +730,28 @@ function apply_actor_control_steering(runtime: MovementPhysicsRuntimeState, desi
             last_breath_processed: runtime.last_breath_processed,
         });
     }
+}
+
+function is_committed_incline_transition(runtime: MovementPhysicsRuntimeState, breath_index: number): boolean {
+    const subtype = runtime.transient_selection?.movement_subtype ?? null;
+    const selected_breath = Math.floor(Number(runtime.transient_selection?.selected_breath ?? -1));
+    const current_breath = Math.floor(Number(breath_index)) || 0;
+    const followthrough = subtype === 'move.walk.incline_up_followthrough' || subtype === 'move.walk.incline_down_followthrough';
+    if (followthrough) {
+        if (selected_breath > current_breath || selected_breath < (current_breath - 1)) return false;
+    } else if (selected_breath !== current_breath) {
+        return false;
+    }
+    return subtype === 'move.walk.incline_up'
+        || subtype === 'move.walk.incline_down'
+        || subtype === 'move.walk.incline_up_followthrough'
+        || subtype === 'move.walk.incline_down_followthrough';
+}
+
+function is_debug_vertical_impulse_active(runtime: MovementPhysicsRuntimeState, breath_index: number): boolean {
+    const subtype = runtime.transient_selection?.movement_subtype ?? null;
+    const selected_breath = Math.floor(Number(runtime.transient_selection?.selected_breath ?? -1));
+    return subtype === 'debug.ascend' && selected_breath <= (Math.floor(Number(breath_index)) || 0) && Math.abs(Number(runtime.velocity.vz) || 0) > 0;
 }
 
 function is_transient_incline_down_selection_ok(cur_z: number, check: { ok: boolean; reason?: string; detail?: any }): boolean {
@@ -841,8 +936,11 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState): void {
                 runtime.transient_selection?.movement_subtype === 'move.walk.incline_up_followthrough' ||
                 runtime.transient_selection?.movement_subtype === 'move.walk.incline_down_followthrough'
             ) &&
-            Math.floor(Number(runtime.transient_selection?.selected_breath ?? -1)) === place_bi
+            Math.floor(Number(runtime.transient_selection?.selected_breath ?? -1)) <= place_bi &&
+            Math.floor(Number(runtime.transient_selection?.selected_breath ?? -1)) >= (place_bi - 1)
         );
+        const debug_ascend_active = runtime.transient_selection?.movement_subtype === 'debug.ascend'
+            && Math.abs(Number(runtime.velocity.vz) || 0) > 0;
         const walk_accel = get_walk_accel_per_breath(any_entity, ctl.mode);
         runtime.latest_intent = ctl.intent ? {
             dx: clamp_intent(ctl.intent.dx),
@@ -855,7 +953,11 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState): void {
         const cur_y = Math.floor(Number(any_entity?.location?.tile?.y ?? 0)) || 0;
         const cur_z = Math.floor(Number(any_entity?.location?.elevation ?? any_entity?.location?.tile?.elevation ?? place_any?.coordinates?.elevation ?? 0)) || 0;
         const desired = desired_step_from_controller(ctl, cur_x, cur_y);
-        const incline = try_select_walk_incline(place_any, entity_ref, runtime.entity_type, cur_x, cur_y, cur_z, desired);
+        const incline_preferred_axis = Math.abs(Number(runtime.velocity.vx) || 0) >= Math.abs(Number(runtime.velocity.vy) || 0) ? 'x' : 'y';
+        const incline = try_select_walk_incline(place_any, entity_ref, runtime.entity_type, cur_x, cur_y, cur_z, desired, incline_preferred_axis);
+        const unsupported = is_entity_unsupported(place_any, entity_ref, runtime.entity_type, cur_x, cur_y, cur_z);
+        const airborne_horizontal_allowed = unsupported && desired !== null && !incline;
+        const airborne_horizontal_can_spend = !airborne_horizontal_allowed || should_allow_airborne_horizontal_control(entity_ref, place_bi);
 
         if (walk_accel) {
             const spend_gate = refill_move_budget_and_apply_debt(runtime, 'walk', walk_accel);
@@ -869,13 +971,28 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState): void {
                     move_debt: runtime.move_debt.walk,
                 });
             }
-            if (spend_gate.can_spend && desired) {
+            if (pending_followthrough) {
+                debug_log('MOVE_VEL_TEST', 'incline followthrough preserved through action phase', {
+                    entity_ref,
+                    place_id: state.place_id,
+                    breath_index: place_bi,
+                    subtype: runtime.transient_selection?.movement_subtype ?? null,
+                    velocity: runtime.velocity,
+                    latest_intent: runtime.latest_intent,
+                    desired,
+                });
+            } else if (spend_gate.can_spend && desired && airborne_horizontal_can_spend && !debug_ascend_active) {
                 apply_actor_control_steering(runtime, desired, incline);
                 let moves_applied = 0;
                 if (incline) {
-                    const incline_preferred_axis = preferred_forward_axis(desired);
                     runtime.velocity.vz += incline.dz;
-                    apply_move_acceleration(runtime, desired);
+                    if (incline.axis === 'x') {
+                        runtime.velocity.vx = clamp_intent(desired?.dx ?? 0);
+                        runtime.velocity.vy = 0;
+                    } else {
+                        runtime.velocity.vx = 0;
+                        runtime.velocity.vy = clamp_intent(desired?.dy ?? 0);
+                    }
                     spend_move_budget(runtime, 'walk', 2);
                     moves_applied = 2;
                     runtime.transient_selection = {
@@ -883,7 +1000,7 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState): void {
                         movement_subtype: `move.walk.${incline.subtype}`,
                         modality: 'walk',
                         selected_breath: place_bi,
-                        preferred_axes: incline_preferred_axis ? ['z', incline_preferred_axis] : ['z'],
+                        preferred_axes: ['z', incline.axis],
                         composite_target: null,
                     };
                 } else {
@@ -914,6 +1031,26 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState): void {
                     move_debt: runtime.move_debt.walk,
                     preferred_axes: runtime.transient_selection?.preferred_axes ?? null,
                     composite_target: runtime.transient_selection?.composite_target ?? null,
+                    unsupported,
+                });
+            } else if (spend_gate.can_spend && desired && airborne_horizontal_allowed && !airborne_horizontal_can_spend && !debug_ascend_active) {
+                debug_log('MOVE_UNIFY_TEST', 'PASS air control half speed', {
+                    entity_ref,
+                    place_id: state.place_id,
+                    breath_index: place_bi,
+                    desired,
+                    unsupported,
+                    velocity: runtime.velocity,
+                });
+                runtime.transient_selection = null;
+            } else if (debug_ascend_active) {
+                debug_log('MOVE_UNIFY_TEST', 'debug ascend preserved through action phase', {
+                    entity_ref,
+                    place_id: state.place_id,
+                    breath_index: place_bi,
+                    velocity: runtime.velocity,
+                    latest_intent: runtime.latest_intent,
+                    desired,
                 });
             } else if (!pending_followthrough) {
                 runtime.transient_selection = null;
@@ -1096,7 +1233,7 @@ function flush_place_breath_outputs(now: number, breath_ticks: Array<{ slot: num
     }
 }
 
-function maybe_run_immediate_visible_place_pulse(slot: number, place_id: string, cause: 'intent' | 'move_to'): void {
+function maybe_run_immediate_visible_place_pulse(slot: number, place_id: string, cause: 'intent' | 'move_to' | 'debug_ascend'): void {
     const key = place_breath_key(slot, place_id);
     const state = place_breath.get(key);
     if (!state?.realtime_visible || !state.place_base) return;
@@ -1198,13 +1335,29 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
                 runtime.transient_selection?.movement_subtype === 'move.walk.incline_up_followthrough' ||
                 runtime.transient_selection?.movement_subtype === 'move.walk.incline_down_followthrough'
             ) &&
-            Math.floor(Number(runtime.transient_selection?.selected_breath ?? -1)) === place_bi
+            Math.floor(Number(runtime.transient_selection?.selected_breath ?? -1)) <= place_bi &&
+            Math.floor(Number(runtime.transient_selection?.selected_breath ?? -1)) >= (place_bi - 1)
         );
+        const cur_x = Math.floor(Number(ent_snap?.tile_position?.x ?? 0)) || 0;
+        const cur_y = Math.floor(Number(ent_snap?.tile_position?.y ?? 0)) || 0;
+        const cur_z = (typeof ent_snap?.elevation === 'number' && Number.isFinite(ent_snap.elevation)) ? Math.floor(ent_snap.elevation) : bz;
+        const unsupported = is_entity_unsupported(place_any, entity_ref, entity_type, cur_x, cur_y, cur_z);
+        const debug_vertical_impulse = is_debug_vertical_impulse_active(runtime, place_bi);
+        const vertical_motion_active = is_vertical_motion_active(runtime, unsupported, debug_vertical_impulse);
 
         const intent_active = !!(ctl.intent && (ctl.intent.dx !== 0 || ctl.intent.dy !== 0));
         const has_path = !!(ctl.path && ctl.path_index < ctl.path.length);
         const has_goal = !!(ctl.goal && Number.isFinite(ctl.goal.x) && Number.isFinite(ctl.goal.y));
-        if (!intent_active && !has_path && !has_goal && !pending_followthrough) return;
+        if (!intent_active && !has_path && !has_goal && !pending_followthrough && !vertical_motion_active) return;
+        if (!intent_active && !has_path && !has_goal && unsupported) {
+            debug_log('MOVE_UNIFY_TEST', 'PASS unsupported actor continues falling without input', {
+                entity_ref,
+                place_id: state.place_id,
+                breath_index: place_bi,
+                at: { x: cur_x, y: cur_y, z: cur_z },
+                velocity: runtime.velocity,
+            });
+        }
 
         // Held intent overrides click-to-move.
         if (intent_active) {
@@ -1214,11 +1367,10 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
             ctl.need_repath = false;
         }
 
-        const cur_x = Math.floor(Number(ent_snap?.tile_position?.x ?? 0)) || 0;
-        const cur_y = Math.floor(Number(ent_snap?.tile_position?.y ?? 0)) || 0;
-        const cur_z = (typeof ent_snap?.elevation === 'number' && Number.isFinite(ent_snap.elevation)) ? Math.floor(ent_snap.elevation) : bz;
-
-        const gravity_delta = get_entity_gravity_delta(place_any, entity_ref, entity_type, any_entity, cur_x, cur_y, cur_z);
+        const gravity_suppressed_for_incline = is_committed_incline_transition(runtime, place_bi);
+        const gravity_delta = gravity_suppressed_for_incline
+            ? 0
+            : get_entity_gravity_delta(place_any, entity_ref, entity_type, any_entity, cur_x, cur_y, cur_z);
         if (gravity_delta !== 0) {
             runtime.velocity.vz += gravity_delta;
             debug_log('MOVE_VEL_TEST', 'physics gravity acceleration', {
@@ -1229,9 +1381,22 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
                 gravity_delta,
                 velocity: runtime.velocity,
             });
+        } else if (gravity_suppressed_for_incline) {
+            debug_log('MOVE_VEL_TEST', 'gravity suppressed during committed incline', {
+                entity_ref,
+                place_id: state.place_id,
+                breath_index: place_bi,
+                at: { x: cur_x, y: cur_y, z: cur_z },
+                subtype: runtime.transient_selection?.movement_subtype ?? null,
+            });
         }
 
-        const attempts = resolve_velocity_step_target(runtime, cur_x, cur_y, cur_z, place_bi);
+        let attempts = resolve_velocity_step_target(runtime, cur_x, cur_y, cur_z, place_bi);
+        if ((unsupported || debug_vertical_impulse) && Math.abs(Number(runtime.velocity.vz) || 0) > 0) {
+            const z_attempts = attempts.filter((a) => a.axis === 'z');
+            const other_attempts = attempts.filter((a) => a.axis !== 'z');
+            attempts = [...z_attempts, ...other_attempts];
+        }
         if (attempts.length === 0) {
             persist_entity_movement_state(any_entity, runtime, place_bi);
             move_ctl.set(key, ctl);
@@ -1243,12 +1408,16 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
         const failed_attempts: Array<{ axis: 'x' | 'y' | 'z'; target: { x: number; y: number; z: number }; reason: string; detail: any }> = [];
         for (const attempt of attempts) {
             if (target) break;
+            const vertical_airborne = attempt.axis === 'z' && (unsupported || debug_vertical_impulse) && Math.abs(Number(runtime.velocity.vz) || 0) > 0;
             const allow_unsupported = !!(
-                attempt.axis === 'z' &&
-                runtime.transient_selection?.movement_verb === 'move' &&
-                (runtime.transient_selection?.movement_subtype === 'move.walk.incline_up' || runtime.transient_selection?.movement_subtype === 'move.walk.incline_down')
+                (attempt.axis === 'z' &&
+                    runtime.transient_selection?.movement_verb === 'move' &&
+                    (runtime.transient_selection?.movement_subtype === 'move.walk.incline_up' || runtime.transient_selection?.movement_subtype === 'move.walk.incline_down'))
+                || vertical_airborne
+                || ((attempt.axis === 'x' || attempt.axis === 'y') && unsupported)
             );
-            const ok = can_place_volume(place_any as any, owner as any, { x: attempt.x, y: attempt.y, z: attempt.z }, 'WALK' as any, {
+            const movement_mode = vertical_airborne ? 'FLY' : 'WALK';
+            const ok = can_place_volume(place_any as any, owner as any, { x: attempt.x, y: attempt.y, z: attempt.z }, movement_mode as any, {
                 exclude_owner: owner as any,
                 support_policy: 'any_footprint' as any,
                 allow_unsupported,
@@ -1267,6 +1436,15 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
                     override_kind: 'vertical',
                 });
             }
+            if (ok.ok && (attempt.axis === 'x' || attempt.axis === 'y') && unsupported) {
+                debug_log('MOVE_UNIFY_TEST', 'PASS airborne horizontal allowed (no_support ignored)', {
+                    entity_ref,
+                    place_id: state.place_id,
+                    breath_index: place_bi,
+                    at: { x: cur_x, y: cur_y, z: cur_z },
+                    attempt,
+                });
+            }
             if (ok.ok || override_ok) {
                 target = attempt;
                 break;
@@ -1276,6 +1454,40 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
                 target: { x: attempt.x, y: attempt.y, z: attempt.z },
                 reason: ok.reason,
                 detail: ok.detail,
+            });
+        }
+
+        const z_attempt_failed = failed_attempts.find((a) => a.axis === 'z') ?? null;
+        if (target && runtime.entity_type === 'actor' && Math.abs(Number(runtime.velocity.vz) || 0) > 0 && target.axis !== 'z') {
+            debug_log('MOVE_UNIFY_TEST', 'actor vertical attempt lost to fallback axis', {
+                entity_ref,
+                place_id: state.place_id,
+                breath_index: place_bi,
+                at: { x: cur_x, y: cur_y, z: cur_z },
+                velocity: runtime.velocity,
+                unsupported,
+                gravity_delta,
+                chosen: target,
+                attempt_order: attempts.map((a) => ({ axis: a.axis, x: a.x, y: a.y, z: a.z })),
+                z_attempt_failed,
+                transient_subtype: runtime.transient_selection?.movement_subtype ?? null,
+                vertical_airborne_mode: unsupported || debug_vertical_impulse,
+            });
+        }
+        if (!target && runtime.entity_type === 'actor' && Math.abs(Number(runtime.velocity.vz) || 0) > 0) {
+            debug_log('MOVE_UNIFY_TEST', 'actor vertical attempt had no legal resolution', {
+                entity_ref,
+                place_id: state.place_id,
+                breath_index: place_bi,
+                at: { x: cur_x, y: cur_y, z: cur_z },
+                velocity: runtime.velocity,
+                unsupported,
+                gravity_delta,
+                attempt_order: attempts.map((a) => ({ axis: a.axis, x: a.x, y: a.y, z: a.z })),
+                z_attempt_failed,
+                failed_attempts,
+                transient_subtype: runtime.transient_selection?.movement_subtype ?? null,
+                vertical_airborne_mode: unsupported || debug_vertical_impulse,
             });
         }
 
@@ -1397,7 +1609,7 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
         }
         if (target.axis === 'z' && resolved_transient_subtype === 'move.walk.incline_up') {
             const followthrough_desired = desired_step_from_controller(ctl, target.x, target.y);
-            const followthrough_axis = preferred_forward_axis(followthrough_desired);
+            const followthrough_axis = resolve_followthrough_axis(followthrough_desired, resolved_preferred_axes);
             if (followthrough_axis) {
                 runtime.transient_selection = {
                     movement_verb: 'move',
@@ -1427,7 +1639,7 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
             });
         } else if (target.axis === 'z' && resolved_transient_subtype === 'move.walk.incline_down') {
             const followthrough_desired = desired_step_from_controller(ctl, target.x, target.y);
-            const followthrough_axis = preferred_forward_axis(followthrough_desired);
+            const followthrough_axis = resolve_followthrough_axis(followthrough_desired, resolved_preferred_axes);
             if (followthrough_axis) {
                 runtime.transient_selection = {
                     movement_verb: 'move',
@@ -1455,7 +1667,7 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
                 to: { x: target.x, y: target.y, z: target.z },
                 preferred_axes: resolved_preferred_axes,
             });
-        } else {
+        } else if (resolved_transient_subtype !== 'debug.ascend') {
             runtime.transient_selection = null;
         }
         if (target.axis !== 'z' && resolved_transient_subtype === 'move.walk.incline_up_followthrough') {
@@ -1475,6 +1687,9 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
                 to: { x: target.x, y: target.y, z: target.z },
                 preferred_axes: resolved_preferred_axes,
             });
+        }
+        if (resolved_transient_subtype === 'debug.ascend' && runtime.velocity.vz <= 0) {
+            runtime.transient_selection = null;
         }
         persist_entity_movement_state(any_entity, runtime, place_bi);
         move_ctl.set(key, ctl);
@@ -2131,18 +2346,24 @@ function apply_gravity_to_place_ground(state: PlaceBreathState): void {
             if (!def_id) continue;
             const resolved = resolve_inline_item(def_id, it as any);
             if (!resolved) continue;
-            if (!has_effective_tag(resolved.effective_tags, 'GRAVITY')) continue;
+            const item_weight = Number(resolved.unit_weight ?? 0);
+            if (!Number.isFinite(item_weight) || item_weight <= 0) continue;
             if ((it as any)?.container_id) continue;
 
-            // If the item is supported, do nothing.
-            const supported = can_place_volume(place_any as any, mover_owner as any, { x, y, z }, 'WALK' as any, {
-                exclude_owner: mover_owner as any,
-                support_policy: 'any_footprint' as any,
-                ignore_occupants: false,
+            const resting_z = resolve_loose_item_ground_z(place_any, x, y, z, it);
+            if (resting_z >= z) continue;
+            const gravity_delta = gravity_delta_for_weight(item_weight, false);
+            if (gravity_delta === 0) continue;
+            debug_log('MOVE_UNIFY_TEST', 'item gravity unsupported', {
+                place_id: state.place_id,
+                breath_index: state.breath_index,
+                item_id: String((it as any)?.id ?? ''),
+                def_id,
+                unit_weight: item_weight,
+                at: { x, y, z },
+                resting_z,
+                gravity_delta,
             });
-
-            if (supported.ok) continue;
-            if (!supported.ok && supported.reason !== 'no_support') continue;
 
             // Attempt one fall step (collision-only).
             const nz = Math.floor(z) - 1;
@@ -2172,6 +2393,27 @@ function apply_gravity_to_place_ground(state: PlaceBreathState): void {
             if (!scattered[nkey]) scattered[nkey] = [];
             scattered[nkey].push(moved);
             moved_any = true;
+            const settled = resolve_loose_item_ground_z(place_any, x, y, nz, moved) >= nz;
+            debug_log('MOVE_UNIFY_TEST', 'item gravity fall step applied', {
+                place_id: state.place_id,
+                breath_index: state.breath_index,
+                item_id: String((moved as any)?.id ?? ''),
+                def_id,
+                unit_weight: item_weight,
+                from: { x, y, z },
+                to: { x, y, z: nz },
+                settled,
+            });
+            if (settled) {
+                debug_log('MOVE_UNIFY_TEST', 'PASS item gravity settled to support', {
+                    place_id: state.place_id,
+                    breath_index: state.breath_index,
+                    item_id: String((moved as any)?.id ?? ''),
+                    def_id,
+                    unit_weight: item_weight,
+                    at: { x, y, z: nz },
+                });
+            }
         }
 
         if (Array.isArray(scattered[key]) && scattered[key].length === 0) {
@@ -2821,6 +3063,61 @@ function place_tile_has_effective_tag(place_any: any, tx: number, ty: number, wz
     return false;
 }
 
+function ground_target_blocked_for_loose_item(place_any: any, tx: number, ty: number, wz: number): boolean {
+    try {
+        const s = structure_occupies_tile_at_world_z(place_any, tx, ty, wz);
+        if (s) return true;
+    } catch {
+        // ignore
+    }
+    return false;
+}
+
+function get_loose_item_support_surface(place_any: any, tx: number, ty: number, support_z: number): { supported: boolean; by: string | null } {
+    const tile = get_place_tile_at_world_z(place_any, tx, ty, support_z);
+    const tile_tags = tile
+        ? ((resolve_place_tile(String(tile.kind ?? ''), tile) ?? null)?.effective_tags ?? (Array.isArray(tile.tags) ? tile.tags : []))
+        : [];
+    if (Array.isArray(tile_tags) && tile_tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'OCCUPIES')) {
+        return { supported: true, by: 'tile' };
+    }
+    if (tile && (Array.isArray((tile as any).contents) || (Array.isArray(tile_tags) && tile_tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER')))) {
+        return { supported: true, by: 'tile_container_surface' };
+    }
+    const structure = structure_occupies_tile_at_world_z(place_any, tx, ty, support_z);
+    if (structure) {
+        return { supported: true, by: `occupant:structure:${String((structure as any)?.id ?? '')}` };
+    }
+    const base_z = get_place_base_z(place_any);
+    const is_support_plane = Math.floor(support_z) === Math.floor(base_z - 1);
+    const has_support_tiles = !!(place_any as any)?.tiles_z0;
+    if (is_support_plane && !has_support_tiles) {
+        return { supported: true, by: 'implicit_ground' };
+    }
+    return { supported: false, by: null };
+}
+
+function resolve_loose_item_ground_z(place_any: any, tx: number, ty: number, requested_z: number, item: any): number {
+    const zb = get_place_world_z_bounds(place_any);
+    const start_z = Number.isFinite(Number(requested_z)) ? Math.floor(Number(requested_z)) : get_place_base_z(place_any);
+    for (let support_z = start_z - 1; support_z >= zb.min_z - 1; support_z -= 1) {
+        const support = get_loose_item_support_surface(place_any, tx, ty, support_z);
+        if (support.supported) {
+            const item_z = support_z + 1;
+            debug_log('MOVE_UNIFY_TEST', 'loose item resting z resolved', {
+                item_id: String((item as any)?.id ?? ''),
+                at: { x: tx, y: ty },
+                requested_z: start_z,
+                support_z,
+                resolved_z: item_z,
+                by: support.by,
+            });
+            return item_z;
+        }
+    }
+    return start_z;
+}
+
 function normalize_voxel_position_key(place_any: any, position_key: string): { key: string; x: number; y: number; z: number } | null {
     const parts = String(position_key ?? '').split('_');
     if (parts.length < 2) return null;
@@ -2936,10 +3233,11 @@ function try_deposit_into_ground_container_item(place_any: any, place_id: string
 function place_item_into_place_legal(place_any: any, place_id: string, tx: number, ty: number, target_wz: number, item: any): { ok: true; placed: 'tile_container' | 'container_item' | 'ground' } | { ok: false; error: string } {
     const base_z = get_place_base_z(place_any);
     const z = Number.isFinite(Number(target_wz)) ? Math.floor(Number(target_wz)) : base_z;
+    const prefer_ground_surface = z > base_z;
 
-    // 1) Tile container present on this tile: always prefer depositing into it.
-    // (Independent of target z; "container on this tile" wins over world placement.)
-    {
+    // 1) Tile/container deposit only when targeting the base interaction plane.
+    // Elevated targets should place onto the supported loose-item surface above the container.
+    if (!prefer_ground_surface) {
         const tile = place_any?.tiles?.cells?.[ty]?.[tx];
         if (tile) {
             const tags = (resolve_place_tile(String(tile.kind ?? ''), tile) ?? null)?.effective_tags ?? (Array.isArray(tile.tags) ? tile.tags : []);
@@ -2953,7 +3251,7 @@ function place_item_into_place_legal(place_any: any, place_id: string, tx: numbe
     }
 
     // 1b) Ground container-item at this voxel.
-    {
+    if (!prefer_ground_surface) {
         const dep = try_deposit_into_ground_container_item(place_any, place_id, tx, ty, z, item);
         if (dep.ok) return { ok: true, placed: 'container_item' };
         // Ignore "no container" errors and fall through; only full should fail hard.
@@ -2961,17 +3259,68 @@ function place_item_into_place_legal(place_any: any, place_id: string, tx: numbe
     }
 
     // 2) If occupied, reject placement.
-    if (place_tile_has_effective_tag(place_any, tx, ty, z, 'OCCUPIES')) {
+    if (ground_target_blocked_for_loose_item(place_any, tx, ty, z)) {
         return { ok: false, error: 'target_occupied' };
     }
 
     // 3) Place into ground at this voxel.
     delete (item as any).grid_x;
     delete (item as any).grid_y;
-    (item as any).elevation = z;
+    (item as any).elevation = resolve_loose_item_ground_z(place_any, tx, ty, z, item);
     const add_res = add_item_to_ground(place_any, tx, ty, item);
     if (!add_res.ok) return { ok: false, error: add_res.error };
     return { ok: true, placed: 'ground' };
+}
+
+function place_item_on_ground_only(place_any: any, tx: number, ty: number, target_wz: number, item: any): { ok: true } | { ok: false; error: string } {
+    const base_z = get_place_base_z(place_any);
+    const z = Number.isFinite(Number(target_wz)) ? Math.floor(Number(target_wz)) : base_z;
+    if (ground_target_blocked_for_loose_item(place_any, tx, ty, z)) {
+        return { ok: false, error: 'target_occupied' };
+    }
+    delete (item as any).grid_x;
+    delete (item as any).grid_y;
+    (item as any).elevation = resolve_loose_item_ground_z(place_any, tx, ty, z, item);
+    const add_res = add_item_to_ground(place_any, tx, ty, item);
+    if (!add_res.ok) return { ok: false, error: add_res.error };
+    return { ok: true };
+}
+
+function find_ground_item_location(place_any: any, item_instance_id: string): { key: string; list: any[]; index: number } | null {
+    const scattered = place_any?.ground?.scattered;
+    if (!scattered || typeof scattered !== 'object') return null;
+    for (const [key, items] of Object.entries(scattered)) {
+        const list = Array.isArray(items) ? (items as any[]) : [];
+        const index = list.findIndex((it: any) => String(it?.id ?? '') === String(item_instance_id));
+        if (index >= 0) return { key, list, index };
+    }
+    return null;
+}
+
+function find_nearby_unsupported_drop_target(place_any: any, x: number, y: number, z: number, radius: number): { x: number; y: number; z: number } | null {
+    const mover_owner = { kind: 'item' as const, id: 'debug_spawn_item' };
+    const candidates: Array<{ x: number; y: number; z: number; dist: number }> = [];
+    for (let dy = -radius; dy <= radius; dy += 1) {
+        for (let dx = -radius; dx <= radius; dx += 1) {
+            const tx = Math.floor(x + dx);
+            const ty = Math.floor(y + dy);
+            const dist = Math.abs(dx) + Math.abs(dy);
+            const supported = can_place_volume(place_any as any, mover_owner as any, { x: tx, y: ty, z }, 'WALK' as any, {
+                exclude_owner: mover_owner as any,
+                support_policy: 'any_footprint' as any,
+                ignore_occupants: false,
+            });
+            if (supported.ok || supported.reason !== 'no_support') continue;
+            const present = can_place_volume(place_any as any, mover_owner as any, { x: tx, y: ty, z }, 'FLY' as any, {
+                exclude_owner: mover_owner as any,
+                ignore_occupants: false,
+            });
+            if (!present.ok) continue;
+            candidates.push({ x: tx, y: ty, z, dist });
+        }
+    }
+    candidates.sort((a, b) => a.dist - b.dist);
+    return candidates[0] ?? null;
 }
 
 function expand_body_slot_meta(meta: unknown): string[] {
@@ -5184,9 +5533,9 @@ function start_http_server(log_path: string): void {
                 const mode = normalize_move_mode((data as any)?.mode);
                 const intent_reason = normalize_intent_reason((data as any)?.reason);
 
-                // Cardinal only
-                const want_dx = (dx !== 0 && dy !== 0) ? dx : dx;
-                const want_dy = (dx !== 0 && dy !== 0) ? 0 : dy;
+                // Blended directional intent: allow diagonals so acceleration can split 50/50 across axes.
+                const want_dx = dx;
+                const want_dy = dy;
                 const want_intent = (want_dx === 0 && want_dy === 0) ? null : { dx: want_dx, dy: want_dy };
 
                 const touched = touch_place_breath_by_id(slot, place_id, { realtime_visible: true });
@@ -5746,6 +6095,86 @@ function start_http_server(log_path: string): void {
             return;
         }
 
+        if (url.pathname === "/api/actor/debug/ascend") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+            if (!Number.isFinite(slot) || slot <= 0) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+            req.on("end", async () => {
+                try {
+                    const data = body ? JSON.parse(body) : {};
+                    const actor_id = String(data?.actor_id ?? "").trim();
+                    const vz_delta_raw = Number(data?.vz_delta ?? 3);
+                    const vz_delta = Number.isFinite(vz_delta_raw) ? Math.floor(vz_delta_raw) : 3;
+                    if (!actor_id) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_actor_id" }));
+                        return;
+                    }
+
+                    const actor_ref = `actor.${actor_id}`;
+                    const actor_any = get_entity_any_cached_or_load(slot, actor_ref) as any;
+                    if (!actor_any) {
+                        res.writeHead(404, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "actor_not_found" }));
+                        return;
+                    }
+
+                    const place_id = String(actor_any?.location?.place_id ?? actor_any?.location?.place ?? actor_any?.current_place_id ?? "eden_crossroads_tavern");
+                    const key = move_ctl_key(slot, actor_ref);
+                    const ctl = move_ctl.get(key) ?? null;
+                    const place_state = place_breath.get(place_breath_key(slot, place_id));
+                    const breath_index = place_state
+                        ? (Math.floor(Number(place_state.breath_index ?? 0)) || 0)
+                        : (Math.floor(Number(actor_any?.breath_index ?? actor_any?.breath_last_processed ?? 0)) || 0);
+                    const runtime = get_or_init_movement_physics_state(actor_ref, place_id, actor_any, ctl, breath_index);
+                    runtime.velocity.vz += vz_delta;
+                    runtime.transient_selection = {
+                        movement_verb: 'move',
+                        movement_subtype: 'debug.ascend',
+                        modality: 'walk',
+                        selected_breath: breath_index + 1,
+                        preferred_axes: ['z'],
+                        composite_target: null,
+                    };
+                    persist_entity_movement_state(actor_any, runtime, breath_index);
+                    actor_cache.set(entity_key(slot, actor_id), actor_any);
+                    queue_save_actor(slot, actor_id);
+
+                    debug_log('MOVE_UNIFY_TEST', 'debug ascend impulse applied', {
+                        slot,
+                        actor_ref,
+                        place_id,
+                        breath_index,
+                        vz_delta,
+                        velocity: runtime.velocity,
+                    });
+
+                    maybe_run_immediate_visible_place_pulse(slot, place_id, 'debug_ascend');
+
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, slot, actor_ref, place_id, vz_delta, velocity: runtime.velocity }));
+                } catch (err) {
+                    debug_error("API", "/api/actor/debug/ascend error", err);
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "internal_error" }));
+                }
+            });
+            return;
+        }
+
         // GET /api/actor?id=xxx - Get actor data
         if (url.pathname === "/api/actor") {
             if (req.method !== "GET") {
@@ -6273,7 +6702,7 @@ function start_http_server(log_path: string): void {
             req.on("end", async () => {
                 try {
                     const data = JSON.parse(body);
-                    const { item_def_id, place_id, x, y, qty = 1, contents } = data;
+                    const { item_def_id, place_id, x, y, elevation, qty = 1, contents, gravity, search_unsupported } = data;
 
                     if (!item_def_id || !place_id) {
                         res.writeHead(400, { "Content-Type": "application/json" });
@@ -6301,6 +6730,17 @@ function start_http_server(log_path: string): void {
 
                     // Create inline item
                     const item = create_inline_item_from_store(item_def_id, qty);
+                    if (typeof elevation === 'number' && Number.isFinite(elevation)) {
+                        (item as any).elevation = Math.floor(elevation);
+                    }
+                    if (gravity === true) {
+                        const tag_add = Array.isArray((item as any).tag_add) ? (item as any).tag_add : [];
+                        const has_gravity = tag_add.some((t: any) => String(t?.name ?? '').toUpperCase() === 'GRAVITY');
+                        if (!has_gravity) {
+                            tag_add.push({ name: 'GRAVITY', mag: 1, meta: [] });
+                            (item as any).tag_add = tag_add;
+                        }
+                    }
 
                     // If contents provided (for containers), add them
                     if (contents && Array.isArray(contents) && contents.length > 0) {
@@ -6316,8 +6756,20 @@ function start_http_server(log_path: string): void {
                     }
 
                     // Add to ground at position
-                    const spawn_x = x ?? 0;
-                    const spawn_y = y ?? 0;
+                    let spawn_x = x ?? 0;
+                    let spawn_y = y ?? 0;
+                    let spawn_z = (typeof (item as any).elevation === 'number' && Number.isFinite((item as any).elevation))
+                        ? Math.floor((item as any).elevation)
+                        : get_place_base_z(place_result.place as any);
+                    if (search_unsupported === true) {
+                        const unsupported_target = find_nearby_unsupported_drop_target(place_result.place as any, Math.floor(spawn_x), Math.floor(spawn_y), spawn_z, 4);
+                        if (unsupported_target) {
+                            spawn_x = unsupported_target.x;
+                            spawn_y = unsupported_target.y;
+                            spawn_z = unsupported_target.z;
+                            (item as any).elevation = spawn_z;
+                        }
+                    }
                     const add_result = add_item_to_ground(place_result.place, spawn_x, spawn_y, item);
                     
                     if (!add_result.ok) {
@@ -6334,7 +6786,7 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    debug_log("API", `Spawned ${item_def_id} on ground at (${spawn_x}, ${spawn_y}) in ${place_id}${item.contents ? ` with ${item.contents.length} items inside` : ''}`);
+                    debug_log("API", `Spawned ${item_def_id} on ground at (${spawn_x}, ${spawn_y}, z=${(item as any).elevation ?? 'base'}) in ${place_id}${item.contents ? ` with ${item.contents.length} items inside` : ''}`);
                     
                     res.writeHead(200, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ 
@@ -6343,6 +6795,7 @@ function start_http_server(log_path: string): void {
                         item_def_id,
                         name: def.name,
                         position: { x: spawn_x, y: spawn_y },
+                        elevation: (item as any).elevation,
                         place_id
                     }));
                 } catch (err) {
@@ -10059,6 +10512,17 @@ function start_http_server(log_path: string): void {
                                 const key = `${pp.x}_${pp.y}_${pp.z}`;
                                 const list: any[] = Array.isArray(place_any?.ground?.scattered?.[key]) ? place_any.ground.scattered[key] : [];
                                 const found = list.find((it: any) => String(it?.id ?? '') === String(child_id));
+                                if (!found) {
+                                    const fallback = find_ground_item_location(place_any, String(child_id));
+                                    if (fallback) {
+                                        debug_log('transfer', '[LEGALITY] ground source fallback resolved peeked item', {
+                                            item_instance_id: child_id,
+                                            requested_from: key,
+                                            actual_from: fallback.key,
+                                        });
+                                        return fallback.list[fallback.index] ?? null;
+                                    }
+                                }
                                 return found ?? null;
                             }
                         }
@@ -10520,8 +10984,8 @@ function start_http_server(log_path: string): void {
                     if (from_place && place_any) {
                         const base_z = get_place_base_z(place_any);
                         if (from_place.kind === 'place_ground') {
-                            const key = `${from_place.x}_${from_place.y}_${from_place.z}`;
-                            const list: any[] = Array.isArray(place_any?.ground?.scattered?.[key]) ? place_any.ground.scattered[key] : [];
+                            let key = `${from_place.x}_${from_place.y}_${from_place.z}`;
+                            let list: any[] = Array.isArray(place_any?.ground?.scattered?.[key]) ? place_any.ground.scattered[key] : [];
                             if (String(item_instance_id).startsWith('pile:')) {
                                 // Move all items at this voxel (pile drag)
                                 if (list.length < 2) {
@@ -10538,7 +11002,20 @@ function start_http_server(log_path: string): void {
                                     delete place_any.ground.scattered[key];
                                 }
                             } else {
-                                const idx = list.findIndex((it: any) => String(it?.id ?? '') === String(item_instance_id));
+                                let idx = list.findIndex((it: any) => String(it?.id ?? '') === String(item_instance_id));
+                                if (idx < 0) {
+                                    const found = find_ground_item_location(place_any, String(item_instance_id));
+                                    if (found) {
+                                        debug_log('transfer', '[INLINE] ground source fallback resolved moved item', {
+                                            item_instance_id,
+                                            requested_from: key,
+                                            actual_from: found.key,
+                                        });
+                                        key = found.key;
+                                        list = found.list;
+                                        idx = found.index;
+                                    }
+                                }
                                 if (idx >= 0) {
                                     const removed_list = list.splice(idx, 1);
                                     removed = removed_list[0] ?? null;
@@ -10659,7 +11136,10 @@ function start_http_server(log_path: string): void {
                         if (to_place.kind === 'place_ground') {
                             delete (removed as any).grid_x;
                             delete (removed as any).grid_y;
-                            const placed = place_item_into_place_legal(place_any, to_place.place_id, to_place.x, to_place.y, to_place.z, removed);
+                            const placing_ground_to_ground = !!(from_place && from_place.kind === 'place_ground');
+                            const placed = placing_ground_to_ground
+                                ? place_item_on_ground_only(place_any, to_place.x, to_place.y, to_place.z, removed)
+                                : place_item_into_place_legal(place_any, to_place.place_id, to_place.x, to_place.y, to_place.z, removed);
                             if (!placed.ok) {
                                 if (rollback_source) rollback_source();
                                 rollback_actor();

@@ -135,7 +135,7 @@ export function create_app_state(): AppState {
             current_place: null as Place | null,
             npc_movement_active: false,
             // World focus layer for Place DOM renderer (0/1/2)
-            focus_z: 1 as 0 | 1 | 2,
+            focus_z: 2,
             // World-Z center for the 3-layer viewport window.
             // Interpreted as an absolute elevation value; layers represent [center-1, center, center+1].
             world_z_center: 0,
@@ -338,6 +338,8 @@ export function create_app_state(): AppState {
 
     const MODULE_LAYOUT_STORAGE_KEY = 'thaumworld:module_layout:v1';
     const PLACE_FOCUS_Z_STORAGE_KEY = 'thaumworld:place_focus_z:v1';
+    const PLACE_VISIBLE_PLANE_RADIUS = 2;
+    const PLACE_VISIBLE_PLANE_COUNT = PLACE_VISIBLE_PLANE_RADIUS * 2 + 1;
 
     function is_rect(v: any): v is Rect {
         return !!v &&
@@ -375,7 +377,7 @@ export function create_app_state(): AppState {
             if (!raw) return;
             const n = Number(raw);
             if (!Number.isFinite(n)) return;
-            const z = Math.max(0, Math.min(2, Math.floor(n))) as 0 | 1 | 2;
+            const z = Math.max(0, Math.min(PLACE_VISIBLE_PLANE_COUNT - 1, Math.floor(n)));
             ui_state.place.focus_z = z;
         } catch {
             // ignore
@@ -1708,8 +1710,12 @@ export function create_app_state(): AppState {
         poll_window_feeds_in_flight = true;
         const now = Date.now();
         const movement_active = is_movement_activity_high();
-        const tasks = window_feeds.map(async (feed) => {
+                const tasks = window_feeds.map(async (feed) => {
             try {
+                if (feed.window_id === 'status' && ui_state.status_override.until_ms > Date.now()) {
+                    set_text_window_messages('status', [ui_state.status_override.lines.join(' | ')]);
+                    return;
+                }
                 if (movement_active && feed.window_id === 'transcript' && (now - last_transcript_poll_ms) < 2400) {
                     return;
                 }
@@ -2241,8 +2247,8 @@ export function create_app_state(): AppState {
     const Y_PLACE0 = 19;
     const Y_PLACE1 = 43;
 
-    // 1-line status window (plus border): 3 tiles tall.
-    const Y_SYS0 = APP_CONFIG.grid_height - 4;
+    // Status/system info window: give it enough height to show text, not just borders.
+    const Y_SYS0 = APP_CONFIG.grid_height - 6;
     const Y_SYS1 = APP_CONFIG.grid_height - 2;
 
     const BTN_X0 = R_X0;
@@ -2283,10 +2289,23 @@ export function create_app_state(): AppState {
         if (!place) return ui_state.place.world_z_center;
         const base_z = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
         const center = ui_state.place.world_z_center;
-        const planes = [center - 1, center, center + 1] as const;
-        const slot = ui_state.place.focus_z;
-        const wz = Math.floor(Number(planes[slot]));
+        const planes: number[] = [];
+        for (let dz = -PLACE_VISIBLE_PLANE_RADIUS; dz <= PLACE_VISIBLE_PLANE_RADIUS; dz += 1) {
+            planes.push(center + dz);
+        }
+        const slot = Math.max(0, Math.min(planes.length - 1, Math.floor(ui_state.place.focus_z)));
+        const wz = Math.floor(Number(planes[slot] ?? center));
         return Number.isFinite(wz) ? wz : base_z;
+    }
+
+    function get_drag_source_ground_elevation(): number | null {
+        const src = String(drag_state.source_container_id ?? '');
+        if (!src.startsWith('place.ground.')) return null;
+        const parts = src.split('.');
+        const pos = String(parts[3] ?? '');
+        const [,, zs] = pos.split('_');
+        const z = Number(zs);
+        return Number.isFinite(z) ? Math.floor(z) : null;
     }
 
     function is_tile_or_structure_container_at(place: Place, tile_x: number, tile_y: number, world_z: number): boolean {
@@ -2828,17 +2847,20 @@ export function create_app_state(): AppState {
                     const parts = src_container_id.split('.');
                     const place_id = parts.length >= 4 ? parts[2] : null;
                     const position_key = parts.length >= 4 ? parts[3] : null;
+                    const source_z = get_drag_source_ground_elevation() ?? get_focus_world_z_for_current_place();
+                    const focus_z = get_focus_world_z_for_current_place();
+                    const target_z = focus_z !== source_z ? focus_z : source_z;
                     if (!place_id || !position_key) {
                         drag_state.reject_drag();
                         return false;
                     }
-                    const dest_key = `${tile_x}_${tile_y}_${get_focus_world_z_for_current_place()}`;
+                    const dest_key = `${tile_x}_${tile_y}_${target_z}`;
                     if (position_key === dest_key) {
                         drag_state.end_drag();
                         return true;
                     }
                     try {
-                        const to_key = `${tile_x}_${tile_y}_${get_focus_world_z_for_current_place()}`;
+                        const to_key = `${tile_x}_${tile_y}_${target_z}`;
                         const mv = await api_transfer_inline({
                             actor_id: APP_CONFIG.input_actor_id,
                             item_instance_id: String(drag_state.item_instance_id ?? ''),
@@ -2852,7 +2874,7 @@ export function create_app_state(): AppState {
                             void refresh_container_data();
                             return true;
                         }
-                        flash_status([`Cannot drag: ${mv.error}`], 2000);
+                        flash_status([`Cannot drag: ${mv.error}`, mv.detail ? JSON.stringify(mv.detail) : ''], 2500);
                         drag_state.reject_drag();
                         return false;
                     } catch {
@@ -2867,6 +2889,9 @@ export function create_app_state(): AppState {
                     const src = String(drag_state.source_container_id ?? '');
                     const parts = src.split('.');
                     const kind = parts[1];
+                    const source_z = get_drag_source_ground_elevation() ?? get_focus_world_z_for_current_place();
+                    const focus_z = get_focus_world_z_for_current_place();
+                    const target_z = focus_z !== source_z ? focus_z : source_z;
                     // place.ground.<place_id>.<x_y> OR place.pile.<place_id>.<x_y>
                     const place_id = parts.length >= 4 ? parts[2] : null;
                     const position_key = parts.length >= 4 ? parts[3] : null;
@@ -2875,7 +2900,7 @@ export function create_app_state(): AppState {
                         return false;
                     }
 
-                    const dest_key = `${tile_x}_${tile_y}_${get_focus_world_z_for_current_place()}`;
+                    const dest_key = `${tile_x}_${tile_y}_${target_z}`;
                     if (position_key === dest_key) {
                         drag_state.end_drag();
                         return true;
@@ -2883,7 +2908,7 @@ export function create_app_state(): AppState {
 
                     // Dragging a pile/item within the place: use /api/transfer.
                     try {
-                        const to_key = `${tile_x}_${tile_y}_${get_focus_world_z_for_current_place()}`;
+                        const to_key = `${tile_x}_${tile_y}_${target_z}`;
                         const mv = await api_transfer_inline({
                             actor_id: APP_CONFIG.input_actor_id,
                             item_instance_id: String(drag_state.item_instance_id ?? ''),
@@ -2897,7 +2922,7 @@ export function create_app_state(): AppState {
                             void refresh_container_data();
                             return true;
                         }
-                        flash_status([`Cannot drag: ${mv.error}`], 2000);
+                        flash_status([`Cannot drag: ${mv.error}`, mv.detail ? JSON.stringify(mv.detail) : ''], 2500);
                         drag_state.reject_drag();
                         return false;
                     } catch {
@@ -2974,7 +2999,7 @@ export function create_app_state(): AppState {
                 const spill_src = String(drag_state.source_container_id ?? '');
                 if (spill_src.startsWith('place.item.')) {
                     try {
-                        const to_z = get_focus_world_z_for_current_place();
+                        const to_z = get_drag_source_ground_elevation() ?? get_focus_world_z_for_current_place();
                         const to_container = `place.ground.${place.id}.${tile_x}_${tile_y}_${to_z}`;
                         const sp = await api_transfer_inline({
                             actor_id: APP_CONFIG.input_actor_id,
@@ -3041,7 +3066,7 @@ export function create_app_state(): AppState {
 
                 try {
                     const actor_id = APP_CONFIG.input_actor_id;
-                    const to_z = get_focus_world_z_for_current_place();
+                    const to_z = get_drag_source_ground_elevation() ?? get_focus_world_z_for_current_place();
                     const to_container = `place.ground.${place.id}.${tile_x}_${tile_y}_${to_z}`;
                     const drop_res = await api_transfer_inline({
                         actor_id,
@@ -3068,14 +3093,17 @@ export function create_app_state(): AppState {
                         return true;
                     } else {
                         debug_log(`[PlaceModule] on_drop: API returned error: ${drop_res.error}`);
+                        if (drop_res.detail) {
+                            debug_log(`[PlaceModule] on_drop: API returned detail: ${JSON.stringify(drop_res.detail)}`);
+                        }
                         drag_state.reject_drag();
-                        flash_status([`Cannot drop: ${drop_res.error}`], 2000);
+                        flash_status([`Cannot drop: ${drop_res.error}`, drop_res.detail ? JSON.stringify(drop_res.detail) : ''], 2500);
                         return false;
                     }
                 } catch (err) {
                     debug_log(`[PlaceModule] on_drop: Exception: ${err}`);
                     drag_state.reject_drag();
-                    flash_status([`Drop failed: ${err}`], 2000);
+                    flash_status([`Drop failed: ${err}`], 2500);
                     return false;
                 }
             },
@@ -3751,7 +3779,8 @@ export function create_app_state(): AppState {
                 }
                 
                 const actor_pos = actor_in_place.tile_position;
-                console.log(`[DEBUG BUTTON] Spawning at (${actor_pos.x}, ${actor_pos.y}) in ${current_place.id}`);
+                const spawn_wz = get_focus_world_z_for_current_place();
+                console.log(`[DEBUG BUTTON] Spawning at (${actor_pos.x}, ${actor_pos.y}, z=${spawn_wz}) in ${current_place.id}`);
                 
                 try {
                     // Use new ground spawn API
@@ -3762,7 +3791,10 @@ export function create_app_state(): AppState {
                             ...spawn_data,
                             place_id: current_place.id,
                             x: actor_pos.x,
-                            y: actor_pos.y
+                            y: actor_pos.y,
+                            elevation: spawn_wz,
+                            gravity: true,
+                            search_unsupported: true,
                         })
                     });
                     
@@ -3830,6 +3862,35 @@ export function create_app_state(): AppState {
 
                 const place = get_current_place();
                 if (place) await update_current_place(place.id);
+            },
+        }),
+
+        make_button_module({
+            id: 'debug_ascend',
+            rect: { x0: DEBUG_X0 + 36, y0: DEBUG_Y_TEST, x1: DEBUG_X1 + 36, y1: DEBUG_Y_TEST + 1 },
+            label: 'ASC',
+            rgb: get_color_by_name('vivid_cyan').rgb,
+            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
+            async OnPress() {
+                const actor_id = APP_CONFIG.input_actor_id;
+                const slot = APP_CONFIG.selected_data_slot;
+                try {
+                    const res = await fetch(`http://localhost:8787/api/actor/debug/ascend?slot=${slot}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ slot, actor_id, vz_delta: 3 }),
+                    });
+                    const data = await res.json().catch(() => null);
+                    if (!res.ok || !data?.ok) {
+                        flash_status([`ASC failed: ${data?.error ?? `HTTP ${res.status}`}`], 1800);
+                        return;
+                    }
+                    flash_status([`ASC +3 vz`, `vz=${data.velocity?.vz ?? '?'}`], 1200);
+                } catch (err) {
+                    console.error('[DEBUG BUTTON] ASC error:', err);
+                    flash_status(['ASC error'], 1500);
+                }
             },
         }),
 
@@ -6039,6 +6100,15 @@ export function create_app_state(): AppState {
                         }
 
                         const src = String(drag_state.source_container_id ?? '');
+                        const target_slot_occupied = Array.isArray(contents) && contents.some((entry: any, idx: number) => {
+                            if (!entry?.instance) return false;
+                            let si = idx;
+                            if (entry.grid_x !== undefined && entry.grid_y !== undefined && cont) {
+                                const { cols } = get_container_grid(cont as any);
+                                si = (entry.grid_y * cols) + entry.grid_x;
+                            }
+                            return si === slot_index;
+                        });
                         
                         // Build transfer request body
                         const transfer_body: any = {
@@ -6054,9 +6124,14 @@ export function create_app_state(): AppState {
                         // When depositing into a nested container-item, do not forward parent grid coords.
                         debug_log(`[DEBUG-GRID] Checking grid condition: source=${drag_state.source_container_id}, target=${target_container_id}, grid_x=${grid_x}, grid_y=${grid_y}`);
                         if (target_container_id === container_id && grid_x !== undefined && grid_y !== undefined) {
-                            transfer_body.target_grid_x = grid_x;
-                            transfer_body.target_grid_y = grid_y;
-                            debug_log(`[DEBUG-GRID] Grid coordinates INCLUDED: (${grid_x}, ${grid_y})`);
+                            const same_container_move = src === container_id;
+                            if (!same_container_move && target_slot_occupied) {
+                                debug_log(`[DEBUG-GRID] Grid coordinates SKIPPED because target slot ${slot_index} is occupied; using auto-place fallback`);
+                            } else {
+                                transfer_body.target_grid_x = grid_x;
+                                transfer_body.target_grid_y = grid_y;
+                                debug_log(`[DEBUG-GRID] Grid coordinates INCLUDED: (${grid_x}, ${grid_y})`);
+                            }
                         } else {
                             debug_log(`[DEBUG-GRID] Grid coordinates SKIPPED`);
                         }
@@ -6092,6 +6167,7 @@ export function create_app_state(): AppState {
                             }
                             return true;
                         } else {
+                            debug_log(`[DEBUG-GRID] Transfer failed response: ${JSON.stringify(transfer_data)}`);
                             flash_status([`Transfer failed: ${transfer_data.error}`], 1500);
                             drag_state.reject_drag();
                             return false;
@@ -6644,6 +6720,12 @@ export function create_app_state(): AppState {
                     renderer_debug.last_actor_pos_key = actor_key;
                     renderer_debug.actor_pos_change_count += 1;
                     renderer_debug.last_actor_pos_changed_ms = now_wall;
+                    if (ui_state.place.world_z_center !== actor_z) {
+                        ui_state.place.world_z_center = actor_z;
+                    }
+                    if (ui_state.place.focus_z !== 2) {
+                        ui_state.place.focus_z = 2;
+                    }
                 }
             } catch {
                 // ignore

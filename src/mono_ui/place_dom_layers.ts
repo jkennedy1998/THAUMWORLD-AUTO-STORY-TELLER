@@ -9,6 +9,9 @@ export type PlaceDomLayersOpts = {
   base_font_size_px: number;
 };
 
+const PLACE_LAYER_COUNT = 5;
+const PLACE_FOCUS_LAYER = Math.floor(PLACE_LAYER_COUNT / 2);
+
 export type PlaceDomViewport = {
   // Absolute screen CSS pixels
   x: number;
@@ -87,8 +90,9 @@ export class PlaceDomLayers {
     const h = Math.max(1, Math.floor(height));
     if (this.space && this.width === w && this.height === h) return;
 
-    // Create a 3-layer voxel space: z=0,1,2
-    const s = createVoxelSpace(w, h, { minZ: 0, maxZ: 2, defaultZ: 1 });
+    const minZ = 0;
+    const maxZ = PLACE_LAYER_COUNT - 1;
+    const s = createVoxelSpace(w, h, { minZ, maxZ, defaultZ: PLACE_FOCUS_LAYER });
 
     // Ensure layers exist for 0 and 2.
     const empty: GridCell = { char: ' ', rgb: { r: 0, g: 0, b: 0 } as Rgb, weight_index: 3 };
@@ -101,12 +105,13 @@ export class PlaceDomLayers {
       cells: make_empty_cells(w, h, empty),
     });
 
-    s.layers.set(0, mk(0, 'z0', 1.0));
-    s.layers.set(1, mk(1, 'z1', 1.0));
-    s.layers.set(2, mk(2, 'z2', 0.85));
-    s.bounds.depth = 3;
-    s.bounds.minZ = 0;
-    s.bounds.maxZ = 2;
+    for (let z = minZ; z <= maxZ; z++) {
+      const opacity = z === PLACE_FOCUS_LAYER ? 1.0 : (Math.abs(z - PLACE_FOCUS_LAYER) === 1 ? 0.85 : 0.72);
+      s.layers.set(z, mk(z, `z${z}`, opacity));
+    }
+    s.bounds.depth = PLACE_LAYER_COUNT;
+    s.bounds.minZ = minZ;
+    s.bounds.maxZ = maxZ;
 
     // Force all layers visible; focus layer alignment is controlled by focus_plane.
     s.camera.show_all_layers = true;
@@ -140,15 +145,16 @@ export class PlaceDomLayers {
     this.renderer.setMouseParallax(cx, cy);
   }
 
-  set_focus_z(z: 0 | 1 | 2): void {
+  set_focus_z(z: number): void {
     if (!this.space) return;
-    this.space.camera.focus_plane = z;
+    const focus = Math.max(0, Math.min(PLACE_LAYER_COUNT - 1, Math.floor(z)));
+    this.space.camera.focus_plane = focus;
 
     // Visual affordance: de-emphasize non-focused layers.
     // (All layers remain visible; focus affects alignment + opacity.)
     for (const [lz, layer] of this.space.layers.entries()) {
       if (!layer) continue;
-      if (lz === z) {
+      if (lz === focus) {
         layer.opacity = 1.0;
       } else {
         // Keep a little more presence for adjacent layers.
@@ -190,13 +196,14 @@ export class PlaceDomLayers {
     }
   }
 
-  set_layer_cells(z: 0 | 1 | 2, cells: GridCell[][], content_version?: number): void {
+  set_layer_cells(z: number, cells: GridCell[][], content_version?: number): void {
     if (!this.space) return;
-    const layer = this.space.layers.get(z);
+    const layer_z = Math.max(0, Math.min(PLACE_LAYER_COUNT - 1, Math.floor(z)));
+    const layer = this.space.layers.get(layer_z);
     if (!layer) return;
     layer.cells = cells;
     if (this.renderer && typeof content_version === 'number' && Number.isFinite(content_version)) {
-      this.renderer.setLayerContentVersion(z, Math.trunc(content_version));
+      this.renderer.setLayerContentVersion(layer_z, Math.trunc(content_version));
     }
   }
 

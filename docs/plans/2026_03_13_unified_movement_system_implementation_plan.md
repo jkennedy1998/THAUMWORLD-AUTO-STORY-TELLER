@@ -707,6 +707,88 @@ Near-term success criteria:
 - no duplicate same-position move batches are emitted for visible realtime stepping
 - click-to-first-step latency remains low without sacrificing steady follow-up cadence
 
+## Vertical Motion Unification Plan
+
+This is the next major convergence target. Vertical movement must stop behaving like several special-case systems and instead run through one coherent physics path.
+
+### Current problem summary
+
+- Incline up/down now behave much closer to spec from a player-feel perspective, but they still rely on committed transition helpers instead of a fully unified vertical-velocity path.
+- Loose-item gravity is now working better, but it is still implemented as a direct active-place sweep instead of sharing a unified active-physics path with actors/NPCs.
+- Actor vertical debug impulses currently reveal that vertical velocity can exist in state without being advanced as a clean standalone physics mode.
+- This causes confusing behavior where vertical motion appears only when other controller activity keeps the movement loop hot.
+
+### Design rule we are converging on
+
+- Vertical motion is just motion: it must advance breath-by-breath from the same canonical velocity state used by the rest of the movement system.
+- The physics phase must continue while `vz != 0`, even when there is no fresh input/path/goal.
+- When vertical motion is active, vertical resolution must preempt horizontal resolution unless a more explicit committed transition rule says otherwise.
+- Incline-up, incline-down, actor falling, and loose-item falling should all be explainable as variants of the same vertical-resolution contract rather than separate bespoke systems.
+
+### Development sequence
+
+1) Keep incline transitions playable while removing accidental dependencies.
+
+- Preserve the current committed incline-up/down behavior until the unified vertical-motion path is proven.
+- Do not regress the current two-breath incline feel while vertical unification is in flight.
+
+2) Make actor vertical motion first-class.
+
+- If an actor/NPC has non-zero `vz`, physics must continue processing even with no input/path/goal.
+- Add an explicit actor vertical-motion state so debug ascend, gravity fall, and airborne continuation do not depend on controller activity.
+- Vertical attempts should be logged and resolved as a primary physics concern, not a side-effect of horizontal intent handling.
+
+3) Enforce vertical-preempts-horizontal while vertical motion is active.
+
+- When `abs(vz) > 0`, the resolver should try `z` first before `x/y`, except where a committed incline followthrough explicitly dictates the second half of a transition.
+- Horizontal air control remains allowed, but only after vertical resolution has had priority for that breath.
+
+4) Unify support/resting semantics.
+
+- Actors, NPCs, and loose items must agree on what support means and what resting above support means.
+- For loose items, the resting z is one layer above the supporting surface.
+- For actors/NPCs, stance origin must remain consistent with the same support surface model, even if body models differ.
+
+5) Fold loose-item gravity into the same vertical-motion mental model.
+
+- Loose items may remain in a direct active-place pass for now, but the rules must mirror the actor/NPC vertical rules:
+  - one z step per breath
+  - settles above support
+  - gravity acceleration is place-level
+- If the direct sweep remains, treat it as a temporary implementation choice, not a different physics model.
+
+6) Verify post-incline gravity resumption.
+
+- Gravity suppression during committed incline transitions is acceptable only for the committed breaths.
+- As soon as the incline transition is complete, normal vertical physics must resume.
+- The actor should then fall, remain supported, or continue airborne according to the same canonical rules as any other vertical motion.
+
+7) Introduce shared gravity/support helpers before full runtime unification.
+
+- Use the same support-state and gravity-delta helpers for actors/NPCs and loose items wherever possible.
+- This does not fully unify runtime storage yet, but it prevents logic drift between entity gravity and loose-item gravity.
+- Tiles/objects with `GRAVITY` should eventually plug into the same helper contract instead of inventing a separate gravity rule.
+
+### Acceptance checks for this phase
+
+- `MOVE_UNIFY_TEST PASS actor vertical step resolved from vz`
+- `MOVE_UNIFY_TEST PASS actor gravity fall settles to support`
+- `MOVE_UNIFY_TEST PASS vertical preempts horizontal while vz active`
+- `MOVE_UNIFY_TEST PASS incline transition resumes normal gravity after commitment`
+- `MOVE_UNIFY_TEST PASS loose item gravity settles above support surface`
+- `MOVE_UNIFY_TEST PASS loose item and actor support semantics agree on support layer`
+
+### Temporary exceptions allowed during migration
+
+- Committed incline-up/down transients may remain until the unified vertical path proves it can replace them without harming feel.
+- Loose-item gravity may remain in a dedicated active-place pass temporarily, provided its support/fall semantics match the canonical vertical rules.
+
+### What not to do
+
+- Do not paper over vertical-motion bugs with hard-coded z offsets or world-height hacks.
+- Do not let debug vertical impulses rely on fresh input to continue simulating.
+- Do not reintroduce visible catch-up bursts or renderer-authoritative vertical stepping while refining this phase.
+
 ## Verification / Acceptance Tests
 
 Add new devlog markers for the velocity system (example): `MOVE_VEL_TEST`.

@@ -70,6 +70,9 @@ function footstep_cooldown_ms(speed_tpm: number): number {
 // Debug logging helper - re-enabled with balanced output
 const place_debug_sample_counts = new Map<string, number>();
 const PLACE_MODULE_TIMING_VERSION = '2026-03-14-visible-pulse-v1';
+const VISIBLE_PLANE_RADIUS = 2;
+const VISIBLE_PLANE_COUNT = VISIBLE_PLANE_RADIUS * 2 + 1;
+const DEFAULT_FOCUS_Z = VISIBLE_PLANE_RADIUS;
 function should_sample_place_debug(prefix: string, sampleEvery: number): boolean {
   const next = (place_debug_sample_counts.get(prefix) ?? 0) + 1;
   place_debug_sample_counts.set(prefix, next);
@@ -194,12 +197,11 @@ export type PlaceModuleConfig = {
   font_family: string;
   base_font_size_px: number;
 
-  // World focus layer (0/1/2) selection.
-  get_focus_z?: () => 0 | 1 | 2;
-  set_focus_z?: (z: 0 | 1 | 2) => void;
+  // World focus layer selection within the visible z window.
+  get_focus_z?: () => number;
+  set_focus_z?: (z: number) => void;
 
-  // World-Z center (absolute elevation) for the 3-layer viewport window.
-  // Layers represent [center-1, center, center+1].
+  // World-Z center (absolute elevation) for the visible viewport window.
   get_world_z_center?: () => number;
 
   // Mouse parallax normalized (-1..+1), centered on place viewport.
@@ -263,8 +265,8 @@ type TargetedEntity = {
 type Particle = {
   x: number;           // Tile x position
   y: number;           // Tile y position  
-  // World Z layer for DOM world rendering (0..2). Defaults to z=1.
-  world_z?: 0 | 1 | 2;
+  // World Z layer for DOM world rendering relative slot.
+  world_z?: number;
   char: string;        // Visual character
   rgb: Rgb;           // Color
   created_at: number;  // Timestamp (Date.now())
@@ -505,19 +507,13 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   // Reuse offscreen canvases to avoid allocating every frame.
   let dom_off_w = 0;
   let dom_off_h = 0;
-  let dom_off0: Canvas | null = null;
-  let dom_off1: Canvas | null = null;
-  let dom_off2: Canvas | null = null;
+  let dom_off_layers: Array<Canvas | null> = Array.from({ length: VISIBLE_PLANE_COUNT }, () => null);
 
   // Reuse DOM-export buffers to reduce GC.
   let dom_cells_w = 0;
   let dom_cells_h = 0;
-  let dom_cells0: GridCell[][] | null = null;
-  let dom_cells1: GridCell[][] | null = null;
-  let dom_cells2: GridCell[][] | null = null;
-  let dom_cells_ver0 = 1;
-  let dom_cells_ver1 = 1;
-  let dom_cells_ver2 = 1;
+  let dom_cells_layers: Array<GridCell[][] | null> = Array.from({ length: VISIBLE_PLANE_COUNT }, () => null);
+  let dom_cells_versions: number[] = Array.from({ length: VISIBLE_PLANE_COUNT }, () => 1);
 
   try {
     window.addEventListener('thaumworld_ui_pan', (ev: any) => {
@@ -687,7 +683,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
   // Target management for communication system
   function set_target(entity_info: HoveredTile): void {
-    const focus_z = config.get_focus_z ? config.get_focus_z() : 1;
+    const focus_z = config.get_focus_z ? config.get_focus_z() : DEFAULT_FOCUS_Z;
     if (entity_info?.entity) {
       // No implicit pick-topmost: entities are only targetable when they are on the focused layer.
       // (get_entity_at already respects focus, but keep this as a defensive fallback.)
@@ -947,7 +943,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   function get_focus_world_z_for_place(place: Place): number {
     const center_world_z = get_world_z_center_for_place(place);
     const visible_planes_z = get_visible_planes_z(center_world_z);
-    const focus_slot = config.get_focus_z ? config.get_focus_z() : 1;
+    const focus_slot = config.get_focus_z ? config.get_focus_z() : DEFAULT_FOCUS_Z;
     return Math.floor(Number(visible_planes_z[focus_slot]));
   }
 
@@ -1126,6 +1122,43 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     }
   }
 
+  async function trigger_actor_ascend(): Promise<void> {
+    const place = config.get_place();
+    if (!place) return;
+    const actor = place.contents.actors_present[0];
+    if (!actor) return;
+    try {
+      const actor_id = String(actor.actor_ref).replace(/^actor\./, '');
+      const response = await fetch('http://localhost:8787/api/actor/debug/ascend', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          actor_id,
+          vz_delta: 3,
+        }),
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data?.ok) {
+        debug_log_place('MOVE_UNIFY_TEST jump/ascend request failed', {
+          actor_ref: actor.actor_ref,
+          status: response.status,
+          body: data,
+        });
+        return;
+      }
+      debug_log_place('MOVE_UNIFY_TEST jump/ascend request ok', {
+        actor_ref: actor.actor_ref,
+        vz_delta: data?.vz_delta ?? 3,
+        velocity: data?.velocity ?? null,
+      });
+    } catch (err: any) {
+      debug_log_place('MOVE_UNIFY_TEST jump/ascend request error', {
+        actor_ref: actor.actor_ref,
+        error: err?.message ?? String(err),
+      });
+    }
+  }
+
   function dispatch_transition_intent(intent: MoveIntent, meta: MoveIntentChangeMeta): void {
     const place = config.get_place();
     if (!place) return;
@@ -1272,18 +1305,20 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     }
   }
 
-  function get_visible_planes_z(center_world_z: number): readonly [number, number, number] {
+  function get_visible_planes_z(center_world_z: number): number[] {
     const c = Number.isFinite(center_world_z) ? Math.floor(center_world_z) : 0;
-    return [c - 1, c, c + 1] as const;
+    const planes: number[] = [];
+    for (let dz = -VISIBLE_PLANE_RADIUS; dz <= VISIBLE_PLANE_RADIUS; dz++) {
+      planes.push(c + dz);
+    }
+    return planes;
   }
 
-  function slot_for_world_z(world_z: number, visible_planes_z: readonly [number, number, number]): 0 | 1 | 2 | null {
+  function slot_for_world_z(world_z: number, visible_planes_z: readonly number[]): number | null {
     const wz = Math.floor(Number(world_z));
     if (!Number.isFinite(wz)) return null;
-    if (wz === Math.floor(visible_planes_z[0])) return 0;
-    if (wz === Math.floor(visible_planes_z[1])) return 1;
-    if (wz === Math.floor(visible_planes_z[2])) return 2;
-    return null;
+    const index = visible_planes_z.findIndex((z) => Math.floor(z) === wz);
+    return index >= 0 ? index : null;
   }
 
   function get_entity_world_z(entity: any, fallback_world_z: number): number {
@@ -1422,11 +1457,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
       // Render requests split by world-z target.
       const rq_ui: RenderRequest[] = [];
-      const rq_z0: RenderRequest[] = [];
-      const rq_z1: RenderRequest[] = [];
-      const rq_z2: RenderRequest[] = [];
+      const rq_layers: RenderRequest[][] = Array.from({ length: VISIBLE_PLANE_COUNT }, () => []);
 
-       const q_for_slot = (slot: 0 | 1 | 2): RenderRequest[] => (slot === 0 ? rq_z0 : (slot === 2 ? rq_z2 : rq_z1));
+      const q_for_slot = (slot: number): RenderRequest[] => rq_layers[slot] ?? rq_layers[DEFAULT_FOCUS_Z]!;
 
       // Calculate visible tile range
       const visible_tile_start_x = view.offset_x;
@@ -1554,7 +1587,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
 
     // Track occupied voxels by world layer slot (for correct item/entity overlap behavior).
-    const entity_occupied = new Set<string>(); // `${slot}:${tile_x}_${tile_y}`
+    const character_occupied = new Set<string>(); // `${slot}:${tile_x}_${tile_y}`
 
     // Render explicit multi-voxel structures.
     {
@@ -1611,8 +1644,6 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           const screen_x = inner.x0 + Math.floor((tile_x - view.offset_x) / view.scale);
           const screen_y = inner.y0 + Math.floor((tile_y - view.offset_y) / view.scale);
           if (!(screen_x >= inner.x0 && screen_x <= inner.x1 && screen_y >= inner.y0 && screen_y <= inner.y1)) continue;
-
-          entity_occupied.add(`${slot}:${tile_x}_${tile_y}`);
 
           const tags = Array.isArray((v as any)?.tags)
             ? (v as any).tags
@@ -1682,8 +1713,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           screen_y >= inner.y0 && screen_y <= inner.y1) {
         const weight = p.weight ?? 4;
         const render_index = p.render_index ?? 3;
-        const wz = (p.world_z ?? 1) as 0 | 1 | 2;
-        const target_q = wz === 0 ? rq_z0 : (wz === 2 ? rq_z2 : rq_z1);
+        const wz = Number.isFinite(Number(p.world_z)) ? Math.floor(Number(p.world_z)) : DEFAULT_FOCUS_Z;
+        const target_q = q_for_slot(wz);
         target_q.push({
           pass: 'particle',
           x: screen_x,
@@ -1779,7 +1810,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           const screen_y = inner.y0 + Math.floor((tile_y - view.offset_y) / view.scale);
           if (!(screen_x >= inner.x0 && screen_x <= inner.x1 && screen_y >= inner.y0 && screen_y <= inner.y1)) continue;
 
-          entity_occupied.add(`${slot}:${tile_x}_${tile_y}`);
+          character_occupied.add(`${slot}:${tile_x}_${tile_y}`);
 
           q_for_slot(slot).push({
             pass: 'character',
@@ -1870,7 +1901,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
       if (item_ids.length < 1) continue;
 
-      if (entity_occupied.has(`${item_slot}:${tile_x}_${tile_y}`)) continue;
+      if (character_occupied.has(`${item_slot}:${tile_x}_${tile_y}`)) continue;
 
       const open_containers = config.get_open_containers?.();
       const tile_hovered = Boolean(hovered && hovered.x === tile_x && hovered.y === tile_y && Math.floor(Number(hovered.world_z ?? NaN)) === voxel_z);
@@ -1997,7 +2028,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
     // Info overlay at top.
     {
-      const fz = config.get_focus_z ? config.get_focus_z() : 1;
+      const fz = config.get_focus_z ? config.get_focus_z() : DEFAULT_FOCUS_Z;
       const info_text = `[${place.name}] ${place.tile_grid.width}x${place.tile_grid.height} | z:${fz} | View: ${Math.floor(view.offset_x)},${Math.floor(view.offset_y)} | Scale: 1:${view.scale}`;
       const info_y = inner.y1;
       let info_x = inner.x0;
@@ -2058,8 +2089,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     // UI overlays remain in mono-canvas.
     draw_render_queue(canvas, rq_ui, { now_ms: Date.now(), pass_order: ['ui'], character_flash_period_ms: 240 });
 
-    // World layers render into DOM canvases (z=0/1/2) clipped to the place inner rect.
-    const focus_z = config.get_focus_z ? config.get_focus_z() : 1;
+    // World layers render into DOM canvases clipped to the place inner rect.
+    const focus_z = config.get_focus_z ? config.get_focus_z() : DEFAULT_FOCUS_Z;
 
      // Phase 0.5: explicit ownership heartbeat (prevents stale layers when place isn't drawn).
      touch_world_layers_owner('place');
@@ -2133,31 +2164,21 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
       // z=0: floor is now emitted via rq_z0 (inside bounds only).
       // Reuse offscreen canvases across frames.
-      if (!dom_off0 || !dom_off1 || !dom_off2 || dom_off_w !== width || dom_off_h !== height) {
+      if (dom_off_layers.some((layer) => !layer) || dom_off_w !== width || dom_off_h !== height) {
         dom_off_w = width;
         dom_off_h = height;
-        dom_off0 = create_canvas(width, height, { char: ' ', rgb: { r: 0, g: 0, b: 0 } });
-        dom_off1 = create_canvas(width, height, { char: ' ', rgb: { r: 0, g: 0, b: 0 } });
-        dom_off2 = create_canvas(width, height, { char: ' ', rgb: { r: 0, g: 0, b: 0 } });
+        dom_off_layers = Array.from({ length: VISIBLE_PLANE_COUNT }, () => create_canvas(width, height, { char: ' ', rgb: { r: 0, g: 0, b: 0 } }));
       } else {
         const full = { x0: 0, y0: 0, x1: width - 1, y1: height - 1 };
-        dom_off0.fill_rect(full, { char: ' ', rgb: { r: 0, g: 0, b: 0 } });
-        dom_off1.fill_rect(full, { char: ' ', rgb: { r: 0, g: 0, b: 0 } });
-        dom_off2.fill_rect(full, { char: ' ', rgb: { r: 0, g: 0, b: 0 } });
+        for (const layer of dom_off_layers) layer?.fill_rect(full, { char: ' ', rgb: { r: 0, g: 0, b: 0 } });
       }
 
-      const off0 = dom_off0;
-      const off1 = dom_off1;
-      const off2 = dom_off2;
-
       let buffers_rebuilt = false;
-      if (!dom_cells0 || !dom_cells1 || !dom_cells2 || dom_cells_w !== width || dom_cells_h !== height) {
+      if (dom_cells_layers.some((layer) => !layer) || dom_cells_w !== width || dom_cells_h !== height) {
         buffers_rebuilt = true;
         dom_cells_w = width;
         dom_cells_h = height;
-        dom_cells0 = ensure_grid_cell_buffer(width, height);
-        dom_cells1 = ensure_grid_cell_buffer(width, height);
-        dom_cells2 = ensure_grid_cell_buffer(width, height);
+        dom_cells_layers = Array.from({ length: VISIBLE_PLANE_COUNT }, () => ensure_grid_cell_buffer(width, height));
       }
 
       const wrap = (local: any) => ({
@@ -2167,22 +2188,22 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
       // Partition particles by world_z.
       // (Other passes are already split at enqueue time.)
-      draw_render_queue(wrap(off0) as any, rq_z0, { now_ms: Date.now(), pass_order: ['tile', 'item', 'character', 'particle'], character_flash_period_ms: 240 });
-      draw_render_queue(wrap(off1) as any, rq_z1, { now_ms: Date.now(), pass_order: ['tile', 'item', 'character', 'particle'], character_flash_period_ms: 240 });
-      draw_render_queue(wrap(off2) as any, rq_z2, { now_ms: Date.now(), pass_order: ['tile', 'item', 'character', 'particle'], character_flash_period_ms: 240 });
-
-      const changed0 = sync_grid_cells_from_canvas(off0, dom_cells0!);
-      const changed1 = sync_grid_cells_from_canvas(off1, dom_cells1!);
-      const changed2 = sync_grid_cells_from_canvas(off2, dom_cells2!);
-      if (changed0) dom_cells_ver0++;
-      if (changed1) dom_cells_ver1++;
-      if (changed2) dom_cells_ver2++;
+      const changed_layers: boolean[] = [];
+      for (let slot = 0; slot < VISIBLE_PLANE_COUNT; slot += 1) {
+        const off = dom_off_layers[slot]!;
+        draw_render_queue(wrap(off) as any, rq_layers[slot]!, { now_ms: Date.now(), pass_order: ['tile', 'item', 'character', 'particle'], character_flash_period_ms: 240 });
+        const changed = sync_grid_cells_from_canvas(off, dom_cells_layers[slot]!);
+        changed_layers.push(changed);
+        if (changed) dom_cells_versions[slot] = (dom_cells_versions[slot] ?? 0) + 1;
+      }
 
       // Only notify DOM layers when content changes (renderer still updates transforms every frame).
       // When buffers are (re)allocated, bind them to layers at least once.
-      if (buffers_rebuilt || changed0) dom_layers.set_layer_cells(0, dom_cells0!, dom_cells_ver0);
-      if (buffers_rebuilt || changed1) dom_layers.set_layer_cells(1, dom_cells1!, dom_cells_ver1);
-      if (buffers_rebuilt || changed2) dom_layers.set_layer_cells(2, dom_cells2!, dom_cells_ver2);
+      for (let slot = 0; slot < VISIBLE_PLANE_COUNT; slot += 1) {
+        if (buffers_rebuilt || changed_layers[slot]) {
+          dom_layers.set_layer_cells(slot, dom_cells_layers[slot]!, dom_cells_versions[slot]);
+        }
+      }
       dom_layers.render();
 
       dom_last_place_id = place.id;
@@ -2267,6 +2288,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const seq_map: Map<string, number> = ((mod as any).__move_seq_by_ref ??= new Map());
       let localActorApplied = 0;
       let lastLocalActorStep: { actor_ref: string; x: number; y: number; z: number | null; seq: number | null } | null = null;
+      let lastLocalActorElevationChange: { actor_ref: string; from_z: number | null; to_z: number | null; seq: number | null } | null = null;
 
       for (const u of updates) {
         const pid = String(u?.place_id ?? '');
@@ -2281,6 +2303,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         if (ref.startsWith('actor.')) {
           const a: any = place.contents.actors_present.find((a0: any) => a0.actor_ref === ref);
           if (!a) continue;
+          const prevZ = (typeof (a as any).elevation === 'number' && Number.isFinite((a as any).elevation))
+            ? Math.floor((a as any).elevation)
+            : null;
           const seq = (typeof u?.seq === 'number' && Number.isFinite(u.seq)) ? Math.floor(u.seq) : null;
           const last = seq_map.get(ref) ?? 0;
           if (seq !== null && seq < last) continue;
@@ -2292,6 +2317,15 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           if (typeof z === 'number') (a as any).elevation = z;
           set_npc_tracked_position(ref, { x, y });
           localActorApplied += 1;
+          const nextZ = (typeof z === 'number') ? z : prevZ;
+          if (prevZ !== nextZ) {
+            lastLocalActorElevationChange = {
+              actor_ref: ref,
+              from_z: prevZ,
+              to_z: nextZ,
+              seq,
+            };
+          }
           lastLocalActorStep = {
             actor_ref: ref,
             x,
@@ -2337,6 +2371,19 @@ export function make_place_module(config: PlaceModuleConfig): Module {
             z: lastLocalActorStep.z,
             seq: lastLocalActorStep.seq,
           });
+        }
+        if (lastLocalActorElevationChange) {
+          console.log(
+            '[MOVE_UNIFY_TEST] renderer applied local actor elevation change ' +
+              JSON.stringify({
+                place_id: place.id,
+                actor_ref: lastLocalActorElevationChange.actor_ref,
+                from_z: lastLocalActorElevationChange.from_z,
+                to_z: lastLocalActorElevationChange.to_z,
+                seq: lastLocalActorElevationChange.seq,
+                breath_index: Math.floor(Number((place as any)?.breath_index ?? 0)) || 0,
+              })
+          );
         }
         const nowMs = Date.now();
         // eslint-disable-next-line no-console
@@ -2448,6 +2495,12 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         });
         center_on_tile(target.x, target.y, place);
         camera.schedule_save(place);
+      }
+
+      // Follow Henry continuously; place panning is disabled.
+      const actor_follow_pos = config.get_actor_position?.() ?? null;
+      if (actor_follow_pos) {
+        center_on_tile(actor_follow_pos.x, actor_follow_pos.y, place);
       }
 
       // Register place with unified movement engine if changed
@@ -2575,10 +2628,6 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const place = config.get_place();
       if (!place) return;
 
-      // Phase 0.6: Space+Drag is reserved for camera/view panning.
-      // Do not start item drags while panning gesture is active.
-      if (e.space) return;
-
       // Don't start a ground drag if a UI drag is active.
       if (config.is_dragging?.()) return;
 
@@ -2606,31 +2655,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     OnDragMove(e): void {
       const place = config.get_place();
       if (!place) return;
-      if (!(e.buttons & 1)) return;
-
-      // When dragging an item (inventory/ground), do not pan the view.
-      if (config.is_dragging?.()) return;
-
-      // Note: Space+Drag routing is handled by CanvasRuntime to avoid triggering global pan.
-
-      const dx = e.step_dx;
-      const dy = e.step_dy;
-      const { width: inner_w, height: inner_h } = inner_size();
-      const bounds = camera.get_bounds(place, inner_w, inner_h);
-
-      // Convert screen delta to tile delta (inverted - dragging moves view opposite)
-      view.offset_x = clamp(
-        view.offset_x - dx * view.scale,
-        bounds.min_x,
-        bounds.max_x
-      );
-      view.offset_y = clamp(
-        view.offset_y - dy * view.scale,
-        bounds.min_y,
-        bounds.max_y
-      );
-
-      camera.schedule_save(place);
+      void e;
+      // Camera panning is disabled; the view follows the actor.
     },
 
     OnDragEnd(e: DragEvent): void {
@@ -2744,11 +2770,11 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const place = config.get_place();
       if (!place) return;
 
-      const focus_z = config.get_focus_z ? config.get_focus_z() : 1;
+      const focus_z = config.get_focus_z ? config.get_focus_z() : DEFAULT_FOCUS_Z;
       const center_world_z = get_world_z_center_for_place(place);
       const visible_planes_z = get_visible_planes_z(center_world_z);
       const base_z = get_place_base_z(place);
-      const focus_world_z = Math.floor(visible_planes_z[focus_z]);
+      const focus_world_z = Math.floor(visible_planes_z[Math.max(0, Math.min(visible_planes_z.length - 1, focus_z))] ?? center_world_z);
 
       // Convert screen to tile coordinates
       const tile = screen_to_tile(e.x, e.y);
@@ -2975,11 +3001,11 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const place = config.get_place();
       if (!place) return;
 
-      const focus_z = config.get_focus_z ? config.get_focus_z() : 1;
+      const focus_z = config.get_focus_z ? config.get_focus_z() : DEFAULT_FOCUS_Z;
       const center_world_z = get_world_z_center_for_place(place);
       const visible_planes_z = get_visible_planes_z(center_world_z);
       const base_z = get_place_base_z(place);
-      const focus_world_z = Math.floor(visible_planes_z[focus_z]);
+      const focus_world_z = Math.floor(visible_planes_z[Math.max(0, Math.min(visible_planes_z.length - 1, focus_z))] ?? center_world_z);
 
       // Convert screen to tile coordinates
       const tile = screen_to_tile(e.x, e.y);
@@ -3081,11 +3107,11 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
     OnWheel(e: WheelEvent): void {
       // Mouse wheel is reserved for world layer selection (focus_z).
-      // No wrap/cycle: clamp to 0..2.
+      // No wrap/cycle: clamp to visible layer count.
       if (!config.set_focus_z) return;
-      const cur = config.get_focus_z ? config.get_focus_z() : 1;
+      const cur = config.get_focus_z ? config.get_focus_z() : DEFAULT_FOCUS_Z;
       const dir = e.delta_y < 0 ? 1 : (e.delta_y > 0 ? -1 : 0);
-      const next = clamp_int(cur + dir, 0, 2) as 0 | 1 | 2;
+      const next = clamp_int(cur + dir, 0, VISIBLE_PLANE_COUNT - 1);
       if (next !== cur) {
         config.set_focus_z(next);
       }
@@ -3100,11 +3126,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const k = String(e.key ?? '');
       const kl = k.toLowerCase();
 
-      // Jump handling on keyup
+      // Jump/ascend is triggered on keydown; keyup only clears local timing state.
       if (kl === ' ') {
-        // Server-authoritative movement: jump is not yet implemented on server.
-        // Avoid local-only vertical stepping (it would rubberband on place refresh).
-        debug_log_place('MOVE_UNIFY_TEST jump disabled (server-authoritative movement)', { actor_ref: place.contents.actors_present?.[0]?.actor_ref ?? null });
         input_state.space_down_ms = null;
         return;
       }
@@ -3132,10 +3155,12 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const place = config.get_place();
       if (!place) return;
 
-      // Jump intent: record key-down time; resolution happens on key-up.
-      // (Movement is now driven by polling get_move_intent() in Draw)
+      // Space is jump/ascend; it overrides normal movement on the initiation breath server-side.
       if (e.key === ' ') {
-        // Disabled under server-authoritative movement.
+        if (!e.repeat) {
+          input_state.space_down_ms = Date.now();
+          void trigger_actor_ascend();
+        }
         return;
       }
 

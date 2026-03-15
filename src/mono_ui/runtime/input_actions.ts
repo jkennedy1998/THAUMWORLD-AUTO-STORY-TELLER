@@ -205,9 +205,9 @@ export function is_down(action: ActionName): boolean {
 }
 
 /**
- * Get movement intent as a cardinal direction.
- * Implements "last press wins" among held movement keys.
- * Returns: { dx, dy } where dx/dy are -1/0/1, or null if no movement
+ * Get movement intent as a blended directional input.
+ * Opposed inputs cancel per axis; orthogonal inputs blend 50/50 for diagonals.
+ * Returns: { dx, dy } where dx/dy are -1/0/1, or null if no movement.
  */
 export function get_move_intent(): { dx: number; dy: number } | null {
   const up = action_states.move_up;
@@ -220,26 +220,18 @@ export function get_move_intent(): { dx: number; dy: number } | null {
     return null;
   }
 
-  // Determine primary direction based on highest down_seq (last pressed wins)
-  // We only want ONE cardinal direction, no diagonals
-  const candidates: Array<{ action: ActionName; dx: number; dy: number; seq: number }> = [];
+  let dx = 0;
+  let dy = 0;
 
-  if (up.down)    candidates.push({ action: 'move_up',    dx: 0,  dy: 1,  seq: up.down_seq });
-  if (down.down) candidates.push({ action: 'move_down',  dx: 0,  dy: -1, seq: down.down_seq });
-  if (left.down) candidates.push({ action: 'move_left',  dx: -1, dy: 0,  seq: left.down_seq });
-  if (right.down)candidates.push({ action: 'move_right', dx: 1,  dy: 0,  seq: right.down_seq });
-
-  if (candidates.length === 0) {
-    return null;
+  if (left.down !== right.down) {
+    dx = left.down ? -1 : 1;
+  }
+  if (up.down !== down.down) {
+    dy = up.down ? 1 : -1;
   }
 
-  // Sort by sequence (highest = most recent press)
-  candidates.sort((a, b) => b.seq - a.seq);
-
-  // Return the most recent press
-  const primary = candidates[0];
-  if (!primary) return null;
-  return { dx: primary.dx, dy: primary.dy };
+  if (dx === 0 && dy === 0) return null;
+  return { dx, dy };
 }
 
 /**

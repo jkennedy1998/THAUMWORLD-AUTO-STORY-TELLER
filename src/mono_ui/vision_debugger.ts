@@ -27,7 +27,7 @@ export type Particle = {
   x: number;
   y: number;
   // Optional world-Z hint for the place module's DOM world layers.
-  world_z?: 0 | 1 | 2;
+  world_z?: number;
   char: string;
   rgb: { r: number; g: number; b: number };
   created_at: number;
@@ -102,18 +102,18 @@ const last_broadcast3d_log_by_key = new Map<string, number>();
 export type BlocksLosAt = (x: number, y: number, world_z: number) => boolean;
 
 export type WorldPos = { x: number; y: number; z: number };
-export type VisiblePlanesZ = readonly [number, number, number];
+export type VisiblePlanesZ = readonly number[];
 
 function clamp_int(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, Math.trunc(n)));
 }
 
-function plane_index_for_world_z(world_z: number, planes: VisiblePlanesZ): 0 | 1 | 2 {
+function plane_index_for_world_z(world_z: number, planes: VisiblePlanesZ): number {
   const z = Number(world_z);
-  if (!Number.isFinite(z)) return 1;
-  let best: 0 | 1 | 2 = 1;
+  if (!Number.isFinite(z)) return Math.floor(planes.length / 2);
+  let best = Math.floor(planes.length / 2);
   let best_d = Number.POSITIVE_INFINITY;
-  for (let i = 0 as 0 | 1 | 2; i <= 2; i = ((i + 1) as any)) {
+  for (let i = 0; i < planes.length; i += 1) {
     const dz = Math.abs(Number(planes[i]) - z);
     if (dz < best_d) {
       best_d = dz;
@@ -299,19 +299,17 @@ export function spawn_vision_cone_particles(
   const half_yaw = (cone.angle_degrees * Math.PI) / 180 / 2;
   const half_pitch = (vertical_fov_deg * Math.PI) / 180 / 2;
 
-  const slot_by_world_z = new Map<number, 0 | 1 | 2>();
-  slot_by_world_z.set(Math.floor(visible_planes_z[0]), 0);
-  slot_by_world_z.set(Math.floor(visible_planes_z[1]), 1);
-  slot_by_world_z.set(Math.floor(visible_planes_z[2]), 2);
+  const slot_by_world_z = new Map<number, number>();
+  for (let i = 0; i < visible_planes_z.length; i += 1) {
+    const wz = visible_planes_z[i];
+    if (typeof wz === 'number' && Number.isFinite(wz)) slot_by_world_z.set(Math.floor(wz), i);
+  }
 
-  const vis0 = new Set<string>();
-  const vis1 = new Set<string>();
-  const vis2 = new Set<string>();
-  const out0 = new Set<string>();
-  const out1 = new Set<string>();
-  const out2 = new Set<string>();
-  const sets_for_slot = (slot: 0 | 1 | 2): Set<string> => (slot === 0 ? vis0 : (slot === 2 ? vis2 : vis1));
-  const outline_for_slot = (slot: 0 | 1 | 2): Set<string> => (slot === 0 ? out0 : (slot === 2 ? out2 : out1));
+  const vis_sets = visible_planes_z.map(() => new Set<string>());
+  const out_sets = visible_planes_z.map(() => new Set<string>());
+  const fallback_slot = Math.floor(visible_planes_z.length / 2);
+  const sets_for_slot = (slot: number): Set<string> => vis_sets[slot] ?? vis_sets[fallback_slot]!;
+  const outline_for_slot = (slot: number): Set<string> => out_sets[slot] ?? out_sets[fallback_slot]!;
 
   const origin_cont = { x: origin2.x + 0.5, y: origin2.y + 0.5, z: origin.z + 0.5 };
 
@@ -369,7 +367,7 @@ export function spawn_vision_cone_particles(
 
 
   if (DEBUG_VISION.show_visible_vision) {
-    const spawn_set = (slot: 0 | 1 | 2, set: Set<string>) => {
+    const spawn_set = (slot: number, set: Set<string>) => {
       for (const key of set) {
         const [xs, ys] = key.split(',');
         spawn_debug_particle({
@@ -385,13 +383,11 @@ export function spawn_vision_cone_particles(
         });
       }
     };
-    spawn_set(0, vis0);
-    spawn_set(1, vis1);
-    spawn_set(2, vis2);
+    vis_sets.forEach((set, slot) => spawn_set(slot, set));
   }
 
   if (DEBUG_VISION.show_vision_cones) {
-    const spawn_outline = (slot: 0 | 1 | 2, set: Set<string>) => {
+    const spawn_outline = (slot: number, set: Set<string>) => {
       for (const key of set) {
         const [xs, ys] = key.split(',');
         spawn_debug_particle({
@@ -406,9 +402,7 @@ export function spawn_vision_cone_particles(
         });
       }
     };
-    spawn_outline(0, out0);
-    spawn_outline(1, out1);
-    spawn_outline(2, out2);
+    out_sets.forEach((set, slot) => spawn_outline(slot, set));
   }
 
   if (blocks_los_at) {
@@ -417,7 +411,7 @@ export function spawn_vision_cone_particles(
       last_los_raycast_log_by_ref.set(entity_ref, now);
       debug_log(
         'VisionDebug',
-        `LOS3D ${entity_ref} mag=${vision_mag} vFov=${vertical_fov_deg} origin_z=${origin.z} planes=[${visible_planes_z.join(',')}] rays=${rays_cast} blocked=${rays_blocked} steps=${vox_steps} vis=[${vis0.size},${vis1.size},${vis2.size}]`
+        `LOS3D ${entity_ref} mag=${vision_mag} vFov=${vertical_fov_deg} origin_z=${origin.z} planes=[${visible_planes_z.join(',')}] rays=${rays_cast} blocked=${rays_blocked} steps=${vox_steps} vis=[${vis_sets.map((s) => s.size).join(',')}]`
       );
     }
   }
