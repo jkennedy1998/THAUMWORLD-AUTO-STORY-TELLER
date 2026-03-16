@@ -5,6 +5,7 @@
   "name": "default actor",
   "title": "",
   "kind": "DEFAULT_KIND",
+  "weight": 1,
   "size_mag": 0,
   "sex": "",
   "age": 0,

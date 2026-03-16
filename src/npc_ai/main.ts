@@ -1328,112 +1328,11 @@ const active_npc_refs = new Set<string>();
 
 async function process_npc_movement_decisions(): Promise<void> {
     try {
-        const now = Date.now();
-        
-        // Get player's location to filter NPCs by place
-        // Only generate movement commands for NPCs in the same place as the player
-        // This prevents log spam from commands for NPCs the player can't see
-        const player_actor_result = load_actor(data_slot_number, "henry_actor");
-        const player_place_id = player_actor_result.ok 
-            ? (player_actor_result.actor as any)?.location?.place_id 
-            : null;
-        
-        if (!player_place_id) {
-            // No player location available, skip movement decisions
-            return;
-        }
-        
-        // Get all NPCs from storage to find active ones
-        const all_npcs = find_npcs(data_slot_number, {});
-        
-        // Add all NPCs to active tracking
-        for (const npc of all_npcs) {
-            const npc_ref = `npc.${npc.id}`;
-            active_npc_refs.add(npc_ref);
-        }
-        
-        // Process all active NPCs
-        for (const npc_ref of active_npc_refs) {
-            const last_check = npc_last_movement_decision.get(npc_ref) || 0;
-            
-            // Only check every WANDER_CHECK_INTERVAL_MS
-            if (now - last_check < WANDER_CHECK_INTERVAL_MS) {
-                continue;
-            }
-            
-            npc_last_movement_decision.set(npc_ref, now);
-            
-            // Filter: Only send commands for NPCs in the same place as the player
-            // This prevents generating commands for NPCs the player can't see
-            const npc_id = npc_ref.replace("npc.", "");
-            const npc_result = load_npc(data_slot_number, npc_id);
-            if (!npc_result.ok) continue;
-            
-            const npc_place_id = get_npc_place_id(npc_result.npc);
-            if (npc_place_id !== player_place_id) {
-                // NPC is not in the player's place - skip silently (no log spam)
-                continue;
-            }
-            
-            // Skip if in conversation.
-            // Witness-driven conversation state is managed by the ActionPipeline (interface_program)
-            // in a different Node process, so we use a small disk-backed presence store here.
-            const in_conv = is_in_conversation_presence(data_slot_number, npc_ref) || is_in_conversation(npc_ref);
-            
-            // Also check place data for "busy" status (set by witness handler in Interface Program)
-            let npc_status_in_place: string | undefined;
-            if (npc_place_id) {
-                const place_result = load_place(data_slot_number, npc_place_id);
-                if (place_result.ok && place_result.place) {
-                    const npc_in_place = place_result.place.contents.npcs_present.find(
-                        (n: any) => n.npc_ref === npc_ref
-                    );
-                    npc_status_in_place = npc_in_place?.status;
-
-                    // Heal stale persisted busy status: busy is an ephemeral conversation visual state.
-                    // If we are not in an active conversation, force it back to present.
-                    if (!in_conv && npc_in_place && npc_in_place.status === "busy") {
-                        npc_in_place.status = "present";
-                        save_place(data_slot_number, place_result.place);
-                        npc_status_in_place = "present";
-                    }
-                }
-            }
-            
-            const is_busy_in_place = npc_status_in_place === "busy";
-            
-            console.log(`[NPC_AI] ${npc_ref} in conversation: ${in_conv}, place status: ${npc_status_in_place}, busy: ${is_busy_in_place}`);
-            
-            if (in_conv || is_busy_in_place) {
-                console.log(`[NPC_AI] ${npc_ref} skipping wander - in conversation or busy`);
-                continue;
-            }
-            
-            // Check if NPC is already moving (prevents redundant commands)
-            const movement_state = get_movement_state(npc_ref);
-            if (movement_state?.is_moving) {
-                continue;
-            }
-            
-            // Check when we last sent a wander command
-            const last_wander = npc_last_wander_time.get(npc_ref) || 0;
-            const time_since_last_wander = now - last_wander;
-            
-            // Must wait minimum time between wander commands to prevent snapping
-            if (time_since_last_wander < MIN_TIME_BETWEEN_WANDERS_MS) {
-                continue;
-            }
-            
-            // Record this wander command
-            npc_last_wander_time.set(npc_ref, now);
-            
-            // Send wander command
-            send_wander_command(
-                npc_ref,
-                "Idle wandering - no conversation active",
-                3, // Normal intensity
-                6  // Normal range
-            );
+        if (!(process_npc_movement_decisions as any).__server_authority_logged) {
+            (process_npc_movement_decisions as any).__server_authority_logged = true;
+            debug_log("NPC_AI", "Skipping legacy NPC movement decisions; server brain owns movement goals", {
+                mode: "server_authoritative_goals",
+            });
         }
     } catch (err) {
         debug_error("NPC_AI", "process_npc_movement_decisions failed", err);
@@ -1447,101 +1346,12 @@ async function process_npc_movement_decisions(): Promise<void> {
 async function process_npc_position_updates(inbox_path: string): Promise<void> {
     try {
         const inbox = read_inbox(inbox_path);
-        const position_updates = inbox.messages.filter((msg: any) => 
-            msg.type === "npc_position_update" && 
-            !msg.meta?.position_processed
-        );
-        
-        for (const msg of position_updates) {
-            try {
-                const update = JSON.parse(msg.content) as {
-                    npc_ref: string;
-                    position: { x: number; y: number };
-                    place_id: string;
-                    facing?: string;
-                    movement_schedule?: any;
-                    breath_index?: number;
-                    breath_last_processed?: number;
-                    breath_last_processed_ms?: number;
-                };
-                
-                const npc_id = update.npc_ref.replace("npc.", "");
-                
-                // Validate position - reject (0,0) which indicates a bug
-                if (update.position.x === 0 && update.position.y === 0) {
-                    debug_log("NPC_AI", `REJECTED invalid position (0,0) for ${update.npc_ref} - not saving`);
-                    // Mark as processed to avoid retry loop
-                    msg.meta = { ...(msg.meta || {}), position_processed: true, rejected: true, reason: "zero_position" };
-                    continue;
-                }
-                
-                // Load NPC from storage
-                const npc_result = load_npc(data_slot_number, npc_id);
-                if (!npc_result.ok) {
-                    debug_log("NPC_AI", `Cannot save position for ${update.npc_ref} - NPC not found`);
-                    continue;
-                }
-                
-                const npc = npc_result.npc as Record<string, any>;
-                
-                // Get current position for logging
-                const old_pos = npc.location?.tile;
-                
-                // Update location
-                if (!npc.location) {
-                    npc.location = {};
-                }
-                npc.location.tile = {
-                    x: update.position.x,
-                    y: update.position.y
-                };
-                npc.location.place_id = update.place_id;
-
-                // Optional scheduling sync from renderer.
-                if (typeof update.facing === "string" && update.facing.trim()) {
-                    (npc as any).facing = String(update.facing).toLowerCase();
-                }
-                if (update.movement_schedule && typeof update.movement_schedule === "object") {
-                    (npc as any).movement_schedule = update.movement_schedule;
-                }
-                if (typeof update.breath_index === "number" && Number.isFinite(update.breath_index)) {
-                    (npc as any).breath_index = Math.floor(update.breath_index);
-                }
-                if (typeof update.breath_last_processed === "number" && Number.isFinite(update.breath_last_processed)) {
-                    (npc as any).breath_last_processed = Math.floor(update.breath_last_processed);
-                }
-                if (typeof update.breath_last_processed_ms === "number" && Number.isFinite(update.breath_last_processed_ms)) {
-                    (npc as any).breath_last_processed_ms = Math.floor(update.breath_last_processed_ms);
-                }
-                
-                // Save to storage
-                save_npc(data_slot_number, npc_id, npc);
-                
-                debug_log("NPC_AI", `Saved position for ${update.npc_ref}`, {
-                    x: update.position.x,
-                    y: update.position.y,
-                    place_id: update.place_id,
-                    moved_from: old_pos ? `(${old_pos.x}, ${old_pos.y})` : "(unknown)",
-                    facing: (npc as any).facing,
-                });
-                
-                // Mark as processed
-                msg.meta = { ...(msg.meta || {}), position_processed: true };
-                
-            } catch (err) {
-                debug_error("NPC_AI", "Failed to process position update", err);
-            }
-        }
-        
-        // Remove processed position updates to prevent inbox growth.
-        if (position_updates.length > 0) {
-            inbox.messages = inbox.messages.filter((m: any) => {
-                if (m?.type !== "npc_position_update") return true;
-                return !m?.meta?.position_processed;
-            });
+        const removed = inbox.messages.filter((msg: any) => msg?.type === "npc_position_update").length;
+        if (removed > 0) {
+            inbox.messages = inbox.messages.filter((msg: any) => msg?.type !== "npc_position_update");
             write_inbox(inbox_path, inbox);
+            debug_log("NPC_AI", "Discarded legacy renderer npc_position_update messages", { removed });
         }
-        
     } catch (err) {
         debug_error("NPC_AI", "process_npc_position_updates failed", err);
     }

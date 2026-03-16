@@ -164,6 +164,26 @@ export function load_master_item(def_id: string): ItemDefLookupResult {
     };
 }
 
+export function list_master_items(): Array<{ id: string; item: ItemDefinition; path: string }> {
+    const master_dir = get_master_items_dir();
+    const categories = ['weapons', 'armor', 'clothing', 'containers', 'currency'];
+    const results: Array<{ id: string; item: ItemDefinition; path: string }> = [];
+    for (const category of categories) {
+        const dir = path.join(master_dir, category);
+        if (!fs.existsSync(dir)) continue;
+        for (const name of fs.readdirSync(dir)) {
+            if (!name.toLowerCase().endsWith('.jsonc')) continue;
+            const def_id = name.replace(/\.jsonc$/i, '');
+            const loaded = load_master_item(def_id);
+            if (loaded.ok) {
+                results.push({ id: def_id, item: loaded.item, path: loaded.path });
+            }
+        }
+    }
+    results.sort((a, b) => a.id.localeCompare(b.id));
+    return results;
+}
+
 export function load_default_item(): ItemDefLookupResult {
     const template_path = get_default_item_path();
     if (!fs.existsSync(template_path)) {

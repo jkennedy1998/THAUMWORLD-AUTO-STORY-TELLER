@@ -70,9 +70,7 @@ function footstep_cooldown_ms(speed_tpm: number): number {
 // Debug logging helper - re-enabled with balanced output
 const place_debug_sample_counts = new Map<string, number>();
 const PLACE_MODULE_TIMING_VERSION = '2026-03-14-visible-pulse-v1';
-const VISIBLE_PLANE_RADIUS = 2;
-const VISIBLE_PLANE_COUNT = VISIBLE_PLANE_RADIUS * 2 + 1;
-const DEFAULT_FOCUS_Z = VISIBLE_PLANE_RADIUS;
+const DEFAULT_FOCUS_Z = 0;
 function should_sample_place_debug(prefix: string, sampleEvery: number): boolean {
   const next = (place_debug_sample_counts.get(prefix) ?? 0) + 1;
   place_debug_sample_counts.set(prefix, next);
@@ -108,7 +106,12 @@ function debug_log_place(...args: any[]) {
   let last_entity_hit: { ref: string; part: string; voxel: { x: number; y: number; z: number } } | null = null;
 
   const multitile_devlog_once = new Set<string>();
-let last_cached_place_id: string | null = null;
+  let last_cached_place_id: string | null = null;
+  let last_painter_drag_key: string | null = null;
+  let painter_pan_drag_active = false;
+  let painter_pan_start = { x: 0, y: 0 };
+  let painter_pan_view_start = { x: 0, y: 0 };
+  let last_painter_key_pan_ms = 0;
 
 /**
  * Populate tag cache from place data
@@ -216,6 +219,9 @@ export type PlaceModuleConfig = {
   on_double_click_ground?: (tile_x: number, tile_y: number) => void;  // Open scattered container
   on_open_tile_container?: (tile_x: number, tile_y: number) => void;  // Open a tile container (harvestable, planter, etc.)
   get_actor_position?: () => { x: number; y: number } | null;  // For distance checking
+  get_camera_target_position?: () => { x: number; y: number } | null;
+  get_camera_target_mode?: () => 'follow_actor' | 'free';
+  set_camera_target_position?: (tile: { x: number; y: number }, mode?: 'follow_actor' | 'free') => void;
 
   // Ground item UX (tabletop): direct drag only when exactly one item exists on the tile.
   on_drag_start_ground_item?: (tile_x: number, tile_y: number) => void;
@@ -231,11 +237,30 @@ export type PlaceModuleConfig = {
   // Optional open container ids, used to show "open" state on ground container-items.
   get_open_containers?: () => Set<string>;
 
+  get_place_painter_preview?: () => null | {
+    kind: 'tile' | 'item';
+    id: string;
+    display_char: string;
+    display_color: string;
+    body_model?: { physical?: Array<{ dx: number; dy: number; dz: number }> } | null;
+  };
+
   // Drag and drop callbacks
   on_drop?: (tile_x: number, tile_y: number) => Promise<boolean>;  // Drop item onto ground tile (adjacent)
   on_throw?: (tile_x: number, tile_y: number) => Promise<boolean>;  // Throw item to distant tile (within range)
   is_dragging?: () => boolean;  // Check if an item is being dragged
   get_drag_source?: () => { item_instance_id: string; source_container_id: string } | null;  // Get drag source info
+
+  // In-game place painter mode hooks.
+  is_place_painter_active?: () => boolean;
+  on_place_painter_primary_action?: (target: {
+    place_id: string;
+    tile_position: TilePosition;
+    world_z: number;
+    button?: number;
+    entity_ref?: string;
+    entity_type?: 'npc' | 'actor';
+  }) => Promise<void> | void;
 };
 
 type ViewState = {
@@ -395,6 +420,19 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     }
   }
 
+  function get_place_tile_at_world_z(place: Place, tile_x: number, tile_y: number, world_z: number): PlaceTile | null {
+    try {
+      const base_z = get_place_base_z(place);
+      const offset = Math.floor(Number(world_z) - Number(base_z));
+      if (offset === 0) return ((place as any)?.tiles?.cells?.[tile_y]?.[tile_x] ?? null) as PlaceTile | null;
+      if (offset === -1) return ((place as any)?.tiles_z0?.cells?.[tile_y]?.[tile_x] ?? null) as PlaceTile | null;
+      if (offset === 1) return ((place as any)?.tiles_z1?.cells?.[tile_y]?.[tile_x] ?? null) as PlaceTile | null;
+      return ((place as any)?.[`tiles_z${offset}`]?.cells?.[tile_y]?.[tile_x] ?? null) as PlaceTile | null;
+    } catch {
+      return null;
+    }
+  }
+
   function get_place_tile_z0(place: Place, tile_x: number, tile_y: number): PlaceTile | null {
     try {
       const t: PlaceTile | undefined = (place as any)?.tiles_z0?.cells?.[tile_y]?.[tile_x];
@@ -507,13 +545,13 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   // Reuse offscreen canvases to avoid allocating every frame.
   let dom_off_w = 0;
   let dom_off_h = 0;
-  let dom_off_layers: Array<Canvas | null> = Array.from({ length: VISIBLE_PLANE_COUNT }, () => null);
+  let dom_off_layers: Array<Canvas | null> = [];
 
   // Reuse DOM-export buffers to reduce GC.
   let dom_cells_w = 0;
   let dom_cells_h = 0;
-  let dom_cells_layers: Array<GridCell[][] | null> = Array.from({ length: VISIBLE_PLANE_COUNT }, () => null);
-  let dom_cells_versions: number[] = Array.from({ length: VISIBLE_PLANE_COUNT }, () => 1);
+  let dom_cells_layers: Array<GridCell[][] | null> = [];
+  let dom_cells_versions: number[] = [];
 
   try {
     window.addEventListener('thaumworld_ui_pan', (ev: any) => {
@@ -542,7 +580,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
       const place = config.get_place();
       const center_world_z = get_world_z_center_for_place(place);
-      const visible_planes_z = get_visible_planes_z(center_world_z);
+      const visible_planes_z = get_defined_place_world_zs(place);
       const origin_z = Number.isFinite(z_raw) ? Math.floor(z_raw) : center_world_z;
 
       const sense = d.sense;
@@ -589,7 +627,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     // Clamp to -1..+1 so camera tuning stays stable.
     const ox = max_dx > 0 ? (px - opts.anchor_screen_x) / max_dx : 0;
     const oy = max_dy > 0 ? (py - opts.anchor_screen_y) / max_dy : 0;
-    return {
+  return {
       x: Math.max(-1, Math.min(1, ox)),
       y: Math.max(-1, Math.min(1, oy)),
     };
@@ -811,6 +849,14 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     camera.center_on_tile(place, width, height, tile_x, tile_y);
   }
 
+  function update_painter_camera_target_from_view(place: Place): void {
+    if (!config.set_camera_target_position) return;
+    const { width, height } = inner_size();
+    const center_x = Math.floor(view.offset_x + (width * view.scale) / 2);
+    const center_y = Math.floor(view.offset_y + (height * view.scale) / 2);
+    config.set_camera_target_position({ x: center_x, y: center_y }, 'free');
+  }
+
   // Get all entities at tile position (for cycling)
   function get_all_entities_at(
     tile_x: number,
@@ -942,7 +988,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
   function get_focus_world_z_for_place(place: Place): number {
     const center_world_z = get_world_z_center_for_place(place);
-    const visible_planes_z = get_visible_planes_z(center_world_z);
+    const visible_planes_z = get_defined_place_world_zs(place);
     const focus_slot = config.get_focus_z ? config.get_focus_z() : DEFAULT_FOCUS_Z;
     return Math.floor(Number(visible_planes_z[focus_slot]));
   }
@@ -1305,13 +1351,20 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     }
   }
 
-  function get_visible_planes_z(center_world_z: number): number[] {
-    const c = Number.isFinite(center_world_z) ? Math.floor(center_world_z) : 0;
-    const planes: number[] = [];
-    for (let dz = -VISIBLE_PLANE_RADIUS; dz <= VISIBLE_PLANE_RADIUS; dz++) {
-      planes.push(c + dz);
+  function get_defined_place_world_zs(place: Place | null): number[] {
+    const base_z = get_place_base_z(place);
+    const place_any: any = place as any;
+    const out = new Set<number>();
+    if (place_any?.tiles_z0) out.add(base_z - 1);
+    if (place_any?.tiles) out.add(base_z);
+    for (const key of Object.keys(place_any ?? {})) {
+      const m = /^tiles_z(-?\d+)$/.exec(key);
+      if (!m) continue;
+      const off = Math.floor(Number(m[1]));
+      if (Number.isFinite(off)) out.add(base_z + off);
     }
-    return planes;
+    if (out.size === 0) out.add(base_z);
+    return Array.from(out).sort((a, b) => a - b);
   }
 
   function slot_for_world_z(world_z: number, visible_planes_z: readonly number[]): number | null {
@@ -1330,7 +1383,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   // Check for entity movement and spawn footsteps
   function check_entity_movement(place: Place) {
     const center_world_z = get_world_z_center_for_place(place);
-    const visible_planes_z = get_visible_planes_z(center_world_z);
+    const visible_planes_z = get_defined_place_world_zs(place);
 
     // Check actors
     for (const actor of place.contents.actors_present) {
@@ -1446,7 +1499,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
        // 3-layer window of absolute world-z values.
        const center_world_z = get_world_z_center_for_place(place);
-       const visible_planes_z = get_visible_planes_z(center_world_z);
+       const visible_planes_z = get_defined_place_world_zs(place);
        const base_z = get_place_base_z(place);
 
       const open_containers = config.get_open_containers ? config.get_open_containers() : null;
@@ -1457,9 +1510,10 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
       // Render requests split by world-z target.
       const rq_ui: RenderRequest[] = [];
-      const rq_layers: RenderRequest[][] = Array.from({ length: VISIBLE_PLANE_COUNT }, () => []);
+      const plane_count = Math.max(1, visible_planes_z.length);
+      const rq_layers: RenderRequest[][] = Array.from({ length: plane_count }, () => []);
 
-      const q_for_slot = (slot: number): RenderRequest[] => rq_layers[slot] ?? rq_layers[DEFAULT_FOCUS_Z]!;
+      const q_for_slot = (slot: number): RenderRequest[] => rq_layers[slot] ?? rq_layers[0]!;
 
       // Calculate visible tile range
       const visible_tile_start_x = view.offset_x;
@@ -1473,95 +1527,43 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       // Spawn/update particles based on movement (used by later particle render pass).
       check_entity_movement(place);
 
-      // Render z=0 support blocks.
-      {
-        const slot_support = slot_for_world_z(base_z - 1, visible_planes_z);
-        if (slot_support !== null) {
-          const rq = q_for_slot(slot_support);
+      // Render authored tiles for all visible world-z planes.
+      for (const world_z of visible_planes_z) {
+        const slot = slot_for_world_z(world_z, visible_planes_z);
+        if (slot === null) continue;
+        const rq = q_for_slot(slot);
         for (let sy = inner.y0; sy <= inner.y1; sy++) {
           for (let sx = inner.x0; sx <= inner.x1; sx++) {
             const tile_x = Math.floor(view.offset_x + (sx - inner.x0) * view.scale);
             const tile_y = Math.floor(view.offset_y + (sy - inner.y0) * view.scale);
             if (tile_x < 0 || tile_x >= place.tile_grid.width || tile_y < 0 || tile_y >= place.tile_grid.height) continue;
-            const t0 = get_place_tile_z0(place, tile_x, tile_y);
-            if (!t0) continue;
-            const display0 = get_tile_display(t0, tile_x, tile_y);
-            rq.push({
-              pass: 'tile',
-              x: sx,
-              y: sy,
-              order: 0,
-              key: `tile_z0:${tile_x},${tile_y}`,
-              payload: make_simple_tile_payload({
-                id: `tile_z0:${place.id}:${tile_x},${tile_y}`,
-                char: display0.char,
-                tags: (t0 as any).tags ?? [],
-                base_fg: hex_to_rgb(display0.color),
-                weight_index: 1,
-              }) as any,
-              ctx: ctx_place_tile(),
-            });
-          }
-        }
-        }
-      }
-
-      // Render z=1 tiles (walls/doors/features).
-      {
-        const slot_struct = slot_for_world_z(base_z, visible_planes_z);
-        if (slot_struct !== null) {
-          const rq = q_for_slot(slot_struct);
-        for (let sy = inner.y0; sy <= inner.y1; sy++) {
-          for (let sx = inner.x0; sx <= inner.x1; sx++) {
-            const tile_x = Math.floor(view.offset_x + (sx - inner.x0) * view.scale);
-            const tile_y = Math.floor(view.offset_y + (sy - inner.y0) * view.scale);
-            if (tile_x < 0 || tile_x >= place.tile_grid.width || tile_y < 0 || tile_y >= place.tile_grid.height) continue;
-            const t1 = get_place_tile(place, tile_x, tile_y);
-            if (!t1) continue;
-
+            const tile = get_place_tile_at_world_z(place, tile_x, tile_y, world_z);
+            if (!tile) continue;
             const open = is_tile_container_open(tile_x, tile_y);
-            const display1 = get_tile_display(t1, tile_x, tile_y);
-            const has_door_tag = tile_has_tag(t1, 'DOOR');
-            const has_container_tag = tile_has_tag(t1, 'CONTAINER');
-
-            if (has_door_tag) {
-              rq.push({
-                pass: 'tile',
-                x: sx,
-                y: sy,
-                order: 10,
-                key: `door:${(t1 as any).door?.target_place_id ?? 'unknown'}:${(t1 as any).door?.direction ?? ''}:${tile_x},${tile_y}`,
-                payload: make_simple_tile_payload({
-                  id: `door:${place.id}:${tile_x},${tile_y}`,
-                  char: display1.char,
-                  tags: (t1 as any).tags ?? [],
-                  base_fg: hex_to_rgb(display1.color),
-                  weight_index: 5,
-                }) as any,
-                ctx: ctx_place_tile({ selected: open }),
-              });
-              continue;
-            }
-
+            const display = get_tile_display(tile, tile_x, tile_y);
+            const has_door_tag = tile_has_tag(tile, 'DOOR');
+            const has_container_tag = tile_has_tag(tile, 'CONTAINER');
+            const weight_index = world_z <= base_z - 1 ? 1 : 2;
+            const key_prefix = world_z === base_z - 1 ? 'tile_support' : has_door_tag ? 'door' : 'tile';
             rq.push({
               pass: 'tile',
               x: sx,
               y: sy,
-              order: 0,
-              key: `tile:${tile_x},${tile_y}`,
+              order: has_door_tag ? 10 : 0,
+              key: `${key_prefix}:${world_z}:${tile_x},${tile_y}`,
               payload: make_simple_tile_payload({
-                id: `tile:${place.id}:${tile_x},${tile_y}`,
-                char: display1.char,
-                tags: (t1 as any).tags ?? [],
-                base_fg: hex_to_rgb(display1.color),
-                weight_index: 2,
+                id: `${key_prefix}:${place.id}:${world_z}:${tile_x},${tile_y}`,
+                char: display.char,
+                tags: (tile as any).tags ?? [],
+                base_fg: hex_to_rgb(display.color),
+                weight_index: has_door_tag ? 5 : weight_index,
               }) as any,
               ctx: ctx_place_tile({ selected: open }),
             });
 
             if (has_container_tag) {
-              const container_glyphs = (t1 as any).container_glyphs;
-              let container_char = display1.char;
+              const container_glyphs = (tile as any).container_glyphs;
+              let container_char = display.char;
               if (container_glyphs && typeof container_glyphs === 'object') {
                 container_char = open ? container_glyphs.open : container_glyphs.closed;
               }
@@ -1570,19 +1572,18 @@ export function make_place_module(config: PlaceModuleConfig): Module {
                 x: sx,
                 y: sy,
                 order: 5,
-                key: `tile_container:${tile_x},${tile_y}`,
+                key: `tile_container:${world_z}:${tile_x},${tile_y}`,
                 payload: make_simple_tile_payload({
-                  id: `tile_container:${place.id}:${tile_x},${tile_y}`,
+                  id: `tile_container:${place.id}:${world_z}:${tile_x},${tile_y}`,
                   char: container_char,
-                  tags: (t1 as any).tags ?? [],
-                  base_fg: hex_to_rgb(display1.color),
+                  tags: (tile as any).tags ?? [],
+                  base_fg: hex_to_rgb(display.color),
                   weight_index: 4,
                 }) as any,
                 ctx: ctx_place_tile({ selected: open }),
               });
             }
           }
-        }
         }
       }
 
@@ -2086,8 +2087,41 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     }
 
 
-    // UI overlays remain in mono-canvas.
-    draw_render_queue(canvas, rq_ui, { now_ms: Date.now(), pass_order: ['ui'], character_flash_period_ms: 240 });
+      // UI overlays remain in mono-canvas.
+      if (config.is_place_painter_active?.() && hovered) {
+        const preview = config.get_place_painter_preview?.() ?? null;
+        if (preview) {
+          const hover_world_z = Number.isFinite(Number(hovered.world_z)) ? Math.floor(Number(hovered.world_z)) : get_focus_world_z_for_place(place);
+          const slot = slot_for_world_z(hover_world_z, visible_planes_z);
+          if (slot !== null) {
+            const rq = q_for_slot(slot);
+            const voxels = Array.isArray(preview.body_model?.physical) && preview.body_model!.physical!.length > 1
+              ? preview.body_model!.physical!
+              : [{ dx: 0, dy: 0, dz: 0 }];
+            for (const v of voxels) {
+              const sx = inner.x0 + Math.floor((hovered.x + Math.floor(Number((v as any)?.dx ?? 0)) - view.offset_x) / view.scale);
+              const sy = inner.y0 + Math.floor((hovered.y + Math.floor(Number((v as any)?.dy ?? 0)) - view.offset_y) / view.scale);
+              if (sx < inner.x0 || sx > inner.x1 || sy < inner.y0 || sy > inner.y1) continue;
+              rq.push({
+                pass: 'tile',
+                x: sx,
+                y: sy,
+                order: 50,
+                  key: `painter_preview:${preview.kind}:${preview.id}:${hovered.x},${hovered.y},${hover_world_z}:${(v as any)?.dx ?? 0},${(v as any)?.dy ?? 0}`,
+                payload: make_simple_tile_payload({
+                  id: `painter_preview:${preview.id}`,
+                  char: preview.display_char,
+                  tags: [],
+                  base_fg: hex_to_rgb(preview.display_color),
+                  weight_index: 5,
+                }) as any,
+                ctx: ctx_place_tile({ selected: true }),
+              });
+            }
+          }
+        }
+      }
+      draw_render_queue(canvas, rq_ui, { now_ms: Date.now(), pass_order: ['ui'], character_flash_period_ms: 240 });
 
     // World layers render into DOM canvases clipped to the place inner rect.
     const focus_z = config.get_focus_z ? config.get_focus_z() : DEFAULT_FOCUS_Z;
@@ -2164,21 +2198,22 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
       // z=0: floor is now emitted via rq_z0 (inside bounds only).
       // Reuse offscreen canvases across frames.
-      if (dom_off_layers.some((layer) => !layer) || dom_off_w !== width || dom_off_h !== height) {
+      if (dom_off_layers.length !== plane_count || dom_off_layers.some((layer) => !layer) || dom_off_w !== width || dom_off_h !== height) {
         dom_off_w = width;
         dom_off_h = height;
-        dom_off_layers = Array.from({ length: VISIBLE_PLANE_COUNT }, () => create_canvas(width, height, { char: ' ', rgb: { r: 0, g: 0, b: 0 } }));
+        dom_off_layers = Array.from({ length: plane_count }, () => create_canvas(width, height, { char: ' ', rgb: { r: 0, g: 0, b: 0 } }));
       } else {
         const full = { x0: 0, y0: 0, x1: width - 1, y1: height - 1 };
         for (const layer of dom_off_layers) layer?.fill_rect(full, { char: ' ', rgb: { r: 0, g: 0, b: 0 } });
       }
 
       let buffers_rebuilt = false;
-      if (dom_cells_layers.some((layer) => !layer) || dom_cells_w !== width || dom_cells_h !== height) {
+      if (dom_cells_layers.length !== plane_count || dom_cells_layers.some((layer) => !layer) || dom_cells_w !== width || dom_cells_h !== height) {
         buffers_rebuilt = true;
         dom_cells_w = width;
         dom_cells_h = height;
-        dom_cells_layers = Array.from({ length: VISIBLE_PLANE_COUNT }, () => ensure_grid_cell_buffer(width, height));
+        dom_cells_layers = Array.from({ length: plane_count }, () => ensure_grid_cell_buffer(width, height));
+        dom_cells_versions = Array.from({ length: plane_count }, (_, idx) => dom_cells_versions[idx] ?? 1);
       }
 
       const wrap = (local: any) => ({
@@ -2189,7 +2224,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       // Partition particles by world_z.
       // (Other passes are already split at enqueue time.)
       const changed_layers: boolean[] = [];
-      for (let slot = 0; slot < VISIBLE_PLANE_COUNT; slot += 1) {
+      for (let slot = 0; slot < plane_count; slot += 1) {
         const off = dom_off_layers[slot]!;
         draw_render_queue(wrap(off) as any, rq_layers[slot]!, { now_ms: Date.now(), pass_order: ['tile', 'item', 'character', 'particle'], character_flash_period_ms: 240 });
         const changed = sync_grid_cells_from_canvas(off, dom_cells_layers[slot]!);
@@ -2199,7 +2234,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
       // Only notify DOM layers when content changes (renderer still updates transforms every frame).
       // When buffers are (re)allocated, bind them to layers at least once.
-      for (let slot = 0; slot < VISIBLE_PLANE_COUNT; slot += 1) {
+      for (let slot = 0; slot < plane_count; slot += 1) {
         if (buffers_rebuilt || changed_layers[slot]) {
           dom_layers.set_layer_cells(slot, dom_cells_layers[slot]!, dom_cells_versions[slot]);
         }
@@ -2403,6 +2438,63 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     }
   });
 
+  wsClient.on('PLACE_TILE_MOVED_BATCH', (msg: any) => {
+    try {
+      const place = config.get_place();
+      if (!place) return;
+      const updates: any[] = Array.isArray(msg?.updates) ? msg.updates : [];
+      if (updates.length === 0) return;
+
+      const baseZ = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
+      const getLayerKey = (z: number): string => {
+        const offset = Math.floor(z - baseZ);
+        if (offset === 0) return 'tiles';
+        if (offset === -1) return 'tiles_z0';
+        if (offset === 1) return 'tiles_z1';
+        return `tiles_z${offset}`;
+      };
+      const ensureLayer = (layerKey: string): any => {
+        const placeAny: any = place as any;
+        if (!placeAny[layerKey]) {
+          const width = Math.max(1, Math.floor(Number(place.tile_grid?.width ?? 1)));
+          const height = Math.max(1, Math.floor(Number(place.tile_grid?.height ?? 1)));
+          placeAny[layerKey] = {
+            width,
+            height,
+            cells: Array.from({ length: height }, () => Array.from({ length: width }, () => null)),
+          };
+        }
+        return placeAny[layerKey];
+      };
+
+      let applied = 0;
+      for (const u of updates) {
+        const pid = String(u?.place_id ?? '');
+        if (pid !== String(place.id)) continue;
+        const from = u?.from;
+        const to = u?.to;
+        if (!from || !to) continue;
+        const fromLayer = ensureLayer(getLayerKey(Math.floor(Number(from.z) || 0)));
+        const toLayer = ensureLayer(getLayerKey(Math.floor(Number(to.z) || 0)));
+        const fx = Math.floor(Number(from.x));
+        const fy = Math.floor(Number(from.y));
+        const tx = Math.floor(Number(to.x));
+        const ty = Math.floor(Number(to.y));
+        if (!Array.isArray(fromLayer?.cells?.[fy]) || !Array.isArray(toLayer?.cells?.[ty])) continue;
+        const tile = fromLayer.cells[fy][fx];
+        if (!tile) continue;
+        fromLayer.cells[fy][fx] = null;
+        toLayer.cells[ty][tx] = tile;
+        applied += 1;
+      }
+      if (applied > 0) {
+        console.log('[MOVE_UNIFY_TEST] renderer applied tile move batch ' + JSON.stringify({ place_id: place.id, applied }));
+      }
+    } catch {
+      // ignore
+    }
+  });
+
   // Helper function to update cache from WebSocket events
   function updateCacheFromEvent(event: TagChangeEvent): void {
     const currentTags = entityTagCache.get(event.entityRef) || [];
@@ -2485,11 +2577,11 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       // First render: center on the actor when available; otherwise default entry.
       // Only do this if we did not load a persisted view state for this place.
       if (!view_loaded && view.offset_x === 0 && view.offset_y === 0) {
-        const actor_pos = config.get_actor_position?.() ?? null;
-        const target = actor_pos ?? place.tile_grid.default_entry;
+        const initial_target = config.get_camera_target_position?.() ?? config.get_actor_position?.() ?? null;
+        const target = initial_target ?? place.tile_grid.default_entry;
         debug_log_place("First render, centering on", {
           target,
-          using_actor: !!actor_pos,
+          using_actor: !!initial_target,
           default_entry: place.tile_grid.default_entry,
           place_size: { w: place.tile_grid.width, h: place.tile_grid.height }
         });
@@ -2497,10 +2589,13 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         camera.schedule_save(place);
       }
 
-      // Follow Henry continuously; place panning is disabled.
-      const actor_follow_pos = config.get_actor_position?.() ?? null;
-      if (actor_follow_pos) {
-        center_on_tile(actor_follow_pos.x, actor_follow_pos.y, place);
+      const painter_active = !!config.is_place_painter_active?.();
+      const camera_target_mode = config.get_camera_target_mode?.() ?? (painter_active ? 'free' : 'follow_actor');
+
+      // Follow actor normally; in painter mode preserve free camera view.
+      const camera_target = (config.get_camera_target_position?.() ?? config.get_actor_position?.() ?? null);
+      if (camera_target && camera_target_mode !== 'free') {
+        center_on_tile(camera_target.x, camera_target.y, place);
       }
 
       // Register place with unified movement engine if changed
@@ -2523,7 +2618,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const INTENT_RESEND_INTERVAL_MS = 750;
       const intent = get_move_intent();
       const actor = place.contents.actors_present[0];
-      if (actor) {
+      if (actor && !painter_active) {
         const mode = get_move_mode();
         record_intent_observed(intent, { mode, place_id: place.id, actor_ref: actor.actor_ref });
         const has_movement = intent !== null;
@@ -2579,6 +2674,22 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         input_state.last_polled_intent = intent ? { dx: intent.dx, dy: intent.dy } : null;
       }
 
+      if (painter_active) {
+        const intent = get_move_intent();
+        if (intent) {
+          const now_ms = Date.now();
+          if (now_ms - last_painter_key_pan_ms >= 90) {
+            last_painter_key_pan_ms = now_ms;
+            view.offset_x += intent.dx;
+            view.offset_y += intent.dy;
+            camera.clamp_to_bounds(place, inner_w, inner_h);
+            update_painter_camera_target_from_view(place);
+            camera.schedule_save(place);
+            debug_log_place('PLACE_PAINTER camera key pan', { dx: intent.dx, dy: intent.dy, offset_x: view.offset_x, offset_y: view.offset_y });
+          }
+        }
+      }
+
       // Populate tag cache from place data ONLY when place changes
       // WebSocket now provides real-time updates, so we don't need to sync every frame
       if (place.id !== last_cached_place_id) {
@@ -2620,6 +2731,46 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         config.on_hover_ground_item?.(-1, -1, null);
       }
 
+      if (config.is_place_painter_active?.()) {
+        if (!e.buttons) {
+          last_painter_drag_key = null;
+        } else {
+          const tile = screen_to_tile(e.x, e.y);
+          if (tile) {
+            const focus_world_z = get_focus_world_z_for_place(place);
+            const button = (e.buttons & 2) !== 0 ? 2 : (e.buttons & 1) !== 0 ? 0 : null;
+            if (button !== null) {
+              const drag_key = `${button}:${tile.x}:${tile.y}:${focus_world_z}`;
+              if (drag_key !== last_painter_drag_key) {
+                last_painter_drag_key = drag_key;
+                const hit = get_entity_hit_at_world_z(tile.x, tile.y, place, focus_world_z);
+                const entity = hit?.entity ?? null;
+                console.log('[PLACE_PAINTER] drag paint dispatch ' + JSON.stringify({
+                  x: e.x,
+                  y: e.y,
+                  button,
+                  tile_x: tile.x,
+                  tile_y: tile.y,
+                  focus_world_z,
+                }));
+                void config.on_place_painter_primary_action?.({
+                  place_id: place.id,
+                  tile_position: { x: tile.x, y: tile.y },
+                  world_z: focus_world_z,
+                  button,
+                  entity_ref: entity
+                    ? ('npc_ref' in entity ? (entity as PlaceNPC).npc_ref : (entity as PlaceActor).actor_ref)
+                    : undefined,
+                  entity_type: entity
+                    ? ('npc_ref' in entity ? 'npc' : 'actor')
+                    : undefined,
+                });
+              }
+            }
+          }
+        }
+      }
+
       last_pointer_x = e.x;
       last_pointer_y = e.y;
     },
@@ -2627,6 +2778,14 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     OnDragStart(e: DragEvent): void {
       const place = config.get_place();
       if (!place) return;
+
+      if (config.is_place_painter_active?.() && e.space && (e.buttons & 1) !== 0) {
+        painter_pan_drag_active = true;
+        painter_pan_start = { x: e.start_x, y: e.start_y };
+        painter_pan_view_start = { x: view.offset_x, y: view.offset_y };
+        debug_log_place('PLACE_PAINTER drag pan start', { start_x: e.start_x, start_y: e.start_y, offset_x: view.offset_x, offset_y: view.offset_y });
+        return;
+      }
 
       // Don't start a ground drag if a UI drag is active.
       if (config.is_dragging?.()) return;
@@ -2655,8 +2814,16 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     OnDragMove(e): void {
       const place = config.get_place();
       if (!place) return;
+      if (config.is_place_painter_active?.() && painter_pan_drag_active) {
+        view.offset_x = painter_pan_view_start.x - e.dx * view.scale;
+        view.offset_y = painter_pan_view_start.y - e.dy * view.scale;
+        const { width, height } = inner_size();
+        camera.clamp_to_bounds(place, width, height);
+        update_painter_camera_target_from_view(place);
+        camera.schedule_save(place);
+        return;
+      }
       void e;
-      // Camera panning is disabled; the view follows the actor.
     },
 
     OnDragEnd(e: DragEvent): void {
@@ -2665,6 +2832,16 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       debug_log_place(`[OnDragEnd] config.is_dragging exists: ${!!config.is_dragging}`);
       debug_log_place(`[OnDragEnd] config.on_drop exists: ${!!config.on_drop}`);
       debug_log_place(`[OnDragEnd] config.get_drag_source exists: ${!!config.get_drag_source}`);
+
+      const place = config.get_place();
+      if (config.is_place_painter_active?.() && painter_pan_drag_active) {
+        painter_pan_drag_active = false;
+        if (place) {
+          update_painter_camera_target_from_view(place);
+          debug_log_place(`[PLACE_PAINTER] drag pan end ${JSON.stringify({ offset_x: view.offset_x, offset_y: view.offset_y })}`);
+        }
+        return;
+      }
       
       // Only handle drops if we're dragging an item
       if (!config.is_dragging) {
@@ -2680,7 +2857,6 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         return;
       }
 
-      const place = config.get_place();
       if (!place) {
         debug_log_place(`[OnDragEnd] No place loaded - ignoring`);
         return;
@@ -2763,22 +2939,98 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
     },
 
-    OnClick(e: PointerEvent): void {
-      // Only left click should move/select. Right click is reserved for INSPECT.
-      if (e.button !== 0) return;
-
+    OnPointerDown(e: PointerEvent): void {
       const place = config.get_place();
       if (!place) return;
+      const painter_active = !!config.is_place_painter_active?.();
+      if (!painter_active) return;
+      last_painter_drag_key = null;
 
       const focus_z = config.get_focus_z ? config.get_focus_z() : DEFAULT_FOCUS_Z;
       const center_world_z = get_world_z_center_for_place(place);
-      const visible_planes_z = get_visible_planes_z(center_world_z);
+      const visible_planes_z = get_defined_place_world_zs(place);
+      const focus_world_z = Math.floor(visible_planes_z[Math.max(0, Math.min(visible_planes_z.length - 1, focus_z))] ?? center_world_z);
+      const tile = screen_to_tile(e.x, e.y);
+      if (!tile) return;
+
+      console.log('[PLACE_PAINTER] pointer down dispatch ' + JSON.stringify({
+        x: e.x,
+        y: e.y,
+        button: e.button,
+        tile_x: tile.x,
+        tile_y: tile.y,
+        focus_world_z,
+      }));
+
+      const hit = get_entity_hit_at_world_z(tile.x, tile.y, place, focus_world_z);
+      const entity = hit?.entity ?? null;
+      void config.on_place_painter_primary_action?.({
+        place_id: place.id,
+        tile_position: { x: tile.x, y: tile.y },
+        world_z: focus_world_z,
+        button: e.button,
+        entity_ref: entity
+          ? ('npc_ref' in entity ? (entity as PlaceNPC).npc_ref : (entity as PlaceActor).actor_ref)
+          : undefined,
+        entity_type: entity
+          ? ('npc_ref' in entity ? 'npc' : 'actor')
+          : undefined,
+      });
+    },
+
+    OnClick(e: PointerEvent): void {
+      const place = config.get_place();
+      if (!place) return;
+
+      const painter_active = !!config.is_place_painter_active?.();
+      if (painter_active) {
+        console.log('[PLACE_PAINTER] click ignored because pointer-down already handles painter action ' + JSON.stringify({ button: e.button, x: e.x, y: e.y }));
+        return;
+      }
+      if (!painter_active && e.button !== 0) {
+        console.log('[PLACE_PAINTER] place click ignored ' + JSON.stringify({ painter_active, button: e.button, reason: 'non_left_click_game_mode' }));
+        return;
+      }
+
+      const focus_z = config.get_focus_z ? config.get_focus_z() : DEFAULT_FOCUS_Z;
+      const center_world_z = get_world_z_center_for_place(place);
+      const visible_planes_z = get_defined_place_world_zs(place);
       const base_z = get_place_base_z(place);
       const focus_world_z = Math.floor(visible_planes_z[Math.max(0, Math.min(visible_planes_z.length - 1, focus_z))] ?? center_world_z);
 
       // Convert screen to tile coordinates
       const tile = screen_to_tile(e.x, e.y);
       if (!tile) return;
+
+      console.log('[PLACE_PAINTER] place click ' + JSON.stringify({ painter_active, x: e.x, y: e.y, button: e.button, tile_x: tile.x, tile_y: tile.y, focus_world_z }));
+
+      if (painter_active) {
+        const hit = get_entity_hit_at_world_z(tile.x, tile.y, place, focus_world_z);
+        const entity = hit?.entity ?? null;
+        console.log('[PLACE_PAINTER] primary action dispatch ' + JSON.stringify({
+          place_id: place.id,
+          tile_x: tile.x,
+          tile_y: tile.y,
+          world_z: focus_world_z,
+          button: e.button,
+          entity_ref: entity
+            ? ('npc_ref' in entity ? (entity as PlaceNPC).npc_ref : (entity as PlaceActor).actor_ref)
+            : null,
+        }));
+        void config.on_place_painter_primary_action?.({
+          place_id: place.id,
+          tile_position: { x: tile.x, y: tile.y },
+          world_z: focus_world_z,
+          button: e.button,
+          entity_ref: entity
+            ? ('npc_ref' in entity ? (entity as PlaceNPC).npc_ref : (entity as PlaceActor).actor_ref)
+            : undefined,
+          entity_type: entity
+            ? ('npc_ref' in entity ? 'npc' : 'actor')
+            : undefined,
+        });
+        return;
+      }
 
       // Focus gating: clicks/targets resolve only within the focused world layer.
 
@@ -3000,10 +3252,11 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     OnContextMenu(e: PointerEvent): void {
       const place = config.get_place();
       if (!place) return;
+      if (config.is_place_painter_active?.()) return;
 
       const focus_z = config.get_focus_z ? config.get_focus_z() : DEFAULT_FOCUS_Z;
       const center_world_z = get_world_z_center_for_place(place);
-      const visible_planes_z = get_visible_planes_z(center_world_z);
+      const visible_planes_z = get_defined_place_world_zs(place);
       const base_z = get_place_base_z(place);
       const focus_world_z = Math.floor(visible_planes_z[Math.max(0, Math.min(visible_planes_z.length - 1, focus_z))] ?? center_world_z);
 
@@ -3111,7 +3364,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       if (!config.set_focus_z) return;
       const cur = config.get_focus_z ? config.get_focus_z() : DEFAULT_FOCUS_Z;
       const dir = e.delta_y < 0 ? 1 : (e.delta_y > 0 ? -1 : 0);
-      const next = clamp_int(cur + dir, 0, VISIBLE_PLANE_COUNT - 1);
+      const plane_count = Math.max(1, get_defined_place_world_zs(config.get_place()).length);
+      const next = clamp_int(cur + dir, 0, plane_count - 1);
       if (next !== cur) {
         config.set_focus_z(next);
       }

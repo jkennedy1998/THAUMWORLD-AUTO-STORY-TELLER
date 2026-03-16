@@ -2,6 +2,7 @@ import type { Place } from "../types/place.js";
 import type { PlaceTile } from "../types/place.js";
 import { eval_body_model_voxels, get_body_model_def } from "../shared/body_model.js";
 import { get_facing, type Direction } from "../npc_ai/facing_system.js";
+import { build_physics_tag_flags, has_tag_name, resolve_tile_physics_tags } from "../shared/physics_tags.js";
 
 export type PlaceOccupancyIndex = {
   width: number;
@@ -44,20 +45,14 @@ function get_tile(tiles_obj: any, x: number, y: number): PlaceTile | null {
   }
 }
 
-function has_runtime_tag(tags: any, name: string): boolean {
-  const up = String(name ?? '').toUpperCase();
-  if (!Array.isArray(tags)) return false;
-  return tags.some((t: any) => String(t?.name ?? '').toUpperCase() === up);
-}
-
 function tile_blocks_movement_runtime(tile: any): boolean {
   if (!tile) return false;
-  return has_runtime_tag((tile as any).tags ?? [], 'OCCUPIES');
+  return resolve_tile_physics_tags(tile).occupies;
 }
 
 function tile_blocks_los_runtime(tile: any): boolean {
   if (!tile) return false;
-  return has_runtime_tag((tile as any).tags ?? [], 'COVER');
+  return has_tag_name(resolve_tile_physics_tags(tile).effective_tags, 'COVER');
 }
 
 export function get_place_occupancy_index(place: Place): PlaceOccupancyIndex {
@@ -224,7 +219,7 @@ export function place_voxel_blocks_movement(place: Place, x: number, y: number, 
 
   // Any OCCUPIES occupant blocks movement.
   const occ = get_voxel_occupants(place, x, y, world_z);
-  if (occ.some((o) => Array.isArray(o.tags) && o.tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'OCCUPIES'))) {
+  if (occ.some((o) => build_physics_tag_flags(o.tags).occupies)) {
     return true;
   }
 
@@ -255,7 +250,7 @@ export function place_voxel_blocks_los(place: Place, x: number, y: number, world
 
   // Any COVER occupant blocks LOS.
   const occ = get_voxel_occupants(place, x, y, world_z);
-  if (occ.some((o) => Array.isArray(o.tags) && o.tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'COVER'))) {
+  if (occ.some((o) => has_tag_name(o.tags, 'COVER'))) {
     return true;
   }
 

@@ -14,7 +14,7 @@ import { ensure_place_tiles, ensure_place_entities_not_on_walls } from "./tiles.
 import { resolve_place_tile } from "../tile_storage/resolve.js";
 import { rotate_offset_xy } from "../shared/body_model.js";
 import { sanitize_place_for_save } from "../shared/defs_deltas_sanitize.js";
-import { normalize_ground_scattered } from "./ground_store.js";
+import { normalize_ground_scattered } from "./ground_normalize.js";
 
 const PLACES_DIR = "places";
 
@@ -144,12 +144,18 @@ export function load_place(slot: number, place_id: string): PlaceResult {
             const r = resolve_place_tile(String(tile.kind), tile as any);
             if (!r) continue;
             (tile as any).tags = r.effective_tags;
+            (tile as any).display_char = r.display_char;
+            (tile as any).display_color = r.display_color;
+            (tile as any).container_glyphs = r.container_glyphs ?? null;
             (tile as any).__derived_runtime = true;
           }
         }
       };
-      augment_tiles((place as any).tiles_z0);
-      augment_tiles((place as any).tiles);
+      for (const key of Object.keys(place as any)) {
+        if (key === 'tiles' || /^tiles_z-?\d+$/.test(key)) {
+          augment_tiles((place as any)[key]);
+        }
+      }
 
       const structs = (place as any).structures;
       if (Array.isArray(structs)) {
@@ -227,14 +233,15 @@ export function load_place(slot: number, place_id: string): PlaceResult {
 export function save_place(slot: number, place: Place): string {
   ensure_places_dir(slot);
   const place_path = get_place_path(slot, place.id);
+  const persisted = JSON.parse(JSON.stringify(place)) as Place;
 
   // defs+deltas migration: strip derived/legacy inline fields before persisting.
   // (Important because some API paths augment tiles/items for UI and may later save.)
-  sanitize_place_for_save(place as any);
+  sanitize_place_for_save(persisted as any);
   
   fs.writeFileSync(
     place_path,
-    JSON.stringify(place, null, 2),
+    JSON.stringify(persisted, null, 2),
     "utf-8"
   );
   

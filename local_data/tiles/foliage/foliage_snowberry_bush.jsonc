@@ -2,6 +2,7 @@
   "id": "foliage_snowberry_bush",
   "name": "Snowberry Bush",
   "description": "A hardy bush that produces small white berries even in cold weather.",
+  "weight": 1,
   "display_char": "&",
   "display_color": "#4f9d35",
   "tags": [

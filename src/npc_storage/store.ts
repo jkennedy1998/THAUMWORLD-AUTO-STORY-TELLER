@@ -44,6 +44,16 @@ function read_jsonc(pathname: string): Record<string, unknown> {
     return (parse(raw) as Record<string, unknown>) ?? {};
 }
 
+function derive_default_npc_weight(npc: Record<string, unknown>): number {
+    const kind_id = String((npc as any)?.kind ?? (npc as any)?.kind_id ?? "").trim();
+    const kind = kind_id ? find_kind(kind_id) : null;
+    const kind_weight = Number((kind as any)?.weight);
+    if (Number.isFinite(kind_weight)) return kind_weight;
+    const size_mag = Number((npc as any)?.size_mag ?? (kind as any)?.size_mag ?? 0);
+    if (Number.isFinite(size_mag)) return Math.max(1, Math.floor(size_mag));
+    return 1;
+}
+
 export function ensure_npc_dir(slot: number): string {
     const dir = get_npc_dir(slot);
     ensure_dir_exists(dir);
@@ -111,6 +121,10 @@ export function load_npc(slot: number, npc_id: string): NpcLookupResult {
                 mp.last_breath_processed = Number((npc as any).breath_last_processed ?? (npc as any).breath_index ?? 0) || 0;
                 dirty = true;
             }
+        }
+        if (typeof (npc as any).weight !== 'number' || !Number.isFinite((npc as any).weight)) {
+            (npc as any).weight = derive_default_npc_weight(npc);
+            dirty = true;
         }
     } catch {
         // ignore

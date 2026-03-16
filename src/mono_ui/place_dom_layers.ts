@@ -9,8 +9,7 @@ export type PlaceDomLayersOpts = {
   base_font_size_px: number;
 };
 
-const PLACE_LAYER_COUNT = 5;
-const PLACE_FOCUS_LAYER = Math.floor(PLACE_LAYER_COUNT / 2);
+const DEFAULT_PLACE_LAYER_COUNT = 17;
 
 export type PlaceDomViewport = {
   // Absolute screen CSS pixels
@@ -40,6 +39,7 @@ export class PlaceDomLayers {
   private space: VoxelSpace | null = null;
   private width = 0;
   private height = 0;
+  private layer_count = 0;
   private place_id: string | null = null;
 
   constructor(opts: PlaceDomLayersOpts) {
@@ -84,15 +84,17 @@ export class PlaceDomLayers {
     this.renderer = createVoxelDOMRenderer(this.root, this.opts.font_family, this.opts.base_font_size_px);
   }
 
-  ensure_space(width: number, height: number): void {
+  ensure_space(width: number, height: number, layer_count: number = DEFAULT_PLACE_LAYER_COUNT): void {
     if (!this.renderer) return;
     const w = Math.max(1, Math.floor(width));
     const h = Math.max(1, Math.floor(height));
-    if (this.space && this.width === w && this.height === h) return;
+    const lc = Math.max(1, Math.floor(layer_count));
+    const focus_layer = Math.floor(lc / 2);
+    if (this.space && this.width === w && this.height === h && this.layer_count === lc) return;
 
     const minZ = 0;
-    const maxZ = PLACE_LAYER_COUNT - 1;
-    const s = createVoxelSpace(w, h, { minZ, maxZ, defaultZ: PLACE_FOCUS_LAYER });
+    const maxZ = lc - 1;
+    const s = createVoxelSpace(w, h, { minZ, maxZ, defaultZ: focus_layer });
 
     // Ensure layers exist for 0 and 2.
     const empty: GridCell = { char: ' ', rgb: { r: 0, g: 0, b: 0 } as Rgb, weight_index: 3 };
@@ -106,10 +108,10 @@ export class PlaceDomLayers {
     });
 
     for (let z = minZ; z <= maxZ; z++) {
-      const opacity = z === PLACE_FOCUS_LAYER ? 1.0 : (Math.abs(z - PLACE_FOCUS_LAYER) === 1 ? 0.85 : 0.72);
+      const opacity = z === focus_layer ? 1.0 : (Math.abs(z - focus_layer) === 1 ? 0.85 : 0.72);
       s.layers.set(z, mk(z, `z${z}`, opacity));
     }
-    s.bounds.depth = PLACE_LAYER_COUNT;
+    s.bounds.depth = lc;
     s.bounds.minZ = minZ;
     s.bounds.maxZ = maxZ;
 
@@ -119,6 +121,7 @@ export class PlaceDomLayers {
     this.space = s;
     this.width = w;
     this.height = h;
+    this.layer_count = lc;
     this.renderer.setSpace(s);
   }
 
@@ -147,7 +150,8 @@ export class PlaceDomLayers {
 
   set_focus_z(z: number): void {
     if (!this.space) return;
-    const focus = Math.max(0, Math.min(PLACE_LAYER_COUNT - 1, Math.floor(z)));
+    const max_index = Math.max(0, this.layer_count - 1);
+    const focus = Math.max(0, Math.min(max_index, Math.floor(z)));
     this.space.camera.focus_plane = focus;
 
     // Visual affordance: de-emphasize non-focused layers.
@@ -198,7 +202,7 @@ export class PlaceDomLayers {
 
   set_layer_cells(z: number, cells: GridCell[][], content_version?: number): void {
     if (!this.space) return;
-    const layer_z = Math.max(0, Math.min(PLACE_LAYER_COUNT - 1, Math.floor(z)));
+    const layer_z = Math.max(0, Math.min(Math.max(0, this.layer_count - 1), Math.floor(z)));
     const layer = this.space.layers.get(layer_z);
     if (!layer) return;
     layer.cells = cells;

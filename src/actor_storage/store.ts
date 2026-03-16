@@ -58,6 +58,16 @@ function read_jsonc(pathname: string): Record<string, unknown> {
     return (parse(raw) as Record<string, unknown>) ?? {};
 }
 
+function derive_default_actor_weight(actor: Record<string, unknown>): number {
+    const kind_id = String((actor as any)?.kind ?? (actor as any)?.kind_id ?? "").trim();
+    const kind = kind_id ? find_kind(kind_id) : null;
+    const kind_weight = Number((kind as any)?.weight);
+    if (Number.isFinite(kind_weight)) return kind_weight;
+    const size_mag = Number((actor as any)?.size_mag ?? (kind as any)?.size_mag ?? 0);
+    if (Number.isFinite(size_mag)) return Math.max(1, Math.floor(size_mag));
+    return 1;
+}
+
 export function ensure_actor_dir(slot: number): string {
     const dir = get_actor_dir(slot);
     ensure_dir_exists(dir);
@@ -129,6 +139,10 @@ export function load_actor(slot: number, actor_id: string): ActorLookupResult {
                 mp.last_breath_processed = Number((actor as any).breath_last_processed ?? (actor as any).breath_index ?? 0) || 0;
                 dirty = true;
             }
+        }
+        if (typeof (actor as any).weight !== 'number' || !Number.isFinite((actor as any).weight)) {
+            (actor as any).weight = derive_default_actor_weight(actor);
+            dirty = true;
         }
     } catch {
         // ignore

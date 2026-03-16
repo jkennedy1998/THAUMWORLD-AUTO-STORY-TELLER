@@ -21,6 +21,8 @@ export type ToolboxOptions = {
   on_tool_select: (tool: ToolType) => void;
   on_left_click_tool_change: (tool: ToolType) => void;
   on_right_click_tool_change: (tool: ToolType) => void;
+  title?: string;
+  tool_defs?: Array<{ tool: ToolType; label: string; icon: string; shortcut: string }>;
   on_move?: (new_rect: Rect) => void;
   on_resize?: (new_rect: Rect) => void;
   on_close?: () => void;
@@ -52,6 +54,8 @@ const MAX_HEIGHT = 30;
 
 export function make_toolbox_module(opts: ToolboxOptions): Module {
   let rect = opts.rect;
+  const tool_defs = opts.tool_defs ?? TOOLS;
+  const title = String(opts.title ?? 'TOOLS');
   
   const gizmo_config: ModuleGizmosConfig = {
     enabled: ['move', 'resize', 'close'],
@@ -70,7 +74,7 @@ export function make_toolbox_module(opts: ToolboxOptions): Module {
   }
 
   function clamp_scroll(): void {
-    const max_scroll = Math.max(0, TOOLS.length - get_visible_count());
+    const max_scroll = Math.max(0, tool_defs.length - get_visible_count());
     scroll_offset = Math.max(0, Math.min(max_scroll, scroll_offset));
   }
 
@@ -78,8 +82,8 @@ export function make_toolbox_module(opts: ToolboxOptions): Module {
     const start_y = rect.y1 - 3;
     const index = scroll_offset + (start_y - y);
     
-    if (index >= 0 && index < TOOLS.length) {
-      return TOOLS[index]!.tool;
+    if (index >= 0 && index < tool_defs.length) {
+      return tool_defs[index]!.tool;
     }
     return null;
   }
@@ -108,7 +112,7 @@ export function make_toolbox_module(opts: ToolboxOptions): Module {
         border_rgb: border_color,
         weight_index: 3,
         header: {
-          text: 'TOOLS',
+          text: title,
           reserve_left_cols: 2 + ((gizmo_config.enabled?.length ?? 0) * 2),
         },
       });
@@ -123,9 +127,9 @@ export function make_toolbox_module(opts: ToolboxOptions): Module {
       
       for (let i = 0; i < visible_count; i++) {
         const tool_index = scroll_offset + i;
-        if (tool_index >= TOOLS.length) break;
+        if (tool_index >= tool_defs.length) break;
         
-        const tool = TOOLS[tool_index]!;
+        const tool = tool_defs[tool_index]!;
         const tool_y = start_y - i;
         if (tool_y <= rect.y0) break;
         

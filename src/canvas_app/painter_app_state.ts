@@ -669,6 +669,19 @@ export function create_painter_app_state(): PainterAppState {
     preview_points,
     get_left_click_tool: () => left_click_tool,
     get_right_click_tool: () => right_click_tool,
+    get_focus_layer_z: () => voxelSpace.camera.focus_plane,
+    cycle_focus_layer: (dir) => {
+      const zs = Array.from(voxelSpace.layers.keys()).sort((a, b) => a - b);
+      const current = voxelSpace.camera.focus_plane;
+      const idx = Math.max(0, zs.findIndex((z) => z === current));
+      const nextIdx = Math.max(0, Math.min(zs.length - 1, idx + dir));
+      const next = zs[nextIdx];
+      if (typeof next === 'number' && next !== current) {
+        voxelSpace.camera.focus_plane = next;
+        const layer = getLayer(voxelSpace, next);
+        if (layer) grid.cells = layer.cells;
+      }
+    },
     history,
     on_push_snapshot: () => {
       pushSnapshot(history, grid);

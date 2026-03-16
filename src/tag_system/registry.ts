@@ -53,6 +53,8 @@ export interface TagRule {
   name: string;
   /** Human-readable description */
   description: string;
+  /** Other tags that must also be present for this tag to remain valid */
+  requires_tags?: string[];
   /** Meta tags this tag has (e.g., ["tool", "weapon"]) */
   meta_tags: string[];
   /** Actions this tag enables */

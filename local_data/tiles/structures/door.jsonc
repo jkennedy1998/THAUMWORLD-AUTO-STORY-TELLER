@@ -2,6 +2,7 @@
   "id": "door",
   "name": "Door",
   "description": "A wooden door that can be opened or closed.",
+  "weight": 3,
   "display_char": "+",
   "display_color": "#a8561a",
   "tags": [

@@ -2,6 +2,7 @@
   "id": "chest_double",
   "name": "Wide Chest",
   "description": "A wide wooden storage chest that spans two tiles.",
+  "weight": 7,
   "display_char": "⍞",
   "display_color": "#8B4513",
   "tags": [
@@ -20,8 +21,8 @@
   "body_model": {
     "anchor_part": "left",
     "physical": [
-      { "part": "left", "dx": 0, "dy": 0, "dz": 0 },
-      { "part": "right", "dx": 1, "dy": 0, "dz": 0 }
+      { "part": "left", "dx": 0, "dy": 0, "dz": 0, "tags": [{ "name": "STEP_UP", "mag": 1, "meta": [], "scope": ["TILE"] }] },
+      { "part": "right", "dx": 1, "dy": 0, "dz": 0, "tags": [{ "name": "STEP_UP", "mag": 1, "meta": [], "scope": ["TILE"] }] }
     ]
   }
 }

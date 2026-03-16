@@ -60,6 +60,8 @@ export type PainterCanvasOptions = {
   on_sample_cell: (cell: { char: string; rgb: Rgb; weight_index: number }) => void;
   get_left_click_tool: () => ToolType;
   get_right_click_tool: () => ToolType;
+  get_focus_layer_z?: () => number;
+  cycle_focus_layer?: (dir: 1 | -1) => void;
   // History manager for undo/redo
   history: HistoryManager;
   // Selection callbacks
@@ -1807,6 +1809,14 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const zoom_step = 0.1;
         scale = clamp(scale + (e.delta_y > 0 ? zoom_step : -zoom_step), 0.5, 3.0);
         return;
+      }
+
+      if (!e.shift && opts.cycle_focus_layer) {
+        const dir = e.delta_y < 0 ? 1 : (e.delta_y > 0 ? -1 : 0);
+        if (dir !== 0) {
+          opts.cycle_focus_layer(dir as 1 | -1);
+          return;
+        }
       }
 
       // Scroll updates camera pan position

@@ -25,6 +25,7 @@ End-state requirement:
 
 - Design goal: `docs/plans/2026_03_13_unified_movement_system_design.md`
 - Legality + pathfinding single source: `docs/plans/2026_03_11_movement_unification_plan.md`
+- Place persistence consolidation: `docs/plans/2026_03_16_place_persistence_consolidation_plan.md`
 - Current server breath + movement controller: `src/interface_program/main.ts`
 - Legality oracle: `src/place_storage/movement_legality.ts` (`can_place_volume(...)`)
 
@@ -64,16 +65,18 @@ This plan is complete only when all of the following are true:
 - Minimize long-lived dual-write / dual-authority windows.
 - Add migration scaffolding only when it shortens the path to deletion.
 - Any temporary compatibility layer added by this plan must have an explicit removal phase.
+- Runtime augmentation and persistence must remain separate concerns: saved place/entity data stays canonical, while renderer/debug/runtime physics augmentation remains reproducible runtime state.
 
 ## Current System (Historical Starting Point)
 
 Server breath + stepping:
 
 - `src/interface_program/main.ts` runs `BREATH_MS = 33` place breaths for active places.
-- Per-entity movement uses `move_ctl` with cadence budget `move_accum` + `breaths_per_step`.
+- Per-entity movement still uses `move_ctl` as the high-level controller shell, but live movement spend is now primarily driven by `movement_physics.move_budget` / `move_debt` and velocity state.
 - Held intent comes from `POST /api/movement/intent`.
 - Click-to-move comes from `POST /api/movement/move_to` and shared pathfinding.
-- Gravity is currently a separate post-step pass (not velocity-driven).
+- Actors/NPCs now resolve movement through explicit action + physics phases in `main.ts`, with gravity applied as velocity acceleration during physics.
+- Loose items still use a dedicated active-place gravity pass; that pass is acceptable only as a temporary host while matching the same support/gravity semantics as actors/NPCs.
 
 Renderer input:
 
@@ -93,9 +96,11 @@ Current migration verification notes:
 - NPC save files in connected places already carry `movement_schedule`, `movement_physics`, `breath_index`, and `breath_last_processed` fields in the expected migration format.
 - `eden_crossroads_square` has been corrected to include a full `tiles_z0` support floor so travel from the tavern and NPC wandering are testable under the unified movement system.
 - Current blocker is no longer data format; it is remaining runtime authority cleanup for NPC-side movement systems.
+- Before Phase 6 verification is considered trustworthy, NPC location data must be consistent across the NPC save, connected-place snapshots, and `place_entity_index`; partial moves like the current Gunther tavern test setup must not leave split authority/debug state behind.
 - Click-to-move now performs immediate server-side path planning on goal queue instead of waiting for the lower-frequency think phase, reducing initial click latency.
 - Intended visible-place behavior is a steady realtime pulse (one breath per scheduled interval) while offscreen places retain catch-up behavior.
-- Current observed drift in logs: visible places are still sometimes executing multi-breath interval pulses, visible movement updates are still being coalesced into final-position snaps, and repeated same-target steps suggest stale authoritative state is being reused inside visible bursts.
+- Recent `dev:logs` runs show visible interval pulses reaching the intended `ticks: 1` cadence more reliably; the remaining convergence focus is now authority cleanup, NPC migration, and keeping renderer reconciliation passive.
+- Recent place save/refresh regressions show that place persistence hardening is now a prerequisite for safe tile/item/entity runtime mutation and for the upcoming place painter; movement work must not rely on in-place save sanitization mutating live active place state.
 
 ## Immediate Alignment Priorities (March 2026)
 
@@ -106,7 +111,7 @@ These priorities are the next implementation focus so the runtime moves back tow
 - In `src/interface_program/main.ts`, visible places must execute at most one breath per scheduled interval tick.
 - Offscreen places may continue to use bounded catch-up.
 - Immediate visible pulses for `intent` / `move_to` remain allowed, but they must not create later visible burst repayment.
-- Development target: visible-place logs should never show `ticks > 1` for ordinary interval pulses.
+- Development target: visible-place logs should continue to show `ticks <= 1` for ordinary interval pulses, and any regression back to burst repayment blocks later migration work.
 
 ### Priority 2: Re-establish per-breath authoritative freshness
 
@@ -118,7 +123,7 @@ These priorities are the next implementation focus so the runtime moves back tow
 
 - Visible-place movement updates must preserve ordered per-breath player steps instead of coalescing everything to the final position of a burst.
 - Offscreen catch-up may still coalesce if needed for efficiency.
-- Development target: local-player renderer logs should show visible-step intervals that track server breath cadence instead of long gaps followed by snaps.
+- Development target: local-player renderer logs should continue to track server breath cadence instead of long gaps followed by snaps, and renderer movement code should not reintroduce its own gameplay cadence.
 
 ### Priority 4: Retune acceleration for debuggability
 
@@ -131,6 +136,13 @@ These priorities are the next implementation focus so the runtime moves back tow
 - Incline selection should remain an action-phase choice, but the resulting velocity and resolver candidate ordering must still produce believable per-breath movement.
 - The physics resolver must continue to attempt at most one successful step per breath while respecting deterministic axis selection and fallback rules from the design doc.
 - Development target: incline-up/down tests produce understandable step sequences without unrelated stored velocity causing confusing sideways movement.
+
+### Priority 6: Harden persistence and place-local pause boundaries
+
+- Place save paths must not sanitize or downgrade the live active place object in place during runtime mutation.
+- Runtime augmentation for tiles/structures/entities must remain reproducible and must not leak into canonical saved place JSON.
+- Reuse the existing place-local pause path (`time_scale` + `pause_sources` + `/api/place/pause`) and harden it so it fully stops breath-driven simulation for the edited place, including movement, tile physics, item gravity, and time-driven updates.
+- Development target: live runtime place edits (items, tiles, actors, NPCs, structures) persist across reboot without causing raw `?` tiles or stale active-place drift.
 
 ## Architecture Mapping (Current -> Target)
 
@@ -145,6 +157,12 @@ These priorities are the next implementation focus so the runtime moves back tow
 - `src/shared/pathfinding.ts`
   - keep as advisory pathfinding only
   - continue to depend on legality rather than embedding movement rules
+- `src/place_storage/store.ts` + `src/shared/defs_deltas_sanitize.ts`
+  - keep as the canonical place persistence boundary
+  - harden so canonical saved place data and runtime-augmented place data remain distinct
+- existing place pause plumbing in `src/interface_program/main.ts` + `src/canvas_app/app_state.ts`
+  - keep as the place-local simulation pause authority
+  - verify and harden rather than rebuilding pause semantics in a second system
 
 ### Transitional systems to reduce and then remove
 
@@ -160,6 +178,16 @@ These priorities are the next implementation focus so the runtime moves back tow
 - `src/npc_ai/movement_loop.ts`
   - current role: legacy NPC stepping/path loop
   - target role: delete or hard-disable once NPCs write goals/intents into the canonical server movement system
+
+### Current build snapshot (March 2026)
+
+- `apply_movement_action_phase_one_breath(...)`, `apply_server_movement_one_breath(...)`, `apply_server_thinking_one_breath(...)`, and `apply_server_brain_one_breath(...)` are already present in `src/interface_program/main.ts` and should be treated as the canonical host for continued migration.
+- The narrow velocity resolver, gravity-on-`vz`, incline injection, and move budget/debt accounting are already partially implemented and tested for actors.
+- Loose-item gravity is behaving closer to spec, but it still runs in `apply_gravity_to_place_ground(...)` rather than through the same active entity runtime host as actors/NPCs.
+- NPC migration is the main remaining authority split: server-side NPC goal/path hooks exist, but renderer/NPC legacy movement systems are still present and must not survive Phase 6/7.
+- Gravity-tagged tiles/objects are not yet part of the canonical runtime path; per the design spec, they should enter through an explicit tile-physics host that reuses shared gravity/support helpers rather than being treated as normal actor/NPC movers.
+- Place persistence/runtime augmentation boundaries are not hardened enough yet for heavy live-authoring workflows; this is now shared prerequisite work for movement-backed runtime tile mutation and place painter mode.
+- Place pause already has meaningful implementation coverage; remaining work is to ensure every breath-driven phase and persistence/sync path respects that existing pause authority cleanly.
 
 ### Current authoritative state to replace
 
@@ -684,6 +712,11 @@ This is the recommended implementation order for the best chance of reaching the
 9) Migrate NPCs fully onto the canonical movement system.
 10) Remove renderer/legacy authority paths.
 
+Current read on sequencing status:
+
+- Steps 1-8 are materially underway or largely landed in the current build, though some acceptance checks remain open.
+- The highest-value remaining work is now: finish NPC single-authority migration, finish renderer authority cleanup, then unify shared gravity/support helpers enough that later gravity-tile work does not fork behavior.
+
 Success criterion for sequencing:
 
 - Do not advance to the next major behavior change until the previous one is stable enough to keep the dev place playable and debuggable.
@@ -768,6 +801,13 @@ This is the next major convergence target. Vertical movement must stop behaving 
 - Use the same support-state and gravity-delta helpers for actors/NPCs and loose items wherever possible.
 - This does not fully unify runtime storage yet, but it prevents logic drift between entity gravity and loose-item gravity.
 - Tiles/objects with `GRAVITY` should eventually plug into the same helper contract instead of inventing a separate gravity rule.
+- This tile/object follow-up is intentionally after NPC single-authority migration; do not mix tile-physics hosting work into the Phase 6 NPC cutover.
+
+Tile-physics alignment note:
+
+- This does not mean tiles should be forced through the actor/NPC controller shell.
+- It means the eventual tile-physics pass should reuse the same support/resting/gravity-step semantics while remaining an explicit tile-physics system, matching the design doc's tile semantics.
+- Current pushable-tile rule: a pushable tile may move only into an empty destination tile cell. It must not overwrite authored tiles, must not chain-push by default, and occupants still block destination legality unless a later explicit push-transaction phase expands that behavior.
 
 ### Acceptance checks for this phase
 
@@ -832,6 +872,7 @@ Planned verification affordances for that scene:
 - clear ledges/voids for incline-down and gravity tests
 - stacked vertical space for z movement verification across 8 layers
 - known actor/NPC placements for deterministic occupancy/collision tests
+- connected-place NPC placements kept synchronized across entity save, place contents, and place index so square <-> tavern travel tests are deterministic
 
 Constraint:
 
@@ -950,18 +991,27 @@ Legend:
 - [~] Ensure loose items / actors / NPCs gravity eligibility matches the design doc
 - [x] Verify gravity integration does not reintroduce a second physics authority path
 
+Current Phase 5 note:
+
+- Actor/NPC gravity now lives in the canonical physics path, but loose items still have a dedicated host pass. Keep refining semantics here without reopening a second authority path.
+
 ### Phase 6: NPC Migration (Single Authority)
 
+- [ ] Fix NPC test-world placement consistency before validating migration logs (`npc` save, source place, destination place, and `place_entity_index` must agree)
 - [~] Route NPC movement decisions to server intent/goal state (no renderer-executed NPC stepping)
+- [ ] Ensure NPC brain writes only goal/intent/repath state on gated breaths; no NPC system writes final movement outcomes
 - [ ] Deprecate NPC outbox movement commands for movement execution
 - [ ] Delete or hard-disable `src/npc_ai/movement_loop.ts` movement stepping once redundant
 - [x] Ensure NPC path planning remains advisory and does not bypass velocity/action/physics phases
 - [ ] Enforce the NPC integration contract at API/helper boundaries
+- [ ] Verify NPC action/physics ordering matches actors exactly (same gravity helpers, same resolver order, same friction/collision path)
 
 Current NPC migration notes:
 
 - NPC wander goal selection in `src/interface_program/main.ts` now uses shared z-aware pathfinding for reachability checks, so NPCs can choose goals that require incline traversal and are less likely to become trapped in pits/holes.
 - Dedicated NPC renderer/legacy movement systems still exist in the repo, but the current dev path is to validate canonical server-side NPC goal/plan/step flow under `npm run dev:logs` before deleting those paths.
+- The intended NPC cadence split is: low-frequency brain for goal selection, lower-frequency think for path/repath, and every-breath action/physics for actual movement/gravity resolution.
+- NPCs should use the same click-to-move style goal -> advisory path -> action/physics flow as actors; NPC-specific pathfinding systems should not remain as a second execution model.
 
 ### Phase 7: Renderer Cleanup
 
@@ -971,6 +1021,10 @@ Current NPC migration notes:
 - [ ] Keep renderer interpolation/reconcile behavior isolated from gameplay rules
 - [ ] Confirm all renderer movement code still present is presentation-only and marked as such
 
+Current Phase 7 note:
+
+- `src/canvas_app/app_state.ts` still wires in legacy NPC movement and movement-command handler startup paths; treat those entrypoints as part of renderer authority cleanup, not as harmless leftovers.
+
 ### Phase 8: Delete Cadence Stepper (`move_ctl`)
 
 - [x] Remove `move_accum`/`breaths_per_step` cadence stepping from server
@@ -978,6 +1032,10 @@ Current NPC migration notes:
 - [~] Confirm all movement (actor + NPC) flows through velocity/budget/debt
 - [ ] Delete or clearly quarantine legacy movement codepaths that are no longer authoritative
 - [ ] Verify legacy authority deletion matrix items are actually removed or downgraded as planned
+
+Current Phase 8 note:
+
+- `move_ctl` still exists as the controller shell for intent/goal/path ownership. That is acceptable during migration, but the plan target remains: no cadence authority, no duplicate movement authority, and no hidden fallback stepping logic.
 
 ### Phase 9: Acceptance Testing
 
@@ -990,6 +1048,8 @@ Current NPC migration notes:
 - [x] `MOVE_VEL_TEST PASS incline injects vz+forward and resolves over time without forcing axis`
 - [x] `MOVE_VEL_TEST PASS current dev place expanded to 8 z layers supports movement verification cases`
 - [ ] `MOVE_VEL_TEST PASS NPC movement decisions only affect goals/intents; final stepping remains canonical server physics`
+- [ ] `MOVE_VEL_TEST PASS NPC brain/think cadence is gated while action/physics still run every breath`
+- [ ] `MOVE_VEL_TEST PASS square <-> tavern NPC test placement stays consistent across save, place contents, and entity index`
 - [x] `MOVE_VEL_TEST PASS resolver legality logs distinguish blocked vs no_support vs out_of_bounds`
 
 ## Documentation Followups

@@ -1,10 +1,10 @@
 {
-  "id": "tile_stone_brick",
-  "name": "Stone Brick",
-  "description": "A solid stone brick block. Forms the basic building material of the world.",
-  "weight": 8,
+  "id": "tile_stone_brick_loose",
+  "name": "Loose Stone Brick",
+  "description": "A single loose stone brick that can be pushed and will fall when unsupported.",
+  "weight": 5,
   "display_char": "#",
-  "display_color": "#787d8b",
+  "display_color": "#b7b1a6",
   "tags": [
     {
       "name": "OCCUPIES",
@@ -13,13 +13,13 @@
       "scope": ["TILE"]
     },
     {
-      "name": "COVER",
+      "name": "GRAVITY",
       "mag": 1,
       "meta": [],
       "scope": ["TILE"]
     },
     {
-      "name": "STEP_UP",
+      "name": "PUSHABLE",
       "mag": 1,
       "meta": [],
       "scope": ["TILE"]

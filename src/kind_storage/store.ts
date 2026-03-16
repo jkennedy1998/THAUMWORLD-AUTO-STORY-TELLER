@@ -6,6 +6,7 @@ import type { BodySlotRepresentation } from "../shared/body_slot_representation.
 export type KindDefinition = {
     id: string;
     name: string;
+    weight?: number;
     greater_kind?: string;
     parts?: { slot: string; critical?: boolean }[];
 

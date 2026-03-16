@@ -10,6 +10,7 @@ import { calculate_grid_dimensions } from "../types/container.js";
 import type { ContainerPosition, Container, ContainerContentEntry } from "../types/container.js";
 import { load_place, save_place } from "../place_storage/store.js";
 import { load_actor, save_actor } from "../actor_storage/store.js";
+import { load_master_item } from "../item_storage/store.js";
 import { 
     check_tag_compatibility, 
     has_equipment_tags,
@@ -767,7 +768,9 @@ export function get_container_contents(
  * For items with container_data, includes weight of nested items
  */
 export function calculate_item_weight(item: ItemInstance): number {
-    let weight = item.qty || 1;
+    const def = item?.def_id ? load_master_item(item.def_id) : null;
+    const unit_weight = def?.ok ? Number(def.item.weight ?? 0) : Number((item as any)?.weight ?? 0);
+    let weight = (Number.isFinite(unit_weight) ? unit_weight : 0) * Math.max(1, Number(item.qty ?? 1) || 1);
     
     // Add weight of items inside this item (if it's a container)
     if (item.container_data?.contents) {

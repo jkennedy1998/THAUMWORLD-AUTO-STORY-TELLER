@@ -245,6 +245,7 @@ export type PlaceNPC = {
   breath_last_processed_ms?: number;
   // Movement cadence scheduling (per locomotion mode).
   movement_schedule?: any;
+  weight?: number;
   status: "present" | "moving" | "busy" | "sleeping";
   activity: string;              // "sitting at the bar", "whittling by the fire"
   tags?: Array<{ name: string; mag: number; meta: string[] }>;  // Optional tags for visual effects
@@ -275,6 +276,7 @@ export type PlaceActor = {
   breath_last_processed_ms?: number;
   // Movement cadence scheduling (per locomotion mode).
   movement_schedule?: any;
+  weight?: number;
   status: "present" | "moving" | "busy";
   tags?: Array<{ name: string; mag: number; meta: string[] }>;  // Optional tags for visual effects
 };

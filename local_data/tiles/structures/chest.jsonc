@@ -2,6 +2,7 @@
   "id": "chest",
   "name": "Chest",
   "description": "A wooden storage chest. Sturdy and spacious.",
+  "weight": 4,
   "display_char": "⍞",
   "display_color": "#8B4513",
   "tags": [
@@ -19,6 +20,12 @@
     },
     {
       "name": "CONTAINER",
+      "mag": 1,
+      "meta": [],
+      "scope": ["TILE"]
+    },
+    {
+      "name": "STEP_UP",
       "mag": 1,
       "meta": [],
       "scope": ["TILE"]

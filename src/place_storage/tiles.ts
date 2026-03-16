@@ -1,6 +1,6 @@
 import type { Place, PlaceTile, PlaceTiles, TilePosition, PlaceConnection } from "../types/place.js";
 import { load_master_tile } from "../tile_storage/store.js";
-import { resolve_place_tile, has_effective_tile_tag } from "../tile_storage/resolve.js";
+import { has_tag_name, resolve_tile_physics_tags } from "../shared/physics_tags.js";
 
 function clamp_int(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, Math.trunc(n)));
@@ -97,30 +97,22 @@ function get_tile(tiles: PlaceTiles, x: number, y: number): PlaceTile | null {
 
 export function tile_blocks_movement(tile: PlaceTile | null): boolean {
   if (!tile) return false;
-  const resolved = resolve_place_tile(tile.kind, tile);
-  const tags = resolved ? resolved.effective_tags : (tile.tags ?? []);
-  return has_effective_tile_tag(tags, "OCCUPIES");
+  return resolve_tile_physics_tags(tile).occupies;
 }
 
 export function tile_blocks_los(tile: PlaceTile | null): boolean {
   if (!tile) return false;
-  const resolved = resolve_place_tile(tile.kind, tile);
-  const tags = resolved ? resolved.effective_tags : (tile.tags ?? []);
-  return has_effective_tile_tag(tags, "COVER");
+  return has_tag_name(resolve_tile_physics_tags(tile).effective_tags, "COVER");
 }
 
 export function tile_is_door(tile: PlaceTile | null): boolean {
   if (!tile) return false;
-  const resolved = resolve_place_tile(tile.kind, tile);
-  const tags = resolved ? resolved.effective_tags : (tile.tags ?? []);
-  return has_effective_tile_tag(tags, "DOOR");
+  return has_tag_name(resolve_tile_physics_tags(tile).effective_tags, "DOOR");
 }
 
 export function tile_is_container(tile: PlaceTile | null): boolean {
   if (!tile) return false;
-  const resolved = resolve_place_tile(tile.kind, tile);
-  const tags = resolved ? resolved.effective_tags : (tile.tags ?? []);
-  return has_effective_tile_tag(tags, "CONTAINER");
+  return resolve_tile_physics_tags(tile).container;
 }
 
 export function ensure_place_tiles(place: Place): { changed: boolean } {

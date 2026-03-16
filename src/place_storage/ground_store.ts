@@ -1,20 +1,12 @@
 // Ground Item Storage - Inline storage for items on the ground
 // No more scattered containers, items stored directly in place.ground
 
-import * as fs from "node:fs";
-import * as path from "node:path";
-import { parse } from "jsonc-parser";
-import { ensure_dir_exists } from "../engine/log_store.js";
 import { debug_log, debug_error } from "../shared/debug.js";
 import type { InlineItem, InlineGround } from "../types/inline_item.js";
 import { randomUUID } from "node:crypto";
-import { get_data_slot_dir } from "../engine/paths.js";
 import { resolve_inline_item } from "../item_storage/resolve.js";
-import { sanitize_place_for_save } from "../shared/defs_deltas_sanitize.js";
-
-function get_place_path(slot: number, place_id: string): string {
-    return path.join(get_data_slot_dir(slot), "places", `${place_id}.jsonc`);
-}
+import { load_place, save_place } from "./store.js";
+import { make_scattered_key, normalize_ground_scattered } from "./ground_normalize.js";
 
 function get_place_base_z(place_any: any): number {
     const z = Number(place_any?.coordinates?.elevation);
@@ -31,71 +23,6 @@ function parse_scattered_key(key: string): { x: number; y: number; z: number | n
     return { x, y, z: Number.isFinite(z) ? z : null };
 }
 
-function make_scattered_key(x: number, y: number, z: number): string {
-    return `${Math.floor(x)}_${Math.floor(y)}_${Math.floor(z)}`;
-}
-
-// Migration: upgrade legacy scattered keys (x_y) into voxel keys (x_y_z).
-// Also enforces item.elevation to match key z when present.
-export function normalize_ground_scattered(place_any: any): boolean {
-    try {
-        if (!place_any || typeof place_any !== 'object') return false;
-        if (!place_any.ground) place_any.ground = { main: [], scattered: {} };
-        if (!place_any.ground.scattered || typeof place_any.ground.scattered !== 'object') place_any.ground.scattered = {};
-
-        const base_z = get_place_base_z(place_any);
-        const scattered = place_any.ground.scattered as Record<string, InlineItem[]>;
-        const next: Record<string, InlineItem[]> = {};
-        let changed = false;
-
-        for (const [k, items] of Object.entries(scattered)) {
-            const p = parse_scattered_key(k);
-            if (!p) {
-                // Keep unknown keys as-is.
-                next[k] = items as any;
-                continue;
-            }
-            const x = p.x;
-            const y = p.y;
-
-            for (const item of (items as any[])) {
-                if (!item) continue;
-                const key_z = p.z;
-                const iz_raw = (item as any).elevation;
-                const iz = (key_z !== null)
-                    ? key_z
-                    : (typeof iz_raw === 'number' && Number.isFinite(iz_raw) ? Math.floor(iz_raw) : base_z);
-
-                if ((item as any).elevation !== iz) {
-                    (item as any).elevation = iz;
-                    changed = true;
-                }
-
-                const nk = make_scattered_key(x, y, iz);
-                if (nk !== k) changed = true;
-                if (!Array.isArray(next[nk])) next[nk] = [];
-                next[nk]!.push(item);
-            }
-        }
-
-        // Preserve stable ordering by iterating in input key order.
-        place_any.ground.scattered = next;
-        return changed;
-    } catch {
-        return false;
-    }
-}
-
-function read_jsonc(pathname: string): Record<string, unknown> {
-    const raw = fs.readFileSync(pathname, "utf-8");
-    return (parse(raw) as Record<string, unknown>) ?? {};
-}
-
-function write_jsonc(pathname: string, data: unknown): void {
-    ensure_dir_exists(path.dirname(pathname));
-    fs.writeFileSync(pathname, JSON.stringify(data, null, 2));
-}
-
 /**
  * Load place with inline ground items
  */
@@ -104,36 +31,12 @@ export function load_place_with_ground(
     place_id: string
 ): { ok: true; place: Record<string, unknown> } | { ok: false; error: string } {
     try {
-        const place_path = get_place_path(slot, place_id);
-        
-        if (!fs.existsSync(place_path)) {
-            return { ok: false, error: `place_not_found: ${place_id}` };
+        const place_result = load_place(slot, place_id);
+        if (!place_result.ok) {
+            return { ok: false, error: `${place_result.error}: ${place_id}` };
         }
-        
-        const place = read_jsonc(place_path);
-        
-        // Ensure ground structure exists
-        if (!place.ground) {
-            place.ground = { main: [], scattered: {} };
-        }
-        
-        const ground = place.ground as InlineGround;
-        if (!ground.main) ground.main = [];
-        if (!ground.scattered) ground.scattered = {};
-        
+        const place = place_result.place as Record<string, unknown>;
         debug_log("ground_items", `Loaded place ${place_id} with ground items`);
-
-        // Migrate scattered keys to voxel keys.
-        try {
-            const changed = normalize_ground_scattered(place as any);
-            if (changed) {
-                write_jsonc(place_path, place);
-                debug_log('ground_items', `Migrated scattered ground keys to x_y_z for ${place_id}`);
-            }
-        } catch {
-            // ignore
-        }
-        
         return { ok: true, place };
     } catch (err) {
         debug_error("ground_items", `Failed to load place ${place_id}`, err);
@@ -150,11 +53,9 @@ export function save_place_with_ground(
     place: Record<string, unknown>
 ): { ok: true } | { ok: false; error: string } {
     try {
-        const place_path = get_place_path(slot, place_id);
-
-        // defs+deltas migration: strip derived/legacy inline fields before persisting.
-        sanitize_place_for_save(place as any);
-        write_jsonc(place_path, place);
+        const actual_place_id = String((place as any)?.id ?? place_id ?? '').trim();
+        if (!actual_place_id) return { ok: false, error: 'missing_place_id' };
+        save_place(slot, place as any);
         debug_log("ground_items", `Saved place ${place_id} with ground items`);
         return { ok: true };
     } catch (err) {

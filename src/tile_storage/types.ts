@@ -40,6 +40,7 @@ export interface TileDefinition {
     id: string;                    // Unique identifier
     name: string;                  // Display name
     description: string;           // Flavor text
+    weight: number;                // Base physical weight for tile physics
     
     // Visual properties
     display_char: string;          // Single char for UI

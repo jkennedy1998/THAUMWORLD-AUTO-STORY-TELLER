@@ -56,6 +56,7 @@ export function sanitize_place_tile_instance(tile: any): boolean {
   changed = del(tile, 'blocks_sight') || changed;
   changed = del(tile, 'blocks_sound') || changed;
   changed = del(tile, '__derived_runtime') || changed;
+  changed = del(tile, '__physics') || changed;
 
   // Tile contents are inline items.
   if (Array.isArray((tile as any).contents)) {
@@ -69,6 +70,8 @@ export function sanitize_place_for_save(place_any: any): boolean {
   if (!is_obj(place_any)) return false;
 
   let changed = false;
+
+  changed = del(place_any, '__api_runtime_augmented') || changed;
 
   // Ground inline items.
   try {
@@ -85,7 +88,7 @@ export function sanitize_place_for_save(place_any: any): boolean {
     // ignore
   }
 
-  // Tiles (both layers).
+  // Tiles (all layers).
   const scrub_tiles = (tiles_obj: any) => {
     if (!tiles_obj || !Array.isArray(tiles_obj.cells)) return;
     for (const row of tiles_obj.cells) {
@@ -96,8 +99,11 @@ export function sanitize_place_for_save(place_any: any): boolean {
       }
     }
   };
-  scrub_tiles((place_any as any).tiles_z0);
-  scrub_tiles((place_any as any).tiles);
+  for (const key of Object.keys(place_any as any)) {
+    if (key === 'tiles' || /^tiles_z-?\d+$/.test(key)) {
+      scrub_tiles((place_any as any)[key]);
+    }
+  }
 
   // Structures (instances): strip derived/runtime-only fields.
   try {

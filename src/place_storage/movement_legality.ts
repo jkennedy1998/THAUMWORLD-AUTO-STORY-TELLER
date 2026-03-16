@@ -1,6 +1,7 @@
 import type { Place } from "../types/place.js";
 import { eval_body_model_voxels, get_body_model_def } from "../shared/body_model.js";
 import { get_facing, type Direction } from "../npc_ai/facing_system.js";
+import { build_physics_tag_flags, has_tag_name, resolve_tile_physics_tags } from "../shared/physics_tags.js";
 
 export type OwnerRef = { kind: "actor" | "npc" | "structure" | "item"; id: string };
 
@@ -16,6 +17,18 @@ export type MoveCheck =
       reason: "out_of_bounds" | "blocked" | "no_support" | "reserved";
       detail?: any;
     };
+
+export type BlockerCapabilityProfile = {
+  owner_kind: "tile" | "occupant";
+  owner_id: string | null;
+  part: string | null;
+  blocked_voxel: { x: number; y: number; z: number };
+  effective_tags: any[];
+  occupies: boolean;
+  pushable: boolean;
+  can_step_up: boolean;
+  can_climb_surface: boolean;
+};
 
 export type LegalityContext = {
   exclude_owner?: OwnerRef;
@@ -152,16 +165,22 @@ function get_tile_at_world_z(place: Place, x: number, y: number, world_z: number
   }
 }
 
-function has_tag(tags: any, name: string): boolean {
-  const up = String(name ?? "").toUpperCase();
-  if (!Array.isArray(tags)) return false;
-  return tags.some((t: any) => String(t?.name ?? "").toUpperCase() === up);
-}
-
 function tile_has_occupies(place: Place, x: number, y: number, z: number): boolean {
   const t = get_tile_at_world_z(place, x, y, z);
   if (!t) return false;
-  return has_tag((t as any)?.tags ?? [], "OCCUPIES");
+  return resolve_tile_physics_tags(t).occupies;
+}
+
+function tile_has_container_surface(place: Place, x: number, y: number, z: number): boolean {
+  try {
+    const tile = get_tile_at_world_z(place, x, y, z);
+    if (!tile) return false;
+    const flags = resolve_tile_physics_tags(tile);
+    const is_container = Array.isArray((tile as any)?.contents) || flags.container;
+    return is_container;
+  } catch {
+    return false;
+  }
 }
 
 function resolve_entity_facing(e: any, owner_id: string): Direction | null {
@@ -196,7 +215,22 @@ function owner_matches(a: OwnerRef | null | undefined, b: OwnerRef | null | unde
 }
 
 function voxel_has_occupies_tag(tags: any[]): boolean {
-  return Array.isArray(tags) && tags.some((t: any) => String(t?.name ?? "").toUpperCase() === "OCCUPIES");
+  return build_physics_tag_flags(tags).occupies;
+}
+
+function build_blocker_profile(owner_kind: "tile" | "occupant", owner_id: string | null, part: string | null, blocked_voxel: { x: number; y: number; z: number }, tags: any[]): BlockerCapabilityProfile {
+  const flags = build_physics_tag_flags(tags);
+  return {
+    owner_kind,
+    owner_id,
+    part,
+    blocked_voxel,
+    effective_tags: Array.isArray(tags) ? tags : [],
+    occupies: flags.occupies,
+    pushable: flags.pushable,
+    can_step_up: has_tag_name(tags, 'STEP_UP') && !flags.pushable,
+    can_climb_surface: has_tag_name(tags, 'CLIMB_SURFACE') && !flags.pushable,
+  };
 }
 
 function find_blocking_occupant_at(place: Place, x: number, y: number, z: number, ctx: LegalityContext | undefined): OccupantInfo | null {
@@ -378,16 +412,20 @@ export function can_place_volume(place: Place, owner: OwnerRef, stance_origin: V
 
     // Tile collision.
     if (tile_has_occupies(place, v.x, v.y, v.z)) {
+      const tile = get_tile_at_world_z(place, v.x, v.y, v.z);
+      const tile_flags = resolve_tile_physics_tags(tile);
+      const blocker_profile = build_blocker_profile('tile', String((tile as any)?.kind ?? ''), v.part, { x: v.x, y: v.y, z: v.z }, tile_flags.effective_tags);
       return {
         ok: false,
         reason: "blocked",
-        detail: { ...detail_base, blocked_voxel: { x: v.x, y: v.y, z: v.z }, blocked_by: "tile", blocked_part: v.part },
+        detail: { ...detail_base, blocked_voxel: { x: v.x, y: v.y, z: v.z }, blocked_by: "tile", blocked_part: v.part, blocker_profile },
       };
     }
 
     // Occupant collision.
     const occ = find_blocking_occupant_at(place, v.x, v.y, v.z, { ...ctx, exclude_owner: ctx.exclude_owner ?? owner });
     if (occ) {
+      const blocker_profile = build_blocker_profile('occupant', `${occ.owner_kind}.${occ.owner_id}`, occ.part, { x: v.x, y: v.y, z: v.z }, occ.tags);
       return {
         ok: false,
         reason: "blocked",
@@ -397,6 +435,7 @@ export function can_place_volume(place: Place, owner: OwnerRef, stance_origin: V
           blocked_by: "occupant",
           blocked_part: v.part,
           blocked_owner: { owner_kind: occ.owner_kind, owner_id: occ.owner_id, part: occ.part },
+          blocker_profile,
         },
       };
     }
@@ -425,6 +464,9 @@ export function can_place_volume(place: Place, owner: OwnerRef, stance_origin: V
         if (tile_has_occupies(place, below.x, below.y, below.z)) {
           ok = true;
           by = "tile";
+        } else if (tile_has_container_surface(place, below.x, below.y, below.z)) {
+          ok = true;
+          by = "tile_container_surface";
         } else {
           // If no support layer is authored at base_z-1, treat as solid ground.
           const bz = base_z(place);
@@ -433,13 +475,6 @@ export function can_place_volume(place: Place, owner: OwnerRef, stance_origin: V
           if (is_support_plane && !has_support_tiles) {
             ok = true;
             by = "implicit_ground";
-          } else {
-            // Occupant support.
-            const occ = find_blocking_occupant_at(place, below.x, below.y, below.z, { ...ctx, exclude_owner: ctx.exclude_owner ?? owner });
-            if (occ) {
-              ok = true;
-              by = `occupant:${occ.owner_kind}:${occ.owner_id}`;
-            }
           }
         }
       }
@@ -461,25 +496,6 @@ export function can_place_volume(place: Place, owner: OwnerRef, stance_origin: V
       };
     }
 
-    // Devlog marker: detect when support comes from an occupant (not tiles).
-    try {
-      const any_occ = supported.some((s) => typeof s.by === 'string' && s.by.startsWith('occupant:'));
-      const any_tile = supported.some((s) => s.by === 'tile' || s.by === 'implicit_ground');
-      if (support_ok && any_occ && !any_tile) {
-        const k = `${owner.kind}:${owner.id}:${key_xyz(so.x, so.y, so.z)}`;
-        if (!move_unify_support_occupant_marked.has(k)) {
-          move_unify_support_occupant_marked.add(k);
-          // eslint-disable-next-line no-console
-          console.log('[MOVE_UNIFY_TEST]', 'PASS stand on entity allowed (support from occupant)', {
-            owner,
-            stance_origin: so,
-            support_checked: supported,
-          });
-        }
-      }
-    } catch {
-      // ignore
-    }
   }
 
   return { ok: true };

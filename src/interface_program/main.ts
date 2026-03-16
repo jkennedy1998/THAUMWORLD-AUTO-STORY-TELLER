@@ -26,16 +26,17 @@ import { load_kind_definitions } from "../kind_storage/store.js";
 import { get_timed_event_state, get_region_by_coords, is_timed_event_active } from "../world_storage/store.js";
 import { travel_between_places } from "../travel/movement.js";
 import { load_npc } from "../npc_storage/store.js";
-import { load_place, list_places_in_region, save_place, create_basic_place } from "../place_storage/store.js";
+import { load_place, list_all_places, list_places_in_region, save_place, create_basic_place } from "../place_storage/store.js";
 import { find_empty_grid_position } from "../shared/migration.js";
 import { find_path as shared_find_path } from "../shared/pathfinding.js";
 import { calculate_grid_dimensions } from "../types/container.js";
-import { load_item_def, load_master_item } from "../item_storage/store.js";
+import { list_master_items, load_item_def, load_master_item } from "../item_storage/store.js";
 import { create_inline_item } from "../item_instances/store.js";
-import { load_master_tile } from "../tile_storage/store.js";
+import { get_all_tile_ids, load_master_tile } from "../tile_storage/store.js";
 import { resolve_inline_item, has_effective_tag } from "../item_storage/resolve.js";
 import { emitBridgeMessage } from "../shared/event_bridge_client.js";
 import { resolve_place_tile } from "../tile_storage/resolve.js";
+import { build_physics_tag_flags, has_tag_name, resolve_structure_physics_tags, resolve_tile_physics_tags } from "../shared/physics_tags.js";
 import {
     load_actor_with_items,
     save_actor_with_items,
@@ -105,10 +106,17 @@ type PlaceBreathState = {
     // Future hook for pause / turn-based mode.
     time_scale: number;
 
+    // Runtime pause holders. Any active source pauses the place.
+    // Examples: place_painter, battle, conversation.
+    pause_sources: string[];
+
     // Base place snapshot for breath processing.
     // Must NOT include `/api/place` derived entity lists.
     place_base: any | null;
     place_dirty: boolean;
+    tile_physics_cache: Array<{ x: number; y: number; z: number; layer_key: string; kind: string }>;
+    tile_physics_cache_dirty: boolean;
+    tile_updates: Array<{ place_id: string; kind: string; from: { x: number; y: number; z: number }; to: { x: number; y: number; z: number } }>;
 };
 
 const BREATH_MS = 33; // Fast fixed tick; most entities won't step every breath.
@@ -133,6 +141,12 @@ let last_breath_interval_started_ms = 0;
 let breath_interval_sample_count = 0;
 
 const place_breath = new Map<string, PlaceBreathState>();
+
+type PlacePauseStateSummary = {
+    paused: boolean;
+    time_scale: number;
+    pause_sources: string[];
+};
 
 // ---------------------------------------------------------------------------
 // Server-Authoritative Movement Controller (intent + click-to-move)
@@ -224,6 +238,87 @@ function entity_has_tag(any_entity: any, tag_name: string): boolean {
 
 function move_ctl_key(slot: number, entity_ref: string): string {
     return `${slot}:${String(entity_ref ?? "").trim()}`;
+}
+
+function get_or_init_move_controller(
+    slot: number,
+    entity_ref: string,
+    place_id: string,
+    mode: MoveMode = 'WALK',
+): EntityMoveController {
+    const key = move_ctl_key(slot, entity_ref);
+    const existing = move_ctl.get(key);
+    if (existing) {
+        existing.place_id = place_id;
+        existing.mode = mode;
+        return existing;
+    }
+    const ctl: EntityMoveController = {
+        slot,
+        entity_ref,
+        entity_type: infer_entity_type(entity_ref),
+        place_id,
+        mode,
+        intent: null,
+        goal: null,
+        path: null,
+        path_index: 0,
+        need_repath: false,
+        last_plan_breath: 0,
+        last_brain_breath: 0,
+        updated_at_ms: Date.now(),
+        move_seq: 0,
+    };
+    move_ctl.set(key, ctl);
+    return ctl;
+}
+
+function clear_entity_goal_and_path(slot: number, entity_ref: string, place_id: string): EntityMoveController {
+    const ctl = get_or_init_move_controller(slot, entity_ref, place_id);
+    ctl.intent = null;
+    ctl.goal = null;
+    ctl.path = null;
+    ctl.path_index = 0;
+    ctl.need_repath = false;
+    ctl.updated_at_ms = Date.now();
+    move_ctl.set(move_ctl_key(slot, entity_ref), ctl);
+    return ctl;
+}
+
+function queue_entity_goal(
+    slot: number,
+    entity_ref: string,
+    place_id: string,
+    goal: { x: number; y: number },
+    place_breath: number,
+    reason: string,
+): EntityMoveController | null {
+    const entity_any = get_entity_any_cached_or_load(slot, entity_ref);
+    if (!entity_any) return null;
+    const ctl = get_or_init_move_controller(slot, entity_ref, place_id);
+    ctl.intent = null;
+    ctl.goal = { x: Math.floor(goal.x), y: Math.floor(goal.y) };
+    ctl.path = null;
+    ctl.path_index = 0;
+    ctl.need_repath = true;
+    ctl.updated_at_ms = Date.now();
+    move_ctl.set(move_ctl_key(slot, entity_ref), ctl);
+    try {
+        const runtime = get_or_init_movement_physics_state(entity_ref, place_id, entity_any, ctl, place_breath);
+        runtime.input_goal_queued_at_ms = Date.now();
+        persist_entity_movement_state(entity_any, runtime, place_breath);
+    } catch {
+        // ignore
+    }
+    debug_log('MOVE_VEL_TEST', 'server queued npc goal', {
+        slot,
+        entity_ref,
+        place_id,
+        goal: ctl.goal,
+        breath_index: place_breath,
+        reason,
+    });
+    return ctl;
 }
 
 function normalize_movement_physics_state(any_entity: any): PersistedMovementPhysicsState {
@@ -410,6 +505,61 @@ function desired_step_from_controller(ctl: EntityMoveController, cur_x: number, 
     return null;
 }
 
+function can_push_blocking_tile_forward(
+    place_any: any,
+    desired: { dx: number; dy: number },
+    forward_check: any,
+): { pushable: boolean; can_push: boolean; blocker?: { x: number; y: number; z: number }; tile_kind?: string } {
+    const blocked_by = String(forward_check?.detail?.blocked_by ?? '');
+    const blocked_voxel = forward_check?.detail?.blocked_voxel;
+    if (blocked_by !== 'tile' || !blocked_voxel) return { pushable: false, can_push: false };
+    const bx = Math.floor(Number(blocked_voxel.x));
+    const by = Math.floor(Number(blocked_voxel.y));
+    const bz = Math.floor(Number(blocked_voxel.z));
+    if (!Number.isFinite(bx) || !Number.isFinite(by) || !Number.isFinite(bz)) return { pushable: false, can_push: false };
+    const blocker_tile = get_place_tile_at_world_z(place_any, bx, by, bz);
+    const blocker_tags = blocker_tile ? get_tile_effective_tags(blocker_tile) : [];
+    if (!blocker_tile || !has_simple_tag(blocker_tags, 'PUSHABLE')) {
+        return { pushable: false, can_push: false, blocker: { x: bx, y: by, z: bz }, tile_kind: String(blocker_tile?.kind ?? '') };
+    }
+    const target = { x: bx + clamp_intent(desired.dx), y: by + clamp_intent(desired.dy), z: bz };
+    const move_ok = can_tile_move_to(place_any, { x: bx, y: by, z: bz }, target);
+    if (!move_ok.ok) {
+        const destination_blocked_by = String(move_ok.detail?.blocked_by ?? '');
+        if (destination_blocked_by === 'tile') {
+            debug_log('MOVE_UNIFY_TEST', 'push blocked by occupied destination tile', {
+                blocker: { x: bx, y: by, z: bz },
+                target,
+                tile_kind: String(blocker_tile?.kind ?? ''),
+                destination_kind: String(move_ok.detail?.occupying_kind ?? ''),
+                reason: move_ok.reason ?? null,
+                detail: move_ok.detail ?? null,
+            });
+        } else if (destination_blocked_by === 'occupant') {
+            debug_log('MOVE_UNIFY_TEST', 'push blocked by occupant in destination', {
+                blocker: { x: bx, y: by, z: bz },
+                target,
+                tile_kind: String(blocker_tile?.kind ?? ''),
+                reason: move_ok.reason ?? null,
+                detail: move_ok.detail ?? null,
+            });
+        }
+        debug_log('MOVE_UNIFY_TEST', 'pushable tile cannot be pushed forward', {
+            blocker: { x: bx, y: by, z: bz },
+            target,
+            tile_kind: String(blocker_tile?.kind ?? ''),
+            reason: move_ok.reason ?? null,
+            detail: move_ok.detail ?? null,
+        });
+    }
+    return {
+        pushable: true,
+        can_push: !!move_ok.ok,
+        blocker: { x: bx, y: by, z: bz },
+        tile_kind: String(blocker_tile?.kind ?? ''),
+    };
+}
+
 function try_select_walk_incline_for_direction(place_any: any, entity_ref: string, entity_type: 'actor' | 'npc', cur_x: number, cur_y: number, cur_z: number, desired: { dx: number; dy: number }): { subtype: 'incline_up' | 'incline_down'; dz: 1 | -1; axis: 'x' | 'y' } | null {
     const owner = { kind: entity_type as any, id: entity_ref };
     const axis: 'x' | 'y' = desired.dx !== 0 ? 'x' : 'y';
@@ -418,8 +568,43 @@ function try_select_walk_incline_for_direction(place_any: any, entity_ref: strin
         support_policy: 'any_footprint' as any,
     });
     if (forward.ok) return null;
+    const forward_blocked_by = String((forward as any)?.detail?.blocked_by ?? '');
+    const blocker_profile = (forward as any)?.detail?.blocker_profile ?? null;
 
     if (forward.reason === 'blocked') {
+        const push_check = can_push_blocking_tile_forward(place_any, desired, forward);
+        if (push_check.pushable) {
+            if (push_check.can_push) {
+                debug_log('MOVE_UNIFY_TEST', 'incline skipped because pushable tile can be pushed', {
+                    entity_ref,
+                    at: { x: cur_x, y: cur_y, z: cur_z },
+                    desired,
+                    blocker: push_check.blocker ?? null,
+                    tile_kind: push_check.tile_kind ?? null,
+                });
+            } else {
+                debug_log('MOVE_UNIFY_TEST', 'pushable tile blocked and not climbable', {
+                    entity_ref,
+                    at: { x: cur_x, y: cur_y, z: cur_z },
+                    desired,
+                    blocker: push_check.blocker ?? null,
+                    tile_kind: push_check.tile_kind ?? null,
+                    reason: 'push_failed',
+                });
+            }
+            return null;
+        }
+        if (!blocker_profile?.can_step_up) {
+            debug_log('MOVE_UNIFY_TEST', 'incline rejected because blocker lacks STEP_UP', {
+                entity_ref,
+                at: { x: cur_x, y: cur_y, z: cur_z },
+                desired,
+                blocked_by: forward_blocked_by || null,
+                blocker_profile,
+                detail: (forward as any)?.detail ?? null,
+            });
+            return null;
+        }
         const up = can_place_volume(place_any as any, owner as any, { x: cur_x, y: cur_y, z: cur_z + 1 }, 'WALK' as any, {
             exclude_owner: owner as any,
             support_policy: 'any_footprint' as any,
@@ -433,6 +618,7 @@ function try_select_walk_incline_for_direction(place_any: any, entity_ref: strin
         entity_ref,
         at: { x: cur_x, y: cur_y, z: cur_z },
         desired,
+        blocker_profile,
         forward,
         up,
         up_forward,
@@ -519,11 +705,97 @@ function apply_friction_to_axis(runtime: MovementPhysicsRuntimeState, axis: 'x' 
 }
 
 function gravity_delta_for_weight(weight_raw: any, supported: boolean): number {
-    if (supported) return 0;
     const weight = Number(weight_raw ?? 1);
-    if (!Number.isFinite(weight) || weight > 0) return -1;
+    if (!Number.isFinite(weight)) return supported ? 0 : -1;
+    if (weight > 0) return supported ? 0 : -1;
     if (weight < 0) return 1;
     return 0;
+}
+
+function resolved_inline_item_unit_weight(item_any: any): number {
+    const def_id = String(item_any?.def_id ?? '');
+    if (def_id) {
+        const resolved = resolve_inline_item(def_id, item_any as any);
+        if (resolved && Number.isFinite(Number(resolved.unit_weight))) return Number(resolved.unit_weight);
+    }
+    const raw = Number(item_any?.weight ?? item_any?.unit_weight ?? 0);
+    return Number.isFinite(raw) ? raw : 0;
+}
+
+function calculate_inline_item_effective_weight(item_any: any): number {
+    if (!item_any || typeof item_any !== 'object') return 0;
+    const qty_raw = Number(item_any?.qty ?? 1);
+    const qty = Number.isFinite(qty_raw) ? Math.max(1, Math.floor(qty_raw)) : 1;
+    let total = resolved_inline_item_unit_weight(item_any) * qty;
+    const contents = Array.isArray(item_any?.contents) ? item_any.contents : [];
+    for (const child of contents) total += calculate_inline_item_effective_weight(child);
+    const nested_entries = Array.isArray(item_any?.container_data?.contents) ? item_any.container_data.contents : [];
+    for (const entry of nested_entries) total += calculate_inline_item_effective_weight((entry as any)?.instance ?? entry);
+    return total;
+}
+
+function calculate_inline_items_effective_weight(items_any: any): number {
+    if (!Array.isArray(items_any)) return 0;
+    let total = 0;
+    for (const item of items_any) total += calculate_inline_item_effective_weight(item);
+    return total;
+}
+
+function calculate_body_slots_effective_weight(body_slots_any: any): number {
+    if (!body_slots_any || typeof body_slots_any !== 'object') return 0;
+    let total = 0;
+    for (const slot of Object.values(body_slots_any as Record<string, any>)) {
+        if (!slot || typeof slot !== 'object') continue;
+        total += calculate_inline_item_effective_weight((slot as any).armor);
+        total += calculate_inline_item_effective_weight((slot as any).tool);
+        total += calculate_inline_items_effective_weight((slot as any).garb);
+    }
+    return total;
+}
+
+function calculate_legacy_inventory_effective_weight(items_any: any): number {
+    if (!Array.isArray(items_any)) return 0;
+    let total = 0;
+    for (const item of items_any) {
+        if (!item || typeof item !== 'object') continue;
+        const qty_raw = Number((item as any)?.qty ?? 1);
+        const qty = Number.isFinite(qty_raw) ? Math.max(1, Math.floor(qty_raw)) : 1;
+        const base = Number((item as any)?.weight ?? 0);
+        total += (Number.isFinite(base) ? base : 0) * qty;
+        total += calculate_legacy_inventory_effective_weight((item as any)?.contents);
+        const nested_entries = Array.isArray((item as any)?.container_data?.contents) ? (item as any).container_data.contents : [];
+        for (const entry of nested_entries) total += calculate_legacy_inventory_effective_weight([(entry as any)?.instance ?? entry]);
+    }
+    return total;
+}
+
+function get_entity_effective_weight(any_entity: any): number {
+    const base_weight_raw = Number(any_entity?.weight ?? 1);
+    const base_weight = Number.isFinite(base_weight_raw) ? base_weight_raw : 1;
+    return base_weight
+        + calculate_body_slots_effective_weight(any_entity?.body_slots)
+        + calculate_legacy_inventory_effective_weight(any_entity?.inventory);
+}
+
+function get_tile_effective_tags(tile: any): any[] {
+    return resolve_tile_physics_tags(tile).effective_tags;
+}
+
+function get_place_tile_effective_weight(tile: any): number {
+    const resolved = tile ? resolve_place_tile(String(tile.kind ?? ''), tile) : null;
+    const base_weight = Number(resolved?.weight);
+    return (Number.isFinite(base_weight) ? base_weight : 0) + calculate_inline_items_effective_weight(tile?.contents);
+}
+
+function get_structure_effective_tags(structure: any): any[] {
+    return resolve_structure_physics_tags(structure).effective_tags;
+}
+
+function get_structure_effective_weight(structure: any): number {
+    const def_id = String(structure?.def_id ?? '');
+    const resolved = def_id ? resolve_place_tile(def_id, { kind: def_id, tag_add: structure?.tag_add, tag_remove: structure?.tag_remove } as any) : null;
+    const base_weight = Number(resolved?.weight);
+    return (Number.isFinite(base_weight) ? base_weight : 0) + calculate_inline_items_effective_weight(structure?.contents);
 }
 
 function get_entity_support_state(place_any: any, entity_ref: string, entity_type: 'actor' | 'npc', x: number, y: number, z: number): { supported: boolean; reason: string | null } {
@@ -543,10 +815,10 @@ function is_vertical_motion_active(runtime: MovementPhysicsRuntimeState, unsuppo
 }
 
 function get_entity_gravity_delta(place_any: any, entity_ref: string, entity_type: 'actor' | 'npc', any_entity: any, x: number, y: number, z: number): number {
-    if (!has_simple_tag(any_entity?.tags, 'GRAVITY')) return 0;
     const support = get_entity_support_state(place_any, entity_ref, entity_type, x, y, z);
-    if (support.supported || support.reason !== 'no_support') return 0;
-    return gravity_delta_for_weight(any_entity?.weight ?? 1, false);
+    const effective_weight = get_entity_effective_weight(any_entity);
+    if (support.reason !== null && support.reason !== 'no_support') return 0;
+    return gravity_delta_for_weight(effective_weight, !!support.supported);
 }
 
 function is_entity_unsupported(place_any: any, entity_ref: string, entity_type: 'actor' | 'npc', x: number, y: number, z: number): boolean {
@@ -638,7 +910,7 @@ function can_use_incline_transient_vertical_override(
         return Math.floor(blocked_voxel_z) === Math.floor(cur_z);
     }
     if (subtype === 'move.walk.incline_down') {
-        if (blocked_by !== 'tile' && blocked_by !== 'occupant') return false;
+        if (blocked_by !== 'tile') return false;
         return Math.floor(blocked_voxel_z) === Math.floor(attempt.z);
     }
     return false;
@@ -699,8 +971,8 @@ function max_move_spend_per_breath(modality: MoveModality): number {
     return 3;
 }
 
-function apply_actor_control_steering(runtime: MovementPhysicsRuntimeState, desired: { dx: number; dy: number } | null, incline: { subtype: 'incline_up' | 'incline_down'; dz: 1 | -1 } | null): void {
-    if (runtime.entity_type !== 'actor' || !desired) return;
+function apply_entity_control_steering(runtime: MovementPhysicsRuntimeState, desired: { dx: number; dy: number } | null, incline: { subtype: 'incline_up' | 'incline_down'; dz: 1 | -1 } | null): void {
+    if (!desired) return;
     const before = { ...runtime.velocity };
     if (desired.dx !== 0) {
         if (Math.sign(runtime.velocity.vx) === -Math.sign(desired.dx)) {
@@ -719,8 +991,9 @@ function apply_actor_control_steering(runtime: MovementPhysicsRuntimeState, desi
         }
     }
     if (before.vx !== runtime.velocity.vx || before.vy !== runtime.velocity.vy) {
-        debug_log('MOVE_VEL_TEST', 'actor control steering applied', {
+        debug_log('MOVE_VEL_TEST', 'control steering applied', {
             entity_ref: runtime.entity_ref,
+            entity_type: runtime.entity_type,
             place_id: runtime.place_id,
             desired,
             incline,
@@ -871,6 +1144,7 @@ function build_place_contents_for_legality(slot: number, place_id: string, place
                 npc_ref: String(npc_ref).startsWith('npc.') ? String(npc_ref) : `npc.${npc_id}`,
                 tile_position: { x: clamped_x, y: clamped_y },
                 elevation: (typeof loc.elevation === 'number' && Number.isFinite(loc.elevation)) ? Math.floor(loc.elevation) : Math.floor(Number(place_any?.coordinates?.elevation ?? 0)) || 0,
+                weight: get_entity_effective_weight(npc_any),
                 facing: typeof npc_any?.facing === 'string' ? String(npc_any.facing).toLowerCase() : get_facing(`npc.${npc_id}`),
                 body_model_id: typeof npc_any?.body_model_id === 'string' ? String(npc_any.body_model_id) : undefined,
                 status: 'present',
@@ -897,6 +1171,7 @@ function build_place_contents_for_legality(slot: number, place_id: string, place
                 actor_ref: String(actor_ref).startsWith('actor.') ? String(actor_ref) : `actor.${actor_id}`,
                 tile_position: { x: clamped_x, y: clamped_y },
                 elevation: (typeof loc.elevation === 'number' && Number.isFinite(loc.elevation)) ? Math.floor(loc.elevation) : Math.floor(Number(place_any?.coordinates?.elevation ?? 0)) || 0,
+                weight: get_entity_effective_weight(actor_any),
                 facing: typeof actor_any?.facing === 'string' ? String(actor_any.facing).toLowerCase() : get_facing(`actor.${actor_id}`),
                 body_model_id: typeof actor_any?.body_model_id === 'string' ? String(actor_any.body_model_id) : undefined,
                 status: 'present',
@@ -982,7 +1257,7 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState): void {
                     desired,
                 });
             } else if (spend_gate.can_spend && desired && airborne_horizontal_can_spend && !debug_ascend_active) {
-                apply_actor_control_steering(runtime, desired, incline);
+                apply_entity_control_steering(runtime, desired, incline);
                 let moves_applied = 0;
                 if (incline) {
                     runtime.velocity.vz += incline.dz;
@@ -1137,6 +1412,7 @@ function run_place_breaths(state: PlaceBreathState, ticks_to_run: number, now: n
             physics_duration_ms += Math.max(0, Date.now() - physics_started_ms);
             const gravity_started_ms = Date.now();
             apply_gravity_to_place_ground(state);
+            apply_gravity_to_place_tiles(state);
             gravity_duration_ms += Math.max(0, Date.now() - gravity_started_ms);
         }
     }
@@ -1194,10 +1470,11 @@ function coalesce_movement_updates(updates: any[], visible_place_keys: Set<strin
     return [...ordered_visible, ...Array.from(last_by_key.values())];
 }
 
-function flush_place_breath_outputs(now: number, breath_ticks: Array<{ slot: number; place_id: string; breath_index: number }>, movement_updates: any[]): void {
+function flush_place_breath_outputs(now: number, breath_ticks: Array<{ slot: number; place_id: string; breath_index: number }>, movement_updates: any[], tile_updates: any[]): void {
     const flush_started_ms = Date.now();
     let breath_emit_duration_ms = 0;
     let movement_emit_duration_ms = 0;
+    let tile_emit_duration_ms = 0;
     if (breath_ticks.length > 0) {
         const emit_started_ms = Date.now();
         void emitBridgeMessage('PLACE_BREATH_TICK', {
@@ -1221,14 +1498,25 @@ function flush_place_breath_outputs(now: number, breath_ticks: Array<{ slot: num
         movement_emit_duration_ms = Math.max(0, Date.now() - emit_started_ms);
     }
 
+    if (tile_updates.length > 0) {
+        const emit_started_ms = Date.now();
+        void emitBridgeMessage('PLACE_TILE_MOVED_BATCH', {
+            sent_at_ms: now,
+            updates: tile_updates,
+        });
+        tile_emit_duration_ms = Math.max(0, Date.now() - emit_started_ms);
+    }
+
     const flush_duration_ms = Math.max(0, Date.now() - flush_started_ms);
-    if (flush_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS || breath_emit_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS || movement_emit_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS) {
+    if (flush_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS || breath_emit_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS || movement_emit_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS || tile_emit_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS) {
         log_move_hotspot('place breath flush hotspot', {
             breath_ticks: breath_ticks.length,
             movement_updates: movement_updates.length,
+            tile_updates: tile_updates.length,
             flush_duration_ms,
             breath_emit_duration_ms,
             movement_emit_duration_ms,
+            tile_emit_duration_ms,
         });
     }
 }
@@ -1237,6 +1525,7 @@ function maybe_run_immediate_visible_place_pulse(slot: number, place_id: string,
     const key = place_breath_key(slot, place_id);
     const state = place_breath.get(key);
     if (!state?.realtime_visible || !state.place_base) return;
+    if (is_place_breath_paused(state)) return;
     const now = Date.now();
     const elapsed_ms = Math.max(0, now - Math.max(0, Number(state.last_tick_ms) || now));
     if (elapsed_ms < Math.max(8, Math.floor(BREATH_MS / 3))) return;
@@ -1252,7 +1541,10 @@ function maybe_run_immediate_visible_place_pulse(slot: number, place_id: string,
         has_goal: Array.from(move_ctl.values()).some((ctl) => ctl.slot === slot && ctl.place_id === place_id && !!ctl.goal),
         movement_updates: movement_updates.length,
     });
-    flush_place_breath_outputs(now, breath_ticks, movement_updates);
+    flush_place_breath_outputs(now, breath_ticks, movement_updates, state.tile_updates.splice(0));
+    if (state.place_dirty) {
+        persist_place_breath_if_needed(state);
+    }
 }
 
 function plan_path_for_controller(state: PlaceBreathState, ctl0: EntityMoveController, any_entity: any, place_bi: number): { planned: boolean; blocked: boolean; blocked_reason?: string | null; path_len?: number } {
@@ -1449,6 +1741,49 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
                 target = attempt;
                 break;
             }
+            const blocked_by = String((ok as any)?.detail?.blocked_by ?? '');
+            const blocked_voxel = (ok as any)?.detail?.blocked_voxel ?? null;
+            if ((attempt.axis === 'x' || attempt.axis === 'y') && blocked_by === 'tile' && blocked_voxel) {
+                const bx = Math.floor(Number(blocked_voxel.x));
+                const by = Math.floor(Number(blocked_voxel.y));
+                const bz = Math.floor(Number(blocked_voxel.z));
+                const blocker_tile = get_place_tile_at_world_z(place_any, bx, by, bz);
+                const blocker_tags = blocker_tile ? get_tile_effective_tags(blocker_tile) : [];
+                if (blocker_tile && has_simple_tag(blocker_tags, 'PUSHABLE')) {
+                    debug_log('MOVE_UNIFY_TEST', 'pushable tile collision detected', {
+                        place_id: state.place_id,
+                        breath_index: place_bi,
+                        entity_ref,
+                        attempt,
+                        blocked_voxel: { x: bx, y: by, z: bz },
+                        tile_kind: String(blocker_tile?.kind ?? ''),
+                    });
+                    const pushed = try_push_tile_by_impulse(
+                        state,
+                        { x: bx, y: by, z: bz },
+                        attempt.axis,
+                        attempt.axis === 'x' ? (attempt.x - cur_x) : (attempt.y - cur_y),
+                        { entity_ref, breath_index: place_bi },
+                    );
+                    if (pushed) {
+                        const retry = can_place_volume(place_any as any, owner as any, { x: attempt.x, y: attempt.y, z: attempt.z }, movement_mode as any, {
+                            exclude_owner: owner as any,
+                            support_policy: 'any_footprint' as any,
+                            allow_unsupported,
+                        });
+                        if (retry.ok) {
+                            target = attempt;
+                            debug_log('MOVE_UNIFY_TEST', 'pushable mover advanced after push', {
+                                place_id: state.place_id,
+                                breath_index: place_bi,
+                                entity_ref,
+                                target: attempt,
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
             failed_attempts.push({
                 axis: attempt.axis,
                 target: { x: attempt.x, y: attempt.y, z: attempt.z },
@@ -1608,6 +1943,14 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
             runtime.input_goal_queued_at_ms = null;
         }
         if (target.axis === 'z' && resolved_transient_subtype === 'move.walk.incline_up') {
+            debug_log('MOVE_UNIFY_TEST', 'incline allowed by STEP_UP', {
+                entity_ref,
+                place_id: state.place_id,
+                breath_index: place_bi,
+                from: { x: cur_x, y: cur_y, z: cur_z },
+                to: { x: target.x, y: target.y, z: target.z },
+                subtype: resolved_transient_subtype,
+            });
             const followthrough_desired = desired_step_from_controller(ctl, target.x, target.y);
             const followthrough_axis = resolve_followthrough_axis(followthrough_desired, resolved_preferred_axes);
             if (followthrough_axis) {
@@ -1993,13 +2336,95 @@ function get_active_place_breath_state(slot: number, place_id: string): PlaceBre
     return place_breath.get(key) ?? null;
 }
 
+function normalize_place_pause_source(source: any): string {
+    const raw = String(source ?? '').trim().toLowerCase();
+    const normalized = raw.replace(/[^a-z0-9_.:-]+/g, '_').replace(/^_+|_+$/g, '');
+    return normalized || 'system';
+}
+
+function ensure_place_pause_sources(state: PlaceBreathState): string[] {
+    if (!Array.isArray(state.pause_sources)) state.pause_sources = [];
+    state.pause_sources = Array.from(new Set(
+        state.pause_sources
+            .map((entry) => normalize_place_pause_source(entry))
+            .filter((entry) => entry.length > 0),
+    ));
+    return state.pause_sources;
+}
+
+function summarize_place_pause_state(state: PlaceBreathState | null): PlacePauseStateSummary {
+    if (!state) {
+        return { paused: false, time_scale: 1, pause_sources: [] };
+    }
+    const pause_sources = [...ensure_place_pause_sources(state)].sort();
+    const paused = pause_sources.length > 0;
+    const time_scale = paused ? 0 : 1;
+    return { paused, time_scale, pause_sources };
+}
+
+function apply_place_pause_state(state: PlaceBreathState): PlacePauseStateSummary {
+    const summary = summarize_place_pause_state(state);
+    state.time_scale = summary.time_scale;
+    if (summary.paused) {
+        state.sim_accum_ms = 0;
+    }
+    return summary;
+}
+
+function set_active_place_pause_source(
+    slot: number,
+    place_id: string,
+    source: any,
+    paused: boolean,
+    opts?: { touch_if_missing?: boolean; realtime_visible?: boolean },
+): { ok: boolean; error?: string; pause_state?: PlacePauseStateSummary } {
+    const pid = String(place_id ?? '').trim();
+    if (!pid) return { ok: false, error: 'missing_place_id' };
+    const src = normalize_place_pause_source(source);
+    if (opts?.touch_if_missing !== false && !get_active_place_breath_state(slot, pid)) {
+        const touched = touch_place_breath_by_id(slot, pid, { realtime_visible: opts?.realtime_visible === true });
+        if (!touched.ok) {
+            return { ok: false, error: touched.error ?? 'place_not_active' };
+        }
+    }
+    const state = get_active_place_breath_state(slot, pid);
+    if (!state) return { ok: false, error: 'place_not_active' };
+    const was_paused = summarize_place_pause_state(state).paused;
+
+    const pause_sources = ensure_place_pause_sources(state);
+    const has_source = pause_sources.includes(src);
+    if (paused && !has_source) pause_sources.push(src);
+    if (!paused && has_source) {
+        state.pause_sources = pause_sources.filter((entry) => entry !== src);
+    }
+    ensure_place_pause_sources(state);
+    state.last_tick_ms = Date.now();
+    const summary = apply_place_pause_state(state);
+    if (was_paused && !summary.paused) {
+        state.last_seen_ms = Date.now();
+        state.sim_accum_ms = Math.max(Number(state.sim_accum_ms ?? 0) || 0, BREATH_MS);
+        debug_log('PLACE_PAUSE', 'place resumed and primed for simulation', {
+            slot,
+            place_id: pid,
+            source: src,
+            realtime_visible: state.realtime_visible,
+            sim_accum_ms: state.sim_accum_ms,
+            pause_state: summary,
+        });
+    }
+    return { ok: true, pause_state: summary };
+}
+
+function is_place_breath_paused(state: PlaceBreathState | null): boolean {
+    return summarize_place_pause_state(state).paused;
+}
+
 function clone_for_api<T>(value: T): T {
     return JSON.parse(JSON.stringify(value)) as T;
 }
 
 function ensure_place_runtime_augmented(place_any: any, place_id: string): void {
     if (!place_any || typeof place_any !== 'object') return;
-    if ((place_any as any).__api_runtime_augmented === true) return;
 
     try {
         const augment_grid = (tiles_obj: any, label: string) => {
@@ -2050,8 +2475,9 @@ function ensure_place_runtime_augmented(place_any: any, place_id: string): void 
             }
         };
 
-        augment_grid((place_any as any)?.tiles_z0, "z0");
-        augment_grid((place_any as any)?.tiles, "z1");
+        for (const layer_key of get_place_tile_layer_keys(place_any as any)) {
+            augment_grid((place_any as any)?.[layer_key], layer_key);
+        }
     } catch (err) {
         debug_warn("API", `Failed to augment tile display properties for ${place_id}`, err);
     }
@@ -2113,7 +2539,6 @@ function ensure_place_runtime_augmented(place_any: any, place_id: string): void 
         // ignore
     }
 
-    (place_any as any).__api_runtime_augmented = true;
 }
 
 function sync_active_place_base(slot: number, place_any: any): void {
@@ -2122,22 +2547,58 @@ function sync_active_place_base(slot: number, place_any: any): void {
     const state = get_active_place_breath_state(slot, place_id);
     if (!state) return;
     try {
-        state.place_base = clone_for_api(place_any);
+        const cloned = clone_for_api(place_any);
+        ensure_place_runtime_augmented(cloned, place_id);
+        state.place_base = cloned;
         state.place_dirty = false;
+        state.tile_physics_cache_dirty = true;
     } catch {
         // ignore
     }
 }
 
-function save_place_and_sync_active(slot: number, place_any: any): string {
+function copy_breath_mutated_place_fields(target_place: any, source_place: any, opts?: { include_ground?: boolean }): void {
+    if (!target_place || !source_place || typeof target_place !== 'object' || typeof source_place !== 'object') return;
+    try {
+        if (opts?.include_ground === true && 'ground' in source_place) {
+            target_place.ground = clone_for_api(source_place.ground);
+        }
+        if ('structures' in source_place) {
+            target_place.structures = clone_for_api(source_place.structures);
+        }
+        for (const key of Object.keys(source_place)) {
+            if (key === 'tiles' || /^tiles_z-?\d+$/.test(key)) {
+                target_place[key] = clone_for_api(source_place[key]);
+            }
+        }
+    } catch {
+        // ignore
+    }
+}
+
+function merge_active_place_runtime_mutations(slot: number, place_id: string, place_any: any): void {
+    const state = get_active_place_breath_state(slot, place_id);
+    if (!state?.place_base) return;
+    copy_breath_mutated_place_fields(place_any, state.place_base, { include_ground: false });
+}
+
+function save_place_and_sync_active(slot: number, place_any: any, opts?: { merge_active_runtime?: boolean }): string {
+    if (opts?.merge_active_runtime !== false) {
+        merge_active_place_runtime_mutations(slot, String((place_any as any)?.id ?? ''), place_any);
+    }
     const out = save_place(slot, place_any as any);
+    ensure_place_runtime_augmented(place_any, String((place_any as any)?.id ?? ''));
     sync_active_place_base(slot, place_any);
     return out;
 }
 
-function save_place_with_ground_and_sync_active(slot: number, place_id: string, place_any: any): any {
+function save_place_with_ground_and_sync_active(slot: number, place_id: string, place_any: any, opts?: { merge_active_runtime?: boolean }): any {
+    if (opts?.merge_active_runtime !== false) {
+        merge_active_place_runtime_mutations(slot, String(place_id ?? (place_any as any)?.id ?? ''), place_any);
+    }
     const out = save_place_with_ground(slot, place_id, place_any as any);
     if (out?.ok) {
+        ensure_place_runtime_augmented(place_any, place_id);
         sync_active_place_base(slot, place_any);
     }
     return out;
@@ -2153,6 +2614,8 @@ function touch_place_breath(slot: number, place_any: any, opts?: { realtime_visi
 
         const existing = place_breath.get(key);
         if (existing) {
+            ensure_place_pause_sources(existing);
+            apply_place_pause_state(existing);
             existing.last_seen_ms = now;
             if (realtime_visible && !existing.realtime_visible) {
                 existing.realtime_visible = true;
@@ -2169,6 +2632,7 @@ function touch_place_breath(slot: number, place_any: any, opts?: { realtime_visi
             // Refresh base snapshot (clone) for breath processing.
             try {
                 existing.place_base = JSON.parse(JSON.stringify(place_any));
+                existing.tile_physics_cache_dirty = true;
             } catch {
                 // ignore
             }
@@ -2211,13 +2675,18 @@ function touch_place_breath(slot: number, place_any: any, opts?: { realtime_visi
             last_visible_pulse_duration_ms: 0,
             sim_accum_ms: 0,
             time_scale: 1,
+            pause_sources: [],
             place_base: null,
             place_dirty: false,
+            tile_physics_cache: [],
+            tile_physics_cache_dirty: true,
+            tile_updates: [],
         };
         place_breath.set(key, state);
 
         try {
             state.place_base = JSON.parse(JSON.stringify(place_any));
+            state.tile_physics_cache_dirty = true;
         } catch {
             state.place_base = null;
         }
@@ -2254,6 +2723,8 @@ function touch_place_breath_by_id(slot: number, place_id: string, opts?: { realt
 
     const existing = place_breath.get(key);
     if (existing) {
+        ensure_place_pause_sources(existing);
+        apply_place_pause_state(existing);
         existing.last_seen_ms = now;
         if (opts?.realtime_visible === true && !existing.realtime_visible) {
             existing.realtime_visible = true;
@@ -2298,11 +2769,11 @@ function persist_place_breath_if_needed(state: PlaceBreathState): void {
         place_any.breath_last_processed = state.breath_last_processed;
         place_any.breath_last_processed_ms = Date.now();
 
-        // If breath processing mutated the base place (e.g. gravity on ground items), persist it.
-        // Keep persistence safe: use the loaded place as the baseline and only carry over stable fields.
+        // If breath processing mutated the base place (e.g. gravity on ground items or tile physics),
+        // persist those canonical runtime mutations onto the loaded baseline.
         if (state.place_dirty && state.place_base) {
             try {
-                place_any.ground = state.place_base.ground;
+                copy_breath_mutated_place_fields(place_any, state.place_base, { include_ground: true });
                 state.place_dirty = false;
             } catch {
                 // ignore
@@ -2344,29 +2815,27 @@ function apply_gravity_to_place_ground(state: PlaceBreathState): void {
             if (!it || typeof it !== 'object') continue;
             const def_id = String((it as any)?.def_id ?? '');
             if (!def_id) continue;
-            const resolved = resolve_inline_item(def_id, it as any);
-            if (!resolved) continue;
-            const item_weight = Number(resolved.unit_weight ?? 0);
-            if (!Number.isFinite(item_weight) || item_weight <= 0) continue;
             if ((it as any)?.container_id) continue;
 
+            const item_weight = calculate_inline_item_effective_weight(it);
+            if (!Number.isFinite(item_weight) || item_weight === 0) continue;
+
             const resting_z = resolve_loose_item_ground_z(place_any, x, y, z, it);
-            if (resting_z >= z) continue;
-            const gravity_delta = gravity_delta_for_weight(item_weight, false);
+            const supported = resting_z >= z;
+            const gravity_delta = gravity_delta_for_weight(item_weight, supported);
             if (gravity_delta === 0) continue;
-            debug_log('MOVE_UNIFY_TEST', 'item gravity unsupported', {
+            debug_log('MOVE_UNIFY_TEST', 'item gravity step prepared', {
                 place_id: state.place_id,
                 breath_index: state.breath_index,
                 item_id: String((it as any)?.id ?? ''),
                 def_id,
-                unit_weight: item_weight,
+                effective_weight: item_weight,
                 at: { x, y, z },
                 resting_z,
                 gravity_delta,
             });
 
-            // Attempt one fall step (collision-only).
-            const nz = Math.floor(z) - 1;
+            const nz = Math.floor(z) + Math.sign(gravity_delta);
             const fall_ok = can_place_volume(place_any as any, mover_owner as any, { x, y, z: nz }, 'FLY' as any, {
                 exclude_owner: mover_owner as any,
                 ignore_occupants: false,
@@ -2399,18 +2868,18 @@ function apply_gravity_to_place_ground(state: PlaceBreathState): void {
                 breath_index: state.breath_index,
                 item_id: String((moved as any)?.id ?? ''),
                 def_id,
-                unit_weight: item_weight,
+                effective_weight: item_weight,
                 from: { x, y, z },
                 to: { x, y, z: nz },
-                settled,
+                settled: item_weight > 0 ? settled : false,
             });
-            if (settled) {
+            if (item_weight > 0 && settled) {
                 debug_log('MOVE_UNIFY_TEST', 'PASS item gravity settled to support', {
                     place_id: state.place_id,
                     breath_index: state.breath_index,
                     item_id: String((moved as any)?.id ?? ''),
                     def_id,
-                    unit_weight: item_weight,
+                    effective_weight: item_weight,
                     at: { x, y, z: nz },
                 });
             }
@@ -2426,10 +2895,527 @@ function apply_gravity_to_place_ground(state: PlaceBreathState): void {
     }
 }
 
+function get_tile_layer_key_for_world_z(place_any: any, wz: number): string | null {
+    const base_z = get_place_base_z(place_any);
+    const offset = Math.floor(Number(wz) - Number(base_z));
+    if (!Number.isFinite(offset)) return null;
+    if (offset === 0) return 'tiles';
+    if (offset === -1) return 'tiles_z0';
+    if (offset === 1) return 'tiles_z1';
+    return `tiles_z${offset}`;
+}
+
+function set_place_tile_at_world_z(place_any: any, tx: number, ty: number, wz: number, tile: any | null): boolean {
+    const layer_key = get_tile_layer_key_for_world_z(place_any, wz);
+    if (!layer_key) return false;
+    if (!(place_any as any)?.[layer_key]) {
+        const width = Math.max(1, Math.floor(Number(place_any?.tile_grid?.width ?? 1)));
+        const height = Math.max(1, Math.floor(Number(place_any?.tile_grid?.height ?? 1)));
+        (place_any as any)[layer_key] = {
+            width,
+            height,
+            cells: Array.from({ length: height }, () => Array.from({ length: width }, () => null)),
+        };
+    }
+    const layer = (place_any as any)?.[layer_key];
+    if (!layer || !Array.isArray(layer.cells) || !Array.isArray(layer.cells[ty])) return false;
+    layer.cells[ty][tx] = tile;
+    return true;
+}
+
+function create_authored_place_tile(def_id: string): any | null {
+    const normalized_id = String(def_id ?? '').trim();
+    if (!normalized_id) return null;
+    const tile_res = load_master_tile(normalized_id);
+    if (!tile_res.ok) return null;
+    const authored: any = { kind: normalized_id };
+    if (tile_res.tile?.container_capacity) {
+        authored.container_capacity = { ...tile_res.tile.container_capacity };
+    }
+    return authored;
+}
+
+function create_authored_place_structure(def_id: string, x: number, y: number, z: number): any | null {
+    const normalized_id = String(def_id ?? '').trim();
+    if (!normalized_id) return null;
+    const tile_res = load_master_tile(normalized_id);
+    if (!tile_res.ok) return null;
+    const tile_any: any = tile_res.tile as any;
+    const body_model = tile_any?.body_model;
+    if (!body_model || !Array.isArray(body_model.physical) || body_model.physical.length < 1) return null;
+    const structure: any = {
+        id: `paint_${normalized_id}_${Date.now()}_${Math.floor(Math.random() * 100000)}`,
+        def_id: normalized_id,
+        origin: { x: Math.floor(x), y: Math.floor(y), z: Math.floor(z) },
+    };
+    if (tile_any?.container_capacity) {
+        structure.container_capacity = { ...tile_any.container_capacity };
+    }
+    return structure;
+}
+
+function find_structure_instance_at_world_voxel(place_any: any, x: number, y: number, z: number): any | null {
+    const structs: any[] = Array.isArray(place_any?.structures) ? place_any.structures : [];
+    for (const s of structs) {
+        const origin = s?.origin;
+        if (!origin) continue;
+        const ox = Math.floor(Number(origin.x) || 0);
+        const oy = Math.floor(Number(origin.y) || 0);
+        const oz = Math.floor(Number(origin.z) || 0);
+        const phys = Array.isArray(s?.body_model?.physical) ? s.body_model.physical : [{ dx: 0, dy: 0, dz: 0 }];
+        for (const v of phys) {
+            const vx = ox + Math.floor(Number((v as any)?.dx ?? 0));
+            const vy = oy + Math.floor(Number((v as any)?.dy ?? 0));
+            const vz = oz + Math.floor(Number((v as any)?.dz ?? 0));
+            if (vx === Math.floor(x) && vy === Math.floor(y) && vz === Math.floor(z)) return s;
+        }
+    }
+    return null;
+}
+
+function create_authored_ground_item(def_id: string, qty: number = 1, owner_ref: string = 'system'): any | null {
+    const normalized_id = String(def_id ?? '').trim();
+    if (!normalized_id) return null;
+    const def_result = load_master_item(normalized_id);
+    if (!def_result.ok) return null;
+    const item = create_inline_item(normalized_id, Math.max(1, Math.floor(Number(qty) || 1)), owner_ref, '');
+    item.tags = Array.isArray(def_result.item?.tags) ? clone_for_api(def_result.item.tags) : [];
+    return item;
+}
+
+function mutate_place_tile_and_sync(
+    slot: number,
+    place_id: string,
+    x: number,
+    y: number,
+    z: number,
+    authored_tile: any | null,
+): { ok: true; place: any } | { ok: false; error: string } {
+    const normalized_place_id = String(place_id ?? '').trim();
+    if (!normalized_place_id) return { ok: false, error: 'missing_place_id' };
+    const place_res = load_place(slot, normalized_place_id);
+    if (!place_res.ok) return { ok: false, error: 'place_not_found' };
+    const place_any: any = place_res.place as any;
+    merge_active_place_runtime_mutations(slot, normalized_place_id, place_any);
+    const structure_here = find_structure_instance_at_world_voxel(place_any, x, y, z);
+    if (structure_here) {
+        place_any.structures = (Array.isArray(place_any.structures) ? place_any.structures : []).filter((s: any) => s !== structure_here);
+    }
+    const before_tile = get_place_tile_at_world_z(place_any, Math.floor(x), Math.floor(y), Math.floor(z));
+    const ok = set_place_tile_at_world_z(place_any, Math.floor(x), Math.floor(y), Math.floor(z), authored_tile);
+    if (!ok) return { ok: false, error: 'tile_set_failed' };
+    const after_tile = get_place_tile_at_world_z(place_any, Math.floor(x), Math.floor(y), Math.floor(z));
+    debug_log('PLACE_PAINTER', 'tile mutation local state', {
+        slot,
+        place_id: normalized_place_id,
+        at: { x: Math.floor(x), y: Math.floor(y), z: Math.floor(z) },
+        before_kind: String((before_tile as any)?.kind ?? ''),
+        after_kind: String((after_tile as any)?.kind ?? ''),
+    });
+    save_place_and_sync_active(slot, place_any, { merge_active_runtime: false });
+    return { ok: true, place: place_any };
+}
+
+function mutate_place_structure_add_and_sync(
+    slot: number,
+    place_id: string,
+    x: number,
+    y: number,
+    z: number,
+    def_id: string,
+): { ok: true; place: any; structure_id: string } | { ok: false; error: string } {
+    const normalized_place_id = String(place_id ?? '').trim();
+    if (!normalized_place_id) return { ok: false, error: 'missing_place_id' };
+    const place_res = load_place(slot, normalized_place_id);
+    if (!place_res.ok) return { ok: false, error: 'place_not_found' };
+    const place_any: any = place_res.place as any;
+    merge_active_place_runtime_mutations(slot, normalized_place_id, place_any);
+    const structure = create_authored_place_structure(def_id, x, y, z);
+    if (!structure) return { ok: false, error: 'structure_def_not_found' };
+    if (!Array.isArray(place_any.structures)) place_any.structures = [];
+    place_any.structures = place_any.structures.filter((s: any) => String(s?.id ?? '') !== String(structure.id));
+    place_any.structures.push(structure);
+    save_place_and_sync_active(slot, place_any, { merge_active_runtime: false });
+    return { ok: true, place: place_any, structure_id: String(structure.id) };
+}
+
+function erase_place_voxel_and_sync(
+    slot: number,
+    place_id: string,
+    x: number,
+    y: number,
+    z: number,
+): { ok: true; place: any } | { ok: false; error: string } {
+    const normalized_place_id = String(place_id ?? '').trim();
+    if (!normalized_place_id) return { ok: false, error: 'missing_place_id' };
+    const place_res = load_place(slot, normalized_place_id);
+    if (!place_res.ok) return { ok: false, error: 'place_not_found' };
+    const place_any: any = place_res.place as any;
+    merge_active_place_runtime_mutations(slot, normalized_place_id, place_any);
+    const structure_here = find_structure_instance_at_world_voxel(place_any, x, y, z);
+    if (structure_here) {
+        place_any.structures = (Array.isArray(place_any.structures) ? place_any.structures : []).filter((s: any) => s !== structure_here);
+        save_place_and_sync_active(slot, place_any, { merge_active_runtime: false });
+        return { ok: true, place: place_any };
+    }
+    const ok = set_place_tile_at_world_z(place_any, Math.floor(x), Math.floor(y), Math.floor(z), null);
+    if (!ok) return { ok: false, error: 'tile_set_failed' };
+    save_place_and_sync_active(slot, place_any, { merge_active_runtime: false });
+    return { ok: true, place: place_any };
+}
+
+function mutate_place_ground_item_add_and_sync(
+    slot: number,
+    place_id: string,
+    x: number,
+    y: number,
+    z: number,
+    def_id: string,
+    qty: number,
+): { ok: true; place: any; item: any } | { ok: false; error: string } {
+    const normalized_place_id = String(place_id ?? '').trim();
+    if (!normalized_place_id) return { ok: false, error: 'missing_place_id' };
+    const place_res = load_place(normalized_place_id ? slot : slot, normalized_place_id);
+    if (!place_res.ok) return { ok: false, error: 'place_not_found' };
+    const place_any: any = place_res.place as any;
+    merge_active_place_runtime_mutations(slot, normalized_place_id, place_any);
+    const item = create_authored_ground_item(def_id, qty, `place.${normalized_place_id}`);
+    if (!item) return { ok: false, error: 'item_def_not_found' };
+    (item as any).elevation = Math.floor(Number(z) || 0);
+    const placed = place_item_on_ground_only(place_any, Math.floor(x), Math.floor(y), Math.floor(z), item);
+    if (!placed.ok) return { ok: false, error: placed.error };
+    save_place_with_ground_and_sync_active(slot, normalized_place_id, place_any, { merge_active_runtime: false });
+    return { ok: true, place: place_any, item };
+}
+
+function mutate_place_layer_and_sync(
+    slot: number,
+    place_id: string,
+    world_z: number,
+    action: 'add' | 'delete',
+): { ok: true; place: any } | { ok: false; error: string } {
+    const normalized_place_id = String(place_id ?? '').trim();
+    if (!normalized_place_id) return { ok: false, error: 'missing_place_id' };
+    const place_res = load_place(slot, normalized_place_id);
+    if (!place_res.ok) return { ok: false, error: 'place_not_found' };
+    const place_any: any = place_res.place as any;
+    merge_active_place_runtime_mutations(slot, normalized_place_id, place_any);
+    const base_z = Math.floor(Number(place_any?.coordinates?.elevation ?? 0)) || 0;
+    const wz = Math.floor(Number(world_z));
+    const offset = wz - base_z;
+    const layer_key = offset === 0 ? 'tiles' : offset === -1 ? 'tiles_z0' : offset === 1 ? 'tiles_z1' : `tiles_z${offset}`;
+    if (action === 'delete') {
+        if (layer_key === 'tiles' || layer_key === 'tiles_z0') return { ok: false, error: 'cannot_delete_base_layer' };
+        delete place_any[layer_key];
+    } else {
+        if (!place_any[layer_key]) {
+            const width = Math.max(1, Math.floor(Number(place_any?.tile_grid?.width ?? 1)));
+            const height = Math.max(1, Math.floor(Number(place_any?.tile_grid?.height ?? 1)));
+            place_any[layer_key] = {
+                width,
+                height,
+                cells: Array.from({ length: height }, () => Array.from({ length: width }, () => null)),
+            };
+        }
+    }
+    save_place_and_sync_active(slot, place_any, { merge_active_runtime: false });
+    return { ok: true, place: place_any };
+}
+
+function is_empty_tile_destination(place_any: any, to: { x: number; y: number; z: number }, from?: { x: number; y: number; z: number }): { ok: true } | { ok: false; detail: any } {
+    const occupying_tile = get_place_tile_at_world_z(place_any, to.x, to.y, to.z);
+    const same_cell = !!from && from.x === to.x && from.y === to.y && from.z === to.z;
+    if (occupying_tile != null && !same_cell) {
+        return {
+            ok: false,
+            detail: {
+                blocked_by: 'tile',
+                blocked_voxel: { x: to.x, y: to.y, z: to.z },
+                blocked_part: 'body',
+                occupying_kind: String((occupying_tile as any)?.kind ?? ''),
+                rule: 'push_destination_must_be_empty',
+            },
+        };
+    }
+    return { ok: true };
+}
+
+function build_empty_tile_layer(width: number, height: number): any {
+    return {
+        width,
+        height,
+        cells: Array.from({ length: height }, () => Array.from({ length: width }, () => null)),
+    };
+}
+
+function reset_tavern_push_fixture(slot: number): { ok: boolean; place_id: string; actor_ref: string; actor_at: { x: number; y: number; z: number } } {
+    const place_id = 'eden_crossroads_tavern';
+    const actor_id = 'henry_actor';
+    const actor_ref = `actor.${actor_id}`;
+    const place_res = load_place(slot, place_id);
+    if (!place_res.ok) throw new Error(`place_not_found:${place_id}`);
+    const actor_res = load_actor(slot, actor_id);
+    if (!actor_res.ok) throw new Error(`actor_not_found:${actor_id}`);
+
+    const place_any: any = place_res.place;
+    const actor_any: any = actor_res.actor;
+    const width = Math.max(1, Math.floor(Number(place_any?.tile_grid?.width ?? 1)));
+    const height = Math.max(1, Math.floor(Number(place_any?.tile_grid?.height ?? 1)));
+    const actor_at = { x: 11, y: 11, z: 1 };
+
+    place_any.tiles_z1 = build_empty_tile_layer(width, height);
+    place_any.tiles_z2 = build_empty_tile_layer(width, height);
+    place_any.tiles_z3 = build_empty_tile_layer(width, height);
+
+    if (place_any.tiles?.cells?.[8]) {
+        place_any.tiles.cells[8][10] = { kind: 'tile_stone_brick_loose' };
+    }
+
+    place_any.tiles_z1.cells[11][11] = { kind: 'tile_stone_brick' };
+    place_any.tiles_z1.cells[11][12] = { kind: 'tile_stone_brick' };
+    place_any.tiles_z2.cells[11][12] = { kind: 'tile_stone_brick_loose' };
+
+    if (actor_any.location && typeof actor_any.location === 'object') {
+        actor_any.location.place_id = place_id;
+        actor_any.location.tile = { x: actor_at.x, y: actor_at.y };
+        actor_any.location.elevation = actor_at.z;
+    }
+    const actor_snap = Array.isArray(place_any?.contents?.actors_present)
+        ? place_any.contents.actors_present.find((a: any) => String(a?.actor_ref ?? '') === actor_ref)
+        : null;
+    if (actor_snap) {
+        actor_snap.tile_position = { x: actor_at.x, y: actor_at.y };
+        actor_snap.elevation = actor_at.z;
+        actor_snap.status = 'present';
+    }
+
+    save_actor(slot, actor_id, actor_any);
+    save_place_and_sync_active(slot, place_any);
+    debug_log('MOVE_UNIFY_TEST', 'reset tavern push fixture', { slot, place_id, actor_ref, actor_at });
+    return { ok: true, place_id, actor_ref, actor_at };
+}
+
+function get_tile_physics_entity_ref(tx: number, ty: number, wz: number, tile: any): string {
+    return `tile.${String(tile?.kind ?? 'unknown')}.${Math.floor(tx)}.${Math.floor(ty)}.${Math.floor(wz)}`;
+}
+
+function get_tile_velocity_attempts(tile: any, tx: number, ty: number, wz: number, breath_index: number): Array<{ axis: 'x' | 'y' | 'z'; x: number; y: number; z: number }> {
+    const runtime = ensure_tile_runtime_physics(tile);
+    return resolve_velocity_step_target({
+        entity_ref: get_tile_physics_entity_ref(tx, ty, wz, tile),
+        entity_type: 'npc',
+        place_id: '',
+        velocity: runtime.velocity,
+        latest_intent: null,
+        move_budget: { walk: 0, climb: 0, swim: 0, fly: 0 },
+        move_debt: { walk: 0, climb: 0, swim: 0, fly: 0 },
+        goal: null,
+        advisory_path: null,
+        advisory_path_index: 0,
+        transient_selection: null,
+        input_goal_queued_at_ms: null,
+        last_breath_processed: runtime.last_breath_processed,
+    } as any, tx, ty, wz, breath_index);
+}
+
+function with_temporarily_cleared_tile<T>(place_any: any, tx: number, ty: number, wz: number, fn: () => T): T {
+    const tile = get_place_tile_at_world_z(place_any, tx, ty, wz);
+    if (tile == null) return fn();
+    if (!set_place_tile_at_world_z(place_any, tx, ty, wz, null)) return fn();
+    try {
+        return fn();
+    } finally {
+        set_place_tile_at_world_z(place_any, tx, ty, wz, tile);
+    }
+}
+
+function get_tile_support_state(place_any: any, tx: number, ty: number, wz: number): { supported: boolean; reason: string | null } {
+    const mover_owner = { kind: 'item' as const, id: 'place_tile_body' };
+    return with_temporarily_cleared_tile(place_any, tx, ty, wz, () => {
+        const check = can_place_volume(place_any as any, mover_owner as any, { x: tx, y: ty, z: wz }, 'WALK' as any, {
+            exclude_owner: mover_owner as any,
+            support_policy: 'any_footprint' as any,
+        });
+        return {
+            supported: !!check.ok,
+            reason: check.ok ? null : String(check.reason ?? 'unknown'),
+        };
+    });
+}
+
+function can_tile_move_to(place_any: any, from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }): { ok: boolean; reason?: string; detail?: any } {
+    const mover_owner = { kind: 'item' as const, id: 'place_tile_body' };
+    const empty_destination = is_empty_tile_destination(place_any, to, from);
+    if (!empty_destination.ok) {
+        return {
+            ok: false,
+            reason: 'blocked',
+            detail: empty_destination.detail,
+        };
+    }
+    return with_temporarily_cleared_tile(place_any, from.x, from.y, from.z, () => {
+        const check = can_place_volume(place_any as any, mover_owner as any, { x: to.x, y: to.y, z: to.z }, 'FLY' as any, {
+            exclude_owner: mover_owner as any,
+        });
+        return check.ok ? { ok: true } : { ok: false, reason: check.reason, detail: check.detail };
+    });
+}
+
+function move_tile_runtime_body(place_any: any, from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }): { ok: boolean; tile?: any } {
+    const tile = get_place_tile_at_world_z(place_any, from.x, from.y, from.z);
+    if (!tile) return { ok: false };
+    if (!set_place_tile_at_world_z(place_any, from.x, from.y, from.z, null)) return { ok: false };
+    if (!set_place_tile_at_world_z(place_any, to.x, to.y, to.z, tile)) {
+        set_place_tile_at_world_z(place_any, from.x, from.y, from.z, tile);
+        return { ok: false };
+    }
+    return { ok: true, tile };
+}
+
+function record_tile_update(state: PlaceBreathState, tile: any, from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }): void {
+    state.tile_updates.push({
+        place_id: state.place_id,
+        kind: String(tile?.kind ?? ''),
+        from: { x: Math.floor(from.x), y: Math.floor(from.y), z: Math.floor(from.z) },
+        to: { x: Math.floor(to.x), y: Math.floor(to.y), z: Math.floor(to.z) },
+    });
+}
+
+function try_push_tile_by_impulse(
+    state: PlaceBreathState,
+    from: { x: number; y: number; z: number },
+    axis: 'x' | 'y',
+    sign: number,
+    source: { entity_ref: string; breath_index: number },
+): boolean {
+    const place_any: any = state.place_base;
+    const tile = get_place_tile_at_world_z(place_any, from.x, from.y, from.z);
+    if (!tile) return false;
+    const tags = get_tile_effective_tags(tile);
+    if (!has_simple_tag(tags, 'PUSHABLE')) return false;
+    const runtime = ensure_tile_runtime_physics(tile);
+    if (axis === 'x') runtime.velocity.vx += Math.sign(sign);
+    else runtime.velocity.vy += Math.sign(sign);
+    const attempts = get_tile_velocity_attempts(tile, from.x, from.y, from.z, state.breath_index).filter((attempt) => attempt.axis === axis);
+    const target = attempts[0];
+    if (!target) return false;
+    const move_ok = can_tile_move_to(place_any, from, { x: target.x, y: target.y, z: target.z });
+    if (!move_ok.ok) {
+        debug_log('MOVE_UNIFY_TEST', 'pushable tile blocked during impulse resolve', {
+            place_id: state.place_id,
+            breath_index: state.breath_index,
+            source: source.entity_ref,
+            tile_kind: String(tile?.kind ?? ''),
+            from,
+            target,
+            reason: move_ok.reason ?? null,
+            detail: move_ok.detail ?? null,
+        });
+        return false;
+    }
+    const moved = move_tile_runtime_body(place_any, from, { x: target.x, y: target.y, z: target.z });
+    if (!moved.ok) return false;
+    apply_friction_to_axis({ velocity: runtime.velocity } as any, axis);
+    runtime.last_breath_processed = state.breath_index;
+    state.place_dirty = true;
+    state.tile_physics_cache_dirty = true;
+    if (moved.tile) record_tile_update(state, moved.tile, from, { x: target.x, y: target.y, z: target.z });
+    debug_log('MOVE_UNIFY_TEST', 'pushable tile moved from impulse', {
+        place_id: state.place_id,
+        breath_index: state.breath_index,
+        source: source.entity_ref,
+        tile_kind: String(tile?.kind ?? ''),
+        from,
+        to: { x: target.x, y: target.y, z: target.z },
+        velocity: runtime.velocity,
+    });
+    return true;
+}
+
+function apply_gravity_to_place_tiles(state: PlaceBreathState): void {
+    const place_any: any = state.place_base;
+    if (!place_any) return;
+    if (state.place_dirty) state.tile_physics_cache_dirty = true;
+    if (state.tile_physics_cache_dirty) refresh_tile_physics_cache(state);
+
+    let moved_any = false;
+
+    const structure_candidates: any[] = Array.isArray(place_any?.structures) ? [...place_any.structures] : [];
+    for (const structure of structure_candidates) {
+        const tags = get_structure_effective_tags(structure);
+        if (!has_simple_tag(tags, 'GRAVITY')) continue;
+        const ox = Math.floor(Number(structure?.origin?.x ?? 0));
+        const oy = Math.floor(Number(structure?.origin?.y ?? 0));
+        const oz = Math.floor(Number(structure?.origin?.z ?? get_place_base_z(place_any)));
+        const support = can_place_volume(place_any as any, { kind: 'structure', id: String(structure?.id ?? '') } as any, { x: ox, y: oy, z: oz }, 'WALK' as any, {
+            exclude_owner: { kind: 'structure', id: String(structure?.id ?? '') } as any,
+            support_policy: 'any_footprint' as any,
+        });
+        const weight = get_structure_effective_weight(structure);
+        const gravity_delta = gravity_delta_for_weight(weight, !!support.ok);
+        if (gravity_delta === 0) continue;
+        const nz = oz + Math.sign(gravity_delta);
+        const move_ok = can_place_volume(place_any as any, { kind: 'structure', id: String(structure?.id ?? '') } as any, { x: ox, y: oy, z: nz }, 'FLY' as any, {
+            exclude_owner: { kind: 'structure', id: String(structure?.id ?? '') } as any,
+        });
+        if (!move_ok.ok) continue;
+        if (!structure.origin) structure.origin = { x: ox, y: oy, z: oz };
+        structure.origin.z = nz;
+        moved_any = true;
+        debug_log('MOVE_UNIFY_TEST', 'tile physics moved structure body', {
+            place_id: state.place_id,
+            breath_index: state.breath_index,
+            structure_id: String(structure?.id ?? ''),
+            effective_weight: weight,
+            from: { x: ox, y: oy, z: oz },
+            to: { x: ox, y: oy, z: nz },
+        });
+    }
+
+    for (const ref of state.tile_physics_cache) {
+        const tile = get_place_tile_at_world_z(place_any, ref.x, ref.y, ref.z);
+        if (!tile || String(tile?.kind ?? '') !== ref.kind) {
+            state.tile_physics_cache_dirty = true;
+            continue;
+        }
+        const runtime = ensure_tile_runtime_physics(tile);
+        const weight = get_place_tile_effective_weight(tile);
+        const support = get_tile_support_state(place_any, ref.x, ref.y, ref.z);
+        const gravity_delta = gravity_delta_for_weight(weight, !!support.supported);
+        if (gravity_delta !== 0) {
+            runtime.velocity.vz += gravity_delta;
+        }
+        const attempts = get_tile_velocity_attempts(tile, ref.x, ref.y, ref.z, state.breath_index);
+        const target = attempts.find((attempt) => {
+            const move_ok = can_tile_move_to(place_any, { x: ref.x, y: ref.y, z: ref.z }, { x: attempt.x, y: attempt.y, z: attempt.z });
+            return move_ok.ok;
+        }) ?? null;
+        if (!target) continue;
+        const moved = move_tile_runtime_body(place_any, { x: ref.x, y: ref.y, z: ref.z }, { x: target.x, y: target.y, z: target.z });
+        if (!moved.ok) continue;
+        apply_friction_to_axis({ velocity: runtime.velocity } as any, target.axis);
+        runtime.last_breath_processed = state.breath_index;
+        moved_any = true;
+        state.tile_physics_cache_dirty = true;
+        if (moved.tile) record_tile_update(state, moved.tile, { x: ref.x, y: ref.y, z: ref.z }, { x: target.x, y: target.y, z: target.z });
+        debug_log('MOVE_UNIFY_TEST', 'tile physics moved gravity tile', {
+            place_id: state.place_id,
+            breath_index: state.breath_index,
+            tile_kind: String(tile?.kind ?? ''),
+            effective_weight: weight,
+            from: { x: ref.x, y: ref.y, z: ref.z },
+            to: { x: target.x, y: target.y, z: target.z },
+            moved_axis: target.axis,
+            velocity: runtime.velocity,
+        });
+    }
+
+    if (moved_any) state.place_dirty = true;
+    if (state.tile_physics_cache_dirty) refresh_tile_physics_cache(state);
+}
+
 function has_simple_tag(tags: any, name: string): boolean {
-    const up = String(name ?? '').toUpperCase();
-    if (!Array.isArray(tags)) return false;
-    return tags.some((t: any) => String(t?.name ?? '').toUpperCase() === up);
+    return has_tag_name(tags, name);
 }
 
 function apply_gravity_to_place_characters(state: PlaceBreathState): void {
@@ -2636,6 +3622,9 @@ setInterval(() => {
             if (ticks_to_run > 0) {
                 state.sim_accum_ms -= ticks_to_run * BREATH_MS;
                 breath_ticks.push(...run_place_breaths(state, ticks_to_run, now, movement_updates, 'interval'));
+                if (state.place_dirty) {
+                    persist_place_breath_if_needed(state);
+                }
             } else {
                 // Nothing to run this callback; still update last_tick_ms so elapsed_wall_ms
                 // doesn't stale-accumulate on the next callback.
@@ -2679,7 +3668,11 @@ setInterval(() => {
     }
 
     const flush_started_ms = Date.now();
-    flush_place_breath_outputs(now, breath_ticks, movement_updates);
+    const tile_updates: any[] = [];
+    for (const state of place_breath.values()) {
+        if (state.tile_updates.length > 0) tile_updates.push(...state.tile_updates.splice(0));
+    }
+    flush_place_breath_outputs(now, breath_ticks, movement_updates, tile_updates);
     const flush_duration_ms = Math.max(0, Date.now() - flush_started_ms);
 
     const interval_duration_ms = Math.max(0, Date.now() - interval_started_ms);
@@ -2861,22 +3854,86 @@ function resolve_inline_item_payload_for_api(item_any: any): {
     return { id, def_id, qty, name, unit_weight, display_char, display_color, tags };
 }
 
+function is_inline_item_container(item_any: any): boolean {
+    const payload = resolve_inline_item_payload_for_api(item_any);
+    return build_physics_tag_flags(payload.tags).container || Array.isArray(item_any?.contents);
+}
+
 function get_place_base_z(place_any: any): number {
     const z = Number(place_any?.coordinates?.elevation);
     return (typeof z === 'number' && Number.isFinite(z)) ? Math.floor(z) : 0;
+}
+
+function get_place_tile_layer_keys(place_any: any): string[] {
+    const keys = Object.keys(place_any ?? {}).filter((key) => key === 'tiles' || /^tiles_z-?\d+$/.test(key));
+    const with_z = keys.map((key) => {
+        if (key === 'tiles') return { key, z: get_place_base_z(place_any) };
+        if (key === 'tiles_z0') return { key, z: get_place_base_z(place_any) - 1 };
+        if (key === 'tiles_z1') return { key, z: get_place_base_z(place_any) + 1 };
+        return { key, z: get_place_base_z(place_any) + Math.floor(Number(key.replace('tiles_z', '')) || 0) };
+    });
+    with_z.sort((a, b) => a.z - b.z || a.key.localeCompare(b.key));
+    return with_z.map((entry) => entry.key);
 }
 
 function get_place_tile_at_world_z(place_any: any, tx: number, ty: number, wz: number): any | null {
     const base_z = get_place_base_z(place_any);
     const z = Math.floor(Number(wz));
     if (!Number.isFinite(z)) return null;
-    if (z === base_z) {
-        return place_any?.tiles?.cells?.[ty]?.[tx] ?? null;
+    const offset = z - base_z;
+    if (offset === 0) return place_any?.tiles?.cells?.[ty]?.[tx] ?? null;
+    if (offset === -1) return place_any?.tiles_z0?.cells?.[ty]?.[tx] ?? null;
+    if (offset === 1) return place_any?.tiles_z1?.cells?.[ty]?.[tx] ?? null;
+    return place_any?.[`tiles_z${offset}`]?.cells?.[ty]?.[tx] ?? null;
+}
+
+function ensure_tile_runtime_physics(tile: any): { velocity: { vx: number; vy: number; vz: number }; last_breath_processed: number } {
+    if (!tile.__physics || typeof tile.__physics !== 'object') {
+        tile.__physics = { velocity: { vx: 0, vy: 0, vz: 0 }, last_breath_processed: 0 };
     }
-    if (z === base_z - 1) {
-        return place_any?.tiles_z0?.cells?.[ty]?.[tx] ?? null;
+    if (!tile.__physics.velocity || typeof tile.__physics.velocity !== 'object') {
+        tile.__physics.velocity = { vx: 0, vy: 0, vz: 0 };
     }
-    return null;
+    if (typeof tile.__physics.last_breath_processed !== 'number' || !Number.isFinite(tile.__physics.last_breath_processed)) {
+        tile.__physics.last_breath_processed = 0;
+    }
+    return tile.__physics;
+}
+
+function refresh_tile_physics_cache(state: PlaceBreathState): void {
+    const place_any: any = state.place_base;
+    if (!place_any) {
+        state.tile_physics_cache = [];
+        state.tile_physics_cache_dirty = false;
+        return;
+    }
+    const out: Array<{ x: number; y: number; z: number; layer_key: string; kind: string }> = [];
+    for (const layer_key of get_place_tile_layer_keys(place_any)) {
+        const layer = place_any?.[layer_key];
+        if (!layer || !Array.isArray(layer.cells)) continue;
+        const layer_z = layer_key === 'tiles'
+            ? get_place_base_z(place_any)
+            : layer_key === 'tiles_z0'
+                ? get_place_base_z(place_any) - 1
+                : layer_key === 'tiles_z1'
+                    ? get_place_base_z(place_any) + 1
+                    : get_place_base_z(place_any) + Math.floor(Number(layer_key.replace('tiles_z', '')) || 0);
+        for (let y = 0; y < layer.cells.length; y += 1) {
+            const row = layer.cells[y];
+            if (!Array.isArray(row)) continue;
+            for (let x = 0; x < row.length; x += 1) {
+                const tile = row[x];
+                if (!tile) continue;
+                const tags = get_tile_effective_tags(tile);
+                if (!has_simple_tag(tags, 'GRAVITY')) continue;
+                ensure_tile_runtime_physics(tile);
+                out.push({ x, y, z: layer_z, layer_key, kind: String(tile.kind ?? '') });
+            }
+        }
+    }
+    out.sort((a, b) => a.z - b.z || a.y - b.y || a.x - b.x || a.kind.localeCompare(b.kind));
+    state.tile_physics_cache = out;
+    state.tile_physics_cache_dirty = false;
 }
 
 function structure_occupies_tile_at_world_z(place_any: any, tx: number, ty: number, wz: number): any | null {
@@ -2944,7 +4001,7 @@ function resolve_tile_container_target(place_any: any, place_id: string, tx: num
         const tile = place_any?.tiles?.cells?.[ty]?.[tx] ?? null;
         if (tile) {
             const tags = (resolve_place_tile(String(tile.kind ?? ''), tile) ?? null)?.effective_tags ?? (Array.isArray(tile.tags) ? tile.tags : []);
-            const is_container = tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER') || Array.isArray(tile.contents);
+            const is_container = build_physics_tag_flags(tags).container || Array.isArray(tile.contents);
             if (is_container) {
                 return { kind: 'tile', tile, save: () => save_place_and_sync_active(data_slot_number, place_any as any) };
             }
@@ -2958,8 +4015,8 @@ function resolve_tile_container_target(place_any: any, place_id: string, tx: num
         const base_z = get_place_base_z(place_any);
         const s = structure_occupies_tile_at_world_z(place_any, tx, ty, base_z);
         if (!s) return null;
-        const tags = Array.isArray(s?.tags) ? s.tags : [];
-        const is_container = tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER') || Array.isArray(s.contents);
+        const tags = get_structure_effective_tags(s);
+        const is_container = build_physics_tag_flags(tags).container || Array.isArray(s.contents);
         if (!is_container) return null;
         return { kind: 'structure', structure: s, save: () => save_place_and_sync_active(data_slot_number, place_any as any) };
     } catch {
@@ -3075,13 +4132,11 @@ function ground_target_blocked_for_loose_item(place_any: any, tx: number, ty: nu
 
 function get_loose_item_support_surface(place_any: any, tx: number, ty: number, support_z: number): { supported: boolean; by: string | null } {
     const tile = get_place_tile_at_world_z(place_any, tx, ty, support_z);
-    const tile_tags = tile
-        ? ((resolve_place_tile(String(tile.kind ?? ''), tile) ?? null)?.effective_tags ?? (Array.isArray(tile.tags) ? tile.tags : []))
-        : [];
-    if (Array.isArray(tile_tags) && tile_tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'OCCUPIES')) {
+    const tile_flags = resolve_tile_physics_tags(tile);
+    if (tile_flags.occupies) {
         return { supported: true, by: 'tile' };
     }
-    if (tile && (Array.isArray((tile as any).contents) || (Array.isArray(tile_tags) && tile_tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER')))) {
+    if (tile && (Array.isArray((tile as any).contents) || tile_flags.container)) {
         return { supported: true, by: 'tile_container_surface' };
     }
     const structure = structure_occupies_tile_at_world_z(place_any, tx, ty, support_z);
@@ -3104,14 +4159,16 @@ function resolve_loose_item_ground_z(place_any: any, tx: number, ty: number, req
         const support = get_loose_item_support_surface(place_any, tx, ty, support_z);
         if (support.supported) {
             const item_z = support_z + 1;
-            debug_log('MOVE_UNIFY_TEST', 'loose item resting z resolved', {
-                item_id: String((item as any)?.id ?? ''),
-                at: { x: tx, y: ty },
-                requested_z: start_z,
-                support_z,
-                resolved_z: item_z,
-                by: support.by,
-            });
+            if (item_z !== start_z) {
+                debug_log('MOVE_UNIFY_TEST', 'loose item resting z resolved', {
+                    item_id: String((item as any)?.id ?? ''),
+                    at: { x: tx, y: ty },
+                    requested_z: start_z,
+                    support_z,
+                    resolved_z: item_z,
+                    by: support.by,
+                });
+            }
             return item_z;
         }
     }
@@ -3155,8 +4212,7 @@ function try_deposit_into_tile_container(place_any: any, place_id: string, tx: n
     const tile = place_any?.tiles?.cells?.[ty]?.[tx];
     if (!tile) return { ok: false, error: 'tile_not_found' };
 
-    const tags = (resolve_place_tile(String(tile.kind ?? ''), tile) ?? null)?.effective_tags ?? (Array.isArray(tile.tags) ? tile.tags : []);
-    const is_container = Array.isArray(tags) && tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER') || Array.isArray(tile.contents);
+    const is_container = resolve_tile_physics_tags(tile).container || Array.isArray(tile.contents);
     if (!is_container) return { ok: false, error: 'not_a_container' };
 
     if (!Array.isArray(tile.contents)) tile.contents = [];
@@ -3201,7 +4257,7 @@ function try_deposit_into_ground_container_item(place_any: any, place_id: string
         if (!Number.isFinite(target_z) || iz !== target_z) continue;
 
         const payload = resolve_inline_item_payload_for_api(it);
-        const is_container = Array.isArray(payload.tags) && payload.tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER');
+        const is_container = build_physics_tag_flags(payload.tags).container;
         if (!is_container) continue;
 
         if (!Array.isArray((it as any).contents)) (it as any).contents = [];
@@ -3240,8 +4296,7 @@ function place_item_into_place_legal(place_any: any, place_id: string, tx: numbe
     if (!prefer_ground_surface) {
         const tile = place_any?.tiles?.cells?.[ty]?.[tx];
         if (tile) {
-            const tags = (resolve_place_tile(String(tile.kind ?? ''), tile) ?? null)?.effective_tags ?? (Array.isArray(tile.tags) ? tile.tags : []);
-            const is_container = Array.isArray(tags) && tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER') || Array.isArray(tile.contents);
+            const is_container = resolve_tile_physics_tags(tile).container || Array.isArray(tile.contents);
             if (is_container) {
                 const dep = try_deposit_into_tile_container(place_any, place_id, tx, ty, item);
                 if (!dep.ok) return { ok: false, error: dep.error };
@@ -3385,7 +4440,7 @@ function compute_compatible_slots_from_tags(tags: any[], log_ctx: string): Array
 }
 import { calculate_tile_distance, is_within_range } from "../types/container.js";
 import { get_npc_location } from "../npc_storage/location.js";
-import { get_entities_in_place } from "../place_storage/entity_index.js";
+import { get_entities_in_place, rebuild_place_entity_index } from "../place_storage/entity_index.js";
 import { get_creation_state_path } from "../engine/paths.js";
 import { PROF_NAMES, STAT_VALUE_BLOCK } from "../character_rules/creation.js";
 import { 
@@ -3455,7 +4510,7 @@ async function update_conversation_facing(): Promise<void> {
   
   // Import conversation state functions dynamically to avoid circular dependencies
   const { get_all_conversations } = await import("../npc_ai/conversation_state.js");
-  const { send_face_command, send_move_command } = await import("../npc_ai/movement_command_sender.js");
+  const { send_face_command } = await import("../npc_ai/movement_command_sender.js");
   const { get_senses_for_action } = await import("../action_system/sense_broadcast.js");
   
   // Get all active conversations from the npc_ai system
@@ -3510,6 +4565,13 @@ async function update_conversation_facing(): Promise<void> {
       const dx = Number(actor_tile.x) - Number(npc_tile.x);
       const dy = Number(actor_tile.y) - Number(npc_tile.y);
       const dist = Math.sqrt(dx * dx + dy * dy);
+
+      // Conversation movement is server-authoritative: clear any stale wander/path state
+      // before deciding whether a follow goal is needed.
+      const conversation_place_id = String(npc_place || actor_place || '');
+      if (conversation_place_id) {
+        clear_entity_goal_and_path(data_slot_number, npc_ref, conversation_place_id);
+      }
 
       // If we're already within pressure distance, don't try to move.
       if (dist <= pressure_range_tiles) continue;
@@ -3573,7 +4635,18 @@ async function update_conversation_facing(): Promise<void> {
         occupied,
       });
       if (!best) continue;
-      send_move_command(npc_ref, best, `Maintain conversation distance (pressure<=${pressure_range_tiles})`);
+      const follow_place_id = conversation_place_id;
+      if (!follow_place_id) continue;
+      const place_state = touch_place_breath_by_id(data_slot_number, follow_place_id, { realtime_visible: true });
+      if (!place_state.ok) continue;
+      queue_entity_goal(
+        data_slot_number,
+        npc_ref,
+        follow_place_id,
+        best,
+        Math.floor(Number(place_state.breath_index ?? 0)) || 0,
+        `conversation_follow_pressure_${pressure_range_tiles}`,
+      );
     } catch {
       // Ignore follow failures; facing updates are still useful.
     }
@@ -3794,6 +4867,7 @@ function ensure_eden_crossroads_places(slot: number): void {
     
     // Ensure NPCs are placed in their locations
     ensure_npcs_in_places(slot);
+    reconcile_entity_place_membership(slot);
 }
 
 /**
@@ -3846,6 +4920,82 @@ function ensure_npcs_in_places(slot: number): void {
             }
         }
     }
+}
+
+function reconcile_entity_place_membership(slot: number): void {
+    const rebuilt = rebuild_place_entity_index(slot);
+    debug_log('MOVE_VEL_TEST', 'rebuilt place entity index from entity locations', rebuilt);
+
+    const places_res = list_all_places(slot);
+    if (!places_res.ok) {
+        debug_warn('MOVE_VEL_TEST', 'failed to list places during entity place reconciliation', { slot, error: places_res.error });
+        return;
+    }
+
+    const place_map = new Map<string, any>();
+    for (const place_id of places_res.places) {
+        const place_res = load_place(slot, place_id);
+        if (!place_res.ok) continue;
+        const place_any: any = place_res.place;
+        if (!place_any.contents) place_any.contents = { npcs_present: [], actors_present: [], items_on_ground: [], features: [] };
+        place_any.contents.npcs_present = [];
+        place_any.contents.actors_present = [];
+        place_map.set(place_id, place_any);
+    }
+
+    for (const npc_hit of find_npcs(slot, {})) {
+        const npc_id = String(npc_hit.id ?? '');
+        if (!npc_id) continue;
+        const npc_res = load_npc(slot, npc_id);
+        if (!npc_res.ok) continue;
+        const npc_any: any = npc_res.npc;
+        const place_id = String(npc_any?.location?.place_id ?? '');
+        const tile = npc_any?.location?.tile;
+        if (!place_id || !tile || !place_map.has(place_id)) continue;
+        const elevation = (typeof npc_any?.location?.elevation === 'number' && Number.isFinite(npc_any.location.elevation))
+            ? Math.floor(npc_any.location.elevation)
+            : Math.floor(Number((place_map.get(place_id) as any)?.coordinates?.elevation ?? 0)) || 0;
+        place_map.get(place_id).contents.npcs_present.push({
+            npc_ref: `npc.${npc_id}`,
+            tile_position: { x: Math.floor(Number(tile.x) || 0), y: Math.floor(Number(tile.y) || 0) },
+            elevation,
+            status: 'present',
+            activity: 'standing here',
+        });
+    }
+
+    for (const actor_hit of find_actors(slot, {})) {
+        const actor_id = String(actor_hit.id ?? '');
+        if (!actor_id) continue;
+        const actor_res = load_actor(slot, actor_id);
+        if (!actor_res.ok) continue;
+        const actor_any: any = actor_res.actor;
+        const place_id = String(actor_any?.location?.place_id ?? '');
+        const tile = actor_any?.location?.tile;
+        if (!place_id || !tile || !place_map.has(place_id)) continue;
+        const elevation = (typeof actor_any?.location?.elevation === 'number' && Number.isFinite(actor_any.location.elevation))
+            ? Math.floor(actor_any.location.elevation)
+            : Math.floor(Number((place_map.get(place_id) as any)?.coordinates?.elevation ?? 0)) || 0;
+        place_map.get(place_id).contents.actors_present.push({
+            actor_ref: `actor.${actor_id}`,
+            tile_position: { x: Math.floor(Number(tile.x) || 0), y: Math.floor(Number(tile.y) || 0) },
+            elevation,
+            status: 'present',
+        });
+    }
+
+    let saved_places = 0;
+    for (const place_any of place_map.values()) {
+        save_place(slot, place_any);
+        saved_places += 1;
+    }
+
+    debug_log('MOVE_VEL_TEST', 'reconciled entity place membership from canonical entity locations', {
+        slot,
+        saved_places,
+        npc_count: find_npcs(slot, {}).length,
+        actor_count: find_actors(slot, {}).length,
+    });
 }
 
 async function fetch_json(url: string, timeout_ms: number): Promise<unknown> {
@@ -5317,11 +6467,13 @@ function start_http_server(log_path: string): void {
 
                 // Add timed event status to response
                 const timed_event = get_timed_event_state(slot);
+                const pause_state = summarize_place_pause_state(get_active_place_breath_state(slot, place_id));
                 
                 res.writeHead(200, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ 
                     ok: true, 
                     place,
+                    pause_state,
                     timed_event_active: timed_event?.timed_event_active || false,
                     timed_event_id: timed_event?.timed_event_id || null
                 }));
@@ -5402,6 +6554,97 @@ function start_http_server(log_path: string): void {
                     res.writeHead(500, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: err?.message ?? "travel_failed" }));
                 }
+            });
+            return;
+        }
+
+        if (url.pathname === "/api/place/pause") {
+            if (req.method === "GET") {
+                const slot_raw = url.searchParams.get("slot");
+                const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+                if (!Number.isFinite(slot) || slot <= 0) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
+                    return;
+                }
+                const place_id = String(url.searchParams.get("place_id") ?? "");
+                if (!place_id) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "missing_place_id" }));
+                    return;
+                }
+                const pause_state = summarize_place_pause_state(get_active_place_breath_state(slot, place_id));
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, slot, place_id, pause_state }));
+                return;
+            }
+
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const MAX_BYTES = 16 * 1024;
+            let body = "";
+            req.on("data", (chunk) => {
+                body += chunk;
+                if (body.length > MAX_BYTES) {
+                    res.writeHead(413, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "payload_too_large" }));
+                    req.destroy();
+                }
+            });
+
+            req.on("end", () => {
+                let data: any = null;
+                try {
+                    data = body ? JSON.parse(body) : {};
+                } catch {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+                    return;
+                }
+
+                const slot_raw = (data as any)?.slot;
+                const slot = (slot_raw === undefined || slot_raw === null) ? data_slot_number : Number(slot_raw);
+                if (!Number.isFinite(slot) || slot <= 0) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
+                    return;
+                }
+
+                const place_id = String((data as any)?.place_id ?? "");
+                if (!place_id) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "missing_place_id" }));
+                    return;
+                }
+
+                const paused = (data as any)?.paused;
+                if (typeof paused !== 'boolean') {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "missing_paused_boolean" }));
+                    return;
+                }
+
+                const source = normalize_place_pause_source((data as any)?.source);
+                const result = set_active_place_pause_source(slot, place_id, source, paused, { touch_if_missing: true, realtime_visible: true });
+                if (!result.ok) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: result.error ?? "pause_failed" }));
+                    return;
+                }
+
+                debug_log('PLACE_PAUSE', paused ? 'pause source added' : 'pause source removed', {
+                    slot,
+                    place_id,
+                    source,
+                    pause_state: result.pause_state,
+                });
+
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, slot, place_id, source, pause_state: result.pause_state }));
             });
             return;
         }
@@ -6807,6 +8050,249 @@ function start_http_server(log_path: string): void {
             return;
         }
 
+        if (url.pathname === "/api/place_painter/tiles") {
+            if (req.method !== 'GET') {
+                res.writeHead(405, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' }));
+                return;
+            }
+
+            try {
+                    const tiles = get_all_tile_ids()
+                    .map((id) => {
+                        const tile_res = load_master_tile(id);
+                        if (!tile_res.ok) return null;
+                        const tile = tile_res.tile as any;
+                        return {
+                            id: String(tile.id ?? id),
+                            name: String(tile.name ?? id),
+                            display_char: String(tile.display_char ?? '?'),
+                            display_color: String(tile.display_color ?? '#888888'),
+                            tags: Array.isArray(tile.tags) ? tile.tags : [],
+                            body_model: tile.body_model ?? null,
+                        };
+                    })
+                    .filter((entry): entry is { id: string; name: string; display_char: string; display_color: string; tags: any[]; body_model: any } => !!entry)
+                    .sort((a, b) => a.id.localeCompare(b.id));
+
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: true, tiles }));
+            } catch (err: any) {
+                debug_error('API', '/api/place_painter/tiles error', err);
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: err?.message ?? 'internal_error' }));
+            }
+            return;
+        }
+
+        if (url.pathname === "/api/place_painter/items") {
+            if (req.method !== 'GET') {
+                res.writeHead(405, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' }));
+                return;
+            }
+            try {
+                const items = list_master_items()
+                    .map(({ id, item }) => ({
+                        id,
+                        name: String(item.name ?? id),
+                        display_char: String(item.display_char ?? '·').charAt(0) || '·',
+                        display_color: String(item.display_color ?? '#9da5ae'),
+                    }));
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: true, items }));
+            } catch (err: any) {
+                debug_error('API', '/api/place_painter/items error', err);
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: err?.message ?? 'internal_error' }));
+            }
+            return;
+        }
+
+        if (url.pathname === "/api/place_painter/layer") {
+            if (req.method !== 'POST') {
+                res.writeHead(405, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' }));
+                return;
+            }
+            let body = '';
+            req.on('data', (chunk) => { body += chunk; });
+            req.on('end', () => {
+                try {
+                    const data = body ? JSON.parse(body) : {};
+                    const slot = Number(data?.slot ?? data_slot_number);
+                    const place_id = String(data?.place_id ?? '');
+                    const world_z = Number(data?.world_z);
+                    const action = String(data?.action ?? '');
+                    if (!Number.isFinite(slot) || slot <= 0) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'invalid_slot' }));
+                        return;
+                    }
+                    if (!place_id || !Number.isFinite(world_z) || (action !== 'add' && action !== 'delete')) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'invalid_layer_request' }));
+                        return;
+                    }
+                    const result = mutate_place_layer_and_sync(slot, place_id, world_z, action as any);
+                    if (!result.ok) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: result.error }));
+                        return;
+                    }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, slot, place_id, world_z: Math.floor(world_z), action }));
+                } catch (err: any) {
+                    debug_error('API', '/api/place_painter/layer error', err);
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? 'internal_error' }));
+                }
+            });
+            return;
+        }
+
+        // POST /api/place/debug/tile - Spawn/replace/erase an authored tile at x,y,z
+        if (url.pathname === "/api/place/debug/tile") {
+            if (req.method !== 'POST') {
+                res.writeHead(405, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' }));
+                return;
+            }
+
+            let body = '';
+            req.on('data', (chunk) => { body += chunk; });
+            req.on('end', () => {
+                try {
+                    const data = body ? JSON.parse(body) : {};
+                    const slot = Number(data?.slot ?? data_slot_number);
+                    const place_id = String(data?.place_id ?? '');
+                    const kind = String(data?.kind ?? '');
+                    const erase = data?.erase === true;
+                    const x = Number(data?.x);
+                    const y = Number(data?.y);
+                    const z = Number(data?.z);
+                    if (!Number.isFinite(slot) || slot <= 0) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'invalid_slot' }));
+                        return;
+                    }
+                    if (!place_id || (!erase && !kind)) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'missing_place_id_or_kind' }));
+                        return;
+                    }
+                    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'invalid_xyz' }));
+                        return;
+                    }
+                    let result: { ok: boolean; error?: string; structure_id?: string };
+                    if (erase) {
+                        result = erase_place_voxel_and_sync(slot, place_id, x, y, z);
+                    } else {
+                        const tile_res = load_master_tile(kind);
+                        if (!tile_res.ok) {
+                            res.writeHead(404, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ ok: false, error: 'tile_def_not_found' }));
+                            return;
+                        }
+                        const body_model = (tile_res.tile as any)?.body_model;
+                        const is_structure = !!(body_model && Array.isArray(body_model.physical) && body_model.physical.length > 1);
+                        result = is_structure
+                            ? mutate_place_structure_add_and_sync(slot, place_id, x, y, z, kind)
+                            : mutate_place_tile_and_sync(slot, place_id, x, y, z, create_authored_place_tile(kind));
+                    }
+                    if (!result.ok) {
+                        debug_warn('API', '/api/place/debug/tile failed', { slot, place_id, x, y, z, erase, kind, error: result.error });
+                        const status = result.error === 'place_not_found' || result.error === 'tile_def_not_found' ? 404 : 500;
+                        res.writeHead(status, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: result.error }));
+                        return;
+                    }
+                    debug_log('PLACE_PAINTER', 'tile mutation applied', { slot, place_id, x, y, z, erase, kind: erase ? null : kind, structure_id: (result as any).structure_id ?? null });
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, slot, place_id, kind: erase ? null : kind, erase, at: { x: Math.floor(x), y: Math.floor(y), z: Math.floor(z) } }));
+                } catch (err: any) {
+                    debug_error('API', '/api/place/debug/tile error', err);
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? 'internal_error' }));
+                }
+            });
+            return;
+        }
+
+        // POST /api/place/debug/item - Spawn a ground item at x,y,z
+        if (url.pathname === "/api/place/debug/item") {
+            if (req.method !== 'POST') {
+                res.writeHead(405, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' }));
+                return;
+            }
+
+            let body = '';
+            req.on('data', (chunk) => { body += chunk; });
+            req.on('end', () => {
+                try {
+                    const data = body ? JSON.parse(body) : {};
+                    const slot = Number(data?.slot ?? data_slot_number);
+                    const place_id = String(data?.place_id ?? '');
+                    const def_id = String(data?.def_id ?? '');
+                    const qty = Number(data?.qty ?? 1);
+                    const x = Number(data?.x);
+                    const y = Number(data?.y);
+                    const z = Number(data?.z);
+                    if (!Number.isFinite(slot) || slot <= 0) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'invalid_slot' }));
+                        return;
+                    }
+                    if (!place_id || !def_id) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'missing_place_id_or_def_id' }));
+                        return;
+                    }
+                    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'invalid_xyz' }));
+                        return;
+                    }
+                    const result = mutate_place_ground_item_add_and_sync(slot, place_id, x, y, z, def_id, qty);
+                    if (!result.ok) {
+                        debug_warn('API', '/api/place/debug/item failed', { slot, place_id, x, y, z, def_id, qty, error: result.error });
+                        const status = result.error === 'place_not_found' || result.error === 'item_def_not_found' ? 404 : 400;
+                        res.writeHead(status, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: result.error }));
+                        return;
+                    }
+                    debug_log('PLACE_PAINTER', 'ground item mutation applied', {
+                        slot,
+                        place_id,
+                        x,
+                        y,
+                        z,
+                        def_id,
+                        qty: Math.max(1, Math.floor(Number(qty) || 1)),
+                        item_id: String(result.item?.id ?? ''),
+                    });
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        ok: true,
+                        slot,
+                        place_id,
+                        def_id,
+                        qty: Math.max(1, Math.floor(Number(qty) || 1)),
+                        at: { x: Math.floor(x), y: Math.floor(y), z: Math.floor(z) },
+                        item_id: String(result.item?.id ?? ''),
+                    }));
+                } catch (err: any) {
+                    debug_error('API', '/api/place/debug/item error', err);
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? 'internal_error' }));
+                }
+            });
+            return;
+        }
+
         // POST /api/place/debug/structure - Spawn a 1-voxel OCCUPIES structure (for movement tests)
         if (url.pathname === "/api/place/debug/structure") {
             if (req.method !== 'POST') {
@@ -6929,6 +8415,37 @@ function start_http_server(log_path: string): void {
                     res.end(JSON.stringify({ ok: true, slot, place_id, removed: Math.max(0, before - after) }));
                 } catch (err: any) {
                     debug_error('API', '/api/place/debug/structure/clear error', err);
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? 'internal_error' }));
+                }
+            });
+            return;
+        }
+
+        // POST /api/place/debug/reset_push_fixture - Restore the tavern push/fall stack
+        if (url.pathname === "/api/place/debug/reset_push_fixture") {
+            if (req.method !== 'POST') {
+                res.writeHead(405, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' }));
+                return;
+            }
+
+            let body = '';
+            req.on('data', (chunk) => { body += chunk; });
+            req.on('end', () => {
+                try {
+                    const data = body ? JSON.parse(body) : {};
+                    const slot = Number(data?.slot ?? data_slot_number);
+                    if (!Number.isFinite(slot) || slot <= 0) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'invalid_slot' }));
+                        return;
+                    }
+                    const result = reset_tavern_push_fixture(slot);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(result));
+                } catch (err: any) {
+                    debug_error('API', '/api/place/debug/reset_push_fixture error', err);
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ ok: false, error: err?.message ?? 'internal_error' }));
                 }
@@ -7173,7 +8690,7 @@ function start_http_server(log_path: string): void {
                     function has_container_tag(it: any): boolean {
                         if (!it || typeof it !== 'object') return false;
                         const p = resolve_inline_item_payload_for_api(it);
-                        return p.tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER');
+                        return build_physics_tag_flags(p.tags).container;
                     }
 
                     let to_container: string | null = null;
@@ -7432,7 +8949,7 @@ function start_http_server(log_path: string): void {
                     function has_container_tag(it: any): boolean {
                         if (!it || typeof it !== 'object') return false;
                         const p = resolve_inline_item_payload_for_api(it);
-                        return p.tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER');
+                        return build_physics_tag_flags(p.tags).container;
                     }
 
                     function parse_body_slots_path(p: string): { slot_name: string; slot_type: 'armor'|'tool'|'garb'; garb_index: number | null } | null {
@@ -7772,7 +9289,7 @@ function start_http_server(log_path: string): void {
 
                     const container_item = found.item as any;
                     const container_payload = resolve_inline_item_payload_for_api(container_item);
-                    const is_container = container_payload.tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER');
+                    const is_container = build_physics_tag_flags(container_payload.tags).container;
                     if (!is_container) {
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
@@ -8380,7 +9897,7 @@ function start_http_server(log_path: string): void {
                         return;
                     }
                     const container_item = found.item as any;
-                    if (!has_tag(container_item, 'CONTAINER')) {
+                    if (!is_inline_item_container(container_item)) {
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
                         return;
@@ -8525,7 +10042,7 @@ function start_http_server(log_path: string): void {
                     }
 
                     const dest_container_item = found.item as any;
-                    if (!has_tag(dest_container_item, 'CONTAINER')) {
+                    if (!is_inline_item_container(dest_container_item)) {
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
                         return;
@@ -8656,7 +10173,7 @@ function start_http_server(log_path: string): void {
                     }
 
                     const container_item = found.item as any;
-                    if (!has_tag(container_item, 'CONTAINER')) {
+                    if (!is_inline_item_container(container_item)) {
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
                         return;
@@ -8788,7 +10305,7 @@ function start_http_server(log_path: string): void {
                     }
 
                     const container_item = found.item as any;
-                    if (!has_tag(container_item, 'CONTAINER')) {
+                    if (!is_inline_item_container(container_item)) {
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
                         return;
@@ -8828,7 +10345,7 @@ function start_http_server(log_path: string): void {
                     }
 
                     function place_into_container_item(dest_container_item: any, item: any, grid: GridTarget, log_ctx: string): { ok: true } | { ok: false; error: string; detail?: any } {
-                        if (!has_tag(dest_container_item, 'CONTAINER')) return { ok: false, error: 'not_a_container' };
+                        if (!is_inline_item_container(dest_container_item)) return { ok: false, error: 'not_a_container' };
                         if (!Array.isArray(dest_container_item.contents)) dest_container_item.contents = [];
 
                         const max_slots = get_container_capacity_max_slots(dest_container_item);
@@ -8918,7 +10435,7 @@ function start_http_server(log_path: string): void {
                         else if (t.slot_type === 'garb' && t.garb_index !== null) existing = slot.garb?.[t.garb_index] ?? null;
 
                         // If dropping onto a body slot that contains a container-item, treat it as deposit.
-                        if (existing && has_tag(existing, 'CONTAINER')) {
+                        if (existing && is_inline_item_container(existing)) {
                             const placed = place_into_container_item(existing, removed, grid_target, `withdraw_to_body_slot_container:${actor_id}:${t.slot_name}:${t.slot_type}`);
                             if (!placed.ok) {
                                 res.writeHead(400, { "Content-Type": "application/json" });
@@ -9069,7 +10586,7 @@ function start_http_server(log_path: string): void {
                     }
 
                     const container_item = found.item as any;
-                    if (!has_tag(container_item, 'CONTAINER')) {
+                    if (!is_inline_item_container(container_item)) {
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
                         return;
@@ -9226,7 +10743,7 @@ function start_http_server(log_path: string): void {
 
                     const from_container = from_found.item as any;
                     const to_container = to_found.item as any;
-                    if (!has_tag(from_container, 'CONTAINER') || !has_tag(to_container, 'CONTAINER')) {
+                    if (!is_inline_item_container(from_container) || !is_inline_item_container(to_container)) {
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
                         return;
@@ -9454,7 +10971,7 @@ function start_http_server(log_path: string): void {
                     }
 
                     const dest_container_item = dest_found.item as any;
-                    if (!has_tag(dest_container_item, 'CONTAINER')) {
+                    if (!is_inline_item_container(dest_container_item)) {
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
                         return;
@@ -11235,7 +12752,7 @@ function start_http_server(log_path: string): void {
                     } else if (to_container.startsWith('body_slots.') || to_container.startsWith('actor.item.')) {
                         const dest_item = get_container_item(to_container);
                         const dest_payload = resolve_inline_item_payload_for_api(dest_item);
-                        const is_dest_container = dest_payload.tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER');
+                        const is_dest_container = build_physics_tag_flags(dest_payload.tags).container;
                         if (is_dest_container) {
                             if (!Array.isArray(dest_item.contents)) dest_item.contents = [];
                             const max_slots = get_container_capacity_max_slots(dest_item);
@@ -11691,7 +13208,7 @@ function start_http_server(log_path: string): void {
 
                 const container_item = found.item as any;
                 const container_payload = resolve_inline_item_payload_for_api(container_item);
-                const is_container = container_payload.tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER');
+                const is_container = build_physics_tag_flags(container_payload.tags).container;
                 if (!is_container) {
                     res.writeHead(400, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
@@ -11927,7 +13444,7 @@ function start_http_server(log_path: string): void {
 
                 const container_item = found.item as any;
                 const container_payload = resolve_inline_item_payload_for_api(container_item);
-                const is_container = container_payload.tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER');
+                const is_container = build_physics_tag_flags(container_payload.tags).container;
                 if (!is_container) {
                     res.writeHead(400, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
@@ -12059,7 +13576,7 @@ function start_http_server(log_path: string): void {
 
                 // Check if it's a container (resolved)
                 const container_payload = resolve_inline_item_payload_for_api(container_item);
-                const is_container = container_payload.tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER');
+                const is_container = build_physics_tag_flags(container_payload.tags).container;
                 if (!is_container) {
                     res.writeHead(400, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
@@ -12201,7 +13718,7 @@ function start_http_server(log_path: string): void {
                 const container_item = items_at_position[index];
 
                 const container_payload = resolve_inline_item_payload_for_api(container_item);
-                const is_container = container_payload.tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER') || Array.isArray((container_item as any)?.contents);
+                const is_container = build_physics_tag_flags(container_payload.tags).container || Array.isArray((container_item as any)?.contents);
                 if (!is_container) {
                     res.writeHead(400, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
