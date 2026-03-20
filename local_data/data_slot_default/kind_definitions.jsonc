@@ -6,6 +6,7 @@
       "name": "Default Kind",
       "weight": 1,
       "body_model_id": "character.biped_2z",
+      "entity_render": {},
       "body_slot_representation": {
         "head": { "parts": ["head"] },
         "torso": { "parts": ["body"] },

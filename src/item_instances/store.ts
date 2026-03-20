@@ -153,24 +153,3 @@ function generate_instance_id(): string {
     }
     return result;
 }
-
-/**
- * @deprecated All item instance file operations have been removed.
- * 
- * Items are now stored inline in entity.containers with the following benefits:
- * - O(1) access instead of O(n) file scanning
- * - No orphaned items (items always exist in a container)
- * - Atomic saves (save entity = save all items)
- * - Better data consistency
- * 
- * Migration completed: All items moved from item_instances/ directory
- * into entity.containers inline storage.
- * 
- * Use these functions instead:
- * - container_storage/store.ts:load_container() - Load container with items
- * - container_storage/store.ts:add_item_to_container() - Add item to container
- * - container_storage/store.ts:remove_item_from_container() - Remove item
- * - container_storage/store.ts:transfer_item_between_containers() - Transfer items
- * - container_storage/store.ts:find_item_in_entity_containers() - Find item by ID
- */
-export const _DEPRECATED_ITEM_OPERATIONS_REMOVED = true;

@@ -1,0 +1,34 @@
+{
+  "id": "place_connector",
+  "name": "Place Connector",
+  "description": "A connector cell on the shared border between two adjacent places.",
+  "weight": 0,
+  "display_char": "=",
+  "display_color": "#c8c8c8",
+  "tags": [
+    {
+      "name": "STRUCTURE",
+      "mag": 1,
+      "meta": [],
+      "scope": ["TILE"]
+    },
+    {
+      "name": "CONNECTOR",
+      "mag": 1,
+      "meta": [],
+      "scope": ["TILE"]
+    },
+    {
+      "name": "PLACE_CONNECTOR",
+      "mag": 1,
+      "meta": [],
+      "scope": ["TILE"]
+    },
+    {
+      "name": "OCCUPIES",
+      "mag": 1,
+      "meta": [],
+      "scope": ["TILE"]
+    }
+  ]
+}

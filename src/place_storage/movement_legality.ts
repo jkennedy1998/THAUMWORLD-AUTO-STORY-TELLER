@@ -467,15 +467,6 @@ export function can_place_volume(place: Place, owner: OwnerRef, stance_origin: V
         } else if (tile_has_container_surface(place, below.x, below.y, below.z)) {
           ok = true;
           by = "tile_container_surface";
-        } else {
-          // If no support layer is authored at base_z-1, treat as solid ground.
-          const bz = base_z(place);
-          const is_support_plane = Math.floor(below.z) === Math.floor(bz - 1);
-          const has_support_tiles = !!(place as any)?.tiles_z0;
-          if (is_support_plane && !has_support_tiles) {
-            ok = true;
-            by = "implicit_ground";
-          }
         }
       }
 

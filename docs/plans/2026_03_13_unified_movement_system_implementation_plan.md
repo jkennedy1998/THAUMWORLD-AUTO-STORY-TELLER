@@ -254,6 +254,117 @@ The server breath loop applies the unified pipeline per breath:
 2) Physics phase (gravity accel -> velocity resolver -> friction -> collision)
 3) Other breathing tags (growth, decay, etc.)
 
+## Breath Scheduler Cleanup
+
+### Intent
+
+Keep `breath` as the single scheduler/time authority, but clarify and normalize the phases it triggers so actors and NPCs follow the same runtime model with different inputs.
+
+This cleanup should improve both:
+
+- conceptual clarity (what runs when, and why)
+- performance control (what can be slowed down, sped up, culled, or paused)
+
+### Alignment With Unified Movement Authority
+
+This section is an extension of the unified movement plan, not a replacement for it.
+
+- `src/interface_program/main.ts` remains the canonical movement authority host.
+- `breath` remains the scheduler and time-scale entrypoint.
+- movement authority must not split again between actors and NPCs.
+- legality stays in `src/place_storage/movement_legality.ts`.
+- pathfinding stays advisory and subordinate to movement legality.
+
+### Canonical Scheduler Model
+
+All mobile entities should share the same scheduler model:
+
+- actors and NPCs are the same category of mover
+- they differ by how they receive input/goals/behavior instructions
+- `breath` decides which subphases run on which ticks
+
+Recommended canonical phase naming:
+
+1. `breath`
+   - scheduler only
+   - owns time scale, pause, and per-phase cadence
+2. `input_resolution`
+   - reads immediate control intent when present
+   - handles input throttling by mobility/speed where needed
+3. `simulate_movement`
+   - movement physics, support, gravity, collisions, pushables
+   - should run every breath for responsive motion
+4. `plan_navigation`
+   - path planning / replanning toward an existing goal
+   - slower cadence than movement
+5. `decide_behavior`
+   - higher-level NPC behavior/task selection
+   - slower cadence than navigation planning
+6. `behavior_resolution`
+   - optional subphase for behavior-specific goal production
+   - current `select_wander_goal` belongs here or inside `decide_behavior`
+
+### Current -> Target Mapping
+
+- current `apply_movement_action_phase_one_breath(...)`
+  - target role: `input_resolution`
+- current `apply_server_movement_one_breath(...)` + gravity helpers
+  - target role: `simulate_movement`
+- current `apply_server_thinking_one_breath(...)`
+  - target role: `plan_navigation`
+- current `apply_server_brain_one_breath(...)`
+  - target role: `decide_behavior`
+- current NPC wander goal search inside `apply_server_brain_one_breath(...)`
+  - target role: `behavior_resolution` or explicit `select_wander_goal`
+
+### Cadence Direction
+
+Initial intended cadence model:
+
+- `breath`
+  - every tick
+- `input_resolution`
+  - every tick where input is possible / not throttled
+- `simulate_movement`
+  - every tick
+- `plan_navigation`
+  - around every second or on demand when path/goal becomes invalid
+- `decide_behavior`
+  - around every 10 seconds or on task completion / behavior invalidation
+- `select_wander_goal`
+  - not an always-on separate scheduler loop; it should be driven by behavior need
+
+These values are design targets, not mandatory final numbers.
+
+### Why This Matters For Performance
+
+This system exists so we can:
+
+- pause simulation cleanly
+- slow or speed phases independently
+- cull expensive planning/behavior work while keeping movement responsive
+- keep multi-place runtime simulation sustainable as more connected places remain active
+
+The lag seen after multi-place work suggests that expensive behavior/planning work is still too tightly coupled to the visible place pulse.
+
+### Anti-Goals
+
+- do not split actor and NPC movement authority into separate schedulers
+- do not move legality or pathfinding rules out of their current canonical hosts
+- do not create a second time system beside `breath`
+- do not rewrite the whole movement system before phase responsibilities are clarified
+
+### First Refactor Step
+
+Before changing cadence values, first make the phase contracts explicit in code and profiling:
+
+- treat current `thinking` as `plan_navigation`
+- treat current `brain` as `decide_behavior`
+- isolate current wander-goal logic as an explicit sub-behavior inside behavior selection
+- keep profiling labels and logs aligned to those meanings
+
+This is the safest first step because it improves clarity and profiling quality without changing movement authority semantics.
+
 The renderer only:
 
 - captures input

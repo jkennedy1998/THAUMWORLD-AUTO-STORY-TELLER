@@ -2,6 +2,7 @@ import type { ItemInstance } from "../item_instances/store.js";
 import type { ItemDefinition } from "../item_storage/store.js";
 import type { Rgb } from "../mono_ui/types.js";
 import type { DiscriminatedRenderPayload } from "./types.js";
+import type { EntityRenderProfile, RenderShaderBindings } from "./definitions.js";
 
 export function pick_tags(instance: any, definition: any): any[] {
     const inst_tags = instance && Array.isArray(instance.tags) ? instance.tags : null;
@@ -110,7 +111,7 @@ export function make_entity_payload(
     id: string,
     name: string,
     tags: any[],
-    opts?: { base_fg?: Rgb },
+    opts?: { base_fg?: Rgb; kind_id?: string; entity_render?: EntityRenderProfile; render_shader?: RenderShaderBindings },
 ): DiscriminatedRenderPayload {
     return {
         kind,
@@ -118,6 +119,9 @@ export function make_entity_payload(
         name,
         tags: Array.isArray(tags) ? tags : [],
         base_fg: opts?.base_fg,
+        kind_id: opts?.kind_id,
+        entity_render: opts?.entity_render,
+        render_shader: opts?.render_shader,
     } as any;
 }
 
@@ -140,19 +144,23 @@ export function make_ground_items_tile_payload(
 export function make_simple_tile_payload(opts: {
     id: string;
     char: string;
+    def_id?: string;
     tags?: any[];
     base_fg?: Rgb;
     weight_index?: number;
     style?: any;
+    render_shader?: RenderShaderBindings;
 }): DiscriminatedRenderPayload {
     return {
         kind: 'tile',
         tile_kind: 'simple',
         id: opts.id,
+        def_id: typeof opts.def_id === 'string' ? opts.def_id : undefined,
         tags: Array.isArray(opts.tags) ? opts.tags : [],
         char: String(opts.char ?? ' ').charAt(0) || ' ',
         base_fg: opts.base_fg,
         weight_index: typeof opts.weight_index === 'number' ? opts.weight_index : undefined,
         style: opts.style,
+        render_shader: opts.render_shader,
     } as any;
 }

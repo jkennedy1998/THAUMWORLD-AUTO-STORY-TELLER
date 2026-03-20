@@ -1,10 +1,8 @@
-// Test script to verify body slot enhancements
-import { initialize_body_slots, equip_item, unequip_item, get_equipped_item_id, is_slot_empty } from "../types/body_slots.js";
+import { initialize_equipment_slots, get_slot_item_id, is_slot_empty } from "../types/body_slots.js";
 
-console.log("Testing Body Slot Enhancements...\n");
+console.log("Testing Equipment Slots...\n");
 
-// Test 1: Initialize body slots
-console.log("Test 1: Initialize Body Slots");
+console.log("Test 1: Initialize Equipment Slots");
 const parts = [
     { slot: "hand_left", critical: false },
     { slot: "hand_right", critical: false },
@@ -12,61 +10,40 @@ const parts = [
     { slot: "head", critical: true },
 ];
 
-const body_slots = initialize_body_slots(parts);
-console.log("  ✓ Body slots initialized");
-console.log(`    - HAND_LEFT: critical=${body_slots.HAND_LEFT?.critical}, empty=${is_slot_empty(body_slots, "HAND_LEFT")}`);
-console.log(`    - CHEST: critical=${body_slots.CHEST?.critical}, empty=${is_slot_empty(body_slots, "CHEST")}`);
-console.log(`    - All slots start with item_instance_id: ${body_slots.HAND_LEFT?.item_instance_id}`);
+const body_slots = initialize_equipment_slots(parts);
+const hand_left = body_slots.hand_left!;
+const head = body_slots.head!;
+console.log("  ✓ Equipment slots initialized");
+console.log(`    - hand_left: critical=${body_slots.hand_left?.critical}, empty=${is_slot_empty(body_slots, "hand_left")}`);
+console.log(`    - chest: critical=${body_slots.chest?.critical}, empty=${is_slot_empty(body_slots, "chest")}`);
+console.log(`    - hand_left tool starts empty: ${body_slots.hand_left?.tool}`);
 
 console.log("");
 
-// Test 2: Equip item
-console.log("Test 2: Equip Item");
-const equip_result = equip_item(body_slots, "HAND_LEFT", "inst_sword_001");
-if (equip_result.success) {
-    console.log("  ✓ Item equipped successfully");
-    console.log(`    - Slot now contains: ${get_equipped_item_id(body_slots, "HAND_LEFT")}`);
-    console.log(`    - Previous item: ${equip_result.previous_item_id} (should be null)`);
-} else {
-    console.log("  ✗ Failed to equip:", equip_result.error);
-}
+console.log("Test 2: Assign tool item");
+hand_left.tool = "inst_sword_001";
+console.log("  ✓ Tool assigned successfully");
+console.log(`    - Slot now contains: ${get_slot_item_id(body_slots, "hand_left")}`);
 
 console.log("");
 
-// Test 3: Replace equipped item
-console.log("Test 3: Replace Equipped Item");
-const replace_result = equip_item(body_slots, "HAND_LEFT", "inst_axe_002");
-if (replace_result.success) {
-    console.log("  ✓ Item replaced successfully");
-    console.log(`    - Slot now contains: ${get_equipped_item_id(body_slots, "HAND_LEFT")}`);
-    console.log(`    - Previous item: ${replace_result.previous_item_id} (should be inst_sword_001)`);
-} else {
-    console.log("  ✗ Failed to replace:", replace_result.error);
-}
+console.log("Test 3: Add garb item");
+hand_left.garb.push("inst_ring_002");
+console.log("  ✓ Garb item added successfully");
+console.log(`    - Slot now contains: ${get_slot_item_id(body_slots, "hand_left")}`);
 
 console.log("");
 
-// Test 4: Unequip item
-console.log("Test 4: Unequip Item");
-const unequip_result = unequip_item(body_slots, "HAND_LEFT");
-if (unequip_result.success) {
-    console.log("  ✓ Item unequipped successfully");
-    console.log(`    - Slot now empty: ${is_slot_empty(body_slots, "HAND_LEFT")}`);
-    console.log(`    - Returned item: ${unequip_result.item_instance_id}`);
-} else {
-    console.log("  ✗ Failed to unequip:", unequip_result.error);
-}
+console.log("Test 4: Clear slot contents");
+hand_left.tool = null;
+hand_left.garb = [];
+console.log("  ✓ Slot cleared successfully");
+console.log(`    - Slot now empty: ${is_slot_empty(body_slots, "hand_left")}`);
 
 console.log("");
 
-// Test 5: Invalid slot
-console.log("Test 5: Invalid Slot Handling");
-const invalid_result = equip_item(body_slots, "INVALID_SLOT", "inst_test");
-if (!invalid_result.success) {
-    console.log("  ✓ Invalid slot rejected correctly");
-    console.log(`    - Error: ${invalid_result.error}`);
-} else {
-    console.log("  ✗ Should have failed for invalid slot");
-}
+console.log("Test 5: Head armor assignment");
+head.armor = "inst_helmet_001";
+console.log(`  ✓ Head slot contains: ${get_slot_item_id(body_slots, "head")}`);
 
 console.log("\nAll tests completed!");

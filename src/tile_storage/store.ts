@@ -70,6 +70,7 @@ export function load_master_tile(def_id: string): TileDefLookupResult {
                 weight: Number(raw.weight),
                 display_char: String(raw.display_char ?? "?"),
                 display_color: String(raw.display_color ?? "#888888"),
+                render_shader: (raw.render_shader && typeof raw.render_shader === 'object') ? (raw.render_shader as TileDefinition["render_shader"]) : undefined,
                 tags: (raw.tags as TileDefinition["tags"]) ?? [],
             };
             

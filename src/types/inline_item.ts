@@ -11,6 +11,8 @@ export interface InlineItem {
     id: string;                    // Unique instance ID (UUID)
     def_id: string;                // Reference to item definition
     qty: number;                   // Stack quantity (default: 1)
+    // Breath-driven time support for breath-reactive item tags.
+    last_breath_processed?: number;
     // Optional absolute world-z for inline ground rendering.
     // If omitted, callers should treat it as the place's structure plane.
     elevation?: number;

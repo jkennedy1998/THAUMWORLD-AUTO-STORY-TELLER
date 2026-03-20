@@ -2,7 +2,7 @@ import type { Canvas, Module, Rect, Rgb, PointerEvent, DragEvent } from "../type
 import type { Container } from "../../types/container.js";
 import type { ItemInstance } from "../../item_instances/store.js";
 import type { ItemDefinition } from "../../item_storage/store.js";
-import type { BodySlots, EquipmentSlots } from "../../types/body_slots.js";
+import type { EquipmentSlots } from "../../types/body_slots.js";
 import { debug_log } from "../../shared/debug.js";
 import { draw_module_border, BORDER_STYLES, draw_horizontal_divider, draw_container_box } from "../module_borders.js";
 import { get_color_by_name } from "../colors.js";
@@ -32,7 +32,7 @@ export type CharacterModuleConfig = {
   // Character data
   get_actor_name: () => string;
   get_actor_id: () => string; // Full actor ID (e.g., "henry_actor")
-  get_body_slots: () => BodySlots | EquipmentSlots;
+  get_body_slots: () => EquipmentSlots;
   get_equipped_items: () => Map<string, { instance: ItemInstance; definition: ItemDefinition }>;
   
   // Weight data
@@ -94,7 +94,6 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
   
   // Track currently hovered slot (includes slot type info)
   let hover_slot: ResolvedSlot | null = null;
-  let last_logged_actor: string | null = null;
   
   // Phase 8: Gizmo state
   const gizmo_state: GizmoState = create_gizmo_state();
@@ -310,14 +309,6 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       const weight = opts.get_weight_data();
       const now_ms = Date.now();
       const rq: RenderRequest[] = [];
-      
-      // Debug logging
-      if (actor_name !== last_logged_actor) {
-        debug_log(`[CharacterModule] Drawing character: ${actor_name}`);
-        debug_log(`[CharacterModule] Body slots: ${Object.keys(body_slots).length}`);
-        debug_log(`[CharacterModule] Equipped items: ${equipped.size}`);
-        last_logged_actor = actor_name;
-      }
       
       // Draw border with header
       draw_module_border(c, {

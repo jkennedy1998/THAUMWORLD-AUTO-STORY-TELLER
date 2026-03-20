@@ -52,6 +52,7 @@ export function sanitize_place_tile_instance(tile: any): boolean {
   changed = del(tile, 'display_char') || changed;
   changed = del(tile, 'display_color') || changed;
   changed = del(tile, 'container_glyphs') || changed;
+  changed = del(tile, 'render_shader') || changed;
   changed = del(tile, 'walkable') || changed;
   changed = del(tile, 'blocks_sight') || changed;
   changed = del(tile, 'blocks_sound') || changed;
@@ -115,6 +116,7 @@ export function sanitize_place_for_save(place_any: any): boolean {
         changed = del(s, 'display_char') || changed;
         changed = del(s, 'display_color') || changed;
         changed = del(s, 'container_glyphs') || changed;
+        changed = del(s, 'render_shader') || changed;
         changed = del(s, 'body_model') || changed;
         changed = del(s, '__derived_runtime') || changed;
       }

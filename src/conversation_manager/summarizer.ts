@@ -8,10 +8,17 @@ import { debug_log, debug_error } from "../shared/debug.js";
 import { ollama_chat } from "../shared/ollama_client.js";
 import type { ConversationArchive } from "./archive.js";
 import { format_for_ai, format_for_npc_perspective } from "./formatter.js";
+import { build_conversation_summary_prompts } from "../npc_ai/prompts.js";
 
 const SUMMARIES_DIR = "conversation_summaries";
 const OLLAMA_HOST = process.env.OLLAMA_HOST ?? "http://localhost:11434";
-const SUMMARIZER_MODEL = process.env.SUMMARIZER_MODEL ?? "llama3.2:latest";
+const SUMMARIZER_MODEL = process.env.SUMMARIZER_MODEL
+    ?? process.env.NPC_AI_MODEL
+    ?? "hf.co/DavidAU/GLM-4.7-Flash-Uncensored-Heretic-NEO-CODE-Imatrix-MAX-GGUF:IQ2_M";
+const SUMMARIZER_NUM_CTX_RAW = Number(process.env.SUMMARIZER_NUM_CTX ?? process.env.NPC_MEMORY_NUM_CTX ?? 8_192);
+const SUMMARIZER_NUM_CTX = Number.isFinite(SUMMARIZER_NUM_CTX_RAW) && SUMMARIZER_NUM_CTX_RAW > 0
+    ? Math.floor(SUMMARIZER_NUM_CTX_RAW)
+    : 8_192;
 const SUMMARIZER_TIMEOUT_MS = 30000;
 
 // In-memory cache for summaries
@@ -79,8 +86,11 @@ export async function summarize_for_npc(
         focus_on_significant: true
     });
     
-    // Build prompt
-    const prompt = build_summarization_prompt(npc_name, npc_personality, formatted);
+    const prompt_pair = build_conversation_summary_prompts({
+        npc_name,
+        npc_personality,
+        formatted_conversation: formatted,
+    });
     
     const start_time = Date.now();
     
@@ -89,14 +99,14 @@ export async function summarize_for_npc(
             host: OLLAMA_HOST,
             model: SUMMARIZER_MODEL,
             messages: [
-                { 
-                    role: "system", 
-                    content: "You are a conversation analyzer. Create concise, meaningful summaries from an NPC's perspective." 
+                {
+                    role: "system",
+                    content: prompt_pair.system
                 },
-                { role: "user", content: prompt }
+                { role: "user", content: prompt_pair.user }
             ],
             timeout_ms: SUMMARIZER_TIMEOUT_MS,
-            options: { temperature: 0.7 }
+            options: { temperature: 0.7, num_ctx: SUMMARIZER_NUM_CTX }
         });
         
         const duration_ms = Date.now() - start_time;
@@ -143,42 +153,6 @@ export async function summarize_for_npc(
         });
         return null;
     }
-}
-
-/**
- * Build the summarization prompt
- */
-function build_summarization_prompt(
-    npc_name: string,
-    npc_personality: string,
-    formatted_conversation: string
-): string {
-    return `You are ${npc_name}. ${npc_personality}
-
-You just had this conversation:
-
-${formatted_conversation}
-
-Create a memory of this conversation from YOUR perspective. Focus on what matters to YOU.
-
-Respond in this exact format:
-
-MEMORY: [2-3 sentences summarizing what happened and your reaction]
-
-EMOTION: [single word or short phrase describing how you feel about this conversation: "pleased", "angry", "suspicious", "grateful", "worried", etc.]
-
-LEARNED:
-- [key fact or information you learned, if any]
-- [another fact, if any]
-
-DECIDED:
-- [any decision or resolution you made, if any]
-- [another decision, if any]
-
-RELATIONSHIPS:
-- [person's name]: [improved/worsened/unchanged] - [brief reason]
-
-Keep it concise and in character. If nothing significant happened, say so.`;
 }
 
 /**

@@ -14,6 +14,7 @@ import { append_metric } from "../engine/metrics_store.js";
 import { get_region_by_coords } from "../world_storage/store.js";
 import { load_place } from "../place_storage/store.js";
 import { load_actor } from "../actor_storage/store.js";
+import { build_inspect_narrative_prompt } from "../inspection/prompts.js";
 
 const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
 const POLL_MS = SERVICE_CONFIG.POLL_MS.RENDERER;
@@ -253,67 +254,6 @@ function getPlaceDetails(target: string, playerActorId?: string): { name: string
 // Current implementation covers: INSPECT, ATTACK, COMMUNICATE, MOVE, USE
 // TODO: Add remaining generators from ACTION_VERBS constant
 
-function generateInspectNarrativePrompt(params: {
-    original_text: string;
-    events: string[];
-    effects: string[];
-    context?: Record<string, unknown>;
-}): string {
-    const ctx = params.context ?? {};
-    const ir = (ctx as any).inspect_result as any;
-    if (ir && typeof ir === "object") {
-        const clarity = String(ir.clarity ?? "unknown");
-        const sense = String(ir.sense_used ?? "unknown");
-        const short_desc = String(ir?.content?.short_description ?? "").trim();
-        const full_desc = String(ir?.content?.full_description ?? "").trim();
-        const features = Array.isArray(ir?.content?.features) ? ir.content.features : [];
-
-        const feature_lines = features
-            .filter((f: any) => !!f && f.discovered === true)
-            .slice(0, 6)
-            .map((f: any) => `- ${String(f.description ?? f.name ?? "").trim()}`)
-            .filter((s: string) => s.length > 2)
-            .join("\n");
-
-        const sensory = ir?.content?.sensory_details;
-        const sensory_lines: string[] = [];
-        if (sensory && typeof sensory === "object") {
-            for (const k of Object.keys(sensory)) {
-                const arr = (sensory as any)[k];
-                if (Array.isArray(arr) && arr.length > 0) {
-                    sensory_lines.push(`${k}: ${arr.slice(0, 6).join(", ")}`);
-                }
-            }
-        }
-
-        return `The player inspects a target. Use ONLY the provided inspection result.
-
-INSPECTION RESULT:
-Clarity: ${clarity}
-Sense: ${sense}
-Short: ${short_desc || "(none)"}
-Full: ${full_desc || "(none)"}
-Sensory: ${sensory_lines.length > 0 ? sensory_lines.join(" | ") : "(none)"}
-Notable features (discovered only):
-${feature_lines || "- (none)"}
-
-Write 1-2 concise sentences in second person.
-Do NOT invent new features, items, identities, or facts.
-If clarity is vague/obscured, keep it restrained and do not add extra detail beyond Short/Sensory/Notable features.`;
-    }
-
-    // Fallback: older, less-structured prompt.
-    const rawTarget = params.events[0]?.match(/target=([^,)]+)/)?.[1] || "the area";
-    const target = resolveRegionName(rawTarget);
-    const hasFindings = params.effects.length > 0;
-
-    return `The player is inspecting ${target}.
-${hasFindings ? "They discover something noteworthy." : "They find nothing of particular interest."}
-
-Write a brief narrative (1-2 sentences) in second person.
-Do not invent specific findings unless explicitly provided in the input.`;
-}
-
 function generateAttackNarrativePrompt(params: {
     original_text: string;
     events: string[];
@@ -497,7 +437,7 @@ function build_renderer_prompt(params: {
     // Route to action-specific narrative generator
     switch (params.action_verb) {
         case "INSPECT":
-            return generateInspectNarrativePrompt({
+            return build_inspect_narrative_prompt({
                 original_text: params.original_text,
                 events: params.events,
                 effects: params.effects,

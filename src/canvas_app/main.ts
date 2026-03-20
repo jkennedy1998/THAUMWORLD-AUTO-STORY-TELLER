@@ -11,7 +11,6 @@ const el = document.getElementById('mono_canvas') as HTMLCanvasElement | null;
 if (!el) throw new Error('mono_canvas element not found');
 
 let modules: readonly Module[];
-let start_window_feed_polling: (interval_ms: number) => void;
 let module_registry: any;
 let on_drag_end_outside: ((x: number, y: number) => void) | undefined;
 let on_pointer_move_global: ((x: number, y: number, e: any) => void) | undefined;
@@ -25,7 +24,6 @@ if (IS_PAINTER_MODE) {
     painter_state = create_painter_app_state();
     modules = painter_state.modules;
     module_registry = painter_state.module_registry;
-    start_window_feed_polling = () => {}; // No polling needed for painter
     on_drag_end_outside = undefined;
     on_pointer_move_global = painter_state.on_pointer_move_global;
 
@@ -48,7 +46,6 @@ if (IS_PAINTER_MODE) {
     console.log('🎮 Initializing Game...');
     const game_state = create_app_state();
     modules = game_state.modules;
-    start_window_feed_polling = game_state.start_window_feed_polling;
     module_registry = game_state.module_registry;
     on_drag_end_outside = game_state.on_drag_end_outside;
     on_pointer_move_global = game_state.on_pointer_move_global;
@@ -331,10 +328,6 @@ async function boot() {
         }
     }
 
-    if (!IS_PAINTER_MODE) {
-        start_window_feed_polling(1000);
-    }
-    
     runtime.start();
 
     // Texture deformation animation

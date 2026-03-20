@@ -9,6 +9,7 @@ export type OllamaChatOptions = {
     temperature?: number;
     top_p?: number;
     num_predict?: number;
+    num_ctx?: number;
 };
 
 export type OllamaChatRequest = {

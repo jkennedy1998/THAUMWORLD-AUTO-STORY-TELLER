@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { parse } from "jsonc-parser";
 import { ensure_dir_exists } from "../engine/log_store.js";
 import { get_default_world_path, get_legacy_default_world_path, get_legacy_world_path, get_world_dir, get_world_path, get_data_slot_dir } from "../engine/paths.js";
+import { list_places_in_region, load_place } from "../place_storage/store.js";
 
 export type WorldLookupResult =
     | { ok: true; world: Record<string, unknown>; path: string }
@@ -90,6 +91,10 @@ export type Region = {
     id: string;
     name: string;
     region_type: "outdoor" | "building" | "dungeon" | "wilderness" | "settlement";
+    region_bounds?: {
+        origin: { x: number; y: number; z: number };
+        size: { x: number; y: number; z: number };
+    };
     world_coords: {
         world_x: number;
         world_y: number;
@@ -196,6 +201,110 @@ function read_jsonc(pathname: string): Record<string, unknown> {
     return (parse(raw) as Record<string, unknown>) ?? {};
 }
 
+export type RegionBounds = NonNullable<Region["region_bounds"]>;
+
+function sanitize_region_bounds(bounds: Region["region_bounds"] | null | undefined): RegionBounds | null {
+    if (!bounds) return null;
+    const ox = Math.floor(Number(bounds.origin?.x ?? 0));
+    const oy = Math.floor(Number(bounds.origin?.y ?? 0));
+    const oz = Math.floor(Number(bounds.origin?.z ?? 0));
+    const sx = Math.max(1, Math.floor(Number(bounds.size?.x ?? 1)) || 1);
+    const sy = Math.max(1, Math.floor(Number(bounds.size?.y ?? 1)) || 1);
+    const sz = Math.max(1, Math.floor(Number(bounds.size?.z ?? 1)) || 1);
+    return { origin: { x: ox, y: oy, z: oz }, size: { x: sx, y: sy, z: sz } };
+}
+
+function default_region_bounds(): RegionBounds {
+    return { origin: { x: 0, y: 0, z: 0 }, size: { x: 1, y: 1, z: 1 } };
+}
+
+export function compute_minimum_region_bounds(slot: number, region_id: string): RegionBounds | null {
+    const places_res = list_places_in_region(slot, region_id);
+    if (!places_res.ok || places_res.places.length < 1) return null;
+    let min_x = Number.POSITIVE_INFINITY;
+    let min_y = Number.POSITIVE_INFINITY;
+    let min_z = Number.POSITIVE_INFINITY;
+    let max_x = Number.NEGATIVE_INFINITY;
+    let max_y = Number.NEGATIVE_INFINITY;
+    let max_z = Number.NEGATIVE_INFINITY;
+    let found = false;
+
+    for (const place_id of places_res.places) {
+        const place_res = load_place(slot, place_id);
+        if (!place_res.ok) continue;
+        const bounds = place_res.place.region_bounds;
+        if (!bounds) continue;
+        const origin_x = Math.floor(Number(bounds.origin.x ?? 0));
+        const origin_y = Math.floor(Number(bounds.origin.y ?? 0));
+        const origin_z = Math.floor(Number(bounds.origin.z ?? 0));
+        const size_x = Math.max(1, Math.floor(Number(bounds.size.x ?? 1)) || 1);
+        const size_y = Math.max(1, Math.floor(Number(bounds.size.y ?? 1)) || 1);
+        const size_z = Math.max(1, Math.floor(Number(bounds.size.z ?? 1)) || 1);
+        min_x = Math.min(min_x, origin_x - 1);
+        min_y = Math.min(min_y, origin_y - 1);
+        min_z = Math.min(min_z, origin_z - 1);
+        max_x = Math.max(max_x, origin_x + size_x);
+        max_y = Math.max(max_y, origin_y + size_y);
+        max_z = Math.max(max_z, origin_z + size_z);
+        found = true;
+    }
+
+    if (!found) return null;
+    return {
+        origin: { x: min_x, y: min_y, z: min_z },
+        size: { x: Math.max(1, max_x - min_x + 1), y: Math.max(1, max_y - min_y + 1), z: Math.max(1, max_z - min_z + 1) },
+    };
+}
+
+function normalize_region_bounds(slot: number, region: Region): { region: Region; changed: boolean } {
+    const existing = sanitize_region_bounds(region.region_bounds);
+    const minimum = compute_minimum_region_bounds(slot, region.id);
+    if (!existing && !minimum) {
+        region.region_bounds = default_region_bounds();
+        return { region, changed: true };
+    }
+    if (!existing && minimum) {
+        region.region_bounds = minimum;
+        return { region, changed: true };
+    }
+    if (!existing) return { region, changed: false };
+    if (!minimum) {
+        if (JSON.stringify(region.region_bounds) !== JSON.stringify(existing)) {
+            region.region_bounds = existing;
+            return { region, changed: true };
+        }
+        return { region, changed: false };
+    }
+
+    const min_end_x = minimum.origin.x + minimum.size.x - 1;
+    const min_end_y = minimum.origin.y + minimum.size.y - 1;
+    const min_end_z = minimum.origin.z + minimum.size.z - 1;
+    const cur_end_x = existing.origin.x + existing.size.x - 1;
+    const cur_end_y = existing.origin.y + existing.size.y - 1;
+    const cur_end_z = existing.origin.z + existing.size.z - 1;
+    const merged: RegionBounds = {
+        origin: {
+            x: Math.min(existing.origin.x, minimum.origin.x),
+            y: Math.min(existing.origin.y, minimum.origin.y),
+            z: Math.min(existing.origin.z, minimum.origin.z),
+        },
+        size: {
+            x: Math.max(cur_end_x, min_end_x) - Math.min(existing.origin.x, minimum.origin.x) + 1,
+            y: Math.max(cur_end_y, min_end_y) - Math.min(existing.origin.y, minimum.origin.y) + 1,
+            z: Math.max(cur_end_z, min_end_z) - Math.min(existing.origin.z, minimum.origin.z) + 1,
+        },
+    };
+    if (JSON.stringify(existing) !== JSON.stringify(merged)) {
+        region.region_bounds = merged;
+        return { region, changed: true };
+    }
+    if (JSON.stringify(region.region_bounds) !== JSON.stringify(existing)) {
+        region.region_bounds = existing;
+        return { region, changed: true };
+    }
+    return { region, changed: false };
+}
+
 // Region file loading
 
 export function get_region_path(slot: number, region_id: string): string {
@@ -213,7 +322,12 @@ export function load_region(slot: number, region_id: string): { ok: true; region
     try {
         const raw = fs.readFileSync(region_path, "utf-8");
         const region = parse(raw) as Region;
-        return { ok: true, region, path: region_path };
+        const normalized = normalize_region_bounds(slot, region);
+        if (normalized.changed) {
+            ensure_dir_exists(path.dirname(region_path));
+            fs.writeFileSync(region_path, JSON.stringify(normalized.region, null, 2), "utf-8");
+        }
+        return { ok: true, region: normalized.region, path: region_path };
     } catch (e) {
         return { ok: false, error: `failed_to_parse_region: ${e instanceof Error ? e.message : String(e)}` };
     }
@@ -225,7 +339,8 @@ export function save_region(slot: number, region: Region): boolean {
     
     try {
         ensure_dir_exists(region_dir);
-        fs.writeFileSync(region_path, JSON.stringify(region, null, 2), "utf-8");
+        const normalized = normalize_region_bounds(slot, region);
+        fs.writeFileSync(region_path, JSON.stringify(normalized.region, null, 2), "utf-8");
         return true;
     } catch {
         return false;

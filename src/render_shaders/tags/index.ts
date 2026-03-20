@@ -1,6 +1,7 @@
 import type { RenderContext, RenderLayer } from "../types.js";
 import { apply_container_modifier } from "./container.js";
 import { apply_fire_modifier } from "./fire.js";
+import { apply_flora_modifier } from "./flora.js";
 
 export type TagModifier = {
     id: string;
@@ -9,6 +10,10 @@ export type TagModifier = {
 
 // Program-order modifiers. Do not encode per-item priorities.
 export const TAG_MODIFIERS: readonly TagModifier[] = [
+    {
+        id: 'FLORA',
+        apply: (layers, tags, ctx) => apply_flora_modifier(layers, tags, ctx),
+    },
     {
         id: 'CONTAINER',
         apply: (layers, tags, ctx) => apply_container_modifier(layers, tags, ctx),

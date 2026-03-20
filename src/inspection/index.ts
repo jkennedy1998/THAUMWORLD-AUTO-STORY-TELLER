@@ -26,6 +26,10 @@ export {
 } from "./data_service.js";
 
 export {
+  build_inspect_narrative_prompt
+} from "./prompts.js";
+
+export {
   calculate_clarity,
   calculate_distance,
   get_best_inspection_sense,

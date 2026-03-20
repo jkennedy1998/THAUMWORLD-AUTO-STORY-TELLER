@@ -28,15 +28,17 @@ import type { Container } from '../types/container.js';
 import { calculate_grid_dimensions, get_container_grid } from '../container_storage/grid_calculator.js';
 import { type ItemInstance } from '../item_instances/store.js';
 import { type ItemDefinition } from '../item_storage/store.js';
-import { type BodySlots, get_slot_item_id } from '../types/body_slots.js';
+import type { EquipmentSlots } from '../types/body_slots.js';
 import { DEBUG_VISION, set_debug_bundle_enabled, spawn_sense_broadcast_particles } from '../mono_ui/vision_debugger.js';
 import { set_ui_debug_enabled, UI_DEBUG } from '../mono_ui/runtime/ui_debug.js';
 import { get_senses_for_action } from '../action_system/sense_broadcast.js';
 import { get_facing } from '../npc_ai/facing_system.js';
 import { eval_body_model_voxels, get_body_model_def } from '../shared/body_model.js';
+import { get_character_camera_focus_tile } from '../shared/character_camera_focus.js';
 import { play_sfx } from '../mono_ui/sfx/sfx_player.js';
 import { format_interval_avg, format_interval_min, get_movement_debug_snapshot } from '../shared/movement_debug_state.js';
 import { has_tag_name } from '../shared/physics_tags.js';
+import { compute_adjacent_place_bounds, detect_place_resize_face, get_place_region_bounds, region_bounds_overlap } from '../shared/place_adjacency.js';
 import {
     api_transfer_inline,
 } from './transfer_api.js';
@@ -67,6 +69,7 @@ export const APP_CONFIG = {
 } as const;
 
 const APP_PLACE_TIMING_VERSION = '2026-03-14-visible-pulse-v1';
+const DEBUG_WINDOW_REFRESH_MS = 500;
 
 export type AppState = {
     modules: readonly Module[];
@@ -145,6 +148,12 @@ export function create_app_state(): AppState {
         place: {
             current_place_id: null as string | null,
             current_place: null as Place | null,
+            current_region_id: null as string | null,
+            current_region_bounds: null as null | { origin: { x: number; y: number; z: number }; size: { x: number; y: number; z: number } },
+            actor_current_place_id: null as string | null,
+            scene_selected_place_id: null as string | null,
+            scene_places: [] as Place[],
+            scene_connector_hops_visible: 1,
             npc_movement_active: false,
             camera_target: {
                 mode: 'follow_actor' as 'follow_actor' | 'free',
@@ -181,10 +190,11 @@ export function create_app_state(): AppState {
         },
     place_painter: {
         active: false,
-        selected_tool: 'paint' as 'paint' | 'erase' | 'move',
-        left_click_tool: 'paint' as 'paint' | 'erase' | 'move',
-        right_click_tool: 'erase' as 'paint' | 'erase' | 'move',
+        selected_tool: 'paint' as 'paint' | 'erase' | 'move' | 'place_create' | 'place_delete' | 'place_resize' | 'region_tool',
+        left_click_tool: 'paint' as 'paint' | 'erase' | 'move' | 'place_create' | 'place_delete' | 'place_resize' | 'region_tool',
+        right_click_tool: 'erase' as 'paint' | 'erase' | 'move' | 'place_create' | 'place_delete' | 'place_resize' | 'region_tool',
         selected_palette_kind: 'tile' as 'tile' | 'item',
+            selected_tile_palette_section: 'blocks' as 'blocks' | 'connectors' | 'all',
             selected_palette_entry_id: null as string | null,
             selected_item_palette_entry_id: null as string | null,
             tile_palette_entries: [] as Array<{
@@ -192,6 +202,7 @@ export function create_app_state(): AppState {
                 name: string;
                 display_char: string;
                 display_color: string;
+                section: 'blocks' | 'connectors';
                 body_model?: { physical?: Array<{ dx: number; dy: number; dz: number }> } | null;
             }>,
             item_palette_entries: [] as Array<{
@@ -208,7 +219,41 @@ export function create_app_state(): AppState {
                 y: number;
                 z: number;
                 entity_ref?: string;
-                entity_type?: 'npc' | 'actor';
+                entity_type?: 'npc' | 'actor' | 'item' | 'pile' | 'structure';
+            },
+            move_pending_source: null as null | {
+                place_id: string;
+                x: number;
+                y: number;
+                z: number;
+                entity_ref: string;
+                entity_type: 'npc' | 'actor' | 'item' | 'pile' | 'structure';
+            },
+            move_drag_session: null as null | {
+                place_id: string;
+                source_x: number;
+                source_y: number;
+                source_z: number;
+                entity_ref: string;
+                entity_type: 'npc' | 'actor' | 'item' | 'pile' | 'structure';
+                display_char: string;
+                display_color: string;
+                body_model?: { physical?: Array<{ dx: number; dy: number; dz: number }> } | null;
+                target_x: number;
+                target_y: number;
+                target_z: number;
+                valid: boolean;
+            },
+            resize_session: null as null | {
+                active: boolean;
+                place_id: string;
+                face: 'x+' | 'x-' | 'y+' | 'y-' | 'z+' | 'z-';
+                interaction: 'drag' | 'click_z';
+                start_bounds: { origin: { x: number; y: number; z: number }; size: { x: number; y: number; z: number } };
+                proposed_bounds: { origin: { x: number; y: number; z: number }; size: { x: number; y: number; z: number } };
+                valid: boolean;
+                conflict_place_id?: string;
+                target_coord: number;
             },
         },
         container: {
@@ -233,7 +278,7 @@ export function create_app_state(): AppState {
         },
         character: {
             is_visible: true,  // Always visible for now
-            body_slots: {} as BodySlots,
+            body_slots: {} as EquipmentSlots,
             equipped_items: new Map() as Map<string, { instance: ItemInstance; definition: ItemDefinition }>,
             weight: { current: 0, max: 100 },
             // Player-selected default container (body_slots path like "body_slots.leg_left.garb.0")
@@ -258,11 +303,15 @@ export function create_app_state(): AppState {
     let place_touch_place_id: string | null = null;
     const owned_current_place_pause_sources = new Set<string>();
     let poll_window_feeds_in_flight = false;
+    let poll_window_feeds_interval_id: number | null = null;
+    let poll_window_feeds_interval_ms: number | null = null;
     let refresh_character_data_in_flight = false;
     let last_transcript_poll_ms = 0;
     let last_targets_poll_ms = 0;
     let last_roller_poll_ms = 0;
     let last_character_refresh_ms = 0;
+    let last_debug_window_refresh_ms = 0;
+    let last_debug_window_signature = '';
 
     const renderer_debug = {
         render_count: 0,
@@ -491,6 +540,7 @@ export function create_app_state(): AppState {
                 name: String(entry?.name ?? entry?.id ?? ''),
                 display_char: String(entry?.display_char ?? '?'),
                 display_color: String(entry?.display_color ?? '#888888'),
+                section: String(entry?.section ?? (String(entry?.id ?? '') === 'place_connector' ? 'connectors' : 'blocks')) === 'connectors' ? 'connectors' : 'blocks',
                 body_model: entry?.body_model ?? null,
             })).filter((entry: { id: string }) => entry.id.length > 0);
             ui_state.place_painter.tile_palette_loaded = true;
@@ -535,11 +585,26 @@ export function create_app_state(): AppState {
         name: string;
         display_char: string;
         display_color: string;
+        section: 'blocks' | 'connectors';
         body_model?: { physical?: Array<{ dx: number; dy: number; dz: number }> } | null;
     } | null {
         const selected_id = ui_state.place_painter.selected_palette_entry_id;
         if (!selected_id) return null;
         return ui_state.place_painter.tile_palette_entries.find((entry) => entry.id === selected_id) ?? null;
+    }
+
+    function get_active_place_painter_tile_entries(): Array<{
+        id: string;
+        name: string;
+        display_char: string;
+        display_color: string;
+        section: 'blocks' | 'connectors';
+        body_model?: { physical?: Array<{ dx: number; dy: number; dz: number }> } | null;
+    }> {
+        const section = ui_state.place_painter.selected_tile_palette_section;
+        const entries = ui_state.place_painter.tile_palette_entries;
+        if (section === 'all') return entries;
+        return entries.filter((entry) => entry.section === section);
     }
 
     function get_selected_place_painter_item_entry(): {
@@ -564,6 +629,36 @@ export function create_app_state(): AppState {
             const off = Math.floor(Number(m[1]));
             if (Number.isFinite(off)) out.add(baseZ + off);
         }
+
+        for (const actor of place?.contents?.actors_present ?? []) {
+            const wz0 = get_entity_camera_anchor_world_z(actor as any, String((actor as any)?.actor_ref ?? ''), baseZ);
+            out.add(wz0);
+            const def = get_body_model_def((actor as any)?.body_model_id);
+            const voxels = eval_body_model_voxels(def, { mode: 'render', facing: get_facing(String((actor as any)?.actor_ref ?? '')) });
+            if (Array.isArray(voxels) && voxels.length > 0) {
+                for (const v of voxels) out.add(wz0 + Math.floor(Number((v as any)?.dz ?? 0)));
+            }
+        }
+
+        for (const npc of place?.contents?.npcs_present ?? []) {
+            const wz0 = get_entity_camera_anchor_world_z(npc as any, String((npc as any)?.npc_ref ?? ''), baseZ);
+            out.add(wz0);
+            const def = get_body_model_def((npc as any)?.body_model_id);
+            const voxels = eval_body_model_voxels(def, { mode: 'render', facing: get_facing(String((npc as any)?.npc_ref ?? '')) });
+            if (Array.isArray(voxels) && voxels.length > 0) {
+                for (const v of voxels) out.add(wz0 + Math.floor(Number((v as any)?.dz ?? 0)));
+            }
+        }
+
+        for (const s of (place as any)?.structures ?? []) {
+            const oz = Math.floor(Number((s as any)?.origin?.z ?? baseZ));
+            const phys = Array.isArray((s as any)?.body_model?.physical)
+                ? (s as any).body_model.physical
+                : [{ dz: 0 }];
+            for (const v of phys) out.add(oz + Math.floor(Number((v as any)?.dz ?? 0)));
+        }
+
+        if (out.size === 0) out.add(baseZ);
         return Array.from(out).sort((a, b) => a - b);
     }
 
@@ -582,25 +677,304 @@ export function create_app_state(): AppState {
         save_place_focus_z();
     }
 
-    async function mutate_place_painter_layer(place_id: string, world_z: number, action: 'add' | 'delete'): Promise<boolean> {
+    async function mutate_place_painter_layer(place_id: string, world_z: number, action: 'add' | 'delete' | 'reorder', new_order?: number[]): Promise<boolean> {
         const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
         try {
             const res = await fetch(`${base_url}/api/place_painter/layer`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ slot: APP_CONFIG.selected_data_slot, place_id, world_z, action }),
+                body: JSON.stringify({ slot: APP_CONFIG.selected_data_slot, place_id, world_z, action, new_order }),
             });
             const data = await res.json().catch(() => null);
-            if (!res.ok || !data?.ok) return false;
-            await update_current_place(place_id);
+            if (!res.ok || !data?.ok) {
+                if (typeof data?.error === 'string') {
+                    const extra = Array.isArray(data?.details?.mapped) ? ` (${String(data.details.target ?? 'multiblock')})` : '';
+                    flash_status([`Layer change failed: ${data.error}${extra}`], 1800);
+                }
+                return false;
+            }
+            await update_current_place(place_id, { source: 'layer_mutation' });
             return true;
         } catch {
             return false;
         }
     }
 
+    function detect_place_border_direction(place: Place, x: number, y: number): 'x+' | 'x-' | 'y+' | 'y-' | null {
+        if (x === 0 && y >= 0 && y < place.tile_grid.height) return 'x-';
+        if (x === place.tile_grid.width - 1 && y >= 0 && y < place.tile_grid.height) return 'x+';
+        if (y === 0 && x >= 0 && x < place.tile_grid.width) return 'y-';
+        if (y === place.tile_grid.height - 1 && x >= 0 && x < place.tile_grid.width) return 'y+';
+        if (x === -1 && y >= 0 && y < place.tile_grid.height) return 'x-';
+        if (x === place.tile_grid.width && y >= 0 && y < place.tile_grid.height) return 'x+';
+        if (y === -1 && x >= 0 && x < place.tile_grid.width) return 'y-';
+        if (y === place.tile_grid.height && x >= 0 && x < place.tile_grid.width) return 'y+';
+        return null;
+    }
+
+    function clone_bounds(bounds: { origin: { x: number; y: number; z: number }; size: { x: number; y: number; z: number } }) {
+        return {
+            origin: { ...bounds.origin },
+            size: { ...bounds.size },
+        };
+    }
+
+    function compute_resized_bounds(
+        start_bounds: { origin: { x: number; y: number; z: number }; size: { x: number; y: number; z: number } },
+        face: 'x+' | 'x-' | 'y+' | 'y-' | 'z+' | 'z-',
+        target_coord: number,
+    ): { origin: { x: number; y: number; z: number }; size: { x: number; y: number; z: number } } {
+        const next = clone_bounds(start_bounds);
+        const max_x = start_bounds.origin.x + start_bounds.size.x - 1;
+        const max_y = start_bounds.origin.y + start_bounds.size.y - 1;
+        const max_z = start_bounds.origin.z + start_bounds.size.z - 1;
+        if (face === 'x+') {
+            const clamped = Math.max(start_bounds.origin.x, Math.floor(target_coord));
+            next.size.x = Math.max(1, clamped - start_bounds.origin.x + 1);
+        } else if (face === 'x-') {
+            const clamped = Math.min(max_x, Math.floor(target_coord));
+            next.origin.x = clamped;
+            next.size.x = Math.max(1, max_x - clamped + 1);
+        } else if (face === 'y+') {
+            const clamped = Math.max(start_bounds.origin.y, Math.floor(target_coord));
+            next.size.y = Math.max(1, clamped - start_bounds.origin.y + 1);
+        } else if (face === 'y-') {
+            const clamped = Math.min(max_y, Math.floor(target_coord));
+            next.origin.y = clamped;
+            next.size.y = Math.max(1, max_y - clamped + 1);
+        } else if (face === 'z+') {
+            const clamped = Math.max(start_bounds.origin.z, Math.floor(target_coord));
+            next.size.z = Math.max(1, clamped - start_bounds.origin.z + 1);
+        } else if (face === 'z-') {
+            const clamped = Math.min(max_z, Math.floor(target_coord));
+            next.origin.z = clamped;
+            next.size.z = Math.max(1, max_z - clamped + 1);
+        }
+        return next;
+    }
+
+    function compute_resize_session_validity(
+        place_id: string,
+        proposed_bounds: { origin: { x: number; y: number; z: number }; size: { x: number; y: number; z: number } },
+    ): { valid: boolean; conflict_place_id?: string } {
+        for (const scene_place of ui_state.place.scene_places) {
+            if (!scene_place || scene_place.id === place_id) continue;
+            if (region_bounds_overlap(get_place_region_bounds(scene_place), proposed_bounds as any)) {
+                return { valid: false, conflict_place_id: scene_place.id };
+            }
+        }
+        return { valid: true };
+    }
+
+    async function apply_place_resize(place_id: string, face: 'x+' | 'x-' | 'y+' | 'y-' | 'z+' | 'z-', proposed_bounds: { origin: { x: number; y: number; z: number }; size: { x: number; y: number; z: number } }): Promise<{ ok: true } | { ok: false; error: string }> {
+        const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+        try {
+            debug_log(`[SEAM_TOOL] resize apply request ${JSON.stringify({ place_id, face, proposed_bounds })}`);
+            const res = await fetch(`${base_url}/api/place/topology/resize`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    slot: APP_CONFIG.selected_data_slot,
+                    place_id,
+                    face,
+                    proposed_bounds,
+                }),
+            });
+            const data = await res.json().catch(() => null);
+            if (!res.ok || !data?.ok) {
+                debug_warn(`[SEAM_TOOL] resize apply failed ${JSON.stringify({ place_id, face, proposed_bounds, status: res.status, data })}`);
+                const error = String(data?.error ?? `http_${res.status}`);
+                if (error === 'place_bounds_overlap') {
+                    return { ok: false, error: `place_bounds_overlap (${String(data?.details?.place_id ?? 'unknown_place')})` };
+                }
+                return { ok: false, error };
+            }
+            debug_log(`[SEAM_TOOL] resize apply success ${JSON.stringify({ place_id, face, proposed_bounds })}`);
+            return { ok: true };
+        } catch (err) {
+            return { ok: false, error: err instanceof Error ? err.message : 'resize_failed' };
+        }
+    }
+
+    function start_place_resize_session(target: { place_id: string; tile_position: { x: number; y: number }; world_z: number; region_position?: { x: number; y: number; z: number } }): void {
+        const active_place = ui_state.place.scene_places.find((p) => p.id === target.place_id) ?? null;
+        const selected_place_id = ui_state.place.scene_selected_place_id ?? ui_state.place.current_place_id;
+        if (!active_place || active_place.id !== selected_place_id) return;
+        const bounds = get_place_region_bounds(active_place);
+        const local_z = Math.floor(Number(target.world_z ?? 0));
+        const face = detect_place_resize_face(active_place, { x: target.tile_position.x, y: target.tile_position.y, z: local_z });
+        if (!face) return;
+        const target_coord = face.startsWith('x')
+            ? Math.floor(Number(target.region_position?.x ?? bounds.origin.x))
+            : face.startsWith('y')
+                ? Math.floor(Number(target.region_position?.y ?? bounds.origin.y))
+                : Math.floor(Number(target.region_position?.z ?? bounds.origin.z));
+        const proposed_bounds = compute_resized_bounds(bounds as any, face, target_coord);
+        const validity = compute_resize_session_validity(active_place.id, proposed_bounds);
+        ui_state.place_painter.resize_session = {
+            active: true,
+            place_id: active_place.id,
+            face,
+            interaction: face.startsWith('z') ? 'click_z' : 'drag',
+            start_bounds: clone_bounds(bounds as any),
+            proposed_bounds,
+            valid: validity.valid,
+            conflict_place_id: validity.conflict_place_id,
+            target_coord,
+        };
+        debug_log(`[SEAM_TOOL] resize start ${JSON.stringify({ place_id: active_place.id, face, target_coord, proposed_bounds, valid: validity.valid, conflict_place_id: validity.conflict_place_id ?? null })}`);
+    }
+
+    function update_place_resize_session(target: { place_id: string; tile_position: { x: number; y: number }; world_z: number; region_position?: { x: number; y: number; z: number } }): void {
+        const session = ui_state.place_painter.resize_session;
+        if (!session?.active) return;
+        let target_coord = session.target_coord;
+        if (session.face.startsWith('x')) target_coord = Math.floor(Number(target.region_position?.x ?? target_coord));
+        else if (session.face.startsWith('y')) target_coord = Math.floor(Number(target.region_position?.y ?? target_coord));
+        else if (session.face.startsWith('z')) target_coord = Math.floor(Number(target.region_position?.z ?? target_coord));
+        const proposed_bounds = compute_resized_bounds(session.start_bounds, session.face, target_coord);
+        const validity = compute_resize_session_validity(session.place_id, proposed_bounds);
+        session.target_coord = target_coord;
+        session.proposed_bounds = proposed_bounds;
+        session.valid = validity.valid;
+        session.conflict_place_id = validity.conflict_place_id;
+        debug_log(`[SEAM_TOOL] resize update ${JSON.stringify({ place_id: session.place_id, face: session.face, target_coord, proposed_bounds, valid: validity.valid, conflict_place_id: validity.conflict_place_id ?? null })}`);
+    }
+
+    function adjust_place_resize_session_z(delta: number): void {
+        const session = ui_state.place_painter.resize_session;
+        if (!session?.active) return;
+        if (!session.face.startsWith('z')) return;
+        session.target_coord += Math.floor(delta);
+        const proposed_bounds = compute_resized_bounds(session.start_bounds, session.face, session.target_coord);
+        const validity = compute_resize_session_validity(session.place_id, proposed_bounds);
+        session.proposed_bounds = proposed_bounds;
+        session.valid = validity.valid;
+        session.conflict_place_id = validity.conflict_place_id;
+        debug_log(`[SEAM_TOOL] resize z adjust ${JSON.stringify({ place_id: session.place_id, face: session.face, target_coord: session.target_coord, proposed_bounds, valid: validity.valid, conflict_place_id: validity.conflict_place_id ?? null })}`);
+    }
+
+    async function finish_place_resize_session(): Promise<void> {
+        const session = ui_state.place_painter.resize_session;
+        if (!session?.active) return;
+        ui_state.place_painter.resize_session = null;
+        const unchanged = JSON.stringify(session.start_bounds) === JSON.stringify(session.proposed_bounds);
+        debug_log(`[SEAM_TOOL] resize finish ${JSON.stringify({ place_id: session.place_id, face: session.face, valid: session.valid, unchanged, proposed_bounds: session.proposed_bounds, conflict_place_id: session.conflict_place_id ?? null })}`);
+        if (!session.valid || unchanged) return;
+        const result = await apply_place_resize(session.place_id, session.face, session.proposed_bounds);
+        if (!result.ok) {
+            flash_status([`Resize failed: ${result.error}`], 1800);
+            return;
+        }
+        const scene = await fetch_scene_topology(session.place_id);
+        if (scene) {
+            apply_scene_topology(scene, { selected_place_id: session.place_id, mirror_to_current_place: ui_state.place.current_place_id === session.place_id });
+        } else {
+            await refresh_single_scene_place(session.place_id);
+        }
+        flash_status([`Resized ${session.place_id}`, `${session.face}`], 1200);
+    }
+
+    async function create_connected_place_from_border(place: Place, x: number, y: number, z: number): Promise<{ ok: true; new_place_id: string } | { ok: false; error: string }> {
+        const direction = detect_place_border_direction(place, x, y);
+        if (!direction) return { ok: false, error: 'not_on_place_border' };
+        const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+        const new_place_id = `${place.id}_place_${Date.now().toString(36)}`;
+        const bounds = get_place_region_bounds(place);
+        const local_z = Math.floor(Number(z ?? bounds.origin.z ?? 0)) - Math.floor(Number(bounds.origin.z ?? 0));
+        const pretty_direction = direction.replace('+', ' plus').replace('-', ' minus');
+        const format_connector_error = (error: string, details: any): string => {
+            if (error === 'place_bounds_overlap') {
+                const place_id = String(details?.place_id ?? 'unknown_place');
+                return `place_bounds_overlap (${place_id})`;
+            }
+            if (error !== 'invalid_connector_configuration') return error;
+            const side = String(details?.side ?? 'unknown');
+            const reason = String(details?.reason ?? details?.context?.reason ?? 'invalid');
+            const tw = details?.context?.target_world;
+            const tws = (tw && Number.isFinite(Number(tw.x)) && Number.isFinite(Number(tw.y)) && Number.isFinite(Number(tw.z)))
+                ? ` @ ${Math.floor(Number(tw.x))},${Math.floor(Number(tw.y))},${Math.floor(Number(tw.z))}`
+                : '';
+            return `invalid_connector_configuration (${side}, ${reason}${tws})`;
+        };
+        try {
+            debug_log(`[SEAM_TOOL] create preflight ${JSON.stringify({ place_id: place.id, border_tile: { x, y, z, local_z }, direction, new_place_id })}`);
+            const preflight_res = await fetch(`${base_url}/api/place/topology/preflight_connected`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    slot: APP_CONFIG.selected_data_slot,
+                    source_place_id: place.id,
+                    new_place_id,
+                    new_place_name: `New Place ${pretty_direction}`,
+                    border_tile: { x, y, z: local_z },
+                    direction,
+                    size: { x: 3, y: 3, z: 3 },
+                }),
+            });
+            const preflight_data = await preflight_res.json().catch(() => null);
+            if (!preflight_res.ok || !preflight_data?.ok) {
+                return { ok: false, error: String(preflight_data?.error ?? `preflight_http_${preflight_res.status}`) };
+            }
+            if (preflight_data?.can_create !== true) {
+                const pf_error = String(preflight_data?.error ?? 'preflight_failed');
+                const pretty = format_connector_error(pf_error, preflight_data?.details ?? null);
+                debug_log(`[PLACE_PAINTER] connector preflight blocked ${JSON.stringify({ place_id: place.id, border_tile: { x, y, z, local_z }, direction, error: pf_error, details: preflight_data?.details ?? null })}`);
+                return { ok: false, error: `preflight:${pretty}` };
+            }
+            const res = await fetch(`${base_url}/api/place/topology/create_connected`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    slot: APP_CONFIG.selected_data_slot,
+                    source_place_id: place.id,
+                    new_place_id,
+                    new_place_name: `New Place ${pretty_direction}`,
+                    border_tile: { x, y, z: local_z },
+                    direction,
+                    size: { x: 3, y: 3, z: 3 },
+                }),
+            });
+            const data = await res.json().catch(() => null);
+            if (!res.ok || !data?.ok) {
+                const error = String(data?.error ?? `http_${res.status}`);
+                const pretty = format_connector_error(error, data?.details ?? null);
+                debug_log(`[SEAM_TOOL] create failed ${JSON.stringify({ place_id: place.id, border_tile: { x, y, z, local_z }, direction, error, details: data?.details ?? null })}`);
+                return { ok: false, error: pretty };
+            }
+            debug_log(`[SEAM_TOOL] create success ${JSON.stringify({ source_place_id: place.id, new_place_id, border_tile: { x, y, z, local_z }, direction })}`);
+            return { ok: true, new_place_id };
+        } catch (err) {
+            return { ok: false, error: err instanceof Error ? err.message : 'create_connected_failed' };
+        }
+    }
+
+    async function delete_adjacent_place(place: Place, target_place_id: string): Promise<{ ok: true; target_place_id: string } | { ok: false; error: string }> {
+        const resolved_target_place_id = String(target_place_id ?? '');
+        if (!resolved_target_place_id || resolved_target_place_id === place.id) return { ok: false, error: 'no_adjacent_place_selected' };
+        const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+        try {
+            debug_log(`[SEAM_TOOL] delete request ${JSON.stringify({ source_place_id: place.id, target_place_id: resolved_target_place_id })}`);
+            const res = await fetch(`${base_url}/api/place/topology/delete_empty`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    slot: APP_CONFIG.selected_data_slot,
+                    source_place_id: place.id,
+                    target_place_id: resolved_target_place_id,
+                }),
+            });
+            const data = await res.json().catch(() => null);
+            if (!res.ok || !data?.ok) return { ok: false, error: String(data?.error ?? `http_${res.status}`) };
+            debug_log(`[SEAM_TOOL] delete success ${JSON.stringify({ source_place_id: place.id, target_place_id: resolved_target_place_id })}`);
+            return { ok: true, target_place_id: resolved_target_place_id };
+        } catch (err) {
+            return { ok: false, error: err instanceof Error ? err.message : 'delete_connected_failed' };
+        }
+    }
+
     function cycle_place_painter_tile_selection(direction: 1 | -1): void {
-        const entries = ui_state.place_painter.tile_palette_entries;
+        const entries = get_active_place_painter_tile_entries();
         if (entries.length < 1) return;
         const current_id = ui_state.place_painter.selected_palette_entry_id;
         const current_index = Math.max(0, entries.findIndex((entry) => entry.id === current_id));
@@ -645,7 +1019,7 @@ export function create_app_state(): AppState {
                 debug_warn(`[PLACE_PAINTER] place item failed ${JSON.stringify({ place_id, x, y, z, def_id, status: res.status, data })}`);
                 return false;
             }
-            await update_current_place(place_id);
+            await update_current_place(place_id, { source: 'place_item_refresh' });
             debug_log(`[PLACE_PAINTER] place item success ${JSON.stringify({ place_id, x, y, z, def_id, item_id: data?.item_id ?? null })}`);
             return true;
         } catch {
@@ -663,59 +1037,234 @@ export function create_app_state(): AppState {
     }
 
     function apply_local_place_tile_mutation(place_id: string, x: number, y: number, z: number, kind: string | null): void {
-        const place: any = ui_state.place.current_place;
-        if (!place || String(place.id ?? '') !== place_id) return;
-        const layerKey = get_place_layer_key_for_world_z(place, z);
-        if (!place[layerKey]) {
-            const width = Math.max(1, Math.floor(Number(place.tile_grid?.width ?? 1)));
-            const height = Math.max(1, Math.floor(Number(place.tile_grid?.height ?? 1)));
-            place[layerKey] = {
-                width,
-                height,
-                cells: Array.from({ length: height }, () => Array.from({ length: width }, () => null)),
+        const apply_to_place = (place: any): void => {
+            if (!place || String(place.id ?? '') !== place_id) return;
+            const layerKey = get_place_layer_key_for_world_z(place, z);
+            if (!place[layerKey]) {
+                const width = Math.max(1, Math.floor(Number(place.tile_grid?.width ?? 1)));
+                const height = Math.max(1, Math.floor(Number(place.tile_grid?.height ?? 1)));
+                place[layerKey] = {
+                    width,
+                    height,
+                    cells: Array.from({ length: height }, () => Array.from({ length: width }, () => null)),
+                };
+            }
+            if (!Array.isArray(place[layerKey]?.cells?.[y])) return;
+            if (kind == null) {
+                place[layerKey].cells[y][x] = null;
+                return;
+            }
+            const entry = ui_state.place_painter.tile_palette_entries.find((t) => t.id === kind);
+            place[layerKey].cells[y][x] = {
+                kind,
+                display_char: entry?.display_char ?? '?',
+                display_color: entry?.display_color ?? '#888888',
             };
-        }
-        if (!Array.isArray(place[layerKey]?.cells?.[y])) return;
-        if (kind == null) {
-            place[layerKey].cells[y][x] = null;
-            return;
-        }
-        const entry = ui_state.place_painter.tile_palette_entries.find((t) => t.id === kind);
-        place[layerKey].cells[y][x] = {
-            kind,
-            display_char: entry?.display_char ?? '?',
-            display_color: entry?.display_color ?? '#888888',
         };
+        apply_to_place(ui_state.place.current_place as any);
+        const scene_place = get_scene_place(place_id) as any;
+        if (scene_place && scene_place !== ui_state.place.current_place) apply_to_place(scene_place);
+        debug_log(`[PLACE_PAINTER] local tile mutation mirrored ${JSON.stringify({ place_id, x, y, z, kind, current_place_id: ui_state.place.current_place_id, scene_selected_place_id: ui_state.place.scene_selected_place_id })}`);
     }
 
     function clear_local_structure_at_voxel(place_id: string, x: number, y: number, z: number): void {
-        const place: any = ui_state.place.current_place;
-        if (!place || String(place.id ?? '') !== place_id || !Array.isArray(place.structures)) return;
-        place.structures = place.structures.filter((s: any) => {
-            const origin = s?.origin;
-            if (!origin) return true;
-            const ox = Math.floor(Number(origin.x) || 0);
-            const oy = Math.floor(Number(origin.y) || 0);
-            const oz = Math.floor(Number(origin.z) || 0);
-            const phys = Array.isArray(s?.body_model?.physical) ? s.body_model.physical : [{ dx: 0, dy: 0, dz: 0 }];
-            return !phys.some((v: any) => ox + Math.floor(Number(v?.dx ?? 0)) === x && oy + Math.floor(Number(v?.dy ?? 0)) === y && oz + Math.floor(Number(v?.dz ?? 0)) === z);
-        });
+        const apply_to_place = (place: any): void => {
+            if (!place || String(place.id ?? '') !== place_id || !Array.isArray(place.structures)) return;
+            place.structures = place.structures.filter((s: any) => {
+                const origin = s?.origin;
+                if (!origin) return true;
+                const ox = Math.floor(Number(origin.x) || 0);
+                const oy = Math.floor(Number(origin.y) || 0);
+                const oz = Math.floor(Number(origin.z) || 0);
+                const phys = Array.isArray(s?.body_model?.physical) ? s.body_model.physical : [{ dx: 0, dy: 0, dz: 0 }];
+                return !phys.some((v: any) => ox + Math.floor(Number(v?.dx ?? 0)) === x && oy + Math.floor(Number(v?.dy ?? 0)) === y && oz + Math.floor(Number(v?.dz ?? 0)) === z);
+            });
+        };
+        apply_to_place(ui_state.place.current_place as any);
+        const scene_place = get_scene_place(place_id) as any;
+        if (scene_place && scene_place !== ui_state.place.current_place) apply_to_place(scene_place);
     }
 
     function apply_local_place_structure_preview(place_id: string, x: number, y: number, z: number, entry: { id: string; display_char: string; display_color: string; body_model?: { physical?: Array<{ dx: number; dy: number; dz: number }> } | null }): void {
-        const place: any = ui_state.place.current_place;
-        if (!place || String(place.id ?? '') !== place_id) return;
-        if (!Array.isArray(place.structures)) place.structures = [];
         clear_local_structure_at_voxel(place_id, x, y, z);
-        place.structures.push({
-            id: `preview_${entry.id}_${x}_${y}_${z}`,
-            def_id: entry.id,
-            origin: { x, y, z },
-            display_char: entry.display_char,
-            display_color: entry.display_color,
-            body_model: entry.body_model ?? null,
-            __derived_runtime: true,
+        const apply_to_place = (place: any): void => {
+            if (!place || String(place.id ?? '') !== place_id) return;
+            if (!Array.isArray(place.structures)) place.structures = [];
+            place.structures.push({
+                id: `preview_${entry.id}_${x}_${y}_${z}`,
+                def_id: entry.id,
+                origin: { x, y, z },
+                display_char: entry.display_char,
+                display_color: entry.display_color,
+                body_model: entry.body_model ?? null,
+                __derived_runtime: true,
+            });
+        };
+        apply_to_place(ui_state.place.current_place as any);
+        const scene_place = get_scene_place(place_id) as any;
+        if (scene_place && scene_place !== ui_state.place.current_place) apply_to_place(scene_place);
+    }
+
+    function apply_local_place_entity_move(place_id: string, entity_ref: string, entity_type: 'npc' | 'actor' | 'item' | 'pile' | 'structure', target_x: number, target_y: number, target_z: number): void {
+        const apply_to_place = (place: any): void => {
+            if (!place || String(place.id ?? '') !== place_id) return;
+            if (entity_type === 'actor') {
+                const actor = Array.isArray(place?.contents?.actors_present) ? place.contents.actors_present.find((a: any) => String(a?.actor_ref ?? '') === entity_ref) : null;
+                if (actor) {
+                    actor.tile_position = { x: target_x, y: target_y };
+                    actor.elevation = target_z;
+                }
+                return;
+            }
+            if (entity_type === 'npc') {
+                const npc = Array.isArray(place?.contents?.npcs_present) ? place.contents.npcs_present.find((n: any) => String(n?.npc_ref ?? '') === entity_ref) : null;
+                if (npc) {
+                    npc.tile_position = { x: target_x, y: target_y };
+                    npc.elevation = target_z;
+                }
+                return;
+            }
+            if (entity_type === 'structure') {
+                const sid = String(entity_ref).replace(/^structure\./, '');
+                const structure = Array.isArray(place?.structures) ? place.structures.find((s: any) => String(s?.id ?? '') === sid) : null;
+                if (structure) {
+                    if (!structure.origin) structure.origin = { x: target_x, y: target_y, z: target_z };
+                    structure.origin.x = target_x;
+                    structure.origin.y = target_y;
+                    structure.origin.z = target_z;
+                }
+            }
+        };
+        apply_to_place(ui_state.place.current_place as any);
+        const scene_place = get_scene_place(place_id) as any;
+        if (scene_place && scene_place !== ui_state.place.current_place) apply_to_place(scene_place);
+        debug_log(`[PLACE_PAINTER] local entity move mirrored ${JSON.stringify({ place_id, entity_ref, entity_type, target_x, target_y, target_z })}`);
+    }
+
+    function get_place_painter_move_source_preview(
+        place_id: string,
+        entity_ref: string,
+        entity_type: 'npc' | 'actor' | 'item' | 'pile' | 'structure',
+    ): { display_char: string; display_color: string; body_model?: { physical?: Array<{ dx: number; dy: number; dz: number }> } | null } | null {
+        const place = (get_scene_place(place_id) ?? ui_state.place.current_place) as any;
+        if (!place || String(place.id ?? '') !== place_id) return null;
+        if (entity_type === 'actor' || entity_type === 'npc') {
+            const list = entity_type === 'actor' ? (place?.contents?.actors_present ?? []) : (place?.contents?.npcs_present ?? []);
+            const match = list.find((entry: any) => String(entity_type === 'actor' ? entry?.actor_ref ?? '' : entry?.npc_ref ?? '') === entity_ref) ?? null;
+            return match ? {
+                display_char: String(match?.display_char ?? (entity_type === 'actor' ? '@' : 'n')),
+                display_color: String(match?.display_color ?? '#ffffff'),
+                body_model: null,
+            } : null;
+        }
+        if (entity_type === 'structure') {
+            const sid = String(entity_ref).replace(/^structure\./, '');
+            const match = Array.isArray(place?.structures) ? place.structures.find((entry: any) => String(entry?.id ?? '') === sid) : null;
+            return match ? {
+                display_char: String(match?.display_char ?? '#'),
+                display_color: String(match?.display_color ?? '#ffffff'),
+                body_model: match?.body_model ?? null,
+            } : null;
+        }
+        if (entity_type === 'item') {
+            const item_id = String(entity_ref).replace(/^item\./, '');
+            const meta = ui_state.place.ground_items_by_id.get(item_id) as any;
+            return meta ? {
+                display_char: String(meta?.display_char ?? '*'),
+                display_color: String(meta?.display_color ?? '#ffffff'),
+                body_model: null,
+            } : null;
+        }
+        if (entity_type === 'pile') {
+            return {
+                display_char: '*',
+                display_color: '#ffd37a',
+                body_model: null,
+            };
+        }
+        return null;
+    }
+
+    function is_place_painter_move_target_valid(place_id: string, x: number, y: number, z: number): boolean {
+        const place = (get_scene_place(place_id) ?? ui_state.place.current_place) as any;
+        if (!place || String(place.id ?? '') !== place_id) return false;
+        const bounds = get_place_region_bounds(place);
+        const local_z = Math.floor(Number(z)) - Math.floor(Number(bounds.origin.z ?? 0));
+        return x >= 0 && x < Math.max(1, Math.floor(Number(bounds.size.x ?? place.tile_grid?.width ?? 1)) || 1)
+            && y >= 0 && y < Math.max(1, Math.floor(Number(bounds.size.y ?? place.tile_grid?.height ?? 1)) || 1)
+            && local_z >= 0 && local_z < Math.max(1, Math.floor(Number(bounds.size.z ?? 1)) || 1);
+    }
+
+    function start_place_move_drag(target: {
+        place_id: string;
+        tile_position: { x: number; y: number };
+        world_z: number;
+        entity_ref?: string;
+        entity_type?: 'npc' | 'actor' | 'item' | 'pile' | 'structure';
+    }): void {
+        if (!target.entity_ref || !target.entity_type) return;
+        const preview = get_place_painter_move_source_preview(target.place_id, target.entity_ref, target.entity_type);
+        if (!preview) return;
+        ui_state.place_painter.move_drag_session = {
+            place_id: target.place_id,
+            source_x: target.tile_position.x,
+            source_y: target.tile_position.y,
+            source_z: target.world_z,
+            entity_ref: target.entity_ref,
+            entity_type: target.entity_type,
+            display_char: preview.display_char,
+            display_color: preview.display_color,
+            body_model: preview.body_model ?? null,
+            target_x: target.tile_position.x,
+            target_y: target.tile_position.y,
+            target_z: target.world_z,
+            valid: false,
+        };
+        debug_log(`[SEAM_TOOL] move drag start ${JSON.stringify({ place_id: target.place_id, entity_ref: target.entity_ref, entity_type: target.entity_type, source: { x: target.tile_position.x, y: target.tile_position.y, z: target.world_z } })}`);
+    }
+
+    function update_place_move_drag(target: { place_id: string; tile_position: { x: number; y: number }; world_z: number }): void {
+        const session = ui_state.place_painter.move_drag_session;
+        if (!session) return;
+        session.target_x = target.tile_position.x;
+        session.target_y = target.tile_position.y;
+        session.target_z = target.world_z;
+        session.valid = target.place_id === session.place_id && is_place_painter_move_target_valid(session.place_id, session.target_x, session.target_y, session.target_z);
+        debug_log(`[SEAM_TOOL] move drag update ${JSON.stringify({ entity_ref: session.entity_ref, target: { x: session.target_x, y: session.target_y, z: session.target_z }, valid: session.valid })}`);
+    }
+
+    async function finish_place_move_drag(): Promise<void> {
+        const session = ui_state.place_painter.move_drag_session;
+        ui_state.place_painter.move_drag_session = null;
+        if (!session) return;
+        debug_log(`[SEAM_TOOL] move drag finish ${JSON.stringify({ entity_ref: session.entity_ref, source: { x: session.source_x, y: session.source_y, z: session.source_z }, target: { x: session.target_x, y: session.target_y, z: session.target_z }, valid: session.valid })}`);
+        if (!session.valid) {
+            flash_status(['Move canceled'], 900);
+            return;
+        }
+        const unchanged = session.source_x === session.target_x && session.source_y === session.target_y && session.source_z === session.target_z;
+        if (unchanged) return;
+        const mv = await move_place_painter_entity({
+            place_id: session.place_id,
+            source_x: session.source_x,
+            source_y: session.source_y,
+            source_z: session.source_z,
+            target_x: session.target_x,
+            target_y: session.target_y,
+            target_z: session.target_z,
+            entity_ref: session.entity_ref,
+            entity_type: session.entity_type,
         });
+        if (!mv.ok) {
+            flash_status([`Move failed: ${mv.error ?? 'unknown_error'}`], 1800);
+            return;
+        }
+        apply_local_place_entity_move(session.place_id, session.entity_ref, session.entity_type, session.target_x, session.target_y, session.target_z);
+        if (get_scene_place(session.place_id)) await refresh_single_scene_place(session.place_id);
+        if (ui_state.place.current_place_id === session.place_id) {
+            await update_current_place(session.place_id, { source: 'place_painter_move_drag', preserve_place_painter: true });
+        }
+        flash_status([`Moved ${session.entity_ref}`, `to ${session.target_x},${session.target_y},${session.target_z}`], 1200);
     }
 
     async function paint_place_tile_at(place_id: string, x: number, y: number, z: number, kind: string): Promise<boolean> {
@@ -746,10 +1295,11 @@ export function create_app_state(): AppState {
             } else {
                 apply_local_place_tile_mutation(place_id, x, y, z, kind);
             }
-            const refreshed = ui_state.place.current_place as any;
+            if (get_scene_place(place_id)) await refresh_single_scene_place(place_id);
+            const refreshed = (get_scene_place(place_id) ?? ui_state.place.current_place) as any;
             const layerKey = z === 0 ? 'tiles' : z === -1 ? 'tiles_z0' : z === 1 ? 'tiles_z1' : `tiles_z${z}`;
             const refreshedTile = refreshed?.[layerKey]?.cells?.[y]?.[x] ?? null;
-            debug_log(`[PLACE_PAINTER] paint tile post-refresh ${JSON.stringify({ place_id, x, y, z, kind, layerKey, refreshed_kind: String(refreshedTile?.kind ?? '') })}`);
+            debug_log(`[PLACE_PAINTER] paint tile post-refresh ${JSON.stringify({ place_id, x, y, z, kind, layerKey, refreshed_kind: String(refreshedTile?.kind ?? ''), current_place_id: ui_state.place.current_place_id, scene_selected_place_id: ui_state.place.scene_selected_place_id })}`);
             debug_log(`[PLACE_PAINTER] paint tile success ${JSON.stringify({ place_id, x, y, z, kind })}`);
             return true;
         } catch {
@@ -780,14 +1330,53 @@ export function create_app_state(): AppState {
             }
             clear_local_structure_at_voxel(place_id, x, y, z);
             apply_local_place_tile_mutation(place_id, x, y, z, null);
-            const refreshed = ui_state.place.current_place as any;
+            if (get_scene_place(place_id)) await refresh_single_scene_place(place_id);
+            const refreshed = (get_scene_place(place_id) ?? ui_state.place.current_place) as any;
             const layerKey = z === 0 ? 'tiles' : z === -1 ? 'tiles_z0' : z === 1 ? 'tiles_z1' : `tiles_z${z}`;
             const refreshedTile = refreshed?.[layerKey]?.cells?.[y]?.[x] ?? null;
-            debug_log(`[PLACE_PAINTER] erase tile post-refresh ${JSON.stringify({ place_id, x, y, z, layerKey, refreshed_kind: String(refreshedTile?.kind ?? '') })}`);
+            debug_log(`[PLACE_PAINTER] erase tile post-refresh ${JSON.stringify({ place_id, x, y, z, layerKey, refreshed_kind: String(refreshedTile?.kind ?? ''), current_place_id: ui_state.place.current_place_id, scene_selected_place_id: ui_state.place.scene_selected_place_id })}`);
             debug_log(`[PLACE_PAINTER] erase tile success ${JSON.stringify({ place_id, x, y, z })}`);
             return true;
         } catch {
             return false;
+        }
+    }
+
+    async function move_place_painter_entity(args: {
+        place_id: string;
+        source_x: number;
+        source_y: number;
+        source_z: number;
+        target_x: number;
+        target_y: number;
+        target_z: number;
+        entity_ref: string;
+        entity_type: 'npc' | 'actor' | 'item' | 'pile' | 'structure';
+    }): Promise<{ ok: boolean; error?: string }> {
+        const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+        try {
+            debug_log(`[PLACE_PAINTER] move request ${JSON.stringify(args)}`);
+            const res = await fetch(`${base_url}/api/place_painter/move`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    slot: APP_CONFIG.selected_data_slot,
+                    place_id: args.place_id,
+                    source: { x: args.source_x, y: args.source_y, z: args.source_z },
+                    target: { x: args.target_x, y: args.target_y, z: args.target_z },
+                    entity_ref: args.entity_ref,
+                    entity_type: args.entity_type,
+                }),
+            });
+            const data = await res.json().catch(() => null as any);
+            if (!res.ok || !data?.ok) {
+                debug_warn(`[PLACE_PAINTER] move failed ${JSON.stringify({ args, status: res.status, data })}`);
+                return { ok: false, error: String(data?.error ?? `HTTP ${res.status}`) };
+            }
+            debug_log(`[PLACE_PAINTER] move success ${JSON.stringify({ args, data })}`);
+            return { ok: true };
+        } catch {
+            return { ok: false, error: 'network_error' };
         }
     }
 
@@ -850,6 +1439,12 @@ export function create_app_state(): AppState {
             ui_state.place_painter.selected_tool = ui_state.place_painter.left_click_tool;
             if (tile_palette_ok) ui_state.place_painter.selected_palette_kind = 'tile';
             else if (item_palette_ok) ui_state.place_painter.selected_palette_kind = 'item';
+            if (tile_palette_ok) {
+                const active_entries = get_active_place_painter_tile_entries();
+                if (!active_entries.some((entry) => entry.id === ui_state.place_painter.selected_palette_entry_id)) {
+                    ui_state.place_painter.selected_palette_entry_id = active_entries[0]?.id ?? ui_state.place_painter.tile_palette_entries[0]?.id ?? null;
+                }
+            }
             const actor_tile = get_current_place()?.contents?.actors_present?.find((a: any) => a.actor_ref === `actor.${APP_CONFIG.input_actor_id}`)?.tile_position;
             if (actor_tile) set_place_camera_target_position(actor_tile, 'free');
             set_place_painter_modules_visible(true);
@@ -859,6 +1454,8 @@ export function create_app_state(): AppState {
         if (!ok) return false;
         ui_state.place_painter.active = false;
         ui_state.place_painter.last_primary_target = null;
+        ui_state.place_painter.move_pending_source = null;
+        ui_state.place_painter.move_drag_session = null;
         ui_state.place.camera_target.mode = 'follow_actor';
         ui_state.place.camera_target.tile = null;
         set_place_painter_modules_visible(false);
@@ -875,7 +1472,7 @@ export function create_app_state(): AppState {
         world_z: number;
         button?: number;
         entity_ref?: string;
-        entity_type?: 'npc' | 'actor';
+        entity_type?: 'npc' | 'actor' | 'item' | 'pile' | 'structure';
     }): Promise<void> {
         ui_state.place_painter.last_primary_target = {
             place_id: target.place_id,
@@ -895,7 +1492,25 @@ export function create_app_state(): AppState {
             : `${target.tile_position.x},${target.tile_position.y},${target.world_z}`;
         debug_log(`[PLACE_PAINTER] primary action ${JSON.stringify({ tool, button: target.button ?? 0, palette_kind: ui_state.place_painter.selected_palette_kind, target_label })}`);
 
+        const active_place = get_current_place();
+        const is_selected_place = !!active_place && active_place.id === target.place_id;
+
+        if (active_place && !is_selected_place) {
+            if (tool === 'paint' || tool === 'erase' || tool === 'move' || tool === 'place_create' || tool === 'place_resize' || tool === 'region_tool') {
+                const focused = await focus_scene_place_for_painter(target.place_id);
+                if (!focused) {
+                    flash_status([`Focus failed: ${target.place_id}`], 1200);
+                }
+                return;
+            }
+        }
+
         if (tool === 'paint') {
+            if (!active_place || !is_selected_place) {
+                flash_status(['Paint only works on the selected place'], 1200);
+                return;
+            }
+            const border_direction = detect_place_border_direction(active_place, target.tile_position.x, target.tile_position.y);
             if (ui_state.place_painter.selected_palette_kind === 'item') {
                 const selected = get_selected_place_painter_item_entry();
                 if (!selected) {
@@ -924,6 +1539,10 @@ export function create_app_state(): AppState {
                 flash_status(['Place painter has no tile selected'], 1200);
                 return;
             }
+            if (selected.id === 'place_connector') {
+                flash_status(['Same-region place_connector is obsolete; use place create instead'], 1800);
+                return;
+            }
             const ok = await paint_place_tile_at(
                 target.place_id,
                 target.tile_position.x,
@@ -943,6 +1562,10 @@ export function create_app_state(): AppState {
         }
 
         if (tool === 'erase') {
+            if (!active_place || !is_selected_place) {
+                flash_status(['Erase only works on the selected place'], 1200);
+                return;
+            }
             const ok = await erase_place_tile_at(
                 target.place_id,
                 target.tile_position.x,
@@ -957,6 +1580,129 @@ export function create_app_state(): AppState {
                 'Erased tile',
                 `tile: ${target_label}`,
             ], 1200);
+            return;
+        }
+
+        if (tool === 'move') {
+            if (!active_place || !is_selected_place) {
+                flash_status(['Move only works on the selected place'], 1200);
+                return;
+            }
+
+            const pending = ui_state.place_painter.move_pending_source;
+            if (!pending) {
+                if (!target.entity_ref || !target.entity_type) {
+                    flash_status(['Move source: click an entity, item, pile, or structure'], 1400);
+                    return;
+                }
+                ui_state.place_painter.move_pending_source = {
+                    place_id: target.place_id,
+                    x: target.tile_position.x,
+                    y: target.tile_position.y,
+                    z: target.world_z,
+                    entity_ref: target.entity_ref,
+                    entity_type: target.entity_type,
+                };
+                flash_status([
+                    `Move source: ${target.entity_ref}`,
+                    `at ${target.tile_position.x},${target.tile_position.y},${target.world_z}`,
+                    'Click destination tile',
+                ], 1500);
+                return;
+            }
+
+            if (
+                pending.place_id === target.place_id
+                && pending.x === target.tile_position.x
+                && pending.y === target.tile_position.y
+                && pending.z === target.world_z
+            ) {
+                ui_state.place_painter.move_pending_source = null;
+                flash_status(['Move canceled'], 900);
+                return;
+            }
+
+            const mv = await move_place_painter_entity({
+                place_id: target.place_id,
+                source_x: pending.x,
+                source_y: pending.y,
+                source_z: pending.z,
+                target_x: target.tile_position.x,
+                target_y: target.tile_position.y,
+                target_z: target.world_z,
+                entity_ref: pending.entity_ref,
+                entity_type: pending.entity_type,
+            });
+
+            ui_state.place_painter.move_pending_source = null;
+            if (!mv.ok) {
+                flash_status([`Move failed: ${mv.error ?? 'unknown_error'}`], 1800);
+                return;
+            }
+
+            if (get_scene_place(target.place_id)) await refresh_single_scene_place(target.place_id);
+            if (ui_state.place.current_place_id === target.place_id) {
+                await update_current_place(target.place_id, { source: 'place_painter_move' });
+            }
+            flash_status([
+                `Moved ${pending.entity_ref}`,
+                `to ${target.tile_position.x},${target.tile_position.y},${target.world_z}`,
+            ], 1200);
+            return;
+        }
+
+        if (tool === 'place_create') {
+            if (!active_place || !is_selected_place) {
+                flash_status(['Place create only works from the selected place'], 1500);
+                return;
+            }
+            const result = await create_connected_place_from_border(active_place, target.tile_position.x, target.tile_position.y, target.world_z);
+            if (!result.ok) {
+                flash_status([`Create place failed: ${result.error}`], 1800);
+                return;
+            }
+            flash_status([`Created ${result.new_place_id}`], 1500);
+            const scene = await fetch_scene_topology(active_place.id);
+            if (scene) {
+                apply_scene_topology(scene, { selected_place_id: active_place.id, mirror_to_current_place: true });
+            } else {
+                await refresh_single_scene_place(active_place.id);
+            }
+            return;
+        }
+
+        if (tool === 'place_delete') {
+            if (!active_place) {
+                flash_status(['Place delete requires a selected place'], 1500);
+                return;
+            }
+            if (target.place_id === active_place.id) {
+                flash_status(['Click the adjacent place you want to delete'], 1500);
+                return;
+            }
+            const result = await delete_adjacent_place(active_place, target.place_id);
+            if (!result.ok) {
+                flash_status([`Delete place failed: ${result.error}`], 1800);
+                return;
+            }
+            flash_status([`Deleted ${result.target_place_id}`], 1500);
+            const scene = await fetch_scene_topology(active_place.id);
+            if (scene) {
+                apply_scene_topology(scene, { selected_place_id: active_place.id, mirror_to_current_place: true });
+            } else {
+                await refresh_single_scene_place(active_place.id);
+            }
+            return;
+        }
+
+        if (tool === 'place_resize') {
+            debug_log(`[SEAM_TOOL] resize requested ${JSON.stringify({ place_id: active_place?.id ?? null, target_place_id: target.place_id, tile: target.tile_position, world_z: target.world_z, is_selected_place })}`);
+            flash_status(['Resize: click a face of the selected place', 'For z faces, click target z next'], 1400);
+            return;
+        }
+
+        if (tool === 'region_tool') {
+            flash_status(['Region tool not implemented yet'], 1200);
             return;
         }
 
@@ -1090,11 +1836,15 @@ export function create_app_state(): AppState {
         };
     }
 
-    function place_painter_tool_defs(): Array<{ tool: 'paint' | 'erase' | 'move'; label: string; icon: string }> {
+    function place_painter_tool_defs(): Array<{ tool: 'paint' | 'erase' | 'move' | 'place_create' | 'place_delete' | 'place_resize' | 'region_tool'; label: string; icon: string }> {
         return [
             { tool: 'paint', label: 'Paint', icon: '✎' },
             { tool: 'erase', label: 'Eraser', icon: '◫' },
             { tool: 'move', label: 'Move', icon: '◎' },
+            { tool: 'place_create', label: 'Create', icon: '+' },
+            { tool: 'place_delete', label: 'Delete', icon: '-' },
+            { tool: 'place_resize', label: 'Resize', icon: '<>' },
+            { tool: 'region_tool', label: 'Region', icon: '[]' },
         ];
     }
 
@@ -1115,6 +1865,21 @@ export function create_app_state(): AppState {
                 }
                 ui_state.place_painter.selected_palette_kind = next;
                 flash_status([`Palette: ${next}`], 1200);
+            } },
+            { id: 'section', label: () => `SEC:${ui_state.place_painter.selected_tile_palette_section.toUpperCase()}`, width: 16, onPress: () => {
+                if (ui_state.place_painter.selected_palette_kind !== 'tile') {
+                    flash_status(['Section filter only applies to tile palette'], 1200);
+                    return;
+                }
+                const order: Array<'blocks' | 'connectors' | 'all'> = ['blocks', 'connectors', 'all'];
+                const idx = order.indexOf(ui_state.place_painter.selected_tile_palette_section);
+                const next = order[(idx + 1) % order.length] ?? 'blocks';
+                ui_state.place_painter.selected_tile_palette_section = next;
+                const active_entries = get_active_place_painter_tile_entries();
+                if (!active_entries.some((entry) => entry.id === ui_state.place_painter.selected_palette_entry_id)) {
+                    ui_state.place_painter.selected_palette_entry_id = active_entries[0]?.id ?? ui_state.place_painter.tile_palette_entries[0]?.id ?? null;
+                }
+                flash_status([`Tile section: ${next}`], 1200);
             } },
         ];
         return make_place_painter_window_module({
@@ -1171,11 +1936,19 @@ export function create_app_state(): AppState {
             on_tool_select: (tool) => {
                 ui_state.place_painter.selected_tool = tool as any;
                 ui_state.place_painter.left_click_tool = tool as any;
+                if (String(tool) !== 'move') {
+                    ui_state.place_painter.move_pending_source = null;
+                    ui_state.place_painter.move_drag_session = null;
+                }
                 flash_status([`Left tool: ${String(tool)}`], 900);
             },
             on_left_click_tool_change: (tool) => {
                 ui_state.place_painter.left_click_tool = tool as any;
                 ui_state.place_painter.selected_tool = tool as any;
+                if (String(tool) !== 'move') {
+                    ui_state.place_painter.move_pending_source = null;
+                    ui_state.place_painter.move_drag_session = null;
+                }
                 flash_status([`Left tool: ${String(tool)}`], 900);
             },
             on_right_click_tool_change: (tool) => {
@@ -1202,6 +1975,11 @@ export function create_app_state(): AppState {
                     `kind: ${ui_state.place_painter.selected_palette_kind}`,
                     `selected: ${selected?.id ?? 'none'}`,
                     selected ? `${selected.display_char} ${selected.name}` : 'no selection',
+                    ui_state.place_painter.move_pending_source
+                        ? `move: ${ui_state.place_painter.move_pending_source.entity_ref} -> ?`
+                        : (ui_state.place_painter.move_drag_session
+                            ? `move: ${ui_state.place_painter.move_drag_session.entity_ref} -> ${ui_state.place_painter.move_drag_session.target_x},${ui_state.place_painter.move_drag_session.target_y},${ui_state.place_painter.move_drag_session.target_z}`
+                            : 'move: (none)'),
                     ui_state.place_painter.last_primary_target
                         ? `last: ${ui_state.place_painter.last_primary_target.x},${ui_state.place_painter.last_primary_target.y},${ui_state.place_painter.last_primary_target.z}`
                         : 'last: none',
@@ -1280,8 +2058,11 @@ export function create_app_state(): AppState {
             onMergeDown: (_z) => {
                 flash_status(['Layer merge not implemented for place painter'], 1000);
             },
-            onReorderLayers: (_newZOrder) => {
-                flash_status(['Layer reorder is disabled for place painter'], 1000);
+            onReorderLayers: async (_newZOrder) => {
+                const place = ui_state.place.current_place;
+                if (!place?.id) return;
+                const ok = await mutate_place_painter_layer(place.id, get_focus_world_z_for_current_place(), 'reorder' as any, _newZOrder);
+                flash_status([ok ? 'Reordered layers' : 'Layer reorder failed'], 1200);
             },
             onMove: (new_rect) => persist_module_rect('place_painter_layers', new_rect),
             onResize: (new_rect) => persist_module_rect('place_painter_layers', new_rect),
@@ -1293,11 +2074,13 @@ export function create_app_state(): AppState {
         return make_place_painter_window_module({
             id: 'place_painter_palette',
             rect,
-            title: ui_state.place_painter.selected_palette_kind === 'item' ? 'ITEMS' : 'TILES',
+            title: ui_state.place_painter.selected_palette_kind === 'item'
+                ? 'ITEMS'
+                : `TILES:${ui_state.place_painter.selected_tile_palette_section.toUpperCase()}`,
             draw_content(c, rect) {
                 const entries = ui_state.place_painter.selected_palette_kind === 'item'
                     ? ui_state.place_painter.item_palette_entries
-                    : ui_state.place_painter.tile_palette_entries;
+                    : get_active_place_painter_tile_entries();
                 const selectedId = ui_state.place_painter.selected_palette_kind === 'item'
                     ? ui_state.place_painter.selected_item_palette_entry_id
                     : ui_state.place_painter.selected_palette_entry_id;
@@ -1332,7 +2115,7 @@ export function create_app_state(): AppState {
                 if (row < 0) return;
                 const entries = ui_state.place_painter.selected_palette_kind === 'item'
                     ? ui_state.place_painter.item_palette_entries
-                    : ui_state.place_painter.tile_palette_entries;
+                    : get_active_place_painter_tile_entries();
                 const selectedId = ui_state.place_painter.selected_palette_kind === 'item'
                     ? ui_state.place_painter.selected_item_palette_entry_id
                     : ui_state.place_painter.selected_palette_entry_id;
@@ -2269,21 +3052,12 @@ export function create_app_state(): AppState {
 
                 // Inline tile container
                 else if (container_id.startsWith('place.tile.')) {
-                    const parts = container_id.split('.');
-                    const place_id = parts[2];
-                    const pos_key = parts[3];
-                    if (!place_id || !pos_key) {
+                    const parsed = parse_place_tile_container_id(container_id);
+                    if (!parsed) {
                         close_container_module(container_id);
                         continue;
                     }
-                    const [xs, ys] = pos_key.split('_');
-                    const x = Number(xs);
-                    const y = Number(ys);
-                    if (!Number.isFinite(x) || !Number.isFinite(y)) {
-                        close_container_module(container_id);
-                        continue;
-                    }
-                    const api_res = await fetch(`http://localhost:8787/api/place/tile_container?place_id=${encodeURIComponent(place_id)}&x=${encodeURIComponent(String(x))}&y=${encodeURIComponent(String(y))}`);
+                    const api_res = await fetch(`http://localhost:8787/api/place/tile_container?place_id=${encodeURIComponent(parsed.place_id)}&x=${encodeURIComponent(String(parsed.x))}&y=${encodeURIComponent(String(parsed.y))}&z=${encodeURIComponent(String(parsed.z))}`);
                     if (!api_res.ok) {
                         close_container_module(container_id);
                         continue;
@@ -2414,8 +3188,163 @@ export function create_app_state(): AppState {
         return ui_state.place.current_place;
     }
 
+    function get_scene_place(place_id: string | null): Place | null {
+        if (!place_id) return null;
+        return ui_state.place.scene_places.find((p) => p.id === place_id) ?? null;
+    }
+
+    function merge_place_into_scene(place: Place): void {
+        const idx = ui_state.place.scene_places.findIndex((p) => p.id === place.id);
+        if (idx >= 0) ui_state.place.scene_places[idx] = place;
+        else ui_state.place.scene_places.push(place);
+        if (ui_state.place.scene_selected_place_id === place.id || ui_state.place.current_place_id === place.id) {
+            ui_state.place.current_place = place;
+            ui_state.place.current_place_id = place.id;
+        }
+    }
+
+    async function refresh_single_scene_place(place_id: string): Promise<Place | null> {
+        const refreshed = await fetch_place_snapshot(place_id);
+        if (!refreshed) return null;
+        merge_place_into_scene(refreshed);
+        debug_log(`[PLACE_SCENE] single place refresh ${JSON.stringify({ place_id, scene_places: ui_state.place.scene_places.map((p) => p.id) })}`);
+        return refreshed;
+    }
+
+    function get_place_region_id(place_id: string | null): string | null {
+        const place = get_scene_place(place_id) ?? (ui_state.place.current_place_id === place_id ? ui_state.place.current_place : null);
+        return place?.region_id ?? ui_state.place.current_region_id ?? null;
+    }
+
+    async function fetch_place_snapshot(place_id: string): Promise<Place | null> {
+        try {
+            const url = `${APP_CONFIG.place_endpoint}?slot=${APP_CONFIG.selected_data_slot}&place_id=${encodeURIComponent(place_id)}`;
+            const res = await fetch(url);
+            if (!res.ok) return null;
+            const data = await res.json().catch(() => null);
+            if (!data?.ok || !data?.place) return null;
+            return data.place as Place;
+        } catch {
+            return null;
+        }
+    }
+
+    type SceneTopologyPayload = {
+        selected_place_id: string;
+        actor_current_place_id: string;
+        region_id: string | null;
+        region_bounds: { origin: { x: number; y: number; z: number }; size: { x: number; y: number; z: number } } | null;
+        places: Place[];
+    };
+
+    function apply_scene_topology(scene: SceneTopologyPayload, opts?: { selected_place_id?: string; mirror_to_current_place?: boolean }): void {
+        ui_state.place.current_region_id = scene.region_id;
+        ui_state.place.current_region_bounds = scene.region_bounds;
+        ui_state.place.actor_current_place_id = scene.actor_current_place_id;
+        ui_state.place.scene_places = scene.places;
+        const selected_place_id = opts?.selected_place_id ?? scene.selected_place_id;
+        ui_state.place.scene_selected_place_id = selected_place_id;
+        const selected_place = scene.places.find((p) => p.id === selected_place_id) ?? scene.places.find((p) => p.id === scene.actor_current_place_id) ?? null;
+        if (opts?.mirror_to_current_place !== false && selected_place) {
+            ui_state.place.current_place_id = selected_place.id;
+            ui_state.place.current_place = selected_place;
+            set_command_handler_place(selected_place);
+        }
+    }
+
+    async function fetch_scene_topology(place_id: string): Promise<SceneTopologyPayload | null> {
+        try {
+            const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+            const selected_place_id = ui_state.place.scene_selected_place_id ?? place_id;
+            const hops_visible = Math.max(0, Math.floor(Number(ui_state.place.scene_connector_hops_visible ?? 1)) || 0);
+            const scene_res = await fetch(`${base_url}/api/region/scene?slot=${APP_CONFIG.selected_data_slot}&place_id=${encodeURIComponent(place_id)}&selected_place_id=${encodeURIComponent(selected_place_id)}&hops_visible=${hops_visible}`);
+            if (!scene_res.ok) return null;
+            const scene_data = await scene_res.json().catch(() => null);
+            if (!scene_data?.ok || !Array.isArray(scene_data.places)) return null;
+            return {
+                selected_place_id: String(scene_data.selected_place_id ?? place_id),
+                actor_current_place_id: String(scene_data.actor_current_place_id ?? place_id),
+                region_id: typeof scene_data?.region?.id === 'string' ? scene_data.region.id : null,
+                region_bounds: scene_data?.region?.region_bounds ?? null,
+                places: scene_data.places.map((entry: any) => entry?.place ?? null).filter((entry: any): entry is Place => !!entry && typeof entry.id === 'string'),
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    async function refresh_scene_topology_preserving_selection(seed_place_id: string, opts?: { preferred_selected_place_id?: string; mirror_to_current_place?: boolean }): Promise<boolean> {
+        const scene = await fetch_scene_topology(seed_place_id);
+        if (!scene) return false;
+        const selected_place_id = opts?.preferred_selected_place_id
+            ?? ui_state.place.scene_selected_place_id
+            ?? scene.selected_place_id
+            ?? seed_place_id;
+        apply_scene_topology(scene, {
+            selected_place_id,
+            mirror_to_current_place: opts?.mirror_to_current_place ?? true,
+        });
+        debug_log(`[PLACE_SCENE] refresh preserve selection ${JSON.stringify({ seed_place_id, selected_place_id, actor_current_place_id: scene.actor_current_place_id, scene_places: scene.places.map((p) => p.id) })}`);
+        return true;
+    }
+
+    async function set_scene_selected_place(place_id: string, opts?: { refresh?: boolean; center_camera?: boolean }): Promise<boolean> {
+        const had_painter = ui_state.place_painter.active;
+        let selected = get_scene_place(place_id);
+        debug_log(`[PLACE_SCENE] select request ${JSON.stringify({ place_id, refresh: !!opts?.refresh, center_camera: !!opts?.center_camera, had_painter, scene_places: ui_state.place.scene_places.map((p) => p.id) })}`);
+        if (opts?.refresh) {
+            const same_region = get_place_region_id(place_id) !== null && get_place_region_id(place_id) === ui_state.place.current_region_id;
+            if (selected && same_region) {
+                const refreshed = await refresh_single_scene_place(place_id);
+                if (refreshed) selected = refreshed;
+            } else {
+                const scene = await fetch_scene_topology(place_id);
+                if (scene && scene.places.length > 0) {
+                    apply_scene_topology(scene, { selected_place_id: place_id, mirror_to_current_place: true });
+                    selected = scene.places.find((p) => p.id === place_id) ?? scene.places.find((p) => p.id === scene.selected_place_id) ?? selected;
+                    debug_log(`[PLACE_SCENE] topology refresh applied ${JSON.stringify({ place_id, selected_place_id: scene.selected_place_id, actor_current_place_id: scene.actor_current_place_id, region_id: scene.region_id, scene_places: scene.places.map((p) => p.id) })}`);
+                } else if (!selected) {
+                    const fetched = await fetch_place_snapshot(place_id);
+                    if (fetched) {
+                        merge_place_into_scene(fetched);
+                        selected = fetched;
+                    }
+                }
+            }
+        }
+        if (!selected) {
+            debug_warn('[PLACE_SCENE] select failed missing place in scene', { place_id, scene_places: ui_state.place.scene_places.map((p) => p.id) });
+            return false;
+        }
+        ui_state.place.scene_selected_place_id = place_id;
+        ui_state.place.current_place_id = place_id;
+        ui_state.place.current_place = selected;
+        set_command_handler_place(selected);
+        if (had_painter) {
+            ui_state.place_painter.active = true;
+            set_place_painter_modules_visible(true);
+            if (!is_current_place_paused_by('place_painter')) {
+                await set_current_place_pause_source('place_painter', true);
+            }
+        }
+        if (opts?.center_camera) {
+            const actor_tile = selected.contents?.actors_present?.find((a: any) => a.actor_ref === `actor.${APP_CONFIG.input_actor_id}`)?.tile_position;
+            if (actor_tile) set_place_camera_target_position(actor_tile, 'free');
+        }
+        debug_log(`[PLACE_SCENE] select applied ${JSON.stringify({ place_id, had_painter, pause_sources: ui_state.place.pause_state.pause_sources, current_place_id: ui_state.place.current_place_id, selected_scene_place_id: ui_state.place.scene_selected_place_id })}`);
+        return true;
+    }
+
+    async function focus_scene_place_for_painter(place_id: string): Promise<boolean> {
+        const ok = await set_scene_selected_place(place_id, { refresh: true, center_camera: true });
+        if (!ok) return false;
+        flash_status([`Editing focus: ${place_id}`], 1200);
+        return true;
+    }
+
     function refresh_debug_window_messages(): void {
         try {
+            if (typeof document !== 'undefined' && document.hidden) return;
             const dbg: string[] = [];
             const movement_debug = get_movement_debug_snapshot();
             const current_place = get_current_place();
@@ -2475,20 +3404,40 @@ export function create_app_state(): AppState {
             if (ui_state.character.hovered_item) {
                 dbg.push(`[hover] ${ui_state.character.hovered_item.name} (${ui_state.character.hovered_item.source})`);
             }
+            const signature = dbg.join('\n');
+            if (signature === last_debug_window_signature) return;
+            last_debug_window_signature = signature;
+            last_debug_window_refresh_ms = Date.now();
             set_text_window_messages('debug', dbg);
         } catch {
             // ignore
         }
     }
 
-    async function update_current_place(place_id: string | null): Promise<void> {
+    function maybe_refresh_debug_window_messages(force = false): void {
+        const now = Date.now();
+        if (!force && (now - last_debug_window_refresh_ms) < DEBUG_WINDOW_REFRESH_MS) return;
+        refresh_debug_window_messages();
+    }
+
+    async function update_current_place(place_id: string | null, opts?: { preserve_place_painter?: boolean; source?: string }): Promise<void> {
+        const preserve_place_painter = opts?.preserve_place_painter === true && ui_state.place_painter.active;
+        const source = String(opts?.source ?? 'unspecified');
+        debug_log(`[PLACE_SCENE] full place load start ${JSON.stringify({ source, place_id, preserve_place_painter, current_place_id: ui_state.place.current_place_id, scene_selected_place_id: ui_state.place.scene_selected_place_id, scene_places: ui_state.place.scene_places.map((p) => p.id) })}`);
         if (!place_id) {
             const old_place_id = ui_state.place.current_place_id;
             await release_owned_place_pause_sources(old_place_id);
             ui_state.place_painter.active = false;
             ui_state.place_painter.last_primary_target = null;
+            ui_state.place_painter.move_pending_source = null;
+            ui_state.place_painter.move_drag_session = null;
             ui_state.place.current_place_id = null;
             ui_state.place.current_place = null;
+            ui_state.place.current_region_id = null;
+            ui_state.place.current_region_bounds = null;
+            ui_state.place.actor_current_place_id = null;
+            ui_state.place.scene_selected_place_id = null;
+            ui_state.place.scene_places = [];
             apply_place_pause_state(null);
             stop_place_touch_heartbeat();
             return;
@@ -2502,9 +3451,16 @@ export function create_app_state(): AppState {
             ui_state.place.current_place_id = place_id;
             // Reset view state for new place
             ui_state.place.current_place = null;
-            ui_state.place_painter.active = false;
-            ui_state.place_painter.last_primary_target = null;
-            apply_place_pause_state(null);
+            ui_state.place.actor_current_place_id = place_id;
+            ui_state.place.scene_selected_place_id = place_id;
+            ui_state.place.scene_places = [];
+            if (!preserve_place_painter) {
+                ui_state.place_painter.active = false;
+                ui_state.place_painter.last_primary_target = null;
+                ui_state.place_painter.move_pending_source = null;
+                ui_state.place_painter.move_drag_session = null;
+                apply_place_pause_state(null);
+            }
         }
 
         // Keep server breath ticking for the current place while the player is in it.
@@ -2559,16 +3515,10 @@ export function create_app_state(): AppState {
                 }
                 
                 const next_place = data.place;
+                ui_state.place.scene_selected_place_id = next_place.id;
 
-                // View centering: keep the 3-plane window anchored to the place base elevation
-                // so the support plane (base_z-1) never "disappears" when the actor stands on z+1.
-                try {
-                    const base_z = Math.floor(Number((next_place as any)?.coordinates?.elevation ?? 0)) || 0;
-                    ui_state.place.world_z_center = base_z;
-                    debug_log(`[PlaceZ] world_z_center=${ui_state.place.world_z_center} (from place.coordinates.elevation)`);
-                } catch {
-                    // ignore
-                }
+                // Keep existing camera z focus stable across place refreshes.
+                // Initial/default z is already set via persisted focus / follow updates.
                 
                 // DEBUG: Log tile information when place is loaded
                 if (data.place?.tiles?.cells) {
@@ -2621,6 +3571,14 @@ export function create_app_state(): AppState {
                 // while interactions use the ground cache.
                 try {
                     const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+                    try {
+                        const scene = await fetch_scene_topology(next_place.id);
+                        if (scene) {
+                            apply_scene_topology(scene, { selected_place_id: next_place.id, mirror_to_current_place: false });
+                        }
+                    } catch {
+                        // ignore scene topology fetch failures for now
+                    }
                     const items_res = await fetch(`${base_url}/api/place/items?place_id=${encodeURIComponent(next_place.id)}`);
                     if (items_res.ok) {
                         const items_data = await items_res.json();
@@ -2756,6 +3714,14 @@ export function create_app_state(): AppState {
                 // Commit the place swap only after caches are refreshed.
                 ui_state.place.current_place = next_place;
                 set_command_handler_place(next_place);
+                if (preserve_place_painter) {
+                    ui_state.place_painter.active = true;
+                    set_place_painter_modules_visible(true);
+                    if (!is_current_place_paused_by('place_painter')) {
+                        await set_current_place_pause_source('place_painter', true);
+                    }
+                }
+                debug_log(`[PLACE_SCENE] full place load applied ${JSON.stringify({ source, place_id: next_place.id, preserve_place_painter, current_place_id: ui_state.place.current_place_id, scene_selected_place_id: ui_state.place.scene_selected_place_id, scene_places: ui_state.place.scene_places.map((p) => p.id), pause_sources: ui_state.place.pause_state.pause_sources })}`);
             } else {
                 ui_state.place.current_place = null;
             }
@@ -2839,7 +3805,7 @@ export function create_app_state(): AppState {
         tasks.push((async () => {
             try {
                 if (movement_active && (now - last_targets_poll_ms) < 2400) {
-                    refresh_debug_window_messages();
+                    maybe_refresh_debug_window_messages();
                     return;
                 }
                 const url = `${APP_CONFIG.interpreter_targets_endpoint}?slot=${APP_CONFIG.selected_data_slot}&actor_id=${APP_CONFIG.input_actor_id}`;
@@ -2861,13 +3827,52 @@ export function create_app_state(): AppState {
                 ui_state.controls.targets_ready = true;
                 last_targets_poll_ms = Date.now();
 
-                // Update current place view only when the place changes.
+                // Update actor-place tracking without tearing down the selected scene place.
                 // Movement is now streamed via websocket; frequent /api/place polling can reintroduce stale snapshots.
                 const place_id = data.place_id ?? null;
-                if (place_id !== ui_state.place.current_place_id) {
-                    await update_current_place(place_id);
-                } else if (!ui_state.place.current_place && place_id) {
-                    await update_current_place(place_id);
+                if (place_id && get_scene_place(place_id) && ui_state.place.current_region_id && get_place_region_id(place_id) === ui_state.place.current_region_id) {
+                    if (place_id !== ui_state.place.actor_current_place_id) {
+                        const prev_actor_place_id = ui_state.place.actor_current_place_id;
+                        const prev_selected_place_id = ui_state.place.scene_selected_place_id;
+                        const follow_actor_selection = !prev_selected_place_id || prev_selected_place_id === prev_actor_place_id;
+                        ui_state.place.actor_current_place_id = place_id;
+                        debug_log(`[PLACE_SCENE] actor place updated in-scene ${JSON.stringify({ actor_current_place_id: place_id, prev_actor_place_id, prev_selected_place_id, follow_actor_selection, scene_places: ui_state.place.scene_places.map((p) => p.id) })}`);
+                        void refresh_scene_topology_preserving_selection(place_id, {
+                            preferred_selected_place_id: follow_actor_selection ? place_id : (prev_selected_place_id ?? place_id),
+                            mirror_to_current_place: true,
+                        });
+                    }
+                } else if (place_id && !ui_state.place.current_place) {
+                    const bootstrapped = await refresh_scene_topology_preserving_selection(place_id, {
+                        preferred_selected_place_id: place_id,
+                        mirror_to_current_place: true,
+                    });
+                    if (!bootstrapped) {
+                        await update_current_place(place_id, { source: 'targets_poll_missing_current' });
+                    }
+                } else if (place_id && place_id !== ui_state.place.current_place_id) {
+                    const refreshed = await refresh_scene_topology_preserving_selection(place_id, {
+                        preferred_selected_place_id: ui_state.place.scene_selected_place_id ?? place_id,
+                        mirror_to_current_place: true,
+                    });
+                    if (!refreshed) {
+                        await update_current_place(place_id, { source: 'targets_poll_place_change' });
+                    }
+                }
+
+                const actor_place_id = ui_state.place.actor_current_place_id;
+                const selected_place_id = ui_state.place.scene_selected_place_id;
+                if (
+                    actor_place_id
+                    && selected_place_id
+                    && actor_place_id !== selected_place_id
+                    && !!get_scene_place(actor_place_id)
+                    && !ui_state.place_painter.active
+                ) {
+                    const switched = await set_scene_selected_place(actor_place_id, { refresh: false, center_camera: true });
+                    if (switched) {
+                        debug_log(`[PLACE_SCENE] auto-follow actor place applied ${JSON.stringify({ actor_current_place_id: actor_place_id, previous_selected_place_id: selected_place_id })}`);
+                    }
                 }
 
                 // Validate persistent selected target
@@ -2880,7 +3885,7 @@ export function create_app_state(): AppState {
                 }
 
                 // Debug reader text (always visible)
-                refresh_debug_window_messages();
+                maybe_refresh_debug_window_messages(true);
             } catch {
                 // ignore
             }
@@ -2894,9 +3899,15 @@ export function create_app_state(): AppState {
     }
 
     function start_window_feed_polling(interval_ms: number): void {
+        if (poll_window_feeds_interval_id !== null) {
+            if (poll_window_feeds_interval_ms === interval_ms) return;
+            window.clearInterval(poll_window_feeds_interval_id);
+            poll_window_feeds_interval_id = null;
+        }
+        poll_window_feeds_interval_ms = interval_ms;
         debug_log(`[MOVE_VEL_TEST] app place timing version ${JSON.stringify({ version: APP_PLACE_TIMING_VERSION, poll_interval_ms: interval_ms })}`);
         void poll_window_feeds();
-        setInterval(() => {
+        poll_window_feeds_interval_id = window.setInterval(() => {
             void poll_window_feeds();
         }, interval_ms);
     }
@@ -3084,10 +4095,9 @@ export function create_app_state(): AppState {
     }
 
     async function fetch_log_messages(slot: number): Promise<(string | TextWindowMessage)[]> {
-    console.log(`[fetch_log_messages] Fetching from API...`);
     const res = await fetch(`${APP_CONFIG.interpreter_log_endpoint}?slot=${slot}`);
     if (!res.ok) {
-        console.error(`[fetch_log_messages] HTTP error: ${res.status}`);
+        debug_warn(`[fetch_log_messages] HTTP error: ${res.status}`);
         throw new Error(`HTTP ${res.status}`);
     }
 
@@ -3189,32 +4199,6 @@ export function create_app_state(): AppState {
          const chosen = latest_renderer_by_reply_to.get(replyKey);
          return chosen ? chosen.id === m.id : renderer_reply_to_allow.has(replyKey);
      });
-
-     // Debug logging for message filtering
-      const npcMessages = filtered_final.filter(m => (m.sender ?? '').toLowerCase().startsWith('npc.'));
-      console.log(`[fetch_log_messages] API returned ${data.messages.length} messages, after filtering: ${filtered_final.length} total, ${npcMessages.length} NPC`);
-    
-    // Log NPC message details for debugging
-    npcMessages.forEach(m => {
-        console.log(`[fetch_log_messages] NPC message: ${m.sender} - "${m.content?.substring(0, 40)}..."`);
-    });
-    
-    // Debug: Show which senders were filtered out
-     const filteredOut = sorted.filter(m => {
-        const sender = (m.sender ?? '').toLowerCase();
-        const content = (m.content ?? '').trim();
-        if (!content) return true;
-        if (sender.startsWith('npc.')) return false;
-        if (sender === 'j') return false;
-        if (sender === 'renderer_ai') return false;
-        if (sender === 'hint') return false;
-        if (m.type === 'user_input') return false;
-        if (sender === 'state_applier') return !UI_DEBUG.enabled;
-        return true;
-    });
-    if (filteredOut.length > 0) {
-        console.log(`[fetch_log_messages] Filtered out ${filteredOut.length} messages from:`, [...new Set(filteredOut.map(m => m.sender))]);
-    }
 
      // Group by correlation_id when present, otherwise keep messages as standalone groups.
      const group_order: string[] = [];
@@ -3395,8 +4379,17 @@ export function create_app_state(): AppState {
         if (ui_state.place.camera_target.mode === 'free' && ui_state.place.camera_target.tile) {
             return { ...ui_state.place.camera_target.tile };
         }
-        return get_current_place()?.contents?.actors_present?.find((a: any) => a.actor_ref === `actor.${APP_CONFIG.input_actor_id}`)?.tile_position
-            ?? null;
+
+        const place = get_current_place();
+        const actor: any = place?.contents?.actors_present?.find((a: any) => a.actor_ref === `actor.${APP_CONFIG.input_actor_id}`) ?? null;
+        if (!actor) return null;
+        const base_z = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
+        const focus = get_character_camera_focus_tile({
+            entity: actor,
+            entity_ref: String(actor?.actor_ref ?? `actor.${APP_CONFIG.input_actor_id}`),
+            fallback_world_z: base_z,
+        });
+        return { x: focus.x, y: focus.y };
     }
 
     function set_place_camera_target_position(tile: { x: number; y: number }, mode: 'follow_actor' | 'free' = 'free'): void {
@@ -3405,24 +4398,12 @@ export function create_app_state(): AppState {
     }
 
     function get_entity_camera_anchor_world_z(entity: any, entity_ref: string, fallback_z: number): number {
-        try {
-            const base_z = (typeof entity?.elevation === 'number' && Number.isFinite(entity.elevation))
-                ? Math.floor(entity.elevation)
-                : Math.floor(Number(fallback_z) || 0);
-            const def = get_body_model_def(entity?.body_model_id);
-            const facing = get_facing(entity_ref);
-            const vox = eval_body_model_voxels(def, { mode: 'physical', facing });
-            if (!Array.isArray(vox) || vox.length < 1) return base_z;
-            const min_dz = Math.min(...vox.map((v: any) => Math.floor(Number(v?.dz ?? 0))));
-            const candidates = vox.filter((v: any) => Math.floor(Number(v?.dz ?? 0)) === min_dz);
-            const preferred = candidates.find((v: any) => {
-                const part = String(v?.part ?? '').toLowerCase();
-                return part === 'feet' || part === 'foot' || part === 'lower_body' || part === 'body';
-            }) ?? candidates[0];
-            return base_z + Math.floor(Number((preferred as any)?.dz ?? 0));
-        } catch {
-            return Math.floor(Number(fallback_z) || 0);
-        }
+        const focus = get_character_camera_focus_tile({
+            entity,
+            entity_ref,
+            fallback_world_z: fallback_z,
+        });
+        return focus.z;
     }
 
     function get_drag_source_ground_elevation(): number | null {
@@ -3435,12 +4416,28 @@ export function create_app_state(): AppState {
         return Number.isFinite(z) ? Math.floor(z) : null;
     }
 
+    function build_place_tile_container_id(place_id: string, tile_x: number, tile_y: number, world_z: number): string {
+        return `place.tile.${place_id}.${Math.floor(tile_x)}_${Math.floor(tile_y)}_${Math.floor(world_z)}`;
+    }
+
+    function parse_place_tile_container_id(container_id: string): { place_id: string; x: number; y: number; z: number } | null {
+        const parts = String(container_id ?? '').split('.');
+        if (parts[0] !== 'place' || parts[1] !== 'tile' || !parts[2] || !parts[3]) return null;
+        const [xs, ys, zs] = String(parts[3]).split('_');
+        const x = Number(xs);
+        const y = Number(ys);
+        const z = Number(zs);
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
+        return { place_id: parts[2], x: Math.floor(x), y: Math.floor(y), z: Math.floor(z) };
+    }
+
     function is_tile_or_structure_container_at(place: Place, tile_x: number, tile_y: number, world_z: number): boolean {
         try {
             const base_z = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
-            if (Math.floor(world_z) !== base_z) return false;
-
-            const t: any = (place as any)?.tiles?.cells?.[tile_y]?.[tile_x] ?? null;
+            const target_z = Math.floor(world_z);
+            const layer_offset = target_z - base_z;
+            const tile_layer_key = layer_offset === 0 ? 'tiles' : `tiles_z${layer_offset}`;
+            const t: any = (place as any)?.[tile_layer_key]?.cells?.[tile_y]?.[tile_x] ?? null;
             const is_tile_container = Array.isArray(t?.contents) || !!t?.container_capacity || !!t?.container_glyphs;
             if (is_tile_container) return true;
 
@@ -3452,7 +4449,6 @@ export function create_app_state(): AppState {
                 const oz0 = Number(origin?.z);
                 if (!Number.isFinite(ox) || !Number.isFinite(oy)) continue;
                 const oz = Number.isFinite(oz0) ? Math.floor(oz0) : base_z;
-                if (oz !== base_z) continue;
 
                 const phys = Array.isArray((s as any)?.body_model?.physical)
                     ? (s as any).body_model.physical
@@ -3462,7 +4458,7 @@ export function create_app_state(): AppState {
                     const vx = Math.floor(ox) + Math.floor(Number((v as any)?.dx ?? 0));
                     const vy = Math.floor(oy) + Math.floor(Number((v as any)?.dy ?? 0));
                     const vz = oz + Math.floor(Number((v as any)?.dz ?? 0));
-                    if (vx === tile_x && vy === tile_y && vz === base_z) { occupies = true; break; }
+                    if (vx === tile_x && vy === tile_y && vz === target_z) { occupies = true; break; }
                 }
                 if (!occupies) continue;
 
@@ -3479,12 +4475,13 @@ export function create_app_state(): AppState {
         place: Place;
         tile_x: number;
         tile_y: number;
+        world_z: number;
         grid_x?: number;
         grid_y?: number;
     }): Promise<boolean> {
         if (!drag_state.is_dragging) return false;
         const place = args.place;
-        const dest_container_id = `place.tile.${place.id}.${args.tile_x}_${args.tile_y}`;
+        const dest_container_id = build_place_tile_container_id(place.id, args.tile_x, args.tile_y, args.world_z);
         const src = String(drag_state.source_container_id ?? '');
 
         // One endpoint for everything: route through /api/transfer.
@@ -3524,6 +4521,10 @@ export function create_app_state(): AppState {
             id: 'place',
             rect: { x0: L_X0, y0: Y_PLACE0, x1: L_X1, y1: Y_PLACE1 },
             get_place: get_current_place,
+            get_scene_places: () => ui_state.place.scene_places,
+            get_scene_selected_place_id: () => ui_state.place.scene_selected_place_id,
+            get_actor_current_place_id: () => ui_state.place.actor_current_place_id,
+            get_scene_connector_hops_visible: () => ui_state.place.scene_connector_hops_visible,
             grid_height: APP_CONFIG.grid_height,
             font_family: APP_CONFIG.font_family,
             base_font_size_px: APP_CONFIG.base_font_size_px,
@@ -3534,6 +4535,26 @@ export function create_app_state(): AppState {
             get_move_mode: () => ui_state.controls.move_mode,
             set_move_mode: (mode) => { ui_state.controls.move_mode = mode; },
             is_place_painter_active: () => ui_state.place_painter.active,
+            get_place_painter_tool: () => ui_state.place_painter.selected_tool,
+            get_place_painter_resize_preview: () => ui_state.place_painter.resize_session ? {
+                place_id: ui_state.place_painter.resize_session.place_id,
+                face: ui_state.place_painter.resize_session.face,
+                interaction: ui_state.place_painter.resize_session.interaction,
+                proposed_bounds: ui_state.place_painter.resize_session.proposed_bounds,
+                valid: ui_state.place_painter.resize_session.valid,
+                conflict_place_id: ui_state.place_painter.resize_session.conflict_place_id ?? null,
+            } : null,
+            get_place_painter_move_preview: () => ui_state.place_painter.move_drag_session ? {
+                place_id: ui_state.place_painter.move_drag_session.place_id,
+                entity_ref: ui_state.place_painter.move_drag_session.entity_ref,
+                entity_type: ui_state.place_painter.move_drag_session.entity_type,
+                display_char: ui_state.place_painter.move_drag_session.display_char,
+                display_color: ui_state.place_painter.move_drag_session.display_color,
+                body_model: ui_state.place_painter.move_drag_session.body_model ?? null,
+                source: { x: ui_state.place_painter.move_drag_session.source_x, y: ui_state.place_painter.move_drag_session.source_y, z: ui_state.place_painter.move_drag_session.source_z },
+                target: { x: ui_state.place_painter.move_drag_session.target_x, y: ui_state.place_painter.move_drag_session.target_y, z: ui_state.place_painter.move_drag_session.target_z },
+                valid: ui_state.place_painter.move_drag_session.valid,
+            } : null,
             get_place_painter_preview: () => {
                 if (!ui_state.place_painter.active) return null;
                 if (ui_state.place_painter.selected_palette_kind === 'item') {
@@ -3557,6 +4578,13 @@ export function create_app_state(): AppState {
                 };
             },
             on_place_painter_primary_action: handle_place_painter_primary_action,
+            on_place_painter_move_start: start_place_move_drag,
+            on_place_painter_move_update: update_place_move_drag,
+            on_place_painter_move_end: () => { void finish_place_move_drag(); },
+            on_place_painter_resize_start: start_place_resize_session,
+            on_place_painter_resize_update: update_place_resize_session,
+            on_place_painter_resize_end: () => { void finish_place_resize_session(); },
+            on_place_painter_resize_adjust_z: adjust_place_resize_session_z,
             get_camera_target_position: get_place_camera_target_position,
             get_camera_target_mode: () => ui_state.place.camera_target.mode,
             set_camera_target_position: set_place_camera_target_position,
@@ -3649,14 +4677,14 @@ export function create_app_state(): AppState {
                     flash_status(['Inspect failed - check console'], 2000);
                 }
             },
-            on_open_tile_container: (tile_x: number, tile_y: number): void => {
+            on_open_tile_container: (tile_x: number, tile_y: number, world_z: number): void => {
                 const place = get_current_place();
                 if (!place) return;
-                const cid = `place.tile.${place.id}.${tile_x}_${tile_y}`;
+                const cid = build_place_tile_container_id(place.id, tile_x, tile_y, world_z);
                 void open_container_module(cid);
             },
             on_place_transition: async (target_place_id: string, direction: string): Promise<boolean> => {
-                // Handle place transition when user clicks on a door
+                // Handle place transition when user clicks on a connector
                 const place = get_current_place();
                 if (!place) {
                     flash_status(['No place loaded'], 1200);
@@ -3712,8 +4740,22 @@ export function create_app_state(): AppState {
                     const travel_data = await travel_response.json();
                     if (travel_data.ok) {
                         flash_status([`Arrived at ${target_place_id.split('_').pop()}`], 2000);
-                        // Update current place to trigger reload
-                        await update_current_place(target_place_id);
+                        const selected_place_id = ui_state.place_painter.active
+                            ? (ui_state.place.scene_selected_place_id ?? target_place_id)
+                            : target_place_id;
+                        const refreshed = await refresh_scene_topology_preserving_selection(target_place_id, {
+                            preferred_selected_place_id: selected_place_id,
+                            mirror_to_current_place: true,
+                        });
+                        if (refreshed) {
+                            const actor_place = get_scene_place(target_place_id) ?? null;
+                            if (actor_place && !ui_state.place_painter.active) {
+                                const actor_tile = actor_place.contents?.actors_present?.find((a: any) => a.actor_ref === `actor.${APP_CONFIG.input_actor_id}`)?.tile_position;
+                                if (actor_tile) set_place_camera_target_position(actor_tile, 'free');
+                            }
+                        } else {
+                            await update_current_place(target_place_id, { source: 'travel_scene_refresh_fallback' });
+                        }
                         return true;
                     } else {
                         flash_status([`Travel failed: ${travel_data.error || 'unknown error'}`], 2000);
@@ -3991,7 +5033,7 @@ export function create_app_state(): AppState {
                     if (place0) {
                         const focus_wz0 = get_focus_world_z_for_current_place();
                         if (is_tile_or_structure_container_at(place0, tile_x, tile_y, focus_wz0)) {
-                            return await perform_drag_drop_into_tile_container({ place: place0, tile_x, tile_y });
+                            return await perform_drag_drop_into_tile_container({ place: place0, tile_x, tile_y, world_z: focus_wz0 });
                         }
                     }
                 } catch (err) {
@@ -4033,7 +5075,7 @@ export function create_app_state(): AppState {
                             log_ground_item_cache_position('pre-refresh optimistic check', moved_item_id, tile_x, tile_y, target_z);
                             flash_status(['Dragged'], 900);
                             drag_state.end_drag();
-                            await update_current_place(place_id);
+                            await update_current_place(place_id, { source: 'drag_ground_to_place' });
                             log_ground_item_cache_position('post-refresh authoritative check', moved_item_id, tile_x, tile_y, target_z);
                             void refresh_container_data();
                             return true;
@@ -4085,7 +5127,7 @@ export function create_app_state(): AppState {
                             log_ground_item_cache_position('pre-refresh optimistic check', moved_item_id, tile_x, tile_y, target_z);
                             flash_status(['Dragged'], 900);
                             drag_state.end_drag();
-                            await update_current_place(place_id);
+                            await update_current_place(place_id, { source: 'drag_ground_within_place' });
                             log_ground_item_cache_position('post-refresh authoritative check', moved_item_id, tile_x, tile_y, target_z);
                             void refresh_container_data();
                             return true;
@@ -4963,7 +6005,7 @@ export function create_app_state(): AppState {
                 }
 
                 const place = get_current_place();
-                if (place) await update_current_place(place.id);
+                if (place) await update_current_place(place.id, { source: 'debug_gravity_toggle' });
             },
         }),
 
@@ -5023,7 +6065,7 @@ export function create_app_state(): AppState {
                     body: JSON.stringify({ slot: APP_CONFIG.selected_data_slot, actor_id, body_model_id: next }),
                 });
                 flash_status([`Body model: ${next}`], 1500);
-                await update_current_place(place.id);
+                await update_current_place(place.id, { source: 'debug_body_model_toggle' });
             },
         }),
 
@@ -6138,9 +7180,10 @@ export function create_app_state(): AppState {
 
     // Seed debug window
     set_text_window_messages('debug', ['[debug] off | overlays:off', '[render] fps:- dt:- max:-', '[breath] now:0 rx_age:-', '[visible_step] age:-', '[intent] none', '[pipeline] stage:idle']);
+    last_debug_window_signature = ['[debug] off | overlays:off', '[render] fps:- dt:- max:-', '[breath] now:0 rx_age:-', '[visible_step] age:-', '[intent] none', '[pipeline] stage:idle'].join('\n');
     window.setInterval(() => {
-        refresh_debug_window_messages();
-    }, 120);
+        maybe_refresh_debug_window_messages();
+    }, DEBUG_WINDOW_REFRESH_MS);
 
     // Server-authoritative movement: disable legacy NPC movement loops.
     // NPC wandering and movement are now driven by the interface server breath+brain ticks.
@@ -6172,7 +7215,7 @@ export function create_app_state(): AppState {
      * Get NPC body slots for a given NPC ID
      * Uses place data instead of API call (workaround for missing /api/npc endpoint)
      */
-    function get_npc_body_slots(npc_id: string): BodySlots {
+    function get_npc_body_slots(npc_id: string): EquipmentSlots {
         const place = get_current_place();
         if (!place) {
             debug_log(`[NPC Module] Error: No place loaded when getting body slots for ${npc_id}`);
@@ -6404,23 +7447,14 @@ export function create_app_state(): AppState {
 
             // Open a tile container (inline tile contents)
             else if (container_id.startsWith('place.tile.')) {
-                // place.tile.<place_id>.<x>_<y>
-                const parts = container_id.split('.');
-                const place_id = parts[2];
-                const pos_key = parts[3];
-                if (!place_id || !pos_key) {
+                // place.tile.<place_id>.<x>_<y>_<z>
+                const parsed = parse_place_tile_container_id(container_id);
+                if (!parsed) {
                     flash_status(['Invalid tile container id'], 1500);
                     return;
                 }
-                const [xs, ys] = pos_key.split('_');
-                const x = xs !== undefined ? Number(xs) : NaN;
-                const y = ys !== undefined ? Number(ys) : NaN;
-                if (!Number.isFinite(x) || !Number.isFinite(y)) {
-                    flash_status(['Invalid tile coords'], 1500);
-                    return;
-                }
 
-                const api_res = await fetch(`http://localhost:8787/api/place/tile_container?place_id=${encodeURIComponent(place_id)}&x=${encodeURIComponent(String(x))}&y=${encodeURIComponent(String(y))}`);
+                const api_res = await fetch(`http://localhost:8787/api/place/tile_container?place_id=${encodeURIComponent(parsed.place_id)}&x=${encodeURIComponent(String(parsed.x))}&y=${encodeURIComponent(String(parsed.y))}&z=${encodeURIComponent(String(parsed.z))}`);
                 if (!api_res.ok) {
                     flash_status(['Tile container not found'], 1500);
                     return;
@@ -6798,25 +7832,17 @@ export function create_app_state(): AppState {
                             return false;
                         }
 
-                        const parts = container_id.split('.');
-                        const place_id = parts[2];
-                        const pos_key = parts[3];
-                        if (!place_id || !pos_key || place.id !== place_id) {
-                            drag_state.reject_drag();
-                            return false;
-                        }
-                        const [xs, ys] = pos_key.split('_');
-                        const x = Number(xs);
-                        const y = Number(ys);
-                        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+                        const parsed = parse_place_tile_container_id(container_id);
+                        if (!parsed || place.id !== parsed.place_id) {
                             drag_state.reject_drag();
                             return false;
                         }
 
                         return await perform_drag_drop_into_tile_container({
                             place,
-                            tile_x: Math.floor(x),
-                            tile_y: Math.floor(y),
+                            tile_x: parsed.x,
+                            tile_y: parsed.y,
+                            world_z: parsed.z,
                             grid_x,
                             grid_y,
                         });
@@ -6865,7 +7891,7 @@ export function create_app_state(): AppState {
                                 if (mv.ok) {
                                     flash_status(['Moved'], 800);
                                     drag_state.end_drag();
-                                    await update_current_place(place_id);
+                                    await update_current_place(place_id, { source: 'container_move_within_place' });
                                     void refresh_container_data();
                                     return true;
                                 }
@@ -6902,7 +7928,7 @@ export function create_app_state(): AppState {
                                 if (mv.ok) {
                                     flash_status(['Moved'], 900);
                                     drag_state.end_drag();
-                                    await update_current_place(place_id);
+                                    await update_current_place(place_id, { source: 'pile_move_within_place' });
                                     void refresh_container_data();
                                     return true;
                                 }
@@ -7155,7 +8181,7 @@ export function create_app_state(): AppState {
                                 const place = get_current_place();
                                 flash_status(['Picked up'], 1200);
                                 drag_state.end_drag();
-                                if (place) await update_current_place(place.id);
+                                if (place) await update_current_place(place.id, { source: 'pickup_refresh' });
                                 void refresh_container_data();
                                 void refresh_character_data();
                                 return true;
@@ -7835,7 +8861,7 @@ export function create_app_state(): AppState {
                     actor,
                     String(actor?.actor_ref ?? `actor.${APP_CONFIG.input_actor_id}`),
                     Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0,
-                );
+                ) + 1;
                 const actor_key = (actor && actor_tile) ? `${actor.actor_ref}:${actor_tile.x},${actor_tile.y},${actor_z}` : null;
                 if (actor_key && actor_key !== renderer_debug.last_actor_pos_key) {
                     renderer_debug.last_actor_pos_key = actor_key;
@@ -7843,7 +8869,20 @@ export function create_app_state(): AppState {
                     renderer_debug.last_actor_pos_changed_ms = now_wall;
                     if (ui_state.place.camera_target.mode !== 'free') {
                         const zs = get_defined_place_world_zs(place);
-                        const actor_layer_index = Math.max(0, zs.findIndex((z) => z === actor_z));
+                        let actor_layer_index = zs.findIndex((z) => z === actor_z);
+                        if (actor_layer_index < 0 && zs.length > 0) {
+                            let best_i = 0;
+                            let best_d = Math.abs(zs[0]! - actor_z);
+                            for (let i = 1; i < zs.length; i++) {
+                                const d = Math.abs(zs[i]! - actor_z);
+                                if (d < best_d) {
+                                    best_d = d;
+                                    best_i = i;
+                                }
+                            }
+                            actor_layer_index = best_i;
+                        }
+                        actor_layer_index = Math.max(0, actor_layer_index);
                         if (ui_state.place.world_z_center !== actor_z) {
                             ui_state.place.world_z_center = actor_z;
                         }

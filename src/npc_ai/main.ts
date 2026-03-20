@@ -29,6 +29,10 @@ import * as path from "node:path";
 import { is_timed_event_active, get_timed_event_state, get_region_by_coords } from "../world_storage/store.js";
 import { load_place, save_place } from "../place_storage/store.js";
 import { consolidate_npc_memory_journal_if_needed, append_non_timed_conversation_journal } from "./timed_event_journal.js";
+import {
+    build_npc_dialogue_prompts,
+    build_turn_summary_prompts,
+} from "./prompts.js";
 
 import { update_conversations } from "./witness_handler.js";
 
@@ -43,9 +47,17 @@ import { is_in_conversation_presence } from "../shared/conversation_presence_sto
 const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
 const POLL_MS = SERVICE_CONFIG.POLL_MS.NPC_AI;
 const OLLAMA_HOST = process.env.OLLAMA_HOST ?? "http://localhost:11434";
-const NPC_AI_MODEL = process.env.NPC_AI_MODEL ?? "llama3.2:latest";
+const NPC_AI_MODEL = process.env.NPC_AI_MODEL ?? "hf.co/DavidAU/GLM-4.7-Flash-Uncensored-Heretic-NEO-CODE-Imatrix-MAX-GGUF:IQ2_M";
 const NPC_AI_TIMEOUT_MS_RAW = Number(process.env.NPC_AI_TIMEOUT_MS ?? 120_000);
 const NPC_AI_TIMEOUT_MS = Number.isFinite(NPC_AI_TIMEOUT_MS_RAW) ? NPC_AI_TIMEOUT_MS_RAW : 120_000;
+const NPC_AI_NUM_CTX_RAW = Number(process.env.NPC_AI_NUM_CTX ?? 12_288);
+const NPC_AI_NUM_CTX = Number.isFinite(NPC_AI_NUM_CTX_RAW) && NPC_AI_NUM_CTX_RAW > 0
+    ? Math.floor(NPC_AI_NUM_CTX_RAW)
+    : 12_288;
+const NPC_MEMORY_NUM_CTX_RAW = Number(process.env.NPC_MEMORY_NUM_CTX ?? 8_192);
+const NPC_MEMORY_NUM_CTX = Number.isFinite(NPC_MEMORY_NUM_CTX_RAW) && NPC_MEMORY_NUM_CTX_RAW > 0
+    ? Math.floor(NPC_MEMORY_NUM_CTX_RAW)
+    : 8_192;
 const NPC_AI_KEEP_ALIVE = "30m";
 const NPC_AI_TEMPERATURE = 0.8;
 
@@ -194,24 +206,23 @@ async function generate_turns_summary(
         .map(t => `${get_speaker_name(t.speaker_ref)}: ${t.content}`)
         .join("\n");
     
-    const prompt = `You are ${npc_name}. ${npc_personality ? `Personality: ${npc_personality}` : ""}
-
-${existing_summary ? `Previous context: ${existing_summary}\n\nNew exchanges:` : "Summarize these exchanges from your perspective:"}
-
-${conversation_text}
-
-Provide a brief 1-sentence summary of what was discussed and how you feel about it. Focus on key facts and emotional reactions. Be concise.`;
+    const prompt_pair = build_turn_summary_prompts({
+        npc_name,
+        npc_personality,
+        existing_summary,
+        conversation_text,
+    });
 
     try {
         const response = await ollama_chat({
             host: OLLAMA_HOST,
             model: NPC_AI_MODEL,
             messages: [
-                { role: "system", content: "You are an NPC summarizing a conversation from your perspective." },
-                { role: "user", content: prompt }
+                { role: "system", content: prompt_pair.system },
+                { role: "user", content: prompt_pair.user }
             ],
             timeout_ms: 15000,
-            options: { temperature: 0.7 },
+            options: { temperature: 0.7, num_ctx: NPC_MEMORY_NUM_CTX },
         });
         
         return response.content.trim();
@@ -380,86 +391,6 @@ function determineResponse(
     }
     
     return { type: "ai", reason: ai_reason };
-}
-
-// Build NPC system prompt based on character sheet
-// TODO: Inject random local and world lore based on incoming action, target, and location
-// through the smart injector system. This will help keep the world THAUMWORLD-oriented.
-// TODO: Include perception notes into NPC AI with culling events to their senses
-function build_npc_prompt(npc: any, player_text: string, can_perceive: boolean, memory_context?: string, player_location?: string, npc_location?: string): string {
-    const personality = npc.personality || {};
-    const appearance = npc.appearance || {};
-    
-    let prompt_parts: string[] = [];
-    
-    // Identity (always included, compact)
-    prompt_parts.push(`You are ${npc.name}${npc.title ? `, ${npc.title}` : ''}.`);
-    
-    // Role/Goal (only if defined and not generic)
-    if (personality.story_goal && npc.role !== 'villager') {
-        prompt_parts.push(`Goal: ${personality.story_goal}`);
-    }
-    
-    // Personality traits (smart injection - only relevant ones)
-    const relevant_traits = get_relevant_personality_traits(player_text, personality);
-    if (relevant_traits.length > 0) {
-        prompt_parts.push(`Traits: ${relevant_traits.join(', ')}`);
-    }
-    
-    // Appearance if notable and player can see them clearly
-    if (appearance.distinguishing_features && can_perceive) {
-        prompt_parts.push(`Features: ${appearance.distinguishing_features}`);
-    }
-    
-    // Memory context with tight culling and random outside memories
-    if (memory_context && memory_context.length > 0) {
-        prompt_parts.push(`\n${memory_context}`);
-    }
-
-    // Location context (condensed)
-    if (npc_location && player_location) {
-        if (npc_location !== player_location) {
-            prompt_parts.push(`\nYou are in ${npc_location}; they claim to be in ${player_location}.`);
-        }
-    }
-    
-    // Smart perception injection - only when cannot perceive
-    // Perception is place-based only: same place = can perceive, different place = cannot
-    if (!can_perceive) {
-        prompt_parts.push(`\nYou sense someone nearby but cannot perceive them clearly.`);
-    }
-    
-    // Compact response instruction (consolidated from 7 lines to 2)
-    prompt_parts.push(`\n"${player_text}" — Reply in character as ${npc.name}, 1-2 sentences. Stay in world; never break character or mention game mechanics.`);
-    
-    return prompt_parts.join("\n");
-}
-
-// Get personality traits relevant to the player's input
-function get_relevant_personality_traits(player_text: string, personality: any): string[] {
-    const traits: string[] = [];
-    const text_lower = player_text.toLowerCase();
-    
-    // Check for trigger matches
-    if (personality.happy_triggers && text_lower.includes(personality.happy_triggers.toLowerCase())) {
-        traits.push(`happy about: ${personality.happy_triggers}`);
-    }
-    if (personality.angry_triggers && text_lower.includes(personality.angry_triggers.toLowerCase())) {
-        traits.push(`angered by: ${personality.angry_triggers}`);
-    }
-    if (personality.sad_triggers && text_lower.includes(personality.sad_triggers.toLowerCase())) {
-        traits.push(`saddened by: ${personality.sad_triggers}`);
-    }
-    
-    // Include core traits only if they might affect response
-    if (personality.fear && (text_lower.includes('fear') || text_lower.includes('scare') || text_lower.includes('afraid'))) {
-        traits.push(`fear: ${personality.fear}`);
-    }
-    if (personality.passion && (text_lower.includes(personality.passion.toLowerCase()) || Math.random() < 0.3)) {
-        traits.push(`passion: ${personality.passion}`);
-    }
-    
-    return traits;
 }
 
 // Check if NPC can perceive the player
@@ -909,23 +840,34 @@ async function process_communication(
             case "ai":
                 // Build hierarchical conversation context
                 let memory_context = "";
+                const npc_mem_ref = `npc.${npc_hit.id}`;
+                const relationship = get_relationship_status(data_slot_number, npc_mem_ref, player_ref);
                 if (correlation_id) {
                     // Get conversation context from session (hierarchical: summary + recent turns)
                     const session_key = get_session_key(npc_hit.id, correlation_id);
                     const conversation_ctx = build_conversation_context(session_key);
                     
-                    // Get random outside memories for variance
-                    const npc_mem_ref = `npc.${npc_hit.id}`;
+                    // Get relevant outside memories for variance + recall quality
                     const all_memories = get_memories_about(data_slot_number, npc_mem_ref, player_ref, { limit: 10 });
                     const outside_memories = all_memories.filter((m: any) => {
                         // Filter out memories that are part of current conversation
                         const is_current_conv = m.conversation_id === conversation_id;
                         return !is_current_conv;
                     });
-                    
-                    // Pick 1-2 random outside memories for variety
-                    const shuffled = outside_memories.sort(() => Math.random() - 0.5);
-                    const selected_random = shuffled.slice(0, Math.min(2, shuffled.length));
+
+                    const query = original_text.toLowerCase();
+                    const selected_random = [...outside_memories]
+                        .map((m: any) => {
+                            const summary = String(m?.summary ?? "");
+                            const emotional = String(m?.emotional_tone ?? "");
+                            const importance = Number(m?.importance ?? 0);
+                            const summary_match = query && summary.toLowerCase().includes(query) ? 3 : 0;
+                            const emotional_bonus = emotional && query.includes(emotional.toLowerCase()) ? 1 : 0;
+                            return { m, score: importance + summary_match + emotional_bonus };
+                        })
+                        .sort((a, b) => b.score - a.score)
+                        .slice(0, 3)
+                        .map((x) => x.m);
                     
                     // Build memory context: conversation history + random outside memories
                     const memory_parts: string[] = [];
@@ -944,10 +886,12 @@ async function process_communication(
                 const npc_place_id = get_npc_place_id(npc);
                 let npc_location_name = "unknown";
                 let player_location_name = "unknown";
+                let npc_place: any = null;
                 
                 if (npc_place_id) {
                     const placeResult = load_place(data_slot_number, npc_place_id);
                     if (placeResult.ok) {
+                        npc_place = placeResult.place;
                         npc_location_name = placeResult.place.name || npc_place_id;
                     }
                 }
@@ -959,18 +903,40 @@ async function process_communication(
                         player_location_name = placeResult.place.name || player_place_id;
                     }
                 }
+
+                let npc_region: any = null;
+                const npc_loc_any = (npc as any)?.location;
+                if (npc_loc_any?.world_tile && npc_loc_any?.region_tile) {
+                    const wx = Number(npc_loc_any.world_tile.x ?? 0);
+                    const wy = Number(npc_loc_any.world_tile.y ?? 0);
+                    const rx = Number(npc_loc_any.region_tile.x ?? 0);
+                    const ry = Number(npc_loc_any.region_tile.y ?? 0);
+                    const region_res = get_region_by_coords(data_slot_number, wx, wy, rx, ry);
+                    if (region_res.ok) npc_region = region_res.region;
+                }
                 
                 // Build prompt with working memory context and location awareness
-                const prompt = build_npc_prompt(npc, original_text, perception.can_perceive, memory_context, player_location_name, npc_location_name);
+                const prompt_pair = build_npc_dialogue_prompts({
+                    npc,
+                    player_text: original_text,
+                    can_perceive: perception.can_perceive,
+                    memory_context,
+                    player_location_name,
+                    npc_location_name,
+                    relationship_status: relationship.status,
+                    relationship_memory_count: relationship.memory_count,
+                    place: npc_place,
+                    region: npc_region,
+                });
                 
                 // Get session history
                 const session_key = get_session_key(npc_hit.id, correlation_id);
                 const history = get_session_history(session_key);
                 
                 const messages: OllamaMessage[] = [
-                    { role: "system", content: "You are roleplaying as an NPC in a fantasy world. Stay in character." },
+                    { role: "system", content: prompt_pair.system },
                     ...history,
-                    { role: "user", content: prompt }
+                    { role: "user", content: prompt_pair.user }
                 ];
                 
                 try {
@@ -981,7 +947,7 @@ async function process_communication(
                         messages,
                         keep_alive: NPC_AI_KEEP_ALIVE,
                         timeout_ms: NPC_AI_TIMEOUT_MS,
-                        options: { temperature: NPC_AI_TEMPERATURE },
+                        options: { temperature: NPC_AI_TEMPERATURE, num_ctx: NPC_AI_NUM_CTX },
                     });
                     ai_duration_ms = Date.now() - ai_start;
                     

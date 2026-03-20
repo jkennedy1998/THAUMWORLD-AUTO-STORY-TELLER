@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import { parse } from "jsonc-parser";
 import { get_kind_definitions_path } from "../engine/paths.js";
 import type { BodySlotRepresentation } from "../shared/body_slot_representation.js";
+import type { EntityRenderProfile } from "../render_shaders/definitions.js";
 
 export type KindDefinition = {
     id: string;
@@ -13,6 +14,7 @@ export type KindDefinition = {
     // Multi-tile rendering / occupancy
     body_model_id?: string;
     body_slot_representation?: BodySlotRepresentation;
+    entity_render?: EntityRenderProfile;
 
     sleep_type?: "SLEEP" | "REPAIR";
     sleep_required_per_day?: number;

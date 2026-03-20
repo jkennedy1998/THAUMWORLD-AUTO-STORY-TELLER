@@ -5,9 +5,28 @@
   "weight": 1,
   "display_char": "&",
   "display_color": "#4f9d35",
+  "render_shader": {
+    "shader_id": "checker_binary",
+    "params": {
+      "z_mode": "place",
+      "breaths_per_swap": 5
+    },
+    "output": {
+      "weight_bands": [2, 4]
+    }
+  },
+  "container_capacity": {
+    "max_slots": 1
+  },
   "tags": [
     {
       "name": "FLORA",
+      "mag": 1,
+      "meta": [],
+      "scope": ["TILE"]
+    },
+    {
+      "name": "CONTAINER",
       "mag": 1,
       "meta": [],
       "scope": ["TILE"]
@@ -18,8 +37,8 @@
       "meta": [],
       "info": [
         {
-          "def_ids": ["snowberries"],
-          "period_ticks": 60
+          "item_def_ids": ["snowberries"],
+          "period_breaths": 300
         }
       ],
       "scope": ["TILE"]

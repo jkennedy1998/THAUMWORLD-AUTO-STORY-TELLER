@@ -4,7 +4,199 @@ Date: 2026-03-15
 
 ## Status
 
-- [ ] planned
+- [~] in progress
+
+## Related Plans
+
+- Multi-place connectors and place tools: `docs/plans/2026_03_16_multiplace_connectors_and_place_tools_plan.md`
+
+## Region Scene Follow-On
+
+The place painter now depends on a second-stage scene model change:
+
+- same-region place switching should not unload and rebuild the whole local scene
+- the loaded runtime unit should become the current region scene, not a single place
+- the player should be able to move and edit across multiple loaded places in one region fluidly
+- the place painter should gain a `region_tool` for resizing region bounds
+
+This section tracks that follow-on so it stays tied to place painter work rather than becoming a disconnected renderer refactor.
+
+### Status
+
+- [~] in progress
+
+### Current Implementation Notes
+
+- Region metadata and region bounds are now flowing through the runtime.
+- Same-region selection and travel are being decoupled from full place reloads.
+- Scene rendering is now being filtered toward a connected local subset instead of treating the whole region as always visible.
+
+### Goal
+
+Make same-region place travel and editing fluid by keeping connected places loaded inside one region scene, and add a region-bounds editing tool to place painter.
+
+### Product Direction
+
+- The runtime scene container should be a region scene, not a single active place.
+- `place_connector` travel inside the same region should not force a full place unload/reload.
+- `region_connector` travel may still remain a region-scene transition for now.
+- Region bounds should be editable in place painter through a dedicated `region_tool`.
+- Region size should be large enough to contain the places authored inside it, while still being manually adjustable.
+
+### Scope
+
+#### In Scope
+
+- add canonical region bounds to persisted region data
+- load a region scene as the main local editing/travel unit
+- keep all currently relevant places in the region scene cache during same-region movement
+- separate `actor_current_place_id` from `scene_selected_place_id`
+- add a `region_tool` to place painter for region bounds resize
+- validate place create/resize against region bounds
+- make current render distance/debug distance configurable without changing the persistence model
+
+#### Out Of Scope
+
+- multi-region streaming
+- automatic world partitioning
+- replacing world tile / region coordinate systems
+- full world map editing
+
+### Architecture Direction
+
+#### Reuse Notes
+
+- Reuse persisted `Region` files and `load_region(...)` / `save_region(...)` in `src/world_storage/store.ts`; do not introduce a second region-scene storage format.
+- Reuse existing `scene_places` / `scene_selected_place_id` work in `src/canvas_app/app_state.ts` as the starting point for region-scene-first state.
+- Reuse the existing place scene renderer in `src/mono_ui/modules/place_module.ts`; do not build a second region renderer.
+- Reuse current place travel/movement authority in `src/travel/movement.ts`, replacing same-region reload semantics rather than replacing the whole movement engine.
+- Reuse `list_places_in_region(...)` and canonical place persistence in `src/place_storage/store.ts` for region-bounds validation and scene assembly.
+
+#### Anti-Rewrite Rules
+
+- do not replace world tile / region coordinate storage
+- do not introduce multi-region streaming in this phase
+- do not replace the current pause controller model
+- do not create a second frontend cache for painter-only region state
+- do not replace connector topology with a region-only travel model
+
+#### Region Scene First
+
+Refactor the runtime so the frontend and interface layer think in terms of a loaded region scene:
+
+- `current_region_scene`
+- `scene_places`
+- `scene_selected_place_id`
+- `actor_current_place_id`
+
+Only region-scene changes should trigger full unload/reload.
+
+Same-region place movement should update pointers and actor location inside the loaded region scene.
+
+#### Region Bounds As Canonical Data
+
+Add canonical `region_bounds` to persisted `Region` data in `src/world_storage/store.ts`.
+
+Recommended rule:
+
+- region bounds must contain all place interiors and shared connector border space
+- region bounds may be expanded manually beyond the tight union of places
+- shrinking region bounds should reject if any place would fall outside them
+
+#### Place Painter Region Tool
+
+Add a `region_tool` to place painter with behavior parallel to place resize:
+
+- highlights current region bounds
+- drags region edges/corners to resize the loaded region scene envelope
+- writes canonical region bounds through backend validation
+- does not resize places directly
+
+### Implementation Phases
+
+#### Phase R1: Persisted Region Bounds
+
+- [~] in progress
+
+Tasks:
+
+- extend `Region` in `src/world_storage/store.ts` with canonical `region_bounds`
+- load/save region bounds from region files
+- add helper to compute a minimum required region envelope from current places when needed
+
+Reuse notes:
+
+- extend the existing `Region` type and region JSON files directly
+- derive minimum required bounds from persisted place `region_bounds`; do not invent a second placement map
+
+#### Phase R2: Region Scene API
+
+- [~] in progress
+
+Tasks:
+
+- add a region-scene API in `src/interface_program/main.ts`
+- return region metadata, region bounds, scene place ids, and full place payloads needed by the place renderer/editor
+- stop treating same-region place selection as a place-only load concern
+
+Reuse notes:
+
+- extend the existing interface program API host
+- reuse current place scene payload shape where possible instead of inventing a parallel renderer payload format
+
+#### Phase R3: Frontend Region Scene State
+
+- [~] in progress
+
+Tasks:
+
+- add region-scene state to `src/canvas_app/app_state.ts`
+- separate `actor_current_place_id` from `scene_selected_place_id`
+- keep place painter alive while switching selected place inside the same region scene
+- reserve full `update_current_place(...)` for hard scene transitions only
+
+Reuse notes:
+
+- evolve the current place-scene selection code already added in `src/canvas_app/app_state.ts`
+- do not replace the whole app state tree with a new scene subsystem
+
+#### Phase R4: Same-Region Travel Without Scene Reload
+
+- [~] in progress
+
+Tasks:
+
+- refactor `src/travel/movement.ts` and related frontend travel handling so `place_connector` travel updates actor location/current place without reloading the local scene
+- keep `region_connector` travel as the remaining hard load boundary for now
+
+Reuse notes:
+
+- replace same-region reload semantics inside the existing travel pipeline
+- keep region travel as the existing hard transition boundary until a later dedicated plan changes it
+
+#### Phase R5: Region Tool
+
+- [~] in progress
+
+Tasks:
+
+- add `region_tool` to the place painter toolbox
+- add region bounds preview/highlight rendering
+- add backend endpoint for region resize validation/save
+- reject place create/resize operations that would leave region bounds
+
+Reuse notes:
+
+- extend the place painter toolbox and preview system already in progress
+- reuse the same status/system-info rejection path used by place topology tools
+
+### Success Criteria
+
+- switching between connected places in the same region does not unload the local scene
+- place painter remains active and fully usable while changing selected place inside the same region scene
+- region bounds are persisted canonically in region data
+- a region resize tool exists in place painter
+- place creation and place resizing respect region bounds
 
 ## Intent
 

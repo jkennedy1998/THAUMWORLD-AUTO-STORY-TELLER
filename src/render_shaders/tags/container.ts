@@ -25,10 +25,9 @@ export function apply_container_modifier(layers: RenderLayer[], tags: any[], ctx
     if (!layers || layers.length === 0) return;
     if (!has_container_tag(tags)) return;
 
-    // Let explicit UI emphasis win.
     const ui = ctx?.ui;
-    const emphasized = Boolean(ui?.hovered || ui?.highlighted || ui?.selected || ui?.targeted);
-    if (emphasized) return;
+    if (!ui?.selected) return;
+    if (ui?.hovered || ui?.highlighted || ui?.targeted) return;
 
     const rgb = get_color_by_name('pumpkin').rgb;
     for (const l of layers) {

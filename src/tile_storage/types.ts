@@ -3,6 +3,7 @@
 
 import type { TagInstance } from "../tag_system/registry.js";
 import type { BodyModelVoxel } from "../shared/body_model.js";
+import type { RenderShaderBindings } from "../render_shaders/definitions.js";
 
 export type TileCategory = "structures" | "foliage" | "terrain" | "water" | "features" | "special";
 
@@ -45,6 +46,7 @@ export interface TileDefinition {
     // Visual properties
     display_char: string;          // Single char for UI
     display_color: string;         // Hex color or named color
+    render_shader?: RenderShaderBindings;
     
     // Tags drive all behavior
     tags: TagInstance[];           // System tags (OCCUPIES, CONTAINER, GROW, etc.)

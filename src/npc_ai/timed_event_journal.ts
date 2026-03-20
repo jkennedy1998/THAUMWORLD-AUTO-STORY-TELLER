@@ -3,6 +3,7 @@ import { debug_error, debug_log } from "../shared/debug.js";
 import { load_npc, save_npc } from "../npc_storage/store.js";
 import { get_working_memory } from "../context_manager/index.js";
 import { get_region_by_coords } from "../world_storage/store.js";
+import { build_memory_journal_prompts } from "./prompts.js";
 
 export const NPC_MEMORY_JOURNAL_CONSOLIDATE_THRESHOLD = (() => {
     const n = Number(process.env.NPC_MEMORY_JOURNAL_CONSOLIDATE_THRESHOLD ?? 25);
@@ -31,9 +32,13 @@ const NPC_MEMORY_JOURNAL_CONSOLIDATE_TARGET = (() => {
 })();
 
 const OLLAMA_HOST = process.env.OLLAMA_HOST ?? "http://localhost:11434";
-const NPC_AI_MODEL = process.env.NPC_AI_MODEL ?? "llama3.2:latest";
+const NPC_AI_MODEL = process.env.NPC_AI_MODEL ?? "hf.co/DavidAU/GLM-4.7-Flash-Uncensored-Heretic-NEO-CODE-Imatrix-MAX-GGUF:IQ2_M";
 const NPC_AI_TIMEOUT_MS_RAW = Number(process.env.NPC_AI_TIMEOUT_MS ?? 120_000);
 const NPC_AI_TIMEOUT_MS = Number.isFinite(NPC_AI_TIMEOUT_MS_RAW) ? NPC_AI_TIMEOUT_MS_RAW : 120_000;
+const NPC_MEMORY_NUM_CTX_RAW = Number(process.env.NPC_MEMORY_NUM_CTX ?? 8_192);
+const NPC_MEMORY_NUM_CTX = Number.isFinite(NPC_MEMORY_NUM_CTX_RAW) && NPC_MEMORY_NUM_CTX_RAW > 0
+    ? Math.floor(NPC_MEMORY_NUM_CTX_RAW)
+    : 8_192;
 const NPC_AI_KEEP_ALIVE = "30m";
 
 function safe_string(v: unknown): string {
@@ -105,23 +110,18 @@ function mark_event_summarized(npc_obj: Record<string, unknown>, event_id: strin
 async function consolidate_entries_if_needed(npc: { id: string; name: string; personality: any }, entries: string[]): Promise<string[]> {
     if (entries.length <= NPC_MEMORY_JOURNAL_CONSOLIDATE_THRESHOLD) return entries;
 
-    const system = `You are roleplaying as an NPC. Consolidate your memory journal while staying in-character.`;
-    const user = [
-        `NPC: ${npc.name} (id=${npc.id})`,
-        "Personality:",
-        JSON.stringify(npc.personality ?? {}, null, 2),
-        "",
-        `You have ${entries.length} journal entries. Consolidate them into at most ${NPC_MEMORY_JOURNAL_CONSOLIDATE_TARGET} entries.`,
-        "Each entry should be 1-4 sentences and preserve the NPC's voice.",
-        "Return ONLY valid JSON: an array of strings.",
-        "",
-        "Journal entries:",
-        entries.map((e, i) => `Entry ${i + 1}: ${e}`).join("\n\n"),
-    ].join("\n");
+    const prompt_pair = build_memory_journal_prompts({
+        npc_id: npc.id,
+        npc_name: npc.name,
+        npc_personality: npc.personality ?? {},
+        mode: "consolidate",
+        entries,
+        consolidate_target: NPC_MEMORY_JOURNAL_CONSOLIDATE_TARGET,
+    });
 
     const messages: OllamaMessage[] = [
-        { role: "system", content: system },
-        { role: "user", content: user },
+        { role: "system", content: prompt_pair.system },
+        { role: "user", content: prompt_pair.user },
     ];
 
     const res = await ollama_chat({
@@ -130,7 +130,7 @@ async function consolidate_entries_if_needed(npc: { id: string; name: string; pe
         messages,
         keep_alive: NPC_AI_KEEP_ALIVE,
         timeout_ms: NPC_AI_TIMEOUT_MS,
-        options: { temperature: 0.5 },
+        options: { temperature: 0.5, num_ctx: NPC_MEMORY_NUM_CTX },
     });
 
     const raw = res.content.trim();
@@ -183,28 +183,20 @@ export async function append_non_timed_conversation_journal(
     const npc_name = safe_string(npc_obj.name) || npc_id;
     const npc_personality = (npc_obj.personality as any) ?? {};
 
-    const system = `You are roleplaying as an NPC in a fantasy world. Stay in character. Write what YOU would remember.`;
-    const user = [
-        `NPC: ${npc_name} (id=${npc_id})`,
-        `Location: ${context.region_label ?? "(unknown region)"}`,
-        context.conversation_id ? `Conversation: ${context.conversation_id}` : "",
-        "",
-        "NPC personality:",
-        JSON.stringify(npc_personality ?? {}, null, 2),
-        "",
-        "Transcript:",
-        context.transcript,
-        "",
-        "In 2-5 sentences, what would you remember from this interaction?",
-        "Do NOT use the word 'player'. Refer to other participants as 'actor.<id>' or 'npc.<id>' if they appear in the transcript.",
-        "Use first-person 'I' only for yourself. Use third-person for everyone else.",
-        "Return plain text only.",
-    ].filter(Boolean).join("\n");
+    const prompt_pair = build_memory_journal_prompts({
+        npc_id,
+        npc_name,
+        npc_personality,
+        mode: "conversation",
+        region_label: context.region_label ?? "(unknown region)",
+        conversation_id: context.conversation_id,
+        transcript: context.transcript,
+    });
 
     try {
         const messages: OllamaMessage[] = [
-            { role: "system", content: system },
-            { role: "user", content: user },
+            { role: "system", content: prompt_pair.system },
+            { role: "user", content: prompt_pair.user },
         ];
         const res = await ollama_chat({
             host: OLLAMA_HOST,
@@ -212,7 +204,7 @@ export async function append_non_timed_conversation_journal(
             messages,
             keep_alive: NPC_AI_KEEP_ALIVE,
             timeout_ms: NPC_AI_TIMEOUT_MS,
-            options: { temperature: 0.6 },
+            options: { temperature: 0.6, num_ctx: NPC_MEMORY_NUM_CTX },
         });
         const summary = res.content.trim();
         if (!summary) return;
@@ -254,30 +246,22 @@ export async function append_timed_event_memory_journal(
     const region_label = get_region_label(slot, event.region);
     const events_text = format_recent_events_for_prompt(slot, event.event_id, `npc.${npc_id}`);
 
-    const system = `You are roleplaying as an NPC in a fantasy world. Stay in character. Write what YOU would remember.`;
-    const user = [
-        `NPC: ${npc_name} (id=${npc_id})`,
-        `Event: ${event.event_type} (${event.event_id})`,
-        `Location: ${region_label}`,
-        `Participants: ${event.participants.join(", ")}`,
-        "",
-        "NPC personality:",
-        JSON.stringify(npc_personality ?? {}, null, 2),
-        "",
-        "Observed events (" + "* = involves you" + "):",
+    const prompt_pair = build_memory_journal_prompts({
+        npc_id,
+        npc_name,
+        npc_personality,
+        mode: "timed_event",
+        region_label,
+        event_id: event.event_id,
+        event_type: event.event_type,
+        participants: event.participants,
         events_text,
-        "",
-        "In 2-5 sentences, what would you remember from this interaction?",
-        "Focus on motives, threats, promises, impressions, and anything personally relevant to you.",
-        "Do NOT use the word 'player'. Refer to other participants as 'actor.<id>' or 'npc.<id>' when possible.",
-        "Use first-person 'I' only for yourself. Use third-person for everyone else.",
-        "Return plain text only.",
-    ].join("\n");
+    });
 
     try {
         const messages: OllamaMessage[] = [
-            { role: "system", content: system },
-            { role: "user", content: user },
+            { role: "system", content: prompt_pair.system },
+            { role: "user", content: prompt_pair.user },
         ];
 
         const res = await ollama_chat({
@@ -286,7 +270,7 @@ export async function append_timed_event_memory_journal(
             messages,
             keep_alive: NPC_AI_KEEP_ALIVE,
             timeout_ms: NPC_AI_TIMEOUT_MS,
-            options: { temperature: 0.6 },
+            options: { temperature: 0.6, num_ctx: NPC_MEMORY_NUM_CTX },
         });
 
         const summary = res.content.trim();

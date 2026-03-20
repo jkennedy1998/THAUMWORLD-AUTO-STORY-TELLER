@@ -9,6 +9,7 @@ import { apply_level1_derived } from "../character_rules/derived.js";
 import { apply_prof_picks, make_empty_profs, random_prof_picks, random_stat_assignment, shuffle } from "../character_rules/creation.js";
 import { resolve_character_body_model_id } from "../shared/body_model.js";
 import { DEFAULT_CHARACTER_BODY_SLOT_REPRESENTATION } from "../shared/body_slot_representation.js";
+import { initialize_equipment_slots, normalize_body_slots } from "../types/body_slots.js";
 
 export type NpcLookupResult =
     | { ok: true; npc: Record<string, unknown>; path: string }
@@ -122,6 +123,11 @@ export function load_npc(slot: number, npc_id: string): NpcLookupResult {
                 dirty = true;
             }
         }
+        const normalized_body_slots = normalize_body_slots((npc as any).body_slots);
+        if (JSON.stringify(normalized_body_slots) !== JSON.stringify((npc as any).body_slots ?? {})) {
+            (npc as any).body_slots = normalized_body_slots;
+            dirty = true;
+        }
         if (typeof (npc as any).weight !== 'number' || !Number.isFinite((npc as any).weight)) {
             (npc as any).weight = derive_default_npc_weight(npc);
             dirty = true;
@@ -166,6 +172,7 @@ export function ensure_npc_exists(slot: number, npc_id: string): NpcLookupResult
 export function save_npc(slot: number, npc_id: string, npc: Record<string, unknown>): string {
     ensure_npc_dir(slot);
     const npc_path = get_npc_path(slot, npc_id);
+    (npc as any).body_slots = normalize_body_slots((npc as any).body_slots);
     fs.writeFileSync(npc_path, JSON.stringify(npc, null, 2), "utf-8");
     return npc_path;
 }
@@ -210,17 +217,7 @@ function pick_kind_id(): string | null {
 }
 
 function apply_body_slots(npc: Record<string, unknown>, parts: Array<{ slot: string; critical?: boolean }> | undefined): void {
-    if (!parts || parts.length === 0) return;
-    const slots: Record<string, unknown> = {};
-    for (const part of parts) {
-        // Normalize to lowercase_snake_case to match actor storage
-        const name = String(part.slot ?? "")
-            .toLowerCase()
-            .replace(/\s+/g, '_');
-        if (!name) continue;
-        slots[name] = { name, critical: Boolean(part.critical) };
-    }
-    npc.body_slots = slots;
+    npc.body_slots = initialize_equipment_slots(parts) as Record<string, unknown>;
 }
 
 function apply_background(npc: Record<string, unknown>, background: string | undefined): void {

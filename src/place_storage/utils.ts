@@ -11,7 +11,8 @@ import type {
   PlaceActor,
   TilePosition,
   PlaceTravelResult,
-  EntityLocation
+  EntityLocation,
+  PlaceConnector
 } from "../types/place.js";
 import { load_place, save_place } from "./store.js";
 
@@ -93,6 +94,11 @@ export function are_places_connected(
   from_place: Place,
   to_place_id: string
 ): boolean {
+  if (Array.isArray(from_place.place_connectors) && from_place.place_connectors.length > 0) {
+    return from_place.place_connectors.some((connector) =>
+      connector.place_a_id === to_place_id || connector.place_b_id === to_place_id
+    );
+  }
   return from_place.connections.some(conn => conn.target_place_id === to_place_id);
 }
 
@@ -104,6 +110,40 @@ export function get_place_connection(
   to_place_id: string
 ) {
   return from_place.connections.find(conn => conn.target_place_id === to_place_id);
+}
+
+export function get_place_connector(
+  from_place: Place,
+  to_place_id: string
+): PlaceConnector | undefined {
+  return (Array.isArray(from_place.place_connectors) ? from_place.place_connectors : []).find((connector) =>
+    connector.place_a_id === to_place_id || connector.place_b_id === to_place_id
+  );
+}
+
+export function get_connector_target_place_id(place: Place, connector: PlaceConnector): string | null {
+  if (connector.place_a_id === place.id) return connector.place_b_id;
+  if (connector.place_b_id === place.id) return connector.place_a_id;
+  return null;
+}
+
+export function get_connector_entry_anchor(place: Place, connector: PlaceConnector): TilePosition {
+  const center_from_volume = (v: any): TilePosition => {
+    const ox = Math.floor(Number(v?.origin?.x ?? 0)) || 0;
+    const oy = Math.floor(Number(v?.origin?.y ?? 0)) || 0;
+    const oz = Math.floor(Number(v?.origin?.z ?? 0)) || 0;
+    const sx = Math.max(1, Math.floor(Number(v?.size?.x ?? 1)) || 1);
+    const sy = Math.max(1, Math.floor(Number(v?.size?.y ?? 1)) || 1);
+    const sz = Math.max(1, Math.floor(Number(v?.size?.z ?? 1)) || 1);
+    return {
+      x: ox + Math.floor((sx - 1) / 2),
+      y: oy + Math.floor((sy - 1) / 2),
+      z: oz + Math.floor((sz - 1) / 2),
+    };
+  };
+  if (connector.place_a_id === place.id) return center_from_volume((connector as any).place_a_entry_volume);
+  if (connector.place_b_id === place.id) return center_from_volume((connector as any).place_b_entry_volume);
+  return { ...place.tile_grid.default_entry };
 }
 
 /**
@@ -248,7 +288,8 @@ export async function move_entity_between_places(
   }
   
   // Get connection info
-  const connection = get_place_connection(from_place, to_place_id)!;
+  const connection = get_place_connection(from_place, to_place_id);
+  const connector = get_place_connector(from_place, to_place_id);
   
   // Determine if NPC or actor
   const is_npc = entity_ref.startsWith("npc.");
@@ -278,8 +319,8 @@ export async function move_entity_between_places(
     ok: true,
     place_id: to_place_id,
     tile_position: entry_position,
-    travel_description: connection.description,
-    time_seconds: connection.travel_time_seconds
+    travel_description: connection?.description ?? "Travel through connector",
+    time_seconds: connection?.travel_time_seconds ?? 0
   };
 }
 
@@ -312,6 +353,11 @@ export function parse_place_id(place_id: string): {
  * Get all connected place IDs from a place
  */
 export function get_connected_places(place: Place): string[] {
+  if (Array.isArray(place.place_connectors) && place.place_connectors.length > 0) {
+    return place.place_connectors
+      .map((connector) => get_connector_target_place_id(place, connector))
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
+  }
   return place.connections.map(conn => conn.target_place_id);
 }
 

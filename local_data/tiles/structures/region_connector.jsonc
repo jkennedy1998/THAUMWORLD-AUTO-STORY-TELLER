@@ -1,0 +1,34 @@
+{
+  "id": "region_connector",
+  "name": "Region Connector",
+  "description": "A connector cell marking a region travel boundary.",
+  "weight": 0,
+  "display_char": "#",
+  "display_color": "#d6d0b8",
+  "tags": [
+    {
+      "name": "STRUCTURE",
+      "mag": 1,
+      "meta": [],
+      "scope": ["TILE"]
+    },
+    {
+      "name": "CONNECTOR",
+      "mag": 1,
+      "meta": [],
+      "scope": ["TILE"]
+    },
+    {
+      "name": "REGION_CONNECTOR",
+      "mag": 1,
+      "meta": [],
+      "scope": ["TILE"]
+    },
+    {
+      "name": "OCCUPIES",
+      "mag": 1,
+      "meta": [],
+      "scope": ["TILE"]
+    }
+  ]
+}

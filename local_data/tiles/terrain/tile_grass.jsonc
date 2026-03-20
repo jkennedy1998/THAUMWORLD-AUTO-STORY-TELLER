@@ -1,0 +1,31 @@
+{
+  "id": "tile_grass",
+  "name": "Grass",
+  "description": "A decorative patch of grass with shifting green bands.",
+  "weight": 0,
+  "display_char": "v",
+  "display_color": "#8c9d4f",
+  "render_shader": {
+    "shader_id": "perlin_noise",
+    "params": {
+      "scale_x": 0.22,
+      "scale_y": 0.22,
+      "scale_z": 0.12,
+      "z_offset": 3,
+      "animated": false,
+      "seed": 17
+    },
+    "output": {
+      "char": "v",
+      "color_bands": ["gray_green", "medium_green", "vivid_green"]
+    }
+  },
+  "tags": [
+    {
+      "name": "FLORA",
+      "mag": 1,
+      "meta": [],
+      "scope": ["TILE"]
+    }
+  ]
+}

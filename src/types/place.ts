@@ -5,18 +5,19 @@
  * regions into smaller interactive areas with tile-level positioning.
  */
 
-import type { BodySlots } from "./body_slots.js";
+import type { EquipmentSlots } from "./body_slots.js";
 import type { Container } from "./container.js";
 import type { InlineItem } from "./inline_item.js";
 import type { TagInstance } from "../tag_system/registry.js";
 import type { BodyModelVoxel } from "../shared/body_model.js";
+import type { EntityRenderProfile, RenderShaderBindings } from "../render_shaders/definitions.js";
 
 /**
  * A place represents a bounded area within a region where interactions are local.
  * Examples: Tavern common room, shop interior, town square, church nave
  */
 export type Place = {
-  schema_version: 1;
+  schema_version: 1 | 2;
   id: string;                    // Unique ID: "eden_crossroads_tavern_common"
   name: string;                  // Display name: "The Singing Sword - Common Room"
   region_id: string;             // Parent region: "eden_crossroads"
@@ -30,8 +31,13 @@ export type Place = {
   
   // Position in the world
   coordinates: PlaceCoordinates;
+
+  // Region-scene placement.
+  // `region_bounds` describes only the editable interior volume of the place.
+  // The visible `_` border / connector layer around the place is outside these bounds.
+  region_bounds?: PlaceRegionBounds;
   
-  // Tile grid dimensions and entry point
+  // Tile grid dimensions and entry point for the editable interior volume.
   tile_grid: TileGrid;
 
   // Tile data:
@@ -41,7 +47,11 @@ export type Place = {
   tiles_z0?: PlaceTiles;
   tiles?: PlaceTiles;
   
-  // Connections to other places (graph structure)
+  // Canonical connector topology.
+  place_connectors?: PlaceConnector[];
+  region_connectors?: RegionConnector[];
+
+  // Deprecated legacy graph structure. Keep temporarily during connector rewrite.
   connections: PlaceConnection[];
   
   // Environmental properties
@@ -103,6 +113,7 @@ export type PlaceStructureInstance = {
   display_color?: string;
   container_glyphs?: { closed: string; open: string };
   tags?: TagInstance[];
+  render_shader?: RenderShaderBindings;
   // Resolved physical body model (voxel footprint). When absent, treated as 1 voxel at origin.
   body_model?: { anchor_part?: string; physical: BodyModelVoxel[] };
   __derived_runtime?: boolean;
@@ -111,15 +122,10 @@ export type PlaceStructureInstance = {
 // Tile definition reference - references local_data/tiles/{category}/{kind}.jsonc
 export type PlaceTileKind = string;
 
-export type PlaceDoorMeta = {
-  target_place_id: string;
-  direction: string;
-};
-
 export type PlaceTile = {
   kind: PlaceTileKind;  // References tile definition ID (e.g., "tile_stone_brick", "chest")
-  
-  // Door metadata (only present if tile has DOOR tag)
+
+  // Deprecated legacy door metadata. Keep temporarily during connector rewrite.
   door?: PlaceDoorMeta;
 
   // Tag deltas (remove+add) applied on top of tile definition tags.
@@ -127,6 +133,7 @@ export type PlaceTile = {
   tag_add?: TagInstance[];
   tag_remove?: Array<{ key: string; mag: number }>;
   tags?: TagInstance[];
+  render_shader?: RenderShaderBindings;
 
   // Inline container-like storage for tile contents (e.g., harvestables, planters).
   // Items may carry grid_x/grid_y fields (same as container-items) for organization.
@@ -140,9 +147,9 @@ export type PlaceTile = {
     max_weight?: number;
   };
 
-  // Time-skip support (bulk tick processing).
-  // Last GameTime.total_minutes when this tile was processed.
-  last_tick_processed?: number;
+  // Breath-driven time support.
+  // Last place breath index when this tile's breath-reactive tags were processed.
+  last_breath_processed?: number;
 
   // Multitile grouping (architecture; not implemented yet).
   multitile_id?: string;
@@ -172,20 +179,87 @@ export type PlaceCoordinates = {
   elevation: number;             // 0=surface, +1=above, -1=below
 };
 
+export type PlaceDoorMeta = {
+  target_place_id: string;
+  direction: string;
+};
+
+export type PlaceRegionBounds = {
+  // Region-scene coordinates for the place's editable interior volume.
+  // This excludes the shared border / connector layer around the place.
+  origin: {
+    x: number;
+    y: number;
+    z: number;
+  };
+  size: {
+    x: number;
+    y: number;
+    z: number;
+  };
+};
+
+export type PlaceConnectorDirection = "x+" | "x-" | "y+" | "y-" | "z+" | "z-";
+
+export type PlaceConnectorTile = {
+  x: number;
+  y: number;
+  z: number;
+};
+
+export type PlaceConnectorVolume = {
+  origin: PlaceConnectorTile;
+  size: {
+    x: number;
+    y: number;
+    z: number;
+  };
+};
+
+export type PlaceConnector = {
+  id: string;
+  kind: "place_connector";
+  place_a_id: string;
+  place_b_id: string;
+  direction_from_a: PlaceConnectorDirection;
+  // Shared connector aperture in border space.
+  border_volume: PlaceConnectorVolume;
+  // Border-adjacent interior aperture on each side.
+  place_a_entry_volume: PlaceConnectorVolume;
+  place_b_entry_volume: PlaceConnectorVolume;
+};
+
+export type RegionConnector = {
+  id: string;
+  kind: "region_connector";
+  // Connector position in border space relative to this place.
+  border_tile: PlaceConnectorTile;
+  // Border-adjacent interior anchor inside this place.
+  place_anchor: PlaceConnectorTile;
+  target_region_coords: {
+    world_x: number;
+    world_y: number;
+    region_x: number;
+    region_y: number;
+  };
+  target_place_id?: string;
+};
+
 /**
  * Tile grid dimensions within a place
  */
 export type TileGrid = {
-  width: number;                 // Tiles across (typical: 20-40)
-  height: number;                // Tiles deep (typical: 20-40)
-  default_entry: {               // Where arrivals appear
+  width: number;                 // Interior tiles across (typical: 20-40)
+  height: number;                // Interior tiles deep (typical: 20-40)
+  default_entry: {               // Interior arrival anchor
     x: number;
     y: number;
   };
 };
 
 /**
- * Connection to another place
+ * Deprecated legacy connection to another place.
+ * Kept temporarily during connector rewrite for compile compatibility.
  */
 export type PlaceConnection = {
   target_place_id: string;       // Target place ID
@@ -249,7 +323,8 @@ export type PlaceNPC = {
   status: "present" | "moving" | "busy" | "sleeping";
   activity: string;              // "sitting at the bar", "whittling by the fire"
   tags?: Array<{ name: string; mag: number; meta: string[] }>;  // Optional tags for visual effects
-  body_slots?: BodySlots;        // Equipment slots for inventory interactions
+  entity_render?: EntityRenderProfile;
+  body_slots?: EquipmentSlots;        // Equipment slots for inventory interactions
 };
 
 /**
@@ -279,6 +354,7 @@ export type PlaceActor = {
   weight?: number;
   status: "present" | "moving" | "busy";
   tags?: Array<{ name: string; mag: number; meta: string[] }>;  // Optional tags for visual effects
+  entity_render?: EntityRenderProfile;
 };
 
 /**

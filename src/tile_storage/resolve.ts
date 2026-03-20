@@ -4,6 +4,7 @@ import { apply_tag_deltas, type TagRemoveOp } from "../tag_system/tag_deltas.js"
 import { load_master_tile } from "./store.js";
 import type { TileDefinition } from "./types.js";
 import { debug_warn } from "../shared/debug.js";
+import type { RenderShaderBindings } from "../render_shaders/definitions.js";
 
 const warned_legacy_tile_kinds = new Set<string>();
 
@@ -14,6 +15,7 @@ export type ResolvedTile = {
   display_char: string;
   display_color: string;
   container_glyphs: TileDefinition["container_glyphs"] | null;
+  render_shader: RenderShaderBindings | null;
 };
 
 function normalize_remove_ops(rm: PlaceTile["tag_remove"]): TagRemoveOp[] {
@@ -66,6 +68,7 @@ export function resolve_place_tile(kind: string, tile: PlaceTile): ResolvedTile 
     display_char: String(def.display_char ?? "?").charAt(0) || "?",
     display_color: String(def.display_color ?? "#888888"),
     container_glyphs: def.container_glyphs ?? null,
+    render_shader: def.render_shader ?? null,
   };
 }
 

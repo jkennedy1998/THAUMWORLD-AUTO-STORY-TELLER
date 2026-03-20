@@ -1,5 +1,6 @@
 import type { Rgb, StyleName } from "../mono_ui/types.js";
 import type { TagInstance } from "../tag_system/registry.js";
+import type { EntityRenderProfile, RenderShaderBindings } from "./definitions.js";
 
 export type RenderKind = 'tile' | 'item' | 'pile' | 'actor' | 'npc' | 'particle' | 'ui';
 
@@ -21,6 +22,7 @@ export type RenderPayloadBase = {
     tags?: TagInstance[];
     // Optional base style inputs supplied by the compositor/module.
     base_fg?: Rgb;
+    render_shader?: RenderShaderBindings;
 };
 
 export type ItemPayload = RenderPayloadBase & {
@@ -42,6 +44,7 @@ export type PilePayload = RenderPayloadBase & {
 export type TilePayload = RenderPayloadBase & {
     kind: 'tile';
     tile_kind?: 'ground_items' | 'simple';
+    def_id?: string;
     pile_count?: number;
     single_qty?: number;
     // For simple tiles (walls/doors/ui grid lines).
@@ -53,6 +56,12 @@ export type TilePayload = RenderPayloadBase & {
 export type UiPayload = RenderPayloadBase & {
     kind: 'ui';
     ui_kind: 'slot' | 'widget';
+};
+
+export type EntityPayload = RenderPayloadBase & {
+    kind: 'actor' | 'npc';
+    kind_id?: string;
+    entity_render?: EntityRenderProfile;
 };
 
 export type UiSlotPayload = UiPayload & {
@@ -67,7 +76,7 @@ export type UiWidgetPayload = UiPayload & {
     widget_state?: 'idle' | 'active' | 'disabled';
 };
 
-export type RenderPayload = ItemPayload | PilePayload | TilePayload | UiPayload | RenderPayloadBase;
+export type RenderPayload = ItemPayload | PilePayload | TilePayload | EntityPayload | UiPayload | RenderPayloadBase;
 
 // NOTE: RenderPayloadBase.kind is a wide union, so it cannot act as a discriminator.
 // Use this discriminated form when adding non-item kinds.
@@ -75,9 +84,10 @@ export type DiscriminatedRenderPayload =
     | ItemPayload
     | PilePayload
     | TilePayload
+    | EntityPayload
     | UiSlotPayload
     | UiWidgetPayload
-    | (RenderPayloadBase & { kind: Exclude<RenderKind, 'item' | 'pile' | 'tile'> });
+    | (RenderPayloadBase & { kind: Exclude<RenderKind, 'item' | 'pile' | 'tile' | 'actor' | 'npc'> });
 
 export type RenderUiState = {
     hovered?: boolean;
@@ -95,7 +105,14 @@ export type RenderContext = {
     // Grid-space coordinates in the chosen space.
     x?: number;
     y?: number;
+    screen_x?: number;
+    screen_y?: number;
+    place_x?: number;
+    place_y?: number;
+    world_x?: number;
+    world_y?: number;
     time_ms?: number;
+    breath_index?: number;
     ui?: RenderUiState;
 
     // Optional additional context for multi-voxel rendering.
@@ -104,6 +121,8 @@ export type RenderContext = {
     body_part?: string;
     facing?: string;
     world_z?: number;
+    focus_world_z?: number;
+    place_base_z?: number;
 };
 
 export type RenderBlendMode = 'normal' | 'add' | 'multiply';

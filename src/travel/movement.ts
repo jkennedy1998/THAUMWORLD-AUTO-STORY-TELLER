@@ -11,16 +11,17 @@
 import type { Place, TilePosition } from "../types/place.js";
 import { find_path, is_tile_walkable } from "../shared/pathfinding.js";
 import type { GameTime } from "../time_system/tracker.js";
-import { load_place, save_place, get_default_place_for_region } from "../place_storage/store.js";
+import { load_place, save_place, get_default_place_for_region, list_places_in_region } from "../place_storage/store.js";
 import { 
   get_tile_distance, 
   is_valid_tile_position,
-  get_connected_places,
+  get_place_connection,
   add_actor_to_place,
   remove_actor_from_place,
   add_npc_to_place,
   remove_npc_from_place
 } from "../place_storage/utils.js";
+import { get_places_face_adjacency } from "../shared/place_adjacency.js";
 import { get_npc_location, set_npc_location, update_npc_location } from "../npc_storage/location.js";
 import { load_actor, save_actor } from "../actor_storage/store.js";
 import { load_npc, save_npc } from "../npc_storage/store.js";
@@ -29,74 +30,6 @@ import { move_entity_in_index } from "../place_storage/entity_index.js";
 import { end_conversations_involving_entity } from "../npc_ai/witness_handler.js";
 import { MetaTagProcessor } from "../tag_system/meta_processor.js";
 import { debug_log } from "../shared/debug.js";
-
-/**
- * Calculate the entry position (door position) based on direction
- * Returns the tile position where someone should appear when entering from that direction
- * 
- * Direction indicates where the door leads TO from the current place.
- * When entering a new place, we need to appear at the door that leads BACK.
- * 
- * Examples:
- * - If direction is "north", the door is on the north edge (y = height - 1)
- * - If direction is "south", the door is on the south edge (y = 0)
- * - If direction is "east", the door is on the east edge (x = width - 1)
- * - If direction is "west", the door is on the west edge (x = 0)
- */
-function calculate_door_position(place: Place, direction: string): TilePosition {
-  const dir = direction.toLowerCase();
-  const width = place.tile_grid.width;
-  const height = place.tile_grid.height;
-  
-  // Calculate door position based on direction
-  // The door is positioned on the edge corresponding to the direction
-  if (dir.includes("north") || dir.includes("up") || dir.includes("forward")) {
-    // North door is on the top edge (max y index)
-    return {
-      x: Math.floor(width / 2),
-      y: height - 1
-    };
-  } else if (dir.includes("south") || dir.includes("down") || dir.includes("backward")) {
-    // South door is on the bottom edge (y = 0)
-    return {
-      x: Math.floor(width / 2),
-      y: 0
-    };
-  } else if (dir.includes("east") || dir.includes("right")) {
-    // East door is on the right edge (max x index)
-    return {
-      x: width - 1,
-      y: Math.floor(height / 2)
-    };
-  } else if (dir.includes("west") || dir.includes("left")) {
-    // West door is on the left edge (x = 0)
-    return {
-      x: 0,
-      y: Math.floor(height / 2)
-    };
-  } else {
-    // Default: use the place's default entry
-    return place.tile_grid.default_entry;
-  }
-}
-
-function calculate_interior_entry_position(place: Place, direction: string): TilePosition {
-  const dir = direction.toLowerCase();
-  const width = place.tile_grid.width;
-  const height = place.tile_grid.height;
-
-  if (dir.includes("north") || dir.includes("up") || dir.includes("forward")) {
-    return { x: Math.floor(width / 2), y: Math.max(1, height - 2) };
-  } else if (dir.includes("south") || dir.includes("down") || dir.includes("backward")) {
-    return { x: Math.floor(width / 2), y: Math.min(Math.max(0, height - 1), 1) };
-  } else if (dir.includes("east") || dir.includes("right")) {
-    return { x: Math.max(1, width - 2), y: Math.floor(height / 2) };
-  } else if (dir.includes("west") || dir.includes("left")) {
-    return { x: Math.min(Math.max(0, width - 1), 1), y: Math.floor(height / 2) };
-  }
-
-  return place.tile_grid.default_entry;
-}
 
 function find_valid_entry_tile(place: Place, entity_ref: string, preferred: TilePosition): TilePosition {
   const width = Math.max(1, Math.floor(Number(place.tile_grid.width) || 1));
@@ -139,6 +72,32 @@ function find_valid_entry_tile(place: Place, entity_ref: string, preferred: Tile
   }
 
   return start;
+}
+
+function is_same_region_adjacent(slot: number, from_place: Place, to_place_id: string): boolean {
+  const region_id = String(from_place.region_id ?? "").trim();
+  if (!region_id) return false;
+  const target_res = load_place(slot, to_place_id);
+  if (!target_res.ok) return false;
+  const target_place = target_res.place;
+  if (String(target_place.region_id ?? "") !== region_id) return false;
+  return !!get_places_face_adjacency(from_place, target_place);
+}
+
+function get_adjacent_place_ids(slot: number, from_place: Place): string[] {
+  const region_id = String(from_place.region_id ?? "").trim();
+  if (!region_id) return [];
+  const listed = list_places_in_region(slot, region_id);
+  if (!listed.ok) return [];
+  const ids: string[] = [];
+  for (const candidate_id of listed.places) {
+    const pid = String(candidate_id ?? "").trim();
+    if (!pid || pid === from_place.id) continue;
+    const target_res = load_place(slot, pid);
+    if (!target_res.ok) continue;
+    if (get_places_face_adjacency(from_place, target_res.place)) ids.push(pid);
+  }
+  return ids;
 }
 
 // Movement speeds (tiles per minute)
@@ -341,8 +300,9 @@ export async function travel_between_places(
   const from_place = from_place_result.place;
   
   // Check if places are connected
-  const connection = from_place.connections.find(c => c.target_place_id === target_place_id);
-  if (!connection) {
+  const connection = get_place_connection(from_place, target_place_id);
+  const adjacent = is_same_region_adjacent(slot, from_place, target_place_id);
+  if (!connection && !adjacent) {
     return { 
       ok: false, 
       error: "places_not_connected",
@@ -358,21 +318,13 @@ export async function travel_between_places(
   }
   const to_place = to_place_result.place;
   
-  // Find the return connection (from target place back to source place)
-  // This tells us which direction we came from, so we know which door to place the entity at
-  const return_connection = to_place.connections.find(c => c.target_place_id === from_place_id);
-  
-  // Calculate entry position based on the return connection's direction
-  // If no return connection found, fall back to default entry
-  const preferred_entry = return_connection
-    ? calculate_interior_entry_position(to_place, return_connection.direction)
-    : to_place.tile_grid.default_entry;
+  const preferred_entry = to_place.tile_grid.default_entry;
   const entry_tile = find_valid_entry_tile(to_place, entity_ref, preferred_entry);
   debug_log('MOVE_VEL_TEST', 'travel destination placement resolved', {
     entity_ref,
     from_place_id,
     to_place_id: target_place_id,
-    via_direction: return_connection?.direction ?? null,
+    via_direction: connection?.direction ?? (adjacent ? 'seam' : null),
     preferred_entry,
     entry_tile,
   });
@@ -424,8 +376,8 @@ export async function travel_between_places(
     ok: true,
     from_place_id,
     to_place_id: target_place_id,
-    travel_time_seconds: connection.travel_time_seconds,
-    travel_description: connection.description
+    travel_time_seconds: connection?.travel_time_seconds ?? 0,
+    travel_description: connection?.description ?? (adjacent ? "Walk across seam" : "Travel")
   };
 }
 
@@ -522,13 +474,14 @@ export function can_travel_between_places(
     return { possible: false, reason: "from_place_not_found" };
   }
   
-  const connection = from_place.place.connections.find(c => c.target_place_id === to_place_id);
-  
-  if (!connection) {
+  const connection = get_place_connection(from_place.place, to_place_id);
+  const adjacent = is_same_region_adjacent(slot, from_place.place, to_place_id);
+
+  if (!connection && !adjacent) {
     return { possible: false, reason: "no_connection" };
   }
   
-  if (connection.requires_key) {
+  if (connection?.requires_key) {
     return { possible: false, reason: "requires_key" };
   }
   
@@ -548,6 +501,13 @@ export function get_available_destinations(
     return [];
   }
   
+  const adjacent_destinations = get_adjacent_place_ids(slot, place_result.place).map((adjacent_place_id) => ({
+    place_id: adjacent_place_id,
+    direction: 'seam',
+    description: 'Walk across seam'
+  }));
+  if (adjacent_destinations.length > 0) return adjacent_destinations;
+
   return place_result.place.connections.map(c => ({
     place_id: c.target_place_id,
     direction: c.direction,

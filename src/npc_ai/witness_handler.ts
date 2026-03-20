@@ -29,6 +29,7 @@ import {
 import { load_npc } from "../npc_storage/store.js";
 import { get_npc_tile_position } from "../npc_storage/location.js";
 import { add_memory } from "../npc_storage/memory.js";
+import { get_relationship_status } from "../npc_storage/memory.js";
 
 import {
   get_movement_state,
@@ -518,6 +519,21 @@ function handle_bystander_reaction(
   
   // Check if this NPC was directly addressed
   const is_direct_address = event.targetRef === observer_ref;
+
+  const relationship = get_relationship_status(data_slot, observer_ref, event.actorRef);
+  const relationship_fondness = (() => {
+    const base = relationship.status === "friendly"
+      ? 4
+      : relationship.status === "hostile"
+        ? -4
+        : relationship.status === "neutral"
+          ? 1
+          : 0;
+    const memory_bonus = Math.min(3, Math.floor((relationship.memory_count || 0) / 3));
+    if (base < 0) return base - memory_bonus;
+    if (base > 0) return base + memory_bonus;
+    return memory_bonus > 0 ? 1 : 0;
+  })();
   
   // Calculate social response with place context
   const result = calculateSocialResponse(
@@ -526,7 +542,7 @@ function handle_bystander_reaction(
     volume as VolumeLevel,
     event.distance,
     event.actorRef,
-    0, // relationship_fondness
+    relationship_fondness,
     current_place_id,
     is_direct_address
   );

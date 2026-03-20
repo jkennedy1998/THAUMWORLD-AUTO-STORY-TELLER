@@ -4,7 +4,25 @@ Date: 2026-03-16
 
 ## Status
 
-- [ ] planned
+- [~] in progress
+
+## Progress Notes
+
+- Completed: connector-era place schema in `src/types/place.ts`
+- Completed: connector tile defs added; legacy `door` tile def removed
+- Completed: legacy door stamping removed from `src/place_storage/tiles.ts`
+- Completed: connector-aware travel/interaction fallback added in `src/travel/movement.ts`, `src/place_storage/utils.ts`, and `src/mono_ui/modules/place_module.ts`
+- Completed: backend create/delete topology endpoints added in `src/interface_program/main.ts`
+- Completed: connector-era bootstrapping started for `eden_crossroads_square` and `eden_crossroads_tavern`
+- Completed: scene-topology loading added to backend/frontend state for selected place plus direct neighbors
+- In progress: static multi-place rendering started in `src/mono_ui/modules/place_module.ts`; hover/inspect/painter targeting now resolves neighbor place ids, but movement/drop behavior still stays selected-place-centric where needed
+- In progress: `place_create` and `place_delete` tool wiring started in `src/canvas_app/app_state.ts`; resize tool is still placeholder-only
+- In progress: topology preview rendering started in `src/mono_ui/modules/place_module.ts` for border create/delete/resize targeting
+- Completed: connected place bounds now share a single border layer; shared border connector glyph rendering has started in `src/place_storage/store.ts` and `src/mono_ui/modules/place_module.ts`
+- In progress: connector interaction is moving from interior-anchor assumptions to true shared-border cell targeting in `src/mono_ui/modules/place_module.ts`
+- In progress: painter focus now switches to the clicked place and selected-place highlighting has started in `src/canvas_app/app_state.ts` and `src/mono_ui/modules/place_module.ts`
+- In progress: same-scene painter focus is being decoupled from full place unload/reload, with added scene-selection debug logging in `src/canvas_app/app_state.ts`
+- In progress: border rendering still needs to move from a local 2D border ring to shared world-space 3D border edges with connector overlay semantics
 
 ## Intent
 
@@ -202,6 +220,20 @@ The border model should be treated as explicit and canonical, not implied.
 - If the user clicks a border cell to create a place, that border cell is the shared connector location for both places.
 - That connector cell is not inside either place interior; travel logic must account for the fact that the connector exists in border space rather than in an interior tile.
 
+### Border rendering semantics
+
+Border rendering should be world-space and shared, not duplicated independently per place.
+
+- If two connected places meet on a shared border, the border occupies the same world-space coordinates for both places.
+- The left border of one place and the right border of its connected neighbor should resolve to the same rendered border cells, not two adjacent border strips.
+- Border rendering should represent the full 3D bounds box of a place, not just a single 2D perimeter ring on one z level.
+- The visible border should cover all 12 straight box edges of the place bounds when projected through visible z planes.
+- Border glyphs should remain `_` for now.
+- Standard border edge color should use indexed `deep_gray`.
+- Border corner color should use indexed `orange`.
+- `place_connector` should continue to render as exactly one xyz cell and should appear as a single overlay on top of the shared border cell.
+- Border rendering should be derived from world-space place bounds and shared-edge deduplication, not from per-place local border loops alone.
+
 ## Legacy Removal Policy
 
 This plan intentionally removes legacy door behavior instead of supporting migration compatibility.
@@ -245,6 +277,8 @@ Any existing seeded/sample place generation should be rewritten directly to use 
 
 ### Phase 1: Canonical schema rewrite
 
+- [x] completed
+
 #### Goal
 
 Replace door-centric place connection types with connector-centric place and region data.
@@ -276,6 +310,8 @@ Replace door-centric place connection types with connector-centric place and reg
 
 ### Phase 2: Tile databank connector definitions
 
+- [x] completed
+
 #### Goal
 
 Make connectors first-class tile definitions and remove the legacy door tile.
@@ -299,6 +335,8 @@ Make connectors first-class tile definitions and remove the legacy door tile.
 - Door tile definition no longer exists.
 
 ### Phase 3: Backend place topology primitives
+
+- [~] in progress
 
 #### Goal
 
@@ -342,6 +380,8 @@ Deletion emptiness should follow the current place concept of traversable blank 
 
 ### Phase 4: Replace door-derived tiles with connector-derived tiles
 
+- [x] completed for legacy door removal; connector border rendering still pending
+
 #### Goal
 
 Remove legacy door stamping and derive visible connector tiles from canonical connector data.
@@ -364,6 +404,8 @@ Remove legacy door stamping and derive visible connector tiles from canonical co
 - No door tile generation remains.
 
 ### Phase 5: Region-scene loading in frontend app state
+
+- [~] in progress
 
 #### Goal
 
@@ -394,6 +436,8 @@ Move from single-place-only scene assumptions to a selected-place plus rendered-
 
 ### Phase 6: Multi-place rendering and hit-testing
 
+- [~] in progress
+
 #### Goal
 
 Render multiple region-local places in one scene and route interactions to the correct place.
@@ -406,12 +450,18 @@ Render multiple region-local places in one scene and route interactions to the c
 - Minimize renderer churn by extending the current place module rather than creating a second renderer.
 - Treat `z` and elevation the same way as `x` and `y` for global relative positioning.
 - Keep camera focus centered on the camera target; place positioning is responsible for preserving correct relative layout between places.
+- Replace per-place local border-ring rendering with world-space border edge rendering derived from `region_bounds`.
+- Deduplicate shared border cells so two adjacent connected places render one shared border line rather than two neighboring border strips.
+- Render full 3D box-edge borders across visible z planes, not only the base z perimeter.
+- Render border edges with `_` in indexed `deep_gray` and border corners with `_` in indexed `orange`.
+- Keep `place_connector` rendering as a single xyz overlay cell on the shared border.
 
 #### Reuse Notes
 
 - Reuse the existing place module, DOM layer stack, viewport math, and painter-mode interaction branch.
 - Reuse current hit-testing and scene interaction entry points where possible, adding place-id resolution instead of replacing the module shell.
 - Do not reintroduce the standalone ASCII painter canvas as a second renderer for place scenes.
+- Reuse existing `region_bounds` placement data as the source of world-space border geometry; do not invent a second border map format.
 
 #### Success Criteria
 
@@ -420,6 +470,8 @@ Render multiple region-local places in one scene and route interactions to the c
 - Painter interactions can target border/shared-connector positions correctly.
 
 ### Phase 7: Same-region connector travel rewrite
+
+- [~] in progress
 
 #### Goal
 
@@ -448,6 +500,8 @@ Replace door-based place travel with connector-based same-region movement.
 
 ### Phase 8: Region connector travel integration
 
+- [ ] pending
+
 #### Goal
 
 Introduce region-level travel points without overhauling cross-region loading.
@@ -469,6 +523,8 @@ Introduce region-level travel points without overhauling cross-region loading.
 - Same-region and cross-region connector concepts are clearly separated.
 
 ### Phase 9: Place painter place tools
+
+- [~] in progress
 
 #### Goal
 
@@ -501,6 +557,8 @@ Extend `place_painter` from tile/item authoring to place topology authoring.
 
 ### Phase 10: Place create tool
 
+- [~] in progress
+
 #### Goal
 
 Allow users to create a connected neighboring place from a border tile.
@@ -528,6 +586,8 @@ Allow users to create a connected neighboring place from a border tile.
 - Overlapping or invalid placements are rejected before commit.
 
 ### Phase 11: Place resize tool
+
+- [ ] pending
 
 #### Goal
 
@@ -558,6 +618,8 @@ Allow users to resize the selected place by dragging its bounds.
 
 ### Phase 12: Place delete tool
 
+- [~] in progress
+
 #### Goal
 
 Allow users to delete an empty connected place from the surviving neighboring place.
@@ -587,6 +649,8 @@ Deletion rejections should be surfaced in the system info window module.
 
 ### Phase 13: Move-tool connector relocation
 
+- [ ] pending
+
 #### Goal
 
 Allow shared `place_connector` position to be moved along a valid shared border.
@@ -608,6 +672,8 @@ Allow shared `place_connector` position to be moved along a valid shared border.
 - Illegal connector moves are rejected.
 
 ### Phase 14: Seed/sample content rewrite
+
+- [~] in progress
 
 #### Goal
 

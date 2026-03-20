@@ -7,7 +7,7 @@ import { find_kind } from "../kind_storage/store.js";
 import { find_language } from "../language_storage/store.js";
 import { apply_level1_derived } from "../character_rules/derived.js";
 import { apply_prof_picks, make_empty_profs } from "../character_rules/creation.js";
-import { initialize_body_slots, type BodySlots } from "../types/body_slots.js";
+import { initialize_equipment_slots, normalize_body_slots } from "../types/body_slots.js";
 import { sanitize_actor_for_save } from "../shared/defs_deltas_sanitize.js";
 import { resolve_character_body_model_id } from "../shared/body_model.js";
 import { DEFAULT_CHARACTER_BODY_SLOT_REPRESENTATION } from "../shared/body_slot_representation.js";
@@ -140,6 +140,11 @@ export function load_actor(slot: number, actor_id: string): ActorLookupResult {
                 dirty = true;
             }
         }
+        const normalized_body_slots = normalize_body_slots((actor as any).body_slots);
+        if (JSON.stringify(normalized_body_slots) !== JSON.stringify((actor as any).body_slots ?? {})) {
+            (actor as any).body_slots = normalized_body_slots;
+            dirty = true;
+        }
         if (typeof (actor as any).weight !== 'number' || !Number.isFinite((actor as any).weight)) {
             (actor as any).weight = derive_default_actor_weight(actor);
             dirty = true;
@@ -184,6 +189,7 @@ export function ensure_actor_exists(slot: number, actor_id: string): ActorLookup
 export function save_actor(slot: number, actor_id: string, actor: Record<string, unknown>): string {
     ensure_actor_dir(slot);
     const actor_path = get_actor_path(slot, actor_id);
+    (actor as any).body_slots = normalize_body_slots((actor as any).body_slots);
 
     // defs+deltas migration: strip derived/legacy inline item fields before persisting.
     sanitize_actor_for_save(actor as any);
@@ -351,8 +357,7 @@ export function find_actors(slot: number, query: ActorSearchQuery): ActorSearchH
 // Apply body slots from kind.parts to actor
 // Initializes with empty slots (item_instance_id: null)
 function apply_body_slots(actor: Record<string, unknown>, parts: Array<{ slot: string; critical?: boolean }> | undefined): void {
-    const slots = initialize_body_slots(parts);
-    actor.body_slots = slots as Record<string, unknown>;
+    actor.body_slots = initialize_equipment_slots(parts) as Record<string, unknown>;
 }
 
 function apply_background(actor: Record<string, unknown>, background: string | undefined): void {

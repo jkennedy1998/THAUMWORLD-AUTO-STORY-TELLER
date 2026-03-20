@@ -113,13 +113,6 @@ export const SLOT_HIGHLIGHT_COLORS = {
   garb: { r: 79, g: 157, b: 53 },     // vivid_green (index 24)
 };
 
-/**
- * Check if a body slot has equipment slot format (armor/garb/tool)
- */
-function is_equipment_format(slot: any): slot is EquipmentSlot {
-  return slot && ("armor" in slot || "garb" in slot || "tool" in slot);
-}
-
 function extract_item_id(maybe_item: any): string | null {
   if (!maybe_item) return null;
   if (typeof maybe_item === "string") return maybe_item;
@@ -139,7 +132,7 @@ function extract_item_id(maybe_item: any): string | null {
  */
 export function resolve_body_slot(
   slot_name: string,
-  slot_data: any,
+  slot_data: EquipmentSlot,
   config: SlotLayoutConfig = DEFAULT_SLOT_LAYOUT
 ): ResolvedSlot[] {
   const slots: ResolvedSlot[] = [];
@@ -148,31 +141,12 @@ export function resolve_body_slot(
   // Determine which slot types this body part supports
   const supports_tool = ["hand_left", "hand_right"].includes(slot_name);
   
-  if (is_equipment_format(slot_data)) {
-    // NEW FORMAT: EquipmentSlot with armor/garb/tool
-    
-    // 1. TOOL slot (hands only)
-    if (supports_tool) {
-      slots.push({
-        body_slot: slot_name,
-        slot_type: "tool",
-        garb_index: null,
-        item_id: extract_item_id(slot_data.tool),
-        is_placeholder: false,
-        rel_x: current_col * (config.cell_width + config.gap),
-        rel_y: 0,
-        screen_x: 0,
-        screen_y: 0,
-      });
-      current_col++;
-    }
-    
-    // 2. ARMOR slot
+  if (supports_tool) {
     slots.push({
       body_slot: slot_name,
-      slot_type: "armor",
+      slot_type: "tool",
       garb_index: null,
-      item_id: extract_item_id(slot_data.armor),
+      item_id: extract_item_id(slot_data.tool),
       is_placeholder: false,
       rel_x: current_col * (config.cell_width + config.gap),
       rel_y: 0,
@@ -180,101 +154,50 @@ export function resolve_body_slot(
       screen_y: 0,
     });
     current_col++;
-    
-    // 3. GARB slots (equipped items first, no gaps)
-    const garb_items: any[] = slot_data.garb || [];
-    for (let i = 0; i < garb_items.length; i++) {
-      const item_id = extract_item_id(garb_items[i]);
-      if (!item_id) continue;
-      slots.push({
-        body_slot: slot_name,
-        slot_type: "garb",
-        garb_index: i,
-        item_id: item_id,
-        is_placeholder: false,
-        rel_x: current_col * (config.cell_width + config.gap),
-        rel_y: 0,
-        screen_x: 0,
-        screen_y: 0,
-      });
-      current_col++;
-    }
-    
-    // 4. Empty garb slot placeholder (for drag targeting)
-    slots.push({
-      body_slot: slot_name,
-      slot_type: "garb",
-      garb_index: garb_items.length,
-      item_id: null,
-      is_placeholder: true,
-      rel_x: current_col * (config.cell_width + config.gap),
-      rel_y: 0,
-      screen_x: 0,
-      screen_y: 0,
-    });
-    
-  } else {
-    // OLD FORMAT: Legacy BodySlot with item_instance_id
-    // Map to appropriate slot for backward compatibility
-    const item_id = slot_data?.item_instance_id || null;
-    
-    // For hands, put legacy items in TOOL slot only (not both tool and armor)
-    if (supports_tool) {
-      slots.push({
-        body_slot: slot_name,
-        slot_type: "tool",
-        garb_index: null,
-        item_id: item_id,
-        is_placeholder: false,
-        rel_x: current_col * (config.cell_width + config.gap),
-        rel_y: 0,
-        screen_x: 0,
-        screen_y: 0,
-      });
-      current_col++;
-      
-      // Armor slot for hands (empty in legacy format)
-      slots.push({
-        body_slot: slot_name,
-        slot_type: "armor",
-        garb_index: null,
-        item_id: null,  // Empty - don't duplicate the tool item
-        is_placeholder: false,
-        rel_x: current_col * (config.cell_width + config.gap),
-        rel_y: 0,
-        screen_x: 0,
-        screen_y: 0,
-      });
-      current_col++;
-    } else {
-      // For non-hands, put legacy items in ARMOR slot
-      slots.push({
-        body_slot: slot_name,
-        slot_type: "armor",
-        garb_index: null,
-        item_id: item_id,
-        is_placeholder: false,
-        rel_x: current_col * (config.cell_width + config.gap),
-        rel_y: 0,
-        screen_x: 0,
-        screen_y: 0,
-      });
-      current_col++;
-    }
-    
-    // One empty garb slot for legacy format
-    slots.push({
-      body_slot: slot_name,
-      slot_type: "garb",
-      garb_index: 0,
-      item_id: null,
-      is_placeholder: true,
-      rel_x: current_col * (config.cell_width + config.gap),
-      rel_y: 0,
-      screen_x: 0,
-      screen_y: 0,
-    });
   }
+
+  slots.push({
+    body_slot: slot_name,
+    slot_type: "armor",
+    garb_index: null,
+    item_id: extract_item_id(slot_data.armor),
+    is_placeholder: false,
+    rel_x: current_col * (config.cell_width + config.gap),
+    rel_y: 0,
+    screen_x: 0,
+    screen_y: 0,
+  });
+  current_col++;
+
+  const garb_items: any[] = Array.isArray(slot_data.garb) ? slot_data.garb : [];
+  for (let i = 0; i < garb_items.length; i++) {
+    const item_id = extract_item_id(garb_items[i]);
+    if (!item_id) continue;
+    slots.push({
+      body_slot: slot_name,
+      slot_type: "garb",
+      garb_index: i,
+      item_id,
+      is_placeholder: false,
+      rel_x: current_col * (config.cell_width + config.gap),
+      rel_y: 0,
+      screen_x: 0,
+      screen_y: 0,
+    });
+    current_col++;
+  }
+
+  slots.push({
+    body_slot: slot_name,
+    slot_type: "garb",
+    garb_index: garb_items.length,
+    item_id: null,
+    is_placeholder: true,
+    rel_x: current_col * (config.cell_width + config.gap),
+    rel_y: 0,
+    screen_x: 0,
+    screen_y: 0,
+  });
   
   return slots;
 }
@@ -287,7 +210,7 @@ export function resolve_body_slot(
  * @returns Map of slot name to resolved slots
  */
 export function resolve_all_body_slots(
-  body_slots: Record<string, any>,
+  body_slots: EquipmentSlots,
   config: SlotLayoutConfig = DEFAULT_SLOT_LAYOUT
 ): Map<string, ResolvedSlot[]> {
   const resolved = new Map<string, ResolvedSlot[]>();
