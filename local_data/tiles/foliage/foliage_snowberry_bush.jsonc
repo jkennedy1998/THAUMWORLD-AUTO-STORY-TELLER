@@ -16,7 +16,7 @@
     }
   },
   "container_capacity": {
-    "max_slots": 1
+    "max_slots": 5
   },
   "tags": [
     {

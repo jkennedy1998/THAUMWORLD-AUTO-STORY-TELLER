@@ -41,8 +41,8 @@ export type Place = {
   tile_grid: TileGrid;
 
   // Tile data:
-  // - tiles_z0: ground/support layer (blocks beneath actors)
-  // - tiles: default layer (z=1 in current 3dification test room)
+  // - tiles_z0: authored layer at base z - 1
+  // - tiles: authored layer at base z
   // y=0 is the bottom row; cells are indexed as cells[y][x].
   tiles_z0?: PlaceTiles;
   tiles?: PlaceTiles;
@@ -125,9 +125,6 @@ export type PlaceTileKind = string;
 export type PlaceTile = {
   kind: PlaceTileKind;  // References tile definition ID (e.g., "tile_stone_brick", "chest")
 
-  // Deprecated legacy door metadata. Keep temporarily during connector rewrite.
-  door?: PlaceDoorMeta;
-
   // Tag deltas (remove+add) applied on top of tile definition tags.
   // Effective tags are resolved server-side; `tags` is treated as derived/runtime-only.
   tag_add?: TagInstance[];
@@ -177,11 +174,6 @@ export type PlaceCoordinates = {
     y: number;
   };
   elevation: number;             // 0=surface, +1=above, -1=below
-};
-
-export type PlaceDoorMeta = {
-  target_place_id: string;
-  direction: string;
 };
 
 export type PlaceRegionBounds = {

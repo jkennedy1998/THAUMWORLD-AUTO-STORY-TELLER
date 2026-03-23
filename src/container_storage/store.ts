@@ -11,6 +11,7 @@ import type { ContainerPosition, Container, ContainerContentEntry } from "../typ
 import { load_place, save_place } from "../place_storage/store.js";
 import { load_actor, save_actor } from "../actor_storage/store.js";
 import { load_master_item } from "../item_storage/store.js";
+import { can_stack_items_with_spoil_policy, merge_item_stack_into_target } from "../item_storage/stacking.js";
 import { 
     check_tag_compatibility, 
     has_equipment_tags,
@@ -806,33 +807,7 @@ function can_stack_items(
     const def_a = source_entry.definition;
     const def_b = dest_entry.definition;
     
-    // Must be same def_id
-    if (item_a.def_id !== item_b.def_id) {
-        return false;
-    }
-    
-    // Must be stackable
-    if (!def_a.stackable || !def_b.stackable) {
-        return false;
-    }
-    
-    // Check max stack size
-    const max_stack = def_a.max_stack_size || 1;
-    const combined_qty = (item_a.qty || 1) + (item_b.qty || 1);
-    if (combined_qty > max_stack) {
-        return false;
-    }
-    
-    // Check tags match (simple comparison)
-    const tags_a = item_a.tags || [];
-    const tags_b = item_b.tags || [];
-    if (tags_a.length !== tags_b.length) {
-        return false;
-    }
-    
-    // TODO: Deep tag comparison if needed
-    
-    return true;
+    return can_stack_items_with_spoil_policy(item_a, def_a, item_b, def_b);
 }
 
 /**
@@ -1423,11 +1398,10 @@ export function transfer_item_between_containers(
         const source_entry = source_contents[item_index]!;
         const target_entry = dest_contents[target_stack_index]!;
         const combined_qty = (source_entry.instance.qty || 1) + (target_entry.instance.qty || 1);
-        
+
         debug_log("transfer", `Stacking ${source_entry.instance.def_id}: ${source_entry.instance.qty || 1} + ${target_entry.instance.qty || 1} = ${combined_qty}`);
-        
-        // Update target quantity
-        target_entry.instance.qty = combined_qty;
+
+        merge_item_stack_into_target(target_entry.instance, source_entry.instance);
         
         // Remove from source
         source_contents.splice(item_index, 1);
@@ -1502,7 +1476,7 @@ export function transfer_item_between_containers(
                 
                 if (combined_qty <= max_stack) {
                     // Merge quantities
-                    target_entry.instance.qty = combined_qty;
+                    merge_item_stack_into_target(target_entry.instance, source_entry.instance);
                     contents.splice(item_index, 1);
                     debug_log("transfer", "[UNIFIED-TRANSFER] STACKED: " + source_entry.instance.def_id + " onto item at (" + target_grid_x + "," + target_grid_y + "): qty=" + combined_qty);
                 } else {
@@ -1681,7 +1655,7 @@ export function transfer_item_between_containers(
                 const max_stack = target_occupied.definition.max_stack_size || 1;
                 
                 if (combined_qty <= max_stack) {
-                    target_occupied.instance.qty = combined_qty;
+                    merge_item_stack_into_target(target_occupied.instance, removed_entry.instance);
                     // Don't add removed_entry to dest_contents since we merged it
                     debug_log("transfer", "[UNIFIED-TRANSFER] Stacked items: total qty = " + combined_qty);
                     // Skip the push since we stacked

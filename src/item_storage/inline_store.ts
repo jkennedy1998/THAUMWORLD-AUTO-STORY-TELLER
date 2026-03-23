@@ -12,6 +12,7 @@ import type { InlineItem, InlineBodySlot } from "../types/inline_item.js";
 import { randomUUID } from "node:crypto";
 import { load_master_item } from "./store.js";
 import { resolve_inline_item, has_effective_tag } from "./resolve.js";
+import { can_stack_items_with_spoil_policy, merge_item_stack_into_target } from "./stacking.js";
 import { sanitize_actor_for_save } from "../shared/defs_deltas_sanitize.js";
 
 function read_jsonc(pathname: string): Record<string, unknown> {
@@ -460,6 +461,16 @@ export function add_item_to_container(
     // Initialize contents if needed
     if (!container_item.contents) {
         container_item.contents = [];
+    }
+
+    const item_resolved = resolve_inline_item(String(item.def_id ?? ''), item);
+    const stack_index = container_item.contents.findIndex((existing: InlineItem) => {
+        const existing_resolved = resolve_inline_item(String(existing?.def_id ?? ''), existing);
+        return can_stack_items_with_spoil_policy(existing, existing_resolved, item, item_resolved);
+    });
+    if (stack_index >= 0) {
+        merge_item_stack_into_target(container_item.contents[stack_index], item);
+        return { ok: true, item_path: `${container_path}.contents.${stack_index}` };
     }
     
     // Check capacity

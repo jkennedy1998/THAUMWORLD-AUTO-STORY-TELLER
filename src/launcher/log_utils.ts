@@ -123,26 +123,26 @@ export function getLatestLogPath(
   slot: number,
   mode: "game" | "painter"
 ): string | null {
-  const logDir = getLogDir(slot, mode);
-  const latestPath = path.join(logDir, "latest.log");
-
-  // Try to parse latest.log
-  const latest = parseLatestLog(latestPath);
-
-  if (latest && fs.existsSync(latest.currentLog)) {
-    return latest.currentLog;
+  const dates = listLogDates(slot, mode);
+  const dirsToCheck = [getLogDir(slot, mode), ...dates.map((date) => getLogDir(slot, mode, new Date(`${date}T00:00:00`)))];
+  const seen = new Set<string>();
+  for (const logDir of dirsToCheck) {
+    if (!logDir || seen.has(logDir)) continue;
+    seen.add(logDir);
+    const latestPath = path.join(logDir, "latest.log");
+    const latest = parseLatestLog(latestPath);
+    if (latest && fs.existsSync(latest.currentLog)) {
+      return latest.currentLog;
+    }
+    const fallback = findMostRecentSession(logDir);
+    if (fallback) {
+      console.log(
+        `[LogUtils] Stale latest.log detected, using fallback: ${path.basename(fallback)}`
+      );
+      return fallback;
+    }
   }
-
-  // Fallback: find most recent session file
-  const fallback = findMostRecentSession(logDir);
-
-  if (fallback) {
-    console.log(
-      `[LogUtils] Stale latest.log detected, using fallback: ${path.basename(fallback)}`
-    );
-  }
-
-  return fallback;
+  return null;
 }
 
 /**

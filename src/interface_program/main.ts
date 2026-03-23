@@ -35,7 +35,9 @@ import { list_master_items, load_item_def, load_master_item } from "../item_stor
 import { create_inline_item } from "../item_instances/store.js";
 import { get_all_tile_ids, load_master_tile } from "../tile_storage/store.js";
 import { resolve_inline_item, has_effective_tag } from "../item_storage/resolve.js";
+import { can_stack_items_with_spoil_policy, merge_item_stack_into_target } from "../item_storage/stacking.js";
 import { emitBridgeMessage } from "../shared/event_bridge_client.js";
+import { tile_layer_key_to_offset, tile_offset_to_layer_key } from "../shared/place_layers.js";
 import { resolve_place_tile } from "../tile_storage/resolve.js";
 import { build_physics_tag_flags, has_tag_name, resolve_structure_physics_tags, resolve_tile_physics_tags } from "../shared/physics_tags.js";
 import {
@@ -119,6 +121,7 @@ type PlaceBreathState = {
     tile_physics_cache: Array<{ x: number; y: number; z: number; layer_key: string; kind: string }>;
     tile_physics_cache_dirty: boolean;
     tile_updates: Array<{ place_id: string; kind: string; from: { x: number; y: number; z: number }; to: { x: number; y: number; z: number } }>;
+    item_refresh_intents: ItemMutationRefreshIntent[];
 };
 
 const BREATH_MS = 33; // Fast fixed tick; most entities won't step every breath.
@@ -1282,10 +1285,10 @@ function build_place_contents_for_legality(slot: number, place_id: string, place
         const snap_npcs: any[] = [];
         const w = Math.floor(Number(place_any?.tile_grid?.width ?? 0)) || 0;
         const h = Math.floor(Number(place_any?.tile_grid?.height ?? 0)) || 0;
-        const bx0 = w > 2 ? 1 : 0;
-        const bx1 = w > 2 ? (w - 2) : Math.max(0, w - 1);
-        const by0 = h > 2 ? 1 : 0;
-        const by1 = h > 2 ? (h - 2) : Math.max(0, h - 1);
+        const bx0 = 0;
+        const bx1 = Math.max(0, w - 1);
+        const by0 = 0;
+        const by1 = Math.max(0, h - 1);
 
         for (const npc_ref of entity_refs.npcs) {
             const npc_id = String(npc_ref).startsWith('npc.') ? String(npc_ref).slice('npc.'.length) : String(npc_ref);
@@ -1747,11 +1750,12 @@ function coalesce_movement_updates(updates: any[], visible_place_keys: Set<strin
     return [...ordered_visible, ...Array.from(last_by_key.values())];
 }
 
-function flush_place_breath_outputs(now: number, breath_ticks: Array<{ slot: number; place_id: string; breath_index: number }>, movement_updates: any[], tile_updates: any[]): void {
+function flush_place_breath_outputs(now: number, breath_ticks: Array<{ slot: number; place_id: string; breath_index: number }>, movement_updates: any[], tile_updates: any[], item_refresh_intents: ItemMutationRefreshIntent[]): void {
     const flush_started_ms = Date.now();
     let breath_emit_duration_ms = 0;
     let movement_emit_duration_ms = 0;
     let tile_emit_duration_ms = 0;
+    let item_refresh_emit_duration_ms = 0;
     if (breath_ticks.length > 0) {
         const emit_started_ms = Date.now();
         void emitBridgeMessage('PLACE_BREATH_TICK', {
@@ -1784,16 +1788,27 @@ function flush_place_breath_outputs(now: number, breath_ticks: Array<{ slot: num
         tile_emit_duration_ms = Math.max(0, Date.now() - emit_started_ms);
     }
 
+    if (item_refresh_intents.length > 0) {
+        const emit_started_ms = Date.now();
+        void emitBridgeMessage('ITEM_MUTATIONS_APPLIED', {
+            sent_at_ms: now,
+            intents: item_refresh_intents,
+        });
+        item_refresh_emit_duration_ms = Math.max(0, Date.now() - emit_started_ms);
+    }
+
     const flush_duration_ms = Math.max(0, Date.now() - flush_started_ms);
-    if (flush_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS || breath_emit_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS || movement_emit_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS || tile_emit_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS) {
+    if (flush_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS || breath_emit_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS || movement_emit_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS || tile_emit_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS || item_refresh_emit_duration_ms >= MOVE_PHASE_HOT_THRESHOLD_MS) {
         log_move_hotspot('place breath flush hotspot', {
             breath_ticks: breath_ticks.length,
             movement_updates: movement_updates.length,
             tile_updates: tile_updates.length,
+            item_refresh_intents: item_refresh_intents.length,
             flush_duration_ms,
             breath_emit_duration_ms,
             movement_emit_duration_ms,
             tile_emit_duration_ms,
+            item_refresh_emit_duration_ms,
         });
     }
 }
@@ -1818,7 +1833,7 @@ function maybe_run_immediate_visible_place_pulse(slot: number, place_id: string,
         has_goal: Array.from(move_ctl.values()).some((ctl) => ctl.slot === slot && ctl.place_id === place_id && !!ctl.goal),
         movement_updates: movement_updates.length,
     });
-    flush_place_breath_outputs(now, breath_ticks, movement_updates, state.tile_updates.splice(0));
+    flush_place_breath_outputs(now, breath_ticks, movement_updates, state.tile_updates.splice(0), state.item_refresh_intents.splice(0));
     if (state.place_dirty) {
         persist_place_breath_if_needed(state);
     }
@@ -2017,22 +2032,6 @@ function ensure_place_min_walk_dimensions(place_any: any, min_w = 5, min_h = 5):
     return true;
 }
 
-function tile_layer_key_to_offset(key: string): number | null {
-    if (key === 'tiles') return 0;
-    if (key === 'tiles_z0') return -1;
-    const m = /^tiles_z(-?\d+)$/.exec(String(key ?? ''));
-    if (!m) return null;
-    const offset = Math.floor(Number(m[1]));
-    return Number.isFinite(offset) ? offset : null;
-}
-
-function tile_offset_to_layer_key(offset: number): string {
-    const normalized = Math.floor(Number(offset) || 0);
-    if (normalized === 0) return 'tiles';
-    if (normalized === -1) return 'tiles_z0';
-    return `tiles_z${normalized}`;
-}
-
 function tile_layer_has_non_empty(layer: any): boolean {
     const rows = Array.isArray(layer?.cells) ? layer.cells : [];
     for (const row of rows) {
@@ -2061,6 +2060,51 @@ function resize_xy_layer_with_shift(layer: any, old_w: number, old_h: number, ne
     return { layer: { ...(layer ?? {}), width: new_w, height: new_h, cells: next_cells }, clipped_non_empty };
 }
 
+function normalize_place_storage_to_region_bounds(place_any: any): boolean {
+    const bounds = get_place_region_bounds(place_any as any);
+    const target_w = Math.max(1, Math.floor(Number(bounds.size?.x ?? place_any?.tile_grid?.width ?? 1)) || 1);
+    const target_h = Math.max(1, Math.floor(Number(bounds.size?.y ?? place_any?.tile_grid?.height ?? 1)) || 1);
+    const target_z = Math.max(1, Math.floor(Number(bounds.size?.z ?? 1)) || 1);
+    const current_w = Math.max(1, Math.floor(Number(place_any?.tile_grid?.width ?? place_any?.tiles?.width ?? target_w)) || target_w);
+    const current_h = Math.max(1, Math.floor(Number(place_any?.tile_grid?.height ?? place_any?.tiles?.height ?? target_h)) || target_h);
+    const layer_keys = Array.from(new Set(Object.keys(place_any ?? {}).filter((k) => k === 'tiles' || /^tiles_z-?\d+$/.test(k))));
+    let changed = false;
+
+    for (const key of layer_keys) {
+        const offset = tile_layer_key_to_offset(key);
+        if (offset === null) continue;
+        if (offset < 0 || offset >= target_z) {
+            if (tile_layer_has_non_empty((place_any as any)[key])) {
+                debug_warn('PLACE_PAINTER', 'dropping out-of-bounds layer during normalize', { place_id: String(place_any?.id ?? ''), key, bounds });
+            }
+            delete place_any[key];
+            changed = true;
+            continue;
+        }
+        const resized = resize_xy_layer_with_shift((place_any as any)[key], current_w, current_h, target_w, target_h, 0, 0);
+        if (resized.clipped_non_empty) {
+            debug_warn('PLACE_PAINTER', 'cropping out-of-bounds layer cells during normalize', { place_id: String(place_any?.id ?? ''), key, bounds });
+        }
+        const layer = resized.layer;
+        const prev = (place_any as any)[key];
+        if (prev?.width !== layer.width || prev?.height !== layer.height || resized.clipped_non_empty) changed = true;
+        (place_any as any)[key] = layer;
+    }
+
+    if (!place_any.tile_grid || typeof place_any.tile_grid !== 'object') place_any.tile_grid = {};
+    if (place_any.tile_grid.width !== target_w || place_any.tile_grid.height !== target_h) {
+        place_any.tile_grid.width = target_w;
+        place_any.tile_grid.height = target_h;
+        changed = true;
+    }
+    if (!place_any.tiles || !Array.isArray(place_any.tiles.cells) || place_any.tiles.width !== target_w || place_any.tiles.height !== target_h) {
+        const resized = resize_xy_layer_with_shift(place_any.tiles, current_w, current_h, target_w, target_h, 0, 0);
+        place_any.tiles = resized.layer;
+        changed = true;
+    }
+    return changed;
+}
+
 function voxel_within_bounds(x: number, y: number, z: number, size: { x: number; y: number; z: number }): boolean {
     return x >= 0 && x < size.x && y >= 0 && y < size.y && z >= 0 && z < size.z;
 }
@@ -2074,6 +2118,7 @@ function resize_place_bounds_and_sync(
     const place_res = load_place(slot, place_id);
     if (!place_res.ok) return { ok: false, error: 'place_not_found' };
     const place_any: any = place_res.place as any;
+    const normalized = normalize_place_storage_to_region_bounds(place_any);
     const current_bounds = get_place_region_bounds(place_any as any);
     const next_bounds = {
         origin: {
@@ -2233,7 +2278,7 @@ function resize_place_bounds_and_sync(
     place_any.coordinates = { ...(place_any.coordinates ?? {}), elevation: next_bounds.origin.z };
     ensure_place_tiles(place_any);
     save_place_and_sync_active(slot, place_any, { merge_active_runtime: false });
-    debug_log('PLACE_PAINTER', 'seam place resize success', { slot, place_id, face, current_bounds, next_bounds, shift_x, shift_y, shift_z, destructive_crop });
+    debug_log('PLACE_PAINTER', 'seam place resize success', { slot, place_id, face, current_bounds, next_bounds, shift_x, shift_y, shift_z, destructive_crop, normalized });
     return { ok: true, place: place_any };
 }
 
@@ -2367,7 +2412,7 @@ function get_effective_place_connectors_for_current_place(state: PlaceBreathStat
     return local;
 }
 
-function resolve_connector_transition_for_step(state: PlaceBreathState, entity_ref: string, entity_type: 'actor' | 'npc', to: { x: number; y: number; z: number }): {
+function resolve_connector_transition_for_step(state: PlaceBreathState, entity_ref: string, entity_type: 'actor' | 'npc', from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }): {
     to_place_id: string;
     connector_id: string;
     entry_tile_hint_local: { x: number; y: number; z: number };
@@ -2378,7 +2423,12 @@ function resolve_connector_transition_for_step(state: PlaceBreathState, entity_r
     const current_place_id = String(state.place_id ?? '');
     const place_base_z = get_place_base_z(place_any);
     const region_bounds = get_place_region_bounds(place_any);
-    const target_region_voxel = {
+    const attempted_local = {
+        x: Math.floor(Number(to.x) || 0),
+        y: Math.floor(Number(to.y) || 0),
+        z: Math.floor(Number(to.z) || place_base_z),
+    };
+    const attempted_region_voxel = {
         x: Math.floor(Number(region_bounds.origin.x ?? 0)) + (Math.floor(Number(to.x)) || 0),
         y: Math.floor(Number(region_bounds.origin.y ?? 0)) + (Math.floor(Number(to.y)) || 0),
         z: Math.floor(Number(to.z) || place_base_z),
@@ -2394,7 +2444,24 @@ function resolve_connector_transition_for_step(state: PlaceBreathState, entity_r
         if (!loaded.ok) continue;
         candidate_places.push(loaded.place as any);
     }
-    const target_place = find_place_containing_region_voxel(candidate_places as any, target_region_voxel, current_place_id);
+    let target_place: any | null = null;
+    let target_local: { x: number; y: number; z: number } | null = null;
+    const adjacency_scan = candidate_places.map((candidate: any) => {
+        const adjacency = get_places_face_adjacency(place_any, candidate as any);
+        const candidate_bounds = get_place_region_bounds(candidate as any);
+        const contains_target = find_place_containing_region_voxel([candidate] as any, attempted_region_voxel, current_place_id) != null;
+        if (!target_place && contains_target) {
+            target_place = candidate;
+            target_local = region_voxel_to_local_voxel(candidate as any, attempted_region_voxel);
+        }
+        return {
+            place_id: String(candidate?.id ?? ''),
+            adjacency: adjacency?.direction_from_a ?? null,
+            contains_target,
+            target_local: contains_target ? region_voxel_to_local_voxel(candidate as any, attempted_region_voxel) : null,
+            bounds: candidate_bounds,
+        };
+    });
     if (!target_place) {
         const seam_scan_log_key = `${state.slot}:${current_place_id}:${entity_ref}`;
         const now_ms = Date.now();
@@ -2405,34 +2472,42 @@ function resolve_connector_transition_for_step(state: PlaceBreathState, entity_r
                 entity_ref,
                 entity_type,
                 place_id: current_place_id,
+                current_region_bounds: region_bounds,
+                from,
                 to,
-                target_region_voxel,
+                attempted_local,
+                attempted_region_voxel,
                 candidate_place_ids: candidate_places.map((p: any) => String(p?.id ?? '')),
+                adjacency_scan,
                 breath_index: Math.floor(Number(state.breath_index ?? 0)) || 0,
             });
             connector_scan_log_last_ms.set(seam_scan_log_key, now_ms);
         }
         return null;
     }
-    const target_local = region_voxel_to_local_voxel(target_place as any, target_region_voxel);
     debug_log('MOVE_UNIFY_TEST', 'seam transition scan hit', {
         slot: state.slot,
         entity_ref,
         entity_type,
         place_id: current_place_id,
+        from,
         to,
         place_base_z,
+        current_region_bounds: region_bounds,
         to_place_id: String((target_place as any)?.id ?? ''),
-        target_region_voxel,
+        attempted_local,
+        attempted_region_voxel,
+        target_region_voxel: attempted_region_voxel,
         entry_tile_hint_local: target_local,
+        adjacency_scan,
         breath_index: Math.floor(Number(state.breath_index ?? 0)) || 0,
     });
     return {
         to_place_id: String((target_place as any)?.id ?? ''),
         connector_id: `seam:${current_place_id}->${String((target_place as any)?.id ?? '')}`,
-        entry_tile_hint_local: target_local,
+        entry_tile_hint_local: target_local ?? region_voxel_to_local_voxel(target_place as any, attempted_region_voxel),
         target_entry_volume_local: {
-            origin: { ...target_local },
+            origin: { ...(target_local ?? region_voxel_to_local_voxel(target_place as any, attempted_region_voxel)) },
             size: { x: 1, y: 1, z: 1 },
         },
         triggered_by: 'entry',
@@ -2534,7 +2609,7 @@ function apply_pending_connector_transition(state: PlaceBreathState, pending: Pe
     const to_place_res = load_place(state.slot, pending.to_place_id);
     if (!to_place_res.ok) return { ok: false, error: 'target_place_not_found' };
     const to_place_any: any = to_place_res.place;
-    const expanded_target = ensure_place_min_walk_dimensions(to_place_any, 5, 5);
+    const expanded_target = false;
 
     build_place_contents_for_legality(state.slot, pending.to_place_id, to_place_any);
     const to_place_base_z = get_place_base_z(to_place_any);
@@ -2648,7 +2723,7 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
     const place_any: any = state.place_base;
     if (!place_any) return profile;
 
-    const expanded_for_walk = ensure_place_min_walk_dimensions(place_any, 5, 5);
+    const expanded_for_walk = false;
     if (expanded_for_walk) {
         save_place_and_sync_active(state.slot, place_any);
         debug_log('MOVE_UNIFY_TEST', 'expanded place min walk dimensions', {
@@ -2913,6 +2988,10 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
             );
             if (blocked_connector_attempt) {
                 const connector_transition = resolve_connector_transition_for_step(state, entity_ref, entity_type, {
+                    x: cur_x,
+                    y: cur_y,
+                    z: cur_z,
+                }, {
                     x: blocked_connector_attempt.target.x,
                     y: blocked_connector_attempt.target.y,
                     z: blocked_connector_attempt.target.z,
@@ -2950,6 +3029,18 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
                     move_ctl.set(key, ctl);
                     return;
                 }
+                debug_log('MOVE_UNIFY_TEST', 'seam transition not resolved from blocked step', {
+                    slot: state.slot,
+                    entity_ref,
+                    entity_type,
+                    from_place_id: state.place_id,
+                    from_tile: { x: cur_x, y: cur_y, z: cur_z },
+                    blocked_target: blocked_connector_attempt.target,
+                    blocked_reason: blocked_connector_attempt.reason,
+                    blocked_detail: blocked_connector_attempt.detail ?? null,
+                    current_region_bounds: get_place_region_bounds(place_any as any),
+                    breath_index: place_bi,
+                });
             }
             if (runtime.velocity.vx !== 0) runtime.velocity.vx = 0;
             if (runtime.velocity.vy !== 0) runtime.velocity.vy = 0;
@@ -3166,48 +3257,16 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
         move_ctl.set(key, ctl);
         profile.stepped_count += 1;
 
-        const connector_transition = resolve_connector_transition_for_step(state, entity_ref, entity_type, {
+        movement_updates.push({
+            slot: state.slot,
+            place_id: state.place_id,
+            entity_ref,
             x: target.x,
             y: target.y,
             z: target.z,
+            breath_index: place_bi,
+            seq: ctl.move_seq,
         });
-        if (connector_transition) {
-            pending_connector_transitions.push({
-                entity_ref,
-                entity_type,
-                from_place_id: state.place_id,
-                to_place_id: connector_transition.to_place_id,
-                connector_id: connector_transition.connector_id,
-                from_tile: { x: cur_x, y: cur_y, z: cur_z },
-                at_tile: { x: target.x, y: target.y, z: target.z },
-                entry_tile_hint_local: connector_transition.entry_tile_hint_local,
-                target_entry_volume_local: connector_transition.target_entry_volume_local,
-                step_seq: ctl.move_seq,
-                triggered_by: connector_transition.triggered_by,
-            });
-            debug_log('MOVE_UNIFY_TEST', 'connector transition queued from movement step', {
-                slot: state.slot,
-                entity_ref,
-                entity_type,
-                connector_id: connector_transition.connector_id,
-                from_place_id: state.place_id,
-                to_place_id: connector_transition.to_place_id,
-                at: { x: target.x, y: target.y, z: target.z },
-                triggered_by: connector_transition.triggered_by,
-                breath_index: place_bi,
-            });
-        } else {
-            movement_updates.push({
-                slot: state.slot,
-                place_id: state.place_id,
-                entity_ref,
-                x: target.x,
-                y: target.y,
-                z: target.z,
-                breath_index: place_bi,
-                seq: ctl.move_seq,
-            });
-        }
     };
 
     const entity_loop_started_ms = Date.now();
@@ -4064,7 +4123,9 @@ function create_connected_place_and_sync(
 
     const source_place: any = source_res.place as any;
     const dry_run = !!opts?.dry_run;
-    const initialize_connected_place_layers = (place_any: any, w: number, h: number) => {
+    const source_bounds = get_place_region_bounds(source_place as any);
+    const source_depth = Math.max(1, Math.floor(Number(source_bounds.size?.z ?? 1)) || 1);
+    const initialize_connected_place_layers = (place_any: any, w: number, h: number, depth: number) => {
         const mk = (fill: any) => {
             const cells: any[] = [];
             for (let y = 0; y < h; y += 1) {
@@ -4074,14 +4135,19 @@ function create_connected_place_and_sync(
             }
             return { width: w, height: h, cells };
         };
+        for (const key of Object.keys(place_any ?? {})) {
+            if (key === 'tiles' || /^tiles_z-?\d+$/.test(key)) delete place_any[key];
+        }
         place_any.tiles = mk(null);
-        place_any.tiles_z0 = mk(() => create_authored_place_tile('tile_stone_brick'));
-        place_any.tiles_z1 = mk(null);
-        place_any.tiles_z2 = mk(null);
+        for (let local_z = 1; local_z < depth; local_z += 1) {
+            const key = local_z === 1 ? 'tiles_z1' : `tiles_z${local_z}`;
+            place_any[key] = mk(null);
+        }
     };
     const sx = Math.max(3, Math.floor(Number(size?.x ?? 3) || 3));
     const sy = Math.max(3, Math.floor(Number(size?.y ?? 3) || 3));
-    const sz = Math.max(1, Math.floor(Number(size?.z ?? 3) || 3));
+    const requested_sz = Math.floor(Number(size?.z));
+    const sz = Math.max(1, Number.isFinite(requested_sz) ? requested_sz : source_depth);
     const proposed_bounds = compute_connected_place_bounds(source_place, border_tile, direction, { x: sx, y: sy, z: sz });
     debug_log('PLACE_PAINTER', 'seam place create proposed bounds', {
         slot,
@@ -4146,7 +4212,7 @@ function create_connected_place_and_sync(
     };
     new_place.region_bounds = proposed_bounds;
     new_place.region_connectors = Array.isArray(new_place.region_connectors) ? new_place.region_connectors : [];
-    initialize_connected_place_layers(new_place, sx, sy);
+    initialize_connected_place_layers(new_place, sx, sy, sz);
 
     if (!dry_run) {
         save_place_and_sync_active(slot, new_place, { merge_active_runtime: false });
@@ -4495,6 +4561,7 @@ function touch_place_breath(slot: number, place_any: any, opts?: { realtime_visi
             tile_physics_cache: [],
             tile_physics_cache_dirty: true,
             tile_updates: [],
+            item_refresh_intents: [],
         };
         place_breath.set(key, state);
 
@@ -4734,10 +4801,7 @@ function get_tile_layer_key_for_world_z(place_any: any, wz: number): string | nu
     const base_z = get_place_base_z(place_any);
     const offset = Math.floor(Number(wz) - Number(base_z));
     if (!Number.isFinite(offset)) return null;
-    if (offset === 0) return 'tiles';
-    if (offset === -1) return 'tiles_z0';
-    if (offset === 1) return 'tiles_z1';
-    return `tiles_z${offset}`;
+    return tile_offset_to_layer_key(offset);
 }
 
 function set_place_tile_at_world_z(place_any: any, tx: number, ty: number, wz: number, tile: any | null): boolean {
@@ -5141,12 +5205,22 @@ function mutate_place_painter_move_and_sync(
     const tz = Math.floor(Number(target.z));
     if (!Number.isFinite(tx) || !Number.isFinite(ty) || !Number.isFinite(tz)) return { ok: false, error: 'invalid_target' };
     if (tx < 0 || ty < 0 || tx >= width || ty >= height) return { ok: false, error: 'target_out_of_bounds' };
+    const validate_owner_target = (owner: { kind: 'actor' | 'npc' | 'structure'; id: string }): { ok: true } | { ok: false; error: string } => {
+        build_place_contents_for_legality(slot, normalized_place_id, place_any);
+        const check = can_place_volume(place_any as any, owner as any, { x: tx, y: ty, z: tz }, 'WALK' as any, {
+            exclude_owner: owner as any,
+            support_policy: 'any_footprint' as any,
+        });
+        return check.ok ? { ok: true } : { ok: false, error: String((check as any).reason ?? 'blocked') };
+    };
 
     if (entity_type === 'actor' || entity_type === 'npc') {
         const ref = String(entity_ref ?? '').trim();
         const id = ref.replace(/^(actor|npc)\./, '');
         if (!id) return { ok: false, error: 'invalid_entity_ref' };
         const full_ref = `${entity_type}.${id}`;
+        const target_ok = validate_owner_target({ kind: entity_type, id: full_ref } as any);
+        if (!target_ok.ok) return target_ok;
 
         if (entity_type === 'actor') {
             const ar = load_actor(slot, id);
@@ -5244,6 +5318,8 @@ function mutate_place_painter_move_and_sync(
     if (entity_type === 'structure') {
         const sid = String(entity_ref ?? '').replace(/^structure\./, '').trim();
         if (!sid) return { ok: false, error: 'invalid_structure_ref' };
+        const target_ok = validate_owner_target({ kind: 'structure', id: sid } as any);
+        if (!target_ok.ok) return target_ok;
         if (!Array.isArray(place_any.structures)) place_any.structures = [];
         const s = place_any.structures.find((it: any) => String(it?.id ?? '') === sid);
         if (!s) return { ok: false, error: 'structure_not_found' };
@@ -5302,7 +5378,7 @@ function mutate_place_layer_and_sync(
     const offset = wz - base_z;
     const layer_key = offset === 0 ? 'tiles' : offset === -1 ? 'tiles_z0' : offset === 1 ? 'tiles_z1' : `tiles_z${offset}`;
     if (action === 'delete') {
-        if (layer_key === 'tiles' || layer_key === 'tiles_z0') return { ok: false, error: 'cannot_delete_base_layer' };
+        if (layer_key === 'tiles') return { ok: false, error: 'cannot_delete_base_layer' };
         delete place_any[layer_key];
     } else {
         if (!place_any[layer_key]) {
@@ -5752,6 +5828,19 @@ type BreathReactiveRouteContext = {
     place_any: any;
     breath_index: number;
     mark_dirty: () => void;
+    owner_kind: 'place' | 'actor' | 'npc';
+    owner_id?: string | null;
+    owner_container_kind?: 'ground' | 'tile' | 'structure' | 'body_slots' | 'unknown';
+};
+
+type ItemMutationRefreshScope = 'place_render' | 'container_contents' | 'character_render';
+
+type ItemMutationRefreshIntent = {
+    place_id: string | null;
+    actor_id: string | null;
+    npc_id: string | null;
+    scopes: ItemMutationRefreshScope[];
+    reasons: string[];
 };
 
 type GrowConfig = {
@@ -5770,6 +5859,33 @@ const tile_breath_tag_handlers = new Map<string, BreathTagHandler>();
 const item_breath_tag_handlers = new Map<string, BreathTagHandler>();
 const warned_missing_grow_item_defs = new Set<string>();
 const warned_missing_spoil_item_defs = new Set<string>();
+
+function record_item_mutation_refresh(ctx: BreathReactiveRouteContext, reason: string): void {
+    const place_id = String(ctx?.state?.place_id ?? '').trim() || null;
+    const actor_id = ctx.owner_kind === 'actor' ? (String(ctx.owner_id ?? '').trim() || null) : null;
+    const npc_id = ctx.owner_kind === 'npc' ? (String(ctx.owner_id ?? '').trim() || null) : null;
+    const scopes = new Set<ItemMutationRefreshScope>();
+    scopes.add('container_contents');
+    if (ctx.owner_kind === 'place' || ctx.owner_kind === 'npc') scopes.add('place_render');
+    if (ctx.owner_kind === 'actor') scopes.add('character_render');
+    const normalized_reason = String(reason ?? '').trim() || 'item_updated';
+    const key = `${place_id ?? ''}|${actor_id ?? ''}|${npc_id ?? ''}`;
+    const existing = ctx.state.item_refresh_intents.find((entry) => `${entry.place_id ?? ''}|${entry.actor_id ?? ''}|${entry.npc_id ?? ''}` === key) ?? null;
+    if (existing) {
+        for (const scope of scopes) {
+            if (!existing.scopes.includes(scope)) existing.scopes.push(scope);
+        }
+        if (!existing.reasons.includes(normalized_reason)) existing.reasons.push(normalized_reason);
+        return;
+    }
+    ctx.state.item_refresh_intents.push({
+        place_id,
+        actor_id,
+        npc_id,
+        scopes: Array.from(scopes),
+        reasons: [normalized_reason],
+    });
+}
 
 function get_layer_world_z(place_any: any, layer_key: string): number {
     if (layer_key === 'tiles') return get_place_base_z(place_any);
@@ -5795,21 +5911,17 @@ function drop_inline_item_to_ground_stacking(place_any: any, gx: number, gy: num
     if (!place_any.ground.scattered[key]) place_any.ground.scattered[key] = [];
 
     const max_stack = typeof def?.max_stack_size === 'number' && Number.isFinite(def.max_stack_size) ? Math.floor(def.max_stack_size) : 1;
-    const can_stack = max_stack > 1;
+    const can_stack = max_stack > 1 && Boolean(def?.stackable);
     if (can_stack) {
         for (const existing of place_any.ground.scattered[key]) {
             if (!existing) continue;
-            if (existing.def_id !== item.def_id) continue;
-            if (existing.contents) continue;
+            const existing_resolved = resolve_inline_item(String(existing?.def_id ?? ''), existing);
+            if (!can_stack_items_with_spoil_policy(existing, existing_resolved, item, def)) continue;
             const ex_qty = Number(existing.qty ?? 1);
+            if (!Number.isFinite(ex_qty) || ex_qty >= max_stack) continue;
             const add_qty = Number(item.qty ?? 1);
-            if (!Number.isFinite(ex_qty) || !Number.isFinite(add_qty)) continue;
-            if (ex_qty >= max_stack) continue;
-            const space = max_stack - ex_qty;
-            const moved = Math.min(space, add_qty);
-            if (moved <= 0) continue;
-            existing.qty = ex_qty + moved;
-            item.qty = add_qty - moved;
+            if (!Number.isFinite(add_qty) || add_qty <= 0) continue;
+            const moved = merge_item_stack_into_target(existing, item, Math.min(max_stack - ex_qty, add_qty));
             if (item.qty <= 0) return;
         }
     }
@@ -5940,9 +6052,28 @@ function handle_tile_grow_tag_breath(ctx: BreathReactiveRouteContext, target: Br
         const created = create_inline_item_from_store(def_id, 1);
 
         const can_put_in_container = is_container && Array.isArray(tile.contents);
+        const stack_target = can_put_in_container
+            ? tile.contents.find((existing: any) => {
+                const existing_resolved = resolve_inline_item(String(existing?.def_id ?? ''), existing);
+                return can_stack_items_with_spoil_policy(existing, existing_resolved, created, def_res.item);
+            })
+            : null;
         const has_space = can_put_in_container ? (tile.contents.length < Math.max(1, max_slots)) : false;
 
-        if (can_put_in_container && has_space) {
+        if (stack_target) {
+            merge_item_stack_into_target(stack_target, created);
+            debug_log('GROW', 'tile container growth stacked item', {
+                place_id: ctx.state.place_id,
+                tile_kind: String(tile?.kind ?? ''),
+                tile_x: target.x,
+                tile_y: target.y,
+                tile_z: target.z,
+                item_def_id: def_id,
+                destination: 'tile.contents.stack',
+                stacked_qty: Number(stack_target?.qty ?? 1),
+                breath_index: ctx.breath_index,
+            });
+        } else if (can_put_in_container && has_space) {
             tile.contents.push(created);
             const normalized = normalize_inline_container_grid(tile.contents, Math.max(1, max_slots), `grow_tile_container:${ctx.state.place_id}:${target.x},${target.y}`);
             const coords_by_id = new Map<string, { x: number; y: number }>();
@@ -5954,8 +6085,32 @@ function handle_tile_grow_tag_breath(ctx: BreathReactiveRouteContext, target: Br
                     (it as any).grid_y = c.y;
                 }
             }
+            debug_log('GROW', 'tile container growth created item', {
+                place_id: ctx.state.place_id,
+                tile_kind: String(tile?.kind ?? ''),
+                tile_x: target.x,
+                tile_y: target.y,
+                tile_z: target.z,
+                item_def_id: def_id,
+                destination: 'tile.contents',
+                tile_contents_count: tile.contents.length,
+                breath_index: ctx.breath_index,
+            });
         } else {
             drop_inline_item_to_ground_stacking(ctx.place_any, target.x, target.y, target.z, created, def_res.item as any);
+            debug_log('GROW', 'tile growth dropped item to ground', {
+                place_id: ctx.state.place_id,
+                tile_kind: String(tile?.kind ?? ''),
+                tile_x: target.x,
+                tile_y: target.y,
+                tile_z: target.z,
+                item_def_id: def_id,
+                destination: 'ground.scattered',
+                can_put_in_container,
+                has_space,
+                tile_contents_count: Array.isArray(tile.contents) ? tile.contents.length : 0,
+                breath_index: ctx.breath_index,
+            });
         }
     }
 
@@ -5995,12 +6150,21 @@ function handle_item_spoils_tag_breath(ctx: BreathReactiveRouteContext, target: 
         last_processed += config.period_breaths;
 
         if (!config.result_item_def_id) {
+            debug_log('SPOILS', 'item spoiled and was deleted', {
+                place_id: ctx.state.place_id,
+                from_def_id: String(item?.def_id ?? ''),
+                qty: Number(item?.qty ?? 1),
+                breath_index: current_breath,
+                last_processed: last_processed,
+            });
             target.removed = true;
             target.replace(null);
+            record_item_mutation_refresh(ctx, 'item_deleted');
             ctx.mark_dirty();
             return;
         }
 
+        const from_def_id = String(item?.def_id ?? '');
         const result_resolved = resolve_inline_item(config.result_item_def_id, item as any);
         item.def_id = config.result_item_def_id;
         if (!Number.isFinite(Number(item.qty))) item.qty = 1;
@@ -6013,6 +6177,15 @@ function handle_item_spoils_tag_breath(ctx: BreathReactiveRouteContext, target: 
         }
         delete item.display_color;
         item.last_breath_processed = last_processed;
+        debug_log('SPOILS', 'item spoiled into new item', {
+            place_id: ctx.state.place_id,
+            from_def_id,
+            to_def_id: config.result_item_def_id,
+            qty: Number(item?.qty ?? 1),
+            breath_index: current_breath,
+            last_processed: last_processed,
+        });
+        record_item_mutation_refresh(ctx, 'item_transformed');
         ctx.mark_dirty();
 
         transitions += 1;
@@ -6088,9 +6261,10 @@ function route_breath_tags_for_body_slots(ctx: BreathReactiveRouteContext, body_
     if (!body_slots_any || typeof body_slots_any !== 'object') return;
     for (const slot of Object.values(body_slots_any as Record<string, any>)) {
         if (!slot || typeof slot !== 'object') continue;
-        route_breath_tags_for_inline_item_field(ctx, slot, 'armor');
-        route_breath_tags_for_inline_item_field(ctx, slot, 'tool');
-        if (Array.isArray(slot.garb)) route_breath_tags_for_inline_item_array(ctx, slot.garb);
+        const slot_ctx: BreathReactiveRouteContext = { ...ctx, owner_container_kind: 'body_slots' };
+        route_breath_tags_for_inline_item_field(slot_ctx, slot, 'armor');
+        route_breath_tags_for_inline_item_field(slot_ctx, slot, 'tool');
+        if (Array.isArray(slot.garb)) route_breath_tags_for_inline_item_array(slot_ctx, slot.garb);
     }
 }
 
@@ -6100,7 +6274,15 @@ function apply_place_breath_reactive_tags(state: PlaceBreathState, breath_index_
     const breath_index = (typeof breath_index_override === 'number' && Number.isFinite(breath_index_override))
         ? Math.floor(breath_index_override)
         : (Math.floor(Number(state.breath_index ?? 0)) || 0);
-    const ctx: BreathReactiveRouteContext = { state, place_any, breath_index, mark_dirty: () => { state.place_dirty = true; } };
+    const ctx: BreathReactiveRouteContext = {
+        state,
+        place_any,
+        breath_index,
+        mark_dirty: () => { state.place_dirty = true; },
+        owner_kind: 'place',
+        owner_id: null,
+        owner_container_kind: 'unknown',
+    };
 
     for (const layer_key of get_place_tile_layer_keys(place_any)) {
         const layer = place_any?.[layer_key];
@@ -6115,7 +6297,7 @@ function apply_place_breath_reactive_tags(state: PlaceBreathState, breath_index_
                 const tags = (resolve_place_tile(String(tile.kind ?? ''), tile) ?? null)?.effective_tags ?? (Array.isArray(tile.tags) ? tile.tags : []);
                 route_breath_target_tags(ctx, { kind: 'tile', tile, x, y, z: layer_z, tags });
                 if (Array.isArray(tile.contents)) {
-                    route_breath_tags_for_inline_item_array(ctx, tile.contents);
+                    route_breath_tags_for_inline_item_array({ ...ctx, owner_container_kind: 'tile' }, tile.contents);
                 }
             }
         }
@@ -6123,17 +6305,17 @@ function apply_place_breath_reactive_tags(state: PlaceBreathState, breath_index_
 
     const structures = Array.isArray(place_any?.structures) ? place_any.structures : [];
     for (const structure of structures) {
-        if (Array.isArray(structure?.contents)) route_breath_tags_for_inline_item_array(ctx, structure.contents);
+        if (Array.isArray(structure?.contents)) route_breath_tags_for_inline_item_array({ ...ctx, owner_container_kind: 'structure' }, structure.contents);
     }
 
     const ground_main = Array.isArray(place_any?.ground?.main) ? place_any.ground.main : [];
-    route_breath_tags_for_inline_item_array(ctx, ground_main);
+    route_breath_tags_for_inline_item_array({ ...ctx, owner_container_kind: 'ground' }, ground_main);
     const scattered_entries = place_any?.ground?.scattered && typeof place_any.ground.scattered === 'object'
         ? Object.values(place_any.ground.scattered)
         : [];
     for (const list of scattered_entries) {
         if (!Array.isArray(list)) continue;
-        route_breath_tags_for_inline_item_array(ctx, list);
+        route_breath_tags_for_inline_item_array({ ...ctx, owner_container_kind: 'ground' }, list);
     }
 }
 
@@ -6161,6 +6343,9 @@ function apply_entity_owned_item_breath_reactive_tags(state: PlaceBreathState): 
             place_any,
             breath_index,
             mark_dirty: () => { owner_dirty = true; },
+            owner_kind: kind,
+            owner_id: id,
+            owner_container_kind: 'body_slots',
         };
         route_breath_tags_for_body_slots(ctx, body_slots_any);
 
@@ -6435,7 +6620,7 @@ setInterval(() => {
     for (const state of place_breath.values()) {
         if (state.tile_updates.length > 0) tile_updates.push(...state.tile_updates.splice(0));
     }
-    flush_place_breath_outputs(now, breath_ticks, movement_updates, tile_updates);
+    flush_place_breath_outputs(now, breath_ticks, movement_updates, tile_updates, Array.from(place_breath.values()).flatMap((state) => state.item_refresh_intents.splice(0)));
     const flush_duration_ms = Math.max(0, Date.now() - flush_started_ms);
 
     const interval_duration_ms = Math.max(0, Date.now() - interval_started_ms);
@@ -6902,12 +7087,6 @@ function get_loose_item_support_surface(place_any: any, tx: number, ty: number, 
     const structure = structure_occupies_tile_at_world_z(place_any, tx, ty, support_z);
     if (structure) {
         return { supported: true, by: `occupant:structure:${String((structure as any)?.id ?? '')}` };
-    }
-    const base_z = get_place_base_z(place_any);
-    const is_support_plane = Math.floor(support_z) === Math.floor(base_z - 1);
-    const has_support_tiles = !!(place_any as any)?.tiles_z0;
-    if (is_support_plane && !has_support_tiles) {
-        return { supported: true, by: 'implicit_ground' };
     }
     return { supported: false, by: null };
 }
@@ -10875,7 +11054,7 @@ function start_http_server(log_path: string): void {
                     const size = {
                         x: Number(data?.size?.x ?? 3),
                         y: Number(data?.size?.y ?? 3),
-                        z: Number(data?.size?.z ?? 3),
+                        z: Number(data?.size?.z),
                     };
                     if (!Number.isFinite(slot) || slot <= 0) {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -10928,7 +11107,7 @@ function start_http_server(log_path: string): void {
                     const size = {
                         x: Number(data?.size?.x ?? 5),
                         y: Number(data?.size?.y ?? 5),
-                        z: Number(data?.size?.z ?? 3),
+                        z: Number(data?.size?.z),
                     };
                     if (!Number.isFinite(slot) || slot <= 0 || !source_place_id || !direction || !Number.isFinite(border_tile.x) || !Number.isFinite(border_tile.y) || !Number.isFinite(border_tile.z)) {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -14979,6 +15158,12 @@ function start_http_server(log_path: string): void {
                         debug_log('transfer', `[LEGALITY] allow`);
                     }
 
+                    if (!String(item_instance_id ?? '').startsWith('pile:')) {
+                        if (!ensure_transfer_item_occurrences(String(item_instance_id), 1, 'before_remove')) {
+                            return;
+                        }
+                    }
+
                     function get_item_at_path(path: string): any {
                         const parsed = parse_body_slots_path(path);
                         if (!parsed) return null;
@@ -15017,6 +15202,13 @@ function start_http_server(log_path: string): void {
                         const container_item = get_container_item(container_path);
                         if (!container_item) return false;
                         if (!Array.isArray(container_item.contents)) container_item.contents = [];
+                        if (container_item.contents.some((it: any) => String(it?.id ?? '') === String(item?.id ?? ''))) {
+                            debug_warn('transfer', '[INLINE] duplicate destination insert blocked for actor container', {
+                                container_path,
+                                item_instance_id: String(item?.id ?? ''),
+                            });
+                            return false;
+                        }
                         if (index === null || index >= container_item.contents.length) {
                             container_item.contents.push(item);
                         } else {
@@ -15096,6 +15288,112 @@ function start_http_server(log_path: string): void {
                         }
 
                         return { ok: true, cols, rows };
+                    }
+
+                    function collect_inline_item_occurrences(items: any[], item_id: string, path_prefix: string, out: string[]): void {
+                        if (!Array.isArray(items)) return;
+                        for (let i = 0; i < items.length; i += 1) {
+                            const it = items[i];
+                            if (!it || typeof it !== 'object') continue;
+                            const item_path = `${path_prefix}.${i}`;
+                            if (String(it?.id ?? '') === item_id) out.push(item_path);
+                            if (Array.isArray(it.contents)) collect_inline_item_occurrences(it.contents, item_id, `${item_path}.contents`, out);
+                        }
+                    }
+
+                    function collect_actor_item_occurrences(item_id: string): string[] {
+                        const out: string[] = [];
+                        const body_slots = actor?.body_slots;
+                        if (!body_slots || typeof body_slots !== 'object') return out;
+                        for (const [slot_name, slot_any] of Object.entries(body_slots as Record<string, any>)) {
+                            const slot = slot_any as any;
+                            if (slot?.armor) {
+                                if (String(slot.armor?.id ?? '') === item_id) out.push(`actor.body_slots.${slot_name}.armor`);
+                                if (Array.isArray(slot.armor.contents)) collect_inline_item_occurrences(slot.armor.contents, item_id, `actor.body_slots.${slot_name}.armor.contents`, out);
+                            }
+                            if (slot?.tool) {
+                                if (String(slot.tool?.id ?? '') === item_id) out.push(`actor.body_slots.${slot_name}.tool`);
+                                if (Array.isArray(slot.tool.contents)) collect_inline_item_occurrences(slot.tool.contents, item_id, `actor.body_slots.${slot_name}.tool.contents`, out);
+                            }
+                            if (Array.isArray(slot?.garb)) {
+                                for (let i = 0; i < slot.garb.length; i += 1) {
+                                    const garb = slot.garb[i];
+                                    if (!garb || typeof garb !== 'object') continue;
+                                    const garb_path = `actor.body_slots.${slot_name}.garb.${i}`;
+                                    if (String(garb?.id ?? '') === item_id) out.push(garb_path);
+                                    if (Array.isArray(garb.contents)) collect_inline_item_occurrences(garb.contents, item_id, `${garb_path}.contents`, out);
+                                }
+                            }
+                        }
+                        return out;
+                    }
+
+                    function collect_place_item_occurrences(item_id: string): string[] {
+                        const out: string[] = [];
+                        if (!place_any || typeof place_any !== 'object') return out;
+
+                        for (const layer_key of get_place_tile_layer_keys(place_any)) {
+                            const layer = place_any?.[layer_key];
+                            const cells = layer?.cells;
+                            if (!Array.isArray(cells)) continue;
+                            const wz = get_layer_world_z(place_any, layer_key);
+                            for (let y = 0; y < cells.length; y += 1) {
+                                const row = cells[y];
+                                if (!Array.isArray(row)) continue;
+                                for (let x = 0; x < row.length; x += 1) {
+                                    const tile = row[x];
+                                    if (!tile || typeof tile !== 'object') continue;
+                                    const tile_path = `place.tile.${place_any.id}.${x}_${y}_${wz}`;
+                                    if (String(tile?.id ?? '') === item_id) out.push(tile_path);
+                                    if (Array.isArray(tile.contents)) collect_inline_item_occurrences(tile.contents, item_id, `${tile_path}.contents`, out);
+                                }
+                            }
+                        }
+
+                        const structures = Array.isArray(place_any?.structures) ? place_any.structures : [];
+                        for (let i = 0; i < structures.length; i += 1) {
+                            const structure = structures[i];
+                            if (!structure || typeof structure !== 'object') continue;
+                            const structure_path = `place.structure.${place_any.id}.${i}`;
+                            if (String(structure?.id ?? '') === item_id) out.push(structure_path);
+                            if (Array.isArray(structure.contents)) collect_inline_item_occurrences(structure.contents, item_id, `${structure_path}.contents`, out);
+                        }
+
+                        if (Array.isArray(place_any?.ground?.main)) collect_inline_item_occurrences(place_any.ground.main, item_id, `place.ground.main.${place_any.id}`, out);
+                        const scattered = place_any?.ground?.scattered;
+                        if (scattered && typeof scattered === 'object') {
+                            for (const [key, list] of Object.entries(scattered as Record<string, any[]>)) {
+                                collect_inline_item_occurrences(list, item_id, `place.ground.${place_any.id}.${key}`, out);
+                            }
+                        }
+                        return out;
+                    }
+
+                    function collect_transfer_item_occurrences(item_id: string): string[] {
+                        return [...collect_actor_item_occurrences(item_id), ...collect_place_item_occurrences(item_id)];
+                    }
+
+                    function reject_transfer_integrity(error: string, detail: any): void {
+                        debug_error('transfer', `[INLINE] integrity failure ${error}`, detail);
+                        res.writeHead(409, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error, detail }));
+                    }
+
+                    function ensure_transfer_item_occurrences(item_id: string, expected_count: number, stage: string): boolean {
+                        const occurrences = collect_transfer_item_occurrences(item_id);
+                        if (occurrences.length !== expected_count) {
+                            reject_transfer_integrity('item_integrity_violation', {
+                                stage,
+                                item_instance_id: item_id,
+                                expected_count,
+                                actual_count: occurrences.length,
+                                occurrences,
+                                from_container,
+                                to_container,
+                            });
+                            return false;
+                        }
+                        return true;
                     }
 
                     function remove_from_body_slot(path: string, child_id: string): any {
@@ -15482,10 +15780,14 @@ function start_http_server(log_path: string): void {
                     }
 
                     if (from_container.startsWith('body_slots.') || from_container.startsWith('actor.item.')) {
-                        // try container contents first
-                        removed = remove_from_container(from_container, item_instance_id);
-                        if (!removed && from_container.startsWith('body_slots.')) {
-                            removed = remove_from_body_slot(from_container, item_instance_id);
+                        const removed_actor = remove_actor_item_by_id(actor_result.actor, String(item_instance_id));
+                        if (removed_actor.ok) {
+                            removed = removed_actor.item;
+                            debug_log('transfer', '[INLINE] removed actor-owned item', {
+                                item_instance_id,
+                                from_container,
+                                removed_path: removed_actor.path,
+                            });
                         }
                     }
 
@@ -15493,6 +15795,14 @@ function start_http_server(log_path: string): void {
                         res.writeHead(404, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: "item_not_found_in_source" }));
                         return;
+                    }
+
+                    if (removed && !String(item_instance_id ?? '').startsWith('pile:')) {
+                        if (!ensure_transfer_item_occurrences(String(item_instance_id), 0, 'after_remove')) {
+                            if (rollback_source) rollback_source();
+                            rollback_actor();
+                            return;
+                        }
                     }
 
                     // Pile move: only supported ground->ground.
@@ -15540,6 +15850,14 @@ function start_http_server(log_path: string): void {
                     let actor_dirty = false;
                     let place_dirty = false;
 
+                    debug_log('transfer', '[INLINE] begin destination insert', {
+                        item_instance_id: String(removed?.id ?? item_instance_id),
+                        from_container,
+                        to_container,
+                        has_grid_target,
+                        grid_target,
+                    });
+
                     if (to_place && place_any) {
                         // Place destinations
                         if (to_place.kind === 'place_ground') {
@@ -15576,6 +15894,17 @@ function start_http_server(log_path: string): void {
                                 rollback_actor();
                                 res.writeHead(400, { "Content-Type": "application/json" });
                                 res.end(JSON.stringify({ ok: false, error: legality.error, detail: legality.detail }));
+                                return;
+                            }
+
+                            if (container_obj.contents.some((it: any) => String(it?.id ?? '') === String(removed?.id ?? ''))) {
+                                if (rollback_source) rollback_source();
+                                rollback_actor();
+                                reject_transfer_integrity('duplicate_destination_item_id', {
+                                    stage: 'insert_place_tile',
+                                    item_instance_id: String(removed?.id ?? ''),
+                                    to_container,
+                                });
                                 return;
                             }
 
@@ -15618,6 +15947,17 @@ function start_http_server(log_path: string): void {
                                 rollback_actor();
                                 res.writeHead(400, { "Content-Type": "application/json" });
                                 res.end(JSON.stringify({ ok: false, error: legality.error, detail: legality.detail }));
+                                return;
+                            }
+
+                            if (container_item.contents.some((it: any) => String(it?.id ?? '') === String(removed?.id ?? ''))) {
+                                if (rollback_source) rollback_source();
+                                rollback_actor();
+                                reject_transfer_integrity('duplicate_destination_item_id', {
+                                    stage: 'insert_place_item',
+                                    item_instance_id: String(removed?.id ?? ''),
+                                    to_container,
+                                });
                                 return;
                             }
 
@@ -15739,9 +16079,19 @@ function start_http_server(log_path: string): void {
                     }
 
                     if (!add_ok) {
+                        if (rollback_source) rollback_source();
+                        rollback_actor();
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: "invalid_destination" }));
                         return;
+                    }
+
+                    if (removed && !String(item_instance_id ?? '').startsWith('pile:')) {
+                        if (!ensure_transfer_item_occurrences(String(item_instance_id), 1, 'after_insert')) {
+                            if (rollback_source) rollback_source();
+                            rollback_actor();
+                            return;
+                        }
                     }
 
                     // Save actor/place

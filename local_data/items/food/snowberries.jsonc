@@ -8,6 +8,7 @@
   "size_mag": 1,
   "hardness_mag": 1,
   "conductivity_mag": 1,
+  "stackable": true,
   "max_stack_size": 20,
   "display_char": "*",
   "tags": [

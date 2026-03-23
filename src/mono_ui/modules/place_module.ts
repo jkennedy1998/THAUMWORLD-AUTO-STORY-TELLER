@@ -33,7 +33,8 @@ import { compute_dom_viewport_for_rect } from "../runtime/dom_viewport.js";
 import { create_place_camera_controller } from "../runtime/place_camera_controller.js";
 import { get_move_intent, is_jump_down, subscribe_move_intent_changes, type MoveIntent, type MoveIntentChangeMeta } from "../runtime/input_actions.js";
 import { get_character_camera_focus_tile } from "../../shared/character_camera_focus.js";
-import { build_place_adjacency_map, compute_adjacent_place_bounds, detect_place_resize_face, find_place_containing_region_voxel, get_local_volume_boundary_info, get_place_region_bounds, get_places_face_adjacency, region_bounds_overlap } from "../../shared/place_adjacency.js";
+import { get_defined_place_world_zs as get_authored_place_world_zs, get_place_base_z, get_place_tile_at_world_z as get_shared_place_tile_at_world_z, tile_offset_to_layer_key } from "../../shared/place_layers.js";
+import { build_place_adjacency_map, compute_adjacent_place_bounds, find_place_containing_region_voxel, get_local_volume_boundary_info, get_place_region_bounds, get_places_face_adjacency, region_bounds_overlap, select_place_resize_face } from "../../shared/place_adjacency.js";
 import {
   record_intent_observed,
   record_intent_post_result,
@@ -137,7 +138,6 @@ let scene_place_cache: ScenePlaceCache | null = null;
   const multitile_devlog_once = new Set<string>();
   let last_cached_place_id: string | null = null;
   let last_painter_drag_key: string | null = null;
-  let painter_resize_drag_active = false;
   let painter_move_drag_active = false;
   let painter_pan_drag_active = false;
   let painter_pan_start = { x: 0, y: 0 };
@@ -283,7 +283,7 @@ export type PlaceModuleConfig = {
   get_place_painter_resize_preview?: () => null | {
     place_id: string;
     face: 'x+' | 'x-' | 'y+' | 'y-' | 'z+' | 'z-';
-    interaction?: 'drag' | 'click_z';
+    interaction?: 'targeting';
     proposed_bounds: { origin: { x: number; y: number; z: number }; size: { x: number; y: number; z: number } };
     valid: boolean;
     conflict_place_id?: string | null;
@@ -295,6 +295,12 @@ export type PlaceModuleConfig = {
     display_char: string;
     display_color: string;
     body_model?: { physical?: Array<{ dx: number; dy: number; dz: number }> } | null;
+    body_model_id?: string;
+    facing?: string | null;
+    name?: string;
+    tags?: any[];
+    kind_id?: string;
+    entity_render?: any;
     source: { x: number; y: number; z: number };
     target: { x: number; y: number; z: number };
     valid: boolean;
@@ -512,25 +518,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   }
 
   function get_place_tile_at_world_z(place: Place, tile_x: number, tile_y: number, world_z: number): PlaceTile | null {
-    try {
-      const base_z = get_place_base_z(place);
-      const offset = Math.floor(Number(world_z) - Number(base_z));
-      if (offset === 0) return ((place as any)?.tiles?.cells?.[tile_y]?.[tile_x] ?? null) as PlaceTile | null;
-      if (offset === -1) return ((place as any)?.tiles_z0?.cells?.[tile_y]?.[tile_x] ?? null) as PlaceTile | null;
-      if (offset === 1) return ((place as any)?.tiles_z1?.cells?.[tile_y]?.[tile_x] ?? null) as PlaceTile | null;
-      return ((place as any)?.[`tiles_z${offset}`]?.cells?.[tile_y]?.[tile_x] ?? null) as PlaceTile | null;
-    } catch {
-      return null;
-    }
-  }
-
-  function get_place_tile_z0(place: Place, tile_x: number, tile_y: number): PlaceTile | null {
-    try {
-      const t: PlaceTile | undefined = (place as any)?.tiles_z0?.cells?.[tile_y]?.[tile_x];
-      return t ?? null;
-    } catch {
-      return null;
-    }
+    return get_shared_place_tile_at_world_z(place, tile_x, tile_y, world_z);
   }
 
   function tile_is_collidable(t: PlaceTile | null): boolean {
@@ -1150,16 +1138,10 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       : null;
   }
 
-  function detect_border_direction(place: Place, x: number, y: number): 'x+' | 'x-' | 'y+' | 'y-' | null {
-    if (x === 0 && y >= 0 && y < place.tile_grid.height) return 'x-';
-    if (x === place.tile_grid.width - 1 && y >= 0 && y < place.tile_grid.height) return 'x+';
-    if (y === 0 && x >= 0 && x < place.tile_grid.width) return 'y-';
-    if (y === place.tile_grid.height - 1 && x >= 0 && x < place.tile_grid.width) return 'y+';
-    if (x === -1 && y >= 0 && y < place.tile_grid.height) return 'x-';
-    if (x === place.tile_grid.width && y >= 0 && y < place.tile_grid.height) return 'x+';
-    if (y === -1 && x >= 0 && x < place.tile_grid.width) return 'y-';
-    if (y === place.tile_grid.height && x >= 0 && x < place.tile_grid.width) return 'y+';
-    return null;
+  function detect_topology_face(place: Place, x: number, y: number, world_z: number): 'x+' | 'x-' | 'y+' | 'y-' | 'z+' | 'z-' | null {
+    const bounds = get_place_region_bounds(place);
+    const local_z = Math.floor(Number(world_z ?? bounds.origin.z ?? 0)) - (Math.floor(Number(bounds.origin.z ?? 0)) || 0);
+    return select_place_resize_face(place, { x, y, z: local_z });
   }
 
   function get_entity_focus_tile(entity: any, place: Place, ref: string): { x: number; y: number; z: number } | null {
@@ -1727,15 +1709,6 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     return 0;
   }
 
-  function get_place_base_z(place: Place | null): number {
-    try {
-      const z = Number((place as any)?.coordinates?.elevation);
-      return Number.isFinite(z) ? Math.floor(z) : 0;
-    } catch {
-      return 0;
-    }
-  }
-
   function get_world_animation_xy(place: Place, tile_x: number, tile_y: number): { x: number; y: number } {
     const region_origin = (place as any)?.region_bounds?.origin;
     const rx = Number(region_origin?.x);
@@ -1760,16 +1733,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
   function get_defined_place_world_zs(place: Place | null): number[] {
     const base_z = get_place_base_z(place);
-    const place_any: any = place as any;
-    const out = new Set<number>();
-    if (place_any?.tiles_z0) out.add(base_z - 1);
-    if (place_any?.tiles) out.add(base_z);
-    for (const key of Object.keys(place_any ?? {})) {
-      const m = /^tiles_z(-?\d+)$/.exec(key);
-      if (!m) continue;
-      const off = Math.floor(Number(m[1]));
-      if (Number.isFinite(off)) out.add(base_z + off);
-    }
+    const out = new Set<number>(get_authored_place_world_zs(place));
 
     for (const actor of place?.contents?.actors_present ?? []) {
       const wz0 = get_entity_world_z(actor as any, base_z);
@@ -2026,8 +1990,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
               const has_connector_tag = tile_has_tag(tile, 'CONNECTOR');
               const has_container_tag = tile_has_tag(tile, 'CONTAINER');
               const world_xy = { x: scene_tile_x, y: scene_tile_y };
-              const weight_index = local_world_z <= scene_base_z - 1 ? 1 : 2;
-              const key_prefix = local_world_z === scene_base_z - 1 ? 'tile_support' : has_connector_tag ? 'connector' : 'tile';
+              const weight_index = local_world_z < scene_base_z ? 1 : 2;
+              const key_prefix = has_connector_tag ? 'connector' : (local_world_z < scene_base_z ? 'tile_lower' : 'tile');
               rq.push({
                 pass: 'tile',
                 x: sx,
@@ -2673,14 +2637,14 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         const hovered_tile = hovered;
         const painter_tool = config.get_place_painter_tool?.() ?? 'paint';
         const hovered_place = get_scene_places(place).find((p) => p.id === hovered_tile.place_id) ?? place;
-        const hovered_border_dir = detect_border_direction(hovered_place, hovered_tile.x, hovered_tile.y);
+        const hover_world_z = Number.isFinite(Number((hovered_tile as any).world_z)) ? Math.floor(Number((hovered_tile as any).world_z)) : get_focus_world_z_for_place(place);
+        const hovered_border_dir = detect_topology_face(hovered_place, hovered_tile.x, hovered_tile.y, hover_world_z);
         const topology_tool = painter_tool === 'place_create' || painter_tool === 'place_delete' || painter_tool === 'place_resize';
 
         if (topology_tool) {
           const is_selected_place = hovered_place.id === place.id;
-          const preview_size = { x: 3, y: 3, z: 3 };
-          const hover_world_z = Number.isFinite(Number((hovered_tile as any).world_z)) ? Math.floor(Number((hovered_tile as any).world_z)) : get_focus_world_z_for_place(place);
           const hovered_bounds = get_place_region_bounds(hovered_place);
+          const preview_size = { x: 3, y: 3, z: Math.max(1, Math.floor(Number(hovered_bounds.size?.z ?? 1)) || 1) };
           const preview_bounds = (painter_tool === 'place_create' && is_selected_place && hovered_border_dir)
             ? compute_adjacent_place_bounds(hovered_place, {
                 x: Math.floor(hovered_tile.x),
@@ -2699,7 +2663,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
               })()
             : null;
           const resize_face = painter_tool === 'place_resize' && is_selected_place
-            ? detect_place_resize_face(hovered_place, {
+            ? select_place_resize_face(hovered_place, {
                 x: Math.floor(hovered_tile.x),
                 y: Math.floor(hovered_tile.y),
                 z: hover_world_z - (Math.floor(Number(hovered_bounds.origin.z ?? 0)) || 0),
@@ -2730,7 +2694,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           if (painter_tool === 'place_resize') {
             const face = resize_preview?.face ?? resize_face;
             const bounds = resize_preview?.proposed_bounds ?? hovered_bounds;
-            if (face && bounds) {
+            if (is_selected_place && face && bounds) {
               const min_x = bounds.origin.x;
               const min_y = bounds.origin.y;
               const max_x = bounds.origin.x + bounds.size.x - 1;
@@ -2744,8 +2708,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
               } else {
                 for (let world_y = min_y; world_y <= max_y; world_y += 1) {
                   for (let world_x = min_x; world_x <= max_x; world_x += 1) {
-                    const on_edge = world_x === min_x || world_x === max_x || world_y === min_y || world_y === max_y;
-                    overlay_cells.push({ x: world_x - selected_origin.x, y: world_y - selected_origin.y, char: on_edge ? '#' : '.' });
+                    overlay_cells.push({ x: world_x - selected_origin.x, y: world_y - selected_origin.y, char: '#' });
                   }
                 }
               }
@@ -2835,32 +2798,58 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
         const move_preview = config.get_place_painter_move_preview?.() ?? null;
         if (move_preview && painter_tool === 'move' && move_preview.place_id === place.id) {
-          const slot = slot_for_world_z(move_preview.target.z, visible_planes_z);
-          if (slot !== null) {
-            const rq = q_for_slot(slot);
-            const voxels = Array.isArray(move_preview.body_model?.physical) && move_preview.body_model!.physical!.length > 1
-              ? move_preview.body_model!.physical!
-              : [{ dx: 0, dy: 0, dz: 0 }];
-            const rgb = move_preview.valid ? get_color_by_name('vivid_green').rgb : get_color_by_name('vivid_red').rgb;
+          const rgb = move_preview.valid ? get_color_by_name('vivid_green').rgb : get_color_by_name('vivid_red').rgb;
+          if (move_preview.entity_type === 'npc' || move_preview.entity_type === 'actor') {
+            const def = get_body_model_def(move_preview.body_model_id);
+            const voxels = eval_body_model_voxels(def, { mode: 'render', facing: (move_preview.facing ?? null) as any });
             for (const v of voxels) {
+              const wz = move_preview.target.z + Math.floor(Number((v as any)?.dz ?? 0));
+              const slot = slot_for_world_z(wz, visible_planes_z);
+              if (slot === null) continue;
               const sx = inner.x0 + Math.floor((move_preview.target.x + Math.floor(Number((v as any)?.dx ?? 0)) - view.offset_x) / view.scale);
               const sy = inner.y0 + Math.floor((move_preview.target.y + Math.floor(Number((v as any)?.dy ?? 0)) - view.offset_y) / view.scale);
               if (sx < inner.x0 || sx > inner.x1 || sy < inner.y0 || sy > inner.y1) continue;
-              rq.push({
-                pass: 'tile',
+              q_for_slot(slot).push({
+                pass: 'character',
                 x: sx,
                 y: sy,
-                order: 60,
-                key: `painter_move_preview:${move_preview.entity_ref}:${move_preview.target.x},${move_preview.target.y},${move_preview.target.z}:${(v as any)?.dx ?? 0},${(v as any)?.dy ?? 0},${(v as any)?.dz ?? 0}`,
-                payload: make_simple_tile_payload({
-                  id: `painter_move_preview:${move_preview.entity_ref}`,
-                  char: move_preview.display_char,
-                  tags: [],
+                order: move_preview.entity_type === 'npc' ? 1 : 0,
+                key: `painter_move_preview:${move_preview.entity_ref}`,
+                payload: make_entity_payload(move_preview.entity_type, move_preview.entity_ref, move_preview.name ?? move_preview.entity_ref, Array.isArray(move_preview.tags) ? move_preview.tags : [], {
                   base_fg: rgb,
-                  weight_index: 6,
+                  kind_id: move_preview.kind_id,
+                  entity_render: move_preview.entity_render,
+                  render_shader: move_preview.entity_render?.render_shader,
                 }) as any,
                 ctx: ctx_place_tile({ selected: true }),
               });
+            }
+          } else {
+            const slot = slot_for_world_z(move_preview.target.z, visible_planes_z);
+            if (slot !== null) {
+              const rq = q_for_slot(slot);
+              const voxels = Array.isArray(move_preview.body_model?.physical) && move_preview.body_model!.physical!.length > 1
+                ? move_preview.body_model!.physical!
+                : [{ dx: 0, dy: 0, dz: 0 }];
+              for (const v of voxels) {
+                const sx = inner.x0 + Math.floor((move_preview.target.x + Math.floor(Number((v as any)?.dx ?? 0)) - view.offset_x) / view.scale);
+                const sy = inner.y0 + Math.floor((move_preview.target.y + Math.floor(Number((v as any)?.dy ?? 0)) - view.offset_y) / view.scale);
+                if (sx < inner.x0 || sx > inner.x1 || sy < inner.y0 || sy > inner.y1) continue;
+                const payload = move_preview.entity_type === 'pile'
+                  ? make_pile_payload({ id: `painter_move_preview:${move_preview.entity_ref}`, pile_count: 2, rep: { display_char: move_preview.display_char, name: move_preview.name }, base_fg: rgb }) as any
+                  : move_preview.entity_type === 'item'
+                    ? make_item_like_payload({ id: `painter_move_preview:${move_preview.entity_ref}`, name: move_preview.name, display_char: move_preview.display_char, tags: Array.isArray(move_preview.tags) ? move_preview.tags : [], base_fg: rgb }) as any
+                    : make_simple_tile_payload({ id: `painter_move_preview:${move_preview.entity_ref}`, char: move_preview.display_char, tags: [], base_fg: rgb, weight_index: 6 }) as any;
+                rq.push({
+                  pass: 'tile',
+                  x: sx,
+                  y: sy,
+                  order: 60,
+                  key: `painter_move_preview:${move_preview.entity_ref}:${move_preview.target.x},${move_preview.target.y},${move_preview.target.z}:${(v as any)?.dx ?? 0},${(v as any)?.dy ?? 0},${(v as any)?.dz ?? 0}`,
+                  payload,
+                  ctx: ctx_place_tile({ selected: true }),
+                });
+              }
             }
           }
         }
@@ -3225,10 +3214,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const baseZ = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
       const getLayerKey = (z: number): string => {
         const offset = Math.floor(z - baseZ);
-        if (offset === 0) return 'tiles';
-        if (offset === -1) return 'tiles_z0';
-        if (offset === 1) return 'tiles_z1';
-        return `tiles_z${offset}`;
+        return tile_offset_to_layer_key(offset);
       };
       const ensureLayer = (layerKey: string): any => {
         const placeAny: any = place as any;
@@ -3516,13 +3502,28 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
       if (config.is_place_painter_active?.()) {
         if (!e.buttons) {
+          if (painter_tool === 'place_resize') {
+            const active_resize = config.get_place_painter_resize_preview?.() ?? null;
+            if (active_resize) {
+              const scene_tile = screen_to_tile(e.x, e.y);
+              const resolved = scene_tile ? resolve_scene_tile(place, scene_tile.x, scene_tile.y, { prefer_selected_border: allow_border_targets }) : null;
+              if (resolved && resolved.place.id === active_resize.place_id && (resolved.is_interior || (allow_border_targets && resolved.is_border))) {
+                config.on_place_painter_resize_update?.({
+                  place_id: resolved.place.id,
+                  tile_position: { x: resolved.tile_x, y: resolved.tile_y },
+                  world_z: get_focus_world_z_for_place(place),
+                  region_position: {
+                    x: Math.floor(Number(get_place_region_bounds(resolved.place).origin.x ?? 0)) + resolved.tile_x,
+                    y: Math.floor(Number(get_place_region_bounds(resolved.place).origin.y ?? 0)) + resolved.tile_y,
+                    z: get_focus_world_z_for_place(place),
+                  },
+                });
+              }
+            }
+          }
           if (painter_move_drag_active) {
             painter_move_drag_active = false;
             config.on_place_painter_move_end?.();
-          }
-          if (painter_resize_drag_active) {
-            painter_resize_drag_active = false;
-            config.on_place_painter_resize_end?.();
           }
           last_painter_drag_key = null;
         } else {
@@ -3530,34 +3531,37 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           const resolved = scene_tile ? resolve_scene_tile(place, scene_tile.x, scene_tile.y, { prefer_selected_border: allow_border_targets }) : null;
           if (resolved && (resolved.is_interior || (allow_border_targets && resolved.is_border))) {
             const focus_world_z = get_focus_world_z_for_place(place);
-            const local_world_z = focus_world_z - resolved.offset.z;
+            const absolute_world_z = focus_world_z;
+            const place_origin_z = Math.floor(Number(get_place_region_bounds(resolved.place).origin.z ?? 0)) || 0;
             if (painter_tool === 'move' && painter_move_drag_active) {
               config.on_place_painter_move_update?.({
                 place_id: resolved.place.id,
                 tile_position: { x: resolved.tile_x, y: resolved.tile_y },
-                world_z: local_world_z,
+                world_z: absolute_world_z,
               });
               return;
             }
-            if (painter_tool === 'place_resize' && painter_resize_drag_active) {
+            const active_resize = config.get_place_painter_resize_preview?.() ?? null;
+            if (painter_tool === 'place_resize' && active_resize && active_resize.place_id === resolved.place.id) {
+              const region_position = {
+                x: Math.floor(Number(get_place_region_bounds(resolved.place).origin.x ?? 0)) + resolved.tile_x,
+                y: Math.floor(Number(get_place_region_bounds(resolved.place).origin.y ?? 0)) + resolved.tile_y,
+                z: absolute_world_z,
+              };
               config.on_place_painter_resize_update?.({
                 place_id: resolved.place.id,
                 tile_position: { x: resolved.tile_x, y: resolved.tile_y },
-                world_z: local_world_z,
-                region_position: {
-                  x: Math.floor(Number(get_place_region_bounds(resolved.place).origin.x ?? 0)) + resolved.tile_x,
-                  y: Math.floor(Number(get_place_region_bounds(resolved.place).origin.y ?? 0)) + resolved.tile_y,
-                  z: Math.floor(Number(get_place_region_bounds(resolved.place).origin.z ?? 0)) + local_world_z,
-                },
+                world_z: region_position.z,
+                region_position,
               });
               return;
             }
             const button = (e.buttons & 2) !== 0 ? 2 : (e.buttons & 1) !== 0 ? 0 : null;
             if (button !== null) {
-              const drag_key = `${button}:${resolved.place.id}:${resolved.tile_x}:${resolved.tile_y}:${local_world_z}`;
+              const drag_key = `${button}:${resolved.place.id}:${resolved.tile_x}:${resolved.tile_y}:${absolute_world_z}`;
               if (drag_key !== last_painter_drag_key) {
                 last_painter_drag_key = drag_key;
-                const hit = get_entity_hit_at_world_z(resolved.tile_x, resolved.tile_y, resolved.place, local_world_z);
+                const hit = get_entity_hit_at_world_z(resolved.tile_x, resolved.tile_y, resolved.place, absolute_world_z);
                 const entity = hit?.entity ?? null;
                 console.log('[PLACE_PAINTER] drag paint dispatch ' + JSON.stringify({
                   x: e.x,
@@ -3566,16 +3570,16 @@ export function make_place_module(config: PlaceModuleConfig): Module {
                   place_id: resolved.place.id,
                   tile_x: resolved.tile_x,
                   tile_y: resolved.tile_y,
-                  focus_world_z: local_world_z,
+                  focus_world_z: absolute_world_z,
                 }));
                 void config.on_place_painter_primary_action?.({
                   place_id: resolved.place.id,
                   tile_position: { x: resolved.tile_x, y: resolved.tile_y },
-                  world_z: local_world_z,
+                  world_z: absolute_world_z,
                   region_position: {
                     x: Math.floor(Number(get_place_region_bounds(resolved.place).origin.x ?? 0)) + resolved.tile_x,
                     y: Math.floor(Number(get_place_region_bounds(resolved.place).origin.y ?? 0)) + resolved.tile_y,
-                    z: Math.floor(Number(get_place_region_bounds(resolved.place).origin.z ?? 0)) + local_world_z,
+                    z: absolute_world_z,
                   },
                   button,
                   entity_ref: entity
@@ -3599,10 +3603,6 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       if (painter_move_drag_active) {
         painter_move_drag_active = false;
         config.on_place_painter_move_end?.();
-      }
-      if (painter_resize_drag_active) {
-        painter_resize_drag_active = false;
-        config.on_place_painter_resize_end?.();
       }
       last_painter_drag_key = null;
     },
@@ -3790,7 +3790,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const scene_tile = screen_to_tile(e.x, e.y);
       const resolved = scene_tile ? resolve_scene_tile(place, scene_tile.x, scene_tile.y, { prefer_selected_border: allow_border_targets }) : null;
       if (!resolved || (!resolved.is_interior && !(allow_border_targets && resolved.is_border))) return;
-      const local_world_z = focus_world_z - resolved.offset.z;
+      const absolute_world_z = focus_world_z;
+      const place_origin_z = Math.floor(Number(get_place_region_bounds(resolved.place).origin.z ?? 0)) || 0;
+      const place_local_z = absolute_world_z - place_origin_z;
 
       console.log('[PLACE_PAINTER] pointer down dispatch ' + JSON.stringify({
         x: e.x,
@@ -3799,14 +3801,14 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         place_id: resolved.place.id,
         tile_x: resolved.tile_x,
         tile_y: resolved.tile_y,
-        focus_world_z: local_world_z,
+        focus_world_z: absolute_world_z,
       }));
 
-      const painter_target = get_place_painter_entity_target(resolved.place, resolved.tile_x, resolved.tile_y, local_world_z);
+      const painter_target = get_place_painter_entity_target(resolved.place, resolved.tile_x, resolved.tile_y, absolute_world_z);
       const region_position = {
         x: Math.floor(Number(get_place_region_bounds(resolved.place).origin.x ?? 0)) + resolved.tile_x,
         y: Math.floor(Number(get_place_region_bounds(resolved.place).origin.y ?? 0)) + resolved.tile_y,
-        z: Math.floor(Number(get_place_region_bounds(resolved.place).origin.z ?? 0)) + local_world_z,
+        z: absolute_world_z,
       };
       if (painter_tool === 'move') {
         const selected_place_id = config.get_scene_selected_place_id?.() ?? place.id;
@@ -3814,7 +3816,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           void config.on_place_painter_primary_action?.({
             place_id: resolved.place.id,
             tile_position: { x: resolved.tile_x, y: resolved.tile_y },
-            world_z: local_world_z,
+            world_z: absolute_world_z,
             region_position,
             button: e.button,
             entity_ref: painter_target?.entity_ref,
@@ -3826,7 +3828,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         config.on_place_painter_move_start?.({
           place_id: resolved.place.id,
           tile_position: { x: resolved.tile_x, y: resolved.tile_y },
-          world_z: local_world_z,
+          world_z: absolute_world_z,
           entity_ref: painter_target.entity_ref,
           entity_type: painter_target.entity_type,
         });
@@ -3835,22 +3837,22 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       if (painter_tool === 'place_resize') {
         const selected_place_id = config.get_scene_selected_place_id?.() ?? place.id;
         const active_resize = config.get_place_painter_resize_preview?.() ?? null;
-        if (active_resize && active_resize.place_id === selected_place_id && active_resize.interaction === 'click_z' && resolved.place.id === selected_place_id) {
+        if (active_resize && active_resize.place_id === selected_place_id && resolved.place.id === selected_place_id) {
           config.on_place_painter_resize_update?.({
             place_id: resolved.place.id,
             tile_position: { x: resolved.tile_x, y: resolved.tile_y },
-            world_z: local_world_z,
+            world_z: absolute_world_z,
             region_position,
           });
           config.on_place_painter_resize_end?.();
           return;
         }
-        const resize_face = detect_place_resize_face(resolved.place, { x: resolved.tile_x, y: resolved.tile_y, z: local_world_z });
+        const resize_face = select_place_resize_face(resolved.place, { x: resolved.tile_x, y: resolved.tile_y, z: place_local_z });
         if (resolved.place.id !== selected_place_id || !resize_face) {
           void config.on_place_painter_primary_action?.({
             place_id: resolved.place.id,
             tile_position: { x: resolved.tile_x, y: resolved.tile_y },
-            world_z: local_world_z,
+            world_z: absolute_world_z,
             region_position,
             button: e.button,
             entity_ref: painter_target?.entity_ref,
@@ -3861,16 +3863,15 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         config.on_place_painter_resize_start?.({
           place_id: resolved.place.id,
           tile_position: { x: resolved.tile_x, y: resolved.tile_y },
-          world_z: local_world_z,
+          world_z: absolute_world_z,
           region_position,
         });
-        painter_resize_drag_active = !resize_face.startsWith('z');
         return;
       }
       void config.on_place_painter_primary_action?.({
         place_id: resolved.place.id,
         tile_position: { x: resolved.tile_x, y: resolved.tile_y },
-        world_z: local_world_z,
+        world_z: absolute_world_z,
         region_position,
         button: e.button,
         entity_ref: painter_target?.entity_ref,
@@ -4276,13 +4277,6 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     },
 
     OnWheel(e: WheelEvent): void {
-      if ((config.get_place_painter_tool?.() ?? 'paint') === 'place_resize' && painter_resize_drag_active && config.on_place_painter_resize_adjust_z) {
-        const dir = e.delta_y < 0 ? 1 : (e.delta_y > 0 ? -1 : 0);
-        if (dir !== 0) {
-          config.on_place_painter_resize_adjust_z(dir);
-          return;
-        }
-      }
       // Mouse wheel is reserved for world layer selection (focus_z).
       // No wrap/cycle: clamp to visible layer count.
       if (!config.set_focus_z) return;

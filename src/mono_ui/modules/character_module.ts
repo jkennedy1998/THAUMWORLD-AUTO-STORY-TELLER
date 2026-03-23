@@ -44,7 +44,7 @@ export type CharacterModuleConfig = {
   // Interaction
   get_is_visible: () => boolean;
   on_slot_click?: (slot_name: string, slot_type: SlotType, garb_index: number | null) => void;
-  on_drop?: (slot_name: string, slot_type: SlotType, garb_index: number | null) => Promise<boolean>;
+  on_drop?: (slot_name: string, slot_type: SlotType, garb_index: number | null, target?: CharacterDropTarget) => Promise<boolean>;
   on_drag_start?: (
     slot_name: string,
     slot_type: SlotType,
@@ -62,6 +62,7 @@ export type CharacterModuleConfig = {
   ) => void;
   get_highlighted_slots?: () => Array<{ slot_name: string; slot_type: SlotType; garb_index?: number }>;
   on_drag_rejected?: () => void;
+  on_invalid_drop?: (message: string) => void;
 
   // Styling
   border_rgb?: Rgb;
@@ -88,6 +89,15 @@ export type CharacterModuleConfig = {
   get_open_containers?: () => Set<string>;
 };
 
+export type CharacterDropTarget = {
+  kind: 'body_slot' | 'sidebar_container';
+  slot_name: string | null;
+  slot_type: SlotType | null;
+  garb_index: number | null;
+  item_instance_id: string | null;
+  container_id: string | null;
+};
+
 export function make_character_module(opts: CharacterModuleConfig): Module {
   // Phase 8: Use mutable rect for moving
   let rect = opts.rect;
@@ -106,6 +116,21 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
   
   // Cache resolved slots for hit detection
   let resolved_slots_cache: Map<string, ResolvedSlot[]> = new Map();
+
+  function get_equipped_item_by_id(item_id: string | null | undefined): { instance: ItemInstance; definition: ItemDefinition } | null {
+    if (!item_id) return null;
+    const equipped = opts.get_equipped_items();
+    return Array.from(equipped.values()).find(item => item.instance.id === item_id) || null;
+  }
+
+  function get_sidebar_container_at_position(x: number, y: number): { container_id: string } | null {
+    for (const box of sidebar_boxes) {
+      if (x >= box.x0 && x <= box.x1 && y >= box.y0 && y <= box.y1) {
+        return { container_id: box.container_id };
+      }
+    }
+    return null;
+  }
   
   // Pan state for body slots area
   let pan_offset = { x: 0, y: 0 };
@@ -229,6 +254,32 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
     }
     
     return null;
+  }
+
+  function get_drop_target_at_position(x: number, y: number): CharacterDropTarget | null {
+    const sidebar = get_sidebar_container_at_position(x, y);
+    if (sidebar) {
+      const container = opts.get_equipped_containers?.().find((entry) => entry.container_id === sidebar.container_id) ?? null;
+      return {
+        kind: 'sidebar_container',
+        slot_name: container?.slot_name ?? null,
+        slot_type: null,
+        garb_index: null,
+        item_instance_id: container?.item_instance?.id ?? null,
+        container_id: sidebar.container_id,
+      };
+    }
+
+    const slot = get_resolved_slot_at_position(x, y);
+    if (!slot) return null;
+    return {
+      kind: 'body_slot',
+      slot_name: slot.body_slot,
+      slot_type: slot.slot_type,
+      garb_index: slot.garb_index,
+      item_instance_id: slot.item_id ?? null,
+      container_id: slot.item_id ? get_slot_container_id(opts.get_actor_id(), slot) : null,
+    };
   }
 
   /**
@@ -674,8 +725,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       // Right-click opens container if item has container_data
       if (e.button === 2) {
         if (slot.item_id) {
-          const equipped = opts.get_equipped_items();
-          const found_item = Array.from(equipped.values()).find(item => item.instance.id === slot.item_id) || null;
+          const found_item = get_equipped_item_by_id(slot.item_id);
           if (found_item) {
             const tags: any[] = (Array.isArray((found_item.instance as any)?.tags) ? (found_item.instance as any).tags : [])
               .concat(Array.isArray((found_item.definition as any)?.tags) ? (found_item.definition as any).tags : []);
@@ -747,9 +797,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
         return;
       }
 
-      const equipped = opts.get_equipped_items();
-      const target_id = slot.item_id;
-      const equipped_item = Array.from(equipped.values()).find(item => item.instance.id === target_id) || null;
+      const equipped_item = get_equipped_item_by_id(slot.item_id);
       
       if (!equipped_item) {
         debug_log(`[CharacterModule] Cannot find equipped item for slot`);
@@ -879,18 +927,19 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       const within_rect = e.x >= rect.x0 && e.x <= rect.x1 && e.y >= rect.y0 && e.y <= rect.y1;
       
       if (within_rect) {
-        const slot = get_resolved_slot_at_position(e.x, e.y);
+        const target = get_drop_target_at_position(e.x, e.y);
         
-        if (!slot) {
-          debug_log(`[CharacterModule] Drop outside valid slot`);
+        if (!target || !target.slot_name) {
+          debug_log(`[CharacterModule] Drop on invalid character target at (${e.x}, ${e.y})`);
+          opts.on_invalid_drop?.('Cannot drop item there');
           opts.on_drag_rejected?.();
           return;
         }
 
-        debug_log(`[CharacterModule] Drop on slot: ${slot.body_slot}.${slot.slot_type}`);
+        debug_log(`[CharacterModule] Drop target: ${target.kind}:${target.container_id ?? `${target.slot_name}.${target.slot_type}`}`);
 
         if (opts.on_drop) {
-          void opts.on_drop(slot.body_slot, slot.slot_type, slot.garb_index).then((success: boolean) => {
+          void opts.on_drop(target.slot_name, target.slot_type ?? 'tool', target.garb_index, target).then((success: boolean) => {
             debug_log(`[CharacterModule] Drop ${success ? 'successful' : 'failed'}`);
           });
         }

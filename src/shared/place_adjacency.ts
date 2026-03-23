@@ -9,6 +9,11 @@ export type PlaceFaceAdjacency = {
   direction_from_a: PlaceConnectorDirection;
 };
 
+export type PlaceFaceAdjacencyDetail = PlaceFaceAdjacency & {
+  overlap_min: RegionVoxel;
+  overlap_max: RegionVoxel;
+};
+
 export type VolumeBoundaryInfo = {
   on_x_min: boolean;
   on_x_max: boolean;
@@ -135,28 +140,146 @@ export function region_bounds_overlap(a: PlaceRegionBounds, b: PlaceRegionBounds
 }
 
 export function get_places_face_adjacency(place_a: Place, place_b: Place): PlaceFaceAdjacency | null {
+  const detail = get_places_face_adjacency_detail(place_a, place_b);
+  if (!detail) return null;
+  return {
+    place_a_id: detail.place_a_id,
+    place_b_id: detail.place_b_id,
+    direction_from_a: detail.direction_from_a,
+  };
+}
+
+export function get_places_face_adjacency_detail(place_a: Place, place_b: Place): PlaceFaceAdjacencyDetail | null {
   const a = get_place_region_extents(place_a);
   const b = get_place_region_extents(place_b);
   if (region_bounds_overlap(get_place_region_bounds(place_a), get_place_region_bounds(place_b))) return null;
   if (a.max_x + 1 === b.min_x && ranges_overlap(a.min_y, a.max_y, b.min_y, b.max_y) && ranges_overlap(a.min_z, a.max_z, b.min_z, b.max_z)) {
-    return { place_a_id: place_a.id, place_b_id: place_b.id, direction_from_a: "x+" };
+    return {
+      place_a_id: place_a.id,
+      place_b_id: place_b.id,
+      direction_from_a: "x+",
+      overlap_min: { x: b.min_x, y: Math.max(a.min_y, b.min_y), z: Math.max(a.min_z, b.min_z) },
+      overlap_max: { x: b.min_x, y: Math.min(a.max_y, b.max_y), z: Math.min(a.max_z, b.max_z) },
+    };
   }
   if (a.min_x === b.max_x + 1 && ranges_overlap(a.min_y, a.max_y, b.min_y, b.max_y) && ranges_overlap(a.min_z, a.max_z, b.min_z, b.max_z)) {
-    return { place_a_id: place_a.id, place_b_id: place_b.id, direction_from_a: "x-" };
+    return {
+      place_a_id: place_a.id,
+      place_b_id: place_b.id,
+      direction_from_a: "x-",
+      overlap_min: { x: b.max_x, y: Math.max(a.min_y, b.min_y), z: Math.max(a.min_z, b.min_z) },
+      overlap_max: { x: b.max_x, y: Math.min(a.max_y, b.max_y), z: Math.min(a.max_z, b.max_z) },
+    };
   }
   if (a.max_y + 1 === b.min_y && ranges_overlap(a.min_x, a.max_x, b.min_x, b.max_x) && ranges_overlap(a.min_z, a.max_z, b.min_z, b.max_z)) {
-    return { place_a_id: place_a.id, place_b_id: place_b.id, direction_from_a: "y+" };
+    return {
+      place_a_id: place_a.id,
+      place_b_id: place_b.id,
+      direction_from_a: "y+",
+      overlap_min: { x: Math.max(a.min_x, b.min_x), y: b.min_y, z: Math.max(a.min_z, b.min_z) },
+      overlap_max: { x: Math.min(a.max_x, b.max_x), y: b.min_y, z: Math.min(a.max_z, b.max_z) },
+    };
   }
   if (a.min_y === b.max_y + 1 && ranges_overlap(a.min_x, a.max_x, b.min_x, b.max_x) && ranges_overlap(a.min_z, a.max_z, b.min_z, b.max_z)) {
-    return { place_a_id: place_a.id, place_b_id: place_b.id, direction_from_a: "y-" };
+    return {
+      place_a_id: place_a.id,
+      place_b_id: place_b.id,
+      direction_from_a: "y-",
+      overlap_min: { x: Math.max(a.min_x, b.min_x), y: b.max_y, z: Math.max(a.min_z, b.min_z) },
+      overlap_max: { x: Math.min(a.max_x, b.max_x), y: b.max_y, z: Math.min(a.max_z, b.max_z) },
+    };
   }
   if (a.max_z + 1 === b.min_z && ranges_overlap(a.min_x, a.max_x, b.min_x, b.max_x) && ranges_overlap(a.min_y, a.max_y, b.min_y, b.max_y)) {
-    return { place_a_id: place_a.id, place_b_id: place_b.id, direction_from_a: "z+" };
+    return {
+      place_a_id: place_a.id,
+      place_b_id: place_b.id,
+      direction_from_a: "z+",
+      overlap_min: { x: Math.max(a.min_x, b.min_x), y: Math.max(a.min_y, b.min_y), z: b.min_z },
+      overlap_max: { x: Math.min(a.max_x, b.max_x), y: Math.min(a.max_y, b.max_y), z: b.min_z },
+    };
   }
   if (a.min_z === b.max_z + 1 && ranges_overlap(a.min_x, a.max_x, b.min_x, b.max_x) && ranges_overlap(a.min_y, a.max_y, b.min_y, b.max_y)) {
-    return { place_a_id: place_a.id, place_b_id: place_b.id, direction_from_a: "z-" };
+    return {
+      place_a_id: place_a.id,
+      place_b_id: place_b.id,
+      direction_from_a: "z-",
+      overlap_min: { x: Math.max(a.min_x, b.min_x), y: Math.max(a.min_y, b.min_y), z: b.max_z },
+      overlap_max: { x: Math.min(a.max_x, b.max_x), y: Math.min(a.max_y, b.max_y), z: b.max_z },
+    };
   }
   return null;
+}
+
+export function project_local_voxel_to_adjacent_place(source_place: Place, target_place: Place, source_local: RegionVoxel, options?: { require_source_face_overlap?: boolean }): { target_local: RegionVoxel; target_region: RegionVoxel; adjacency: PlaceFaceAdjacencyDetail } | null {
+  const adjacency = get_places_face_adjacency_detail(source_place, target_place);
+  if (!adjacency) return null;
+  const source_region = local_voxel_to_region_voxel(source_place, source_local);
+  const strict = !!options?.require_source_face_overlap;
+  const source_extents = get_place_region_extents(source_place);
+  if (strict) {
+    if (adjacency.direction_from_a === "x+" && source_region.x !== source_extents.max_x) return null;
+    if (adjacency.direction_from_a === "x-" && source_region.x !== source_extents.min_x) return null;
+    if (adjacency.direction_from_a === "y+" && source_region.y !== source_extents.max_y) return null;
+    if (adjacency.direction_from_a === "y-" && source_region.y !== source_extents.min_y) return null;
+    if (adjacency.direction_from_a === "z+" && source_region.z !== source_extents.max_z) return null;
+    if (adjacency.direction_from_a === "z-" && source_region.z !== source_extents.min_z) return null;
+    if (adjacency.direction_from_a === "x+" || adjacency.direction_from_a === "x-") {
+      if (source_region.y < adjacency.overlap_min.y || source_region.y > adjacency.overlap_max.y) return null;
+      if (source_region.z < adjacency.overlap_min.z || source_region.z > adjacency.overlap_max.z) return null;
+    }
+    if (adjacency.direction_from_a === "y+" || adjacency.direction_from_a === "y-") {
+      if (source_region.x < adjacency.overlap_min.x || source_region.x > adjacency.overlap_max.x) return null;
+      if (source_region.z < adjacency.overlap_min.z || source_region.z > adjacency.overlap_max.z) return null;
+    }
+    if (adjacency.direction_from_a === "z+" || adjacency.direction_from_a === "z-") {
+      if (source_region.x < adjacency.overlap_min.x || source_region.x > adjacency.overlap_max.x) return null;
+      if (source_region.y < adjacency.overlap_min.y || source_region.y > adjacency.overlap_max.y) return null;
+    }
+  }
+  let target_region: RegionVoxel;
+  if (adjacency.direction_from_a === "x+") {
+    target_region = {
+      x: adjacency.overlap_min.x,
+      y: clamp(source_region.y, adjacency.overlap_min.y, adjacency.overlap_max.y),
+      z: clamp(source_region.z, adjacency.overlap_min.z, adjacency.overlap_max.z),
+    };
+  } else if (adjacency.direction_from_a === "x-") {
+    target_region = {
+      x: adjacency.overlap_max.x,
+      y: clamp(source_region.y, adjacency.overlap_min.y, adjacency.overlap_max.y),
+      z: clamp(source_region.z, adjacency.overlap_min.z, adjacency.overlap_max.z),
+    };
+  } else if (adjacency.direction_from_a === "y+") {
+    target_region = {
+      x: clamp(source_region.x, adjacency.overlap_min.x, adjacency.overlap_max.x),
+      y: adjacency.overlap_min.y,
+      z: clamp(source_region.z, adjacency.overlap_min.z, adjacency.overlap_max.z),
+    };
+  } else if (adjacency.direction_from_a === "y-") {
+    target_region = {
+      x: clamp(source_region.x, adjacency.overlap_min.x, adjacency.overlap_max.x),
+      y: adjacency.overlap_max.y,
+      z: clamp(source_region.z, adjacency.overlap_min.z, adjacency.overlap_max.z),
+    };
+  } else if (adjacency.direction_from_a === "z+") {
+    target_region = {
+      x: clamp(source_region.x, adjacency.overlap_min.x, adjacency.overlap_max.x),
+      y: clamp(source_region.y, adjacency.overlap_min.y, adjacency.overlap_max.y),
+      z: adjacency.overlap_min.z,
+    };
+  } else {
+    target_region = {
+      x: clamp(source_region.x, adjacency.overlap_min.x, adjacency.overlap_max.x),
+      y: clamp(source_region.y, adjacency.overlap_min.y, adjacency.overlap_max.y),
+      z: adjacency.overlap_max.z,
+    };
+  }
+  if (!is_region_voxel_inside_place(target_place, target_region)) return null;
+  return {
+    target_local: region_voxel_to_local_voxel(target_place, target_region),
+    target_region,
+    adjacency,
+  };
 }
 
 export function build_place_adjacency_map(places: Place[]): Map<string, Set<string>> {
@@ -264,12 +387,32 @@ export function get_place_region_boundary_info(place: Place, region: RegionVoxel
 export function detect_place_resize_face(place: Place, local: RegionVoxel): PlaceFace | null {
   const info = get_local_volume_boundary_info(get_place_region_bounds(place).size, local);
   if (!info) return null;
+  if (info.on_z_min) return "z-";
+  if (info.on_z_max) return "z+";
   if (info.on_x_min) return "x-";
   if (info.on_x_max) return "x+";
   if (info.on_y_min) return "y-";
   if (info.on_y_max) return "y+";
-  if (info.on_z_min) return "z-";
-  if (info.on_z_max) return "z+";
+  return null;
+}
+
+export function select_place_resize_face(place: Place, local: RegionVoxel): PlaceFace | null {
+  const bounds = get_place_region_bounds(place);
+  const sx = clamp_size(bounds.size.x ?? 1);
+  const sy = clamp_size(bounds.size.y ?? 1);
+  const sz = clamp_size(bounds.size.z ?? 1);
+  const lx = Math.floor(Number(local.x ?? 0)) || 0;
+  const ly = Math.floor(Number(local.y ?? 0)) || 0;
+  const lz = Math.floor(Number(local.z ?? 0)) || 0;
+  const on_xy_interior = lx >= 0 && lx < sx && ly >= 0 && ly < sy;
+  const on_x_border = ly >= 0 && ly < sy && (lx === -1 || lx === 0 || lx === sx - 1 || lx === sx);
+  const on_y_border = lx >= 0 && lx < sx && (ly === -1 || ly === 0 || ly === sy - 1 || ly === sy);
+
+  if (on_xy_interior && lz === 0) return "z-";
+  if (on_xy_interior && lz === sz - 1) return "z+";
+  if (lz < 0 || lz >= sz) return null;
+  if (on_x_border) return lx <= 0 ? "x-" : "x+";
+  if (on_y_border) return ly <= 0 ? "y-" : "y+";
   return null;
 }
 

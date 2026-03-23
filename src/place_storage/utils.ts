@@ -15,6 +15,7 @@ import type {
   PlaceConnector
 } from "../types/place.js";
 import { load_place, save_place } from "./store.js";
+import { get_place_region_bounds, get_places_face_adjacency, is_region_voxel_inside_place, region_voxel_to_local_voxel } from "../shared/place_adjacency.js";
 
 /**
  * Calculate distance between two tile positions (in tiles)
@@ -277,9 +278,10 @@ export async function move_entity_between_places(
   
   const from_place = from_result.place;
   const to_place = to_result.place;
+  const seam_adjacent = !!get_places_face_adjacency(from_place, to_place);
   
   // Check if places are connected
-  if (!are_places_connected(from_place, to_place_id)) {
+  if (!are_places_connected(from_place, to_place_id) && !seam_adjacent) {
     return {
       ok: false,
       error: "places_not_connected",
@@ -289,10 +291,12 @@ export async function move_entity_between_places(
   
   // Get connection info
   const connection = get_place_connection(from_place, to_place_id);
-  const connector = get_place_connector(from_place, to_place_id);
   
   // Determine if NPC or actor
   const is_npc = entity_ref.startsWith("npc.");
+  const source_entity = is_npc
+    ? from_place.contents.npcs_present.find((npc) => npc.npc_ref === entity_ref)
+    : from_place.contents.actors_present.find((actor) => actor.actor_ref === entity_ref);
   
   // Remove from source place
   if (is_npc) {
@@ -302,7 +306,24 @@ export async function move_entity_between_places(
   }
   
   // Determine entry position
-  const entry_position = target_tile ?? to_place.tile_grid.default_entry;
+  const source_bounds = get_place_region_bounds(from_place);
+  const seam_target = (!target_tile && seam_adjacent && source_entity?.tile_position)
+    ? (() => {
+        const world_region = {
+          x: (Math.floor(Number(source_bounds.origin.x ?? 0)) || 0) + (Math.floor(Number(source_entity.tile_position.x) || 0)),
+          y: (Math.floor(Number(source_bounds.origin.y ?? 0)) || 0) + (Math.floor(Number(source_entity.tile_position.y) || 0)),
+          z: Number.isFinite(Number((source_entity as any)?.elevation))
+            ? Math.floor(Number((source_entity as any).elevation))
+            : (Math.floor(Number(source_bounds.origin.z ?? 0)) || 0),
+        };
+        if (!is_region_voxel_inside_place(to_place, world_region)) return null;
+        const local = region_voxel_to_local_voxel(to_place, world_region);
+        return { target_local: local, target_region: world_region };
+      })()
+    : null;
+  const entry_position = target_tile ?? (seam_target
+    ? { x: seam_target.target_local.x, y: seam_target.target_local.y, z: seam_target.target_region.z }
+    : to_place.tile_grid.default_entry);
   
   // Add to destination place
   if (is_npc) {
@@ -319,7 +340,7 @@ export async function move_entity_between_places(
     ok: true,
     place_id: to_place_id,
     tile_position: entry_position,
-    travel_description: connection?.description ?? "Travel through connector",
+    travel_description: connection?.description ?? (seam_adjacent ? "Walk across seam" : "Travel through connector"),
     time_seconds: connection?.travel_time_seconds ?? 0
   };
 }

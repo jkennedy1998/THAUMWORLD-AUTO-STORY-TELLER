@@ -14,9 +14,6 @@ export type PlaceOccupancyIndex = {
   // LOS blockers on z=1 (initially same as OCCUPIES semantics).
   blocks_los_z1: boolean[][];
 
-  // Support map for z=0 (true means solid support exists).
-  supports_z0: boolean[][] | null;
-
   // Multi-voxel owner occupancy keyed by absolute world voxel.
   // Key format: "x_y_z".
   occupants_by_voxel: Map<string, Array<{ owner_kind: string; owner_id: string; part: string; tags: any[] }>>;
@@ -61,7 +58,6 @@ export function get_place_occupancy_index(place: Place): PlaceOccupancyIndex {
 
   const blocks_z1 = make_bool_grid(w, h, false);
   const blocks_los_z1 = make_bool_grid(w, h, false);
-  const supports_z0 = (place as any)?.tiles_z0 ? make_bool_grid(w, h, false) : null;
   const occupants_by_voxel = new Map<string, Array<{ owner_kind: string; owner_id: string; part: string; tags: any[] }>>();
 
   const base_z = (() => {
@@ -86,11 +82,6 @@ export function get_place_occupancy_index(place: Place): PlaceOccupancyIndex {
       const b = tile_blocks_movement_runtime(t1);
       blocks_z1[y]![x] = b;
       blocks_los_z1[y]![x] = tile_blocks_los_runtime(t1);
-
-      if (supports_z0) {
-        const t0 = get_tile((place as any)?.tiles_z0, x, y);
-        supports_z0[y]![x] = tile_blocks_movement_runtime(t0);
-      }
     }
   }
 
@@ -180,7 +171,6 @@ export function get_place_occupancy_index(place: Place): PlaceOccupancyIndex {
     height: h,
     blocks_movement_z1: blocks_z1,
     blocks_los_z1,
-    supports_z0,
     occupants_by_voxel,
   };
   return idx;
@@ -237,7 +227,6 @@ export function place_voxel_blocks_movement(place: Place, x: number, y: number, 
     if (wz === base_z) {
       // z=1 in the original relative scheme.
       if (idx.blocks_movement_z1[y]?.[x]) return true;
-      if (idx.supports_z0 && !idx.supports_z0[y]?.[x]) return true;
     }
   }
 
@@ -275,7 +264,6 @@ export function place_tile_blocks_movement(place: Place, x: number, y: number): 
   const idx = get_place_occupancy_index(place);
   if (x < 0 || y < 0 || x >= idx.width || y >= idx.height) return true;
   if (idx.blocks_movement_z1[y]?.[x]) return true;
-  if (idx.supports_z0 && !idx.supports_z0[y]?.[x]) return true;
   return false;
 }
 

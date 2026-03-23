@@ -5,7 +5,7 @@ import { make_input_module } from '../mono_ui/modules/input_module.js';
 import { make_roller_module } from '../mono_ui/modules/roller_module.js';
 import { make_place_module } from '../mono_ui/modules/place_module.js';
 import { make_container_module, type SlotItem } from '../mono_ui/modules/container_module.js';
-import { make_character_module } from '../mono_ui/modules/character_module.js';
+import { make_character_module, type CharacterDropTarget } from '../mono_ui/modules/character_module.js';
 import { make_toolbox_module } from '../mono_ui/modules/toolbox_module.js';
 import { makeLayerPaletteModule } from '../ascii_painter/layer_palette_module.js';
 import type { SlotType } from '../equipment/body_slot_resolver.js';
@@ -29,16 +29,18 @@ import { calculate_grid_dimensions, get_container_grid } from '../container_stor
 import { type ItemInstance } from '../item_instances/store.js';
 import { type ItemDefinition } from '../item_storage/store.js';
 import type { EquipmentSlots } from '../types/body_slots.js';
+import { initWebSocketClient } from '../mono_ui/websocket_client.js';
 import { DEBUG_VISION, set_debug_bundle_enabled, spawn_sense_broadcast_particles } from '../mono_ui/vision_debugger.js';
 import { set_ui_debug_enabled, UI_DEBUG } from '../mono_ui/runtime/ui_debug.js';
 import { get_senses_for_action } from '../action_system/sense_broadcast.js';
 import { get_facing } from '../npc_ai/facing_system.js';
 import { eval_body_model_voxels, get_body_model_def } from '../shared/body_model.js';
 import { get_character_camera_focus_tile } from '../shared/character_camera_focus.js';
+import { get_defined_place_world_zs as get_authored_place_world_zs } from '../shared/place_layers.js';
 import { play_sfx } from '../mono_ui/sfx/sfx_player.js';
 import { format_interval_avg, format_interval_min, get_movement_debug_snapshot } from '../shared/movement_debug_state.js';
 import { has_tag_name } from '../shared/physics_tags.js';
-import { compute_adjacent_place_bounds, detect_place_resize_face, get_place_region_bounds, region_bounds_overlap } from '../shared/place_adjacency.js';
+import { compute_adjacent_place_bounds, get_place_region_bounds, region_bounds_overlap, select_place_resize_face } from '../shared/place_adjacency.js';
 import {
     api_transfer_inline,
 } from './transfer_api.js';
@@ -70,6 +72,16 @@ export const APP_CONFIG = {
 
 const APP_PLACE_TIMING_VERSION = '2026-03-14-visible-pulse-v1';
 const DEBUG_WINDOW_REFRESH_MS = 500;
+
+type ItemMutationRefreshScope = 'place_render' | 'container_contents' | 'character_render';
+
+type ItemMutationRefreshIntent = {
+    place_id?: string | null;
+    actor_id?: string | null;
+    npc_id?: string | null;
+    scopes?: ItemMutationRefreshScope[];
+    reasons?: string[];
+};
 
 export type AppState = {
     modules: readonly Module[];
@@ -239,6 +251,12 @@ export function create_app_state(): AppState {
                 display_char: string;
                 display_color: string;
                 body_model?: { physical?: Array<{ dx: number; dy: number; dz: number }> } | null;
+                body_model_id?: string;
+                facing?: string | null;
+                name?: string;
+                tags?: any[];
+                kind_id?: string;
+                entity_render?: any;
                 target_x: number;
                 target_y: number;
                 target_z: number;
@@ -248,7 +266,7 @@ export function create_app_state(): AppState {
                 active: boolean;
                 place_id: string;
                 face: 'x+' | 'x-' | 'y+' | 'y-' | 'z+' | 'z-';
-                interaction: 'drag' | 'click_z';
+                phase: 'targeting';
                 start_bounds: { origin: { x: number; y: number; z: number }; size: { x: number; y: number; z: number } };
                 proposed_bounds: { origin: { x: number; y: number; z: number }; size: { x: number; y: number; z: number } };
                 valid: boolean;
@@ -620,15 +638,7 @@ export function create_app_state(): AppState {
 
     function get_defined_place_world_zs(place: Place | null): number[] {
         const baseZ = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
-        const out = new Set<number>();
-        if ((place as any)?.tiles_z0) out.add(baseZ - 1);
-        if ((place as any)?.tiles) out.add(baseZ);
-        for (const key of Object.keys(place as any ?? {})) {
-            const m = /^tiles_z(-?\d+)$/.exec(key);
-            if (!m) continue;
-            const off = Math.floor(Number(m[1]));
-            if (Number.isFinite(off)) out.add(baseZ + off);
-        }
+        const out = new Set<number>(get_authored_place_world_zs(place));
 
         for (const actor of place?.contents?.actors_present ?? []) {
             const wz0 = get_entity_camera_anchor_world_z(actor as any, String((actor as any)?.actor_ref ?? ''), baseZ);
@@ -700,16 +710,19 @@ export function create_app_state(): AppState {
         }
     }
 
-    function detect_place_border_direction(place: Place, x: number, y: number): 'x+' | 'x-' | 'y+' | 'y-' | null {
-        if (x === 0 && y >= 0 && y < place.tile_grid.height) return 'x-';
-        if (x === place.tile_grid.width - 1 && y >= 0 && y < place.tile_grid.height) return 'x+';
-        if (y === 0 && x >= 0 && x < place.tile_grid.width) return 'y-';
-        if (y === place.tile_grid.height - 1 && x >= 0 && x < place.tile_grid.width) return 'y+';
-        if (x === -1 && y >= 0 && y < place.tile_grid.height) return 'x-';
-        if (x === place.tile_grid.width && y >= 0 && y < place.tile_grid.height) return 'x+';
-        if (y === -1 && x >= 0 && x < place.tile_grid.width) return 'y-';
-        if (y === place.tile_grid.height && x >= 0 && x < place.tile_grid.width) return 'y+';
-        return null;
+    function detect_place_topology_face(place: Place, x: number, y: number, world_z: number): 'x+' | 'x-' | 'y+' | 'y-' | 'z+' | 'z-' | null {
+        const bounds = get_place_region_bounds(place);
+        const local_z = Math.floor(Number(world_z ?? bounds.origin.z ?? 0)) - (Math.floor(Number(bounds.origin.z ?? 0)) || 0);
+        return select_place_resize_face(place, { x, y, z: local_z });
+    }
+
+    function get_connected_place_create_size(place: Place): { x: number; y: number; z: number } {
+        const bounds = get_place_region_bounds(place);
+        return {
+            x: 3,
+            y: 3,
+            z: Math.max(1, Math.floor(Number(bounds.size?.z ?? 1)) || 1),
+        };
     }
 
     function clone_bounds(bounds: { origin: { x: number; y: number; z: number }; size: { x: number; y: number; z: number } }) {
@@ -766,6 +779,26 @@ export function create_app_state(): AppState {
         return { valid: true };
     }
 
+    function clamp_resize_target_coord(
+        start_bounds: { origin: { x: number; y: number; z: number }; size: { x: number; y: number; z: number } },
+        face: 'x+' | 'x-' | 'y+' | 'y-' | 'z+' | 'z-',
+        target_coord: number,
+    ): number {
+        const raw = Math.floor(Number(target_coord) || 0);
+        if (face !== 'z+' && face !== 'z-') return raw;
+        const min_allowed = Math.floor(Number(start_bounds.origin.z ?? 0)) - 8;
+        const max_allowed = Math.floor(Number(start_bounds.origin.z ?? 0)) + Math.max(1, Math.floor(Number(start_bounds.size.z ?? 1)) || 1) - 1 + 8;
+        return Math.max(min_allowed, Math.min(max_allowed, raw));
+    }
+
+    function is_world_z_inside_place(place: Place, world_z: number): boolean {
+        const bounds = get_place_region_bounds(place);
+        const z = Math.floor(Number(world_z));
+        const min_z = Math.floor(Number(bounds.origin.z ?? 0)) || 0;
+        const max_z = min_z + Math.max(1, Math.floor(Number(bounds.size.z ?? 1)) || 1) - 1;
+        return z >= min_z && z <= max_z;
+    }
+
     async function apply_place_resize(place_id: string, face: 'x+' | 'x-' | 'y+' | 'y-' | 'z+' | 'z-', proposed_bounds: { origin: { x: number; y: number; z: number }; size: { x: number; y: number; z: number } }): Promise<{ ok: true } | { ok: false; error: string }> {
         const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
         try {
@@ -801,21 +834,28 @@ export function create_app_state(): AppState {
         const selected_place_id = ui_state.place.scene_selected_place_id ?? ui_state.place.current_place_id;
         if (!active_place || active_place.id !== selected_place_id) return;
         const bounds = get_place_region_bounds(active_place);
-        const local_z = Math.floor(Number(target.world_z ?? 0));
-        const face = detect_place_resize_face(active_place, { x: target.tile_position.x, y: target.tile_position.y, z: local_z });
+        const local_z = Math.floor(Number(target.region_position?.z ?? target.world_z ?? 0)) - Math.floor(Number(bounds.origin.z ?? 0));
+        const face = select_place_resize_face(active_place, { x: target.tile_position.x, y: target.tile_position.y, z: local_z });
         if (!face) return;
-        const target_coord = face.startsWith('x')
-            ? Math.floor(Number(target.region_position?.x ?? bounds.origin.x))
-            : face.startsWith('y')
-                ? Math.floor(Number(target.region_position?.y ?? bounds.origin.y))
-                : Math.floor(Number(target.region_position?.z ?? bounds.origin.z));
-        const proposed_bounds = compute_resized_bounds(bounds as any, face, target_coord);
+        const target_coord_raw = face === 'x+'
+            ? bounds.origin.x + bounds.size.x - 1
+            : face === 'x-'
+                ? bounds.origin.x
+                : face === 'y+'
+                    ? bounds.origin.y + bounds.size.y - 1
+                    : face === 'y-'
+                        ? bounds.origin.y
+                        : face === 'z+'
+                            ? bounds.origin.z + bounds.size.z - 1
+                            : bounds.origin.z;
+        const target_coord = clamp_resize_target_coord(bounds as any, face, target_coord_raw);
+        const proposed_bounds = clone_bounds(bounds as any);
         const validity = compute_resize_session_validity(active_place.id, proposed_bounds);
         ui_state.place_painter.resize_session = {
             active: true,
             place_id: active_place.id,
             face,
-            interaction: face.startsWith('z') ? 'click_z' : 'drag',
+            phase: 'targeting',
             start_bounds: clone_bounds(bounds as any),
             proposed_bounds,
             valid: validity.valid,
@@ -823,15 +863,18 @@ export function create_app_state(): AppState {
             target_coord,
         };
         debug_log(`[SEAM_TOOL] resize start ${JSON.stringify({ place_id: active_place.id, face, target_coord, proposed_bounds, valid: validity.valid, conflict_place_id: validity.conflict_place_id ?? null })}`);
+        flash_status([`Resize face selected: ${face}`, 'Hover target, click to commit'], 1400);
     }
 
     function update_place_resize_session(target: { place_id: string; tile_position: { x: number; y: number }; world_z: number; region_position?: { x: number; y: number; z: number } }): void {
         const session = ui_state.place_painter.resize_session;
         if (!session?.active) return;
+        if (target.place_id !== session.place_id) return;
         let target_coord = session.target_coord;
         if (session.face.startsWith('x')) target_coord = Math.floor(Number(target.region_position?.x ?? target_coord));
         else if (session.face.startsWith('y')) target_coord = Math.floor(Number(target.region_position?.y ?? target_coord));
         else if (session.face.startsWith('z')) target_coord = Math.floor(Number(target.region_position?.z ?? target_coord));
+        target_coord = clamp_resize_target_coord(session.start_bounds, session.face, target_coord);
         const proposed_bounds = compute_resized_bounds(session.start_bounds, session.face, target_coord);
         const validity = compute_resize_session_validity(session.place_id, proposed_bounds);
         session.target_coord = target_coord;
@@ -845,7 +888,7 @@ export function create_app_state(): AppState {
         const session = ui_state.place_painter.resize_session;
         if (!session?.active) return;
         if (!session.face.startsWith('z')) return;
-        session.target_coord += Math.floor(delta);
+        session.target_coord = clamp_resize_target_coord(session.start_bounds, session.face, session.target_coord + Math.floor(delta));
         const proposed_bounds = compute_resized_bounds(session.start_bounds, session.face, session.target_coord);
         const validity = compute_resize_session_validity(session.place_id, proposed_bounds);
         session.proposed_bounds = proposed_bounds;
@@ -876,14 +919,15 @@ export function create_app_state(): AppState {
     }
 
     async function create_connected_place_from_border(place: Place, x: number, y: number, z: number): Promise<{ ok: true; new_place_id: string } | { ok: false; error: string }> {
-        const direction = detect_place_border_direction(place, x, y);
+        const direction = detect_place_topology_face(place, x, y, z);
         if (!direction) return { ok: false, error: 'not_on_place_border' };
         const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
         const new_place_id = `${place.id}_place_${Date.now().toString(36)}`;
         const bounds = get_place_region_bounds(place);
+        const create_size = get_connected_place_create_size(place);
         const local_z = Math.floor(Number(z ?? bounds.origin.z ?? 0)) - Math.floor(Number(bounds.origin.z ?? 0));
         const pretty_direction = direction.replace('+', ' plus').replace('-', ' minus');
-        const format_connector_error = (error: string, details: any): string => {
+        const format_topology_error = (error: string, details: any): string => {
             if (error === 'place_bounds_overlap') {
                 const place_id = String(details?.place_id ?? 'unknown_place');
                 return `place_bounds_overlap (${place_id})`;
@@ -909,7 +953,7 @@ export function create_app_state(): AppState {
                     new_place_name: `New Place ${pretty_direction}`,
                     border_tile: { x, y, z: local_z },
                     direction,
-                    size: { x: 3, y: 3, z: 3 },
+                    size: create_size,
                 }),
             });
             const preflight_data = await preflight_res.json().catch(() => null);
@@ -918,8 +962,8 @@ export function create_app_state(): AppState {
             }
             if (preflight_data?.can_create !== true) {
                 const pf_error = String(preflight_data?.error ?? 'preflight_failed');
-                const pretty = format_connector_error(pf_error, preflight_data?.details ?? null);
-                debug_log(`[PLACE_PAINTER] connector preflight blocked ${JSON.stringify({ place_id: place.id, border_tile: { x, y, z, local_z }, direction, error: pf_error, details: preflight_data?.details ?? null })}`);
+                const pretty = format_topology_error(pf_error, preflight_data?.details ?? null);
+                debug_log(`[PLACE_PAINTER] seam preflight blocked ${JSON.stringify({ place_id: place.id, border_tile: { x, y, z, local_z }, direction, error: pf_error, details: preflight_data?.details ?? null })}`);
                 return { ok: false, error: `preflight:${pretty}` };
             }
             const res = await fetch(`${base_url}/api/place/topology/create_connected`, {
@@ -932,13 +976,13 @@ export function create_app_state(): AppState {
                     new_place_name: `New Place ${pretty_direction}`,
                     border_tile: { x, y, z: local_z },
                     direction,
-                    size: { x: 3, y: 3, z: 3 },
+                    size: create_size,
                 }),
             });
             const data = await res.json().catch(() => null);
             if (!res.ok || !data?.ok) {
                 const error = String(data?.error ?? `http_${res.status}`);
-                const pretty = format_connector_error(error, data?.details ?? null);
+                const pretty = format_topology_error(error, data?.details ?? null);
                 debug_log(`[SEAM_TOOL] create failed ${JSON.stringify({ place_id: place.id, border_tile: { x, y, z, local_z }, direction, error, details: data?.details ?? null })}`);
                 return { ok: false, error: pretty };
             }
@@ -1145,7 +1189,17 @@ export function create_app_state(): AppState {
         place_id: string,
         entity_ref: string,
         entity_type: 'npc' | 'actor' | 'item' | 'pile' | 'structure',
-    ): { display_char: string; display_color: string; body_model?: { physical?: Array<{ dx: number; dy: number; dz: number }> } | null } | null {
+    ): {
+        display_char: string;
+        display_color: string;
+        body_model?: { physical?: Array<{ dx: number; dy: number; dz: number }> } | null;
+        body_model_id?: string;
+        facing?: string | null;
+        name?: string;
+        tags?: any[];
+        kind_id?: string;
+        entity_render?: any;
+    } | null {
         const place = (get_scene_place(place_id) ?? ui_state.place.current_place) as any;
         if (!place || String(place.id ?? '') !== place_id) return null;
         if (entity_type === 'actor' || entity_type === 'npc') {
@@ -1155,6 +1209,12 @@ export function create_app_state(): AppState {
                 display_char: String(match?.display_char ?? (entity_type === 'actor' ? '@' : 'n')),
                 display_color: String(match?.display_color ?? '#ffffff'),
                 body_model: null,
+                body_model_id: typeof match?.body_model_id === 'string' ? String(match.body_model_id) : undefined,
+                facing: typeof match?.facing === 'string' ? String(match.facing) : get_facing(entity_ref),
+                name: String(match?.name ?? entity_ref.split('.').pop() ?? entity_ref),
+                tags: Array.isArray(match?.tags) ? match.tags : [],
+                kind_id: typeof match?.kind_id === 'string' ? String(match.kind_id) : undefined,
+                entity_render: match?.entity_render,
             } : null;
         }
         if (entity_type === 'structure') {
@@ -1164,6 +1224,7 @@ export function create_app_state(): AppState {
                 display_char: String(match?.display_char ?? '#'),
                 display_color: String(match?.display_color ?? '#ffffff'),
                 body_model: match?.body_model ?? null,
+                name: String(match?.name ?? sid),
             } : null;
         }
         if (entity_type === 'item') {
@@ -1173,6 +1234,8 @@ export function create_app_state(): AppState {
                 display_char: String(meta?.display_char ?? '*'),
                 display_color: String(meta?.display_color ?? '#ffffff'),
                 body_model: null,
+                name: String(meta?.name ?? item_id),
+                tags: Array.isArray(meta?.tags) ? meta.tags : [],
             } : null;
         }
         if (entity_type === 'pile') {
@@ -1180,6 +1243,7 @@ export function create_app_state(): AppState {
                 display_char: '*',
                 display_color: '#ffd37a',
                 body_model: null,
+                name: 'Item pile',
             };
         }
         return null;
@@ -1193,6 +1257,36 @@ export function create_app_state(): AppState {
         return x >= 0 && x < Math.max(1, Math.floor(Number(bounds.size.x ?? place.tile_grid?.width ?? 1)) || 1)
             && y >= 0 && y < Math.max(1, Math.floor(Number(bounds.size.y ?? place.tile_grid?.height ?? 1)) || 1)
             && local_z >= 0 && local_z < Math.max(1, Math.floor(Number(bounds.size.z ?? 1)) || 1);
+    }
+
+    function compute_place_painter_move_target_validity(
+        place_id: string,
+        entity_ref: string,
+        entity_type: 'npc' | 'actor' | 'item' | 'pile' | 'structure',
+        x: number,
+        y: number,
+        z: number,
+    ): { valid: boolean; reason?: string } {
+        const place = (get_scene_place(place_id) ?? ui_state.place.current_place) as any;
+        if (!place || String(place.id ?? '') !== place_id) return { valid: false, reason: 'place_not_loaded' };
+        if (!is_place_painter_move_target_valid(place_id, x, y, z)) return { valid: false, reason: 'out_of_bounds' };
+        if (entity_type === 'actor' || entity_type === 'npc') {
+            const owner = { kind: entity_type, id: entity_ref } as any;
+            const check = can_place_volume(place as any, owner, { x, y, z }, 'WALK' as any, {
+                exclude_owner: owner,
+                support_policy: 'any_footprint' as any,
+            });
+            return check.ok ? { valid: true } : { valid: false, reason: String((check as any).reason ?? 'blocked') };
+        }
+        if (entity_type === 'structure') {
+            const owner = { kind: 'structure', id: String(entity_ref).replace(/^structure\./, '') } as any;
+            const check = can_place_volume(place as any, owner, { x, y, z }, 'WALK' as any, {
+                exclude_owner: owner,
+                support_policy: 'any_footprint' as any,
+            });
+            return check.ok ? { valid: true } : { valid: false, reason: String((check as any).reason ?? 'blocked') };
+        }
+        return { valid: true };
     }
 
     function start_place_move_drag(target: {
@@ -1215,6 +1309,12 @@ export function create_app_state(): AppState {
             display_char: preview.display_char,
             display_color: preview.display_color,
             body_model: preview.body_model ?? null,
+            body_model_id: preview.body_model_id,
+            facing: preview.facing ?? null,
+            name: preview.name,
+            tags: Array.isArray(preview.tags) ? preview.tags : [],
+            kind_id: preview.kind_id,
+            entity_render: preview.entity_render,
             target_x: target.tile_position.x,
             target_y: target.tile_position.y,
             target_z: target.world_z,
@@ -1229,8 +1329,11 @@ export function create_app_state(): AppState {
         session.target_x = target.tile_position.x;
         session.target_y = target.tile_position.y;
         session.target_z = target.world_z;
-        session.valid = target.place_id === session.place_id && is_place_painter_move_target_valid(session.place_id, session.target_x, session.target_y, session.target_z);
-        debug_log(`[SEAM_TOOL] move drag update ${JSON.stringify({ entity_ref: session.entity_ref, target: { x: session.target_x, y: session.target_y, z: session.target_z }, valid: session.valid })}`);
+        const validity = target.place_id === session.place_id
+            ? compute_place_painter_move_target_validity(session.place_id, session.entity_ref, session.entity_type, session.target_x, session.target_y, session.target_z)
+            : { valid: false, reason: 'wrong_place' };
+        session.valid = validity.valid;
+        debug_log(`[SEAM_TOOL] move drag update ${JSON.stringify({ entity_ref: session.entity_ref, target: { x: session.target_x, y: session.target_y, z: session.target_z }, valid: session.valid, reason: validity.reason ?? null })}`);
     }
 
     async function finish_place_move_drag(): Promise<void> {
@@ -1494,6 +1597,12 @@ export function create_app_state(): AppState {
 
         const active_place = get_current_place();
         const is_selected_place = !!active_place && active_place.id === target.place_id;
+        const z_sensitive_tool = tool === 'paint' || tool === 'erase' || tool === 'place_create' || tool === 'place_delete' || tool === 'place_resize';
+        if (active_place && z_sensitive_tool && !is_world_z_inside_place(active_place, target.world_z)) {
+            flash_status([`Target z ${target.world_z} is outside ${active_place.id}`], 1500);
+            debug_warn(`[PLACE_PAINTER] rejected out-of-bounds z target ${JSON.stringify({ tool, place_id: active_place.id, target_place_id: target.place_id, target_world_z: target.world_z, bounds: get_place_region_bounds(active_place) })}`);
+            return;
+        }
 
         if (active_place && !is_selected_place) {
             if (tool === 'paint' || tool === 'erase' || tool === 'move' || tool === 'place_create' || tool === 'place_resize' || tool === 'region_tool') {
@@ -1510,7 +1619,7 @@ export function create_app_state(): AppState {
                 flash_status(['Paint only works on the selected place'], 1200);
                 return;
             }
-            const border_direction = detect_place_border_direction(active_place, target.tile_position.x, target.tile_position.y);
+            const border_direction = detect_place_topology_face(active_place, target.tile_position.x, target.tile_position.y, target.world_z);
             if (ui_state.place_painter.selected_palette_kind === 'item') {
                 const selected = get_selected_place_painter_item_entry();
                 if (!selected) {
@@ -1697,7 +1806,7 @@ export function create_app_state(): AppState {
 
         if (tool === 'place_resize') {
             debug_log(`[SEAM_TOOL] resize requested ${JSON.stringify({ place_id: active_place?.id ?? null, target_place_id: target.place_id, tile: target.tile_position, world_z: target.world_z, is_selected_place })}`);
-            flash_status(['Resize: click a face of the selected place', 'For z faces, click target z next'], 1400);
+            flash_status(['Resize: click a face of the selected place', 'For z faces, click target z to reanchor that face'], 1600);
             return;
         }
 
@@ -2622,10 +2731,10 @@ export function create_app_state(): AppState {
     }
 
     // Load character data (body slots, equipped items, weight) - Phase 5 Inline System
-    async function refresh_character_data(): Promise<void> {
+    async function refresh_character_data(force: boolean = false): Promise<void> {
         if (refresh_character_data_in_flight) return;
         const now = Date.now();
-        if (is_movement_activity_high() && (now - last_character_refresh_ms) < 15000) {
+        if (!force && is_movement_activity_high() && (now - last_character_refresh_ms) < 15000) {
             return;
         }
         refresh_character_data_in_flight = true;
@@ -3195,8 +3304,15 @@ export function create_app_state(): AppState {
 
     function merge_place_into_scene(place: Place): void {
         const idx = ui_state.place.scene_places.findIndex((p) => p.id === place.id);
-        if (idx >= 0) ui_state.place.scene_places[idx] = place;
-        else ui_state.place.scene_places.push(place);
+        if (idx >= 0) {
+            ui_state.place.scene_places = [
+                ...ui_state.place.scene_places.slice(0, idx),
+                place,
+                ...ui_state.place.scene_places.slice(idx + 1),
+            ];
+        } else {
+            ui_state.place.scene_places = [...ui_state.place.scene_places, place];
+        }
         if (ui_state.place.scene_selected_place_id === place.id || ui_state.place.current_place_id === place.id) {
             ui_state.place.current_place = place;
             ui_state.place.current_place_id = place.id;
@@ -3209,6 +3325,165 @@ export function create_app_state(): AppState {
         merge_place_into_scene(refreshed);
         debug_log(`[PLACE_SCENE] single place refresh ${JSON.stringify({ place_id, scene_places: ui_state.place.scene_places.map((p) => p.id) })}`);
         return refreshed;
+    }
+
+    async function refresh_ground_item_cache_for_place(place_id: string): Promise<void> {
+        try {
+            const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+            const items_res = await fetch(`${base_url}/api/place/items?place_id=${encodeURIComponent(place_id)}`);
+            if (!items_res.ok) return;
+            const items_data = await items_res.json();
+            if (!items_data.ok || !Array.isArray(items_data.items)) return;
+            ui_state.place.ground_items_by_id.clear();
+            ui_state.place.ground_items_by_voxel.clear();
+            ui_state.place.ground_items_by_position.clear();
+            for (const it of items_data.items) {
+                const rec = {
+                    id: String(it.id),
+                    def_id: String(it.def_id ?? ''),
+                    name: String(it.name ?? it.def_id ?? it.id),
+                    qty: Number(it.qty ?? 1),
+                    weight: Number(it.weight ?? 0),
+                    display_char: typeof it.display_char === 'string' ? String(it.display_char).charAt(0) : undefined,
+                    display_color: typeof it.display_color === 'string' ? it.display_color : undefined,
+                    tags: Array.isArray(it.tags) ? it.tags : [],
+                    elevation: (typeof it.elevation === 'number' && Number.isFinite(it.elevation)) ? Math.floor(it.elevation) : undefined,
+                    position_key: typeof it.position_key === 'string' ? it.position_key : undefined,
+                    position: it.position && typeof it.position.x === 'number' && typeof it.position.y === 'number'
+                        ? { x: it.position.x, y: it.position.y }
+                        : undefined,
+                };
+
+                const key = rec.position_key || (rec.position ? `${rec.position.x}_${rec.position.y}` : null);
+                if (key) rec.position_key = key;
+
+                const voxel_key = (rec.position && typeof rec.elevation === 'number' && Number.isFinite(rec.elevation))
+                    ? `${rec.position.x}_${rec.position.y}_${Math.floor(rec.elevation)}`
+                    : null;
+
+                ui_state.place.ground_items_by_id.set(rec.id, rec);
+                if (voxel_key) {
+                    const arr = ui_state.place.ground_items_by_voxel.get(voxel_key) ?? [];
+                    arr.push(rec.id);
+                    ui_state.place.ground_items_by_voxel.set(voxel_key, arr);
+                }
+                if (rec.position) {
+                    const xy_key = `${rec.position.x}_${rec.position.y}`;
+                    const arr = ui_state.place.ground_items_by_position.get(xy_key) ?? [];
+                    arr.push(rec.id);
+                    ui_state.place.ground_items_by_position.set(xy_key, arr);
+                }
+            }
+
+            try {
+                const next_place = get_scene_place(place_id) ?? (ui_state.place.current_place_id === place_id ? ui_state.place.current_place : null);
+                if (next_place?.id === 'eden_crossroads_tavern') {
+                    const base_z = Math.floor(Number((next_place as any)?.coordinates?.elevation ?? 0)) || 0;
+                    const want_z = base_z + 1;
+                    const elevated = Array.from(ui_state.place.ground_items_by_id.values()).filter((r: any) => Math.floor(Number(r?.elevation ?? base_z)) === want_z);
+                    if (elevated.length > 0) {
+                        debug_log('3DIFICATION_TEST', `PASS ground item cache includes elevated item(s) (place=${next_place.id} z=${want_z} count=${elevated.length})`);
+                    } else {
+                        debug_warn('3DIFICATION_TEST', `FAIL ground item cache missing elevated items (place=${next_place.id} z=${want_z})`);
+                    }
+
+                    const by_xy = new Map<string, Set<number>>();
+                    for (const [xy, ids] of ui_state.place.ground_items_by_position.entries()) {
+                        const s = by_xy.get(xy) ?? new Set<number>();
+                        for (const id of ids) {
+                            const meta: any = ui_state.place.ground_items_by_id.get(id) ?? null;
+                            const iz = (typeof meta?.elevation === 'number' && Number.isFinite(meta.elevation)) ? Math.floor(meta.elevation) : base_z;
+                            s.add(iz);
+                        }
+                        by_xy.set(xy, s);
+                    }
+                    const multi = Array.from(by_xy.values()).some((s) => s.size >= 2);
+                    if (multi) {
+                        debug_log('3DIFICATION_TEST', `PASS ground item cache supports multi-z piles (place=${next_place.id})`);
+                    } else {
+                        debug_warn('3DIFICATION_TEST', `FAIL ground item cache missing multi-z pile scenario (place=${next_place.id})`);
+                    }
+
+                    const by_xy_z_count = new Map<string, Map<number, number>>();
+                    for (const [voxel_key, ids] of ui_state.place.ground_items_by_voxel.entries()) {
+                        const parts = String(voxel_key).split('_');
+                        if (parts.length !== 3) continue;
+                        const x = Number(parts[0]);
+                        const y = Number(parts[1]);
+                        const z = Number(parts[2]);
+                        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+                        const xy = `${x}_${y}`;
+                        const mz = by_xy_z_count.get(xy) ?? new Map<number, number>();
+                        mz.set(Math.floor(z), (mz.get(Math.floor(z)) ?? 0) + ids.length);
+                        by_xy_z_count.set(xy, mz);
+                    }
+                    const stacked_piles = Array.from(by_xy_z_count.values()).some((mz) => {
+                        let pile_layers = 0;
+                        for (const c of mz.values()) {
+                            if (c >= 2) pile_layers++;
+                            if (pile_layers >= 2) return true;
+                        }
+                        return false;
+                    });
+                    if (stacked_piles) {
+                        debug_log('3DIFICATION_TEST', `PASS ground item cache supports stacked piles (place=${next_place.id})`);
+                    } else {
+                        debug_warn('3DIFICATION_TEST', `FAIL ground item cache missing stacked piles (place=${next_place.id})`);
+                    }
+                }
+            } catch {
+                // ignore
+            }
+
+            const open = Array.from(ui_state.container.open_containers);
+            for (const cid of open) {
+                if (cid.startsWith('place.pile.')) {
+                    const parts = cid.split('.');
+                    const position_key = parts[3];
+                    if (!position_key) continue;
+                    const ids = ui_state.place.ground_items_by_voxel.get(position_key) ?? [];
+                    if (ids.length <= 1) {
+                        close_container_module(cid);
+                    }
+                }
+            }
+        } catch (err) {
+            debug_warn('[mono_ui]', 'failed to refresh ground item cache', err);
+        }
+    }
+
+    async function refresh_place_visual_state(place_id: string): Promise<void> {
+        const is_scene_place = !!get_scene_place(place_id);
+        const is_current_place = ui_state.place.current_place_id === place_id;
+        if (is_scene_place || is_current_place) {
+            await refresh_single_scene_place(place_id);
+        }
+        if (is_current_place) {
+            await refresh_ground_item_cache_for_place(place_id);
+        }
+    }
+
+    async function handle_item_mutations_event(payload: any): Promise<void> {
+        const intents = Array.isArray(payload?.intents) ? payload.intents as ItemMutationRefreshIntent[] : [];
+        if (intents.length === 0) return;
+        const place_ids = new Set<string>();
+        let refresh_containers = false;
+        let refresh_character = false;
+        for (const intent of intents) {
+            const scopes = Array.isArray(intent?.scopes) ? intent.scopes : [];
+            const place_id = String(intent?.place_id ?? '').trim();
+            if (scopes.includes('place_render') && place_id) place_ids.add(place_id);
+            if (scopes.includes('container_contents')) refresh_containers = true;
+            if (scopes.includes('character_render')) {
+                const actor_id = String(intent?.actor_id ?? '').trim();
+                if (!actor_id || actor_id === APP_CONFIG.input_actor_id) refresh_character = true;
+            }
+        }
+        for (const place_id of place_ids) {
+            await refresh_place_visual_state(place_id);
+        }
+        if (refresh_containers) await refresh_container_data();
+        if (refresh_character) await refresh_character_data(true);
     }
 
     function get_place_region_id(place_id: string | null): string | null {
@@ -3834,12 +4109,13 @@ export function create_app_state(): AppState {
                     if (place_id !== ui_state.place.actor_current_place_id) {
                         const prev_actor_place_id = ui_state.place.actor_current_place_id;
                         const prev_selected_place_id = ui_state.place.scene_selected_place_id;
-                        const follow_actor_selection = !prev_selected_place_id || prev_selected_place_id === prev_actor_place_id;
+                        const painter_lock_selection = ui_state.place_painter.active && !!prev_selected_place_id;
+                        const follow_actor_selection = !painter_lock_selection && (!prev_selected_place_id || prev_selected_place_id === prev_actor_place_id);
                         ui_state.place.actor_current_place_id = place_id;
-                        debug_log(`[PLACE_SCENE] actor place updated in-scene ${JSON.stringify({ actor_current_place_id: place_id, prev_actor_place_id, prev_selected_place_id, follow_actor_selection, scene_places: ui_state.place.scene_places.map((p) => p.id) })}`);
+                        debug_log(`[PLACE_SCENE] actor place updated in-scene ${JSON.stringify({ actor_current_place_id: place_id, prev_actor_place_id, prev_selected_place_id, painter_lock_selection, follow_actor_selection, scene_places: ui_state.place.scene_places.map((p) => p.id) })}`);
                         void refresh_scene_topology_preserving_selection(place_id, {
                             preferred_selected_place_id: follow_actor_selection ? place_id : (prev_selected_place_id ?? place_id),
-                            mirror_to_current_place: true,
+                            mirror_to_current_place: !painter_lock_selection,
                         });
                     }
                 } else if (place_id && !ui_state.place.current_place) {
@@ -4539,7 +4815,7 @@ export function create_app_state(): AppState {
             get_place_painter_resize_preview: () => ui_state.place_painter.resize_session ? {
                 place_id: ui_state.place_painter.resize_session.place_id,
                 face: ui_state.place_painter.resize_session.face,
-                interaction: ui_state.place_painter.resize_session.interaction,
+                interaction: ui_state.place_painter.resize_session.phase,
                 proposed_bounds: ui_state.place_painter.resize_session.proposed_bounds,
                 valid: ui_state.place_painter.resize_session.valid,
                 conflict_place_id: ui_state.place_painter.resize_session.conflict_place_id ?? null,
@@ -4551,6 +4827,12 @@ export function create_app_state(): AppState {
                 display_char: ui_state.place_painter.move_drag_session.display_char,
                 display_color: ui_state.place_painter.move_drag_session.display_color,
                 body_model: ui_state.place_painter.move_drag_session.body_model ?? null,
+                body_model_id: ui_state.place_painter.move_drag_session.body_model_id,
+                facing: ui_state.place_painter.move_drag_session.facing ?? null,
+                name: ui_state.place_painter.move_drag_session.name,
+                tags: ui_state.place_painter.move_drag_session.tags ?? [],
+                kind_id: ui_state.place_painter.move_drag_session.kind_id,
+                entity_render: ui_state.place_painter.move_drag_session.entity_render,
                 source: { x: ui_state.place_painter.move_drag_session.source_x, y: ui_state.place_painter.move_drag_session.source_y, z: ui_state.place_painter.move_drag_session.source_z },
                 target: { x: ui_state.place_painter.move_drag_session.target_x, y: ui_state.place_painter.move_drag_session.target_y, z: ui_state.place_painter.move_drag_session.target_z },
                 valid: ui_state.place_painter.move_drag_session.valid,
@@ -6140,27 +6422,55 @@ export function create_app_state(): AppState {
                 ui_state.character.highlighted_slots = compatible;
                 console.log(`[Character] Drag started from ${slot_name}.${slot_type}${garb_index !== null ? `.${garb_index}` : ''} - highlighting slots:`, compatible);
             },
-            on_drop: async (slot_name: string, slot_type: SlotType, garb_index: number | null): Promise<boolean> => {
+            on_invalid_drop: (message: string) => {
+                flash_status([message], 1800);
+            },
+            on_drop: async (slot_name: string, slot_type: SlotType, garb_index: number | null, target?: CharacterDropTarget): Promise<boolean> => {
                 // Check if there's an active drag
                 if (!drag_state.is_dragging) return false;
 
                 const actor_id = APP_CONFIG.input_actor_id;
-                
-                // Build inline target path (Phase 5)
+                const resolved_target = target ?? {
+                    kind: 'body_slot',
+                    slot_name,
+                    slot_type,
+                    garb_index,
+                    item_instance_id: null,
+                    container_id: null,
+                };
+
                 let target_container_id = `body_slots.${slot_name}.${slot_type}`;
                 if (slot_type === 'garb' && garb_index !== null) {
                     target_container_id += `.${garb_index}`;
                 }
+                if (resolved_target.kind === 'sidebar_container' && resolved_target.container_id) {
+                    target_container_id = resolved_target.container_id;
+                }
+
+                debug_log(`[Character] Drop resolve ${JSON.stringify({
+                    kind: resolved_target.kind,
+                    slot_name,
+                    slot_type,
+                    garb_index,
+                    target_container_id,
+                    target_item_instance_id: resolved_target.item_instance_id,
+                })}`);
 
                 // Shortcut: if dropping onto an occupied container-item in a body slot, deposit into it.
                 try {
-                    const body_slots_any: any = ui_state.character.body_slots as any;
-                    const slot = body_slots_any?.[slot_name];
                     let existing: any = null;
-                    if (slot) {
-                        if (slot_type === 'armor') existing = slot.armor;
-                        else if (slot_type === 'tool') existing = slot.tool;
-                        else if (slot_type === 'garb' && garb_index !== null) existing = slot.garb?.[garb_index] ?? null;
+                    if (resolved_target.kind === 'sidebar_container') {
+                        existing = resolved_target.item_instance_id
+                            ? ui_state.character.equipped_items.get(resolved_target.item_instance_id)?.instance ?? null
+                            : null;
+                    } else {
+                        const body_slots_any: any = ui_state.character.body_slots as any;
+                        const slot = body_slots_any?.[slot_name];
+                        if (slot) {
+                            if (slot_type === 'armor') existing = slot.armor;
+                            else if (slot_type === 'tool') existing = slot.tool;
+                            else if (slot_type === 'garb' && garb_index !== null) existing = slot.garb?.[garb_index] ?? null;
+                        }
                     }
 
                     const is_container = has_tag(existing?.tags, 'CONTAINER');
@@ -6171,7 +6481,9 @@ export function create_app_state(): AppState {
                             return false;
                         }
 
-                        const nested_dest = `actor.item.${actor_id}.${existing.id}`;
+                        const nested_dest = resolved_target.kind === 'sidebar_container' && resolved_target.container_id
+                            ? resolved_target.container_id
+                            : `actor.item.${actor_id}.${existing.id}`;
 
                         const src = String(drag_state.source_container_id ?? '');
 
@@ -6237,7 +6549,8 @@ export function create_app_state(): AppState {
                 if (src.startsWith('place.ground.') || src.startsWith('place.pile.')) {
                     // Validate compatibility using backend API (same as inventory->character)
                     const item_def = drag_state.item_definition;
-                    if (item_def) {
+                    const allow_nested_container = resolved_target.kind === 'sidebar_container' || (has_tag((ui_state.character.equipped_items.get(resolved_target.item_instance_id ?? '')?.instance as any)?.tags, 'CONTAINER'));
+                    if (item_def && !allow_nested_container) {
                         const compatible_slots = await get_compatible_slots_for_instance(drag_state.item_instance_id!, drag_state.source_container_id, item_def);
                         const is_compatible = compatible_slots.some((slot: { slot_name: string; slot_type: string; garb_index?: number }) =>
                             slot.slot_name === slot_name && slot.slot_type === slot_type
@@ -7188,6 +7501,11 @@ export function create_app_state(): AppState {
     // Server-authoritative movement: disable legacy NPC movement loops.
     // NPC wandering and movement are now driven by the interface server breath+brain ticks.
     ui_state.place.npc_movement_active = false;
+
+    const wsClient = initWebSocketClient();
+    wsClient.on('ITEM_MUTATIONS_APPLIED', (payload: any) => {
+        void handle_item_mutations_event(payload);
+    });
 
     // Initial load of character data
     void refresh_character_data();

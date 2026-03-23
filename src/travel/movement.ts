@@ -21,7 +21,7 @@ import {
   add_npc_to_place,
   remove_npc_from_place
 } from "../place_storage/utils.js";
-import { get_places_face_adjacency } from "../shared/place_adjacency.js";
+import { get_place_region_bounds, get_places_face_adjacency, is_region_voxel_inside_place, region_voxel_to_local_voxel } from "../shared/place_adjacency.js";
 import { get_npc_location, set_npc_location, update_npc_location } from "../npc_storage/location.js";
 import { load_actor, save_actor } from "../actor_storage/store.js";
 import { load_npc, save_npc } from "../npc_storage/store.js";
@@ -98,6 +98,27 @@ function get_adjacent_place_ids(slot: number, from_place: Place): string[] {
     if (get_places_face_adjacency(from_place, target_res.place)) ids.push(pid);
   }
   return ids;
+}
+
+function resolve_same_region_entry_tile(from_place: Place, to_place: Place, current_location: { tile?: TilePosition; elevation?: number } | null | undefined): TilePosition | null {
+  const tile = current_location?.tile;
+  if (!tile || typeof tile.x !== "number" || typeof tile.y !== "number") return null;
+  const from_bounds = get_place_region_bounds(from_place);
+  const current_world_z = Number.isFinite(Number(current_location?.elevation))
+    ? Math.floor(Number(current_location?.elevation))
+    : Math.floor(Number((tile as any)?.z ?? from_bounds.origin.z ?? 0)) || 0;
+  const world_region = {
+    x: (Math.floor(Number(from_bounds.origin.x ?? 0)) || 0) + (Math.floor(Number(tile.x) || 0)),
+    y: (Math.floor(Number(from_bounds.origin.y ?? 0)) || 0) + (Math.floor(Number(tile.y) || 0)),
+    z: current_world_z,
+  };
+  if (!is_region_voxel_inside_place(to_place, world_region)) return null;
+  const local = region_voxel_to_local_voxel(to_place, world_region);
+  return {
+    x: local.x,
+    y: local.y,
+    z: world_region.z,
+  };
 }
 
 // Movement speeds (tiles per minute)
@@ -318,13 +339,16 @@ export async function travel_between_places(
   }
   const to_place = to_place_result.place;
   
-  const preferred_entry = to_place.tile_grid.default_entry;
+  const preferred_entry = adjacent
+    ? (resolve_same_region_entry_tile(from_place, to_place, current_location) ?? to_place.tile_grid.default_entry)
+    : to_place.tile_grid.default_entry;
   const entry_tile = find_valid_entry_tile(to_place, entity_ref, preferred_entry);
   debug_log('MOVE_VEL_TEST', 'travel destination placement resolved', {
     entity_ref,
     from_place_id,
     to_place_id: target_place_id,
     via_direction: connection?.direction ?? (adjacent ? 'seam' : null),
+    adjacent,
     preferred_entry,
     entry_tile,
   });
@@ -506,13 +530,16 @@ export function get_available_destinations(
     direction: 'seam',
     description: 'Walk across seam'
   }));
-  if (adjacent_destinations.length > 0) return adjacent_destinations;
-
-  return place_result.place.connections.map(c => ({
+  const explicitDestinations = place_result.place.connections.map(c => ({
     place_id: c.target_place_id,
     direction: c.direction,
     description: c.description
   }));
+  const merged = new Map<string, { place_id: string; direction: string; description: string }>();
+  for (const dest of [...adjacent_destinations, ...explicitDestinations]) {
+    if (!merged.has(dest.place_id)) merged.set(dest.place_id, dest);
+  }
+  return Array.from(merged.values());
 }
 
 /**

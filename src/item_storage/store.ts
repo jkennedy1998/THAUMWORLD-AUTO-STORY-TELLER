@@ -122,7 +122,7 @@ export function load_item_def(slot: number, def_id: string): ItemDefLookupResult
  */
 export function load_master_item(def_id: string): ItemDefLookupResult {
     const master_dir = get_master_items_dir();
-    const categories = ['weapons', 'armor', 'clothing', 'containers', 'currency'];
+    const categories = ['weapons', 'armor', 'clothing', 'containers', 'currency', 'food'];
     
     // Search all category directories
     for (const category of categories) {
@@ -166,7 +166,7 @@ export function load_master_item(def_id: string): ItemDefLookupResult {
 
 export function list_master_items(): Array<{ id: string; item: ItemDefinition; path: string }> {
     const master_dir = get_master_items_dir();
-    const categories = ['weapons', 'armor', 'clothing', 'containers', 'currency'];
+    const categories = ['weapons', 'armor', 'clothing', 'containers', 'currency', 'food'];
     const results: Array<{ id: string; item: ItemDefinition; path: string }> = [];
     for (const category of categories) {
         const dir = path.join(master_dir, category);

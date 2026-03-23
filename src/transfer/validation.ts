@@ -2,6 +2,7 @@ import type { ItemInstance } from "../item_instances/store.js";
 import type { ItemDefinition } from "../item_storage/store.js";
 import { check_tag_compatibility } from "../equipment/tag_validation.js";
 import { debug_log, debug_error } from "../shared/debug.js";
+import { can_stack_items_with_spoil_policy } from "../item_storage/stacking.js";
 
 /**
  * Transfer operation types
@@ -36,36 +37,12 @@ export function can_stack(
     item_b: ItemInstance,
     def_b: ItemDefinition
 ): boolean {
-    // Must be same def_id
-    if (def_a.id !== def_b.id) {
-        debug_log("transfer", `Cannot stack: different def_id (${def_a.id} vs ${def_b.id})`);
+    if (!can_stack_items_with_spoil_policy(item_a, def_a, item_b, def_b)) {
+        debug_log("transfer", `Cannot stack: policy rejected merge for ${def_a.id} and ${def_b.id}`);
         return false;
     }
     
-    // Must have stackable flag
-    if (!def_a.stackable || !def_b.stackable) {
-        debug_log("transfer", `Cannot stack: not stackable (${def_a.stackable}, ${def_b.stackable})`);
-        return false;
-    }
-    
-    // Check max stack size
-    const max_stack = def_a.max_stack_size || 1;
-    const combined_qty = (item_a.qty || 1) + (item_b.qty || 1);
-    if (combined_qty > max_stack) {
-        debug_log("transfer", `Cannot stack: would exceed max (${combined_qty} > ${max_stack})`);
-        return false;
-    }
-    
-    // Check tags match (simple length comparison for now)
-    // TODO: Deep compare tags if needed
-    const tags_a = item_a.tags || [];
-    const tags_b = item_b.tags || [];
-    if (tags_a.length !== tags_b.length) {
-        debug_log("transfer", `Cannot stack: different tag counts`);
-        return false;
-    }
-    
-    debug_log("transfer", `Can stack: ${def_a.id} (${item_a.qty || 1} + ${item_b.qty || 1} <= ${max_stack})`);
+    debug_log("transfer", `Can stack: ${def_a.id} (${item_a.qty || 1} + ${item_b.qty || 1} <= ${def_a.max_stack_size || 1})`);
     return true;
 }
 

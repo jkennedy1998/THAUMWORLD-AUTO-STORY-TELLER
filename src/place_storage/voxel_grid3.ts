@@ -1,5 +1,6 @@
 import type { Place } from "../types/place.js";
 import type { PlaceTile } from "../types/place.js";
+import { get_place_tile_at_world_z } from "../shared/place_layers.js";
 import { get_place_occupancy_index, place_voxel_blocks_los, place_voxel_blocks_movement } from "./occupancy_index.js";
 
 // Absolute world-z.
@@ -11,36 +12,18 @@ export type PlaceVoxelGrid3 = {
 
   // Tile instances are authored on:
   // - tiles_z0 at world_z = base_z - 1
+  // - tiles_z1 at world_z = base_z + 1, etc.
   // - tiles at world_z = base_z
   get_tile: (x: number, y: number, world_z: WorldZ) => PlaceTile | null;
 
   // Semantics (initial):
-  // - movement: walking plane is z=1; z=0 must support
-  // - LOS: uses z=1 blockers
+  // - movement and LOS currently consult authored blockers on the base layer
   blocks_movement: (x: number, y: number, world_z: WorldZ) => boolean;
   blocks_los: (x: number, y: number, world_z: WorldZ) => boolean;
 };
 
-function get_place_base_z(place: Place): number {
-  try {
-    const z = Number((place as any)?.coordinates?.elevation);
-    return Number.isFinite(z) ? Math.floor(z) : 0;
-  } catch {
-    return 0;
-  }
-}
-
 function get_tile(place: Place, x: number, y: number, world_z: WorldZ): PlaceTile | null {
-  try {
-    const base_z = get_place_base_z(place);
-    const wz = Math.floor(Number(world_z));
-    if (!Number.isFinite(wz)) return null;
-    if (wz === base_z - 1) return ((place as any)?.tiles_z0?.cells?.[y]?.[x] ?? null) as any;
-    if (wz === base_z) return ((place as any)?.tiles?.cells?.[y]?.[x] ?? null) as any;
-    return null;
-  } catch {
-    return null;
-  }
+  return get_place_tile_at_world_z(place, x, y, world_z);
 }
 
 export function make_place_voxel_grid3(place: Place): PlaceVoxelGrid3 {
