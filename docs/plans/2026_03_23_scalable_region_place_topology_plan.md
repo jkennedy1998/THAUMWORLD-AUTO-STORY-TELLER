@@ -159,7 +159,6 @@ type RegionPlaceGraph = {
   }>;
 };
 ```
-```
 
 Purpose:
 
@@ -349,33 +348,45 @@ Legend:
 
 ### Phase 1: Region membership index
 
-- [ ] add `region_place_index` derived storage and in-memory cache
-- [ ] implement full rebuild from place JSON
-- [ ] replace `list_places_in_region(...)` with index-backed reads
-- [ ] replace lightweight region bounds record reads with the new index
-- [ ] add safe cache invalidation helpers
+- [x] add `region_place_index` derived storage and in-memory cache
+- [x] implement full rebuild from place JSON
+- [x] replace `list_places_in_region(...)` with index-backed reads
+- [x] replace lightweight region bounds record reads with the new index
+- [x] add safe cache invalidation helpers
 
 ### Phase 2: Region adjacency graph
 
-- [ ] add `region_place_graph` derived storage and in-memory cache
-- [ ] implement full adjacency rebuild from region membership bounds
-- [ ] keep `get_places_face_adjacency(...)` as the final adjacency oracle
-- [ ] replace runtime region graph rebuilds with graph reads
-- [ ] replace travel/editor neighbor scans with graph reads
+- [x] add `region_place_graph` derived storage and in-memory cache
+- [x] implement full adjacency rebuild from region membership bounds
+- [x] keep `get_places_face_adjacency(...)` as the final adjacency oracle
+- [x] replace runtime region graph rebuilds with graph reads
+- [x] replace travel/editor neighbor scans with graph reads
 
 ### Phase 3: Scene topology path
 
-- [ ] switch `/api/region/scene` to index-backed BFS over cached neighbors
-- [ ] include `graph_version` in topology responses
-- [ ] ensure visible scene cost scales with visible place count, not region size
-- [ ] remove redundant renderer-side adjacency rebuilding when server topology is available
+- [x] switch `/api/region/scene` to index-backed BFS over cached neighbors
+- [x] include `graph_version` in topology responses
+- [~] ensure visible scene cost scales with visible place count, not region size
+- [x] remove redundant renderer-side adjacency rebuilding when server topology is available
+
+Current note:
+
+- [x] topology-only region scene endpoint exists and app state hydrates visible place payloads by `visible_place_ids`
+- [~] scene refresh still uses per-place payload fetches; batch hydration/finer stale detection remains follow-up work
 
 ### Phase 4: Movement handoff during zone loading
 
-- [ ] emit explicit actor place-transition events when seam crossing changes place ownership
-- [ ] update renderer scene handoff to react immediately to topology change
-- [ ] ensure movement updates can apply to any loaded visible place, not only the current selected place
-- [ ] make heavy payload refreshes reconcile after the scene handoff instead of blocking it
+- [x] emit explicit actor place-transition events when seam crossing changes place ownership
+- [x] update renderer scene handoff to react immediately to topology change
+- [x] ensure movement updates can apply to any loaded visible place, not only the current selected place
+- [x] make heavy payload refreshes reconcile after the scene handoff instead of blocking it
+
+Hardening notes:
+
+- [x] transition devlogs exist for server emit, topology fetch, hydration, and scene handoff timing
+- [x] scene handoff has a fast-path when `graph_version`, actor place, and `visible_place_ids` are unchanged
+- [x] handoff hydration fetches only missing visible place payloads
+- [x] client performs immediate local handoff to an already-loaded destination scene place before topology reconciliation finishes
 
 ### Phase 5: Incremental invalidation
 
@@ -395,22 +406,22 @@ Legend:
 
 ### Functional topology checks
 
-- [ ] `list_places_in_region(...)` returns the same place ids as the old scan path on existing data
-- [ ] derived graph neighbors match direct `get_places_face_adjacency(...)` results on the tavern cluster
+- [x] `list_places_in_region(...)` returns the same place ids as the old scan path on existing data
+- [x] derived graph neighbors match direct `get_places_face_adjacency(...)` results on controlled regression fixtures
 - [ ] overlap detection still rejects interior overlap and allows face-touching adjacency
-- [ ] edge-only and corner-only touching still do not create neighbors
+- [x] edge-only and corner-only touching still do not create neighbors
 
 ### Scene loading checks
 
-- [ ] `/api/region/scene` for the tavern cluster returns the same visible ids as before
+- [~] `/api/region/scene` for the tavern cluster returns the same visible ids as before
 - [ ] visible ids remain stable when selected place differs from actor current place
-- [ ] scene responses do not perform full-region adjacency rebuilds during ordinary requests
+- [~] scene responses do not perform full-region adjacency rebuilds during ordinary requests
 
 ### Movement/transition checks
 
-- [ ] seam crossing updates actor place without waiting on poll-based discovery
-- [ ] moving into a newly visible adjacent place does not stall until a full place reload completes
-- [ ] ordered visible movement updates remain preserved for visible places
+- [x] seam crossing updates actor place without waiting on poll-based discovery
+- [~] moving into a newly visible adjacent place does not stall until a full place reload completes
+- [~] ordered visible movement updates remain preserved for visible places
 - [ ] crossing between adjacent places still respects destination legality checks
 
 ### Editor/update checks
@@ -446,7 +457,7 @@ Legend:
 ### Runtime/devlog tests
 
 - add devlog markers for `region_place_index rebuild`, `region_place_graph rebuild`, and `scene topology read`
-- verify ordinary movement across a seam does not log whole-region graph rebuilds
+- [~] verify ordinary movement across a seam does not log whole-region graph rebuilds
 - verify a place resize bumps `graph_version` for only the affected region
 
 ### Synthetic scale tests
