@@ -7,6 +7,7 @@
 import type { Rect } from '../mono_ui/types.js';
 
 const STORAGE_KEY = 'painter_module_positions';
+const VISIBILITY_STORAGE_KEY = 'painter_module_visibility';
 
 export type ModulePositionData = {
   x0: number;
@@ -17,6 +18,10 @@ export type ModulePositionData = {
 
 export type ModulePositions = {
   [moduleId: string]: ModulePositionData;
+};
+
+export type ModuleVisibility = {
+  [moduleId: string]: boolean;
 };
 
 /**
@@ -84,5 +89,47 @@ export function clearModulePositions(): void {
     localStorage.removeItem(STORAGE_KEY);
   } catch (e) {
     console.warn('Failed to clear module positions:', e);
+  }
+}
+
+export function saveModuleVisibilityState(visibility: ModuleVisibility): void {
+  try {
+    localStorage.setItem(VISIBILITY_STORAGE_KEY, JSON.stringify(visibility));
+  } catch (e) {
+    console.warn('Failed to save module visibility:', e);
+  }
+}
+
+export function loadModuleVisibilityState(): ModuleVisibility {
+  try {
+    const data = localStorage.getItem(VISIBILITY_STORAGE_KEY);
+    if (data) {
+      return JSON.parse(data) as ModuleVisibility;
+    }
+  } catch (e) {
+    console.warn('Failed to load module visibility:', e);
+  }
+  return {};
+}
+
+export function saveModuleVisibility(moduleId: string, visible: boolean): void {
+  const visibility = loadModuleVisibilityState();
+  visibility[moduleId] = visible;
+  saveModuleVisibilityState(visibility);
+}
+
+export function getModuleVisibility(moduleId: string): boolean | null {
+  const visibility = loadModuleVisibilityState();
+  if (moduleId in visibility) {
+    return visibility[moduleId] ?? false;
+  }
+  return null;
+}
+
+export function clearModuleVisibilityState(): void {
+  try {
+    localStorage.removeItem(VISIBILITY_STORAGE_KEY);
+  } catch (e) {
+    console.warn('Failed to clear module visibility:', e);
   }
 }

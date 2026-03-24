@@ -171,6 +171,43 @@ export class CanvasRuntime {
 
     set_modules(modules: readonly Module[]): void {
         this.modules = modules as Module[];
+        this.sync_runtime_pan_to_modules();
+    }
+
+    private sync_runtime_pan_to_modules(): void {
+        for (const module of this.modules) {
+            try {
+                module?.setRuntimePanOffset?.(this.pan_tiles_x, this.pan_tiles_y);
+            } catch {
+                // ignore
+            }
+        }
+    }
+
+    private get_screen_locked_pan_bounds(): { min_x: number; max_x: number; min_y: number; max_y: number } | null {
+        let found = false;
+        let min_x = Number.NEGATIVE_INFINITY;
+        let max_x = Number.POSITIVE_INFINITY;
+        let min_y = Number.NEGATIVE_INFINITY;
+        let max_y = Number.POSITIVE_INFINITY;
+
+        for (const module of this.modules) {
+            if (!module?.isScreenLocked || !module.getScreenLockedPanBounds) continue;
+            const bounds = module.getScreenLockedPanBounds();
+            min_x = Math.max(min_x, bounds.min_x);
+            max_x = Math.min(max_x, bounds.max_x);
+            min_y = Math.max(min_y, bounds.min_y);
+            max_y = Math.min(max_y, bounds.max_y);
+            found = true;
+        }
+
+        if (!found) return null;
+        return {
+            min_x: Number.isFinite(min_x) ? min_x : 0,
+            max_x: Number.isFinite(max_x) ? max_x : 0,
+            min_y: Number.isFinite(min_y) ? min_y : 0,
+            max_y: Number.isFinite(max_y) ? max_y : 0,
+        };
     }
 
     start(): void {
@@ -360,6 +397,8 @@ export class CanvasRuntime {
             this.pan_accum_px_y = 0;
         }
 
+        const screen_locked_pan_bounds = this.get_screen_locked_pan_bounds();
+
         const mx = this.PAN_MARGIN_TILES * tile_w;
         const my = this.PAN_MARGIN_TILES * tile_h;
 
@@ -378,11 +417,25 @@ export class CanvasRuntime {
         this.pan_tiles_x = Math.round((clamped_x - this.base_pan_px_x) / tile_w);
         this.pan_tiles_y = Math.round((clamped_y - this.base_pan_px_y) / tile_h);
 
+        if (screen_locked_pan_bounds) {
+            const next_pan_x = Math.max(screen_locked_pan_bounds.min_x, Math.min(screen_locked_pan_bounds.max_x, this.pan_tiles_x));
+            const next_pan_y = Math.max(screen_locked_pan_bounds.min_y, Math.min(screen_locked_pan_bounds.max_y, this.pan_tiles_y));
+            if (next_pan_x !== this.pan_tiles_x) {
+                this.pan_accum_px_x = 0;
+                this.pan_tiles_x = next_pan_x;
+            }
+            if (next_pan_y !== this.pan_tiles_y) {
+                this.pan_accum_px_y = 0;
+                this.pan_tiles_y = next_pan_y;
+            }
+        }
+
         const final_x = this.base_pan_px_x + this.pan_tiles_x * tile_w;
         const final_y = this.base_pan_px_y + this.pan_tiles_y * tile_h;
 
         // Apply CSS transform to move the entire canvas
         this.canvas_el.style.transform = `translate(${final_x}px, ${final_y}px)`;
+        this.sync_runtime_pan_to_modules();
 
         // Best-effort notification so the app shell can keep background patterns aligned.
         try {

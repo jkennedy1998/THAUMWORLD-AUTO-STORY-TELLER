@@ -8,44 +8,43 @@
 
 import type { Canvas, Module, Rect, PointerEvent, DragEvent } from '../types.js';
 import { get_color_by_name } from '../colors.js';
-import { draw_module_border, BORDER_STYLES } from '../module_borders.js';
-import type { ModuleGizmosConfig, GizmoState } from '../module_gizmos.js';
-import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area, handle_global_pointer_down_for_gizmos } from '../module_gizmos.js';
+import type { ModuleGizmosConfig } from '../module_gizmos.js';
+import { make_floating_panel_module } from './floating_panel_module.js';
 
 export type WeightSelectorOptions = {
   id: string;
   rect: Rect;
   get_weight_index: () => number;
-  on_weight_change: (weight_index: number) => void;
+  get_left_weight_index?: () => number;
+  get_right_weight_index?: () => number;
+  on_weight_change: (weight_index: number, button: number) => void;
   on_move?: (new_rect: Rect) => void;
   on_close?: () => void;
 };
 
 const NUM_WEIGHTS = 8;
 const WEIGHT_LABELS = ['Thin', 'XLight', 'Light', 'Regular', 'Medium', 'SBold', 'Bold', 'Black'];
-const WEIGHT_CHARS = ['░', '▒', '▓', '█', '▓', '▒', '░', '█']; // Visual indicators
-
 export function make_weight_selector_module(opts: WeightSelectorOptions): Module {
-  // Mutable rect for moving
-  let rect = opts.rect;
-  
-  // Gizmo configuration
+  const MIN_WIDTH = 12;
+  const MAX_WIDTH = 32;
+  const MIN_HEIGHT = 7;
+  const MAX_HEIGHT = 16;
+
   const gizmo_config: ModuleGizmosConfig = {
-    enabled: ['move', 'close'],
+    enabled: ['move', 'resize', 'close'],
     can_close: true,
     can_move: true,
     can_save_position: false,
     on_close: opts.on_close,
     on_move: opts.on_move,
   };
-  
-  const gizmo_state: GizmoState = create_gizmo_state();
-  
+
   // Drag state for slider
   let is_dragging_slider = false;
+  let drag_button = 0;
 
   // Calculate weight from x position
-  function get_weight_from_x(x: number): number {
+  function get_weight_from_x(rect: Rect, x: number): number {
     const slider_start_x = rect.x0 + 2;
     const slider_width = rect.x1 - rect.x0 - 3; // -3 for borders and padding
     const segment_width = slider_width / (NUM_WEIGHTS - 1);
@@ -57,33 +56,32 @@ export function make_weight_selector_module(opts: WeightSelectorOptions): Module
     return weight;
   }
 
-  return {
-    id: opts.id,
-    get rect() { return rect; },
-    set rect(newRect) { rect = newRect; },
-    Focusable: true,
+  function get_weight_for_button(button: number): number {
+    return button === 2
+      ? (opts.get_right_weight_index?.() ?? opts.get_weight_index())
+      : (opts.get_left_weight_index?.() ?? opts.get_weight_index());
+  }
 
-    Draw(c: Canvas): void {
+  return make_floating_panel_module({
+    id: opts.id,
+    rect: opts.rect,
+    title: 'WEIGHTS',
+    gizmos: gizmo_config,
+    background: { rgb: get_color_by_name('off_black').rgb },
+    resize: {
+      min_width: MIN_WIDTH,
+      min_height: MIN_HEIGHT,
+      max_width: MAX_WIDTH,
+      max_height: MAX_HEIGHT,
+    },
+    draw_content(c: Canvas, rect: Rect): void {
       const bg_color = get_color_by_name('off_black').rgb;
-      const border_color = get_color_by_name('medium_gray').rgb;
       const text_color = get_color_by_name('off_white').rgb;
       const slider_bg = get_color_by_name('dark_gray').rgb;
       const slider_fg = get_color_by_name('vivid_blue').rgb;
-      const handle_color = get_color_by_name('vivid_yellow').rgb;
-      
-      // Fill background
+      const left_weight = opts.get_left_weight_index?.() ?? opts.get_weight_index();
+      const right_weight = opts.get_right_weight_index?.() ?? opts.get_weight_index();
       c.fill_rect(rect, { char: ' ', rgb: bg_color, style: 'regular' });
-
-      draw_module_border(c, {
-        rect,
-        style: BORDER_STYLES.double,
-        border_rgb: border_color,
-        weight_index: 3,
-        header: {
-          text: 'WEIGHT',
-          reserve_left_cols: 2 + ((gizmo_config.enabled?.length ?? 0) * 2),
-        },
-      });
       
       // Draw slider track
       const slider_y = rect.y1 - 3;
@@ -113,6 +111,21 @@ export function make_weight_selector_module(opts: WeightSelectorOptions): Module
           style: 'regular',
           weight_index: is_selected ? 6 : 3
         });
+
+        const has_left = i === left_weight;
+        const has_right = i === right_weight;
+        if (has_left || has_right) {
+          c.set(marker_x, slider_y - 1, {
+            char: has_left && has_right ? 'B' : has_left ? 'L' : 'R',
+            rgb: has_left && has_right
+              ? get_color_by_name('vivid_yellow').rgb
+              : has_left
+                ? get_color_by_name('vivid_blue').rgb
+                : get_color_by_name('vivid_red').rgb,
+            style: 'regular',
+            weight_index: 4
+          });
+        }
       }
       
       // Draw current weight label
@@ -128,82 +141,31 @@ export function make_weight_selector_module(opts: WeightSelectorOptions): Module
           weight_index: 4
         });
       }
-      
-      // Draw gizmos
-      draw_module_gizmos(c, rect, gizmo_config, gizmo_state, 'WEIGHTS');
     },
-
-    OnGlobalPointerDown(e: PointerEvent): void {
-      handle_global_pointer_down_for_gizmos(e, rect, gizmo_config, gizmo_state);
-    },
-
-    OnPointerDown(e: PointerEvent): void {
-      // Check gizmo area first
-      if (is_in_gizmo_area(e.x, e.y, rect)) {
-        const gizmo = handle_gizmo_click(e.x, e.y, rect, gizmo_config, gizmo_state);
-        if (gizmo === 'move') {
-          gizmo_state.move_start_x = e.x;
-          gizmo_state.move_start_y = e.y;
-        }
-        return;
-      }
-      
-      // Handle move mode
-      if (gizmo_state.is_move_mode) {
-        gizmo_state.move_start_x = e.x;
-        gizmo_state.move_start_y = e.y;
-        return;
-      }
-      
+    on_pointer_down_content(e: PointerEvent, rect: Rect): void {
       // Check if clicking on slider area
       const slider_y = rect.y1 - 3;
       if (e.y === slider_y || e.y === slider_y - 1 || e.y === slider_y + 1) {
         is_dragging_slider = true;
-        const new_weight = get_weight_from_x(e.x);
-        if (new_weight !== opts.get_weight_index()) {
-          opts.on_weight_change(new_weight);
+        drag_button = e.button;
+        const new_weight = get_weight_from_x(rect, e.x);
+        if (new_weight !== get_weight_for_button(e.button)) {
+          opts.on_weight_change(new_weight, e.button);
         }
       }
     },
-
-    OnDragMove(e: DragEvent): void {
-      if (gizmo_state.is_move_mode && gizmo_state.original_rect) {
-        const dx = e.x - gizmo_state.move_start_x;
-        const dy = e.y - gizmo_state.move_start_y;
-        
-        const new_rect: Rect = {
-          x0: gizmo_state.original_rect.x0 + dx,
-          y0: gizmo_state.original_rect.y0 + dy,
-          x1: gizmo_state.original_rect.x1 + dx,
-          y1: gizmo_state.original_rect.y1 + dy,
-        };
-        
-        rect = new_rect;
-        
-        if (opts.on_move) {
-          opts.on_move(rect);
-        }
-        return;
-      }
-      
+    on_drag_move_content(e: DragEvent, rect: Rect): void {
       // Handle slider dragging
       if (is_dragging_slider) {
-        const new_weight = get_weight_from_x(e.x);
-        if (new_weight !== opts.get_weight_index()) {
-          opts.on_weight_change(new_weight);
+        const new_weight = get_weight_from_x(rect, e.x);
+        if (new_weight !== get_weight_for_button(drag_button)) {
+          opts.on_weight_change(new_weight, drag_button);
         }
       }
     },
-
-    OnPointerUp(): void {
+    on_pointer_up_content(): void {
       is_dragging_slider = false;
-      
-      if (gizmo_state.is_move_mode) {
-        gizmo_state.is_move_mode = false;
-        if (opts.on_move) {
-          opts.on_move(rect);
-        }
-      }
+      drag_button = 0;
     },
-  };
+  });
 }

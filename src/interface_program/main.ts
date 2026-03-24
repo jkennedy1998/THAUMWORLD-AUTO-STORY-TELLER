@@ -27,7 +27,8 @@ import { get_timed_event_state, get_region_by_coords, is_timed_event_active, loa
 import { travel_between_places } from "../travel/movement.js";
 import { load_npc } from "../npc_storage/store.js";
 import { load_place, list_all_places, list_places_in_region, save_place, create_basic_place, compute_connected_place_bounds, region_bounds_conflict, create_place_connector_record, delete_place } from "../place_storage/store.js";
-import { build_place_adjacency_map, find_overlapping_place_pairs, find_place_containing_region_voxel, get_places_face_adjacency, get_place_region_bounds, region_voxel_to_local_voxel } from "../shared/place_adjacency.js";
+import { build_connected_region_place_ids_from_graph, get_region_place_graph_region, list_adjacent_place_ids_from_graph } from "../place_storage/region_place_graph.js";
+import { find_place_containing_region_voxel, get_places_face_adjacency, get_place_region_bounds, region_voxel_to_local_voxel } from "../shared/place_adjacency.js";
 import { find_empty_grid_position } from "../shared/migration.js";
 import { find_path as shared_find_path } from "../shared/pathfinding.js";
 import { calculate_grid_dimensions } from "../types/container.js";
@@ -2701,6 +2702,32 @@ function apply_pending_connector_transition(state: PlaceBreathState, pending: Pe
         seq: pending.step_seq,
     });
 
+    const transition_sent_at_ms = Date.now();
+    void emitBridgeMessage('ENTITY_PLACE_TRANSITION', {
+        sent_at_ms: transition_sent_at_ms,
+        slot: state.slot,
+        entity_ref: pending.entity_ref,
+        entity_type: pending.entity_type,
+        from_place_id: pending.from_place_id,
+        to_place_id: pending.to_place_id,
+        x: entry_tile.x,
+        y: entry_tile.y,
+        z: entry_tile.z,
+        breath_index: state.breath_index,
+        seq: pending.step_seq,
+        triggered_by: pending.triggered_by,
+    });
+    debug_log('MOVE_VEL_TEST', 'emitted actor place transition', {
+        slot: state.slot,
+        entity_ref: pending.entity_ref,
+        from_place_id: pending.from_place_id,
+        to_place_id: pending.to_place_id,
+        breath_index: state.breath_index,
+        seq: pending.step_seq,
+        sent_at_ms: transition_sent_at_ms,
+        triggered_by: pending.triggered_by,
+    });
+
     debug_log('MOVE_UNIFY_TEST', 'connector transition applied from movement step', {
         slot: state.slot,
         entity_ref: pending.entity_ref,
@@ -4318,21 +4345,14 @@ function repair_place_connector_children(slot: number, source_place_id: string):
     }
 }
 
-function build_place_scene_topology(slot: number, place_id: string): { ok: true; selected_place_id: string; places: any[] } | { ok: false; error: string } {
+function build_place_scene_topology(slot: number, place_id: string): { ok: true; selected_place_id: string; graph_version: number; visible_place_ids: string[]; places: any[] } | { ok: false; error: string } {
     const root_res = load_place(slot, place_id);
     if (!root_res.ok) return { ok: false, error: 'place_not_found' };
     const root_place: any = root_res.place as any;
-    const region_places_res = list_places_in_region(slot, String(root_place.region_id ?? ''));
-    const connector_targets = new Set<string>();
-    if (region_places_res.ok) {
-        for (const other_place_id of region_places_res.places) {
-            if (other_place_id === place_id) continue;
-            const other_res = load_place(slot, other_place_id);
-            if (!other_res.ok) continue;
-            const other_place: any = other_res.place as any;
-            if (get_places_face_adjacency(root_place, other_place)) connector_targets.add(other_place_id);
-        }
-    }
+    const connector_targets = new Set<string>(
+        list_adjacent_place_ids_from_graph(slot, String(root_place.region_id ?? ''), place_id)
+    );
+    const graph_version = get_region_place_graph_region(slot, String(root_place.region_id ?? ''))?.graph_version ?? 0;
 
     const ids = [place_id, ...Array.from(connector_targets)];
     const places: any[] = [];
@@ -4353,60 +4373,30 @@ function build_place_scene_topology(slot: number, place_id: string): { ok: true;
             place: clone_for_api(place_any),
         });
     }
-    return { ok: true, selected_place_id: place_id, places };
+    return { ok: true, selected_place_id: place_id, graph_version, visible_place_ids: ids, places };
 }
 
 function build_region_place_adjacency(slot: number, region_id: string): Map<string, Set<string>> {
-    const places_res = list_places_in_region(slot, region_id);
-    if (!places_res.ok) return new Map<string, Set<string>>();
-    const places: any[] = [];
-    for (const place_id of places_res.places) {
-        const place_res = load_place(slot, place_id);
-        if (!place_res.ok) continue;
-        places.push(place_res.place as any);
+    const region = get_region_place_graph_region(slot, region_id);
+    const adjacency = new Map<string, Set<string>>();
+    for (const [place_id, neighbors] of Object.entries(region?.neighbors ?? {})) {
+        adjacency.set(place_id, new Set<string>(neighbors));
     }
-    const adjacency = build_place_adjacency_map(places as any);
-    const overlaps = find_overlapping_place_pairs(places as any);
     debug_log('PLACE_SCENE', 'seam region adjacency built', {
         slot,
         region_id,
-        place_ids: places.map((p: any) => String(p?.id ?? '')),
+        place_ids: Array.from(adjacency.keys()),
         adjacency: Array.from(adjacency.entries()).map(([id, neighbors]) => ({ id, neighbors: Array.from(neighbors.values()) })),
-        overlap_count: overlaps.length,
+        graph_version: region?.graph_version ?? 0,
     });
-    if (overlaps.length > 0) {
-        debug_warn('SEAM_DIAG', 'region contains overlapping places', {
-            slot,
-            region_id,
-            overlaps,
-        });
-    }
     return adjacency;
 }
 
 function build_connected_region_place_ids(slot: number, region_id: string, seed_place_ids: string[], hops_visible: number): string[] {
-    const neighbors = build_region_place_adjacency(slot, region_id);
-    const hops = Math.max(0, Math.floor(Number(hops_visible) || 0));
-    const visible = new Set<string>();
-    const queue: Array<{ id: string; depth: number }> = [];
-    for (const id of seed_place_ids) {
-        const sid = String(id ?? '').trim();
-        if (!sid) continue;
-        queue.push({ id: sid, depth: 0 });
-    }
-    while (queue.length > 0) {
-        const next = queue.shift()!;
-        if (visible.has(next.id)) continue;
-        visible.add(next.id);
-        if (next.depth >= hops) continue;
-        for (const n of neighbors.get(next.id) ?? []) {
-            if (!visible.has(n)) queue.push({ id: n, depth: next.depth + 1 });
-        }
-    }
-    return Array.from(visible.values());
+    return build_connected_region_place_ids_from_graph(slot, region_id, seed_place_ids, hops_visible).visible_ids;
 }
 
-function build_region_scene(slot: number, actor_place_id: string, selected_place_id?: string, hops_visible?: number): { ok: true; selected_place_id: string; actor_current_place_id: string; region: any; places: any[] } | { ok: false; error: string } {
+function build_region_scene(slot: number, actor_place_id: string, selected_place_id?: string, hops_visible?: number): { ok: true; selected_place_id: string; actor_current_place_id: string; graph_version: number; visible_place_ids: string[]; region: any; places: any[] } | { ok: false; error: string } {
     const root_res = load_place(slot, actor_place_id);
     if (!root_res.ok) return { ok: false, error: 'place_not_found' };
     const root_place: any = root_res.place as any;
@@ -4417,7 +4407,8 @@ function build_region_scene(slot: number, actor_place_id: string, selected_place
     if (!region_res.ok) return { ok: false, error: region_res.error };
 
     const selected_id = String(selected_place_id ?? actor_place_id).trim() || actor_place_id;
-    const visible_ids = build_connected_region_place_ids(slot, region_id, [actor_place_id, selected_id], Math.max(0, Math.floor(Number(hops_visible ?? 1)) || 0));
+    const visible = build_connected_region_place_ids_from_graph(slot, region_id, [actor_place_id, selected_id], Math.max(0, Math.floor(Number(hops_visible ?? 1)) || 0));
+    const visible_ids = visible.visible_ids;
 
     const places: any[] = [];
     for (const id of visible_ids) {
@@ -4442,8 +4433,32 @@ function build_region_scene(slot: number, actor_place_id: string, selected_place
         ok: true,
         selected_place_id: selected_id,
         actor_current_place_id: actor_place_id,
+        graph_version: visible.graph_version,
+        visible_place_ids: visible_ids,
         region: clone_for_api(region_res.region),
         places,
+    };
+}
+
+function build_region_scene_topology(slot: number, actor_place_id: string, selected_place_id?: string, hops_visible?: number): { ok: true; selected_place_id: string; actor_current_place_id: string; graph_version: number; visible_place_ids: string[]; region: any } | { ok: false; error: string } {
+    const root_res = load_place(slot, actor_place_id);
+    if (!root_res.ok) return { ok: false, error: 'place_not_found' };
+    const root_place: any = root_res.place as any;
+    const region_id = String(root_place.region_id ?? '').trim();
+    if (!region_id) return { ok: false, error: 'region_not_found_for_place' };
+
+    const region_res = load_region(slot, region_id);
+    if (!region_res.ok) return { ok: false, error: region_res.error };
+
+    const selected_id = String(selected_place_id ?? actor_place_id).trim() || actor_place_id;
+    const visible = build_connected_region_place_ids_from_graph(slot, region_id, [actor_place_id, selected_id], Math.max(0, Math.floor(Number(hops_visible ?? 1)) || 0));
+    return {
+        ok: true,
+        selected_place_id: selected_id,
+        actor_current_place_id: actor_place_id,
+        graph_version: visible.graph_version,
+        visible_place_ids: visible.visible_ids,
+        region: clone_for_api(region_res.region),
     };
 }
 
@@ -5080,6 +5095,63 @@ function mutate_place_tile_and_sync(
     return { ok: true, place: place_any };
 }
 
+function mutate_place_tiles_and_sync(
+    slot: number,
+    place_id: string,
+    ops: Array<{ x: number; y: number; z: number; kind?: string | null; erase?: boolean }>,
+): { ok: true; place: any; count: number } | { ok: false; error: string } {
+    const normalized_place_id = String(place_id ?? '').trim();
+    if (!normalized_place_id) return { ok: false, error: 'missing_place_id' };
+    const place_res = load_place(slot, normalized_place_id);
+    if (!place_res.ok) return { ok: false, error: 'place_not_found' };
+    const place_any: any = place_res.place as any;
+    merge_active_place_runtime_mutations(slot, normalized_place_id, place_any);
+
+    for (const op of ops) {
+        const x = Math.floor(Number(op?.x));
+        const y = Math.floor(Number(op?.y));
+        const z = Math.floor(Number(op?.z));
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return { ok: false, error: 'invalid_xyz' };
+
+        if (op?.erase === true) {
+            const structure_here = find_structure_instance_at_world_voxel(place_any, x, y, z);
+            if (structure_here) {
+                place_any.structures = (Array.isArray(place_any.structures) ? place_any.structures : []).filter((s: any) => s !== structure_here);
+            } else if (!set_place_tile_at_world_z(place_any, x, y, z, null)) {
+                return { ok: false, error: 'tile_set_failed' };
+            }
+            continue;
+        }
+
+        const kind = String(op?.kind ?? '').trim();
+        if (!kind) return { ok: false, error: 'missing_kind' };
+        const tile_res = load_master_tile(kind);
+        if (!tile_res.ok) return { ok: false, error: 'tile_def_not_found' };
+        const body_model = (tile_res.tile as any)?.body_model;
+        const is_structure = !!(body_model && Array.isArray(body_model.physical) && body_model.physical.length > 1);
+        const structure_here = find_structure_instance_at_world_voxel(place_any, x, y, z);
+        if (structure_here) {
+            place_any.structures = (Array.isArray(place_any.structures) ? place_any.structures : []).filter((s: any) => s !== structure_here);
+        }
+        if (is_structure) {
+            const structure = create_authored_place_structure(kind, x, y, z);
+            if (!structure) return { ok: false, error: 'structure_def_not_found' };
+            if (!Array.isArray(place_any.structures)) place_any.structures = [];
+            place_any.structures = place_any.structures.filter((s: any) => String(s?.id ?? '') !== String(structure.id));
+            place_any.structures.push(structure);
+        } else {
+            const authored_tile = create_authored_place_tile(kind);
+            if (!authored_tile) return { ok: false, error: 'tile_def_not_found' };
+            if (!set_place_tile_at_world_z(place_any, x, y, z, authored_tile)) return { ok: false, error: 'tile_set_failed' };
+        }
+    }
+
+    const connector_check = validate_connectors_for_places_or_error(slot, [normalized_place_id], new Map([[normalized_place_id, place_any]]));
+    if (!connector_check.ok) return { ok: false, error: connector_check.error };
+    save_place_and_sync_active(slot, place_any, { merge_active_runtime: false });
+    return { ok: true, place: place_any, count: ops.length };
+}
+
 function mutate_place_structure_add_and_sync(
     slot: number,
     place_id: string,
@@ -5205,10 +5277,11 @@ function mutate_place_painter_move_and_sync(
     const tz = Math.floor(Number(target.z));
     if (!Number.isFinite(tx) || !Number.isFinite(ty) || !Number.isFinite(tz)) return { ok: false, error: 'invalid_target' };
     if (tx < 0 || ty < 0 || tx >= width || ty >= height) return { ok: false, error: 'target_out_of_bounds' };
-    const validate_owner_target = (owner: { kind: 'actor' | 'npc' | 'structure'; id: string }): { ok: true } | { ok: false; error: string } => {
+    const validate_owner_target = (owner: { kind: 'actor' | 'npc' | 'structure'; id: string }, opts?: { allow_unsupported?: boolean }): { ok: true } | { ok: false; error: string } => {
         build_place_contents_for_legality(slot, normalized_place_id, place_any);
         const check = can_place_volume(place_any as any, owner as any, { x: tx, y: ty, z: tz }, 'WALK' as any, {
             exclude_owner: owner as any,
+            allow_unsupported: !!opts?.allow_unsupported,
             support_policy: 'any_footprint' as any,
         });
         return check.ok ? { ok: true } : { ok: false, error: String((check as any).reason ?? 'blocked') };
@@ -5219,7 +5292,7 @@ function mutate_place_painter_move_and_sync(
         const id = ref.replace(/^(actor|npc)\./, '');
         if (!id) return { ok: false, error: 'invalid_entity_ref' };
         const full_ref = `${entity_type}.${id}`;
-        const target_ok = validate_owner_target({ kind: entity_type, id: full_ref } as any);
+        const target_ok = validate_owner_target({ kind: entity_type, id: full_ref } as any, { allow_unsupported: true });
         if (!target_ok.ok) return target_ok;
 
         if (entity_type === 'actor') {
@@ -7655,10 +7728,7 @@ function ensure_minimum_game_data(slot: number): void {
  */
 function ensure_npcs_in_places(slot: number): void {
     const npcs = find_npcs(slot, {});
-    const pinned_npc_locations: Record<string, { place_id: string; tile: { x: number; y: number } }> = {
-        gunther: { place_id: "eden_crossroads_tavern", tile: { x: 5, y: 5 } },
-    };
-    
+
     for (const npc_data of npcs) {
         const npc_id = npc_data.id;
         const npc_res = load_npc(slot, npc_id);
@@ -7667,40 +7737,6 @@ function ensure_npcs_in_places(slot: number): void {
         
         const npc = npc_res.npc as Record<string, unknown>;
         const location = npc.location as Record<string, unknown>;
-
-        const pin = pinned_npc_locations[String(npc_id ?? "").toLowerCase()];
-        if (pin) {
-            const place_res = load_place(slot, pin.place_id);
-            if (place_res.ok) {
-                const w = Math.max(1, Number((place_res.place as any)?.tile_grid?.width ?? 1));
-                const h = Math.max(1, Number((place_res.place as any)?.tile_grid?.height ?? 1));
-                const x = Math.max(0, Math.min(w - 1, Math.floor(Number(pin.tile.x) || 0)));
-                const y = Math.max(0, Math.min(h - 1, Math.floor(Number(pin.tile.y) || 0)));
-                const base_elevation = (typeof (place_res.place as any)?.coordinates?.elevation === 'number' && Number.isFinite((place_res.place as any).coordinates.elevation))
-                    ? Math.floor((place_res.place as any).coordinates.elevation)
-                    : 0;
-
-                const current_place_id = String((location?.place_id as string) ?? '');
-                const current_x = Math.floor(Number((location as any)?.tile?.x) || 0);
-                const current_y = Math.floor(Number((location as any)?.tile?.y) || 0);
-                const current_elevation = (typeof (location as any)?.elevation === 'number' && Number.isFinite((location as any).elevation))
-                    ? Math.floor((location as any).elevation)
-                    : base_elevation;
-
-                if (current_place_id !== pin.place_id || current_x !== x || current_y !== y || current_elevation !== base_elevation) {
-                    npc.location = {
-                        world_tile: (place_res.place as any).coordinates?.world_tile ?? { x: 0, y: 0 },
-                        region_tile: (place_res.place as any).coordinates?.region_tile ?? { x: 0, y: 0 },
-                        place_id: pin.place_id,
-                        tile: { x, y },
-                        elevation: base_elevation,
-                    };
-                    save_npc(slot, npc_id, npc);
-                    debug_log("Boot: pinned NPC location", { npc_id, place_id: pin.place_id, tile: { x, y }, elevation: base_elevation });
-                }
-            }
-            continue;
-        }
         
         // Check if NPC has a valid place_id
         const place_id = location?.place_id as string;
@@ -9214,6 +9250,46 @@ function start_http_server(log_path: string): void {
                 res.end(JSON.stringify(scene));
             } catch (err: any) {
                 debug_error("API", "/api/region/scene error", err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: err?.message ?? "internal_error" }));
+            }
+            return;
+        }
+
+        if (url.pathname === "/api/region/scene/topology") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+            const place_id = String(url.searchParams.get("place_id") ?? "").trim();
+            const selected_place_id = String(url.searchParams.get("selected_place_id") ?? place_id).trim();
+            const hops_visible = Math.max(0, Math.floor(Number(url.searchParams.get("hops_visible") ?? 1)) || 0);
+            if (!Number.isFinite(slot) || slot <= 0) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
+                return;
+            }
+            if (!place_id) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_place_id" }));
+                return;
+            }
+
+            try {
+                const scene = build_region_scene_topology(slot, place_id, selected_place_id, hops_visible);
+                if (!scene.ok) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: scene.error }));
+                    return;
+                }
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify(scene));
+            } catch (err: any) {
+                debug_error("API", "/api/region/scene/topology error", err);
                 res.writeHead(500, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ ok: false, error: err?.message ?? "internal_error" }));
             }
@@ -11282,6 +11358,51 @@ function start_http_server(log_path: string): void {
                     res.end(JSON.stringify({ ok: true, slot, place_id, kind: erase ? null : kind, erase, at: { x: Math.floor(x), y: Math.floor(y), z: Math.floor(z) } }));
                 } catch (err: any) {
                     debug_error('API', '/api/place/debug/tile error', err);
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? 'internal_error' }));
+                }
+            });
+            return;
+        }
+
+        if (url.pathname === "/api/place/debug/tiles") {
+            if (req.method !== 'POST') {
+                res.writeHead(405, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' }));
+                return;
+            }
+
+            let body = '';
+            req.on('data', (chunk) => { body += chunk; });
+            req.on('end', () => {
+                try {
+                    const data = body ? JSON.parse(body) : {};
+                    const slot = Number(data?.slot ?? data_slot_number);
+                    const place_id = String(data?.place_id ?? '');
+                    const ops = Array.isArray(data?.ops) ? data.ops : [];
+                    if (!Number.isFinite(slot) || slot <= 0) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'invalid_slot' }));
+                        return;
+                    }
+                    if (!place_id || ops.length < 1) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'missing_place_id_or_ops' }));
+                        return;
+                    }
+                    const result = mutate_place_tiles_and_sync(slot, place_id, ops);
+                    if (!result.ok) {
+                        const status = result.error === 'place_not_found' || result.error === 'tile_def_not_found'
+                            ? 404
+                            : 400;
+                        res.writeHead(status, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: result.error }));
+                        return;
+                    }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, slot, place_id, count: result.count }));
+                } catch (err: any) {
+                    debug_error('API', '/api/place/debug/tiles error', err);
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ ok: false, error: err?.message ?? 'internal_error' }));
                 }

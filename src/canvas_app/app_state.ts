@@ -15,12 +15,13 @@ import { handleEntityClick } from '../interface_program/frontend_api.js';
 import type { Place } from '../types/place.js';
 import { debug_warn, debug_log } from '../shared/debug.js';
 import { resolve_char } from '../render_shaders/resolver.js';
-import { debug_peek_next_step } from '../shared/movement_engine.js';
+import { debug_peek_next_step, is_entity_moving } from '../shared/movement_engine.js';
 import { can_place_volume } from '../place_storage/movement_legality.js';
 import { set_command_handler_place } from '../mono_ui/modules/movement_command_handler.js';
 import { get_color_by_name } from '../mono_ui/colors.js';
-import { BORDER_STYLES, draw_module_border } from '../mono_ui/module_borders.js';
-import { create_gizmo_state, draw_module_gizmos, get_resize_edge, handle_gizmo_click, handle_global_pointer_down_for_gizmos, handle_resize_drag, is_in_gizmo_area, type GizmoState, type ModuleGizmosConfig } from '../mono_ui/module_gizmos.js';
+import type { ModuleGizmosConfig } from '../mono_ui/module_gizmos.js';
+import { make_floating_panel_module } from '../mono_ui/modules/floating_panel_module.js';
+import { make_screen_overlay_bar_module } from '../mono_ui/modules/screen_overlay_bar_module.js';
 import { infer_action_verb_hint } from '../shared/intent_hint.js';
 // NOTE: Do NOT import Node.js modules (load_actor, find_kind, etc.) here.
 // This code runs in browser context and must use HTTP APIs instead.
@@ -37,6 +38,7 @@ import { get_facing } from '../npc_ai/facing_system.js';
 import { eval_body_model_voxels, get_body_model_def } from '../shared/body_model.js';
 import { get_character_camera_focus_tile } from '../shared/character_camera_focus.js';
 import { get_defined_place_world_zs as get_authored_place_world_zs } from '../shared/place_layers.js';
+import { get_flood_fill_points, get_line_points, get_rect_fill_points, get_rect_stroke_points, type PainterPoint } from '../shared/painter_tools.js';
 import { play_sfx } from '../mono_ui/sfx/sfx_player.js';
 import { format_interval_avg, format_interval_min, get_movement_debug_snapshot } from '../shared/movement_debug_state.js';
 import { has_tag_name } from '../shared/physics_tags.js';
@@ -74,6 +76,24 @@ const APP_PLACE_TIMING_VERSION = '2026-03-14-visible-pulse-v1';
 const DEBUG_WINDOW_REFRESH_MS = 500;
 
 type ItemMutationRefreshScope = 'place_render' | 'container_contents' | 'character_render';
+
+type PlacePainterTool =
+    | 'paint'
+    | 'erase'
+    | 'eyedropper'
+    | 'line'
+    | 'rect_stroke'
+    | 'rect_fill'
+    | 'bucket'
+    | 'move'
+    | 'place_create'
+    | 'place_delete'
+    | 'place_resize'
+    | 'region_tool';
+
+function is_place_painter_shape_tool(tool: PlacePainterTool): tool is 'line' | 'rect_stroke' | 'rect_fill' {
+    return tool === 'line' || tool === 'rect_stroke' || tool === 'rect_fill';
+}
 
 type ItemMutationRefreshIntent = {
     place_id?: string | null;
@@ -165,11 +185,15 @@ export function create_app_state(): AppState {
             actor_current_place_id: null as string | null,
             scene_selected_place_id: null as string | null,
             scene_places: [] as Place[],
+            scene_visible_place_ids: [] as string[],
+            scene_graph_version: 0,
             scene_connector_hops_visible: 1,
             npc_movement_active: false,
             camera_target: {
                 mode: 'follow_actor' as 'follow_actor' | 'free',
                 tile: null as { x: number; y: number } | null,
+                region_pose: null as null | { x: number; y: number; z: number },
+                last_follow_update_ms: 0,
             },
             // World focus layer for Place DOM renderer (0/1/2)
             focus_z: 0,
@@ -202,9 +226,9 @@ export function create_app_state(): AppState {
         },
     place_painter: {
         active: false,
-        selected_tool: 'paint' as 'paint' | 'erase' | 'move' | 'place_create' | 'place_delete' | 'place_resize' | 'region_tool',
-        left_click_tool: 'paint' as 'paint' | 'erase' | 'move' | 'place_create' | 'place_delete' | 'place_resize' | 'region_tool',
-        right_click_tool: 'erase' as 'paint' | 'erase' | 'move' | 'place_create' | 'place_delete' | 'place_resize' | 'region_tool',
+        selected_tool: 'paint' as PlacePainterTool,
+        left_click_tool: 'paint' as PlacePainterTool,
+        right_click_tool: 'erase' as PlacePainterTool,
         selected_palette_kind: 'tile' as 'tile' | 'item',
             selected_tile_palette_section: 'blocks' as 'blocks' | 'connectors' | 'all',
             selected_palette_entry_id: null as string | null,
@@ -261,6 +285,16 @@ export function create_app_state(): AppState {
                 target_y: number;
                 target_z: number;
                 valid: boolean;
+            },
+            shape_session: null as null | {
+                tool: 'line' | 'rect_stroke' | 'rect_fill';
+                button: number;
+                place_id: string;
+                world_z: number;
+                start_x: number;
+                start_y: number;
+                current_x: number;
+                current_y: number;
             },
             resize_session: null as null | {
                 active: boolean;
@@ -634,6 +668,62 @@ export function create_app_state(): AppState {
         const selected_id = ui_state.place_painter.selected_item_palette_entry_id;
         if (!selected_id) return null;
         return ui_state.place_painter.item_palette_entries.find((entry) => entry.id === selected_id) ?? null;
+    }
+
+    function get_place_painter_tool_for_button(button?: number): PlacePainterTool {
+        return button === 2
+            ? ui_state.place_painter.right_click_tool
+            : ui_state.place_painter.left_click_tool;
+    }
+
+    function set_place_painter_selected_tile_by_id(id: string): boolean {
+        const entry = ui_state.place_painter.tile_palette_entries.find((it) => it.id === id);
+        if (!entry) return false;
+        ui_state.place_painter.selected_palette_kind = 'tile';
+        ui_state.place_painter.selected_palette_entry_id = entry.id;
+        return true;
+    }
+
+    function set_place_painter_selected_item_by_id(id: string): boolean {
+        const entry = ui_state.place_painter.item_palette_entries.find((it) => it.id === id);
+        if (!entry) return false;
+        ui_state.place_painter.selected_palette_kind = 'item';
+        ui_state.place_painter.selected_item_palette_entry_id = entry.id;
+        return true;
+    }
+
+    function get_place_tile_kind_at(place: Place | null, x: number, y: number, z: number): string | null {
+        const p: any = place as any;
+        if (!p) return null;
+        const structure = Array.isArray(p.structures)
+            ? p.structures.find((s: any) => {
+                const origin = s?.origin;
+                if (!origin) return false;
+                const ox = Math.floor(Number(origin.x) || 0);
+                const oy = Math.floor(Number(origin.y) || 0);
+                const oz = Math.floor(Number(origin.z) || 0);
+                const phys = Array.isArray(s?.body_model?.physical) ? s.body_model.physical : [{ dx: 0, dy: 0, dz: 0 }];
+                return phys.some((v: any) => ox + Math.floor(Number(v?.dx ?? 0)) === x && oy + Math.floor(Number(v?.dy ?? 0)) === y && oz + Math.floor(Number(v?.dz ?? 0)) === z);
+            })
+            : null;
+        if (structure) return String((structure as any)?.def_id ?? (structure as any)?.kind ?? '').trim() || null;
+
+        const layerKey = get_place_layer_key_for_world_z(place, z);
+        const cell = p?.[layerKey]?.cells?.[y]?.[x] ?? null;
+        const kind = String((cell as any)?.kind ?? '').trim();
+        return kind || null;
+    }
+
+    function get_place_painter_shape_preview_points(): PainterPoint[] {
+        const session = ui_state.place_painter.shape_session;
+        if (!session) return [];
+        if (session.tool === 'line') return get_line_points(session.start_x, session.start_y, session.current_x, session.current_y);
+        if (session.tool === 'rect_stroke') return get_rect_stroke_points(session.start_x, session.start_y, session.current_x, session.current_y);
+        return get_rect_fill_points(session.start_x, session.start_y, session.current_x, session.current_y);
+    }
+
+    function clear_place_painter_shape_session(): void {
+        ui_state.place_painter.shape_session = null;
     }
 
     function get_defined_place_world_zs(place: Place | null): number[] {
@@ -1274,6 +1364,7 @@ export function create_app_state(): AppState {
             const owner = { kind: entity_type, id: entity_ref } as any;
             const check = can_place_volume(place as any, owner, { x, y, z }, 'WALK' as any, {
                 exclude_owner: owner,
+                allow_unsupported: true,
                 support_policy: 'any_footprint' as any,
             });
             return check.ok ? { valid: true } : { valid: false, reason: String((check as any).reason ?? 'blocked') };
@@ -1445,6 +1536,54 @@ export function create_app_state(): AppState {
         }
     }
 
+    async function mutate_place_tiles_batch(place_id: string, ops: Array<{ x: number; y: number; z: number; kind?: string | null; erase?: boolean }>): Promise<boolean> {
+        if (ops.length < 1) return true;
+        const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+        try {
+            const normalized_ops = ops.map((op) => ({
+                x: Math.floor(Number(op.x)),
+                y: Math.floor(Number(op.y)),
+                z: Math.floor(Number(op.z)),
+                erase: op.erase === true,
+                kind: op.erase === true ? null : (typeof op.kind === 'string' ? op.kind : null),
+            }));
+            debug_log(`[PLACE_PAINTER] batch tile request ${JSON.stringify({ place_id, count: normalized_ops.length })}`);
+            const res = await fetch(`${base_url}/api/place/debug/tiles`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    slot: APP_CONFIG.selected_data_slot,
+                    place_id,
+                    ops: normalized_ops,
+                }),
+            });
+            const data = await res.json().catch(() => null);
+            if (!res.ok || !data?.ok) {
+                debug_warn(`[PLACE_PAINTER] batch tile failed ${JSON.stringify({ place_id, count: normalized_ops.length, status: res.status, data })}`);
+                return false;
+            }
+            for (const op of normalized_ops) {
+                if (op.erase) {
+                    clear_local_structure_at_voxel(place_id, op.x, op.y, op.z);
+                    apply_local_place_tile_mutation(place_id, op.x, op.y, op.z, null);
+                } else if (op.kind) {
+                    const entry = ui_state.place_painter.tile_palette_entries.find((tile) => tile.id === op.kind);
+                    const is_multiblock = !!(entry?.body_model && Array.isArray(entry.body_model.physical) && entry.body_model.physical.length > 1);
+                    if (entry && is_multiblock) apply_local_place_structure_preview(place_id, op.x, op.y, op.z, entry);
+                    else apply_local_place_tile_mutation(place_id, op.x, op.y, op.z, op.kind);
+                }
+            }
+            if (get_scene_place(place_id)) await refresh_single_scene_place(place_id);
+            if (ui_state.place.current_place_id === place_id) {
+                await update_current_place(place_id, { source: 'place_tile_batch_refresh', preserve_place_painter: true });
+            }
+            debug_log(`[PLACE_PAINTER] batch tile success ${JSON.stringify({ place_id, count: normalized_ops.length })}`);
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
     async function move_place_painter_entity(args: {
         place_id: string;
         source_x: number;
@@ -1559,14 +1698,88 @@ export function create_app_state(): AppState {
         ui_state.place_painter.last_primary_target = null;
         ui_state.place_painter.move_pending_source = null;
         ui_state.place_painter.move_drag_session = null;
-        ui_state.place.camera_target.mode = 'follow_actor';
-        ui_state.place.camera_target.tile = null;
+        ui_state.place_painter.shape_session = null;
+        snap_place_camera_follow_to_actor();
         set_place_painter_modules_visible(false);
         return true;
     }
 
     async function toggle_place_painter(): Promise<boolean> {
         return await set_place_painter_active(!ui_state.place_painter.active);
+    }
+
+    function start_place_shape_drag(target: {
+        place_id: string;
+        tile_position: { x: number; y: number };
+        world_z: number;
+        button?: number;
+    }): void {
+        const tool = get_place_painter_tool_for_button(target.button);
+        if (!is_place_painter_shape_tool(tool)) return;
+        ui_state.place_painter.selected_tool = tool;
+        ui_state.place_painter.shape_session = {
+            tool,
+            button: target.button === 2 ? 2 : 0,
+            place_id: target.place_id,
+            world_z: Math.floor(target.world_z),
+            start_x: Math.floor(target.tile_position.x),
+            start_y: Math.floor(target.tile_position.y),
+            current_x: Math.floor(target.tile_position.x),
+            current_y: Math.floor(target.tile_position.y),
+        };
+    }
+
+    function update_place_shape_drag(target: {
+        place_id: string;
+        tile_position: { x: number; y: number };
+        world_z: number;
+    }): void {
+        const session = ui_state.place_painter.shape_session;
+        if (!session || session.place_id !== target.place_id) return;
+        if (Math.floor(target.world_z) !== session.world_z) return;
+        session.current_x = Math.floor(target.tile_position.x);
+        session.current_y = Math.floor(target.tile_position.y);
+    }
+
+    async function finish_place_shape_drag(): Promise<void> {
+        const session = ui_state.place_painter.shape_session;
+        clear_place_painter_shape_session();
+        if (!session) return;
+
+        const active_place = get_current_place();
+        if (!active_place || active_place.id !== session.place_id) {
+            flash_status(['Shape tools only work on the selected place'], 1200);
+            return;
+        }
+
+        const points = get_place_painter_shape_preview_points_from_session(session);
+        if (points.length < 1) return;
+
+        if (ui_state.place_painter.selected_palette_kind !== 'tile') {
+            flash_status(['Line/rect/fill are tile-only for now'], 1200);
+            return;
+        }
+
+        const tool = session.button === 2 ? ui_state.place_painter.right_click_tool : ui_state.place_painter.left_click_tool;
+        if (tool === 'erase') {
+            const ok = await mutate_place_tiles_batch(session.place_id, points.map((point) => ({ x: point.x, y: point.y, z: session.world_z, erase: true })));
+            flash_status([ok ? `Erased ${points.length} tiles` : 'Shape erase failed'], 1200);
+            return;
+        }
+
+        const selected = get_selected_place_painter_tile_entry();
+        if (!selected) {
+            flash_status(['Place painter has no tile selected'], 1200);
+            return;
+        }
+        const ok = await mutate_place_tiles_batch(session.place_id, points.map((point) => ({ x: point.x, y: point.y, z: session.world_z, kind: selected.id })));
+        flash_status([ok ? `Painted ${selected.id} x${points.length}` : `Shape paint failed: ${selected.id}`], 1200);
+    }
+
+    function get_place_painter_shape_preview_points_from_session(session: NonNullable<typeof ui_state.place_painter.shape_session>): PainterPoint[] {
+        if (session.tool === 'line') return get_line_points(session.start_x, session.start_y, session.current_x, session.current_y);
+        if (session.tool === 'rect_stroke') return get_rect_stroke_points(session.start_x, session.start_y, session.current_x, session.current_y);
+        return get_rect_fill_points(session.start_x, session.start_y, session.current_x, session.current_y);
     }
 
     async function handle_place_painter_primary_action(target: {
@@ -1586,9 +1799,7 @@ export function create_app_state(): AppState {
             entity_type: target.entity_type,
         };
 
-        const tool = target.button === 2
-            ? ui_state.place_painter.right_click_tool
-            : ui_state.place_painter.left_click_tool;
+        const tool = get_place_painter_tool_for_button(target.button);
         ui_state.place_painter.selected_tool = tool;
         const target_label = target.entity_ref
             ? `${target.entity_ref} @ ${target.tile_position.x},${target.tile_position.y},${target.world_z}`
@@ -1667,6 +1878,60 @@ export function create_app_state(): AppState {
                 `Painted ${selected.id}`,
                 `tile: ${target_label}`,
             ], 1200);
+            return;
+        }
+
+        if (tool === 'eyedropper') {
+            const sampled_place = get_scene_place(target.place_id) ?? active_place;
+            if (target.entity_type === 'item' && target.entity_ref) {
+                const itemId = target.entity_ref.replace(/^item\./, '');
+                const meta: any = ui_state.place.ground_items_by_id.get(itemId) ?? null;
+                const itemDefId = String(meta?.def_id ?? '').trim();
+                if (itemDefId && set_place_painter_selected_item_by_id(itemDefId)) {
+                    flash_status([`Item: ${itemDefId}`], 1200);
+                    return;
+                }
+            }
+            const sampledKind = get_place_tile_kind_at(sampled_place, target.tile_position.x, target.tile_position.y, target.world_z);
+            if (sampledKind && set_place_painter_selected_tile_by_id(sampledKind)) {
+                flash_status([`Tile: ${sampledKind}`], 1200);
+                return;
+            }
+            flash_status(['Nothing to sample'], 1000);
+            return;
+        }
+
+        if (tool === 'bucket') {
+            if (!active_place || !is_selected_place) {
+                flash_status(['Bucket only works on the selected place'], 1200);
+                return;
+            }
+            if (ui_state.place_painter.selected_palette_kind !== 'tile') {
+                flash_status(['Bucket is tile-only for now'], 1200);
+                return;
+            }
+            const selected = get_selected_place_painter_tile_entry();
+            if (!selected) {
+                flash_status(['Place painter has no tile selected'], 1200);
+                return;
+            }
+            const startKind = get_place_tile_kind_at(active_place, target.tile_position.x, target.tile_position.y, target.world_z);
+            if (startKind === selected.id) {
+                flash_status(['Bucket target already matches selection'], 1000);
+                return;
+            }
+            const points = get_flood_fill_points(
+                target.tile_position.x,
+                target.tile_position.y,
+                (x, y) => get_place_tile_kind_at(get_current_place(), x, y, target.world_z),
+                (candidate, targetKind) => candidate === targetKind,
+            );
+            if (points.length < 1) {
+                flash_status(['Nothing to fill'], 1000);
+                return;
+            }
+            const ok = await mutate_place_tiles_batch(target.place_id, points.map((point) => ({ x: point.x, y: point.y, z: target.world_z, kind: selected.id })));
+            flash_status([ok ? `Filled ${points.length} tiles` : `Bucket failed: ${selected.id}`], 1200);
             return;
         }
 
@@ -1843,112 +2108,41 @@ export function create_app_state(): AppState {
         draw_content: (c: Canvas, rect: Rect) => void;
         on_pointer_down_content?: (e: PointerEvent, rect: Rect) => void;
     }): Module {
-        let rect = opts.rect;
         const gizmo_config: ModuleGizmosConfig = {
             enabled: ['move', 'resize', 'close'],
             can_close: true,
             can_move: true,
             can_save_position: false,
             on_close: () => set_module_visible(opts.id, false),
-            on_move: (new_rect) => {
-                rect = new_rect;
-                persist_module_rect(opts.id, new_rect);
-            },
-            on_resize: (new_rect) => {
-                rect = new_rect;
-                persist_module_rect(opts.id, new_rect);
-            },
+            on_move: (new_rect) => persist_module_rect(opts.id, new_rect),
+            on_resize: (new_rect) => persist_module_rect(opts.id, new_rect),
         };
-        const gizmo_state: GizmoState = create_gizmo_state();
-        return {
+        return make_floating_panel_module({
             id: opts.id,
-            get rect() { return rect; },
-            set rect(next_rect) { rect = next_rect; },
-            Focusable: true,
-            Draw(c: Canvas): void {
-                c.fill_rect(rect, { char: ' ', rgb: get_color_by_name('off_black').rgb, weight_index: 3, render_index: 6, style: 'regular' });
-                draw_module_border(c, {
-                    rect,
-                    style: BORDER_STYLES.double,
-                    border_rgb: get_color_by_name('medium_gray').rgb,
-                    weight_index: 3,
-                    header: { text: opts.title, reserve_left_cols: 8 },
-                });
-                opts.draw_content(c, rect);
-                draw_module_gizmos(c, rect, gizmo_config, gizmo_state, opts.title);
+            rect: opts.rect,
+            title: opts.title,
+            gizmos: gizmo_config,
+            background: { rgb: get_color_by_name('off_black').rgb },
+            resize: {
+                min_width: 12,
+                min_height: 6,
+                max_width: 120,
+                max_height: 40,
             },
-            OnGlobalPointerDown(e: PointerEvent): void {
-                handle_global_pointer_down_for_gizmos(e, rect, gizmo_config, gizmo_state);
-            },
-            OnPointerDown(e: PointerEvent): void {
-                if (is_in_gizmo_area(e.x, e.y, rect)) {
-                    const gizmo = handle_gizmo_click(e.x, e.y, rect, gizmo_config, gizmo_state);
-                    if (gizmo === 'move') {
-                        gizmo_state.move_start_x = e.x;
-                        gizmo_state.move_start_y = e.y;
-                    }
-                    return;
-                }
-                if (gizmo_state.is_resize_mode) {
-                    const edge = get_resize_edge(e.x, e.y, rect);
-                    if (edge) {
-                        gizmo_state.resize_edge = edge;
-                        gizmo_state.is_dragging_resize = true;
-                        gizmo_state.move_start_x = e.x;
-                        gizmo_state.move_start_y = e.y;
-                        gizmo_state.original_rect = { ...rect };
-                        return;
-                    }
-                }
-                if (gizmo_state.is_move_mode) {
-                    gizmo_state.move_start_x = e.x;
-                    gizmo_state.move_start_y = e.y;
-                    return;
-                }
-                opts.on_pointer_down_content?.(e, rect);
-            },
-            OnPointerMove(e: PointerEvent): void {
-                if (gizmo_state.is_resize_mode && !gizmo_state.is_dragging_resize) {
-                    gizmo_state.resize_edge = get_resize_edge(e.x, e.y, rect);
-                }
-            },
-            OnDragMove(e: any): void {
-                if (gizmo_state.is_move_mode && gizmo_state.original_rect) {
-                    const dx = e.x - gizmo_state.move_start_x;
-                    const dy = e.y - gizmo_state.move_start_y;
-                    const next_rect = {
-                        x0: gizmo_state.original_rect.x0 + dx,
-                        y0: gizmo_state.original_rect.y0 + dy,
-                        x1: gizmo_state.original_rect.x1 + dx,
-                        y1: gizmo_state.original_rect.y1 + dy,
-                    };
-                    rect = next_rect;
-                    gizmo_config.on_move?.(next_rect);
-                    return;
-                }
-                if (gizmo_state.is_resize_mode && gizmo_state.is_dragging_resize && gizmo_state.original_rect) {
-                    const next_rect = handle_resize_drag(e.x, e.y, gizmo_state, gizmo_state.original_rect, 12, 6, 120, 40, gizmo_config.on_resize);
-                    if (next_rect) rect = next_rect;
-                }
-            },
-            OnPointerUp(): void {
-                if (gizmo_state.is_move_mode) {
-                    gizmo_state.is_move_mode = false;
-                    gizmo_config.on_move?.(rect);
-                }
-                if (gizmo_state.is_dragging_resize) {
-                    gizmo_state.is_dragging_resize = false;
-                    gizmo_state.resize_edge = null;
-                    gizmo_config.on_resize?.(rect);
-                }
-            },
-        };
+            draw_content: opts.draw_content,
+            on_pointer_down_content: opts.on_pointer_down_content,
+        });
     }
 
-    function place_painter_tool_defs(): Array<{ tool: 'paint' | 'erase' | 'move' | 'place_create' | 'place_delete' | 'place_resize' | 'region_tool'; label: string; icon: string }> {
+    function place_painter_tool_defs(): Array<{ tool: PlacePainterTool; label: string; icon: string }> {
         return [
             { tool: 'paint', label: 'Paint', icon: '✎' },
             { tool: 'erase', label: 'Eraser', icon: '◫' },
+            { tool: 'eyedropper', label: 'Dropper', icon: '◉' },
+            { tool: 'line', label: 'Line', icon: '╱' },
+            { tool: 'rect_stroke', label: 'Rect', icon: '□' },
+            { tool: 'rect_fill', label: 'Fill', icon: '■' },
+            { tool: 'bucket', label: 'Bucket', icon: '▧' },
             { tool: 'move', label: 'Move', icon: '◎' },
             { tool: 'place_create', label: 'Create', icon: '+' },
             { tool: 'place_delete', label: 'Delete', icon: '-' },
@@ -1991,40 +2185,20 @@ export function create_app_state(): AppState {
                 flash_status([`Tile section: ${next}`], 1200);
             } },
         ];
-        return make_place_painter_window_module({
+        return make_screen_overlay_bar_module({
             id: 'place_painter_toolbar',
-            rect,
             title: 'PLACE PAINTER',
-            draw_content(c, rect) {
-                let x = rect.x0 + 1;
-                const y = rect.y0 + 1;
-                for (const btn of buttons) {
-                    const text = btn.label();
-                    const active = btn.id === 'tool' || btn.id === 'kind';
-                    const color = active ? get_color_by_name('vivid_yellow').rgb : get_color_by_name('off_white').rgb;
-                    for (let i = 0; i < Math.min(btn.width, text.length); i += 1) {
-                        c.set(x + i, y, { char: text[i]!, rgb: color, weight_index: 4, render_index: 6, style: 'regular' });
-                    }
-                    x += btn.width + 1;
-                    if (x >= rect.x1 - 1) break;
-                }
-            },
-            on_pointer_down_content(e, rect) {
-                if (e.button !== 0 || !ui_state.place_painter.active) return;
-                const relX = e.x - rect.x0 - 1;
-                const relY = e.y - rect.y0;
-                if (relY !== 1) return;
-                let cursor = 0;
-                for (const btn of buttons) {
-                    const start = cursor;
-                    const end = cursor + btn.width - 1;
-                    if (relX >= start && relX <= end) {
-                        void btn.onPress();
-                        return;
-                    }
-                    cursor += btn.width + 1;
-                }
-            },
+            get_screen_size: () => ({ width: APP_CONFIG.grid_width, height: APP_CONFIG.grid_height }),
+            get_is_visible: () => ui_state.place_painter.active && module_registry.is_visible('place_painter_toolbar'),
+            default_expanded: true,
+            get_status_text: () => `KIND:${ui_state.place_painter.selected_palette_kind.toUpperCase()} SEC:${ui_state.place_painter.selected_tile_palette_section.toUpperCase()} L:${ui_state.place_painter.left_click_tool} R:${ui_state.place_painter.right_click_tool}`,
+            buttons: () => buttons.map((btn) => ({
+                id: btn.id,
+                label: btn.label,
+                width: btn.width,
+                onPress: () => { void btn.onPress(); },
+                is_active: () => btn.id === 'kind' || btn.id === 'section',
+            })),
         });
     }
 
@@ -2049,6 +2223,7 @@ export function create_app_state(): AppState {
                     ui_state.place_painter.move_pending_source = null;
                     ui_state.place_painter.move_drag_session = null;
                 }
+                ui_state.place_painter.shape_session = null;
                 flash_status([`Left tool: ${String(tool)}`], 900);
             },
             on_left_click_tool_change: (tool) => {
@@ -2058,10 +2233,12 @@ export function create_app_state(): AppState {
                     ui_state.place_painter.move_pending_source = null;
                     ui_state.place_painter.move_drag_session = null;
                 }
+                ui_state.place_painter.shape_session = null;
                 flash_status([`Left tool: ${String(tool)}`], 900);
             },
             on_right_click_tool_change: (tool) => {
                 ui_state.place_painter.right_click_tool = tool as any;
+                ui_state.place_painter.shape_session = null;
                 flash_status([`Right tool: ${String(tool)}`], 900);
             },
             on_move: (new_rect) => persist_module_rect('place_painter_tools', new_rect),
@@ -2334,6 +2511,7 @@ export function create_app_state(): AppState {
         ui_state.modules.visibility.set(module_id, visible);
         ui_state.modules.registry?.set_visibility(module_id, visible);
         if (module_id === 'character_module') ui_state.character.is_visible = visible;
+        if (module_id === 'inventory_container') ui_state.container.is_visible = visible;
         persist_module_layout_debounced();
     }
 
@@ -3319,6 +3497,30 @@ export function create_app_state(): AppState {
         }
     }
 
+    function remove_actor_from_non_target_scene_places(actor_ref: string, target_place_id: string): void {
+        const clean_place = (place: Place): Place => {
+            const actors = Array.isArray(place.contents?.actors_present) ? place.contents.actors_present : [];
+            const filtered = actors.filter((a: any) => String(a?.actor_ref ?? '') !== actor_ref);
+            if (filtered.length === actors.length) return place;
+            return {
+                ...place,
+                contents: {
+                    ...place.contents,
+                    actors_present: filtered,
+                },
+            };
+        };
+
+        ui_state.place.scene_places = ui_state.place.scene_places.map((place) => {
+            if (!place || place.id === target_place_id) return place;
+            return clean_place(place);
+        });
+
+        if (ui_state.place.current_place && ui_state.place.current_place.id !== target_place_id) {
+            ui_state.place.current_place = clean_place(ui_state.place.current_place);
+        }
+    }
+
     async function refresh_single_scene_place(place_id: string): Promise<Place | null> {
         const refreshed = await fetch_place_snapshot(place_id);
         if (!refreshed) return null;
@@ -3509,13 +3711,27 @@ export function create_app_state(): AppState {
         actor_current_place_id: string;
         region_id: string | null;
         region_bounds: { origin: { x: number; y: number; z: number }; size: { x: number; y: number; z: number } } | null;
+        graph_version: number;
+        visible_place_ids: string[];
         places: Place[];
     };
+
+    type SceneTopologyMeta = Omit<SceneTopologyPayload, 'places'>;
+
+    function same_string_array(a: string[], b: string[]): boolean {
+        if (a.length !== b.length) return false;
+        for (let i = 0; i < a.length; i += 1) {
+            if (a[i] !== b[i]) return false;
+        }
+        return true;
+    }
 
     function apply_scene_topology(scene: SceneTopologyPayload, opts?: { selected_place_id?: string; mirror_to_current_place?: boolean }): void {
         ui_state.place.current_region_id = scene.region_id;
         ui_state.place.current_region_bounds = scene.region_bounds;
         ui_state.place.actor_current_place_id = scene.actor_current_place_id;
+        ui_state.place.scene_graph_version = Math.max(0, Math.floor(Number(scene.graph_version) || 0));
+        ui_state.place.scene_visible_place_ids = Array.isArray(scene.visible_place_ids) ? [...scene.visible_place_ids] : scene.places.map((p) => p.id);
         ui_state.place.scene_places = scene.places;
         const selected_place_id = opts?.selected_place_id ?? scene.selected_place_id;
         ui_state.place.scene_selected_place_id = selected_place_id;
@@ -3527,39 +3743,108 @@ export function create_app_state(): AppState {
         }
     }
 
-    async function fetch_scene_topology(place_id: string): Promise<SceneTopologyPayload | null> {
+    function apply_scene_topology_meta(scene: SceneTopologyMeta, opts?: { selected_place_id?: string; mirror_to_current_place?: boolean }): void {
+        ui_state.place.current_region_id = scene.region_id;
+        ui_state.place.current_region_bounds = scene.region_bounds;
+        ui_state.place.actor_current_place_id = scene.actor_current_place_id;
+        ui_state.place.scene_graph_version = Math.max(0, Math.floor(Number(scene.graph_version) || 0));
+        ui_state.place.scene_visible_place_ids = Array.isArray(scene.visible_place_ids) ? [...scene.visible_place_ids] : [];
+        ui_state.place.scene_places = ui_state.place.scene_places.filter((p) => ui_state.place.scene_visible_place_ids.includes(p.id));
+        const selected_place_id = opts?.selected_place_id ?? scene.selected_place_id;
+        ui_state.place.scene_selected_place_id = selected_place_id;
+        const selected_place = ui_state.place.scene_places.find((p) => p.id === selected_place_id)
+            ?? ui_state.place.scene_places.find((p) => p.id === scene.actor_current_place_id)
+            ?? null;
+        if (opts?.mirror_to_current_place !== false && selected_place) {
+            ui_state.place.current_place_id = selected_place.id;
+            ui_state.place.current_place = selected_place;
+            set_command_handler_place(selected_place);
+        }
+    }
+
+    async function fetch_scene_topology_meta(place_id: string): Promise<SceneTopologyMeta | null> {
+        const started_ms = Date.now();
         try {
             const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
             const selected_place_id = ui_state.place.scene_selected_place_id ?? place_id;
             const hops_visible = Math.max(0, Math.floor(Number(ui_state.place.scene_connector_hops_visible ?? 1)) || 0);
-            const scene_res = await fetch(`${base_url}/api/region/scene?slot=${APP_CONFIG.selected_data_slot}&place_id=${encodeURIComponent(place_id)}&selected_place_id=${encodeURIComponent(selected_place_id)}&hops_visible=${hops_visible}`);
+            const scene_res = await fetch(`${base_url}/api/region/scene/topology?slot=${APP_CONFIG.selected_data_slot}&place_id=${encodeURIComponent(place_id)}&selected_place_id=${encodeURIComponent(selected_place_id)}&hops_visible=${hops_visible}`);
             if (!scene_res.ok) return null;
             const scene_data = await scene_res.json().catch(() => null);
-            if (!scene_data?.ok || !Array.isArray(scene_data.places)) return null;
-            return {
+            if (!scene_data?.ok) return null;
+            const meta = {
                 selected_place_id: String(scene_data.selected_place_id ?? place_id),
                 actor_current_place_id: String(scene_data.actor_current_place_id ?? place_id),
                 region_id: typeof scene_data?.region?.id === 'string' ? scene_data.region.id : null,
                 region_bounds: scene_data?.region?.region_bounds ?? null,
-                places: scene_data.places.map((entry: any) => entry?.place ?? null).filter((entry: any): entry is Place => !!entry && typeof entry.id === 'string'),
+                graph_version: Math.max(0, Math.floor(Number(scene_data.graph_version) || 0)),
+                visible_place_ids: Array.isArray(scene_data.visible_place_ids) ? scene_data.visible_place_ids.map((id: any) => String(id ?? '')).filter((id: string) => id.length > 0) : [],
             };
+            debug_log(`[PLACE_SCENE] topology meta fetched ${JSON.stringify({ place_id, selected_place_id: meta.selected_place_id, actor_current_place_id: meta.actor_current_place_id, graph_version: meta.graph_version, visible_place_ids: meta.visible_place_ids, elapsed_ms: Math.max(0, Date.now() - started_ms) })}`);
+            return meta;
         } catch {
             return null;
         }
     }
 
+    async function hydrate_scene_places(visible_place_ids: string[], opts?: { preserve_existing?: boolean }): Promise<Place[]> {
+        const started_ms = Date.now();
+        const ids = Array.from(new Set((visible_place_ids ?? []).map((id) => String(id ?? '').trim()).filter((id) => id.length > 0)));
+        if (ids.length === 0) return [];
+        const preserve_existing = opts?.preserve_existing !== false;
+        const existing = new Map<string, Place>();
+        if (preserve_existing) {
+            for (const place of ui_state.place.scene_places) {
+                if (place && typeof place.id === 'string') existing.set(place.id, place);
+            }
+            if (ui_state.place.current_place?.id) existing.set(ui_state.place.current_place.id, ui_state.place.current_place);
+        }
+        const missing = ids.filter((id) => !existing.has(id));
+        if (missing.length > 0) {
+            const fetched = await Promise.all(missing.map((id) => fetch_place_snapshot(id)));
+            for (let i = 0; i < missing.length; i += 1) {
+                const place = fetched[i];
+                if (place) existing.set(missing[i]!, place);
+            }
+        }
+        const places = ids.map((id) => existing.get(id) ?? null).filter((p): p is Place => !!p);
+        debug_log(`[PLACE_SCENE] topology hydrate ${JSON.stringify({ visible_place_ids: ids, reused_count: ids.length - missing.length, missing_count: missing.length, resolved_count: places.length, elapsed_ms: Math.max(0, Date.now() - started_ms) })}`);
+        return places;
+    }
+
+    async function fetch_scene_topology(place_id: string): Promise<SceneTopologyPayload | null> {
+        const meta = await fetch_scene_topology_meta(place_id);
+        if (!meta) return null;
+        const places = await hydrate_scene_places(meta.visible_place_ids, { preserve_existing: true });
+        return { ...meta, places };
+    }
+
     async function refresh_scene_topology_preserving_selection(seed_place_id: string, opts?: { preferred_selected_place_id?: string; mirror_to_current_place?: boolean }): Promise<boolean> {
-        const scene = await fetch_scene_topology(seed_place_id);
-        if (!scene) return false;
+        const started_ms = Date.now();
+        const meta = await fetch_scene_topology_meta(seed_place_id);
+        if (!meta) return false;
         const selected_place_id = opts?.preferred_selected_place_id
             ?? ui_state.place.scene_selected_place_id
-            ?? scene.selected_place_id
+            ?? meta.selected_place_id
             ?? seed_place_id;
-        apply_scene_topology(scene, {
+        const topology_unchanged = meta.graph_version === ui_state.place.scene_graph_version
+            && same_string_array(meta.visible_place_ids, ui_state.place.scene_visible_place_ids)
+            && meta.actor_current_place_id === ui_state.place.actor_current_place_id;
+        const missing_visible_ids = meta.visible_place_ids.filter((id) => !(get_scene_place(id) ?? (ui_state.place.current_place?.id === id ? ui_state.place.current_place : null)));
+        apply_scene_topology_meta(meta, {
             selected_place_id,
             mirror_to_current_place: opts?.mirror_to_current_place ?? true,
         });
-        debug_log(`[PLACE_SCENE] refresh preserve selection ${JSON.stringify({ seed_place_id, selected_place_id, actor_current_place_id: scene.actor_current_place_id, scene_places: scene.places.map((p) => p.id) })}`);
+        if (topology_unchanged && missing_visible_ids.length === 0) {
+            debug_log(`[PLACE_SCENE] refresh preserve selection fast-path ${JSON.stringify({ seed_place_id, selected_place_id, actor_current_place_id: meta.actor_current_place_id, graph_version: meta.graph_version, visible_place_ids: meta.visible_place_ids, elapsed_ms: Math.max(0, Date.now() - started_ms) })}`);
+            return true;
+        }
+        const places = await hydrate_scene_places(meta.visible_place_ids, { preserve_existing: true });
+        apply_scene_topology({ ...meta, places }, {
+            selected_place_id,
+            mirror_to_current_place: opts?.mirror_to_current_place ?? true,
+        });
+        debug_log(`[PLACE_SCENE] refresh preserve selection ${JSON.stringify({ seed_place_id, selected_place_id, actor_current_place_id: meta.actor_current_place_id, graph_version: meta.graph_version, visible_place_ids: meta.visible_place_ids, missing_visible_ids, scene_places: places.map((p) => p.id), elapsed_ms: Math.max(0, Date.now() - started_ms) })}`);
         return true;
     }
 
@@ -3577,7 +3862,7 @@ export function create_app_state(): AppState {
                 if (scene && scene.places.length > 0) {
                     apply_scene_topology(scene, { selected_place_id: place_id, mirror_to_current_place: true });
                     selected = scene.places.find((p) => p.id === place_id) ?? scene.places.find((p) => p.id === scene.selected_place_id) ?? selected;
-                    debug_log(`[PLACE_SCENE] topology refresh applied ${JSON.stringify({ place_id, selected_place_id: scene.selected_place_id, actor_current_place_id: scene.actor_current_place_id, region_id: scene.region_id, scene_places: scene.places.map((p) => p.id) })}`);
+                    debug_log(`[PLACE_SCENE] topology refresh applied ${JSON.stringify({ place_id, selected_place_id: scene.selected_place_id, actor_current_place_id: scene.actor_current_place_id, region_id: scene.region_id, graph_version: scene.graph_version, visible_place_ids: scene.visible_place_ids, scene_places: scene.places.map((p) => p.id) })}`);
                 } else if (!selected) {
                     const fetched = await fetch_place_snapshot(place_id);
                     if (fetched) {
@@ -3604,7 +3889,8 @@ export function create_app_state(): AppState {
         }
         if (opts?.center_camera) {
             const actor_tile = selected.contents?.actors_present?.find((a: any) => a.actor_ref === `actor.${APP_CONFIG.input_actor_id}`)?.tile_position;
-            if (actor_tile) set_place_camera_target_position(actor_tile, 'free');
+            if (had_painter && actor_tile) set_place_camera_target_position(actor_tile, 'free');
+            else if (!had_painter) snap_place_camera_follow_to_actor();
         }
         debug_log(`[PLACE_SCENE] select applied ${JSON.stringify({ place_id, had_painter, pause_sources: ui_state.place.pause_state.pause_sources, current_place_id: ui_state.place.current_place_id, selected_scene_place_id: ui_state.place.scene_selected_place_id })}`);
         return true;
@@ -3713,6 +3999,10 @@ export function create_app_state(): AppState {
             ui_state.place.actor_current_place_id = null;
             ui_state.place.scene_selected_place_id = null;
             ui_state.place.scene_places = [];
+            ui_state.place.scene_visible_place_ids = [];
+            ui_state.place.scene_graph_version = 0;
+            ui_state.place.camera_target.region_pose = null;
+            ui_state.place.camera_target.last_follow_update_ms = 0;
             apply_place_pause_state(null);
             stop_place_touch_heartbeat();
             return;
@@ -3729,6 +4019,10 @@ export function create_app_state(): AppState {
             ui_state.place.actor_current_place_id = place_id;
             ui_state.place.scene_selected_place_id = place_id;
             ui_state.place.scene_places = [];
+            ui_state.place.scene_visible_place_ids = [];
+            ui_state.place.scene_graph_version = 0;
+            ui_state.place.camera_target.region_pose = null;
+            ui_state.place.camera_target.last_follow_update_ms = 0;
             if (!preserve_place_painter) {
                 ui_state.place_painter.active = false;
                 ui_state.place_painter.last_primary_target = null;
@@ -3995,14 +4289,18 @@ export function create_app_state(): AppState {
                     if (!is_current_place_paused_by('place_painter')) {
                         await set_current_place_pause_source('place_painter', true);
                     }
+                } else {
+                    snap_place_camera_follow_to_actor();
                 }
                 debug_log(`[PLACE_SCENE] full place load applied ${JSON.stringify({ source, place_id: next_place.id, preserve_place_painter, current_place_id: ui_state.place.current_place_id, scene_selected_place_id: ui_state.place.scene_selected_place_id, scene_places: ui_state.place.scene_places.map((p) => p.id), pause_sources: ui_state.place.pause_state.pause_sources })}`);
             } else {
                 ui_state.place.current_place = null;
+                ui_state.place.camera_target.region_pose = null;
             }
         } catch (err) {
             debug_warn('[mono_ui] failed to load place', place_id, err);
             ui_state.place.current_place = null;
+            ui_state.place.camera_target.region_pose = null;
         }
     }
 
@@ -4639,6 +4937,8 @@ export function create_app_state(): AppState {
     {
         const v_char = ui_state.modules.visibility.get('character_module');
         if (typeof v_char === 'boolean') ui_state.character.is_visible = v_char;
+        const v_inventory = ui_state.modules.visibility.get('inventory_container');
+        if (typeof v_inventory === 'boolean') ui_state.container.is_visible = v_inventory;
     }
 
     function get_focus_world_z_for_current_place(): number {
@@ -4651,12 +4951,148 @@ export function create_app_state(): AppState {
         return Number.isFinite(wz) ? wz : base_z;
     }
 
+    function get_place_region_origin(place: Place | null | undefined): { x: number; y: number; z: number } | null {
+        const origin = place?.region_bounds?.origin;
+        if (!origin) return null;
+        const x = Math.floor(Number(origin.x));
+        const y = Math.floor(Number(origin.y));
+        const z = Math.floor(Number(origin.z));
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
+        return { x, y, z };
+    }
+
+    function sync_place_camera_focus_z(world_z: number): void {
+        const place = get_current_place();
+        const next_world_z = Math.floor(Number(world_z));
+        if (!Number.isFinite(next_world_z)) return;
+        ui_state.place.world_z_center = next_world_z;
+        if (!place) return;
+        const zs = get_defined_place_world_zs(place);
+        if (zs.length < 1) return;
+        let best_i = 0;
+        let best_d = Math.abs(zs[0]! - next_world_z);
+        for (let i = 1; i < zs.length; i += 1) {
+            const d = Math.abs(zs[i]! - next_world_z);
+            if (d < best_d) {
+                best_d = d;
+                best_i = i;
+            }
+        }
+        ui_state.place.focus_z = best_i;
+    }
+
+    function resolve_follow_actor_camera_focus_region(): { place_id: string; region_x: number; region_y: number; world_z: number; local_x: number; local_y: number } | null {
+        const actor_ref = `actor.${APP_CONFIG.input_actor_id}`;
+        const candidate_place_ids = [
+            ui_state.place.actor_current_place_id,
+            ui_state.place.current_place_id,
+            ui_state.place.scene_selected_place_id,
+        ].filter((id): id is string => typeof id === 'string' && id.length > 0);
+        const visited = new Set<string>();
+        const ordered_places: Place[] = [];
+        for (const place_id of candidate_place_ids) {
+            if (visited.has(place_id)) continue;
+            const place = get_scene_place(place_id) ?? (ui_state.place.current_place?.id === place_id ? ui_state.place.current_place : null);
+            if (!place) continue;
+            visited.add(place_id);
+            ordered_places.push(place);
+        }
+        for (const place of ui_state.place.scene_places) {
+            if (!place?.id || visited.has(place.id)) continue;
+            visited.add(place.id);
+            ordered_places.push(place);
+        }
+        if (ui_state.place.current_place?.id && !visited.has(ui_state.place.current_place.id)) ordered_places.push(ui_state.place.current_place);
+
+        for (const place of ordered_places) {
+            const actor: any = place?.contents?.actors_present?.find((a: any) => a.actor_ref === actor_ref) ?? null;
+            if (!actor) continue;
+            const base_z = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
+            const focus = get_character_camera_focus_tile({
+                entity: actor,
+                entity_ref: actor_ref,
+                fallback_world_z: base_z,
+            });
+            const origin = get_place_region_origin(place);
+            if (!origin) {
+                return {
+                    place_id: place.id,
+                    region_x: focus.x,
+                    region_y: focus.y,
+                    world_z: focus.z,
+                    local_x: focus.x,
+                    local_y: focus.y,
+                };
+            }
+            return {
+                place_id: place.id,
+                region_x: origin.x + focus.x,
+                region_y: origin.y + focus.y,
+                world_z: focus.z,
+                local_x: focus.x,
+                local_y: focus.y,
+            };
+        }
+        return null;
+    }
+
+    function snap_place_camera_follow_to_actor(): void {
+        ui_state.place.camera_target.mode = 'follow_actor';
+        ui_state.place.camera_target.tile = null;
+        const target = resolve_follow_actor_camera_focus_region();
+        if (!target) return;
+        ui_state.place.camera_target.region_pose = {
+            x: target.region_x,
+            y: target.region_y,
+            z: target.world_z,
+        };
+        ui_state.place.camera_target.last_follow_update_ms = Date.now();
+        sync_place_camera_focus_z(target.world_z);
+    }
+
+    function update_place_camera_follow(now_ms: number): void {
+        if (ui_state.place.camera_target.mode === 'free') return;
+        const actor_ref = `actor.${APP_CONFIG.input_actor_id}`;
+        const recently_changed_ms = Math.max(0, now_ms - Math.max(0, renderer_debug.last_actor_pos_changed_ms || 0));
+        const actor_is_repositioning = recently_changed_ms <= 220;
+        if (!is_entity_moving(actor_ref) && !actor_is_repositioning) return;
+        const target = resolve_follow_actor_camera_focus_region();
+        if (!target) return;
+        const last_ms = Math.max(0, Math.floor(Number(ui_state.place.camera_target.last_follow_update_ms) || 0));
+        const dt_ms = last_ms > 0 ? Math.max(1, now_ms - last_ms) : 16;
+        ui_state.place.camera_target.last_follow_update_ms = now_ms;
+        const dt = Math.max(0.001, Math.min(0.05, dt_ms / 1000));
+        const pose = ui_state.place.camera_target.region_pose;
+        if (!pose) {
+            ui_state.place.camera_target.region_pose = { x: target.region_x, y: target.region_y, z: target.world_z };
+            sync_place_camera_focus_z(target.world_z);
+            return;
+        }
+        const follow_tau_xy = 0.10;
+        const follow_tau_z = 0.14;
+        const alpha_xy = 1 - Math.exp(-dt / follow_tau_xy);
+        const alpha_z = 1 - Math.exp(-dt / follow_tau_z);
+        pose.x += (target.region_x - pose.x) * alpha_xy;
+        pose.y += (target.region_y - pose.y) * alpha_xy;
+        pose.z += (target.world_z - pose.z) * alpha_z;
+        sync_place_camera_focus_z(pose.z);
+    }
+
     function get_place_camera_target_position(): { x: number; y: number } | null {
         if (ui_state.place.camera_target.mode === 'free' && ui_state.place.camera_target.tile) {
             return { ...ui_state.place.camera_target.tile };
         }
 
+        const pose = ui_state.place.camera_target.region_pose;
         const place = get_current_place();
+        const origin = get_place_region_origin(place);
+        if (pose && origin) {
+            return {
+                x: pose.x - origin.x,
+                y: pose.y - origin.y,
+            };
+        }
+
         const actor: any = place?.contents?.actors_present?.find((a: any) => a.actor_ref === `actor.${APP_CONFIG.input_actor_id}`) ?? null;
         if (!actor) return null;
         const base_z = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
@@ -4669,8 +5105,12 @@ export function create_app_state(): AppState {
     }
 
     function set_place_camera_target_position(tile: { x: number; y: number }, mode: 'follow_actor' | 'free' = 'free'): void {
-        ui_state.place.camera_target.mode = mode;
-        ui_state.place.camera_target.tile = { x: Math.floor(tile.x), y: Math.floor(tile.y) };
+        if (mode === 'free') {
+            ui_state.place.camera_target.mode = 'free';
+            ui_state.place.camera_target.tile = { x: Math.floor(tile.x), y: Math.floor(tile.y) };
+            return;
+        }
+        snap_place_camera_follow_to_actor();
     }
 
     function get_entity_camera_anchor_world_z(entity: any, entity_ref: string, fallback_z: number): number {
@@ -4812,6 +5252,8 @@ export function create_app_state(): AppState {
             set_move_mode: (mode) => { ui_state.controls.move_mode = mode; },
             is_place_painter_active: () => ui_state.place_painter.active,
             get_place_painter_tool: () => ui_state.place_painter.selected_tool,
+            get_place_painter_tool_for_button: (button) => get_place_painter_tool_for_button(button),
+            get_place_painter_shape_preview: () => get_place_painter_shape_preview_points(),
             get_place_painter_resize_preview: () => ui_state.place_painter.resize_session ? {
                 place_id: ui_state.place_painter.resize_session.place_id,
                 face: ui_state.place_painter.resize_session.face,
@@ -4860,6 +5302,9 @@ export function create_app_state(): AppState {
                 };
             },
             on_place_painter_primary_action: handle_place_painter_primary_action,
+            on_place_painter_shape_start: start_place_shape_drag,
+            on_place_painter_shape_update: update_place_shape_drag,
+            on_place_painter_shape_end: finish_place_shape_drag,
             on_place_painter_move_start: start_place_move_drag,
             on_place_painter_move_update: update_place_move_drag,
             on_place_painter_move_end: () => { void finish_place_move_drag(); },
@@ -5033,7 +5478,7 @@ export function create_app_state(): AppState {
                             const actor_place = get_scene_place(target_place_id) ?? null;
                             if (actor_place && !ui_state.place_painter.active) {
                                 const actor_tile = actor_place.contents?.actors_present?.find((a: any) => a.actor_ref === `actor.${APP_CONFIG.input_actor_id}`)?.tile_position;
-                                if (actor_tile) set_place_camera_target_position(actor_tile, 'free');
+                                if (actor_tile) snap_place_camera_follow_to_actor();
                             }
                         } else {
                             await update_current_place(target_place_id, { source: 'travel_scene_refresh_fallback' });
@@ -6967,7 +7412,7 @@ export function create_app_state(): AppState {
             get_is_visible: () => ui_state.container.is_visible,
             set_is_visible: async (visible: boolean) => { 
                 debug_log(`[Inventory] set_is_visible called with: ${visible}`);
-                ui_state.container.is_visible = visible;
+                set_module_visible('inventory_container', visible);
                 if (visible) {
                     // Phase 1: Load main inventory (equipped sack) when opening
                     debug_log('[Inventory] Opening inventory - fetching main inventory container...');
@@ -7384,7 +7829,7 @@ export function create_app_state(): AppState {
                 can_save_position: false,
                 on_close: () => {
                     debug_log('[ContainerModule] Close gizmo clicked - hiding container');
-                    ui_state.container.is_visible = false;
+                    set_module_visible('inventory_container', false);
                     flash_status(['Inventory closed (X clicked)'], 800);
                 },
                 on_move_start: () => {
@@ -7460,6 +7905,10 @@ export function create_app_state(): AppState {
     if (!ui_state.modules.visibility.has('character_module')) {
         ui_state.modules.visibility.set('character_module', ui_state.character.is_visible);
     }
+    if (!ui_state.modules.visibility.has('inventory_container')) {
+        ui_state.modules.visibility.set('inventory_container', ui_state.container.is_visible);
+        module_registry.set_visibility('inventory_container', ui_state.container.is_visible);
+    }
     if (!ui_state.modules.visibility.has('debug')) {
         ui_state.modules.visibility.set('debug', module_registry.is_visible('debug'));
     }
@@ -7503,6 +7952,60 @@ export function create_app_state(): AppState {
     ui_state.place.npc_movement_active = false;
 
     const wsClient = initWebSocketClient();
+    wsClient.on('ENTITY_PLACE_TRANSITION', (payload: any) => {
+        try {
+            const entity_ref = String(payload?.entity_ref ?? '');
+            const target_place_id = String(payload?.to_place_id ?? '').trim();
+            if (entity_ref !== `actor.${APP_CONFIG.input_actor_id}` || !target_place_id) return;
+            remove_actor_from_non_target_scene_places(entity_ref, target_place_id);
+            const prev_actor_place_id = ui_state.place.actor_current_place_id;
+            const prev_selected_place_id = ui_state.place.scene_selected_place_id;
+            const painter_lock_selection = ui_state.place_painter.active && !!prev_selected_place_id;
+            const follow_actor_selection = !painter_lock_selection && (!prev_selected_place_id || prev_selected_place_id === prev_actor_place_id);
+            const transition_bridge_latency_ms = (typeof payload?.sent_at_ms === 'number' && Number.isFinite(payload.sent_at_ms))
+                ? Math.max(0, Date.now() - Math.floor(payload.sent_at_ms))
+                : null;
+            debug_log(`[PLACE_SCENE] actor place transition event ${JSON.stringify({ entity_ref, from_place_id: payload?.from_place_id ?? null, to_place_id: target_place_id, prev_actor_place_id, prev_selected_place_id, painter_lock_selection, follow_actor_selection, graph_version: ui_state.place.scene_graph_version, visible_place_ids: ui_state.place.scene_visible_place_ids, transition_bridge_latency_ms, breath_index: payload?.breath_index ?? null, seq: payload?.seq ?? null })}`);
+            ui_state.place.actor_current_place_id = target_place_id;
+            const cached_target_place = get_scene_place(target_place_id);
+            if (cached_target_place) {
+                const actor_ref = `actor.${APP_CONFIG.input_actor_id}`;
+                const actor_x = Math.floor(Number(payload?.x));
+                const actor_y = Math.floor(Number(payload?.y));
+                const actor_z = (typeof payload?.z === 'number' && Number.isFinite(payload.z)) ? Math.floor(payload.z) : null;
+                if (Number.isFinite(actor_x) && Number.isFinite(actor_y)) {
+                    const actors = Array.isArray(cached_target_place.contents?.actors_present) ? cached_target_place.contents.actors_present : [];
+                    const actor_entry: any = actors.find((a: any) => a.actor_ref === actor_ref) ?? null;
+                    if (actor_entry) {
+                        actor_entry.tile_position = { x: actor_x, y: actor_y };
+                        if (actor_z !== null) actor_entry.elevation = actor_z;
+                    } else {
+                        actors.push({ actor_ref, tile_position: { x: actor_x, y: actor_y }, elevation: actor_z ?? undefined, status: 'present' });
+                        if (!cached_target_place.contents) cached_target_place.contents = { npcs_present: [], actors_present: [], items_on_ground: [], features: [] } as any;
+                        cached_target_place.contents.actors_present = actors;
+                    }
+                }
+                const next_selected_place_id = follow_actor_selection ? target_place_id : (prev_selected_place_id ?? target_place_id);
+                ui_state.place.scene_selected_place_id = next_selected_place_id;
+                if (!painter_lock_selection) {
+                    ui_state.place.current_place_id = cached_target_place.id;
+                    ui_state.place.current_place = cached_target_place;
+                    set_command_handler_place(cached_target_place);
+                    const actor_tile = cached_target_place.contents?.actors_present?.find((a: any) => a.actor_ref === `actor.${APP_CONFIG.input_actor_id}`)?.tile_position;
+                    if (actor_tile) snap_place_camera_follow_to_actor();
+                }
+                debug_log(`[PLACE_SCENE] actor place transition local handoff ${JSON.stringify({ target_place_id, used_cached_scene_place: true, next_selected_place_id, mirror_to_current_place: !painter_lock_selection, scene_places: ui_state.place.scene_places.map((p) => p.id) })}`);
+            } else {
+                debug_log(`[PLACE_SCENE] actor place transition local handoff ${JSON.stringify({ target_place_id, used_cached_scene_place: false, visible_place_ids: ui_state.place.scene_visible_place_ids, scene_places: ui_state.place.scene_places.map((p) => p.id) })}`);
+            }
+            void refresh_scene_topology_preserving_selection(target_place_id, {
+                preferred_selected_place_id: follow_actor_selection ? target_place_id : (prev_selected_place_id ?? target_place_id),
+                mirror_to_current_place: !painter_lock_selection,
+            });
+        } catch {
+            // ignore
+        }
+    });
     wsClient.on('ITEM_MUTATIONS_APPLIED', (payload: any) => {
         void handle_item_mutations_event(payload);
     });
@@ -9185,30 +9688,8 @@ export function create_app_state(): AppState {
                     renderer_debug.last_actor_pos_key = actor_key;
                     renderer_debug.actor_pos_change_count += 1;
                     renderer_debug.last_actor_pos_changed_ms = now_wall;
-                    if (ui_state.place.camera_target.mode !== 'free') {
-                        const zs = get_defined_place_world_zs(place);
-                        let actor_layer_index = zs.findIndex((z) => z === actor_z);
-                        if (actor_layer_index < 0 && zs.length > 0) {
-                            let best_i = 0;
-                            let best_d = Math.abs(zs[0]! - actor_z);
-                            for (let i = 1; i < zs.length; i++) {
-                                const d = Math.abs(zs[i]! - actor_z);
-                                if (d < best_d) {
-                                    best_d = d;
-                                    best_i = i;
-                                }
-                            }
-                            actor_layer_index = best_i;
-                        }
-                        actor_layer_index = Math.max(0, actor_layer_index);
-                        if (ui_state.place.world_z_center !== actor_z) {
-                            ui_state.place.world_z_center = actor_z;
-                        }
-                        if (ui_state.place.focus_z !== actor_layer_index) {
-                            ui_state.place.focus_z = actor_layer_index;
-                        }
-                    }
                 }
+                update_place_camera_follow(now_wall);
             } catch {
                 // ignore
             }

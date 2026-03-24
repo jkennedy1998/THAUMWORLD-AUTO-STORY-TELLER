@@ -16,6 +16,8 @@ import { rotate_offset_xy } from "../shared/body_model.js";
 import { compute_adjacent_place_bounds, region_bounds_overlap as shared_region_bounds_overlap } from "../shared/place_adjacency.js";
 import { sanitize_place_for_save } from "../shared/defs_deltas_sanitize.js";
 import { normalize_ground_scattered } from "./ground_normalize.js";
+import { get_region_place_index_record, list_place_ids_in_region_index, list_region_place_index_records, remove_place_from_region_place_index, sync_place_to_region_place_index } from "./region_place_index.js";
+import { sync_region_place_graph_for_place } from "./region_place_graph.js";
 
 const PLACES_DIR = "places";
 
@@ -50,6 +52,18 @@ function get_tile_layer_offset_from_key(key: string): number | null {
   if (!m) return null;
   const offset = Math.floor(Number(m[1]));
   return Number.isFinite(offset) ? offset : null;
+}
+
+function same_region_bounds(a: PlaceRegionBounds | null | undefined, b: PlaceRegionBounds | null | undefined): boolean {
+  if (!a || !b) return !a && !b;
+  return (
+    Math.floor(Number(a.origin.x ?? 0)) === Math.floor(Number(b.origin.x ?? 0)) &&
+    Math.floor(Number(a.origin.y ?? 0)) === Math.floor(Number(b.origin.y ?? 0)) &&
+    Math.floor(Number(a.origin.z ?? 0)) === Math.floor(Number(b.origin.z ?? 0)) &&
+    Math.floor(Number(a.size.x ?? 0)) === Math.floor(Number(b.size.x ?? 0)) &&
+    Math.floor(Number(a.size.y ?? 0)) === Math.floor(Number(b.size.y ?? 0)) &&
+    Math.floor(Number(a.size.z ?? 0)) === Math.floor(Number(b.size.z ?? 0))
+  );
 }
 
 function normalize_place_region_bounds_to_content(place: Place): { changed: boolean; used_min_z: number; used_max_z: number } {
@@ -334,6 +348,7 @@ export function load_place(slot: number, place_id: string): PlaceResult {
 export function save_place(slot: number, place: Place): string {
   ensure_places_dir(slot);
   const place_path = get_place_path(slot, place.id);
+  const previous_record = get_region_place_index_record(slot, place.id);
   const persisted = JSON.parse(JSON.stringify(place)) as Place;
   normalize_place_region_bounds_to_content(persisted);
 
@@ -346,6 +361,15 @@ export function save_place(slot: number, place: Place): string {
     JSON.stringify(persisted, null, 2),
     "utf-8"
   );
+
+  const region_id = String(persisted.region_id ?? "").trim();
+  const topology_changed = !previous_record
+    || previous_record.region_id !== region_id
+    || !same_region_bounds(previous_record.bounds, persisted.region_bounds);
+  if (topology_changed) {
+    sync_place_to_region_place_index(slot, persisted.id);
+    sync_region_place_graph_for_place(slot, persisted.id, previous_record?.region_id ?? null);
+  }
   
   return place_path;
 }
@@ -387,23 +411,14 @@ export function list_all_places(slot: number): PlaceListResult {
  * List places in a specific region
  */
 export function list_places_in_region(slot: number, region_id: string): PlaceListResult {
-  const all_result = list_all_places(slot);
-  
-  if (!all_result.ok) {
-    return all_result;
+  try {
+    return { ok: true, places: list_place_ids_in_region_index(slot, region_id) };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
-  
-  // Filter places by region_id
-  const region_places: string[] = [];
-  
-  for (const place_id of all_result.places) {
-    const place_result = load_place(slot, place_id);
-    if (place_result.ok && place_result.place.region_id === region_id) {
-      region_places.push(place_id);
-    }
-  }
-  
-  return { ok: true, places: region_places };
 }
 
 /**
@@ -411,9 +426,12 @@ export function list_places_in_region(slot: number, region_id: string): PlaceLis
  */
 export function delete_place(slot: number, place_id: string): boolean {
   try {
+    const previous_record = get_region_place_index_record(slot, place_id);
     const place_path = get_place_path(slot, place_id);
     if (fs.existsSync(place_path)) {
       fs.unlinkSync(place_path);
+      remove_place_from_region_place_index(slot, place_id);
+      sync_region_place_graph_for_place(slot, place_id, previous_record?.region_id ?? null);
       return true;
     }
     return false;
@@ -545,16 +563,18 @@ export type RegionPlaceRecord = {
 };
 
 export function list_region_place_records(slot: number, region_id: string): { ok: true; places: RegionPlaceRecord[] } | { ok: false; error: string } {
-  const places_res = list_places_in_region(slot, region_id);
-  if (!places_res.ok) return { ok: false, error: places_res.error };
-  const places: RegionPlaceRecord[] = [];
-  for (const place_id of places_res.places) {
-    const place_res = load_place(slot, place_id);
-    if (!place_res.ok) continue;
-    if (!place_res.place.region_bounds) continue;
-    places.push({ place_id, bounds: place_res.place.region_bounds });
+  try {
+    const places = list_region_place_index_records(slot, region_id).map((rec) => ({
+      place_id: rec.place_id,
+      bounds: rec.bounds,
+    }));
+    return { ok: true, places };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
-  return { ok: true, places };
 }
 
 export function region_bounds_overlap(a: PlaceRegionBounds, b: PlaceRegionBounds): boolean {

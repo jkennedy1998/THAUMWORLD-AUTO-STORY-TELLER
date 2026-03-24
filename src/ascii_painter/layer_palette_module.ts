@@ -19,9 +19,10 @@
 import type { Module, Canvas, Rect, PointerEvent, DragEvent } from '../mono_ui/types.js';
 import type { VoxelSpace, VoxelLayer } from './voxel_space.js';
 import { get_color_by_name } from '../mono_ui/colors.js';
+import { MODULE_CHROME_RENDER_INDEX, PANEL_BORDER_PRESETS, draw_panel_horizontal_divider } from '../mono_ui/module_borders.js';
 import { addLayer, removeLayer, duplicateLayer, getVisibleLayers } from './voxel_space.js';
-import type { ModuleGizmosConfig, GizmoState } from '../mono_ui/module_gizmos.js';
-import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area, get_resize_edge, handle_resize_drag } from '../mono_ui/module_gizmos.js';
+import type { ModuleGizmosConfig } from '../mono_ui/module_gizmos.js';
+import { make_floating_panel_module } from '../mono_ui/modules/floating_panel_module.js';
 
 export type LayerPaletteOptions = {
   id: string;
@@ -122,8 +123,6 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
     on_move: opts.onMove,
   };
   
-  const gizmo_state: GizmoState = create_gizmo_state();
-  
   function getSortedLayers(): VoxelLayer[] {
     const space = getSpace();
     return Array.from(space.layers.values())
@@ -144,61 +143,57 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
     return index + 1;
   }
   
-  const module: Module = {
+  return make_floating_panel_module({
     id: opts.id,
-    rect,
-    Focusable: true, // IMPORTANT: Allows receiving keyboard events
-    
-    Draw(c: Canvas): void {
-      c.fill_rect(rect, { char: ' ', rgb: bgColor, weight_index: 0, render_index: 0 });
-      
-      if (!gizmo_state.is_resize_mode) {
-        for (let x = rect.x0; x <= rect.x1; x++) {
-          c.set(x, rect.y1, { char: '─', rgb: borderColor, weight_index: 3, render_index: 1 });
-          c.set(x, rect.y0, { char: '─', rgb: borderColor, weight_index: 3, render_index: 1 });
-        }
-        for (let y = rect.y0; y <= rect.y1; y++) {
-          c.set(rect.x0, y, { char: '│', rgb: borderColor, weight_index: 3, render_index: 1 });
-          c.set(rect.x1, y, { char: '│', rgb: borderColor, weight_index: 3, render_index: 1 });
-        }
-        c.set(rect.x0, rect.y1, { char: '┌', rgb: borderColor, weight_index: 3, render_index: 1 });
-        c.set(rect.x1, rect.y1, { char: '┐', rgb: borderColor, weight_index: 3, render_index: 1 });
-        c.set(rect.x0, rect.y0, { char: '└', rgb: borderColor, weight_index: 3, render_index: 1 });
-        c.set(rect.x1, rect.y0, { char: '┘', rgb: borderColor, weight_index: 3, render_index: 1 });
-      }
-      
+    rect: opts.rect,
+    title: 'LAYERS',
+    gizmos: gizmo_config,
+    background: { rgb: bgColor },
+    border: {
+      style: PANEL_BORDER_PRESETS.default_double.style,
+      border_rgb: borderColor,
+      weight_index: PANEL_BORDER_PRESETS.default_double.weight_index,
+      text_rgb: textColor,
+      markers: () => {
+        const layers = getSortedLayers();
+        const contentHeight = rect.y1 - rect.y0 - 4;
+        return {
+          top: scrollOffset > 0 ? '^' : undefined,
+          bottom: scrollOffset < Math.max(0, layers.length - contentHeight) ? 'v' : undefined,
+        };
+      },
+    },
+    resize: {
+      min_width: MIN_WIDTH,
+      min_height: MIN_HEIGHT,
+      max_width: MAX_WIDTH,
+      max_height: MAX_HEIGHT,
+    },
+    draw_content(c: Canvas, next_rect: Rect): void {
+      rect = next_rect;
       // Header
       const titleY = rect.y1 - 1;
-      const title = 'Layers';
-      let titleX = rect.x0 + 6;
-      for (let i = 0; i < title.length && titleX + i <= rect.x1; i++) {
-        c.set(titleX + i, titleY, { 
-          char: title[i]!, 
-          rgb: textColor, 
-          weight_index: 5,
-          render_index: 1 
-        });
-      }
       
       // [+] button
-      c.set(rect.x1 - 2, titleY, { char: '[', rgb: borderColor, weight_index: 3, render_index: 1 });
-      c.set(rect.x1 - 1, titleY, { char: '+', rgb: visibleColor, weight_index: 5, render_index: 1 });
-      c.set(rect.x1, titleY, { char: ']', rgb: borderColor, weight_index: 3, render_index: 1 });
+      c.set(rect.x1 - 2, titleY, { char: '[', rgb: borderColor, weight_index: 3, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+      c.set(rect.x1 - 1, titleY, { char: '+', rgb: visibleColor, weight_index: 5, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
       
       // Column headers
       const headerY = rect.y1 - 2;
-      c.set(rect.x0 + HEADER_COL_DRAG, headerY, { char: '☰', rgb: dragHandleColor, weight_index: 3, render_index: 1 });
-      c.set(rect.x0 + HEADER_COL_VIS, headerY, { char: 'V', rgb: borderColor, weight_index: 3, render_index: 1 });
-      c.set(rect.x0 + HEADER_COL_LOCK, headerY, { char: 'L', rgb: borderColor, weight_index: 3, render_index: 1 });
-      c.set(rect.x0 + COL_ORDER_START, headerY, { char: '#', rgb: borderColor, weight_index: 3, render_index: 1 });
+      c.set(rect.x0 + HEADER_COL_DRAG, headerY, { char: '☰', rgb: dragHandleColor, weight_index: 3, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+      c.set(rect.x0 + HEADER_COL_VIS, headerY, { char: 'V', rgb: borderColor, weight_index: 3, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+      c.set(rect.x0 + HEADER_COL_LOCK, headerY, { char: 'L', rgb: borderColor, weight_index: 3, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+      c.set(rect.x0 + COL_ORDER_START, headerY, { char: '#', rgb: borderColor, weight_index: 3, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
       
       // Separator
       const separatorY = rect.y1 - 3;
-      for (let x = rect.x0 + 1; x < rect.x1; x++) {
-        c.set(x, separatorY, { char: '─', rgb: borderColor, weight_index: 2, render_index: 1 });
-      }
-      c.set(rect.x0, separatorY, { char: '├', rgb: borderColor, weight_index: 3, render_index: 1 });
-      c.set(rect.x1, separatorY, { char: '┤', rgb: borderColor, weight_index: 3, render_index: 1 });
+      draw_panel_horizontal_divider(c, {
+        y: separatorY,
+        rect,
+        style: PANEL_BORDER_PRESETS.default_double.style,
+        rgb: borderColor,
+        weight_index: 2,
+      });
       
       const layers = getSortedLayers();
       const contentStartY = separatorY - 1;
@@ -410,18 +405,8 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
         }
       }
       
-      // Scroll indicators
-      if (scrollOffset > 0) {
-        c.set(rect.x1 - 1, contentStartY + 1, { char: '▲', rgb: borderColor, weight_index: 3, render_index: 1 });
-      }
-      if (scrollOffset < layers.length - maxVisibleRows) {
-        c.set(rect.x1 - 1, contentEndY, { char: '▼', rgb: borderColor, weight_index: 3, render_index: 1 });
-      }
-
-      draw_module_gizmos(c, rect, gizmo_config, gizmo_state, 'LAYERS');
     },
-    
-    OnPointerDown(e: PointerEvent): void {
+    on_pointer_down_content(e: PointerEvent, rect: Rect): void {
       // If currently renaming, check if we clicked elsewhere
       if (renameState.isRenaming) {
         const localY = e.y - rect.y0;
@@ -451,38 +436,6 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
           renameState.isRenaming = false;
           renameState.layerZ = null;
         }
-      }
-      
-      // Handle gizmo clicks
-      if (is_in_gizmo_area(e.x, e.y, rect)) {
-        const gizmo = handle_gizmo_click(e.x, e.y, rect, gizmo_config, gizmo_state);
-        if (gizmo === 'move') {
-          gizmo_state.move_start_x = e.x;
-          gizmo_state.move_start_y = e.y;
-          gizmo_state.original_rect = { ...rect };
-        }
-        return;
-      }
-      
-      // Resize edge click
-      if (gizmo_state.is_resize_mode) {
-        const edge = get_resize_edge(e.x, e.y, rect);
-        if (edge) {
-          gizmo_state.resize_edge = edge;
-          gizmo_state.is_dragging_resize = true;
-          gizmo_state.move_start_x = e.x;
-          gizmo_state.move_start_y = e.y;
-          gizmo_state.original_rect = { ...rect };
-          return;
-        }
-      }
-      
-      // Move mode
-      if (gizmo_state.is_move_mode) {
-        gizmo_state.move_start_x = e.x;
-        gizmo_state.move_start_y = e.y;
-        gizmo_state.original_rect = { ...rect };
-        return;
       }
       
       const localY = e.y - rect.y0;
@@ -544,47 +497,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
         renameState.cursorPosition = layer.name.length;
       }
     },
-    
-    OnDragMove(e: DragEvent): void {
-      // Move mode
-      if (gizmo_state.is_move_mode && gizmo_state.original_rect) {
-        const dx = e.x - gizmo_state.move_start_x;
-        const dy = e.y - gizmo_state.move_start_y;
-        
-        const newRect: Rect = {
-          x0: gizmo_state.original_rect.x0 + dx,
-          y0: gizmo_state.original_rect.y0 + dy,
-          y1: gizmo_state.original_rect.y1 + dy,
-          x1: gizmo_state.original_rect.x1 + dx,
-        };
-        
-        rect = newRect;
-        
-        if (opts.onMove) {
-          opts.onMove(rect);
-        }
-        return;
-      }
-      
-      // Resize
-      if (gizmo_state.is_resize_mode && gizmo_state.is_dragging_resize && gizmo_state.original_rect) {
-        const newRect = handle_resize_drag(
-          e.x, e.y, gizmo_state, gizmo_state.original_rect,
-          MIN_WIDTH, MIN_HEIGHT, MAX_WIDTH, MAX_HEIGHT,
-          (newRect) => {
-            rect = newRect;
-            if (opts.onResize) {
-              opts.onResize(rect);
-            }
-          }
-        );
-        
-        if (newRect) {
-          rect = newRect;
-        }
-        return;
-      }
-      
+    on_drag_move_content(e: DragEvent): void {
       // Layer dragging - update position
       if (dragState.isDragging) {
         dragState.dragStartY = e.y;
@@ -606,26 +519,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
         dragState.currentDropIndex = clampedIndex;
       }
     },
-    
-    OnPointerUp(e: PointerEvent): void {
-      // Move mode
-      if (gizmo_state.is_move_mode) {
-        gizmo_state.is_move_mode = false;
-        gizmo_state.original_rect = null;
-        if (opts.onMove) {
-          opts.onMove(rect);
-        }
-      }
-      
-      // Resize
-      if (gizmo_state.is_dragging_resize) {
-        gizmo_state.is_dragging_resize = false;
-        gizmo_state.resize_edge = null;
-        if (opts.onResize) {
-          opts.onResize(rect);
-        }
-      }
-      
+    on_pointer_up_content(): void {
       // Layer drop
       if (dragState.isDragging && dragState.sourceLayerZ !== null) {
         if (dragState.currentDropIndex !== null) {
@@ -680,8 +574,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
         dragState.draggedLayer = null;
       }
     },
-    
-    OnKeyDown(e: KeyboardEvent): void {
+    on_key_down(e: KeyboardEvent): void {
       if (!renameState.isRenaming) return;
       
       if (e.key === 'Enter') {
@@ -736,8 +629,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
         e.preventDefault();
       }
     },
-    
-    OnTextInput(text: string): void {
+    on_text_input(text: string): void {
       if (!renameState.isRenaming) return;
       
       // Insert text at cursor position
@@ -747,14 +639,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
         renameState.editText.slice(renameState.cursorPosition);
       renameState.cursorPosition += text.length;
     },
-    
-    OnPointerMove(e: PointerEvent): void {
-      if (gizmo_state.is_resize_mode && !gizmo_state.is_dragging_resize) {
-        gizmo_state.resize_edge = get_resize_edge(e.x, e.y, rect);
-      }
-    },
-    
-    OnWheel(e: { delta_x: number; delta_y: number; delta_mode: number }): void {
+    on_wheel_content(e: { delta_x: number; delta_y: number; delta_mode: number }): void {
       const layers = getSortedLayers();
       const contentHeight = rect.y1 - rect.y0 - 4;
       
@@ -764,7 +649,5 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
         scrollOffset = Math.max(scrollOffset - 1, 0);
       }
     },
-  };
-  
-  return module;
+  });
 }

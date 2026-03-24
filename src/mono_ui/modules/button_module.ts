@@ -1,6 +1,6 @@
 import type { Canvas, Module, Rect, Rgb, PointerEvent } from '../types.js';
 import { get_color_by_name } from '../colors.js';
-import { draw_module_border, BORDER_STYLES } from '../module_borders.js';
+import { draw_module_border, PANEL_BORDER_PRESETS } from '../module_borders.js';
 import { play_sfx } from '../sfx/sfx_player.js';
 
 export type ButtonOptions = {
@@ -129,9 +129,9 @@ export function make_button_module(opts: ButtonOptions): Module {
             // Standard double-border chrome for all buttons.
             draw_module_border(c, {
                 rect,
-                style: BORDER_STYLES.double,
+                style: PANEL_BORDER_PRESETS.default_double.style,
                 border_rgb,
-                weight_index: 3,
+                weight_index: PANEL_BORDER_PRESETS.default_double.weight_index,
             });
 
             // Click feedback: temporarily tint label brighter.

@@ -8,6 +8,8 @@
  */
 
 import type { Grid, GridCell, GridExport } from './types.js';
+import type { EditPlaneId, GridPoint } from './types.js';
+import type { Voxel3 } from '../shared/coords.js';
 
 /**
  * Camera modes for viewing the voxel space
@@ -21,7 +23,7 @@ export type CameraMode = 'straight_ortho' | 'parallax_ortho' | 'rotated_ortho';
  * yz: Looking down X-axis (side/wall view)
  * xz: Looking down Y-axis (top-down/floor view)
  */
-export type CameraOrientation = 'xy' | 'yz' | 'xz';
+export type CameraOrientation = EditPlaneId;
 
 /**
  * Euler rotation angles for camera view (in degrees)
@@ -38,6 +40,11 @@ export interface EulerRotation {
 export interface CalibrationOffset {
   x: number;  // Horizontal offset in pixels
   y: number;  // Vertical offset in pixels
+}
+
+export interface EditPlaneState {
+  plane: CameraOrientation;
+  depth: number;
 }
 
 /**
@@ -100,6 +107,13 @@ export const DEFAULT_CAMERA_VALUES = {
  */
 export function createDefaultCamera(): CameraConfig {
   return { ...DEFAULT_CAMERA_VALUES };
+}
+
+export function getEditPlaneState(space: VoxelSpace): EditPlaneState {
+  return {
+    plane: space.camera.orientation,
+    depth: space.camera.focus_plane,
+  };
 }
 
 /**
@@ -286,6 +300,10 @@ export function getVoxel(
   return layer.cells[y]?.[x] ?? null;
 }
 
+export function getVoxelAt(space: VoxelSpace, voxel: Voxel3): GridCell | null {
+  return getVoxel(space, voxel.x, voxel.y, voxel.z);
+}
+
 /**
  * Set cell at specific voxel coordinates
  */
@@ -313,6 +331,18 @@ export function setVoxel(
   }
   
   return true;
+}
+
+export function setVoxelAt(space: VoxelSpace, voxel: Voxel3, cell: GridCell): boolean {
+  return setVoxel(space, voxel.x, voxel.y, voxel.z, cell);
+}
+
+export function getPlaneCell(space: VoxelSpace, point: GridPoint, depth: number): GridCell | null {
+  return getVoxel(space, point.x, point.y, depth);
+}
+
+export function setPlaneCell(space: VoxelSpace, point: GridPoint, depth: number, cell: GridCell): boolean {
+  return setVoxel(space, point.x, point.y, depth, cell);
 }
 
 /**

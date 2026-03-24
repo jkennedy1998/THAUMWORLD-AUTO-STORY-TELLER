@@ -11,6 +11,7 @@ import type { InlineItem } from "./inline_item.js";
 import type { TagInstance } from "../tag_system/registry.js";
 import type { BodyModelVoxel } from "../shared/body_model.js";
 import type { EntityRenderProfile, RenderShaderBindings } from "../render_shaders/definitions.js";
+import type { Bounds3, Point2, Size3, Voxel3, WorldVoxel } from "../shared/coords.js";
 
 /**
  * A place represents a bounded area within a region where interactions are local.
@@ -176,6 +177,11 @@ export type PlaceCoordinates = {
   elevation: number;             // 0=surface, +1=above, -1=below
 };
 
+export type PlaceTilePoint = Point2;
+export type PlaceVoxel = WorldVoxel;
+export type PlaceBounds3 = Bounds3;
+export type PlaceSize3 = Size3;
+
 export type PlaceRegionBounds = {
   // Region-scene coordinates for the place's editable interior volume.
   // This excludes the shared border / connector layer around the place.
@@ -198,6 +204,8 @@ export type PlaceConnectorTile = {
   y: number;
   z: number;
 };
+
+export type PlaceConnectorVoxel = Voxel3;
 
 export type PlaceConnectorVolume = {
   origin: PlaceConnectorTile;

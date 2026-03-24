@@ -11,7 +11,8 @@
 import type { Place, TilePosition } from "../types/place.js";
 import { find_path, is_tile_walkable } from "../shared/pathfinding.js";
 import type { GameTime } from "../time_system/tracker.js";
-import { load_place, save_place, get_default_place_for_region, list_places_in_region } from "../place_storage/store.js";
+import { load_place, save_place, get_default_place_for_region } from "../place_storage/store.js";
+import { list_adjacent_place_ids_from_graph } from "../place_storage/region_place_graph.js";
 import { 
   get_tile_distance, 
   is_valid_tile_position,
@@ -21,7 +22,7 @@ import {
   add_npc_to_place,
   remove_npc_from_place
 } from "../place_storage/utils.js";
-import { get_place_region_bounds, get_places_face_adjacency, is_region_voxel_inside_place, region_voxel_to_local_voxel } from "../shared/place_adjacency.js";
+import { get_place_region_bounds, is_region_voxel_inside_place, region_voxel_to_local_voxel } from "../shared/place_adjacency.js";
 import { get_npc_location, set_npc_location, update_npc_location } from "../npc_storage/location.js";
 import { load_actor, save_actor } from "../actor_storage/store.js";
 import { load_npc, save_npc } from "../npc_storage/store.js";
@@ -77,27 +78,14 @@ function find_valid_entry_tile(place: Place, entity_ref: string, preferred: Tile
 function is_same_region_adjacent(slot: number, from_place: Place, to_place_id: string): boolean {
   const region_id = String(from_place.region_id ?? "").trim();
   if (!region_id) return false;
-  const target_res = load_place(slot, to_place_id);
-  if (!target_res.ok) return false;
-  const target_place = target_res.place;
-  if (String(target_place.region_id ?? "") !== region_id) return false;
-  return !!get_places_face_adjacency(from_place, target_place);
+  return list_adjacent_place_ids_from_graph(slot, region_id, from_place.id).includes(String(to_place_id ?? ""));
 }
 
 function get_adjacent_place_ids(slot: number, from_place: Place): string[] {
   const region_id = String(from_place.region_id ?? "").trim();
   if (!region_id) return [];
-  const listed = list_places_in_region(slot, region_id);
-  if (!listed.ok) return [];
-  const ids: string[] = [];
-  for (const candidate_id of listed.places) {
-    const pid = String(candidate_id ?? "").trim();
-    if (!pid || pid === from_place.id) continue;
-    const target_res = load_place(slot, pid);
-    if (!target_res.ok) continue;
-    if (get_places_face_adjacency(from_place, target_res.place)) ids.push(pid);
-  }
-  return ids;
+  return list_adjacent_place_ids_from_graph(slot, region_id, from_place.id)
+    .filter((pid) => pid && pid !== from_place.id);
 }
 
 function resolve_same_region_entry_tile(from_place: Place, to_place: Place, current_location: { tile?: TilePosition; elevation?: number } | null | undefined): TilePosition | null {

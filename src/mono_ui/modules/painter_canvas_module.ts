@@ -15,7 +15,7 @@ import { createGrid, getCell, setCell } from '../../ascii_painter/types.js';
 import { drawCell, drawLine, eraseCell, applyTool, sampleCell, previewLine, previewRectStroke, previewRectFill } from '../../ascii_painter/tools.js';
 import { logCellAction, logSelectionAction, startBatch, endBatch, addToBatch, cancelBatch, undo, redo, getHistoryState, type HistoryManager, type CellChange } from '../../ascii_painter/history.js';
 import { get_color_by_name } from '../colors.js';
-import { draw_module_border, BORDER_STYLES } from '../module_borders.js';
+import { draw_module_border, PANEL_BORDER_PRESETS } from '../module_borders.js';
 import type { SelectionBitmap, SelectionMode } from '../../ascii_painter/selection.js';
 import { createSelectionBitmap, selectRect, deselectRect, selectPolygon, isSelected, hasSelection, getSelectionBounds, isSelectionBorder, clearSelection, selectAll, invertSelection, applySelectionMode } from '../../ascii_painter/selection.js';
 import type { CopyData } from '../../ascii_painter/copy_paste.js';
@@ -41,12 +41,15 @@ export type PainterCanvasOptions = {
   id: string;
   rect: Rect;
   grid: Grid;
+  brush?: Brush;
   // Always fetch the latest space (it can be replaced on load/new).
   get_space: () => VoxelSpace;
   get_selected_z: () => number;
   get_current_tool: () => ToolType;
-  brush: Brush;
+  get_preview_brush?: () => Brush;
+  get_brush_for_button?: (button: number) => Brush;
   get_brush_size: () => number;
+  get_brush_size_for_button?: (button: number) => number;
   get_space_replace: () => boolean;
   get_paste_space_replace: () => boolean;
   get_selection_mode: () => SelectionMode;
@@ -57,7 +60,7 @@ export type PainterCanvasOptions = {
   get_text_enterspace: () => number; // -16 to 16, horizontal offset on Enter key
   preview_points: { x: number; y: number }[];
   on_push_snapshot: () => void;
-  on_sample_cell: (cell: { char: string; rgb: Rgb; weight_index: number }) => void;
+  on_sample_cell: (cell: { char: string; rgb: Rgb; weight_index: number }, button: number) => void;
   get_left_click_tool: () => ToolType;
   get_right_click_tool: () => ToolType;
   get_focus_layer_z?: () => number;
@@ -89,6 +92,26 @@ export type PainterCanvasOptions = {
 
 export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   let rect = opts.rect;
+
+  function getBrushForButton(button: number): Brush {
+    if (opts.get_brush_for_button) return opts.get_brush_for_button(button === 2 ? 2 : 0);
+    return opts.brush ?? opts.get_preview_brush?.() ?? { char: '█', rgb: get_color_by_name('off_white').rgb, weight_index: 4 };
+  }
+
+  function getBrushSizeForButton(button: number): number {
+    if (opts.get_brush_size_for_button) return opts.get_brush_size_for_button(button === 2 ? 2 : 0);
+    return opts.get_brush_size();
+  }
+
+  function getDragButton(): number {
+    return (drag_start_buttons & 2) ? 2 : 0;
+  }
+
+  function getPreviewBrush(): Brush {
+      return drag_start_buttons
+        ? getBrushForButton(getDragButton())
+      : opts.get_preview_brush?.() ?? opts.brush ?? getBrushForButton(0);
+  }
 
   function getSpace(): VoxelSpace {
     return opts.get_space();
@@ -235,6 +258,11 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     }
   }
 
+  function updateRect(next_rect: Rect): void {
+    rect = next_rect;
+    emitViewport();
+  }
+
   // Mouse position for parallax calculations (relative to canvas center, -1 to +1)
   let mouse_offset_x = 0;
   let mouse_offset_y = 0;
@@ -353,8 +381,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     }
   }
 
-  function drawWithBrushSize(x: number, y: number, is_eraser: boolean): void {
-    const size = opts.get_brush_size();
+  function drawWithBrushSize(x: number, y: number, is_eraser: boolean, brush: Brush, size: number): void {
     const offset = Math.floor(size / 2);
     
     // (debug logging removed)
@@ -373,7 +400,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           if (is_eraser) {
             eraseCell(opts.grid, draw_x, draw_y);
           } else {
-            drawCell(opts.grid, draw_x, draw_y, opts.brush);
+            drawCell(opts.grid, draw_x, draw_y, brush);
           }
           
           // Always track changes
@@ -388,7 +415,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     }
   }
 
-  function drawLineWithBrushSize(x0: number, y0: number, x1: number, y1: number, is_eraser: boolean): void {
+  function drawLineWithBrushSize(x0: number, y0: number, x1: number, y1: number, is_eraser: boolean, brush: Brush, size: number): void {
     const dx = Math.abs(x1 - x0);
     const dy = Math.abs(y1 - y0);
     const sx = x0 < x1 ? 1 : -1;
@@ -398,7 +425,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     let curr_y = y0;
 
     while (true) {
-      drawWithBrushSize(curr_x, curr_y, is_eraser);
+      drawWithBrushSize(curr_x, curr_y, is_eraser, brush, size);
       if (curr_x === x1 && curr_y === y1) break;
       const e2 = 2 * err;
       if (e2 > -dy) { err -= dy; curr_x += sx; }
@@ -410,8 +437,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   }
 
   // Apply weight to cells with brush size
-  function applyWeightWithBrushSize(x: number, y: number, weight_index: number): void {
-    const size = opts.get_brush_size();
+  function applyWeightWithBrushSize(x: number, y: number, weight_index: number, size: number): void {
     const offset = Math.floor(size / 2);
     
     for (let dy = 0; dy < size; dy++) {
@@ -437,8 +463,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   }
 
   // Apply color to cells with brush size
-  function applyColorWithBrushSize(x: number, y: number, rgb: Rgb): void {
-    const size = opts.get_brush_size();
+  function applyColorWithBrushSize(x: number, y: number, rgb: Rgb, size: number): void {
     const offset = Math.floor(size / 2);
     
     for (let dy = 0; dy < size; dy++) {
@@ -481,7 +506,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     setGlobalPanOffset: (x: number, y: number) => void;
   } = {
     id: opts.id,
-    rect,
+    get rect() { return rect; },
+    set rect(next_rect: Rect) { updateRect(next_rect); },
     Focusable: true,
     
     OnFocus(): void {
@@ -739,10 +765,11 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       // Draw preview points for line/rect/select/lasso tools
       if (opts.preview_points.length > 0) {
         const is_selection_preview = is_selecting || is_lasso_selecting;
+        const preview_brush = getPreviewBrush();
         const preview_color = is_selection_preview 
           ? get_color_by_name('vivid_yellow').rgb 
-          : opts.brush.rgb;
-        const preview_char = is_selection_preview ? '▫' : opts.brush.char;
+          : preview_brush.rgb;
+        const preview_char = is_selection_preview ? '▫' : preview_brush.char;
         for (const point of opts.preview_points) {
           const canvas_x = rect.x0 + (point.x - start_x);
           const canvas_y = rect.y0 + (point.y - start_y);
@@ -778,11 +805,24 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       // Draw canvas border (standard double border; resize mode only tints it).
       {
         const border_color = get_color_by_name('medium_gray').rgb;
+        const viewport_width = rect.x1 - rect.x0 + 1;
+        const viewport_height = rect.y1 - rect.y0 + 1;
+        const totalPan = getTotalPan();
+        const show_left = totalPan.x > 0;
+        const show_bottom = totalPan.y > 0;
+        const show_right = totalPan.x + viewport_width < opts.grid.width;
+        const show_top = totalPan.y + viewport_height < opts.grid.height;
         draw_module_border(c, {
           rect,
-          style: BORDER_STYLES.double,
+          style: PANEL_BORDER_PRESETS.default_double.style,
           border_rgb: border_color,
-          weight_index: 3,
+          weight_index: PANEL_BORDER_PRESETS.default_double.weight_index,
+          markers: {
+            top: show_top ? '^' : undefined,
+            bottom: show_bottom ? 'v' : undefined,
+            left: show_left ? '<' : undefined,
+            right: show_right ? '>' : undefined,
+          },
           header: {
             text: 'CANVAS',
             reserve_left_cols: 2 + ((gizmo_config.enabled?.length ?? 0) * 2),
@@ -933,7 +973,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       }
 
       // Draw gizmos LAST so they appear on top (including resize borders)
-      draw_module_gizmos(c, rect, gizmo_config, gizmo_state, 'CANVAS');
+      draw_module_gizmos(c, rect, gizmo_config, gizmo_state);
     },
 
     OnPointerDown(e: PointerEvent): void {
@@ -1078,10 +1118,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (tool_for_button === 'eyedropper') {
           const cell = sampleCell(opts.grid, grid_x, grid_y);
           if (cell) {
-            opts.brush.char = cell.char;
-            opts.brush.rgb = { ...cell.rgb };
-            opts.brush.weight_index = cell.weight_index;
-            opts.on_sample_cell(cell);
+            opts.on_sample_cell(cell, e.button);
           }
           return;
         }
@@ -1092,7 +1129,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             const beforeRegion = captureRegion(0, 0, opts.grid.width - 1, opts.grid.height - 1);
             
             // Apply bucket fill
-            applyTool(opts.grid, 'bucket', grid_x, grid_y, opts.brush);
+            applyTool(opts.grid, 'bucket', grid_x, grid_y, getBrushForButton(e.button));
             
             // Diff and track changes
             diffRegion(beforeRegion, 0, 0, opts.grid.width - 1, opts.grid.height - 1);
@@ -1120,14 +1157,14 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (tool_for_button === 'pencil') {
           is_drawing = true;
           last_draw_pos = { x: grid_x, y: grid_y };
-          drawWithBrushSize(grid_x, grid_y, false);
+          drawWithBrushSize(grid_x, grid_y, false, getBrushForButton(e.button), getBrushSizeForButton(e.button));
           return;
         }
 
         if (tool_for_button === 'eraser') {
           is_erasing = true;
           last_draw_pos = { x: grid_x, y: grid_y };
-          drawWithBrushSize(grid_x, grid_y, true);
+          drawWithBrushSize(grid_x, grid_y, true, getBrushForButton(e.button), getBrushSizeForButton(e.button));
           return;
         }
 
@@ -1135,7 +1172,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (tool_for_button === 'weighter') {
           is_weighing = true;
           last_draw_pos = { x: grid_x, y: grid_y };
-          applyWeightWithBrushSize(grid_x, grid_y, opts.brush.weight_index);
+          const brush = getBrushForButton(e.button);
+          applyWeightWithBrushSize(grid_x, grid_y, brush.weight_index, getBrushSizeForButton(e.button));
           return;
         }
 
@@ -1143,7 +1181,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (tool_for_button === 'colorer') {
           is_coloring = true;
           last_draw_pos = { x: grid_x, y: grid_y };
-          applyColorWithBrushSize(grid_x, grid_y, opts.brush.rgb);
+          const brush = getBrushForButton(e.button);
+          applyColorWithBrushSize(grid_x, grid_y, brush.rgb, getBrushSizeForButton(e.button));
           return;
         }
 
@@ -1206,7 +1245,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           y1: gizmo_state.original_rect.y1 + dy,
         };
         
-        rect = new_rect;
+        updateRect(new_rect);
         
         if (opts.on_move) {
           opts.on_move(rect);
@@ -1219,10 +1258,13 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const new_rect = handle_resize_drag(
           e.x, e.y, gizmo_state, gizmo_state.original_rect,
           CANVAS_MIN_WIDTH, CANVAS_MIN_HEIGHT, CANVAS_MAX_WIDTH, CANVAS_MAX_HEIGHT,
-          opts.on_resize
+          (next_rect) => {
+            updateRect(next_rect);
+            opts.on_resize?.(next_rect);
+          }
         );
         if (new_rect) {
-          rect = new_rect;
+          updateRect(new_rect);
         }
         return;
       }
@@ -1244,7 +1286,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const grid_y = grid_coords.y;
         if (grid_x < 0 || grid_x >= opts.grid.width || grid_y < 0 || grid_y >= opts.grid.height) return;
         if (grid_x !== last_draw_pos.x || grid_y !== last_draw_pos.y) {
-          drawLineWithBrushSize(last_draw_pos.x, last_draw_pos.y, grid_x, grid_y, true);
+          drawLineWithBrushSize(last_draw_pos.x, last_draw_pos.y, grid_x, grid_y, true, getBrushForButton(getDragButton()), getBrushSizeForButton(getDragButton()));
           last_draw_pos = { x: grid_x, y: grid_y };
         }
         return;
@@ -1256,7 +1298,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const grid_y = grid_coords.y;
         if (grid_x < 0 || grid_x >= opts.grid.width || grid_y < 0 || grid_y >= opts.grid.height) return;
         if (grid_x !== last_draw_pos.x || grid_y !== last_draw_pos.y) {
-          drawLineWithBrushSize(last_draw_pos.x, last_draw_pos.y, grid_x, grid_y, false);
+          drawLineWithBrushSize(last_draw_pos.x, last_draw_pos.y, grid_x, grid_y, false, getBrushForButton(getDragButton()), getBrushSizeForButton(getDragButton()));
           last_draw_pos = { x: grid_x, y: grid_y };
         }
         return;
@@ -1269,7 +1311,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const grid_y = grid_coords.y;
         if (grid_x < 0 || grid_x >= opts.grid.width || grid_y < 0 || grid_y >= opts.grid.height) return;
         if (grid_x !== last_draw_pos.x || grid_y !== last_draw_pos.y) {
-          applyWeightWithBrushSize(grid_x, grid_y, opts.brush.weight_index);
+          const brush = getBrushForButton(getDragButton());
+          applyWeightWithBrushSize(grid_x, grid_y, brush.weight_index, getBrushSizeForButton(getDragButton()));
           last_draw_pos = { x: grid_x, y: grid_y };
         }
         return;
@@ -1282,7 +1325,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const grid_y = grid_coords.y;
         if (grid_x < 0 || grid_x >= opts.grid.width || grid_y < 0 || grid_y >= opts.grid.height) return;
         if (grid_x !== last_draw_pos.x || grid_y !== last_draw_pos.y) {
-          applyColorWithBrushSize(grid_x, grid_y, opts.brush.rgb);
+          const brush = getBrushForButton(getDragButton());
+          applyColorWithBrushSize(grid_x, grid_y, brush.rgb, getBrushSizeForButton(getDragButton()));
           last_draw_pos = { x: grid_x, y: grid_y };
         }
         return;
@@ -1454,7 +1498,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const beforeRegion = captureRegion(minX, minY, maxX, maxY);
         
         // Apply the tool
-        applyTool(opts.grid, tool_for_end, end_x, end_y, opts.brush, drag_start);
+        applyTool(opts.grid, tool_for_end, end_x, end_y, getBrushForButton(getDragButton()), drag_start);
         
         // Diff and track changes
         diffRegion(beforeRegion, minX, minY, maxX, maxY);
@@ -1645,7 +1689,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const beforeRegion = captureRegion(minX, minY, maxX, maxY);
         
         // Apply the tool
-        applyTool(opts.grid, tool_for_up, end_x, end_y, opts.brush, drag_start);
+        applyTool(opts.grid, tool_for_up, end_x, end_y, getBrushForButton(getDragButton()), drag_start);
         
         // Diff and track changes
         diffRegion(beforeRegion, minX, minY, maxX, maxY);
@@ -1721,12 +1765,14 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       if (gizmo_state.is_move_mode) {
         gizmo_state.is_move_mode = false;
         gizmo_state.original_rect = null;
+        emitViewport();
         if (opts.on_move) opts.on_move(rect);
       }
 
       if (gizmo_state.is_dragging_resize) {
         gizmo_state.is_dragging_resize = false;
         gizmo_state.resize_edge = null;
+        emitViewport();
         if (opts.on_resize) opts.on_resize(rect);
       }
 
@@ -1991,11 +2037,12 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           // Handle space directly to ensure it works
           if (text_cursor_x >= 0 && text_cursor_x < opts.grid.width &&
               text_cursor_y >= 0 && text_cursor_y < opts.grid.height) {
+            const text_brush = getPreviewBrush();
             if (opts.get_space_replace()) {
               opts.grid.cells[text_cursor_y]![text_cursor_x] = {
                 char: ' ',
-                rgb: { ...opts.brush.rgb },
-                weight_index: opts.brush.weight_index
+                rgb: { ...text_brush.rgb },
+                weight_index: text_brush.weight_index
               };
             }
             // Move cursor by spacing and charlead
@@ -2095,6 +2142,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         
         if (text_cursor_x >= 0 && text_cursor_x < opts.grid.width &&
             text_cursor_y >= 0 && text_cursor_y < opts.grid.height) {
+          const text_brush = getPreviewBrush();
           
           // Track the change for undo
           const oldCell = getGridCell(text_cursor_x, text_cursor_y);
@@ -2103,8 +2151,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             if (opts.get_space_replace()) {
               opts.grid.cells[text_cursor_y]![text_cursor_x] = {
                 char: ' ',
-                rgb: { ...opts.brush.rgb },
-                weight_index: opts.brush.weight_index
+                rgb: { ...text_brush.rgb },
+                weight_index: text_brush.weight_index
               };
               const newCell = getGridCell(text_cursor_x, text_cursor_y);
               if (oldCell && newCell) {
@@ -2114,8 +2162,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           } else {
             opts.grid.cells[text_cursor_y]![text_cursor_x] = {
               char: char,
-              rgb: { ...opts.brush.rgb },
-              weight_index: opts.brush.weight_index
+              rgb: { ...text_brush.rgb },
+              weight_index: text_brush.weight_index
             };
             const newCell = getGridCell(text_cursor_x, text_cursor_y);
             if (oldCell && newCell) {

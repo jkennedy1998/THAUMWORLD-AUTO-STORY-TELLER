@@ -261,6 +261,14 @@ const TOOL_PROPERTIES_KEY = 'thaumworld_ascii_painter_tool_properties';
 export interface ToolProperties {
   // Brush settings
   brush_size: number;
+  left_brush_size: number;
+  right_brush_size: number;
+  left_brush_char: string;
+  right_brush_char: string;
+  left_brush_rgb: { r: number; g: number; b: number };
+  right_brush_rgb: { r: number; g: number; b: number };
+  left_brush_weight_index: number;
+  right_brush_weight_index: number;
   
   // Text tool settings
   text_spacing: number;
@@ -287,6 +295,14 @@ export interface ToolProperties {
  */
 const DEFAULT_TOOL_PROPERTIES: ToolProperties = {
   brush_size: 1,
+  left_brush_size: 1,
+  right_brush_size: 1,
+  left_brush_char: '█',
+  right_brush_char: '█',
+  left_brush_rgb: { r: 255, g: 255, b: 255 },
+  right_brush_rgb: { r: 255, g: 255, b: 255 },
+  left_brush_weight_index: 4,
+  right_brush_weight_index: 4,
   text_spacing: 1,
   text_charlead: 0,
   text_enterlead: 1,
@@ -324,7 +340,18 @@ export function loadToolProperties(): ToolProperties {
     if (!data) return DEFAULT_TOOL_PROPERTIES;
     
     const parsed = JSON.parse(data);
-    return { ...DEFAULT_TOOL_PROPERTIES, ...parsed };
+    return {
+      ...DEFAULT_TOOL_PROPERTIES,
+      ...parsed,
+      left_brush_size: parsed.left_brush_size ?? parsed.brush_size ?? DEFAULT_TOOL_PROPERTIES.left_brush_size,
+      right_brush_size: parsed.right_brush_size ?? parsed.brush_size ?? DEFAULT_TOOL_PROPERTIES.right_brush_size,
+      left_brush_char: parsed.left_brush_char ?? DEFAULT_TOOL_PROPERTIES.left_brush_char,
+      right_brush_char: parsed.right_brush_char ?? DEFAULT_TOOL_PROPERTIES.right_brush_char,
+      left_brush_rgb: parsed.left_brush_rgb ?? DEFAULT_TOOL_PROPERTIES.left_brush_rgb,
+      right_brush_rgb: parsed.right_brush_rgb ?? DEFAULT_TOOL_PROPERTIES.right_brush_rgb,
+      left_brush_weight_index: parsed.left_brush_weight_index ?? DEFAULT_TOOL_PROPERTIES.left_brush_weight_index,
+      right_brush_weight_index: parsed.right_brush_weight_index ?? DEFAULT_TOOL_PROPERTIES.right_brush_weight_index,
+    };
   } catch (e) {
     console.warn('Load tool properties failed:', e);
     return DEFAULT_TOOL_PROPERTIES;

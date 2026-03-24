@@ -27,8 +27,9 @@ import type { Module, Canvas, Rect, PointerEvent, DragEvent, WheelEvent } from '
 import type { VoxelSpace, CameraConfig, CameraOrientation } from './voxel_space.js';
 import { DEFAULT_CAMERA_VALUES } from './voxel_space.js';
 import { get_color_by_name } from '../mono_ui/colors.js';
-import type { ModuleGizmosConfig, GizmoState } from '../mono_ui/module_gizmos.js';
-import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area, get_resize_edge, handle_resize_drag } from '../mono_ui/module_gizmos.js';
+import { PANEL_BORDER_PRESETS, draw_panel_horizontal_divider } from '../mono_ui/module_borders.js';
+import type { ModuleGizmosConfig } from '../mono_ui/module_gizmos.js';
+import { make_floating_panel_module } from '../mono_ui/modules/floating_panel_module.js';
 
 export type CameraControlOptions = {
   id: string;
@@ -155,8 +156,6 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
     on_move: opts.onMove,
   };
   
-  const gizmo_state: GizmoState = create_gizmo_state();
-  
   // Button press states for visual feedback
   let pressedButtons = new Set<string>();
   
@@ -223,9 +222,13 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
   function drawSeparator(c: Canvas, row: number): void {
     if (!is_row_visible(row)) return;
     const y = get_screen_y(row);
-    for (let x = rect.x0 + 1; x < rect.x1; x++) {
-      c.set(x, y, { char: '─', rgb: borderColor, weight_index: 0, render_index: 10 });
-    }
+    draw_panel_horizontal_divider(c, {
+      y,
+      rect,
+      style: PANEL_BORDER_PRESETS.default_double.style,
+      rgb: borderColor,
+      weight_index: 2,
+    });
   }
   
   function drawLabel(c: Canvas, row: number, text: string): void {
@@ -337,44 +340,36 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
     return Math.abs(y - slider_y) <= 1 && x >= rect.x1 - 3 && x <= rect.x1 - 1;
   }
 
-  return {
+  return make_floating_panel_module({
     id: opts.id,
-    get rect() { return rect; },
-    set rect(newRect) { rect = newRect; clamp_scroll(); },
-    Focusable: true,
-
-    Draw(c: Canvas): void {
+    rect: opts.rect,
+    title: 'CAMERA',
+    gizmos: gizmo_config,
+    background: { rgb: bgColor },
+    border: {
+      style: PANEL_BORDER_PRESETS.default_double.style,
+      border_rgb: borderColor,
+      weight_index: PANEL_BORDER_PRESETS.default_double.weight_index,
+      text_rgb: accentColor,
+      markers: () => {
+        const max_scroll = Math.max(0, CONTENT_HEIGHT - get_visible_height());
+        return {
+          top: scroll_offset > 0 ? '^' : undefined,
+          bottom: scroll_offset < max_scroll ? 'v' : undefined,
+        };
+      },
+    },
+    resize: {
+      min_width: MIN_WIDTH,
+      min_height: MIN_HEIGHT,
+      max_width: MAX_WIDTH,
+      max_height: MAX_HEIGHT,
+    },
+    draw_content(c: Canvas, next_rect: Rect): void {
+      rect = next_rect;
       clamp_scroll();
       
-      // Background
-      c.fill_rect(rect, { char: ' ', rgb: bgColor, weight_index: 0, render_index: 0 });
-      
-      // Border
-      for (let x = rect.x0; x <= rect.x1; x++) {
-        c.set(x, rect.y0, { char: '─', rgb: borderColor, weight_index: 0, render_index: 10 });
-        c.set(x, rect.y1, { char: '─', rgb: borderColor, weight_index: 0, render_index: 10 });
-      }
-      for (let y = rect.y0; y <= rect.y1; y++) {
-        c.set(rect.x0, y, { char: '│', rgb: borderColor, weight_index: 0, render_index: 10 });
-        c.set(rect.x1, y, { char: '│', rgb: borderColor, weight_index: 0, render_index: 10 });
-      }
-      // Corners
-      c.set(rect.x0, rect.y0, { char: '┌', rgb: borderColor, weight_index: 0, render_index: 10 });
-      c.set(rect.x1, rect.y0, { char: '┐', rgb: borderColor, weight_index: 0, render_index: 10 });
-      c.set(rect.x0, rect.y1, { char: '└', rgb: borderColor, weight_index: 0, render_index: 10 });
-      c.set(rect.x1, rect.y1, { char: '┘', rgb: borderColor, weight_index: 0, render_index: 10 });
-      
       const camera = opts.getSpace().camera;
-      
-      // Title
-      if (is_row_visible(ROW_TITLE)) {
-        const title = 'Camera';
-        const titleX = rect.x0 + Math.floor((rect.x1 - rect.x0 - title.length) / 2);
-        const y = get_screen_y(ROW_TITLE);
-        for (let i = 0; i < title.length; i++) {
-          c.set(titleX + i, y, { char: title[i]!, rgb: accentColor, weight_index: 5, render_index: 10 });
-        }
-      }
       
       drawSeparator(c, ROW_SEPARATOR_1);
       
@@ -576,61 +571,11 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
       
       drawSlider(c, ROW_PAN_Y_SLIDER, camera.pan_y ?? DEFAULT_CAMERA_VALUES.pan_y, -100, 100, 1);
       
-      // Draw gizmos
-      draw_module_gizmos(c, rect, gizmo_config, gizmo_state, 'Camera');
-      
-      // Draw scroll indicator if needed
-      const max_scroll = Math.max(0, CONTENT_HEIGHT - get_visible_height());
-      if (max_scroll > 0 && is_row_visible(Math.floor(scroll_offset + get_visible_height() / 2))) {
-        const indicatorY = get_screen_y(Math.floor(scroll_offset + get_visible_height() / 2));
-        const scrollPercent = scroll_offset / max_scroll;
-        const indicatorChar = scrollPercent < 0.33 ? '▲' : scrollPercent > 0.66 ? '▼' : '◆';
-        c.set(rect.x1 - 1, indicatorY, {
-          char: indicatorChar,
-          rgb: accentColor,
-          weight_index: 5,
-          render_index: 10
-        });
-      }
     },
-    
-    OnPointerDown(e: PointerEvent): void {
+    on_pointer_down_content(e: PointerEvent): void {
       // Clear any stuck slider state first
       if (is_dragging_slider !== null) {
         is_dragging_slider = null;
-      }
-      
-      // Check gizmo area first
-      if (is_in_gizmo_area(e.x, e.y, rect)) {
-        const gizmo = handle_gizmo_click(e.x, e.y, rect, gizmo_config, gizmo_state);
-        if (gizmo === 'move') {
-          gizmo_state.move_start_x = e.x;
-          gizmo_state.move_start_y = e.y;
-        }
-        if (gizmo === 'close') {
-          opts.onClose?.();
-        }
-        return;
-      }
-      
-      // Check if clicking on resize border when in resize mode
-      if (gizmo_state.is_resize_mode) {
-        const edge = get_resize_edge(e.x, e.y, rect);
-        if (edge) {
-          gizmo_state.resize_edge = edge;
-          gizmo_state.is_dragging_resize = true;
-          gizmo_state.move_start_x = e.x;
-          gizmo_state.move_start_y = e.y;
-          gizmo_state.original_rect = { ...rect };
-          return;
-        }
-      }
-      
-      // Handle move mode
-      if (gizmo_state.is_move_mode) {
-        gizmo_state.move_start_x = e.x;
-        gizmo_state.move_start_y = e.y;
-        return;
       }
       
       // Check slider track interactions (drag mode)
@@ -963,8 +908,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
         return;
       }
     },
-    
-    OnPointerMove(e: PointerEvent): void {
+    on_pointer_move_content(e: PointerEvent): void {
       // Handle slider dragging - only update if actually dragging
       if (is_dragging_slider === 'scale_per_layer') {
         const newValue = get_slider_value(e.x, -1.0, 1.0);
@@ -1030,73 +974,16 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
         opts.onPanYChange?.(clampedValue);
         return;
       }
-
-      // Update resize edge hover state
-      if (gizmo_state.is_resize_mode && !gizmo_state.is_dragging_resize) {
-        gizmo_state.resize_edge = get_resize_edge(e.x, e.y, rect);
-      }
     },
-    
-    OnPointerUp(e: PointerEvent): void {
+    on_pointer_up_content(): void {
       pressedButtons.clear();
       is_dragging_slider = null;
-      
-      // Finalize move
-      if (gizmo_state.is_move_mode) {
-        gizmo_state.is_move_mode = false;
-        opts.onMove?.(rect);
-      }
-      
-      // Finalize resize
-      if (gizmo_state.is_dragging_resize) {
-        gizmo_state.is_dragging_resize = false;
-        gizmo_state.resize_edge = null;
-        opts.onResize?.(rect);
-      }
     },
-    
-    OnDragMove(e: DragEvent): void {
-      // Handle move mode dragging
-      if (gizmo_state.is_move_mode && gizmo_state.original_rect) {
-        const dx = e.x - gizmo_state.move_start_x;
-        const dy = e.y - gizmo_state.move_start_y;
-
-        rect = {
-          x0: gizmo_state.original_rect.x0 + dx,
-          y0: gizmo_state.original_rect.y0 + dy,
-          x1: gizmo_state.original_rect.x1 + dx,
-          y1: gizmo_state.original_rect.y1 + dy,
-        };
-        return;
-      }
-      
-      // Handle resize dragging
-      if (gizmo_state.is_resize_mode && gizmo_state.is_dragging_resize && gizmo_state.original_rect) {
-        const new_rect = handle_resize_drag(
-          e.x,
-          e.y,
-          gizmo_state,
-          gizmo_state.original_rect,
-          MIN_WIDTH,
-          MIN_HEIGHT,
-          MAX_WIDTH,
-          MAX_HEIGHT,
-          (newRect) => {
-            rect = newRect;
-          }
-        );
-        if (new_rect) {
-          rect = new_rect;
-        }
-        return;
-      }
-    },
-    
-    OnWheel(e: WheelEvent): void {
+    on_wheel_content(e: WheelEvent): void {
       scroll_offset += e.delta_y > 0 ? 1 : -1;
       clamp_scroll();
     },
-  };
+  });
 }
 
 export { makeCameraControlModule };

@@ -4,14 +4,14 @@ import type { ItemInstance } from "../../item_instances/store.js";
 import type { ItemDefinition } from "../../item_storage/store.js";
 import type { EquipmentSlots } from "../../types/body_slots.js";
 import { debug_log } from "../../shared/debug.js";
-import { draw_module_border, BORDER_STYLES, draw_horizontal_divider, draw_container_box } from "../module_borders.js";
+import { PANEL_BORDER_PRESETS, draw_container_box } from "../module_borders.js";
 import { get_color_by_name } from "../colors.js";
 import { resolve_cell } from "../../render_shaders/resolver.js";
 import { make_item_payload, make_slot_payload } from "../../render_shaders/payload_builders.js";
 import { draw_render_queue, type RenderRequest } from "../../render_shaders/render_queue.js";
 import { ctx_character_slot, ctx_container_ui } from "../../render_shaders/context_builders.js";
-import type { ModuleGizmosConfig, GizmoState } from "../module_gizmos.js";
-import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area, get_resize_edge, handle_resize_drag, handle_global_pointer_down_for_gizmos } from "../module_gizmos.js";
+import type { ModuleGizmosConfig } from "../module_gizmos.js";
+import { make_floating_panel_module } from "./floating_panel_module.js";
 import {
   resolve_all_body_slots,
   find_slot_at_position,
@@ -104,9 +104,6 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
   
   // Track currently hovered slot (includes slot type info)
   let hover_slot: ResolvedSlot | null = null;
-  
-  // Phase 8: Gizmo state
-  const gizmo_state: GizmoState = create_gizmo_state();
   
   // Layout constants
   const SIDEBAR_WIDTH = 5;
@@ -344,42 +341,38 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
     }
   }
 
-  return {
+  return make_floating_panel_module({
     id: opts.id,
-    get rect() { return rect; },
-    Focusable: true,
-
-    Draw(c: Canvas): void {
-      if (!opts.get_is_visible()) {
-        return;
-      }
-
+    rect: opts.rect,
+    title: () => opts.get_actor_name(),
+    gizmos: opts.gizmos,
+    is_visible: opts.get_is_visible,
+    background: { rgb: opts.bg_rgb ?? { r: 20, g: 20, b: 20 } },
+    border: {
+      style: PANEL_BORDER_PRESETS.default_double.style,
+      border_rgb: opts.border_rgb ?? { r: 150, g: 150, b: 150 },
+      weight_index: PANEL_BORDER_PRESETS.default_double.weight_index,
+      text_rgb: opts.text_rgb ?? { r: 220, g: 220, b: 220 },
+      divider_at_col: 5,
+      divider_mode: 'full_height',
+      reserve_left_cols: 2 + ((opts.gizmos?.enabled?.length ?? 0) * 2),
+    },
+    resize: opts.gizmos ? {
+      min_width: 30,
+      min_height: 16,
+      max_width: 160,
+      max_height: 80,
+    } : undefined,
+    draw_content(c: Canvas, next_rect: Rect): void {
+      rect = next_rect;
       const actor_name = opts.get_actor_name();
       const body_slots = opts.get_body_slots();
       const equipped = opts.get_equipped_items();
       const weight = opts.get_weight_data();
       const now_ms = Date.now();
       const rq: RenderRequest[] = [];
-      
-      // Draw border with header
-      draw_module_border(c, {
-        rect,
-        style: BORDER_STYLES.double,
-        border_rgb: opts.border_rgb ?? { r: 150, g: 150, b: 150 },
-        bg_rgb: opts.bg_rgb ?? { r: 20, g: 20, b: 20 },
-        weight_index: 3,
-        header: {
-          text: actor_name,
-          text_rgb: opts.text_rgb ?? { r: 220, g: 220, b: 220 },
-          divider_at_col: 5,
-          divider_mode: 'full_height',
-        }
-      });
-      
-      // Draw gizmos
-      if (opts.gizmos) {
-        draw_module_gizmos(c, rect, opts.gizmos, gizmo_state);
-      }
+
+      void actor_name;
       
       // Draw container sidebar
       sidebar_boxes = [];
@@ -589,15 +582,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       draw_render_queue(c, rq, { now_ms, pass_order: ['ui', 'item'] });
 
     },
-
-    OnPointerMove(e: PointerEvent): void {
-      if (!opts.get_is_visible()) return;
-
-      // Resize edge hover feedback.
-      if (gizmo_state.is_resize_mode && !gizmo_state.is_dragging_resize) {
-        gizmo_state.resize_edge = get_resize_edge(e.x, e.y, rect);
-      }
-      
+    on_pointer_move_content(e: PointerEvent): void {
       const new_hover = get_resolved_slot_at_position(e.x, e.y);
       
       if (
@@ -627,10 +612,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
         );
       }
     },
-
-    OnPointerDown(e: PointerEvent): void {
-      if (!opts.get_is_visible()) return;
-
+    on_pointer_down_content(e: PointerEvent): void {
       // Sidebar click debugging (helps diagnose "clicking sidebar does nothing")
       try {
         if (sidebar_boxes.length > 0) {
@@ -652,29 +634,6 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       } catch {
         // ignore
       }
-      
-      // Check gizmo clicks
-      if (opts.gizmos && is_in_gizmo_area(e.x, e.y, rect)) {
-        const clicked_gizmo = handle_gizmo_click(e.x, e.y, rect, opts.gizmos, gizmo_state);
-        if (clicked_gizmo) {
-          debug_log(`[CharacterModule] Gizmo clicked: ${clicked_gizmo}`);
-          return;
-        }
-      }
-
-      // Resize mode edge clicking.
-      if (gizmo_state.is_resize_mode) {
-        const edge = get_resize_edge(e.x, e.y, rect);
-        if (edge) {
-          gizmo_state.resize_edge = edge;
-          gizmo_state.is_dragging_resize = true;
-          gizmo_state.move_start_x = e.x;
-          gizmo_state.move_start_y = e.y;
-          gizmo_state.original_rect = { ...rect };
-          return;
-        }
-      }
-      
       // Check sidebar clicks
       for (const box of sidebar_boxes) {
         if (e.x >= box.x0 && e.x <= box.x1 && e.y >= box.y0 && e.y <= box.y1) {
@@ -745,34 +704,12 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       debug_log(`[CharacterModule] Clicked: ${slot.body_slot}.${slot.slot_type}${slot.garb_index !== null ? `.${slot.garb_index}` : ''}`);
       opts.on_slot_click?.(slot.body_slot, slot.slot_type, slot.garb_index);
     },
-
-    OnPointerLeave(): void {
+    on_pointer_leave_content(): void {
       hover_slot = null;
       opts.on_slot_hover?.(null, null, null, null);
     },
-
-    OnGlobalPointerDown(e: PointerEvent): void {
-      if (opts.gizmos) {
-        handle_global_pointer_down_for_gizmos(e, rect, opts.gizmos, gizmo_state);
-      }
-    },
-
-    OnDragStart(e: DragEvent): void {
+    on_drag_start_content(e: DragEvent): void {
       debug_log(`[CharacterModule] OnDragStart called at (${e.start_x}, ${e.start_y})`);
-      
-      if (!opts.get_is_visible()) {
-        debug_log(`[CharacterModule] Drag rejected - module not visible`);
-        return;
-      }
-
-      // Handle move mode
-      if (gizmo_state.is_move_mode) {
-        debug_log(`[CharacterModule] Move mode drag started`);
-        gizmo_state.move_start_x = e.start_x;
-        gizmo_state.move_start_y = e.start_y;
-        opts.gizmos?.on_move_start?.();
-        return;
-      }
 
       // Get the slot where drag started
       const slot = get_resolved_slot_at_position(e.start_x, e.start_y);
@@ -817,52 +754,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
         container_id
       );
     },
-
-    OnDragMove(e: DragEvent): void {
-      // Handle move mode
-      if (gizmo_state.is_move_mode && gizmo_state.original_rect) {
-        const dx = e.x - gizmo_state.move_start_x;
-        const dy = e.y - gizmo_state.move_start_y;
-        
-        const new_rect: Rect = {
-          x0: gizmo_state.original_rect.x0 + dx,
-          y0: gizmo_state.original_rect.y0 + dy,
-          x1: gizmo_state.original_rect.x1 + dx,
-          y1: gizmo_state.original_rect.y1 + dy,
-        };
-        
-        rect = new_rect;
-        opts.gizmos?.on_move?.(new_rect);
-        return;
-      }
-
-      // Handle resize dragging
-      if (gizmo_state.is_resize_mode && gizmo_state.is_dragging_resize && gizmo_state.original_rect) {
-        const min_width = 30;
-        const min_height = 16;
-        const max_width = 160;
-        const max_height = 80;
-
-        const new_rect = handle_resize_drag(
-          e.x,
-          e.y,
-          gizmo_state,
-          gizmo_state.original_rect,
-          min_width,
-          min_height,
-          max_width,
-          max_height,
-          (newRect) => {
-            rect = newRect;
-            if (opts.gizmos?.on_resize) opts.gizmos.on_resize(rect);
-            else opts.gizmos?.on_move?.(rect);
-          },
-        );
-
-        if (new_rect) rect = new_rect;
-        return;
-      }
-      
+    on_drag_move_content(e: DragEvent): void {
       // Handle panning
       if (is_panning) {
         const dx = e.x - pan_start.x;
@@ -884,42 +776,13 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       }
 
     },
-
-    OnDragEnd(e: DragEvent): void {
+    on_drag_end_content(e: DragEvent): void {
       debug_log(`[CharacterModule] OnDragEnd at (${e.x}, ${e.y})`);
-      
-      if (!opts.get_is_visible()) return;
-
-      // Handle resize end
-      if (gizmo_state.is_resize_mode && gizmo_state.is_dragging_resize) {
-        gizmo_state.is_dragging_resize = false;
-        gizmo_state.resize_edge = null;
-        if (opts.gizmos?.on_resize_end) opts.gizmos.on_resize_end(rect);
-        else opts.gizmos?.on_move_end?.(rect);
-        return;
-      }
 
       // Handle panning end
       if (is_panning) {
         is_panning = false;
         debug_log(`[CharacterModule] Panning ended at offset (${pan_offset.x}, ${pan_offset.y})`);
-        return;
-      }
-
-      // Handle move mode
-      if (gizmo_state.is_move_mode && gizmo_state.original_rect) {
-        const dx = e.x - gizmo_state.move_start_x;
-        const dy = e.y - gizmo_state.move_start_y;
-        
-        const final_rect: Rect = {
-          x0: gizmo_state.original_rect.x0 + dx,
-          y0: gizmo_state.original_rect.y0 + dy,
-          x1: gizmo_state.original_rect.x1 + dx,
-          y1: gizmo_state.original_rect.y1 + dy,
-        };
-        
-        rect = final_rect;
-        opts.gizmos?.on_move_end?.(final_rect);
         return;
       }
 
@@ -949,16 +812,5 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       // Drop outside module - let parent handle
       opts.on_cross_module_drop?.(e.x, e.y);
     },
-
-    OnPointerUp(): void {
-      // If the user clicks an edge but doesn't exceed drag threshold,
-      // CanvasRuntime will not emit OnDragEnd. Ensure resize doesn't get stuck.
-      if (gizmo_state.is_resize_mode && gizmo_state.is_dragging_resize) {
-        gizmo_state.is_dragging_resize = false;
-        gizmo_state.resize_edge = null;
-        if (opts.gizmos?.on_resize_end) opts.gizmos.on_resize_end(rect);
-        else opts.gizmos?.on_move_end?.(rect);
-      }
-    },
-  };
+  });
 }

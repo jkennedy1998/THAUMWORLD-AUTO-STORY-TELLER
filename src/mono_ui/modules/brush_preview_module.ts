@@ -6,25 +6,24 @@
  * Acts like a "swatch" showing what you're about to draw with.
  */
 
-import type { Canvas, Module, Rect, PointerEvent, DragEvent } from '../types.js';
+import type { Canvas, Module, Rect } from '../types.js';
 import { get_color_by_name } from '../colors.js';
-import { draw_module_border, BORDER_STYLES } from '../module_borders.js';
-import type { ModuleGizmosConfig, GizmoState } from '../module_gizmos.js';
-import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area, handle_global_pointer_down_for_gizmos } from '../module_gizmos.js';
+import type { ModuleGizmosConfig } from '../module_gizmos.js';
+import { make_floating_panel_module } from './floating_panel_module.js';
 
 export type BrushPreviewOptions = {
   id: string;
   rect: Rect;
-  get_brush: () => { char: string; rgb: { r: number; g: number; b: number }; weight_index: number };
+  get_left_brush: () => { char: string; rgb: { r: number; g: number; b: number }; weight_index: number };
+  get_right_brush: () => { char: string; rgb: { r: number; g: number; b: number }; weight_index: number };
+  get_left_brush_size?: () => number;
+  get_right_brush_size?: () => number;
+  get_active_side?: () => 'left' | 'right';
   on_move?: (new_rect: Rect) => void;
   on_close?: () => void;
 };
 
 export function make_brush_preview_module(opts: BrushPreviewOptions): Module {
-  // Mutable rect for moving
-  let rect = opts.rect;
-  
-  // Gizmo configuration
   const gizmo_config: ModuleGizmosConfig = {
     enabled: ['move', 'close'],
     can_close: true,
@@ -33,99 +32,54 @@ export function make_brush_preview_module(opts: BrushPreviewOptions): Module {
     on_close: opts.on_close,
     on_move: opts.on_move,
   };
-  
-  const gizmo_state: GizmoState = create_gizmo_state();
 
-  return {
+  return make_floating_panel_module({
     id: opts.id,
-    get rect() { return rect; },
-    set rect(newRect) { rect = newRect; },
-    Focusable: true,
-
-    Draw(c: Canvas): void {
-      const bg_color = get_color_by_name('off_black').rgb;
-      const border_color = get_color_by_name('medium_gray').rgb;
-      const brush = opts.get_brush();
-      const text_color = brush.rgb;
-      
-      // Fill background
-      c.fill_rect(rect, { char: ' ', rgb: bg_color, style: 'regular' });
-
-      draw_module_border(c, {
-        rect,
-        style: BORDER_STYLES.double,
-        border_rgb: border_color,
-        weight_index: 3,
-        header: {
-          text: 'PREVIEW',
-          reserve_left_cols: 2 + ((gizmo_config.enabled?.length ?? 0) * 2),
-        },
-      });
-      
-      // Draw the brush character in the center
+    rect: opts.rect,
+    title: 'PREVIEW',
+    gizmos: gizmo_config,
+    background: { rgb: get_color_by_name('off_black').rgb },
+    draw_content(c: Canvas, rect: Rect): void {
+      const left = opts.get_left_brush();
+      const right = opts.get_right_brush();
+      const active = opts.get_active_side?.() ?? 'left';
       const center_x = Math.floor((rect.x0 + rect.x1) / 2);
       const center_y = Math.floor((rect.y0 + rect.y1) / 2);
-      
-      c.set(center_x, center_y, {
-        char: brush.char,
-        rgb: text_color,
+      const left_x = Math.max(rect.x0 + 2, center_x - 2);
+      const right_x = Math.min(rect.x1 - 1, center_x + 2);
+      const label_y = Math.min(rect.y1 - 1, center_y + 2);
+      const left_label = `L${opts.get_left_brush_size ? opts.get_left_brush_size() : ''}`;
+      const right_label = `R${opts.get_right_brush_size ? opts.get_right_brush_size() : ''}`;
+
+      c.set(left_x, center_y, {
+        char: left.char,
+        rgb: left.rgb,
         style: 'regular',
-        weight_index: brush.weight_index
+        weight_index: left.weight_index
       });
-      
-      // Draw gizmos
-      draw_module_gizmos(c, rect, gizmo_config, gizmo_state, 'PREVIEW');
-    },
+      c.set(right_x, center_y, {
+        char: right.char,
+        rgb: right.rgb,
+        style: 'regular',
+        weight_index: right.weight_index
+      });
 
-    OnGlobalPointerDown(e: PointerEvent): void {
-      handle_global_pointer_down_for_gizmos(e, rect, gizmo_config, gizmo_state);
-    },
-
-    OnPointerDown(e: PointerEvent): void {
-      // Check gizmo area first
-      if (is_in_gizmo_area(e.x, e.y, rect)) {
-        const gizmo = handle_gizmo_click(e.x, e.y, rect, gizmo_config, gizmo_state);
-        if (gizmo === 'move') {
-          gizmo_state.move_start_x = e.x;
-          gizmo_state.move_start_y = e.y;
-        }
-        return;
+      for (let i = 0; i < left_label.length && left_x - 1 + i < center_x; i++) {
+        c.set(left_x - 1 + i, label_y, {
+          char: left_label[i]!,
+          rgb: active === 'left' ? get_color_by_name('vivid_blue').rgb : get_color_by_name('medium_gray').rgb,
+          style: 'regular',
+          weight_index: 4
+        });
       }
-      
-      // Handle move mode
-      if (gizmo_state.is_move_mode) {
-        gizmo_state.move_start_x = e.x;
-        gizmo_state.move_start_y = e.y;
+      for (let i = 0; i < right_label.length && right_x - 1 + i <= rect.x1 - 1; i++) {
+        c.set(right_x - 1 + i, label_y, {
+          char: right_label[i]!,
+          rgb: active === 'right' ? get_color_by_name('vivid_red').rgb : get_color_by_name('medium_gray').rgb,
+          style: 'regular',
+          weight_index: 4
+        });
       }
     },
-
-    OnDragMove(e: DragEvent): void {
-      if (gizmo_state.is_move_mode && gizmo_state.original_rect) {
-        const dx = e.x - gizmo_state.move_start_x;
-        const dy = e.y - gizmo_state.move_start_y;
-        
-        const new_rect: Rect = {
-          x0: gizmo_state.original_rect.x0 + dx,
-          y0: gizmo_state.original_rect.y0 + dy,
-          x1: gizmo_state.original_rect.x1 + dx,
-          y1: gizmo_state.original_rect.y1 + dy,
-        };
-        
-        rect = new_rect;
-        
-        if (opts.on_move) {
-          opts.on_move(rect);
-        }
-      }
-    },
-
-    OnPointerUp(): void {
-      if (gizmo_state.is_move_mode) {
-        gizmo_state.is_move_mode = false;
-        if (opts.on_move) {
-          opts.on_move(rect);
-        }
-      }
-    },
-  };
+  });
 }

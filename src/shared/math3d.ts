@@ -1,10 +1,17 @@
-export type VoxelPos = {
-  x: number;
-  y: number;
-  z: number;
-};
+import type { Point2, Voxel3 } from './coords.js';
+import { point2, voxel3 } from './coords.js';
+
+export type VoxelPos = Voxel3;
 
 export type Vec3 = VoxelPos;
+
+export function add3(a: VoxelPos, b: VoxelPos): VoxelPos {
+  return voxel3(a.x + b.x, a.y + b.y, a.z + b.z);
+}
+
+export function sub3(a: VoxelPos, b: VoxelPos): VoxelPos {
+  return voxel3(a.x - b.x, a.y - b.y, a.z - b.z);
+}
 
 export function dist3_sq(a: VoxelPos, b: VoxelPos): number {
   const dx = Number(b.x) - Number(a.x);
@@ -64,6 +71,14 @@ export function trace_grid_2d(
       y += sy;
     }
   }
+}
+
+export function trace_line_2d(
+  start: Point2,
+  end: Point2,
+  visit: (point: Point2) => boolean | void,
+): void {
+  trace_grid_2d(start.x, start.y, end.x, end.y, (x, y) => visit(point2(x, y)));
 }
 
 function intbound(s: number, ds: number): number {
@@ -217,4 +232,12 @@ export function trace_grid_3d(
       }
     }
   }
+}
+
+export function trace_line_3d(
+  start: VoxelPos,
+  end: VoxelPos,
+  visit: (voxel: VoxelPos) => boolean | void,
+): void {
+  trace_grid_3d(start, end, (x, y, z) => visit(voxel3(x, y, z)));
 }

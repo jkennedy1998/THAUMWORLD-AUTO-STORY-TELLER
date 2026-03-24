@@ -1,9 +1,9 @@
 import type { Canvas, Module, Rect, Rgb, WheelEvent, DragEvent } from "../types.js";
 import { rect_width, rect_height } from "../types.js";
 import { get_color_by_name } from "../colors.js";
-import { draw_module_border, BORDER_STYLES } from "../module_borders.js";
-import type { ModuleGizmosConfig, GizmoState } from "../module_gizmos.js";
-import { create_gizmo_state, draw_module_gizmos, get_resize_edge, handle_gizmo_click, handle_resize_drag, is_in_gizmo_area, handle_global_pointer_down_for_gizmos } from "../module_gizmos.js";
+import { draw_module_border, PANEL_BORDER_PRESETS } from "../module_borders.js";
+import type { ModuleGizmosConfig } from "../module_gizmos.js";
+import { make_floating_panel_module } from "./floating_panel_module.js";
 
 export type TextWindowMessage = {
     content: string;
@@ -186,11 +186,8 @@ function wrap_messages(messages: (string | TextWindowMessage)[], width: number):
 
 
 export function make_text_window_module(opts: TextWindowOptions): Module {
-    // Mutable rect for move/resize.
-    let rect = opts.rect;
-
     const gizmo_config: ModuleGizmosConfig | undefined = opts.gizmos;
-    const gizmo_state: GizmoState = create_gizmo_state();
+    let rect = opts.rect;
 
     let scroll_y = 0;
 
@@ -237,34 +234,33 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
         scroll_y = clamp(scroll_y + dy_lines, 0, max_scroll);
     }
 
-    return {
+    return make_floating_panel_module({
         id: opts.id,
-        get rect() { return rect; },
-        Focusable: true,
-
-        Draw(c: Canvas): void {
-            const border_rgb = opts.border_rgb ?? get_color_by_name("light_gray").rgb;
+        rect: opts.rect,
+        title: (opts.title ?? opts.id).toUpperCase(),
+        gizmos: gizmo_config,
+        background: opts.bg,
+        border: {
+            border_rgb: opts.border_rgb ?? get_color_by_name("light_gray").rgb,
+            weight_index: PANEL_BORDER_PRESETS.default_double.weight_index,
+            style: PANEL_BORDER_PRESETS.default_double.style,
+        },
+        resize: gizmo_config ? {
+            min_width: 20,
+            min_height: 6,
+            max_width: 200,
+            max_height: 80,
+        } : undefined,
+        draw_content(c: Canvas, next_rect: Rect): void {
+            rect = next_rect;
             const text_rgb = opts.text_rgb ?? get_color_by_name("off_white").rgb;
             const hint_rgb = opts.hint_rgb ?? get_color_by_name("pale_yellow").rgb;
             const w_base = base_weight();
-
-            // optional bg fill behind everything
-            if (opts.bg) {
-                c.fill_rect(rect, { char: opts.bg.char, rgb: opts.bg.rgb, style: "regular", weight_index: w_base });
-            }
-
             const text_r = inner_text_rect();
             const text_w = rect_width(text_r);
             const text_h = rect_height(text_r);
 
-            // Degenerate: rect too small to display text area
             if (text_w <= 0 || text_h <= 0) {
-                draw_module_border(c, {
-                    rect,
-                    style: BORDER_STYLES.double,
-                    border_rgb,
-                    weight_index: w_base,
-                });
                 return;
             }
 
@@ -274,192 +270,69 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
             const has_up = scroll_y > 0;
             const has_down = scroll_y + text_h < total;
 
-            // draw border with scroll markers
-            const markers: BorderMarkers = {};
-            if (has_up) markers.top = "^";
-            if (has_down) markers.bottom = "v";
-
-            draw_module_border(c, {
-                rect,
-                style: BORDER_STYLES.double,
-                border_rgb,
-                weight_index: w_base,
-                markers: { top: markers.top, bottom: markers.bottom },
-                header: {
-                    text: (opts.title ?? opts.id).toUpperCase(),
-                    reserve_left_cols: 2 + ((gizmo_config?.enabled?.length ?? 0) * 2),
-                },
-            });
-
-
-            // clear text area so old chars don't linger
-            // If the module has a bg, clear to bg; otherwise clear to space (default canvas bg).
             if (opts.bg) {
                 c.fill_rect(text_r, { char: opts.bg.char, rgb: opts.bg.rgb, style: "regular", weight_index: w_base });
             } else {
                 c.fill_rect(text_r, { char: " ", style: "regular", weight_index: w_base });
             }
 
-
-            // render visible lines
             let npcLinesRendered = 0;
             for (let row = 0; row < text_h; row++) {
                 const line_i = scroll_y + row;
                 const line_info = cached_lines[line_i];
                 const line_text = line_info?.text ?? "";
                 const line_sender = line_info?.sender;
-                // Determine color based on sender type
                 let line_rgb = text_rgb;
                 if (line_sender === "hint" || line_sender === "inspection") line_rgb = hint_rgb;
                 else if (line_sender === "npc") {
                     line_rgb = opts.npc_rgb ?? text_rgb;
                     npcLinesRendered++;
-                }
-                else if (line_sender === "state") line_rgb = opts.state_rgb ?? text_rgb;
-                // Rect is bottom-left coordinates (y0 bottom, y1 top). We render top-down:
-                const y_top = text_r.y1;
-                const y = y_top - row;
+                } else if (line_sender === "state") line_rgb = opts.state_rgb ?? text_rgb;
+                const y = text_r.y1 - row;
                 const cps = Array.from(line_text);
                 for (let col = 0; col < text_w; col++) {
                     const ch = cps[col] ?? " ";
-
-                    const x = text_r.x0 + col;
-
-                    c.set(x, y, { char: ch, rgb: line_rgb, style: "regular", weight_index: w_base });
+                    c.set(text_r.x0 + col, y, { char: ch, rgb: line_rgb, style: "regular", weight_index: w_base });
                 }
             }
-            
-            // Debug logging
+
             if (npcLinesRendered > 0) {
                 console.log(`[window_module:${opts.id}] Rendered ${text_h} lines, ${npcLinesRendered} NPC lines visible (scroll: ${scroll_y}/${cached_lines.length})`);
             }
 
-            // Draw widgets last.
-            if (gizmo_config) {
-                draw_module_gizmos(c, rect, gizmo_config, gizmo_state);
-            }
+            const markers: BorderMarkers = {};
+            if (has_up) markers.top = "^";
+            if (has_down) markers.bottom = "v";
+
+            draw_module_border(c, {
+                rect,
+                style: PANEL_BORDER_PRESETS.default_double.style,
+                border_rgb: opts.border_rgb ?? get_color_by_name("light_gray").rgb,
+                weight_index: PANEL_BORDER_PRESETS.default_double.weight_index,
+                markers: { top: markers.top, bottom: markers.bottom },
+                header: {
+                    text: (opts.title ?? opts.id).toUpperCase(),
+                    reserve_left_cols: 2 + ((gizmo_config?.enabled?.length ?? 0) * 2),
+                },
+            });
         },
-
-        OnGlobalPointerDown(e: any): void {
-            if (gizmo_config) {
-                handle_global_pointer_down_for_gizmos(e, rect, gizmo_config, gizmo_state);
-            }
-        },
-
-        OnPointerMove(e: any): void {
-            if (gizmo_state.is_resize_mode && !gizmo_state.is_dragging_resize) {
-                gizmo_state.resize_edge = get_resize_edge(e.x, e.y, rect);
-            }
-        },
-
-        OnPointerDown(e: any): void {
-            if (gizmo_config && is_in_gizmo_area(e.x, e.y, rect)) {
-                const gizmo = handle_gizmo_click(e.x, e.y, rect, gizmo_config, gizmo_state);
-                if (gizmo === 'move' || gizmo === 'resize') {
-                    gizmo_state.move_start_x = e.x;
-                    gizmo_state.move_start_y = e.y;
-                    gizmo_state.original_rect = { ...rect };
-                }
-                return;
-            }
-
-            if (gizmo_state.is_resize_mode) {
-                const edge = get_resize_edge(e.x, e.y, rect);
-                if (edge) {
-                    gizmo_state.resize_edge = edge;
-                    gizmo_state.is_dragging_resize = true;
-                    gizmo_state.move_start_x = e.x;
-                    gizmo_state.move_start_y = e.y;
-                    gizmo_state.original_rect = { ...rect };
-                }
-            }
-        },
-
-        OnDragStart(e: DragEvent): void {
-            if (gizmo_state.is_move_mode || gizmo_state.is_resize_mode) {
-                gizmo_state.move_start_x = e.start_x;
-                gizmo_state.move_start_y = e.start_y;
-                if (!gizmo_state.original_rect) gizmo_state.original_rect = { ...rect };
-                return;
-            }
-
-            // Drag-to-scroll (when not in widget modes)
+        on_drag_start_content(e: DragEvent): void {
             if (e.buttons & 1) {
                 is_drag_panning = true;
             }
         },
-
-        OnDragMove(e: DragEvent): void {
-            if (gizmo_state.is_move_mode && gizmo_state.original_rect) {
-                const dx = e.x - gizmo_state.move_start_x;
-                const dy = e.y - gizmo_state.move_start_y;
-                const next: Rect = {
-                    x0: gizmo_state.original_rect.x0 + dx,
-                    y0: gizmo_state.original_rect.y0 + dy,
-                    x1: gizmo_state.original_rect.x1 + dx,
-                    y1: gizmo_state.original_rect.y1 + dy,
-                };
-                rect = next;
-                if (gizmo_config?.on_resize) gizmo_config.on_resize(rect);
-                else gizmo_config?.on_move?.(rect);
-                return;
-            }
-
-            if (gizmo_state.is_resize_mode && gizmo_state.is_dragging_resize && gizmo_state.original_rect) {
-                const min_width = 20;
-                const min_height = 6;
-                const max_width = 200;
-                const max_height = 80;
-                const next = handle_resize_drag(
-                    e.x,
-                    e.y,
-                    gizmo_state,
-                    gizmo_state.original_rect,
-                    min_width,
-                    min_height,
-                    max_width,
-                    max_height,
-                    (r) => {
-                        rect = r;
-                        if (gizmo_config?.on_resize) gizmo_config.on_resize(rect);
-                        else gizmo_config?.on_move?.(rect);
-                    },
-                );
-                if (next) rect = next;
-                return;
-            }
-
-            // Drag-to-scroll (when not in widget modes)
+        on_drag_move_content(e: DragEvent): void {
             if (!is_drag_panning) return;
             if (!(e.buttons & 1)) return;
-            // Drag up (positive step_dy) scrolls down to newer lines.
             scroll_by(e.step_dy);
         },
-
-        OnDragEnd(_e: DragEvent): void {
-            if (gizmo_state.is_resize_mode && gizmo_state.is_dragging_resize) {
-                gizmo_state.is_dragging_resize = false;
-                gizmo_state.resize_edge = null;
-                if (gizmo_config?.on_resize_end) gizmo_config.on_resize_end(rect);
-                else gizmo_config?.on_move_end?.(rect);
-            }
-
-            if (gizmo_state.is_move_mode && gizmo_state.original_rect) {
-                gizmo_config?.on_move_end?.(rect);
-            }
-
+        on_drag_end_content(): void {
             is_drag_panning = false;
         },
-
-        OnWheel(e: WheelEvent): void {
-            // line scrolling (normalize: pixels -> 1 step, lines -> direct)
+        on_wheel_content(e: WheelEvent): void {
             const dy = e.delta_y;
             if (dy === 0) return;
-
-            // prefer sign-based scroll for stability across devices
-            const step = dy > 0 ? 1 : -1;
-            scroll_by(step);
+            scroll_by(dy > 0 ? 1 : -1);
         },
-
-    };
+    });
 }

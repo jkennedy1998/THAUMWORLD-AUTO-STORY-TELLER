@@ -8,15 +8,17 @@
 
 import type { Canvas, Module, Rect, PointerEvent, DragEvent, WheelEvent } from '../types.js';
 import { get_color_by_name } from '../colors.js';
-import { draw_module_border, BORDER_STYLES } from '../module_borders.js';
-import type { ModuleGizmosConfig, GizmoState } from '../module_gizmos.js';
-import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area, handle_move_drag, get_resize_edge, handle_resize_drag, handle_global_pointer_down_for_gizmos } from '../module_gizmos.js';
+import type { ModuleGizmosConfig } from '../module_gizmos.js';
+import { make_floating_panel_module } from './floating_panel_module.js';
 
 export type CharacterSelectorOptions = {
   id: string;
   rect: Rect;
-  selected_char: string;
-  on_char_select: (char: string) => void;
+  selected_char?: string;
+  get_selected_char?: () => string;
+  get_left_selected_char?: () => string;
+  get_right_selected_char?: () => string;
+  on_char_select: (char: string, button: number) => void;
   on_move?: (new_rect: Rect) => void;
   on_close?: () => void;
 };
@@ -105,9 +107,6 @@ function get_chars_per_row(width: number): number {
 }
 
 export function make_character_selector_module(opts: CharacterSelectorOptions): Module {
-  // Mutable rect for moving
-  let rect = opts.rect;
-  
   // Size constraints for resizing
   const MIN_WIDTH = 10;  // Minimum width
   const MAX_WIDTH = 30;  // Maximum width
@@ -124,31 +123,25 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
     on_move: opts.on_move,
   };
   
-  const gizmo_state: GizmoState = create_gizmo_state();
-  
   // Scroll state
   let scroll_offset = 0;
-  let selected_char = opts.selected_char;
+  let selected_char = opts.selected_char ?? opts.get_selected_char?.() ?? '█';
   
   // Calculate visible rows based on height
-  function get_visible_rows(): number {
+  function get_visible_rows(rect: Rect): number {
     const inner_height = rect.y1 - rect.y0 - 2; // -2 for gizmo/title rows
     return Math.max(1, Math.floor(inner_height / CHAR_SPACING_Y));
   }
   
-  function get_visible_count(): number {
-    return get_visible_rows() * get_chars_per_row(rect.x1 - rect.x0);
-  }
-  
-  function clamp_scroll(): void {
+  function clamp_scroll(rect: Rect): void {
     const chars_per_row = get_chars_per_row(rect.x1 - rect.x0);
     const rows = Math.ceil(CHARACTER_SET.length / chars_per_row);
-    const max_scroll = Math.max(0, rows - get_visible_rows());
+    const max_scroll = Math.max(0, rows - get_visible_rows(rect));
     scroll_offset = Math.max(0, Math.min(max_scroll, scroll_offset));
   }
   
   // Get character at grid position (row, col)
-  function get_char_at(row: number, col: number): string | null {
+  function get_char_at(rect: Rect, row: number, col: number): string | null {
     const chars_per_row = get_chars_per_row(rect.x1 - rect.x0);
     const char_index = (scroll_offset + row) * chars_per_row + col;
     
@@ -159,7 +152,7 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
   }
   
   // Get grid position from screen coordinates
-  function get_grid_pos_from_screen(x: number, y: number): { row: number; col: number } | null {
+  function get_grid_pos_from_screen(rect: Rect, x: number, y: number): { row: number; col: number } | null {
     const chars_per_row = get_chars_per_row(rect.x1 - rect.x0);
     const start_x = rect.x0 + 2;
     const start_y = rect.y1 - 3;
@@ -167,53 +160,45 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
     const col = Math.floor((x - start_x) / CHAR_SPACING_X);
     const row = Math.floor((start_y - y) / CHAR_SPACING_Y);
     
-    if (col >= 0 && col < chars_per_row && row >= 0 && row < get_visible_rows()) {
+    if (col >= 0 && col < chars_per_row && row >= 0 && row < get_visible_rows(rect)) {
       return { row, col };
     }
     return null;
   }
-  
-  // Check if coordinates are in the character list area (not gizmo area)
-  function is_in_content_area(x: number, y: number): boolean {
-    return x > rect.x0 && x < rect.x1 && y > rect.y0 && y < rect.y1 - 1;
-  }
 
-  return {
+  return make_floating_panel_module({
     id: opts.id,
-    get rect() { return rect; },
-    set rect(newRect) { rect = newRect; },
-    Focusable: true,
-
-    Draw(c: Canvas): void {
+    rect: opts.rect,
+    title: 'CHARS',
+    gizmos: gizmo_config,
+    background: { rgb: get_color_by_name('off_black').rgb },
+    resize: {
+      min_width: MIN_WIDTH,
+      min_height: MIN_HEIGHT,
+      max_width: MAX_WIDTH,
+      max_height: MAX_HEIGHT,
+    },
+    draw_content(c: Canvas, rect: Rect): void {
+      selected_char = opts.get_selected_char?.() ?? selected_char;
       const bg_color = get_color_by_name('off_black').rgb;
-      const border_color = get_color_by_name('medium_gray').rgb;
       const text_color = get_color_by_name('off_white').rgb;
       const selected_bg = get_color_by_name('vivid_blue').rgb;
       const selected_text = get_color_by_name('off_white').rgb;
+      const left_selected_char = opts.get_left_selected_char?.() ?? selected_char;
+      const right_selected_char = opts.get_right_selected_char?.() ?? selected_char;
       
       // Fill background
       c.fill_rect(rect, { char: ' ', rgb: bg_color, style: 'regular' });
 
-      draw_module_border(c, {
-        rect,
-        style: BORDER_STYLES.double,
-        border_rgb: border_color,
-        weight_index: 3,
-        header: {
-          text: 'CHARS',
-          reserve_left_cols: 2 + ((gizmo_config.enabled?.length ?? 0) * 2),
-        },
-      });
-      
       // Draw characters in a grid (responsive to width)
-      const visible_rows = get_visible_rows();
+      const visible_rows = get_visible_rows(rect);
       const chars_per_row = get_chars_per_row(rect.x1 - rect.x0);
       const start_x = rect.x0 + 2;
       const start_y = rect.y1 - 3;
       
       for (let row = 0; row < visible_rows; row++) {
         for (let col = 0; col < chars_per_row; col++) {
-          const char = get_char_at(row, col);
+          const char = get_char_at(rect, row, col);
           if (!char) continue;
           
           const char_x = start_x + (col * CHAR_SPACING_X);
@@ -222,6 +207,8 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
           if (char_y <= rect.y0) continue;
           
           const is_selected = char === selected_char;
+          const is_left = char === left_selected_char;
+          const is_right = char === right_selected_char;
           
           // Draw character
           c.set(char_x, char_y, {
@@ -239,11 +226,23 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
               style: 'regular'
             });
           }
+
+          if ((is_left || is_right) && char_y - 1 > rect.y0) {
+            const marker_char = is_left && is_right ? 'B' : is_left ? 'L' : 'R';
+            const marker_rgb = is_left && is_right
+              ? get_color_by_name('vivid_yellow').rgb
+              : is_left
+                ? get_color_by_name('vivid_blue').rgb
+                : get_color_by_name('vivid_red').rgb;
+            c.set(char_x, char_y - 1, {
+              char: marker_char,
+              rgb: marker_rgb,
+              style: 'regular',
+              weight_index: 4,
+            });
+          }
         }
       }
-      
-      // Draw gizmos
-      draw_module_gizmos(c, rect, gizmo_config, gizmo_state, 'CHARS');
       
       // Draw scroll indicator if needed
       const total_rows = Math.ceil(CHARACTER_SET.length / chars_per_row);
@@ -260,126 +259,21 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
         }
       }
     },
-
-    OnGlobalPointerDown(e: PointerEvent): void {
-      handle_global_pointer_down_for_gizmos(e, rect, gizmo_config, gizmo_state);
-    },
-
-    OnPointerDown(e: PointerEvent): void {
-      // Check gizmo area first
-      if (is_in_gizmo_area(e.x, e.y, rect)) {
-        const gizmo = handle_gizmo_click(e.x, e.y, rect, gizmo_config, gizmo_state);
-        if (gizmo === 'move') {
-          gizmo_state.move_start_x = e.x;
-          gizmo_state.move_start_y = e.y;
-        }
-        return;
-      }
-      
-      // Check if clicking on resize border when in resize mode
-      if (gizmo_state.is_resize_mode) {
-        const edge = get_resize_edge(e.x, e.y, rect);
-        if (edge) {
-          gizmo_state.resize_edge = edge;
-          gizmo_state.is_dragging_resize = true;
-          gizmo_state.move_start_x = e.x;
-          gizmo_state.move_start_y = e.y;
-          gizmo_state.original_rect = { ...rect };
-          return;
-        }
-      }
-      
-      // Handle move mode
-      if (gizmo_state.is_move_mode) {
-        gizmo_state.move_start_x = e.x;
-        gizmo_state.move_start_y = e.y;
-        return;
-      }
-      
+    on_pointer_down_content(e: PointerEvent, rect: Rect): void {
       // Character selection - grid based
-      const grid_pos = get_grid_pos_from_screen(e.x, e.y);
+      const grid_pos = get_grid_pos_from_screen(rect, e.x, e.y);
       if (grid_pos) {
-        const char = get_char_at(grid_pos.row, grid_pos.col);
-        if (char) {
-          selected_char = char;
-          opts.on_char_select(char);
-        }
-      }
-    },
-
-    OnPointerMove(e: PointerEvent): void {
-      // Update resize edge hover state
-      if (gizmo_state.is_resize_mode && !gizmo_state.is_dragging_resize) {
-        gizmo_state.resize_edge = get_resize_edge(e.x, e.y, rect);
-      }
-    },
-
-    OnDragMove(e: DragEvent): void {
-      if (gizmo_state.is_move_mode && gizmo_state.original_rect) {
-        const dx = e.x - gizmo_state.move_start_x;
-        const dy = e.y - gizmo_state.move_start_y;
-        
-        const new_rect: Rect = {
-          x0: gizmo_state.original_rect.x0 + dx,
-          y0: gizmo_state.original_rect.y0 + dy,
-          x1: gizmo_state.original_rect.x1 + dx,
-          y1: gizmo_state.original_rect.y1 + dy,
-        };
-        
-        rect = new_rect;
-        
-        if (opts.on_move) {
-          opts.on_move(rect);
-        }
-        return;
-      }
-      
-      // Handle resize dragging
-      if (gizmo_state.is_resize_mode && gizmo_state.is_dragging_resize && gizmo_state.original_rect) {
-        const new_rect = handle_resize_drag(
-          e.x,
-          e.y,
-          gizmo_state,
-          gizmo_state.original_rect,
-          MIN_WIDTH,
-          MIN_HEIGHT,
-          MAX_WIDTH,
-          MAX_HEIGHT,
-          (newRect) => {
-            rect = newRect;
-            if (opts.on_move) {
-              opts.on_move(rect);
-            }
+          const char = get_char_at(rect, grid_pos.row, grid_pos.col);
+          if (char) {
+            selected_char = char;
+            opts.on_char_select(char, e.button);
           }
-        );
-        
-        if (new_rect) {
-          rect = new_rect;
         }
-      }
-    },
-
-    OnPointerUp(): void {
-      if (gizmo_state.is_move_mode) {
-        gizmo_state.is_move_mode = false;
-        if (opts.on_move) {
-          opts.on_move(rect);
-        }
-      }
-      
-      if (gizmo_state.is_dragging_resize) {
-        gizmo_state.is_dragging_resize = false;
-        gizmo_state.resize_edge = null;
-        if (opts.on_move) {
-          opts.on_move(rect);
-        }
-      }
-    },
-
-    OnWheel(e: WheelEvent): void {
+      },
+    on_wheel_content(e: WheelEvent, rect: Rect): void {
       const scroll_amount = e.delta_y > 0 ? 1 : -1;
       scroll_offset += scroll_amount;
-      clamp_scroll();
+      clamp_scroll(rect);
     },
-  };
+  });
 }

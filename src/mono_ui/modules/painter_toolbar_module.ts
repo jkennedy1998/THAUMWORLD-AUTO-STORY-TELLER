@@ -6,7 +6,7 @@
 
 import type { Canvas, Module, Rect, PointerEvent, Rgb } from '../types.js';
 import { get_color_by_name } from '../colors.js';
-import { draw_module_border, BORDER_STYLES } from '../module_borders.js';
+import { draw_module_border, PANEL_BORDER_PRESETS } from '../module_borders.js';
 import type { ToolType } from '../../ascii_painter/types.js';
 
 export type PainterToolbarOptions = {
@@ -71,9 +71,9 @@ export function make_painter_toolbar_module(opts: PainterToolbarOptions): Module
 
       draw_module_border(c, {
         rect,
-        style: BORDER_STYLES.double,
+        style: PANEL_BORDER_PRESETS.default_double.style,
         border_rgb: border_color,
-        weight_index: 3,
+        weight_index: PANEL_BORDER_PRESETS.default_double.weight_index,
         header: { text: 'TOOLS' },
       });
       

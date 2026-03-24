@@ -6,6 +6,12 @@
 
 import type { Grid, GridCell, GridPoint, Brush, ToolType } from './types.js';
 import { getCell, setCell } from './types.js';
+import {
+  get_flood_fill_points,
+  get_line_points,
+  get_rect_fill_points,
+  get_rect_stroke_points,
+} from '../shared/painter_tools.js';
 
 /**
  * Draw a single cell with the brush
@@ -47,26 +53,8 @@ export function drawLine(
   y1: number, 
   brush: Brush
 ): void {
-  const dx = Math.abs(x1 - x0);
-  const dy = Math.abs(y1 - y0);
-  const sx = x0 < x1 ? 1 : -1;
-  const sy = y0 < y1 ? 1 : -1;
-  let err = dx - dy;
-
-  while (true) {
-    drawCell(grid, x0, y0, brush);
-
-    if (x0 === x1 && y0 === y1) break;
-
-    const e2 = 2 * err;
-    if (e2 > -dy) {
-      err -= dy;
-      x0 += sx;
-    }
-    if (e2 < dx) {
-      err += dx;
-      y0 += sy;
-    }
+  for (const point of get_line_points(x0, y0, x1, y1)) {
+    drawCell(grid, point.x, point.y, brush);
   }
 }
 
@@ -81,21 +69,8 @@ export function drawRectStroke(
   y1: number,
   brush: Brush
 ): void {
-  const minX = Math.min(x0, x1);
-  const maxX = Math.max(x0, x1);
-  const minY = Math.min(y0, y1);
-  const maxY = Math.max(y0, y1);
-
-  // Top and bottom edges
-  for (let x = minX; x <= maxX; x++) {
-    drawCell(grid, x, minY, brush);
-    drawCell(grid, x, maxY, brush);
-  }
-
-  // Left and right edges
-  for (let y = minY + 1; y < maxY; y++) {
-    drawCell(grid, minX, y, brush);
-    drawCell(grid, maxX, y, brush);
+  for (const point of get_rect_stroke_points(x0, y0, x1, y1)) {
+    drawCell(grid, point.x, point.y, brush);
   }
 }
 
@@ -110,15 +85,8 @@ export function drawRectFill(
   y1: number,
   brush: Brush
 ): void {
-  const minX = Math.min(x0, x1);
-  const maxX = Math.max(x0, x1);
-  const minY = Math.min(y0, y1);
-  const maxY = Math.max(y0, y1);
-
-  for (let y = minY; y <= maxY; y++) {
-    for (let x = minX; x <= maxX; x++) {
-      drawCell(grid, x, y, brush);
-    }
+  for (const point of get_rect_fill_points(x0, y0, x1, y1)) {
+    drawCell(grid, point.x, point.y, brush);
   }
 }
 
@@ -134,45 +102,27 @@ export function floodFill(
   const startCell = getCell(grid, startX, startY);
   if (!startCell) return;
 
-  // Determine what we're filling (match char and color)
-  const targetChar = startCell.char;
-  const targetRgb = startCell.rgb;
-
   // Don't fill if clicking on same character/color
-  if (targetChar === brush.char && 
-      targetRgb.r === brush.rgb.r && 
-      targetRgb.g === brush.rgb.g && 
-      targetRgb.b === brush.rgb.b) {
+  if (startCell.char === brush.char && 
+      startCell.rgb.r === brush.rgb.r && 
+      startCell.rgb.g === brush.rgb.g && 
+      startCell.rgb.b === brush.rgb.b) {
     return;
   }
 
-  const stack: [number, number][] = [[startX, startY]];
-  const visited = new Set<string>();
-
-  while (stack.length > 0) {
-    const [x, y] = stack.pop()!;
-    const key = `${x},${y}`;
-
-    if (visited.has(key)) continue;
-    visited.add(key);
-
-    const cell = getCell(grid, x, y);
-    if (!cell) continue;
-
-    // Check if this cell matches the target
-    if (cell.char === targetChar && 
-        cell.rgb.r === targetRgb.r && 
-        cell.rgb.g === targetRgb.g && 
-        cell.rgb.b === targetRgb.b) {
-      
-      drawCell(grid, x, y, brush);
-
-      // Add neighbors
-      stack.push([x + 1, y]);
-      stack.push([x - 1, y]);
-      stack.push([x, y + 1]);
-      stack.push([x, y - 1]);
-    }
+  const points = get_flood_fill_points(
+    startX,
+    startY,
+    (x, y) => getCell(grid, x, y),
+    (candidate, target) => (
+      candidate.char === target.char &&
+      candidate.rgb.r === target.rgb.r &&
+      candidate.rgb.g === target.rgb.g &&
+      candidate.rgb.b === target.rgb.b
+    ),
+  );
+  for (const point of points) {
+    drawCell(grid, point.x, point.y, brush);
   }
 }
 
@@ -228,32 +178,7 @@ export function previewLine(
   x1: number,
   y1: number
 ): GridPoint[] {
-  const points: GridPoint[] = [];
-  const dx = Math.abs(x1 - x0);
-  const dy = Math.abs(y1 - y0);
-  const sx = x0 < x1 ? 1 : -1;
-  const sy = y0 < y1 ? 1 : -1;
-  let err = dx - dy;
-  let x = x0;
-  let y = y0;
-
-  while (true) {
-    points.push({ x, y });
-
-    if (x === x1 && y === y1) break;
-
-    const e2 = 2 * err;
-    if (e2 > -dy) {
-      err -= dy;
-      x += sx;
-    }
-    if (e2 < dx) {
-      err += dx;
-      y += sy;
-    }
-  }
-
-  return points;
+  return get_line_points(x0, y0, x1, y1);
 }
 
 /**
@@ -266,25 +191,7 @@ export function previewRectStroke(
   x1: number,
   y1: number
 ): GridPoint[] {
-  const points: GridPoint[] = [];
-  const minX = Math.min(x0, x1);
-  const maxX = Math.max(x0, x1);
-  const minY = Math.min(y0, y1);
-  const maxY = Math.max(y0, y1);
-
-  // Top and bottom edges
-  for (let x = minX; x <= maxX; x++) {
-    points.push({ x, y: minY });
-    points.push({ x, y: maxY });
-  }
-
-  // Left and right edges
-  for (let y = minY + 1; y < maxY; y++) {
-    points.push({ x: minX, y });
-    points.push({ x: maxX, y });
-  }
-
-  return points;
+  return get_rect_stroke_points(x0, y0, x1, y1);
 }
 
 /**
@@ -297,17 +204,5 @@ export function previewRectFill(
   x1: number,
   y1: number
 ): GridPoint[] {
-  const points: GridPoint[] = [];
-  const minX = Math.min(x0, x1);
-  const maxX = Math.max(x0, x1);
-  const minY = Math.min(y0, y1);
-  const maxY = Math.max(y0, y1);
-
-  for (let y = minY; y <= maxY; y++) {
-    for (let x = minX; x <= maxX; x++) {
-      points.push({ x, y });
-    }
-  }
-
-  return points;
+  return get_rect_fill_points(x0, y0, x1, y1);
 }

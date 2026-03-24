@@ -4,7 +4,7 @@ Date: 2026-03-23
 
 ## Status
 
-- [ ] not started
+- [~] in progress
 
 ## Intent
 
@@ -66,6 +66,17 @@ This plan is complete only when all of the following are true:
 - `src/mono_ui/module_registry.ts` already centralizes registration and visibility.
 - `src/canvas_app/main.ts` already renders only visible modules when registry visibility is used.
 - many floating modules already share the same visual language and header/gizmo layout.
+- `src/mono_ui/module_borders.ts` is now the canonical source for panel border rendering, border presets, and shared divider helpers.
+- directional edge markers for scrollable and pannable panels now belong to `src/mono_ui/module_borders.ts` rather than ad hoc panel drawing.
+- border glyphs now render below shared chrome, while module titles and gizmos render together on the chrome layer above the border.
+- shared floating-panel modules now draw content before border/chrome so the canonical border, title, resize, and close affordances remain visually intact across character/color/weight-style panels.
+- game-side place-painter utility windows and text windows are being moved toward the same floating-panel chrome ordering so module-specific content no longer overwrites shared border/title/gizmo chrome.
+- the shared floating-panel helper now supports feature-disabled usage (for example, titleless or gizmo-free modules), so more modules can converge on one shell implementation even when move/resize/close are turned off.
+- `layer_palette_module` and `camera_control_module` now use the shared floating-panel shell, leaving their bespoke content logic intact while unifying border/title/gizmo/move/resize/close integration.
+- `tool_properties_module` now uses the shared floating-panel shell as well, reducing one more custom shell implementation to content-only logic plus shared chrome.
+- `character_module` and `container_module` now route their shell behavior through the shared floating-panel integration while preserving their bespoke slot, drag/drop, sidebar, and panning logic.
+- durable hidden modules are being stabilized around registry visibility; the hidden inventory panel path now syncs its open/closed state through the shared module visibility system so hidden panels do not remain interactive in hit-testing.
+- a shared screen-locked overlay bar implementation now exists for fixed viewport-position shortcut/status bars, keeping them on the type grid, non-pannable, and reusable across painter and place-painter contexts.
 
 ### What Is Still Split
 
@@ -475,13 +486,15 @@ Success criteria:
 
 ### Phase 2: Define The Canonical Shared Panel API
 
-- [ ] document the exact shared shell API before touching module implementations
-- [ ] define feature flags for shell capabilities
-- [ ] define durable-panel visibility hooks
+- [x] document the exact shared shell API before touching module implementations
+- [x] define feature flags for shell capabilities
+- [x] define durable-panel visibility hooks
 - [ ] define ephemeral-instance hooks
-- [ ] define persistence hooks and storage-key ownership
+- [x] define persistence hooks and storage-key ownership
 - [ ] define how shared shell code hands off content-area pointer events to the module body
 - [ ] define migration notes for modules that only support move/close and not resize
+- [x] centralize default border rendering and section-divider helpers in `module_borders`
+- [x] centralize directional border markers for scrollable and pannable panels in `module_borders`
 
 Guardrails:
 
@@ -492,9 +505,9 @@ Guardrails:
 ### Phase 3: Standardize Persistence And State Ownership
 
 - [ ] choose the canonical shell-persistence owner and document it
-- [ ] map painter persistence keys to the future shared contract
+- [x] map painter persistence keys to the future shared contract
 - [ ] map game persistence keys to the future shared contract
-- [ ] define any compatibility read path needed to preserve old saved layouts during migration
+- [x] define any compatibility read path needed to preserve old saved layouts during migration
 - [ ] define the removal point for compatibility logic so it does not become permanent garbage
 - [ ] decide whether `module_registry.update_position(...)` needs to be strengthened as part of this work
 
@@ -506,14 +519,18 @@ Success criteria:
 
 - [ ] migrate `debug`
 - [ ] migrate game place-painter wrapper panels
-- [ ] migrate `toolbox_module`
+- [x] migrate `toolbox_module`
 - [ ] migrate `tool_properties_module`
-- [ ] migrate `color_selector_module`
-- [ ] migrate `character_selector_module`
-- [ ] migrate `weight_selector_module`
-- [ ] migrate `brush_preview_module`
+- [x] migrate `color_selector_module`
+- [x] migrate `character_selector_module`
+- [x] migrate `weight_selector_module`
+- [x] migrate `brush_preview_module`
 - [ ] migrate `layer_palette_module`
 - [ ] migrate `camera_control_module`
+- [x] migrate `layer_palette_module` border rendering to shared `module_borders`
+- [x] migrate `camera_control_module` border rendering to shared `module_borders`
+- [x] migrate shared panel modules to `PANEL_BORDER_PRESETS.default_double` for canonical double-border usage
+- [x] migrate pannable canvas border arrows to shared border markers
 
 For each migrated module:
 

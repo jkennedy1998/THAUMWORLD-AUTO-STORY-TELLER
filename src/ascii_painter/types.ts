@@ -6,6 +6,7 @@
  */
 
 import type { Rgb } from '../mono_ui/types.js';
+import type { PlaneId, Point2 } from '../shared/coords.js';
 
 /**
  * A single cell in the ASCII grid
@@ -65,10 +66,9 @@ export interface ToolState {
 /**
  * Point in grid coordinates
  */
-export interface GridPoint {
-  x: number;
-  y: number;
-}
+export type GridPoint = Point2;
+
+export type EditPlaneId = PlaneId;
 
 /**
  * History snapshot for undo/redo

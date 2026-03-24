@@ -8,18 +8,23 @@
 
 import type { Canvas, Module, Rect, PointerEvent, DragEvent, WheelEvent } from '../types.js';
 import { get_color_by_name, INDEXED_COLORS } from '../colors.js';
-import { draw_module_border, BORDER_STYLES } from '../module_borders.js';
-import type { ModuleGizmosConfig, GizmoState } from '../module_gizmos.js';
-import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area, get_resize_edge, handle_resize_drag, handle_global_pointer_down_for_gizmos } from '../module_gizmos.js';
+import type { ModuleGizmosConfig } from '../module_gizmos.js';
+import { make_floating_panel_module } from './floating_panel_module.js';
 
 export type ColorSelectorOptions = {
   id: string;
   rect: Rect;
   get_brush: () => { char: string; rgb: { r: number; g: number; b: number }; weight_index: number };
-  on_color_select: (rgb: { r: number; g: number; b: number }) => void;
+  get_left_rgb?: () => { r: number; g: number; b: number };
+  get_right_rgb?: () => { r: number; g: number; b: number };
+  on_color_select: (rgb: { r: number; g: number; b: number }, button: number) => void;
   on_move?: (new_rect: Rect) => void;
   on_close?: () => void;
 };
+
+function rgb_eq(a: { r: number; g: number; b: number } | undefined, b: { r: number; g: number; b: number } | undefined): boolean {
+  return !!a && !!b && a.r === b.r && a.g === b.g && a.b === b.b;
+}
 
 // Grid layout - responsive to module size
 const COLOR_SPACING_X = 3;  // Space between colors horizontally
@@ -37,9 +42,6 @@ let last_flash_time = 0;
 const FLASH_INTERVAL = 500; // ms
 
 export function make_color_selector_module(opts: ColorSelectorOptions): Module {
-  // Mutable rect for moving
-  let rect = opts.rect;
-
   // Size constraints for resizing
   const MIN_WIDTH = 10;  // Minimum width
   const MAX_WIDTH = 40;  // Maximum width
@@ -56,26 +58,24 @@ export function make_color_selector_module(opts: ColorSelectorOptions): Module {
     on_move: opts.on_move,
   };
   
-  const gizmo_state: GizmoState = create_gizmo_state();
-  
   // Scroll state
   let scroll_offset = 0;
   
   // Calculate visible rows based on height
-  function get_visible_rows(): number {
+  function get_visible_rows(rect: Rect): number {
     const inner_height = rect.y1 - rect.y0 - 2; // -2 for gizmo/title rows
     return Math.max(1, Math.floor(inner_height / COLOR_SPACING_Y));
   }
   
-  function clamp_scroll(): void {
+  function clamp_scroll(rect: Rect): void {
     const colors_per_row = get_colors_per_row(rect.x1 - rect.x0);
     const total_rows = Math.ceil(INDEXED_COLORS.length / colors_per_row);
-    const max_scroll = Math.max(0, total_rows - get_visible_rows());
+    const max_scroll = Math.max(0, total_rows - get_visible_rows(rect));
     scroll_offset = Math.max(0, Math.min(max_scroll, scroll_offset));
   }
   
   // Get color at grid position (row, col)
-  function get_color_at(row: number, col: number): typeof INDEXED_COLORS[0] | null {
+  function get_color_at(rect: Rect, row: number, col: number): typeof INDEXED_COLORS[0] | null {
     const colors_per_row = get_colors_per_row(rect.x1 - rect.x0);
     const color_index = (scroll_offset + row) * colors_per_row + col;
     
@@ -86,7 +86,7 @@ export function make_color_selector_module(opts: ColorSelectorOptions): Module {
   }
   
   // Get grid position from screen coordinates
-  function get_grid_pos_from_screen(x: number, y: number): { row: number; col: number } | null {
+  function get_grid_pos_from_screen(rect: Rect, x: number, y: number): { row: number; col: number } | null {
     const colors_per_row = get_colors_per_row(rect.x1 - rect.x0);
     const start_x = rect.x0 + 2;
     const start_y = rect.y1 - 3;
@@ -94,7 +94,7 @@ export function make_color_selector_module(opts: ColorSelectorOptions): Module {
     const col = Math.floor((x - start_x) / COLOR_SPACING_X);
     const row = Math.floor((start_y - y) / COLOR_SPACING_Y);
     
-    if (col >= 0 && col < colors_per_row && row >= 0 && row < get_visible_rows()) {
+    if (col >= 0 && col < colors_per_row && row >= 0 && row < get_visible_rows(rect)) {
       return { row, col };
     }
     return null;
@@ -109,16 +109,20 @@ export function make_color_selector_module(opts: ColorSelectorOptions): Module {
     }
   }
 
-  return {
+  return make_floating_panel_module({
     id: opts.id,
-    get rect() { return rect; },
-    set rect(newRect) { rect = newRect; },
-    Focusable: true,
-
-    Draw(c: Canvas): void {
+    rect: opts.rect,
+    title: 'COLORS',
+    gizmos: gizmo_config,
+    background: { rgb: get_color_by_name('off_black').rgb },
+    resize: {
+      min_width: MIN_WIDTH,
+      min_height: MIN_HEIGHT,
+      max_width: MAX_WIDTH,
+      max_height: MAX_HEIGHT,
+    },
+    draw_content(c: Canvas, rect: Rect): void {
       const bg_color = get_color_by_name('off_black').rgb;
-      const border_color = get_color_by_name('medium_gray').rgb;
-      const text_color = get_color_by_name('off_white').rgb;
       
       // Update flashing animation
       update_flash();
@@ -126,27 +130,18 @@ export function make_color_selector_module(opts: ColorSelectorOptions): Module {
       // Fill background
       c.fill_rect(rect, { char: ' ', rgb: bg_color, style: 'regular' });
 
-      draw_module_border(c, {
-        rect,
-        style: BORDER_STYLES.double,
-        border_rgb: border_color,
-        weight_index: 3,
-        header: {
-          text: 'COLORS',
-          reserve_left_cols: 2 + ((gizmo_config.enabled?.length ?? 0) * 2),
-        },
-      });
-      
       // Draw colors in a grid
-      const visible_rows = get_visible_rows();
+      const visible_rows = get_visible_rows(rect);
       const colors_per_row = get_colors_per_row(rect.x1 - rect.x0);
       const start_x = rect.x0 + 2;
       const start_y = rect.y1 - 3;
       const brush = opts.get_brush();
+      const left_rgb = opts.get_left_rgb?.();
+      const right_rgb = opts.get_right_rgb?.();
       
       for (let row = 0; row < visible_rows; row++) {
         for (let col = 0; col < colors_per_row; col++) {
-          const color = get_color_at(row, col);
+          const color = get_color_at(rect, row, col);
           if (!color) continue;
           
           const color_x = start_x + (col * COLOR_SPACING_X);
@@ -164,11 +159,27 @@ export function make_color_selector_module(opts: ColorSelectorOptions): Module {
             style: 'regular',
             weight_index: brush.weight_index
           });
+
+          const left_selected = rgb_eq(color.rgb, left_rgb);
+          const right_selected = rgb_eq(color.rgb, right_rgb);
+          if (left_selected || right_selected) {
+            const marker_char = left_selected && right_selected ? 'B' : left_selected ? 'L' : 'R';
+            const marker_rgb = left_selected && right_selected
+              ? get_color_by_name('vivid_yellow').rgb
+              : left_selected
+                ? get_color_by_name('vivid_blue').rgb
+                : get_color_by_name('vivid_red').rgb;
+            if (color_y - 1 > rect.y0) {
+              c.set(color_x, color_y - 1, {
+                char: marker_char,
+                rgb: marker_rgb,
+                style: 'regular',
+                weight_index: 5,
+              });
+            }
+          }
         }
       }
-      
-      // Draw gizmos
-      draw_module_gizmos(c, rect, gizmo_config, gizmo_state, 'COLORS');
       
       // Draw scroll indicator if needed
       const total_rows = Math.ceil(INDEXED_COLORS.length / colors_per_row);
@@ -185,125 +196,20 @@ export function make_color_selector_module(opts: ColorSelectorOptions): Module {
         }
       }
     },
-
-    OnGlobalPointerDown(e: PointerEvent): void {
-      handle_global_pointer_down_for_gizmos(e, rect, gizmo_config, gizmo_state);
-    },
-
-    OnPointerDown(e: PointerEvent): void {
-      // Check gizmo area first
-      if (is_in_gizmo_area(e.x, e.y, rect)) {
-        const gizmo = handle_gizmo_click(e.x, e.y, rect, gizmo_config, gizmo_state);
-        if (gizmo === 'move') {
-          gizmo_state.move_start_x = e.x;
-          gizmo_state.move_start_y = e.y;
-        }
-        return;
-      }
-
-      // Check if clicking on resize border when in resize mode
-      if (gizmo_state.is_resize_mode) {
-        const edge = get_resize_edge(e.x, e.y, rect);
-        if (edge) {
-          gizmo_state.resize_edge = edge;
-          gizmo_state.is_dragging_resize = true;
-          gizmo_state.move_start_x = e.x;
-          gizmo_state.move_start_y = e.y;
-          gizmo_state.original_rect = { ...rect };
-          return;
-        }
-      }
-
-      // Handle move mode
-      if (gizmo_state.is_move_mode) {
-        gizmo_state.move_start_x = e.x;
-        gizmo_state.move_start_y = e.y;
-        return;
-      }
-
+    on_pointer_down_content(e: PointerEvent, rect: Rect): void {
       // Color selection
-      const grid_pos = get_grid_pos_from_screen(e.x, e.y);
+      const grid_pos = get_grid_pos_from_screen(rect, e.x, e.y);
       if (grid_pos) {
-        const color = get_color_at(grid_pos.row, grid_pos.col);
+        const color = get_color_at(rect, grid_pos.row, grid_pos.col);
         if (color) {
-          opts.on_color_select(color.rgb);
+          opts.on_color_select(color.rgb, e.button);
         }
       }
     },
-
-    OnPointerMove(e: PointerEvent): void {
-      // Update resize edge hover state
-      if (gizmo_state.is_resize_mode && !gizmo_state.is_dragging_resize) {
-        gizmo_state.resize_edge = get_resize_edge(e.x, e.y, rect);
-      }
-    },
-
-    OnDragMove(e: DragEvent): void {
-      if (gizmo_state.is_move_mode && gizmo_state.original_rect) {
-        const dx = e.x - gizmo_state.move_start_x;
-        const dy = e.y - gizmo_state.move_start_y;
-
-        const new_rect: Rect = {
-          x0: gizmo_state.original_rect.x0 + dx,
-          y0: gizmo_state.original_rect.y0 + dy,
-          x1: gizmo_state.original_rect.x1 + dx,
-          y1: gizmo_state.original_rect.y1 + dy,
-        };
-
-        rect = new_rect;
-
-        if (opts.on_move) {
-          opts.on_move(rect);
-        }
-        return;
-      }
-
-      // Handle resize dragging
-      if (gizmo_state.is_resize_mode && gizmo_state.is_dragging_resize && gizmo_state.original_rect) {
-        const new_rect = handle_resize_drag(
-          e.x,
-          e.y,
-          gizmo_state,
-          gizmo_state.original_rect,
-          MIN_WIDTH,
-          MIN_HEIGHT,
-          MAX_WIDTH,
-          MAX_HEIGHT,
-          (newRect) => {
-            rect = newRect;
-            if (opts.on_move) {
-              opts.on_move(rect);
-            }
-          }
-        );
-
-        if (new_rect) {
-          rect = new_rect;
-        }
-      }
-    },
-
-    OnPointerUp(): void {
-      if (gizmo_state.is_move_mode) {
-        gizmo_state.is_move_mode = false;
-        if (opts.on_move) {
-          opts.on_move(rect);
-        }
-      }
-
-      if (gizmo_state.is_dragging_resize) {
-        gizmo_state.is_dragging_resize = false;
-        gizmo_state.resize_edge = null;
-        if (opts.on_move) {
-          opts.on_move(rect);
-        }
-      }
-    },
-
-    OnWheel(e: WheelEvent): void {
+    on_wheel_content(e: WheelEvent, rect: Rect): void {
       const scroll_amount = e.delta_y > 0 ? 1 : -1;
       scroll_offset += scroll_amount;
-      clamp_scroll();
+      clamp_scroll(rect);
     },
-  };
+  });
 }

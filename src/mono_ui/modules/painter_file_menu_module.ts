@@ -4,9 +4,8 @@
  * Provides save/load/new/exit buttons for file operations.
  */
 
-import type { Canvas, Module, Rect, PointerEvent, Rgb } from '../types.js';
-import { get_color_by_name } from '../colors.js';
-import { draw_module_border, BORDER_STYLES } from '../module_borders.js';
+import type { Module, Rect } from '../types.js';
+import { make_screen_overlay_bar_module } from './screen_overlay_bar_module.js';
 
 export type FileMenuOptions = {
   id: string;
@@ -28,178 +27,35 @@ export type FileMenuOptions = {
   on_toggle_tool_properties?: () => void;
   on_toggle_layer_palette?: () => void;
   on_toggle_camera?: () => void;
-};
-
-type MenuButton = {
-  label: string;
-  shortcut: string;
-  action: () => void;
-  x: number;
-  y: number;
-  width: number;
+  get_status_text?: () => string;
+  get_screen_size?: () => { width: number; height: number };
 };
 
 export function make_file_menu_module(opts: FileMenuOptions): Module {
-  const rect = opts.rect;
-
-  const buttons: MenuButton[] = [
-    { label: 'NEW', shortcut: 'N', action: opts.on_new, x: 1, y: 0, width: 6 },
-    { label: 'SAVE', shortcut: 'S', action: opts.on_save, x: 8, y: 0, width: 6 },
-    { label: 'LOAD', shortcut: 'O', action: opts.on_load, x: 15, y: 0, width: 6 },
-    // CLEAR is intentionally placed farther right so it's not adjacent to save/load.
-    { label: 'CLEAR', shortcut: 'C', action: opts.on_clear, x: 45, y: 0, width: 7 },
+  const buttons: Array<{ id: string; label: string; shortcut?: string; shortcut_ctrl?: boolean; onPress: () => void; width: number }> = [
+    { id: 'new', label: 'NEW', shortcut: 'N', shortcut_ctrl: true, onPress: opts.on_new, width: 6 },
+    { id: 'save', label: 'SAVE', shortcut: 'S', shortcut_ctrl: true, onPress: opts.on_save, width: 6 },
+    { id: 'load', label: 'LOAD', shortcut: 'O', shortcut_ctrl: true, onPress: opts.on_load, width: 6 },
+    { id: 'clear', label: 'CLEAR', shortcut: 'C', shortcut_ctrl: true, onPress: opts.on_clear, width: 7 },
   ];
-  
-  // Add module toggle buttons
-  let module_button_x = 60;
-  
-  if (opts.on_toggle_toolbox) {
-    buttons.push({ label: 'TOOLS', shortcut: '', action: opts.on_toggle_toolbox, x: module_button_x, y: 0, width: 7 });
-    module_button_x += 8;
-  }
-  
-  if (opts.on_toggle_char_selector) {
-    buttons.push({ label: 'CHAR', shortcut: '', action: opts.on_toggle_char_selector, x: module_button_x, y: 0, width: 6 });
-    module_button_x += 7;
-  }
-  
-  if (opts.on_toggle_color_selector) {
-    buttons.push({ label: 'COLOR', shortcut: '', action: opts.on_toggle_color_selector, x: module_button_x, y: 0, width: 7 });
-    module_button_x += 8;
-  }
-  
-  if (opts.on_toggle_weight_selector) {
-    buttons.push({ label: 'WEIGHT', shortcut: '', action: opts.on_toggle_weight_selector, x: module_button_x, y: 0, width: 8 });
-    module_button_x += 9;
-  }
-  
-  if (opts.on_toggle_brush_preview) {
-    buttons.push({ label: 'SWATCH', shortcut: '', action: opts.on_toggle_brush_preview, x: module_button_x, y: 0, width: 8 });
-    module_button_x += 9;
-  }
-  
-  if (opts.on_toggle_tool_properties) {
-    buttons.push({ label: 'PROPS', shortcut: '', action: opts.on_toggle_tool_properties, x: module_button_x, y: 0, width: 7 });
-    module_button_x += 8;
-  }
-  
-  if (opts.on_toggle_layer_palette) {
-    buttons.push({ label: 'LAYERS', shortcut: '', action: opts.on_toggle_layer_palette, x: module_button_x, y: 0, width: 8 });
-    module_button_x += 9;
-  }
 
-  if (opts.on_toggle_camera) {
-    buttons.push({ label: 'CAMERA', shortcut: '', action: opts.on_toggle_camera, x: module_button_x, y: 0, width: 8 });
-    module_button_x += 9;
-  }
+  if (opts.on_toggle_toolbox) buttons.push({ id: 'tools', label: 'TOOLS', onPress: opts.on_toggle_toolbox, width: 7 });
+  if (opts.on_toggle_char_selector) buttons.push({ id: 'char', label: 'CHAR', onPress: opts.on_toggle_char_selector, width: 6 });
+  if (opts.on_toggle_color_selector) buttons.push({ id: 'color', label: 'COLOR', onPress: opts.on_toggle_color_selector, width: 7 });
+  if (opts.on_toggle_weight_selector) buttons.push({ id: 'weight', label: 'WEIGHT', onPress: opts.on_toggle_weight_selector, width: 8 });
+  if (opts.on_toggle_brush_preview) buttons.push({ id: 'swatch', label: 'SWATCH', onPress: opts.on_toggle_brush_preview, width: 8 });
+  if (opts.on_toggle_tool_properties) buttons.push({ id: 'props', label: 'PROPS', onPress: opts.on_toggle_tool_properties, width: 7 });
+  if (opts.on_toggle_layer_palette) buttons.push({ id: 'layers', label: 'LAYERS', onPress: opts.on_toggle_layer_palette, width: 8 });
+  if (opts.on_toggle_camera) buttons.push({ id: 'camera', label: 'CAMERA', onPress: opts.on_toggle_camera, width: 8 });
+  if (opts.on_reset_positions) buttons.push({ id: 'reset', label: 'RESET', onPress: opts.on_reset_positions, width: 7 });
+  if (opts.on_reset_camera) buttons.push({ id: 'camdef', label: 'CAM-DEF', onPress: opts.on_reset_camera, width: 9 });
 
-  // Add reset positions button if callback provided
-  if (opts.on_reset_positions) {
-    buttons.push({ 
-      label: 'RESET', 
-      shortcut: '', 
-      action: opts.on_reset_positions, 
-      x: module_button_x, 
-      y: 0, 
-      width: 7 
-    });
-    module_button_x += 8;
-  }
-
-  // Add reset camera button if callback provided
-  if (opts.on_reset_camera) {
-    buttons.push({ 
-      label: 'CAM-DEF', 
-      shortcut: '', 
-      action: opts.on_reset_camera, 
-      x: module_button_x, 
-      y: 0, 
-      width: 9 
-    });
-  }
-
-  function get_button_at(x: number, y: number): MenuButton | null {
-    for (const btn of buttons) {
-      if (x >= btn.x && x < btn.x + btn.width && y === btn.y) {
-        return btn;
-      }
-    }
-    return null;
-  }
-
-  return {
+  return make_screen_overlay_bar_module({
     id: opts.id,
-    rect,
-    Focusable: true,
-
-    Draw(c: Canvas): void {
-      const bg_color = get_color_by_name('deep_blue').rgb;
-      const border_color = get_color_by_name('medium_gray').rgb;
-      const text_color = get_color_by_name('off_white').rgb;
-      const hover_bg = get_color_by_name('medium_gray').rgb;
-
-      // Fill background
-      c.fill_rect(rect, { char: ' ', rgb: bg_color, style: 'regular' });
-
-      draw_module_border(c, {
-        rect,
-        style: BORDER_STYLES.double,
-        border_rgb: border_color,
-        weight_index: 3,
-        header: { text: 'FILE' },
-      });
-
-      // Draw buttons
-      for (const btn of buttons) {
-        // Draw button background
-        for (let bx = 0; bx < btn.width; bx++) {
-          c.set(rect.x0 + btn.x + bx, rect.y0 + btn.y + 1, {
-            char: ' ',
-            rgb: bg_color,
-            style: 'regular'
-          });
-        }
-
-        // Draw label
-        for (let i = 0; i < btn.label.length && i < btn.width; i++) {
-          const ch = btn.label.charAt(i);
-          c.set(rect.x0 + btn.x + i, rect.y0 + btn.y + 1, {
-            char: ch,
-            rgb: text_color,
-            style: 'regular',
-            weight_index: 4
-          });
-        }
-      }
-
-      // Title is handled by the standard border header.
-    },
-
-    OnPointerDown(e: PointerEvent): void {
-      if (e.button !== 0) return;
-
-      const rel_x = e.x - rect.x0;
-      const rel_y = e.y - rect.y0;
-
-      const btn = get_button_at(rel_x, rel_y);
-      if (btn) {
-        btn.action();
-      }
-    },
-
-    OnKeyDown(e: KeyboardEvent): void {
-      // Ctrl+ shortcuts
-      if (e.ctrlKey || e.metaKey) {
-        const key = e.key.toUpperCase();
-
-        for (const btn of buttons) {
-          if (btn.shortcut === key) {
-            e.preventDefault();
-            btn.action();
-            return;
-          }
-        }
-      }
-    }
-  };
+    title: 'PAINTER',
+    get_screen_size: opts.get_screen_size ?? (() => ({ width: opts.rect.x1 - opts.rect.x0 + 1, height: opts.rect.y1 - opts.rect.y0 + 1 })),
+    default_expanded: true,
+    get_status_text: opts.get_status_text,
+    buttons: () => buttons,
+  });
 }

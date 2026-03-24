@@ -1,5 +1,6 @@
 import type { Canvas, PointerEvent, Rect, Rgb } from "./types.js";
 import { rect_contains } from "./types.js";
+import { MODULE_CHROME_RENDER_INDEX } from "./module_borders.js";
 import { debug_log } from "../shared/debug.js";
 import { resolve_cell } from "../render_shaders/resolver.js";
 import { make_widget_payload } from "../render_shaders/payload_builders.js";
@@ -109,6 +110,10 @@ function get_gizmo_rect(rect: Rect, index: number): { x: number; y: number } {
   };
 }
 
+function is_in_gizmo_hitbox(x: number, y: number, pos: { x: number; y: number }): boolean {
+  return y === pos.y && x >= pos.x && x <= pos.x + 1;
+}
+
 /**
  * Draw module gizmos (close X, move #, save $)
  * Optionally draws module name to the right of gizmos
@@ -147,7 +152,7 @@ export function draw_module_gizmos(
       },
     );
 
-    c.set(pos.x, pos.y, shaded);
+    c.set(pos.x, pos.y, { ...shaded, render_index: MODULE_CHROME_RENDER_INDEX });
   }
 
   // Draw close gizmo (X) - Red
@@ -169,7 +174,7 @@ export function draw_module_gizmos(
         time_ms: Date.now(),
       },
     );
-    c.set(pos.x, pos.y, shaded);
+    c.set(pos.x, pos.y, { ...shaded, render_index: MODULE_CHROME_RENDER_INDEX });
   }
 
   // Draw save gizmo ($) - Green (future feature)
@@ -191,7 +196,7 @@ export function draw_module_gizmos(
         time_ms: Date.now(),
       },
     );
-    c.set(pos.x, pos.y, shaded);
+    c.set(pos.x, pos.y, { ...shaded, render_index: MODULE_CHROME_RENDER_INDEX });
   }
 
   // Draw resize gizmo (╋) - Orange
@@ -214,7 +219,7 @@ export function draw_module_gizmos(
         time_ms: Date.now(),
       },
     );
-    c.set(pos.x, pos.y, shaded);
+    c.set(pos.x, pos.y, { ...shaded, render_index: MODULE_CHROME_RENDER_INDEX });
   }
 
   // Draw module name to the right of gizmos
@@ -229,6 +234,7 @@ export function draw_module_gizmos(
         rgb: name_color,
         style: 'regular',
         weight_index: 4,
+        render_index: MODULE_CHROME_RENDER_INDEX,
       });
     }
   }
@@ -326,7 +332,7 @@ export function handle_gizmo_click(
   // Check move gizmo (#)
   if (config.enabled.includes('move') && config.can_move) {
     const pos = get_gizmo_rect(rect, gizmo_index++);
-    if (x === pos.x && y === pos.y) {
+    if (is_in_gizmo_hitbox(x, y, pos)) {
       debug_log('[Gizmos] Move gizmo clicked');
       
       // Toggle move mode
@@ -352,7 +358,7 @@ export function handle_gizmo_click(
   // Check close gizmo (X)
   if (config.enabled.includes('close') && config.can_close) {
     const pos = get_gizmo_rect(rect, gizmo_index++);
-    if (x === pos.x && y === pos.y) {
+    if (is_in_gizmo_hitbox(x, y, pos)) {
       debug_log('[Gizmos] Close gizmo clicked');
       if (config.on_close) {
         config.on_close();
@@ -364,7 +370,7 @@ export function handle_gizmo_click(
   // Check save gizmo ($)
   if (config.enabled.includes('save_position') && config.can_save_position) {
     const pos = get_gizmo_rect(rect, gizmo_index++);
-    if (x === pos.x && y === pos.y) {
+    if (is_in_gizmo_hitbox(x, y, pos)) {
       debug_log('[Gizmos] Save gizmo clicked');
       return 'save_position';
     }
@@ -373,7 +379,7 @@ export function handle_gizmo_click(
   // Check resize gizmo (╋)
   if (config.enabled.includes('resize')) {
     const pos = get_gizmo_rect(rect, gizmo_index++);
-    if (x === pos.x && y === pos.y) {
+    if (is_in_gizmo_hitbox(x, y, pos)) {
       debug_log('[Gizmos] Resize gizmo clicked');
       
       // Toggle resize mode

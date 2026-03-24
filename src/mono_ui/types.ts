@@ -169,6 +169,11 @@ export type Module = {
     // optional global pointer lane (UI calls for all modules)
     OnGlobalPointerDown?(e: PointerEvent): void;
 
+    // optional runtime pan notification (tile units, screen-space canvas transform)
+    setRuntimePanOffset?(x_tiles: number, y_tiles: number): void;
+    isScreenLocked?: boolean;
+    getScreenLockedPanBounds?(): { min_x: number; max_x: number; min_y: number; max_y: number };
+
 };
 
 

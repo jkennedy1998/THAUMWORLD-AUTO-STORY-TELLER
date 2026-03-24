@@ -22,7 +22,13 @@ import { make_color_selector_module } from '../mono_ui/modules/color_selector_mo
 import { make_weight_selector_module } from '../mono_ui/modules/weight_selector_module.js';
 import { make_toolbox_module } from '../mono_ui/modules/toolbox_module.js';
 import { make_tool_properties_module } from '../mono_ui/modules/tool_properties_module.js';
-import { saveModulePosition, getModulePosition, clearModulePositions } from '../ascii_painter/module_position_storage.js';
+import {
+  saveModulePosition,
+  getModulePosition,
+  clearModulePositions,
+  getModuleVisibility,
+  saveModuleVisibility,
+} from '../ascii_painter/module_position_storage.js';
 import { createGradiatorState, type GradiatorState, type GradiatorSlot, setActiveGradiatorSlot, selectGradiatorChar, addGradiatorChar, removeGradiatorChar, setGradiatorChar } from '../ascii_painter/gradiator.js';
 import { saveGradiatorState, loadGradiatorState } from '../ascii_painter/gradiator_storage.js';
 import {
@@ -284,15 +290,61 @@ export function create_painter_app_state(): PainterAppState {
   let left_click_tool: ToolType = saved_tool_props.left_click_tool as ToolType || 'pencil';
   let right_click_tool: ToolType = saved_tool_props.right_click_tool as ToolType || 'eraser';
   
-  // Brush state
-  const brush: Brush = {
-    char: '█',
-    rgb: get_color_by_name('off_white').rgb,
-    weight_index: 4
+  let active_property_side: 'left' | 'right' = 'left';
+
+  const left_brush: Brush = {
+    char: saved_tool_props.left_brush_char ?? '█',
+    rgb: { ...saved_tool_props.left_brush_rgb },
+    weight_index: saved_tool_props.left_brush_weight_index ?? 4,
   };
-  
-  // Brush tip size (1-5, for 1x1 to 5x5)
-  let brush_size = saved_tool_props.brush_size ?? 1;
+  const right_brush: Brush = {
+    char: saved_tool_props.right_brush_char ?? '█',
+    rgb: { ...saved_tool_props.right_brush_rgb },
+    weight_index: saved_tool_props.right_brush_weight_index ?? 4,
+  };
+
+  let left_brush_size = saved_tool_props.left_brush_size ?? saved_tool_props.brush_size ?? 1;
+  let right_brush_size = saved_tool_props.right_brush_size ?? saved_tool_props.brush_size ?? 1;
+
+  function getBrushForSide(side: 'left' | 'right'): Brush {
+    return side === 'right' ? right_brush : left_brush;
+  }
+
+  function getBrushForButton(button: number): Brush {
+    return getBrushForSide(button === 2 ? 'right' : 'left');
+  }
+
+  function getBrushSizeForSide(side: 'left' | 'right'): number {
+    return side === 'right' ? right_brush_size : left_brush_size;
+  }
+
+  function getBrushSizeForButton(button: number): number {
+    return getBrushSizeForSide(button === 2 ? 'right' : 'left');
+  }
+
+  function getPreviewBrush(): Brush {
+    return getBrushForSide(active_property_side);
+  }
+
+  function saveBrushState(side: 'left' | 'right'): void {
+    const brush = getBrushForSide(side);
+    if (side === 'left') {
+      saveToolProperties({
+        left_brush_char: brush.char,
+        left_brush_rgb: { ...brush.rgb },
+        left_brush_weight_index: brush.weight_index,
+        left_brush_size,
+        brush_size: left_brush_size,
+      });
+      return;
+    }
+    saveToolProperties({
+      right_brush_char: brush.char,
+      right_brush_rgb: { ...brush.rgb },
+      right_brush_weight_index: brush.weight_index,
+      right_brush_size,
+    });
+  }
   
   // Text tool: space replaces character or preserves it
   let space_replace = true;
@@ -650,8 +702,10 @@ export function create_painter_app_state(): PainterAppState {
     get_space: () => voxelSpace,
     get_selected_z: () => voxelSpace.camera.focus_plane,
     get_current_tool: () => current_tool,
-    brush,
-    get_brush_size: () => brush_size,
+    get_preview_brush: () => getPreviewBrush(),
+    get_brush_for_button: (button) => getBrushForButton(button),
+    get_brush_size: () => getBrushSizeForSide(active_property_side),
+    get_brush_size_for_button: (button) => getBrushSizeForButton(button),
     get_space_replace: () => space_replace,
     get_paste_space_replace: () => paste_space_replace,
     get_paste_scale: () => paste_scale,
@@ -687,10 +741,13 @@ export function create_painter_app_state(): PainterAppState {
       pushSnapshot(history, grid);
       schedule_auto_save();
     },
-    on_sample_cell: (cell) => {
+    on_sample_cell: (cell, button) => {
+      active_property_side = button === 2 ? 'right' : 'left';
+      const brush = getBrushForButton(button);
       brush.char = cell.char;
       brush.rgb = { ...cell.rgb };
       brush.weight_index = cell.weight_index;
+      saveBrushState(active_property_side);
     },
     on_selection_change: () => {
       // Force redraw when selection changes
@@ -754,32 +811,36 @@ export function create_painter_app_state(): PainterAppState {
     }
   });
 
+  function getInitialModuleVisibility(moduleId: string, fallback: boolean): boolean {
+    return getModuleVisibility(moduleId) ?? fallback;
+  }
+
   // Track module visibility state - MUST be declared before file menu
-  let char_selector_open = true;
-  let brush_preview_open = true;
-  let color_selector_open = true;
-  let weight_selector_open = true;
-  let toolbox_open = true;
-  let tool_properties_open = true;
-  
-  // Helper function to toggle any module
+  let char_selector_open = getInitialModuleVisibility('char_selector', true);
+  let brush_preview_open = getInitialModuleVisibility('brush_preview', true);
+  let color_selector_open = getInitialModuleVisibility('color_selector', true);
+  let weight_selector_open = getInitialModuleVisibility('weight_selector', true);
+  let toolbox_open = getInitialModuleVisibility('toolbox', true);
+  let tool_properties_open = getInitialModuleVisibility('tool_properties', true);
+
+  function setModuleOpen(moduleId: string, visible: boolean, setOpen: (v: boolean) => void): void {
+    setOpen(visible);
+    if (registry.has(moduleId)) {
+      registry.set_visibility(moduleId, visible);
+    }
+    saveModuleVisibility(moduleId, visible);
+  }
+
   function toggleModule(
     isOpen: boolean,
     setOpen: (v: boolean) => void,
     moduleId: string,
     createModule: () => Module,
-    moduleVar: Module | null
   ): void {
-    if (isOpen) {
-      setOpen(false);
-      registry.unregister(moduleId);
-    } else {
-      if (!registry.get_all().find(m => m.id === moduleId)) {
-        setOpen(true);
-        const mod = createModule();
-        registry.register(mod);
-      }
+    if (!registry.has(moduleId)) {
+      registry.register(createModule());
     }
+    setModuleOpen(moduleId, !isOpen, setOpen);
   }
   
   // Create module instances (but don't register yet)
@@ -860,8 +921,10 @@ export function create_painter_app_state(): PainterAppState {
     return make_character_selector_module({
       id: 'char_selector',
       rect: char_selector_rect,
-      selected_char: brush.char,
-      on_char_select: (char) => {
+      get_selected_char: () => getPreviewBrush().char,
+      get_left_selected_char: () => left_brush.char,
+      get_right_selected_char: () => right_brush.char,
+      on_char_select: (char, button) => {
         // Check if we're editing a gradiator
         if (gradiator_state.isEditing && gradiator_state.editSlot !== null) {
           // Set the character in the gradiator at the selected position
@@ -870,7 +933,9 @@ export function create_painter_app_state(): PainterAppState {
           console.log('Set gradiator character:', char, 'at position', gradiator_state.editCursorX);
         } else {
           // Normal brush character selection
-          brush.char = char;
+          active_property_side = button === 2 ? 'right' : 'left';
+          getBrushForButton(button).char = char;
+          saveBrushState(active_property_side);
           console.log('Selected character:', char);
         }
       },
@@ -881,9 +946,7 @@ export function create_painter_app_state(): PainterAppState {
         }
       },
       on_close: () => {
-        char_selector_open = false;
-        registry.unregister('char_selector');
-        char_selector_module = null;
+        setModuleOpen('char_selector', false, (v) => { char_selector_open = v; });
       }
     });
   }
@@ -892,7 +955,11 @@ export function create_painter_app_state(): PainterAppState {
     return make_brush_preview_module({
       id: 'brush_preview',
       rect: brush_preview_rect,
-      get_brush: () => brush,
+      get_left_brush: () => left_brush,
+      get_right_brush: () => right_brush,
+      get_left_brush_size: () => left_brush_size,
+      get_right_brush_size: () => right_brush_size,
+      get_active_side: () => active_property_side,
       on_move: (new_rect) => {
         if (brush_preview_module) {
           brush_preview_module.rect = new_rect;
@@ -900,9 +967,7 @@ export function create_painter_app_state(): PainterAppState {
         }
       },
       on_close: () => {
-        brush_preview_open = false;
-        registry.unregister('brush_preview');
-        brush_preview_module = null;
+        setModuleOpen('brush_preview', false, (v) => { brush_preview_open = v; });
       }
     });
   }
@@ -911,8 +976,10 @@ export function create_painter_app_state(): PainterAppState {
     return make_color_selector_module({
       id: 'color_selector',
       rect: color_selector_rect,
-      get_brush: () => brush,
-      on_color_select: (rgb) => {
+      get_brush: () => getPreviewBrush(),
+      get_left_rgb: () => left_brush.rgb,
+      get_right_rgb: () => right_brush.rgb,
+      on_color_select: (rgb, button) => {
         // Check if we're selecting the ignore color
         if ((globalThis as any).__selecting_ignore_color) {
           paste_ignore_color_rgb = rgb;
@@ -920,7 +987,9 @@ export function create_painter_app_state(): PainterAppState {
           (globalThis as any).__selecting_ignore_color = false;
           console.log('Set ignore color:', rgb);
         } else {
-          brush.rgb = rgb;
+          active_property_side = button === 2 ? 'right' : 'left';
+          getBrushForButton(button).rgb = { ...rgb };
+          saveBrushState(active_property_side);
           console.log('Selected color:', rgb);
         }
       },
@@ -931,9 +1000,7 @@ export function create_painter_app_state(): PainterAppState {
         }
       },
       on_close: () => {
-        color_selector_open = false;
-        registry.unregister('color_selector');
-        color_selector_module = null;
+        setModuleOpen('color_selector', false, (v) => { color_selector_open = v; });
       }
     });
   }
@@ -942,9 +1009,13 @@ export function create_painter_app_state(): PainterAppState {
     return make_weight_selector_module({
       id: 'weight_selector',
       rect: weight_selector_rect,
-      get_weight_index: () => brush.weight_index,
-      on_weight_change: (weight_index) => {
-        brush.weight_index = weight_index;
+      get_weight_index: () => getPreviewBrush().weight_index,
+      get_left_weight_index: () => left_brush.weight_index,
+      get_right_weight_index: () => right_brush.weight_index,
+      on_weight_change: (weight_index, button) => {
+        active_property_side = button === 2 ? 'right' : 'left';
+        getBrushForButton(button).weight_index = weight_index;
+        saveBrushState(active_property_side);
         console.log('Selected weight:', weight_index);
       },
       on_move: (new_rect) => {
@@ -954,9 +1025,7 @@ export function create_painter_app_state(): PainterAppState {
         }
       },
       on_close: () => {
-        weight_selector_open = false;
-        registry.unregister('weight_selector');
-        weight_selector_module = null;
+        setModuleOpen('weight_selector', false, (v) => { weight_selector_open = v; });
       }
     });
   }
@@ -973,11 +1042,13 @@ export function create_painter_app_state(): PainterAppState {
         console.log('Selected tool:', tool);
       },
       on_left_click_tool_change: (tool) => {
+        active_property_side = 'left';
         left_click_tool = tool;
         saveToolProperties({ left_click_tool: tool });
         console.log('Left-click tool:', tool);
       },
       on_right_click_tool_change: (tool) => {
+        active_property_side = 'right';
         right_click_tool = tool;
         saveToolProperties({ right_click_tool: tool });
         console.log('Right-click tool:', tool);
@@ -994,9 +1065,7 @@ export function create_painter_app_state(): PainterAppState {
         }
       },
       on_close: () => {
-        toolbox_open = false;
-        registry.unregister('toolbox');
-        toolbox_module = null;
+        setModuleOpen('toolbox', false, (v) => { toolbox_open = v; });
       }
     });
   }
@@ -1006,10 +1075,15 @@ export function create_painter_app_state(): PainterAppState {
       id: 'tool_properties',
       rect: tool_properties_rect,
       get_current_tool: () => current_tool,
-      get_brush_size: () => brush_size,
-      on_brush_size_change: (size) => {
-        brush_size = size;
-        saveToolProperties({ brush_size: size });
+      get_brush_size: () => getBrushSizeForSide(active_property_side),
+      get_left_brush_size: () => left_brush_size,
+      get_right_brush_size: () => right_brush_size,
+      get_active_side: () => active_property_side,
+      on_brush_size_change: (size, side) => {
+        active_property_side = side;
+        if (side === 'right') right_brush_size = size;
+        else left_brush_size = size;
+        saveBrushState(side);
         console.log('Selected brush size:', size);
       },
       get_space_replace: () => space_replace,
@@ -1139,9 +1213,7 @@ export function create_painter_app_state(): PainterAppState {
         }
       },
       on_close: () => {
-        tool_properties_open = false;
-        registry.unregister('tool_properties');
-        tool_properties_module = null;
+        setModuleOpen('tool_properties', false, (v) => { tool_properties_open = v; });
       }
     });
   }
@@ -1150,6 +1222,11 @@ export function create_painter_app_state(): PainterAppState {
   const file_menu = make_file_menu_module({
     id: 'painter_file_menu',
     rect: file_menu_rect,
+    get_screen_size: () => ({ width: GRID_WIDTH, height: GRID_HEIGHT }),
+    get_status_text: () => {
+      const preview = getPreviewBrush();
+      return `L:${left_click_tool} R:${right_click_tool} CUR:${current_tool} CHAR:${preview.char} SIZE:L${getBrushSizeForSide('left')} R${getBrushSizeForSide('right')} Z:${voxelSpace.camera.focus_plane}`;
+    },
     on_save: () => {
       void save_file().catch((e) => {
         console.error('Save failed:', e);
@@ -1209,8 +1286,7 @@ export function create_painter_app_state(): PainterAppState {
         toolbox_open,
         (v) => { toolbox_open = v; },
         'toolbox',
-        create_toolbox_module,
-        toolbox_module
+        create_toolbox_module
       );
     },
     on_toggle_char_selector: () => {
@@ -1218,8 +1294,7 @@ export function create_painter_app_state(): PainterAppState {
         char_selector_open,
         (v) => { char_selector_open = v; },
         'char_selector',
-        create_char_selector_module,
-        char_selector_module
+        create_char_selector_module
       );
     },
     on_toggle_color_selector: () => {
@@ -1227,8 +1302,7 @@ export function create_painter_app_state(): PainterAppState {
         color_selector_open,
         (v) => { color_selector_open = v; },
         'color_selector',
-        create_color_selector_module,
-        color_selector_module
+        create_color_selector_module
       );
     },
     on_toggle_weight_selector: () => {
@@ -1236,8 +1310,7 @@ export function create_painter_app_state(): PainterAppState {
         weight_selector_open,
         (v) => { weight_selector_open = v; },
         'weight_selector',
-        create_weight_selector_module,
-        weight_selector_module
+        create_weight_selector_module
       );
     },
     on_toggle_brush_preview: () => {
@@ -1245,8 +1318,7 @@ export function create_painter_app_state(): PainterAppState {
         brush_preview_open,
         (v) => { brush_preview_open = v; },
         'brush_preview',
-        create_brush_preview_module,
-        brush_preview_module
+        create_brush_preview_module
       );
     },
     on_toggle_tool_properties: () => {
@@ -1254,8 +1326,7 @@ export function create_painter_app_state(): PainterAppState {
         tool_properties_open,
         (v) => { tool_properties_open = v; },
         'tool_properties',
-        create_tool_properties_module,
-        tool_properties_module
+        create_tool_properties_module
       );
     },
     on_toggle_layer_palette: () => {
@@ -1263,8 +1334,7 @@ export function create_painter_app_state(): PainterAppState {
         layer_palette_open,
         (v) => { layer_palette_open = v; },
         'layer_palette',
-        create_layer_palette_module,
-        layer_palette_module
+        create_layer_palette_module
       );
     },
     on_toggle_camera: () => {
@@ -1272,14 +1342,13 @@ export function create_painter_app_state(): PainterAppState {
         camera_control_open,
         (v) => { camera_control_open = v; },
         'camera_control',
-        create_camera_control_module,
-        camera_control_module
+        create_camera_control_module
       );
     }
   });
 
   // Create Layer Palette module (3D layers UI)
-  let layer_palette_open = true;
+  let layer_palette_open = getInitialModuleVisibility('layer_palette', true);
   let layer_palette_module: Module | null = null;
   
   function create_layer_palette_module(): Module {
@@ -1433,9 +1502,7 @@ export function create_painter_app_state(): PainterAppState {
         }
       },
       onClose: () => {
-        layer_palette_open = false;
-        registry.unregister('layer_palette');
-        layer_palette_module = null;
+        setModuleOpen('layer_palette', false, (v) => { layer_palette_open = v; });
       }
     });
   }
@@ -1449,7 +1516,7 @@ export function create_painter_app_state(): PainterAppState {
   registry.register(layer_palette_module);
 
   // Create Camera Control module (closed by default)
-  let camera_control_open = false;
+  let camera_control_open = getInitialModuleVisibility('camera_control', false);
   let camera_control_module: Module | null = null;
 
   function create_camera_control_module(): Module {
@@ -1568,9 +1635,7 @@ export function create_painter_app_state(): PainterAppState {
         }
       },
       onClose: () => {
-        camera_control_open = false;
-        registry.unregister('camera_control');
-        camera_control_module = null;
+        setModuleOpen('camera_control', false, (v) => { camera_control_open = v; });
       }
     });
   }
@@ -1582,12 +1647,23 @@ export function create_painter_app_state(): PainterAppState {
   weight_selector_module = create_weight_selector_module();
   toolbox_module = create_toolbox_module();
   tool_properties_module = create_tool_properties_module();
+  camera_control_module = create_camera_control_module();
   registry.register(char_selector_module);
   registry.register(brush_preview_module);
   registry.register(color_selector_module);
   registry.register(weight_selector_module);
   registry.register(toolbox_module);
   registry.register(tool_properties_module);
+  registry.register(camera_control_module);
+
+  registry.set_visibility('char_selector', char_selector_open);
+  registry.set_visibility('brush_preview', brush_preview_open);
+  registry.set_visibility('color_selector', color_selector_open);
+  registry.set_visibility('weight_selector', weight_selector_open);
+  registry.set_visibility('toolbox', toolbox_open);
+  registry.set_visibility('tool_properties', tool_properties_open);
+  registry.set_visibility('layer_palette', layer_palette_open);
+  registry.set_visibility('camera_control', camera_control_open);
   
   return {
     modules: registry.get_all(),

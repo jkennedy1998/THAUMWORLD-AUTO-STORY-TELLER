@@ -64,6 +64,28 @@ export const BORDER_STYLES = {
   } as BorderStyle,
 };
 
+export const PANEL_BORDER_PRESETS = {
+  default_double: {
+    style: BORDER_STYLES.double,
+    weight_index: 3,
+  },
+  compact_double: {
+    style: BORDER_STYLES.double,
+    weight_index: 2,
+  },
+  single: {
+    style: BORDER_STYLES.single,
+    weight_index: 2,
+  },
+  thick: {
+    style: BORDER_STYLES.thick,
+    weight_index: 3,
+  },
+} as const;
+
+export const MODULE_BORDER_RENDER_INDEX = 6;
+export const MODULE_CHROME_RENDER_INDEX = 7;
+
 /**
  * Configuration for drawing a module border
  */
@@ -78,6 +100,12 @@ export type ModuleBorderConfig = {
   markers?: {
     top?: string;
     bottom?: string;
+    left?: string;
+    right?: string;
+    top_x?: number;
+    bottom_x?: number;
+    left_y?: number;
+    right_y?: number;
   };
   
   // Optional header configuration
@@ -94,6 +122,26 @@ export type ModuleBorderConfig = {
     divider_at_col?: number;
     divider_mode?: 'none' | 'header_only' | 'full_height';
   };
+};
+
+export type HorizontalDividerConfig = {
+  y: number;
+  rect: Rect;
+  style?: BorderStyle;
+  rgb?: Rgb;
+  weight_index?: number;
+  inset_left?: number;
+  inset_right?: number;
+};
+
+export type VerticalDividerConfig = {
+  x: number;
+  rect: Rect;
+  style?: BorderStyle;
+  rgb?: Rgb;
+  weight_index?: number;
+  inset_top?: number;
+  inset_bottom?: number;
 };
 
 /**
@@ -157,17 +205,20 @@ export function draw_module_border(
       }
     }
 
-    c.set(x, y1, { char, rgb: border_rgb, style: "regular", weight_index });
+    c.set(x, y1, { char, rgb: border_rgb, style: "regular", weight_index, render_index: MODULE_BORDER_RENDER_INDEX });
   }
 
   // Optional scroll marker overwrites top border.
   if (markers?.top) {
-    const cx = Math.floor((x0 + x1) / 2);
+    const cx = typeof markers.top_x === 'number'
+      ? Math.max(x0 + 1, Math.min(x1 - 1, markers.top_x))
+      : Math.floor((x0 + x1) / 2);
     c.set(cx, y1, {
       char: String(markers.top).charAt(0) || style.horizontal,
       rgb: border_rgb,
       style: 'regular',
       weight_index: Math.min(7, weight_index + 2),
+      render_index: MODULE_CHROME_RENDER_INDEX,
     });
   }
 
@@ -205,6 +256,7 @@ export function draw_module_border(
           rgb: text_rgb,
           style: "regular",
           weight_index,
+          render_index: MODULE_CHROME_RENDER_INDEX,
         });
       }
     }
@@ -222,6 +274,7 @@ export function draw_module_border(
             rgb: border_rgb,
             style: "regular",
             weight_index,
+            render_index: MODULE_BORDER_RENDER_INDEX,
           });
         }
         // Bottom junction
@@ -230,6 +283,7 @@ export function draw_module_border(
           rgb: border_rgb,
           style: "regular",
           weight_index,
+          render_index: MODULE_BORDER_RENDER_INDEX,
         });
       }
     }
@@ -248,24 +302,53 @@ export function draw_module_border(
         char = style.junction_b;
       }
     }
-    c.set(x, y0, { char, rgb: border_rgb, style: "regular", weight_index });
+    c.set(x, y0, { char, rgb: border_rgb, style: "regular", weight_index, render_index: MODULE_BORDER_RENDER_INDEX });
   }
 
   // Optional scroll marker overwrites bottom border.
   if (markers?.bottom) {
-    const cx = Math.floor((x0 + x1) / 2);
+    const cx = typeof markers.bottom_x === 'number'
+      ? Math.max(x0 + 1, Math.min(x1 - 1, markers.bottom_x))
+      : Math.floor((x0 + x1) / 2);
     c.set(cx, y0, {
       char: String(markers.bottom).charAt(0) || style.horizontal,
       rgb: border_rgb,
       style: 'regular',
       weight_index: Math.min(7, weight_index + 2),
+      render_index: MODULE_CHROME_RENDER_INDEX,
+    });
+  }
+
+  if (markers?.left) {
+    const cy = typeof markers.left_y === 'number'
+      ? Math.max(y0 + 1, Math.min(y1 - 1, markers.left_y))
+      : Math.floor((y0 + y1) / 2);
+    c.set(x0, cy, {
+      char: String(markers.left).charAt(0) || style.vertical,
+      rgb: border_rgb,
+      style: 'regular',
+      weight_index: Math.min(7, weight_index + 2),
+      render_index: MODULE_CHROME_RENDER_INDEX,
+    });
+  }
+
+  if (markers?.right) {
+    const cy = typeof markers.right_y === 'number'
+      ? Math.max(y0 + 1, Math.min(y1 - 1, markers.right_y))
+      : Math.floor((y0 + y1) / 2);
+    c.set(x1, cy, {
+      char: String(markers.right).charAt(0) || style.vertical,
+      rgb: border_rgb,
+      style: 'regular',
+      weight_index: Math.min(7, weight_index + 2),
+      render_index: MODULE_CHROME_RENDER_INDEX,
     });
   }
 
   // Draw left and right borders (excluding corners)
   for (let y = y1 - 1; y > y0; y--) {
-    c.set(x0, y, { char: style.vertical, rgb: border_rgb, style: "regular", weight_index });
-    c.set(x1, y, { char: style.vertical, rgb: border_rgb, style: "regular", weight_index });
+    c.set(x0, y, { char: style.vertical, rgb: border_rgb, style: "regular", weight_index, render_index: MODULE_BORDER_RENDER_INDEX });
+    c.set(x1, y, { char: style.vertical, rgb: border_rgb, style: "regular", weight_index, render_index: MODULE_BORDER_RENDER_INDEX });
   }
 }
 
@@ -335,8 +418,27 @@ export function draw_horizontal_divider(
     let char = style.horizontal;
     if (x === x0) char = style.junction_l;
     else if (x === x1) char = style.junction_r;
-    c.set(x, y, { char, rgb, style: "regular", weight_index });
+    c.set(x, y, { char, rgb, style: "regular", weight_index, render_index: MODULE_BORDER_RENDER_INDEX });
   }
+}
+
+export function draw_panel_horizontal_divider(
+  c: Canvas,
+  config: HorizontalDividerConfig
+): void {
+  const {
+    y,
+    rect,
+    style = BORDER_STYLES.double,
+    rgb = { r: 150, g: 150, b: 150 },
+    weight_index = 3,
+    inset_left = 0,
+    inset_right = 0,
+  } = config;
+
+  const x0 = rect.x0 + inset_left;
+  const x1 = rect.x1 - inset_right;
+  draw_horizontal_divider(c, y, x0, x1, style, rgb, weight_index);
 }
 
 /**
@@ -355,6 +457,25 @@ export function draw_vertical_divider(
     let char = style.vertical;
     if (y === y1) char = style.junction_t;
     else if (y === y0) char = style.junction_b;
-    c.set(x, y, { char, rgb, style: "regular", weight_index });
+    c.set(x, y, { char, rgb, style: "regular", weight_index, render_index: MODULE_BORDER_RENDER_INDEX });
   }
+}
+
+export function draw_panel_vertical_divider(
+  c: Canvas,
+  config: VerticalDividerConfig
+): void {
+  const {
+    x,
+    rect,
+    style = BORDER_STYLES.double,
+    rgb = { r: 150, g: 150, b: 150 },
+    weight_index = 3,
+    inset_top = 0,
+    inset_bottom = 0,
+  } = config;
+
+  const y0 = rect.y0 + inset_bottom;
+  const y1 = rect.y1 - inset_top;
+  draw_vertical_divider(c, x, y0, y1, style, rgb, weight_index);
 }
