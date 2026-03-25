@@ -55,8 +55,8 @@ export interface PipelineDependencies {
   getAvailableTargets: (location: Location, radius: number) => Promise<AvailableTarget[]>;
   getActorLocation: (actorRef: string) => Promise<Location | null>;
   checkActorAwareness: (actorRef: string, targetRef: string) => Promise<boolean>;
-  checkActionCost: (actorRef: string, cost: ActionCost) => Promise<boolean>;
-  consumeActionCost: (actorRef: string, cost: ActionCost) => Promise<boolean>;
+  checkActionCost: (actorRef: string, cost: ActionCost, intent?: ActionIntent) => Promise<boolean>;
+  consumeActionCost: (actorRef: string, cost: ActionCost, intent?: ActionIntent) => Promise<boolean>;
   
   // Actor data access for tool validation
   getActorData: (actorRef: string) => Promise<{
@@ -395,13 +395,13 @@ export class ActionPipeline {
     }
     
     // Check if actor can afford the cost
-    const canAfford = await this.deps.checkActionCost(intent.actorRef, intent.actionCost);
+    const canAfford = await this.deps.checkActionCost(intent.actorRef, intent.actionCost, intent);
     if (!canAfford) {
       return markIntentFailed(intent, `Cannot afford ${intent.actionCost} action`);
     }
     
     // Consume the cost
-    const consumed = await this.deps.consumeActionCost(intent.actorRef, intent.actionCost);
+    const consumed = await this.deps.consumeActionCost(intent.actorRef, intent.actionCost, intent);
     if (!consumed) {
       return markIntentFailed(intent, "Failed to consume action cost");
     }

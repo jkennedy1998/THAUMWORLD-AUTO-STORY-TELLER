@@ -1326,13 +1326,13 @@ export class CanvasRuntime {
 
         this.key_sink.addEventListener('keydown', (ev) => {
             unlock_sfx();
+            const typing = this.focused_owner?.id === 'input';
 
             // Update authoritative action state (so movement can poll it)
-            handle_keydown(ev, { typing: this.focused_owner?.id === 'input' });
+            handle_keydown(ev, { typing });
 
             if (ev.code === 'Space') {
                 // Space is reserved for global UI pan gesture when not typing into input.
-                const typing = this.focused_owner?.id === 'input';
                 if (DEBUG_LEVEL >= 4 && !ev.repeat) {
                     debug_log('[RUNTIME-DEBUG] Space keydown - typing:', typing, 'focused_owner:', this.focused_owner?.id);
                 }
@@ -1341,16 +1341,18 @@ export class CanvasRuntime {
                     ev.preventDefault();
                 }
             }
-            for (let i = this.modules.length - 1; i >= 0; i--) {
-                const m = this.modules[i];
-                if (!m) continue;
-                if (m.OnGlobalKeyDown) {
-                    m.OnGlobalKeyDown(ev);
-                    break;
+            if (!typing) {
+                for (let i = this.modules.length - 1; i >= 0; i--) {
+                    const m = this.modules[i];
+                    if (!m) continue;
+                    if (m.OnGlobalKeyDown) {
+                        m.OnGlobalKeyDown(ev);
+                        break;
+                    }
                 }
             }
 
-            if (this.dispatch_global_keydown(ev)) return;
+            if (!typing && this.dispatch_global_keydown(ev)) return;
             if (DEBUG_LEVEL >= 4 && !ev.repeat) {
                 debug_log('[RUNTIME-DEBUG] Calling OnKeyDown on focused_owner:', this.focused_owner?.id, 'key:', ev.code);
             }

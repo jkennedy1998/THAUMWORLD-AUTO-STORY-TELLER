@@ -38,6 +38,20 @@ export async function handleInspect(
   context: ActionContext
 ): Promise<ActionResult> {
   const { actorRef, targetRef, actorLocation, targetLocation, parameters } = context;
+
+  const parsePlaceTileRef = (ref: string): { place_id: string } | null => {
+    if (!ref.startsWith('place_tile.')) return null;
+    const parts = ref.split('.');
+    if (parts.length < 4) return null;
+    const place_id = parts.slice(1, parts.length - 2).join('.');
+    return place_id ? { place_id } : null;
+  };
+
+  const parsePlaceRef = (ref: string): { place_id: string } | null => {
+    if (!ref.startsWith('place.')) return null;
+    const place_id = ref.slice('place.'.length).trim();
+    return place_id ? { place_id } : null;
+  };
   
   if (!targetRef) {
     return {
@@ -59,23 +73,111 @@ export async function handleInspect(
   // Build an InspectionTarget for the inspection data service.
   const target: InspectionTarget = (() => {
     if (targetRef.startsWith("npc.")) {
-      return { type: "npc", ref: targetRef, place_id: actorLocation.place_id };
+      const tp = targetLocation && typeof targetLocation.x === 'number' && typeof targetLocation.y === 'number'
+        ? {
+            x: targetLocation.x,
+            y: targetLocation.y,
+            z: typeof parameters.target_world_z === 'number' && Number.isFinite(parameters.target_world_z)
+              ? Math.floor(parameters.target_world_z)
+              : undefined,
+          }
+        : undefined;
+      return { type: "npc", ref: targetRef, place_id: actorLocation.place_id, tile_position: tp };
     }
     if (targetRef.startsWith("actor.")) {
-      return { type: "character", ref: targetRef, place_id: actorLocation.place_id };
+      const tp = targetLocation && typeof targetLocation.x === 'number' && typeof targetLocation.y === 'number'
+        ? {
+            x: targetLocation.x,
+            y: targetLocation.y,
+            z: typeof parameters.target_world_z === 'number' && Number.isFinite(parameters.target_world_z)
+              ? Math.floor(parameters.target_world_z)
+              : undefined,
+          }
+        : undefined;
+      return { type: "character", ref: targetRef, place_id: actorLocation.place_id, tile_position: tp };
     }
     if (targetRef.startsWith("item.")) {
-      return { type: "item", ref: targetRef, place_id: actorLocation.place_id };
+      const tp = targetLocation && typeof targetLocation.x === 'number' && typeof targetLocation.y === 'number'
+        ? {
+            x: targetLocation.x,
+            y: targetLocation.y,
+            z: typeof parameters.target_world_z === 'number' && Number.isFinite(parameters.target_world_z)
+              ? Math.floor(parameters.target_world_z)
+              : undefined,
+          }
+        : undefined;
+      return { type: "item", ref: targetRef, place_id: actorLocation.place_id, tile_position: tp };
+    }
+    if (targetRef.startsWith("structure.")) {
+      const tp = targetLocation && typeof targetLocation.x === 'number' && typeof targetLocation.y === 'number'
+        ? {
+            x: targetLocation.x,
+            y: targetLocation.y,
+            z: typeof parameters.target_world_z === 'number' && Number.isFinite(parameters.target_world_z)
+              ? Math.floor(parameters.target_world_z)
+              : undefined,
+          }
+        : undefined;
+      return { type: "structure", ref: targetRef.slice("structure.".length), place_id: actorLocation.place_id, tile_position: tp } as InspectionTarget;
+    }
+    if (targetRef.startsWith("pile.")) {
+      const tp = targetLocation && typeof targetLocation.x === 'number' && typeof targetLocation.y === 'number'
+        ? {
+            x: targetLocation.x,
+            y: targetLocation.y,
+            z: typeof parameters.target_world_z === 'number' && Number.isFinite(parameters.target_world_z)
+              ? Math.floor(parameters.target_world_z)
+              : undefined,
+          }
+        : undefined;
+      return { type: "item_pile", ref: targetRef, place_id: actorLocation.place_id, tile_position: tp } as InspectionTarget;
     }
     if (targetRef.startsWith("tile.")) {
       const tile_id = targetRef.slice("tile.".length);
       const tp = targetLocation && typeof targetLocation.x === 'number' && typeof targetLocation.y === 'number'
-        ? { x: targetLocation.x, y: targetLocation.y }
+        ? {
+            x: targetLocation.x,
+            y: targetLocation.y,
+            z: typeof parameters.target_world_z === 'number' && Number.isFinite(parameters.target_world_z)
+              ? Math.floor(parameters.target_world_z)
+              : undefined,
+          }
         : undefined;
       return { type: "tile", ref: tile_id, place_id: actorLocation.place_id, tile_position: tp };
     }
+    if (targetRef.startsWith("place_tile.")) {
+      const parsed = parsePlaceTileRef(targetRef);
+      const tp = targetLocation && typeof targetLocation.x === 'number' && typeof targetLocation.y === 'number'
+        ? {
+            x: targetLocation.x,
+            y: targetLocation.y,
+            z: typeof parameters.target_world_z === 'number' && Number.isFinite(parameters.target_world_z)
+              ? Math.floor(parameters.target_world_z)
+              : undefined,
+          }
+        : undefined;
+      return {
+        type: "tile",
+        ref: targetRef,
+        place_id: parsed?.place_id ?? actorLocation.place_id,
+        tile_position: tp,
+      };
+    }
+    if (targetRef.startsWith("place.")) {
+      const parsed = parsePlaceRef(targetRef);
+      const tp = targetLocation && typeof targetLocation.x === 'number' && typeof targetLocation.y === 'number'
+        ? { x: targetLocation.x, y: targetLocation.y, z: typeof parameters.target_world_z === 'number' && Number.isFinite(parameters.target_world_z) ? Math.floor(parameters.target_world_z) : undefined }
+        : undefined;
+      return { type: "place", ref: parsed?.place_id ?? targetRef.slice("place.".length), place_id: parsed?.place_id ?? actorLocation.place_id, tile_position: tp } as InspectionTarget;
+    }
+    if (targetRef.startsWith("adjacent_place.")) {
+      const tp = targetLocation && typeof targetLocation.x === 'number' && typeof targetLocation.y === 'number'
+        ? { x: targetLocation.x, y: targetLocation.y, z: typeof parameters.target_world_z === 'number' && Number.isFinite(parameters.target_world_z) ? Math.floor(parameters.target_world_z) : undefined }
+        : undefined;
+      return { type: "adjacent_place", ref: targetRef.slice("adjacent_place.".length), place_id: actorLocation.place_id, tile_position: tp } as InspectionTarget;
+    }
     // Fallback: treat unknown refs as item-like.
-    return { type: "item", ref: targetRef, place_id: actorLocation.place_id };
+    return { type: "item", ref: targetRef.startsWith('item.') ? targetRef : `item.${targetRef}`, place_id: actorLocation.place_id };
   })();
 
   // Ensure target_location is present for distance/clarity.

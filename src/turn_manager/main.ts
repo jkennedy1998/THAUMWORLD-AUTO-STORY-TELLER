@@ -1,7 +1,7 @@
 import { get_data_slot_dir, get_inbox_path, get_log_path, get_outbox_path, get_world_path } from "../engine/paths.js";
 import { ensure_dir_exists, ensure_log_exists, append_log_message } from "../engine/log_store.js";
 import { ensure_inbox_exists, append_inbox_message } from "../engine/inbox_store.js";
-import { ensure_outbox_exists, read_outbox, append_outbox_message } from "../engine/outbox_store.js";
+import { ensure_outbox_exists, read_outbox, write_outbox, append_outbox_message } from "../engine/outbox_store.js";
 import { create_message } from "../engine/message.js";
 import type { MessageInput } from "../engine/message.js";
 import { debug_log, log_service_error } from "../shared/debug.js";
@@ -9,29 +9,30 @@ import { load_actor } from "../actor_storage/store.js";
 import { load_npc } from "../npc_storage/store.js";
 import {
     ensure_world_exists,
+    clear_stale_timed_event,
     get_timed_event_state,
     save_world_store,
     start_timed_event,
-    end_timed_event,
     advance_turn,
+    can_actor_afford_action_cost,
+    consume_actor_action_cost,
+    consume_pending_communication_opportunity,
+    finalize_timed_event_turn_if_exhausted,
+    has_pending_communication_opportunity,
     mark_actor_done,
-    check_all_done,
     mark_actor_left_region,
     is_actor_in_region,
-    get_active_actor_ref
+    get_timed_event_phase
 } from "../world_storage/store.js";
 import type { WorldStore } from "../world_storage/store.js";
 import type { MessageEnvelope } from "../engine/types.js";
 import * as fs from "node:fs";
 import { parse } from "jsonc-parser";
 import { SERVICE_CONFIG } from "../shared/constants.js";
-import { build_working_memory, add_event_to_memory, get_working_memory, cleanup_expired_memories } from "../context_manager/index.js";
+import { build_working_memory, cleanup_expired_memories } from "../context_manager/index.js";
 import type { TimedEventType } from "../shared/constants.js";
-import { initialize_turn_state, roll_initiative as roll_initiative_state_machine, transition_phase, get_turn_state, is_turn_timer_expired, get_turn_summary, type TurnState } from "./state_machine.js";
-import { validate_action, can_perform_action, type ActorState } from "./validator.js";
-import { hold_action, check_triggers, process_reaction, clear_event_reactions, create_trigger, type ReactionRequest } from "./reactions.js";
-import { append_timed_event_memory_journal } from "../npc_ai/timed_event_journal.js";
-import { MetaTagProcessor } from "../tag_system/meta_processor.js";
+import { getDefaultCost } from "../action_system/registry.js";
+import { face_target } from "../npc_ai/facing_system.js";
 
 const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
 const POLL_MS = SERVICE_CONFIG.POLL_MS.TURN_MANAGER;
@@ -42,6 +43,21 @@ const processedMessages = new Set<string>();
 
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function purge_stale_debug_timed_event_requests(outbox_path: string): number {
+    const outbox = read_outbox(outbox_path);
+    const before = outbox.messages.length;
+    outbox.messages = outbox.messages.filter((message) => String(message.stage ?? "") !== "debug_timed_event_start");
+    const removed = before - outbox.messages.length;
+    if (removed > 0) {
+        write_outbox(outbox_path, outbox);
+        debug_log("TIMED_EVENT_BOOT", "purged stale debug timed event requests from outbox", {
+            slot: data_slot_number,
+            removed,
+        });
+    }
+    return removed;
 }
 
 // Read actor/NPC DEX score for initiative
@@ -91,6 +107,93 @@ function get_actor_location(slot: number, actor_ref: string): { world_x: number;
         region_x: Number(region.x ?? 0),
         region_y: Number(region.y ?? 0)
     };
+}
+
+function get_entity_place_and_tile(slot: number, actor_ref: string): { place_id: string; x: number; y: number; z?: number } | null {
+    let entity: Record<string, unknown> | null = null;
+    if (actor_ref.startsWith("actor.")) {
+        const actor_id = actor_ref.replace("actor.", "");
+        const result = load_actor(slot, actor_id);
+        if (result.ok) entity = result.actor;
+    } else if (actor_ref.startsWith("npc.")) {
+        const npc_id = actor_ref.replace("npc.", "");
+        const result = load_npc(slot, npc_id);
+        if (result.ok) entity = result.npc;
+    }
+    if (!entity) return null;
+    const location = (entity.location as Record<string, unknown>) ?? {};
+    const tile = (location.tile as Record<string, unknown>) ?? {};
+    const place_id = String(location.place_id ?? "").trim();
+    if (!place_id) return null;
+    return {
+        place_id,
+        x: Math.floor(Number(tile.x ?? 0)) || 0,
+        y: Math.floor(Number(tile.y ?? 0)) || 0,
+        z: Number.isFinite(Number(location.elevation)) ? Math.floor(Number(location.elevation)) : undefined,
+    };
+}
+
+function choose_npc_wander_goal(slot: number, actor_ref: string, target_ref?: string | null): { place_id: string; x: number; y: number; z?: number } | null {
+    const npc_pos = get_entity_place_and_tile(slot, actor_ref);
+    if (!npc_pos) return null;
+    const target_pos = target_ref ? get_entity_place_and_tile(slot, target_ref) : null;
+    if (target_pos && target_pos.place_id === npc_pos.place_id) {
+        face_target(actor_ref, target_ref!, { x: target_pos.x, y: target_pos.y }, { x: npc_pos.x, y: npc_pos.y });
+        const dx = Math.sign(target_pos.x - npc_pos.x);
+        const dy = Math.sign(target_pos.y - npc_pos.y);
+        if (dx !== 0 || dy !== 0) {
+            return { place_id: npc_pos.place_id, x: npc_pos.x + dx, y: npc_pos.y + dy, z: npc_pos.z };
+        }
+        return null;
+    }
+    const wander_options = [
+        { x: npc_pos.x + 1, y: npc_pos.y },
+        { x: npc_pos.x - 1, y: npc_pos.y },
+        { x: npc_pos.x, y: npc_pos.y + 1 },
+        { x: npc_pos.x, y: npc_pos.y - 1 },
+    ];
+    const choice = wander_options[Math.floor(Math.random() * wander_options.length)] ?? null;
+    return choice ? { place_id: npc_pos.place_id, x: choice.x, y: choice.y, z: npc_pos.z } : null;
+}
+
+async function request_entity_move_to(slot: number, actor_ref: string, goal: { place_id: string; x: number; y: number; z?: number }): Promise<boolean> {
+    try {
+        const response = await fetch("http://localhost:8787/api/movement/move_to", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                slot,
+                entity_ref: actor_ref,
+                place_id: goal.place_id,
+                x: goal.x,
+                y: goal.y,
+                z: goal.z,
+                mode: "WALK",
+            }),
+        });
+        if (!response.ok) return false;
+        const data = await response.json().catch(() => ({}));
+        return !!data?.ok;
+    } catch {
+        return false;
+    }
+}
+
+async function maybe_finalize_exhausted_turn(slot: number, actor_ref: string, context: Record<string, unknown>): Promise<boolean> {
+    const result = finalize_timed_event_turn_if_exhausted(slot, actor_ref);
+    if (!result.ok) {
+        if (result.error !== "no_active_timed_event" && result.error !== "not_your_turn") {
+            debug_log("TurnManager: failed to finalize exhausted turn", { actor: actor_ref, ...context, error: result.error });
+        }
+        return false;
+    }
+    if (!result.exhausted) return false;
+    debug_log("TurnManager: marked exhausted turn done", {
+        actor: actor_ref,
+        ...context,
+        advanced: result.advanced,
+    });
+    return true;
 }
 
 // Roll 1d20
@@ -212,7 +315,111 @@ async function process_npc_turn(slot: number, actor_ref: string, store: WorldSto
     
     const npc = npc_result.npc;
     const npc_name = (npc.name as string) ?? npc_id;
-    
+
+    const pending_comm = consume_pending_communication_opportunity(slot, actor_ref);
+    const communication_focus_ref = pending_comm?.target_ref || pending_comm?.speaker_ref || null;
+    if (pending_comm) {
+        const move_goal = choose_npc_wander_goal(slot, actor_ref, communication_focus_ref);
+        if (move_goal) {
+            const moved = await request_entity_move_to(slot, actor_ref, move_goal);
+            debug_log("TurnManager: NPC communication movement attempt", {
+                actor: actor_ref,
+                move_goal,
+                moved,
+                opportunity_id: pending_comm.opportunity_id,
+            });
+        }
+        const communicate_cost = getDefaultCost("COMMUNICATE");
+        if (!can_actor_afford_action_cost(slot, actor_ref, communicate_cost)) {
+            const npc_action: MessageInput = {
+                sender: actor_ref,
+                content: `${npc_name} has no ${communicate_cost} action left to speak.`,
+                stage: "npc_timed_action",
+                status: "sent",
+                meta: {
+                    npc_id,
+                    npc_name,
+                    action_type: "COMMUNICATE_BLOCKED",
+                    action_cost: communicate_cost,
+                    turn_number: store.current_turn,
+                    pending_opportunity_id: pending_comm.opportunity_id,
+                },
+            };
+            append_inbox_message(inbox_path, create_message(npc_action));
+            append_log_message(log_path, "system", `${npc_name} cannot respond; no ${communicate_cost} action left.`);
+            debug_log("TurnManager: NPC lacks action cost for pending communication", {
+                actor: actor_ref,
+                action_cost: communicate_cost,
+                opportunity_id: pending_comm.opportunity_id,
+            });
+            mark_actor_done(slot, actor_ref);
+            return;
+        }
+
+        const spent_ok = consume_actor_action_cost(slot, actor_ref, communicate_cost);
+        if (!spent_ok) {
+            append_log_message(log_path, "system", `${npc_name} failed to spend ${communicate_cost} action for communication.`);
+            debug_log("TurnManager: failed spending NPC communication action cost", {
+                actor: actor_ref,
+                action_cost: communicate_cost,
+                opportunity_id: pending_comm.opportunity_id,
+            });
+            mark_actor_done(slot, actor_ref);
+            return;
+        }
+
+        const outbox_path = get_outbox_path(slot);
+        ensure_outbox_exists(outbox_path);
+
+        const communicate_msg = create_message({
+            sender: pending_comm.speaker_ref,
+            content: pending_comm.original_text,
+            stage: "applied_COMMUNICATE",
+            status: "sent",
+            correlation_id: pending_comm.correlation_id,
+            conversation_id: pending_comm.conversation_id,
+            meta: {
+                intent_verb: "COMMUNICATE",
+                original_text: pending_comm.original_text,
+                target_ref: pending_comm.target_ref,
+                observed_by: [pending_comm.npc_ref],
+                response_eligible_by: [pending_comm.npc_ref],
+                force_npc_ref: pending_comm.npc_ref,
+                intent_subtype: pending_comm.volume ?? "NORMAL",
+                timed_event_pending_opportunity_id: pending_comm.opportunity_id,
+                timed_event_trigger_context: pending_comm.trigger_context,
+            },
+        });
+        append_outbox_message(outbox_path, communicate_msg);
+
+        const npc_action: MessageInput = {
+            sender: actor_ref,
+            content: `${npc_name} takes their turn to respond.`,
+            stage: "npc_timed_action",
+            status: "sent",
+            meta: {
+                npc_id,
+                npc_name,
+                action_type: "COMMUNICATE",
+                action_cost: communicate_cost,
+                turn_number: store.current_turn,
+                pending_opportunity_id: pending_comm.opportunity_id,
+            },
+        };
+        append_inbox_message(inbox_path, create_message(npc_action));
+        append_log_message(log_path, "system", `${npc_name}'s turn: responding to conversation.`);
+        debug_log("TurnManager: NPC consumed pending communication opportunity", {
+            actor: actor_ref,
+            opportunity_id: pending_comm.opportunity_id,
+            source_message_id: pending_comm.source_message_id,
+            action_cost: communicate_cost,
+        });
+        if (await maybe_finalize_exhausted_turn(slot, actor_ref, { reason: "pending_communication" })) {
+            return;
+        }
+        return;
+    }
+     
     // Check if there are active player actors to interact with
     const player_actors = store.initiative_order?.filter(e => 
         e.actor_ref.startsWith("actor.") && e.status === "active"
@@ -224,19 +431,27 @@ async function process_npc_turn(slot: number, actor_ref: string, store: WorldSto
         return;
     }
     
+    const player_target_ref = player_actors[0]?.actor_ref ?? null;
+    const move_goal = choose_npc_wander_goal(slot, actor_ref, store.timed_event_type === "conversation" ? player_target_ref : null);
+    let moved = false;
+    if (move_goal) {
+        moved = await request_entity_move_to(slot, actor_ref, move_goal);
+        debug_log("TurnManager: NPC idle movement attempt", {
+            actor: actor_ref,
+            move_goal,
+            moved,
+            event_type: store.timed_event_type,
+        });
+    }
+
     // Simple behavior based on event type
     let action_text = "";
-    
     if (store.timed_event_type === "combat") {
-        // In combat, NPCs might attack or defend
-        const actions = ["prepares to attack", "takes a defensive stance", "assesses the situation", "waits for an opening"];
-        action_text = actions[Math.floor(Math.random() * actions.length)] ?? "";
+        action_text = moved ? "wanders cautiously" : "idles and watches the room";
     } else if (store.timed_event_type === "conversation") {
-        // In conversation, NPCs respond
-        action_text = "listens attentively";
+        action_text = moved ? "steps closer and listens" : "faces the speaker and listens";
     } else {
-        // Exploration or other
-        action_text = "observes the surroundings";
+        action_text = moved ? "wanders a short distance" : "observes the surroundings";
     }
     
     // Create NPC action message
@@ -256,7 +471,10 @@ async function process_npc_turn(slot: number, actor_ref: string, store: WorldSto
     append_inbox_message(inbox_path, create_message(npc_action));
     append_log_message(log_path, "system", `${npc_name}'s turn: ${action_text}`);
     
-    // Mark NPC as done
+    if (await maybe_finalize_exhausted_turn(slot, actor_ref, { reason: "npc_idle_behavior", moved, event_type: store.timed_event_type })) {
+        return;
+    }
+
     mark_actor_done(slot, actor_ref);
     
     debug_log("TurnManager: NPC turn complete", { actor: actor_ref, action: action_text });
@@ -264,24 +482,53 @@ async function process_npc_turn(slot: number, actor_ref: string, store: WorldSto
 
 // Process turn advancement
 async function process_turn_advancement(slot: number, store: WorldStore): Promise<void> {
+    const fresh_store = get_timed_event_state(slot);
+    if (!fresh_store?.timed_event_active) return;
+    if (get_timed_event_phase(slot) === "world_sim_interstitial") return;
+
     const inbox_path = get_inbox_path(slot);
     const log_path = get_log_path(slot);
     
     // Check if current actor is done
-    const active_index = store.active_actor_index ?? 0;
-    const current_entry = store.initiative_order?.[active_index];
+    const active_index = fresh_store.active_actor_index ?? 0;
+    const current_entry = fresh_store.initiative_order?.[active_index];
     
     if (!current_entry) return;
+
+    debug_log("TIMED_EVENT_TURN", "turn manager inspected active turn state", {
+        slot,
+        active_actor: current_entry.actor_ref,
+        status: current_entry.status,
+        current_turn: fresh_store.current_turn ?? null,
+        current_round: fresh_store.current_round ?? null,
+        timed_event_phase: fresh_store.timed_event_phase ?? null,
+        movement_budgets: current_entry.movement_budgets ?? null,
+        actions_remaining: current_entry.actions_remaining ?? null,
+        partial_actions_remaining: current_entry.partial_actions_remaining ?? null,
+    });
     
     // If current actor is done, advance to next
     if (current_entry.status === "done" || current_entry.status === "left_region") {
         debug_log("TurnManager: advancing turn", { 
             from_actor: current_entry.actor_ref,
-            turn: store.current_turn 
+            turn: fresh_store.current_turn,
+            movement_budgets: current_entry.movement_budgets ?? null,
+            actions_remaining: current_entry.actions_remaining ?? null,
+            partial_actions_remaining: current_entry.partial_actions_remaining ?? null,
         });
         
         const result = advance_turn(slot);
-        
+
+        if (!result.ok && result.error === "world_sim_interstitial_started") {
+            append_log_message(log_path, "system", "Initiative cycle complete. World simulation interstitial has started.");
+            debug_log("TurnManager: world sim interstitial started", {
+                slot,
+                turn: store.current_turn,
+                round: store.current_round,
+            });
+            return;
+        }
+
         if (result.ok) {
             // Create turn announcement
             const turn_announcement: MessageInput = {
@@ -292,18 +539,13 @@ async function process_turn_advancement(slot: number, store: WorldStore): Promis
                 meta: {
                     turn_number: result.new_turn,
                     active_actor: result.active_actor,
-                    event_type: store.timed_event_type
+                    event_type: fresh_store.timed_event_type
                 }
             };
             
             append_inbox_message(inbox_path, create_message(turn_announcement));
             append_log_message(log_path, "system", `Turn ${result.new_turn}: ${result.active_actor.split(".")[1]}'s turn`);
             
-            // If it's an NPC's turn, process it automatically
-            if (result.active_actor.startsWith("npc.")) {
-                await sleep(1000); // Small delay for readability
-                await process_npc_turn(slot, result.active_actor, store);
-            }
         }
     }
 }
@@ -311,86 +553,155 @@ async function process_turn_advancement(slot: number, store: WorldStore): Promis
 // Check if event should end
 async function check_event_end(slot: number, store: WorldStore): Promise<void> {
     if (!store.timed_event_active) return;
-    
-    const inbox_path = get_inbox_path(slot);
-    const log_path = get_log_path(slot);
-    
-    // Check if all participants are done or have left
-    const all_done = check_all_done(slot);
-    
-    if (all_done) {
-        debug_log("TurnManager: ending timed event", { 
-            event_id: store.timed_event_id,
-            turns: store.current_turn 
-        });
-        
-        // Create end announcement
-        const end_announcement: MessageInput = {
-            sender: "turn_manager",
-            content: `The ${store.timed_event_type} has concluded after ${store.current_turn} turns.`,
-            stage: "timed_event_end",
-            status: "sent",
-            meta: {
-                event_type: store.timed_event_type,
-                total_turns: store.current_turn,
-                event_id: store.timed_event_id
-            }
-        };
-        
-        append_inbox_message(inbox_path, create_message(end_announcement));
-        append_log_message(log_path, "system", `Timed event ended: ${store.timed_event_type} (${store.current_turn} turns)`);
-
-        // NPC memory journal: summarize what each NPC would remember from this timed event
-        try {
-            const event_id = store.timed_event_id;
-            const event_type = store.timed_event_type;
-            const region = store.event_region ?? null;
-            const participants = Array.isArray(store.initiative_order)
-                ? store.initiative_order.map((e: any) => String(e?.actor_ref ?? "")).filter((s) => s.length > 0)
-                : [];
-            if (event_id && event_type && participants.length > 0) {
-                for (const ref of participants) {
-                    if (!ref.startsWith("npc.")) continue;
-                    void append_timed_event_memory_journal(slot, ref, {
-                        event_id,
-                        event_type,
-                        participants,
-                        region,
-                    });
-                }
-            }
-        } catch (err) {
-            log_service_error("turn_manager", "npc_memory_journal_end", { event_id: store.timed_event_id }, err);
-        }
-        
-        // End the event
-        end_timed_event(slot);
-    }
+    debug_log("TurnManager: automatic timed event end disabled", {
+        event_id: store.timed_event_id,
+        current_turn: store.current_turn,
+        current_round: store.current_round,
+        reason: "manual_debug_end_only",
+    });
 }
 
 // Process messages that trigger timed events
 async function process_trigger_messages(outbox_path: string, inbox_path: string, log_path: string): Promise<void> {
     try {
         const outbox = read_outbox(outbox_path);
+
+        const start_timed_event_from_trigger = async (
+            event_type: TimedEventType,
+            participants: string[],
+            location: { world_x: number; world_y: number; region_x: number; region_y: number },
+            trigger: string,
+            trigger_context?: { source_ref?: string; target_refs?: string[]; summary?: string },
+        ): Promise<void> => {
+            debug_log("TurnManager: starting timed event", {
+                type: event_type,
+                participants,
+                trigger,
+            });
+
+            const result = start_timed_event(
+                data_slot_number,
+                event_type,
+                participants,
+                location,
+                {
+                    trigger: {
+                        kind: trigger,
+                        source_ref: trigger_context?.source_ref,
+                        target_refs: trigger_context?.target_refs,
+                        summary: trigger_context?.summary,
+                    },
+                },
+            );
+
+            if (!result.ok) return;
+
+            const new_store = get_timed_event_state(data_slot_number);
+            if (new_store) {
+                await roll_initiative(data_slot_number, new_store);
+            }
+
+            const turn_store = get_timed_event_state(data_slot_number);
+            const store_order = Array.isArray(turn_store?.initiative_order)
+                ? turn_store.initiative_order.map((entry) => entry.actor_ref)
+                : participants;
+            const first_actor = turn_store?.initiative_order?.[0]?.actor_ref ?? null;
+            const turn_announcement: MessageInput = {
+                sender: "turn_manager",
+                content: `Turn order: ${store_order.map((ref) => {
+                    const parts = ref.split(".");
+                    return parts[1] || ref;
+                }).join(", ")}`,
+                stage: "turn_order",
+                status: "sent",
+                meta: {
+                    event_id: result.event_id,
+                    initiative_order: store_order,
+                    first_actor,
+                },
+            };
+            append_inbox_message(inbox_path, create_message(turn_announcement));
+
+            try {
+                const region_id = `region.${location.world_x}_${location.world_y}_${location.region_x}_${location.region_y}`;
+                await build_working_memory(
+                    data_slot_number,
+                    result.event_id,
+                    event_type,
+                    region_id,
+                    participants,
+                );
+                debug_log("TurnManager: working memory built", { event_id: result.event_id, participants: participants.length });
+            } catch (err) {
+                debug_log("TurnManager: failed to build working memory", { error: err instanceof Error ? err.message : String(err) });
+            }
+
+            const start_announcement: MessageInput = {
+                sender: "turn_manager",
+                content: `Timed event begins! ${participants.length} participants.`,
+                stage: "timed_event_start",
+                status: "sent",
+                meta: {
+                    event_type,
+                    participants,
+                    event_id: result.event_id,
+                    region: location,
+                    trigger,
+                    trigger_context: trigger_context ?? null,
+                },
+            };
+
+            append_inbox_message(inbox_path, create_message(start_announcement));
+            append_log_message(log_path, "system", `Timed event started: ${event_type} with ${participants.length} participants.`);
+        };
         
         // Look for ruling messages that might trigger timed events
         const candidates = outbox.messages.filter((m: MessageEnvelope) => {
-            return m.stage?.startsWith("ruling_") && 
-                   m.status === "done" && 
-                   !processedMessages.has(m.id);
+            const stage = String(m.stage ?? "");
+            const is_ruling = stage.startsWith("ruling_") && m.status === "done";
+            const is_debug_start = stage === "debug_timed_event_start";
+            return (is_ruling || is_debug_start) && !processedMessages.has(m.id);
         });
         
         for (const msg of candidates) {
             processedMessages.add(msg.id);
+            const meta = (msg.meta as Record<string, unknown>) ?? {};
+
+            if (msg.stage === "debug_timed_event_start") {
+                const store = get_timed_event_state(data_slot_number);
+                if (store?.timed_event_active) continue;
+
+                const participants = Array.isArray(meta.participants)
+                    ? meta.participants.filter((p): p is string => typeof p === "string" && (p.startsWith("actor.") || p.startsWith("npc.")))
+                    : [];
+                if (participants.length < 2) continue;
+
+                const first_participant = participants[0] ?? "";
+                if (!first_participant) continue;
+                const location = get_actor_location(data_slot_number, first_participant);
+                if (!location) {
+                    debug_log("TurnManager: cannot start debug timed event, no location", { participant: first_participant });
+                    continue;
+                }
+
+                const requested_type = String(meta.event_type ?? "combat").toLowerCase();
+                const event_type: TimedEventType = requested_type === "conversation" ? "conversation" : "combat";
+                await start_timed_event_from_trigger(event_type, participants, location, "debug_start", {
+                    summary: typeof meta.summary === "string" ? meta.summary : `Debug start for ${participants.length} participants`,
+                });
+                continue;
+            }
             
-            const events = (msg.meta as Record<string, unknown>)?.events as string[] ?? [];
-            const machine_text = (msg.meta as Record<string, unknown>)?.machine_text as string ?? "";
+            const events = meta.events as string[] ?? [];
+            const machine_text = meta.machine_text as string ?? "";
+            const sender = String(msg.sender ?? "");
             
-            // Check if this is an ATTACK or COMMUNICATE action
-            const is_attack = events.some(e => e.includes(".ATTACK(")) || machine_text.includes(".ATTACK(");
+            // Harmful USE and COMMUNICATE are the first-pass timed-event triggers.
+            const is_harmful_use = events.some(e => e.includes(".USE(") && /health|injur|damage|harm/i.test(e))
+                || (machine_text.includes(".USE(") && /health|injur|damage|harm/i.test(machine_text));
             const is_communicate = events.some(e => e.includes(".COMMUNICATE(")) || machine_text.includes(".COMMUNICATE(");
             
-            if (!is_attack && !is_communicate) continue;
+            if (!is_harmful_use && !is_communicate) continue;
             
             // Check if timed event is already active
             const store = get_timed_event_state(data_slot_number);
@@ -403,7 +714,6 @@ async function process_trigger_messages(outbox_path: string, inbox_path: string,
             const participants: string[] = [];
             
             // Add the actor who initiated
-            const sender = msg.sender ?? "";
             if (sender.startsWith("actor.") || sender.startsWith("npc.")) {
                 participants.push(sender);
             }
@@ -436,111 +746,15 @@ async function process_trigger_messages(outbox_path: string, inbox_path: string,
                 continue;
             }
             
-            // Determine event type
-            const event_type = is_attack ? "combat" : "conversation";
-            
-            debug_log("TurnManager: starting timed event", {
-                type: event_type,
-                participants,
-                trigger: is_attack ? "attack" : "communicate"
+            const target_refs = participants.filter((ref) => ref !== sender);
+            const event_type: TimedEventType = is_harmful_use ? "combat" : "conversation";
+            await start_timed_event_from_trigger(event_type, participants, location, is_harmful_use ? "harmful_use" : "communicate", {
+                source_ref: sender || undefined,
+                target_refs,
+                summary: is_harmful_use
+                    ? "Hostile or injurious USE triggered timed event"
+                    : "Communication escalation triggered timed event",
             });
-            
-            // Start the timed event
-            const result = start_timed_event(
-                data_slot_number,
-                event_type,
-                participants,
-                location
-            );
-            
-            if (result.ok) {
-                // Get the updated store and roll initiative
-                const new_store = get_timed_event_state(data_slot_number);
-                if (new_store) {
-                    await roll_initiative(data_slot_number, new_store);
-                }
-                
-                // ===== PHASE 5: INITIALIZE TURN STATE MACHINE =====
-                try {
-                    // Initialize turn state
-                    const turn_state = initialize_turn_state(
-                        result.event_id,
-                        event_type as TimedEventType,
-                        participants,
-                        { turn_duration_limit_ms: 60000 } // 60 second turn limit
-                    );
-                    
-                    // Roll initiative
-                    const initiative_scores = new Map<string, number>();
-                    for (const participant of participants) {
-                        const dex = get_actor_dex(data_slot_number, participant);
-                        const roll = roll_d20();
-                        const bonus = get_dex_bonus(dex);
-                        initiative_scores.set(participant, roll + bonus + 50); // Base 50 + roll + bonus
-                    }
-                    
-                    roll_initiative_state_machine(turn_state, initiative_scores);
-                    
-                    debug_log("TurnManager: turn state initialized", { 
-                        event_id: result.event_id, 
-                        participants: participants.length,
-                        first_actor: turn_state.current_actor_ref,
-                        phase: turn_state.phase
-                    });
-                    
-                    // Create turn announcement with initiative order
-                    const turn_announcement: MessageInput = {
-                        sender: "turn_manager",
-                        content: `Turn order: ${turn_state.initiative_order.map(ref => {
-                            const parts = ref.split(".");
-                            return parts[1] || ref;
-                        }).join(", ")}`,
-                        stage: "turn_order",
-                        status: "sent",
-                        meta: {
-                            event_id: result.event_id,
-                            initiative_order: turn_state.initiative_order,
-                            first_actor: turn_state.current_actor_ref
-                        }
-                    };
-                    append_inbox_message(inbox_path, create_message(turn_announcement));
-                    
-                } catch (err) {
-                    debug_log("TurnManager: failed to initialize turn state", { error: err instanceof Error ? err.message : String(err) });
-                }
-                
-                // Build working memory for this timed event
-                try {
-                    const region_id = `region.${location.world_x}_${location.world_y}_${location.region_x}_${location.region_y}`;
-                    await build_working_memory(
-                        data_slot_number,
-                        result.event_id,
-                        event_type as TimedEventType,
-                        region_id,
-                        participants
-                    );
-                    debug_log("TurnManager: working memory built", { event_id: result.event_id, participants: participants.length });
-                } catch (err) {
-                    debug_log("TurnManager: failed to build working memory", { error: err instanceof Error ? err.message : String(err) });
-                }
-                
-                // Create start announcement
-                const start_announcement: MessageInput = {
-                    sender: "turn_manager",
-                    content: `${event_type === "combat" ? "Combat" : "Conversation"} begins! ${participants.length} participants.`,
-                    stage: "timed_event_start",
-                    status: "sent",
-                    meta: {
-                        event_type,
-                        participants,
-                        event_id: result.event_id,
-                        region: location
-                    }
-                };
-                
-                append_inbox_message(inbox_path, create_message(start_announcement));
-                append_log_message(log_path, "system", `Timed event started: ${event_type} with ${participants.length} participants`);
-            }
         }
     } catch (err) {
         log_service_error("turn_manager", "process_trigger_messages", {}, err);
@@ -575,17 +789,27 @@ async function tick(outbox_path: string, inbox_path: string, log_path: string): 
         // Check for region exits
         await check_region_exits(data_slot_number, store);
         
-        // ===== PHASE 5: PROCESS TURN STATE MACHINE =====
-        if (store.event_id) {
-            const turn_state = get_turn_state(store.event_id);
-            if (turn_state) {
-                await process_turn_phases(data_slot_number, store.event_id, turn_state, inbox_path, log_path);
-            }
-        }
-        
-        // Legacy turn advancement (kept for compatibility)
+        // Store-backed turn advancement is authoritative.
         await process_turn_advancement(data_slot_number, store);
-        
+
+        const post_advance_store = get_timed_event_state(data_slot_number);
+        const active_index = post_advance_store?.active_actor_index ?? -1;
+        const active_entry = active_index >= 0 ? (post_advance_store?.initiative_order?.[active_index] ?? null) : null;
+        if (
+            post_advance_store?.timed_event_active &&
+            active_entry &&
+            active_entry.status === "active" &&
+            active_entry.actor_ref.startsWith("npc.")
+        ) {
+            debug_log("TurnManager: auto-processing active NPC turn", {
+                actor: active_entry.actor_ref,
+                turn: post_advance_store.current_turn,
+                round: post_advance_store.current_round,
+                has_pending_communication: has_pending_communication_opportunity(data_slot_number, active_entry.actor_ref),
+            });
+            await process_npc_turn(data_slot_number, active_entry.actor_ref, post_advance_store);
+        }
+
         // Refresh store state after potential changes
         const updated_store = get_timed_event_state(data_slot_number);
         if (updated_store?.timed_event_active) {
@@ -595,195 +819,6 @@ async function tick(outbox_path: string, inbox_path: string, log_path: string): 
         
     } catch (err) {
         log_service_error("turn_manager", "tick", {}, err);
-    }
-}
-
-// ===== PHASE 5: TURN STATE MACHINE PROCESSING =====
-
-async function process_turn_phases(
-    slot: number,
-    event_id: string,
-    turn_state: TurnState,
-    inbox_path: string,
-    log_path: string
-): Promise<void> {
-    try {
-        // Check turn timer
-        if (is_turn_timer_expired(turn_state)) {
-            debug_log("TurnManager", `Turn timer expired for ${turn_state.current_actor_ref}`, {
-                event_id,
-                turn: turn_state.current_turn
-            });
-            
-            // Auto-skip turn
-            transition_phase(turn_state, "TURN_END");
-            
-            const skip_announcement: MessageInput = {
-                sender: "turn_manager",
-                content: `${turn_state.current_actor_ref}'s turn timed out and was skipped.`,
-                stage: "turn_skip",
-                status: "sent",
-                meta: {
-                    event_id,
-                    skipped_actor: turn_state.current_actor_ref,
-                    turn: turn_state.current_turn
-                }
-            };
-            append_inbox_message(inbox_path, create_message(skip_announcement));
-        }
-        
-        // Process based on current phase
-        switch (turn_state.phase) {
-            case "TURN_START":
-                // Announce turn start
-                const turn_announcement: MessageInput = {
-                    sender: "turn_manager",
-                    content: `Turn ${turn_state.current_turn}: ${turn_state.current_actor_ref}`,
-                    stage: "turn_start",
-                    status: "sent",
-                    meta: {
-                        event_id,
-                        turn: turn_state.current_turn,
-                        actor: turn_state.current_actor_ref,
-                        round: turn_state.round_number,
-                        time_remaining: turn_state.turn_time_remaining_ms
-                    }
-                };
-                append_inbox_message(inbox_path, create_message(turn_announcement));
-                
-                // Transition to action selection
-                transition_phase(turn_state, "ACTION_SELECTION");
-                break;
-                
-            case "ACTION_SELECTION":
-                // Wait for action input (player) or NPC decision
-                // This is handled by other services (interpreter, npc_ai)
-                // Turn manager just waits in this phase
-                break;
-                
-            case "ACTION_RESOLUTION":
-                // Action is being resolved
-                // This is handled by state_applier
-                // After resolution, transition to turn end
-                // (State applier should signal completion)
-                break;
-                
-            case "TURN_END":
-                // Process any held action triggers
-                const held_reactions = check_triggers(
-                    event_id,
-                    `turn_end_${turn_state.current_turn}`,
-                    turn_state.current_turn,
-                    { actor_ref: turn_state.current_actor_ref ?? undefined }
-                );
-                
-                if (held_reactions.length > 0) {
-                    // Process reactions
-                    for (const reaction of held_reactions) {
-                        const result = process_reaction(reaction, (actor, action, target) => {
-                            // Simple validation - in full implementation would check properly
-                            return true;
-                        });
-                        
-                        debug_log("TurnManager", `Processed reaction: ${result.message}`, {
-                            event_id,
-                            reactor: reaction.reactor_ref,
-                            success: result.success
-                        });
-                    }
-                }
-                
-                // Process dispersing tags at end of turn
-                await MetaTagProcessor.processDispersingTags(slot);
-                
-                // Transition to event end check (which may start next turn)
-                transition_phase(turn_state, "EVENT_END_CHECK");
-                break;
-                
-            case "EVENT_END_CHECK":
-                // Check end conditions
-                const should_end = await check_event_end_conditions(slot, event_id, turn_state);
-                if (should_end) {
-                    transition_phase(turn_state, "EVENT_END");
-                    
-                    // Clear reactions
-                    clear_event_reactions(event_id);
-                    
-                    // End the timed event
-                    // NPC memory journal: summarize what each NPC would remember from this timed event
-                    try {
-                        const store = get_timed_event_state(slot);
-                        const region = store?.event_region ?? null;
-                        const participants = Array.isArray(turn_state.initiative_order) ? turn_state.initiative_order : [];
-                        for (const ref of participants) {
-                            if (!ref.startsWith("npc.")) continue;
-                            void append_timed_event_memory_journal(slot, ref, {
-                                event_id,
-                                event_type: turn_state.event_type,
-                                participants,
-                                region,
-                            });
-                        }
-                    } catch (err) {
-                        log_service_error("turn_manager", "npc_memory_journal_end", { event_id }, err);
-                    }
-
-                    end_timed_event(slot);
-                    
-                    const end_announcement: MessageInput = {
-                        sender: "turn_manager",
-                        content: `${turn_state.event_type} has ended.`,
-                        stage: "timed_event_end",
-                        status: "sent",
-                        meta: {
-                            event_id,
-                            event_type: turn_state.event_type,
-                            rounds: turn_state.round_number,
-                            final_turn: turn_state.current_turn
-                        }
-                    };
-                    append_inbox_message(inbox_path, create_message(end_announcement));
-                    append_log_message(log_path, "system", `Timed event ended: ${event_id}`);
-                }
-                break;
-        }
-        
-        // Log turn summary periodically
-        if (turn_state.current_turn % 5 === 0) {
-            const summary = get_turn_summary(turn_state);
-            debug_log("TurnManager", "Turn summary", summary);
-        }
-        
-    } catch (err) {
-        log_service_error("turn_manager", "process_turn_phases", { event_id }, err);
-    }
-}
-
-async function check_event_end_conditions(
-    slot: number,
-    event_id: string,
-    turn_state: TurnState
-): Promise<boolean> {
-    // Check different end conditions based on event type
-    switch (turn_state.event_type) {
-        case "combat":
-            // End if all enemies defeated or all allies defeated
-            // This would check working memory or world state
-            // For now, end after 20 turns max
-            return turn_state.round_number >= 20;
-            
-        case "conversation":
-            // End if conversation naturally concludes
-            // Or after 10 turns
-            return turn_state.round_number >= 10;
-            
-        case "exploration":
-            // End if time limit reached or objective found
-            // Or after 15 turns
-            return turn_state.round_number >= 15;
-            
-        default:
-            return false;
     }
 }
 
@@ -799,9 +834,17 @@ function initialize(): { outbox_path: string; inbox_path: string; log_path: stri
     ensure_log_exists(log_path);
     ensure_inbox_exists(inbox_path);
     ensure_outbox_exists(outbox_path);
+    purge_stale_debug_timed_event_requests(outbox_path);
     
     // Ensure world exists
     ensure_world_exists(data_slot_number);
+    const stale_clear = clear_stale_timed_event(data_slot_number, "turn_manager_boot");
+    if (!stale_clear.ok) {
+        debug_log("TIMED_EVENT_BOOT", "failed to clear stale timed event on boot", {
+            slot: data_slot_number,
+            error: stale_clear.error,
+        });
+    }
     
     return { outbox_path, inbox_path, log_path };
 }

@@ -4,6 +4,10 @@ import { parse } from "jsonc-parser";
 import { ensure_dir_exists } from "../engine/log_store.js";
 import { get_default_world_path, get_legacy_default_world_path, get_legacy_world_path, get_world_dir, get_world_path, get_data_slot_dir } from "../engine/paths.js";
 import { list_places_in_region, load_place } from "../place_storage/store.js";
+import { load_actor } from "../actor_storage/store.js";
+import { load_npc } from "../npc_storage/store.js";
+import type { ActionCost } from "../shared/constants.js";
+import { debug_log } from "../shared/debug.js";
 
 export type WorldLookupResult =
     | { ok: true; world: Record<string, unknown>; path: string }
@@ -22,8 +26,86 @@ type InitiativeEntry = {
     actions_remaining: number;
     partial_actions_remaining: number;
     movement_remaining: number;
+    movement_budgets?: {
+        walk: number;
+        climb: number;
+        swim: number;
+        fly: number;
+    };
     status: "active" | "passed" | "left_region" | "done";
 };
+
+export type TimedEventPhase = "initiative_turn" | "world_sim_interstitial";
+
+export const DEFAULT_TIMED_EVENT_MOVEMENT_PER_TURN = 6;
+export const TIMED_EVENT_TURN_WINDOW_BREATHS = 18;
+
+export function timed_event_stat_to_bps(speed: number): number {
+    const s = Math.floor(Number(speed));
+    if (!Number.isFinite(s) || s <= 0) return 8;
+    if (s >= 8) return 1;
+    return Math.max(1, 9 - s);
+}
+
+function create_default_timed_event_movement_budgets() {
+    return {
+        walk: DEFAULT_TIMED_EVENT_MOVEMENT_PER_TURN,
+        climb: DEFAULT_TIMED_EVENT_MOVEMENT_PER_TURN,
+        swim: DEFAULT_TIMED_EVENT_MOVEMENT_PER_TURN,
+        fly: DEFAULT_TIMED_EVENT_MOVEMENT_PER_TURN,
+    };
+}
+
+function sanitize_timed_event_movement_budget(value: unknown, fallback: number): number {
+    const num = Math.floor(Number(value));
+    if (!Number.isFinite(num)) return Math.max(0, Math.floor(Number(fallback) || 0));
+    return Math.max(0, num);
+}
+
+function resolve_timed_event_movement_budgets(slot: number, actor_ref: string): { walk: number; climb: number; swim: number; fly: number } {
+    const fallback = create_default_timed_event_movement_budgets();
+    const ref = String(actor_ref ?? "").trim();
+    if (!ref) return fallback;
+
+    let entity: Record<string, unknown> | null = null;
+    if (ref.startsWith("actor.")) {
+        const result = load_actor(slot, ref.slice("actor.".length));
+        entity = result.ok ? result.actor : null;
+    } else if (ref.startsWith("npc.")) {
+        const result = load_npc(slot, ref.slice("npc.".length));
+        entity = result.ok ? result.npc : null;
+    }
+
+    const movement = (entity && typeof (entity as any).movement === "object") ? (entity as any).movement : null;
+    const resolved = {
+        walk: sanitize_timed_event_movement_budget(movement?.walk, fallback.walk),
+        climb: sanitize_timed_event_movement_budget(movement?.climb, fallback.climb),
+        swim: sanitize_timed_event_movement_budget(movement?.swim, fallback.swim),
+        fly: sanitize_timed_event_movement_budget(movement?.fly, fallback.fly),
+    };
+
+    debug_log("TIMED_EVENT_MOVE", "resolved timed-event movement budgets", {
+        slot,
+        actor_ref,
+        source: movement ? "entity_record" : "default_fallback",
+        movement_source: movement ?? null,
+        resolved_budgets: resolved,
+    });
+
+    return resolved;
+}
+
+function normalize_initiative_entry_movement(entry: InitiativeEntry): InitiativeEntry {
+    const budgets = entry.movement_budgets ?? create_default_timed_event_movement_budgets();
+    entry.movement_budgets = {
+        walk: Math.max(0, Math.floor(Number(budgets.walk) || 0)),
+        climb: Math.max(0, Math.floor(Number(budgets.climb) || 0)),
+        swim: Math.max(0, Math.floor(Number(budgets.swim) || 0)),
+        fly: Math.max(0, Math.floor(Number(budgets.fly) || 0)),
+    };
+    entry.movement_remaining = entry.movement_budgets.walk;
+    return entry;
+}
 
 type TimedEventEffect = {
     id: string;
@@ -31,6 +113,32 @@ type TimedEventEffect = {
     target_ref: string;
     effect_type: string;
     effect_args: Record<string, unknown>;
+};
+
+type TimedEventTriggerContext = {
+    kind: string;
+    source_ref?: string;
+    target_refs?: string[];
+    summary?: string;
+};
+
+export type PendingCommunicationOpportunity = {
+    opportunity_id: string;
+    event_id?: string;
+    source_message_id: string;
+    npc_ref: string;
+    speaker_ref: string;
+    target_ref?: string;
+    participants: string[];
+    original_text: string;
+    response_eligible_reason: string;
+    trigger_context?: string;
+    created_turn?: number;
+    created_round?: number;
+    volume?: string;
+    conversation_id?: string;
+    correlation_id?: string;
+    status: "pending" | "in_flight" | "consumed" | "expired" | "cancelled";
 };
 
 export type WorldStore = {
@@ -43,12 +151,18 @@ export type WorldStore = {
     timed_event_id?: string;
     timed_event_type?: "combat" | "conversation" | "exploration";
     timed_event_start_time?: string;  // ISO timestamp
+    timed_event_trigger?: TimedEventTriggerContext;
     
     // Turn Management
     current_turn?: number;
     current_round?: number;
     initiative_order?: InitiativeEntry[];
     active_actor_index?: number;
+    timed_event_phase?: TimedEventPhase;
+    current_turn_window_breaths?: number;
+    current_turn_started_breath?: number;
+    timed_event_world_breath_index?: number;
+    world_sim_interstitial_breaths?: number;
     
     // Region tracking for proximity
     event_region?: {
@@ -60,6 +174,7 @@ export type WorldStore = {
     
     // Pending effects
     timed_effects_queue?: TimedEventEffect[];
+    pending_communication_opportunities?: PendingCommunicationOpportunity[];
 };
 
 // New Region Types - Regions stored in separate files
@@ -583,7 +698,11 @@ export function get_region_tile(slot: number, world_x: number, world_y: number, 
 export function get_timed_event_state(slot: number): WorldStore | null {
     const world = ensure_world_exists(slot);
     if (!world.ok) return null;
-    return world.world as WorldStore;
+    const store = world.world as WorldStore;
+    if (Array.isArray(store.initiative_order)) {
+        for (const entry of store.initiative_order) normalize_initiative_entry_movement(entry);
+    }
+    return store;
 }
 
 export function save_world_store(slot: number, store: WorldStore): boolean {
@@ -600,7 +719,10 @@ export function start_timed_event(
     slot: number,
     event_type: "combat" | "conversation" | "exploration",
     participants: string[],
-    region: { world_x: number; world_y: number; region_x: number; region_y: number }
+    region: { world_x: number; world_y: number; region_x: number; region_y: number },
+    options?: {
+        trigger?: TimedEventTriggerContext;
+    },
 ): { ok: true; event_id: string } | { ok: false; error: string } {
     const world = ensure_world_exists(slot);
     if (!world.ok) return { ok: false, error: world.error };
@@ -612,9 +734,22 @@ export function start_timed_event(
     store.timed_event_id = event_id;
     store.timed_event_type = event_type;
     store.timed_event_start_time = new Date().toISOString();
+    store.timed_event_trigger = options?.trigger ? {
+        kind: String(options.trigger.kind ?? "unknown"),
+        source_ref: typeof options.trigger.source_ref === "string" ? options.trigger.source_ref : undefined,
+        target_refs: Array.isArray(options.trigger.target_refs)
+            ? options.trigger.target_refs.filter((ref): ref is string => typeof ref === "string" && ref.length > 0)
+            : undefined,
+        summary: typeof options.trigger.summary === "string" ? options.trigger.summary : undefined,
+    } : undefined;
     store.current_turn = 1;
     store.current_round = 1;
-    store.initiative_order = participants.map(ref => ({
+    store.timed_event_phase = "initiative_turn";
+    store.current_turn_window_breaths = TIMED_EVENT_TURN_WINDOW_BREATHS;
+    store.current_turn_started_breath = undefined;
+    store.timed_event_world_breath_index = 0;
+    store.world_sim_interstitial_breaths = undefined;
+    store.initiative_order = participants.map((ref): InitiativeEntry => ({
         actor_ref: ref,
         initiative_roll: 0,  // Will be set by turn manager
         dex_score: 0,        // Will be set by turn manager
@@ -622,8 +757,9 @@ export function start_timed_event(
         actions_remaining: 1,
         partial_actions_remaining: 1,
         movement_remaining: 0,
+        movement_budgets: resolve_timed_event_movement_budgets(slot, ref),
         status: "active"
-    }));
+    })).map(normalize_initiative_entry_movement);
     store.active_actor_index = 0;
     store.event_region = region;
     store.timed_effects_queue = [];
@@ -631,6 +767,14 @@ export function start_timed_event(
     if (!save_world_store(slot, store)) {
         return { ok: false, error: "failed_to_save_world" };
     }
+    debug_log("TIMED_EVENT_BREATH", "timed event started with frozen world breaths", {
+        slot,
+        event_id,
+        event_type,
+        participants: participants.length,
+        timed_event_world_breath_index: store.timed_event_world_breath_index ?? 0,
+        turn_window_breaths: store.current_turn_window_breaths ?? TIMED_EVENT_TURN_WINDOW_BREATHS,
+    });
     
     return { ok: true, event_id };
 }
@@ -644,24 +788,541 @@ export function end_timed_event(slot: number): boolean {
     store.timed_event_id = undefined;
     store.timed_event_type = undefined;
     store.timed_event_start_time = undefined;
+    store.timed_event_trigger = undefined;
+    store.pending_communication_opportunities = undefined;
     store.current_turn = undefined;
     store.current_round = undefined;
     store.initiative_order = undefined;
     store.active_actor_index = undefined;
+    store.timed_event_phase = undefined;
+    store.current_turn_window_breaths = undefined;
+    store.current_turn_started_breath = undefined;
+    store.timed_event_world_breath_index = undefined;
+    store.world_sim_interstitial_breaths = undefined;
     store.event_region = undefined;
     store.timed_effects_queue = undefined;
+    debug_log("TIMED_EVENT_BREATH", "timed event ended and normal world breaths resumed", {
+        slot,
+    });
     
     return save_world_store(slot, store);
 }
 
+export function clear_stale_timed_event(slot: number, reason: string): { ok: true; cleared: boolean } | { ok: false; error: string } {
+    const world = ensure_world_exists(slot);
+    if (!world.ok) return { ok: false, error: world.error };
+
+    const store = world.world as WorldStore;
+    if (!store.timed_event_active) {
+        debug_log("TIMED_EVENT_BOOT", "no stale timed event to clear", {
+            slot,
+            reason,
+        });
+        return { ok: true, cleared: false };
+    }
+
+    const snapshot = {
+        event_id: store.timed_event_id ?? store.event_id ?? null,
+        event_type: store.timed_event_type ?? null,
+        current_turn: store.current_turn ?? null,
+        current_round: store.current_round ?? null,
+        timed_event_phase: store.timed_event_phase ?? null,
+        active_actor_index: typeof store.active_actor_index === "number" ? store.active_actor_index : null,
+        active_actor_ref: (typeof store.active_actor_index === "number" && Array.isArray(store.initiative_order))
+            ? (store.initiative_order[store.active_actor_index]?.actor_ref ?? null)
+            : null,
+        timed_event_world_breath_index: store.timed_event_world_breath_index ?? null,
+    };
+
+    const cleared = end_timed_event(slot);
+    if (!cleared) return { ok: false, error: "failed_to_clear_stale_timed_event" };
+
+    debug_log("TIMED_EVENT_BOOT", "cleared stale timed event on boot", {
+        slot,
+        reason,
+        ...snapshot,
+    });
+    return { ok: true, cleared: true };
+}
+
 export function get_active_actor_ref(slot: number): string | null {
     const store = get_timed_event_state(slot);
-    if (!store?.timed_event_active || !store.initiative_order || store.active_actor_index === undefined) {
+    if (!store?.timed_event_active || store.timed_event_phase === "world_sim_interstitial" || !store.initiative_order || store.active_actor_index === undefined) {
         return null;
     }
     
     const entry = store.initiative_order[store.active_actor_index];
     return entry?.actor_ref ?? null;
+}
+
+export function get_timed_event_phase(slot: number): TimedEventPhase | null {
+    const store = get_timed_event_state(slot);
+    if (!store?.timed_event_active) return null;
+    return store.timed_event_phase === "world_sim_interstitial" ? "world_sim_interstitial" : "initiative_turn";
+}
+
+export function is_timed_event_world_sim_interstitial(slot: number): boolean {
+    return get_timed_event_phase(slot) === "world_sim_interstitial";
+}
+
+export function get_timed_event_turn_window_breaths(slot: number): number {
+    const store = get_timed_event_state(slot);
+    const configured = Math.floor(Number(store?.current_turn_window_breaths ?? TIMED_EVENT_TURN_WINDOW_BREATHS)) || TIMED_EVENT_TURN_WINDOW_BREATHS;
+    return Math.max(1, configured);
+}
+
+export function get_timed_event_world_breath_index(slot: number): number | null {
+    const store = get_timed_event_state(slot);
+    if (!store?.timed_event_active) return null;
+    const value = Math.floor(Number(store.timed_event_world_breath_index ?? 0));
+    return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+export function advance_timed_event_world_breaths(slot: number, breaths: number): { ok: true; world_breath_index: number; remaining_interstitial_breaths: number | null } | { ok: false; error: string } {
+    const world = ensure_world_exists(slot);
+    if (!world.ok) return { ok: false, error: world.error };
+
+    const store = world.world as WorldStore;
+    if (!store.timed_event_active) return { ok: false, error: "no_active_timed_event" };
+
+    const applied = Math.max(0, Math.floor(Number(breaths) || 0));
+    const current = Math.max(0, Math.floor(Number(store.timed_event_world_breath_index ?? 0)) || 0);
+    store.timed_event_world_breath_index = current + applied;
+
+    if (store.timed_event_phase === "world_sim_interstitial") {
+        const remaining = Math.max(0, Math.floor(Number(store.world_sim_interstitial_breaths ?? TIMED_EVENT_TURN_WINDOW_BREATHS)) || TIMED_EVENT_TURN_WINDOW_BREATHS);
+        store.world_sim_interstitial_breaths = Math.max(0, remaining - applied);
+    }
+
+    if (!save_world_store(slot, store)) return { ok: false, error: "failed_to_save" };
+    return {
+        ok: true,
+        world_breath_index: store.timed_event_world_breath_index ?? 0,
+        remaining_interstitial_breaths: store.timed_event_phase === "world_sim_interstitial"
+            ? Math.max(0, Math.floor(Number(store.world_sim_interstitial_breaths ?? 0)) || 0)
+            : null,
+    };
+}
+
+export function note_current_turn_started_breath(slot: number, breath_index: number): boolean {
+    const world = ensure_world_exists(slot);
+    if (!world.ok) return false;
+
+    const store = world.world as WorldStore;
+    if (!store.timed_event_active || store.timed_event_phase === "world_sim_interstitial") return false;
+    const next = Math.max(0, Math.floor(Number(breath_index) || 0));
+    if (store.current_turn_started_breath === next) return true;
+    if (typeof store.current_turn_started_breath === 'number' && Number.isFinite(store.current_turn_started_breath)) return true;
+    store.current_turn_started_breath = next;
+    return save_world_store(slot, store);
+}
+
+export function has_current_turn_started_breath(slot: number): boolean {
+    const store = get_timed_event_state(slot);
+    return !!(store?.timed_event_active && typeof store.current_turn_started_breath === 'number' && Number.isFinite(store.current_turn_started_breath));
+}
+
+export function is_current_turn_window_expired(slot: number, breath_index: number): boolean {
+    const store = get_timed_event_state(slot);
+    if (!store?.timed_event_active || store.timed_event_phase === "world_sim_interstitial") return false;
+    if (typeof store.current_turn_started_breath !== 'number' || !Number.isFinite(store.current_turn_started_breath)) return false;
+    const turn_window = get_timed_event_turn_window_breaths(slot);
+    const current = Math.max(0, Math.floor(Number(breath_index) || 0));
+    return (current - store.current_turn_started_breath) >= turn_window;
+}
+
+export function get_current_turn_breaths_remaining(slot: number, breath_index?: number | null): number | null {
+    const store = get_timed_event_state(slot);
+    if (!store?.timed_event_active) return null;
+    if (store.timed_event_phase === "world_sim_interstitial") {
+        const remaining = Math.floor(Number(store.world_sim_interstitial_breaths ?? TIMED_EVENT_TURN_WINDOW_BREATHS)) || TIMED_EVENT_TURN_WINDOW_BREATHS;
+        return Math.max(0, remaining);
+    }
+    const turn_window = get_timed_event_turn_window_breaths(slot);
+    if (typeof store.current_turn_started_breath !== 'number' || !Number.isFinite(store.current_turn_started_breath)) {
+        return turn_window;
+    }
+    const current_breath = (typeof breath_index === 'number' && Number.isFinite(breath_index))
+        ? Math.floor(Number(breath_index) || 0)
+        : Math.max(0, Math.floor(Number(store.timed_event_world_breath_index ?? store.current_turn_started_breath ?? 0)) || 0);
+    const elapsed = Math.max(0, current_breath - store.current_turn_started_breath);
+    return Math.max(0, turn_window - elapsed);
+}
+
+function reset_initiative_round_entries(slot: number, entries: InitiativeEntry[]): void {
+    for (const entry of entries) {
+        if (entry.status === "left_region") continue;
+        entry.status = "active";
+        entry.has_acted_this_turn = false;
+        entry.actions_remaining = 1;
+        entry.partial_actions_remaining = 1;
+        entry.movement_budgets = resolve_timed_event_movement_budgets(slot, entry.actor_ref);
+        normalize_initiative_entry_movement(entry);
+    }
+}
+
+function begin_world_sim_interstitial(store: WorldStore): void {
+    store.timed_event_phase = "world_sim_interstitial";
+    store.active_actor_index = undefined;
+    store.current_turn_started_breath = undefined;
+    store.world_sim_interstitial_breaths = TIMED_EVENT_TURN_WINDOW_BREATHS;
+}
+
+export function finalize_world_sim_interstitial(slot: number): { ok: true; new_turn: number; active_actor: string | null } | { ok: false; error: string } {
+    const world = ensure_world_exists(slot);
+    if (!world.ok) return { ok: false, error: world.error };
+
+    const store = world.world as WorldStore;
+    if (!store.timed_event_active || !store.initiative_order) return { ok: false, error: "no_active_timed_event" };
+
+    store.current_turn = (store.current_turn ?? 1) + 1;
+    store.current_round = (store.current_round ?? 1) + 1;
+    reset_initiative_round_entries(slot, store.initiative_order);
+    store.active_actor_index = 0;
+    store.timed_event_phase = "initiative_turn";
+    store.current_turn_window_breaths = TIMED_EVENT_TURN_WINDOW_BREATHS;
+    store.current_turn_started_breath = undefined;
+    store.timed_event_world_breath_index = Math.max(0, Math.floor(Number(store.timed_event_world_breath_index ?? 0)) || 0);
+    store.world_sim_interstitial_breaths = undefined;
+
+    debug_log("TIMED_EVENT_TURN", "finalized world sim interstitial", {
+        slot,
+        new_turn: store.current_turn ?? 1,
+        new_round: store.current_round ?? 1,
+        active_actor: store.initiative_order[0]?.actor_ref ?? null,
+        timed_event_world_breath_index: store.timed_event_world_breath_index ?? 0,
+    });
+
+    if (!save_world_store(slot, store)) return { ok: false, error: "failed_to_save" };
+    return { ok: true, new_turn: store.current_turn ?? 1, active_actor: store.initiative_order[0]?.actor_ref ?? null };
+}
+
+function get_initiative_entry(slot: number, actor_ref: string): InitiativeEntry | null {
+    const store = get_timed_event_state(slot);
+    if (!store?.timed_event_active || !store.initiative_order) return null;
+    const entry = store.initiative_order.find((entry) => entry.actor_ref === actor_ref) ?? null;
+    return entry ? normalize_initiative_entry_movement(entry) : null;
+}
+
+export function should_auto_end_actor_turn(slot: number, actor_ref: string): boolean {
+    const entry = get_initiative_entry(slot, actor_ref);
+    if (!entry) return false;
+    const actions_remaining = Math.max(0, Math.floor(Number(entry.actions_remaining ?? 0)) || 0);
+    const partial_actions_remaining = Math.max(0, Math.floor(Number(entry.partial_actions_remaining ?? 0)) || 0);
+    const budgets = normalize_initiative_entry_movement(entry).movement_budgets!;
+    const total_movement_remaining = Math.max(0, Math.floor(Number(budgets.walk ?? 0)) || 0)
+        + Math.max(0, Math.floor(Number(budgets.climb ?? 0)) || 0)
+        + Math.max(0, Math.floor(Number(budgets.swim ?? 0)) || 0)
+        + Math.max(0, Math.floor(Number(budgets.fly ?? 0)) || 0);
+    return actions_remaining <= 0 && partial_actions_remaining <= 0 && total_movement_remaining <= 0;
+}
+
+export function finalize_timed_event_turn_if_exhausted(slot: number, actor_ref: string): { ok: true; exhausted: false } | { ok: true; exhausted: true; advanced: boolean; interstitial_started?: boolean } | { ok: false; error: string } {
+    const active_actor_ref = get_active_actor_ref(slot);
+    if (!active_actor_ref) return { ok: false, error: "no_active_timed_event" };
+    if (active_actor_ref !== actor_ref) return { ok: false, error: "not_your_turn" };
+    if (!should_auto_end_actor_turn(slot, actor_ref)) return { ok: true, exhausted: false };
+    if (!mark_actor_done(slot, actor_ref)) return { ok: false, error: "failed_to_mark_done" };
+    return { ok: true, exhausted: true, advanced: false };
+}
+
+export function can_actor_afford_action_cost(slot: number, actor_ref: string, cost: ActionCost): boolean {
+    const store = get_timed_event_state(slot);
+    if (!store?.timed_event_active) return true;
+    const entry = get_initiative_entry(slot, actor_ref);
+    if (!entry) return false;
+
+    switch (cost) {
+        case "FREE":
+            return true;
+        case "PARTIAL":
+            return (entry.partial_actions_remaining ?? 0) > 0;
+        case "FULL":
+            return (entry.actions_remaining ?? 0) > 0;
+        case "EXTENDED":
+            return (entry.actions_remaining ?? 0) > 0 && (entry.partial_actions_remaining ?? 0) > 0;
+        default:
+            return false;
+    }
+}
+
+export function can_actor_afford_movement_cost(slot: number, actor_ref: string, movement_cost: number): boolean {
+    const store = get_timed_event_state(slot);
+    if (!store?.timed_event_active) return true;
+    if (store.timed_event_phase === "world_sim_interstitial") return false;
+    const entry = get_initiative_entry(slot, actor_ref);
+    if (!entry) return false;
+    const cost = Math.max(0, Math.floor(Number(movement_cost) || 0));
+    const budgets = normalize_initiative_entry_movement(entry).movement_budgets!;
+    return budgets.walk >= cost;
+}
+
+export function consume_actor_action_cost(slot: number, actor_ref: string, cost: ActionCost): boolean {
+    const world = ensure_world_exists(slot);
+    if (!world.ok) return false;
+
+    const store = world.world as WorldStore;
+    if (!store.timed_event_active || !store.initiative_order) return true;
+    const entry = store.initiative_order.find((it) => it.actor_ref === actor_ref);
+    if (!entry) return false;
+    if (!can_actor_afford_action_cost(slot, actor_ref, cost)) return false;
+
+    switch (cost) {
+        case "FREE":
+            break;
+        case "PARTIAL":
+            entry.partial_actions_remaining = Math.max(0, (entry.partial_actions_remaining ?? 0) - 1);
+            break;
+        case "FULL":
+            entry.actions_remaining = Math.max(0, (entry.actions_remaining ?? 0) - 1);
+            break;
+        case "EXTENDED":
+            entry.actions_remaining = Math.max(0, (entry.actions_remaining ?? 0) - 1);
+            entry.partial_actions_remaining = Math.max(0, (entry.partial_actions_remaining ?? 0) - 1);
+            break;
+    }
+
+    entry.has_acted_this_turn = true;
+    return save_world_store(slot, store);
+}
+
+export function consume_actor_movement_cost(slot: number, actor_ref: string, movement_cost: number): boolean {
+    const world = ensure_world_exists(slot);
+    if (!world.ok) return false;
+
+    const store = world.world as WorldStore;
+    if (!store.timed_event_active || !store.initiative_order) return true;
+    const entry = store.initiative_order.find((it) => it.actor_ref === actor_ref);
+    if (!entry) return false;
+    const cost = Math.max(0, Math.floor(Number(movement_cost) || 0));
+    const before = normalize_initiative_entry_movement(entry);
+    if (!can_actor_afford_movement_cost(slot, actor_ref, cost)) {
+        debug_log("TIMED_EVENT_MOVE", "movement cost denied", {
+            slot,
+            actor_ref,
+            cost,
+            movement_budgets: before.movement_budgets,
+            movement_remaining: before.movement_remaining,
+            timed_event_phase: store.timed_event_phase ?? null,
+            current_turn: store.current_turn ?? null,
+            current_round: store.current_round ?? null,
+        });
+        return false;
+    }
+    const normalized = before;
+    const before_budgets = { ...normalized.movement_budgets! };
+    normalized.movement_budgets = {
+        walk: Math.max(0, normalized.movement_budgets!.walk - cost),
+        climb: Math.max(0, normalized.movement_budgets!.climb),
+        swim: Math.max(0, normalized.movement_budgets!.swim),
+        fly: Math.max(0, normalized.movement_budgets!.fly),
+    };
+    normalize_initiative_entry_movement(normalized);
+    entry.has_acted_this_turn = true;
+    debug_log("TIMED_EVENT_MOVE", "movement cost consumed", {
+        slot,
+        actor_ref,
+        cost,
+        movement_budgets_before: before_budgets,
+        movement_budgets_after: normalized.movement_budgets,
+        movement_remaining_after: normalized.movement_remaining,
+        timed_event_phase: store.timed_event_phase ?? null,
+        current_turn: store.current_turn ?? null,
+        current_round: store.current_round ?? null,
+    });
+    return save_world_store(slot, store);
+}
+
+export function refill_actor_movement_budgets(slot: number, actor_ref: string): boolean {
+    const world = ensure_world_exists(slot);
+    if (!world.ok) return false;
+
+    const store = world.world as WorldStore;
+    if (!store.timed_event_active || !store.initiative_order) return true;
+    const entry = store.initiative_order.find((it) => it.actor_ref === actor_ref);
+    if (!entry) return false;
+
+    const before = entry.movement_budgets ? { ...entry.movement_budgets } : null;
+    entry.movement_budgets = resolve_timed_event_movement_budgets(slot, actor_ref);
+    normalize_initiative_entry_movement(entry);
+    entry.has_acted_this_turn = true;
+    debug_log("TIMED_EVENT_MOVE", "refilled actor movement budgets from persisted movement", {
+        slot,
+        actor_ref,
+        movement_budgets_before: before,
+        movement_budgets_after: entry.movement_budgets ?? null,
+        movement_remaining_after: entry.movement_remaining ?? null,
+    });
+    return save_world_store(slot, store);
+}
+
+export function perform_move_action_refresh(slot: number, actor_ref: string, cost: ActionCost): { ok: true } | { ok: false; error: string } {
+    const active_actor_ref = get_active_actor_ref(slot);
+    if (!active_actor_ref) return { ok: false, error: "no_active_timed_event" };
+    if (active_actor_ref !== actor_ref) return { ok: false, error: "not_your_turn" };
+    if (!can_actor_afford_action_cost(slot, actor_ref, cost)) return { ok: false, error: `cannot_afford_${String(cost).toLowerCase()}` };
+    if (!consume_actor_action_cost(slot, actor_ref, cost)) return { ok: false, error: "failed_to_consume_action_cost" };
+    if (!refill_actor_movement_budgets(slot, actor_ref)) return { ok: false, error: "failed_to_refill_movement" };
+    return { ok: true };
+}
+
+export function queue_pending_communication_opportunity(slot: number, opp: Omit<PendingCommunicationOpportunity, "opportunity_id" | "status">): { ok: true; opportunity_id: string } | { ok: false; error: string } {
+    const world = ensure_world_exists(slot);
+    if (!world.ok) return { ok: false, error: world.error };
+
+    const store = world.world as WorldStore;
+    const opportunity_id = `comm_opp_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    const list = Array.isArray(store.pending_communication_opportunities) ? store.pending_communication_opportunities : [];
+
+    const already_exists = list.some((existing) =>
+        existing.status === "pending" &&
+        existing.source_message_id === opp.source_message_id &&
+        existing.npc_ref === opp.npc_ref,
+    );
+    if (already_exists) {
+        const existing_opp = list.find((e) => e.source_message_id === opp.source_message_id && e.npc_ref === opp.npc_ref) ?? null;
+        debug_log("TIMED_EVENT_COMM", "queue skipped duplicate pending opportunity", {
+            slot,
+            npc_ref: opp.npc_ref,
+            speaker_ref: opp.speaker_ref,
+            target_ref: opp.target_ref ?? null,
+            source_message_id: opp.source_message_id,
+            correlation_id: opp.correlation_id ?? null,
+            conversation_id: opp.conversation_id ?? null,
+            opportunity_id: existing_opp?.opportunity_id ?? opportunity_id,
+            existing_status: existing_opp?.status ?? null,
+            original_text: opp.original_text,
+        });
+        return { ok: true, opportunity_id: existing_opp?.opportunity_id ?? opportunity_id };
+    }
+
+    list.push({
+        ...opp,
+        opportunity_id,
+        status: "pending",
+    });
+    store.pending_communication_opportunities = list;
+    const saved = save_world_store(slot, store);
+    debug_log("TIMED_EVENT_COMM", saved ? "queued pending communication opportunity" : "failed to queue pending communication opportunity", {
+        slot,
+        npc_ref: opp.npc_ref,
+        speaker_ref: opp.speaker_ref,
+        target_ref: opp.target_ref ?? null,
+        source_message_id: opp.source_message_id,
+        correlation_id: opp.correlation_id ?? null,
+        conversation_id: opp.conversation_id ?? null,
+        opportunity_id,
+        created_turn: opp.created_turn ?? null,
+        created_round: opp.created_round ?? null,
+        trigger_context: opp.trigger_context ?? null,
+        original_text: opp.original_text,
+    });
+    return saved ? { ok: true, opportunity_id } : { ok: false, error: "save_failed" };
+}
+
+export function consume_pending_communication_opportunity(slot: number, npc_ref: string): PendingCommunicationOpportunity | null {
+    const world = ensure_world_exists(slot);
+    if (!world.ok) return null;
+
+    const store = world.world as WorldStore;
+    const list = Array.isArray(store.pending_communication_opportunities) ? store.pending_communication_opportunities : [];
+    const idx = list.findIndex((opp) => opp.npc_ref === npc_ref && opp.status === "pending");
+    if (idx < 0) {
+        debug_log("TIMED_EVENT_COMM", "no pending communication opportunity to consume", {
+            slot,
+            npc_ref,
+            available: list.filter((opp) => opp.npc_ref === npc_ref).map((opp) => ({
+                opportunity_id: opp.opportunity_id,
+                status: opp.status,
+                source_message_id: opp.source_message_id,
+                correlation_id: opp.correlation_id ?? null,
+                original_text: opp.original_text,
+            })),
+        });
+        return null;
+    }
+
+    const opp = list[idx]!;
+    opp.status = "in_flight";
+    store.pending_communication_opportunities = list;
+    if (!save_world_store(slot, store)) {
+        debug_log("TIMED_EVENT_COMM", "failed to mark communication opportunity in_flight", {
+            slot,
+            npc_ref,
+            opportunity_id: opp.opportunity_id,
+            source_message_id: opp.source_message_id,
+        });
+        return null;
+    }
+    debug_log("TIMED_EVENT_COMM", "consumed pending communication opportunity", {
+        slot,
+        npc_ref,
+        opportunity_id: opp.opportunity_id,
+        source_message_id: opp.source_message_id,
+        speaker_ref: opp.speaker_ref,
+        target_ref: opp.target_ref ?? null,
+        correlation_id: opp.correlation_id ?? null,
+        conversation_id: opp.conversation_id ?? null,
+        original_text: opp.original_text,
+    });
+    return { ...opp };
+}
+
+export function complete_pending_communication_opportunity(slot: number, opportunity_id: string): boolean {
+    const world = ensure_world_exists(slot);
+    if (!world.ok) return false;
+    const store = world.world as WorldStore;
+    const list = Array.isArray(store.pending_communication_opportunities) ? store.pending_communication_opportunities : [];
+    const idx = list.findIndex((opp) => opp.opportunity_id === opportunity_id);
+    if (idx < 0) {
+        debug_log("TIMED_EVENT_COMM", "attempted to complete missing communication opportunity", { slot, opportunity_id });
+        return false;
+    }
+    const opp = list[idx]!;
+    opp.status = "consumed";
+    store.pending_communication_opportunities = list.filter((item) => item.status === "pending" || item.status === "in_flight");
+    const saved = save_world_store(slot, store);
+    debug_log("TIMED_EVENT_COMM", saved ? "completed communication opportunity" : "failed to complete communication opportunity", {
+        slot,
+        opportunity_id,
+        npc_ref: opp.npc_ref,
+        source_message_id: opp.source_message_id,
+        correlation_id: opp.correlation_id ?? null,
+        original_text: opp.original_text,
+    });
+    return saved;
+}
+
+export function release_pending_communication_opportunity(slot: number, opportunity_id: string): boolean {
+    const world = ensure_world_exists(slot);
+    if (!world.ok) return false;
+    const store = world.world as WorldStore;
+    const list = Array.isArray(store.pending_communication_opportunities) ? store.pending_communication_opportunities : [];
+    const idx = list.findIndex((opp) => opp.opportunity_id === opportunity_id);
+    if (idx < 0) {
+        debug_log("TIMED_EVENT_COMM", "attempted to release missing communication opportunity", { slot, opportunity_id });
+        return false;
+    }
+    const opp = list[idx]!;
+    opp.status = "pending";
+    store.pending_communication_opportunities = list;
+    const saved = save_world_store(slot, store);
+    debug_log("TIMED_EVENT_COMM", saved ? "released communication opportunity back to pending" : "failed to release communication opportunity", {
+        slot,
+        opportunity_id,
+        npc_ref: opp.npc_ref,
+        source_message_id: opp.source_message_id,
+        correlation_id: opp.correlation_id ?? null,
+        original_text: opp.original_text,
+    });
+    return saved;
+}
+
+export function has_pending_communication_opportunity(slot: number, npc_ref: string): boolean {
+    const store = get_timed_event_state(slot);
+    if (!store?.timed_event_active) return false;
+    const list = Array.isArray(store.pending_communication_opportunities) ? store.pending_communication_opportunities : [];
+    return list.some((opp) => opp.npc_ref === npc_ref && opp.status === "pending");
 }
 
 export function advance_turn(slot: number): { ok: true; new_turn: number; active_actor: string } | { ok: false; error: string } {
@@ -671,6 +1332,9 @@ export function advance_turn(slot: number): { ok: true; new_turn: number; active
     const store = world.world as WorldStore;
     if (!store.timed_event_active || !store.initiative_order) {
         return { ok: false, error: "no_active_timed_event" };
+    }
+    if (store.timed_event_phase === "world_sim_interstitial") {
+        return { ok: false, error: "world_sim_interstitial_active" };
     }
     
     // Mark current actor as done
@@ -695,25 +1359,38 @@ export function advance_turn(slot: number): { ok: true; new_turn: number; active
     }
     
     if (!found) {
-        // All actors have acted, start new turn
-        store.current_turn = (store.current_turn ?? 1) + 1;
-        store.current_round = Math.floor((store.current_turn - 1) / store.initiative_order.length) + 1;
-        
-        // Reset all actors to active
-        for (const entry of store.initiative_order) {
-            if (entry.status !== "left_region") {
-                entry.status = "active";
-                entry.has_acted_this_turn = false;
-                entry.actions_remaining = 1;
-                entry.partial_actions_remaining = 1;
-            }
+        begin_world_sim_interstitial(store);
+        debug_log("TIMED_EVENT_TURN", "initiative cycle complete; entering world sim interstitial", {
+            slot,
+            current_turn: store.current_turn ?? null,
+            current_round: store.current_round ?? null,
+            timed_event_world_breath_index: store.timed_event_world_breath_index ?? 0,
+            world_sim_interstitial_breaths: store.world_sim_interstitial_breaths ?? null,
+        });
+        if (!save_world_store(slot, store)) {
+            return { ok: false, error: "failed_to_save" };
         }
-        
-        next_index = 0;
+        return { ok: false, error: "world_sim_interstitial_started" };
     }
     
     store.active_actor_index = next_index;
+    store.timed_event_phase = "initiative_turn";
+    store.current_turn_window_breaths = TIMED_EVENT_TURN_WINDOW_BREATHS;
+    store.current_turn_started_breath = undefined;
+    store.timed_event_world_breath_index = Math.max(0, Math.floor(Number(store.timed_event_world_breath_index ?? 0)) || 0);
+    store.world_sim_interstitial_breaths = undefined;
     const active_actor = store.initiative_order[next_index]?.actor_ref ?? "unknown";
+
+    debug_log("TIMED_EVENT_TURN", "advanced to next initiative actor", {
+        slot,
+        new_turn: store.current_turn ?? 1,
+        current_round: store.current_round ?? null,
+        active_actor,
+        movement_budgets: store.initiative_order[next_index]?.movement_budgets ?? null,
+        actions_remaining: store.initiative_order[next_index]?.actions_remaining ?? null,
+        partial_actions_remaining: store.initiative_order[next_index]?.partial_actions_remaining ?? null,
+        timed_event_world_breath_index: store.timed_event_world_breath_index ?? 0,
+    });
     
     if (!save_world_store(slot, store)) {
         return { ok: false, error: "failed_to_save" };
@@ -731,8 +1408,22 @@ export function mark_actor_done(slot: number, actor_ref: string): boolean {
     
     const entry = store.initiative_order.find(e => e.actor_ref === actor_ref);
     if (!entry) return false;
-    
+
+    const previous_status = entry.status;
     entry.status = "done";
+    debug_log("TIMED_EVENT_TURN", "marked actor done", {
+        slot,
+        actor_ref,
+        previous_status,
+        actions_remaining: entry.actions_remaining ?? null,
+        partial_actions_remaining: entry.partial_actions_remaining ?? null,
+        movement_budgets: entry.movement_budgets ?? null,
+        movement_remaining: entry.movement_remaining ?? null,
+        current_turn: store.current_turn ?? null,
+        current_round: store.current_round ?? null,
+        timed_event_phase: store.timed_event_phase ?? null,
+        timed_event_world_breath_index: store.timed_event_world_breath_index ?? 0,
+    });
     return save_world_store(slot, store);
 }
 

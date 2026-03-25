@@ -6,8 +6,15 @@ export type {
   InspectionTarget,
   InspectionFeature,
   InspectionResult,
-  InspectorData
-} from "./data_service.js";
+  InspectorData,
+  InspectTargetKind,
+  InspectIncludeFlag,
+  InspectSeed,
+  InspectFeatureDef,
+  InspectProfile,
+  InspectProfileDiff,
+  InspectionNarrationContext,
+} from "./types.js";
 
 export type {
   SenseType,

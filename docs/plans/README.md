@@ -51,9 +51,9 @@ These two plans work together. The Inventory Movement Plan is the **primary impl
 
 ### Other Active Plans
 - `docs/plans/2026_03_23_action_pipeline_refinement_plan.md` - Breath-driven action economy + timed-event movement integration for current verbs
+- `docs/plans/2026_02_13_advanced_npc_interactions_scheduler.md` - Breath/turn-driven NPC communication scheduling and reply ownership
 - `docs/plans/2026_02_25_ascii_painter_and_logging_plan.md` - Shared renderer + ASCII painter mode + logging reliability
 - `docs/plans/2026_02_17_advanced_tags.md` - Advanced tag features (fire damage, spreading, diseases, etc.)
-- `docs/plans/2026_02_13_advanced_npc_interactions_scheduler.md`
 - `docs/plans/2026_02_13_ui_improvements_log_time_audio_shaders.md`
 - `docs/plans/2026_02_12_npc_archetypes_and_interaction_phases.md`
 - `docs/plans/2026_02_06_action_range_system.md`

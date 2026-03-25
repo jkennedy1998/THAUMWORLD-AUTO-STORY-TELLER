@@ -12,7 +12,7 @@ import type { SlotType } from '../equipment/body_slot_resolver.js';
 import type { Canvas, Module, PointerEvent, Rgb, Rect } from '../mono_ui/types.js';
 import { create_module_registry, type ModuleRegistry } from '../mono_ui/module_registry.js';
 import { handleEntityClick } from '../interface_program/frontend_api.js';
-import type { Place } from '../types/place.js';
+import type { Place, TilePosition } from '../types/place.js';
 import { debug_warn, debug_log } from '../shared/debug.js';
 import { resolve_char } from '../render_shaders/resolver.js';
 import { debug_peek_next_step, is_entity_moving } from '../shared/movement_engine.js';
@@ -37,7 +37,7 @@ import { get_senses_for_action } from '../action_system/sense_broadcast.js';
 import { get_facing } from '../npc_ai/facing_system.js';
 import { eval_body_model_voxels, get_body_model_def } from '../shared/body_model.js';
 import { get_character_camera_focus_tile } from '../shared/character_camera_focus.js';
-import { get_defined_place_world_zs as get_authored_place_world_zs } from '../shared/place_layers.js';
+import { get_defined_place_world_zs as get_authored_place_world_zs, get_place_tile_kind_at_world_z as get_shared_place_tile_kind_at_world_z } from '../shared/place_layers.js';
 import { get_flood_fill_points, get_line_points, get_rect_fill_points, get_rect_stroke_points, type PainterPoint } from '../shared/painter_tools.js';
 import { play_sfx } from '../mono_ui/sfx/sfx_player.js';
 import { format_interval_avg, format_interval_min, get_movement_debug_snapshot } from '../shared/movement_debug_state.js';
@@ -176,6 +176,38 @@ export function create_app_state(): AppState {
             dice_label: "D20",
             disabled: true,
             roll_id: null as string | null,
+        },
+        timed_event_debug: {
+            active: false,
+            type: null as string | null,
+            phase: null as string | null,
+            trigger_kind: null as string | null,
+            current_turn: null as number | null,
+            current_round: null as number | null,
+            active_actor_ref: null as string | null,
+            turn_window_breaths: null as number | null,
+            turn_breaths_remaining: null as number | null,
+            pending_communication_opportunities: [] as Array<{
+                opportunity_id: string;
+                npc_ref: string;
+                speaker_ref: string;
+                target_ref: string | null;
+                original_text: string;
+                response_eligible_reason: string;
+                trigger_context: string | null;
+                created_turn: number | null;
+                created_round: number | null;
+                status: string;
+            }>,
+            initiative_order: [] as Array<{
+                actor_ref: string;
+                initiative_roll: number;
+                actions_remaining: number;
+                partial_actions_remaining: number;
+                movement_remaining: number;
+                movement_budgets: { walk: number; climb: number; swim: number; fly: number } | null;
+                status: string;
+            }>,
         },
         place: {
             current_place_id: null as string | null,
@@ -693,25 +725,7 @@ export function create_app_state(): AppState {
     }
 
     function get_place_tile_kind_at(place: Place | null, x: number, y: number, z: number): string | null {
-        const p: any = place as any;
-        if (!p) return null;
-        const structure = Array.isArray(p.structures)
-            ? p.structures.find((s: any) => {
-                const origin = s?.origin;
-                if (!origin) return false;
-                const ox = Math.floor(Number(origin.x) || 0);
-                const oy = Math.floor(Number(origin.y) || 0);
-                const oz = Math.floor(Number(origin.z) || 0);
-                const phys = Array.isArray(s?.body_model?.physical) ? s.body_model.physical : [{ dx: 0, dy: 0, dz: 0 }];
-                return phys.some((v: any) => ox + Math.floor(Number(v?.dx ?? 0)) === x && oy + Math.floor(Number(v?.dy ?? 0)) === y && oz + Math.floor(Number(v?.dz ?? 0)) === z);
-            })
-            : null;
-        if (structure) return String((structure as any)?.def_id ?? (structure as any)?.kind ?? '').trim() || null;
-
-        const layerKey = get_place_layer_key_for_world_z(place, z);
-        const cell = p?.[layerKey]?.cells?.[y]?.[x] ?? null;
-        const kind = String((cell as any)?.kind ?? '').trim();
-        return kind || null;
+        return get_shared_place_tile_kind_at_world_z(place, x, y, z);
     }
 
     function get_place_painter_shape_preview_points(): PainterPoint[] {
@@ -1663,6 +1677,287 @@ export function create_app_state(): AppState {
             mode: ok ? 'paused' : 'blocked',
             sources: [...ui_state.place.pause_state.pause_sources],
         };
+    }
+
+    async function start_debug_timed_event(place_id: string, event_type: 'combat' | 'conversation' = 'combat'): Promise<{ ok: boolean; error?: string; participants?: string[] }> {
+        try {
+            debug_log('[TIMED_EVENT_DEBUG_UI] start request', { place_id, event_type, slot: APP_CONFIG.selected_data_slot });
+            const res = await fetch(`http://localhost:8787/api/timed_event/debug/start?slot=${APP_CONFIG.selected_data_slot}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ place_id, event_type }),
+            });
+            const data = await res.json().catch(() => null as any);
+            debug_log('[TIMED_EVENT_DEBUG_UI] start response', { status: res.status, ok: res.ok, data });
+            if (!res.ok || !data?.ok) {
+                return { ok: false, error: String(data?.error ?? `HTTP ${res.status}`) };
+            }
+            return { ok: true, participants: Array.isArray(data?.participants) ? data.participants : [] };
+        } catch {
+            return { ok: false, error: 'network_error' };
+        }
+    }
+
+    async function fetch_timed_event_state(): Promise<any | null> {
+        try {
+            const res = await fetch(`http://localhost:8787/api/timed_event/state?slot=${APP_CONFIG.selected_data_slot}`);
+            if (!res.ok) return null;
+            const data = await res.json().catch(() => null as any);
+            debug_log('[TIMED_EVENT_DEBUG_UI] state fetch', { status: res.status, ok: res.ok, data });
+            return data?.ok ? data : null;
+        } catch {
+            return null;
+        }
+    }
+
+    async function debug_advance_timed_event_turn(): Promise<{ ok: boolean; error?: string; active_actor?: string; new_turn?: number }> {
+        try {
+            const res = await fetch(`http://localhost:8787/api/timed_event/debug/next_turn?slot=${APP_CONFIG.selected_data_slot}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+            });
+            const data = await res.json().catch(() => null as any);
+            if (!res.ok || !data?.ok) {
+                return { ok: false, error: String(data?.error ?? `HTTP ${res.status}`) };
+            }
+            return { ok: true, active_actor: data.active_actor, new_turn: data.new_turn };
+        } catch {
+            return { ok: false, error: 'network_error' };
+        }
+    }
+
+    async function debug_move_refresh(): Promise<{ ok: boolean; error?: string; actor_ref?: string }> {
+        try {
+            const action_cost = String(ui_state.controls.override_cost ?? 'FULL').toUpperCase();
+            const res = await fetch(`http://localhost:8787/api/timed_event/debug/move?slot=${APP_CONFIG.selected_data_slot}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action_cost }),
+            });
+            const data = await res.json().catch(() => null as any);
+            if (!res.ok || !data?.ok) {
+                return { ok: false, error: String(data?.error ?? `HTTP ${res.status}`) };
+            }
+            return { ok: true, actor_ref: typeof data?.actor_ref === 'string' ? data.actor_ref : undefined };
+        } catch {
+            return { ok: false, error: 'network_error' };
+        }
+    }
+
+    async function debug_end_timed_event(): Promise<{ ok: boolean; error?: string }> {
+        try {
+            debug_log('[TIMED_EVENT_DEBUG_UI] end request', { slot: APP_CONFIG.selected_data_slot });
+            const res = await fetch(`http://localhost:8787/api/timed_event/debug/end?slot=${APP_CONFIG.selected_data_slot}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+            });
+            const data = await res.json().catch(() => null as any);
+            debug_log('[TIMED_EVENT_DEBUG_UI] end response', { status: res.status, ok: res.ok, data });
+            if (!res.ok || !data?.ok) {
+                return { ok: false, error: String(data?.error ?? `HTTP ${res.status}`) };
+            }
+            return { ok: true };
+        } catch {
+            return { ok: false, error: 'network_error' };
+        }
+    }
+
+    async function refresh_timed_event_debug_state(): Promise<void> {
+        const prev_timed_event_active = ui_state.timed_event_debug.active;
+        const prev_active_actor_ref = ui_state.timed_event_debug.active_actor_ref;
+        const data = await fetch_timed_event_state();
+        ui_state.timed_event_debug.active = !!data?.timed_event_active;
+        ui_state.timed_event_debug.type = data?.timed_event_type ?? null;
+        ui_state.timed_event_debug.phase = typeof data?.timed_event_phase === 'string' ? data.timed_event_phase : null;
+        ui_state.timed_event_debug.trigger_kind = data?.trigger?.kind ?? null;
+        ui_state.timed_event_debug.current_turn = typeof data?.current_turn === 'number' ? data.current_turn : null;
+        ui_state.timed_event_debug.current_round = typeof data?.current_round === 'number' ? data.current_round : null;
+        ui_state.timed_event_debug.active_actor_ref = typeof data?.active_actor_ref === 'string' ? data.active_actor_ref : null;
+        ui_state.timed_event_debug.turn_window_breaths = typeof data?.turn_window_breaths === 'number' ? data.turn_window_breaths : null;
+        ui_state.timed_event_debug.turn_breaths_remaining = typeof data?.turn_breaths_remaining === 'number' ? data.turn_breaths_remaining : null;
+        ui_state.timed_event_debug.pending_communication_opportunities = Array.isArray(data?.pending_communication_opportunities)
+            ? data.pending_communication_opportunities.map((opp: any) => ({
+                opportunity_id: String(opp?.opportunity_id ?? ''),
+                npc_ref: String(opp?.npc_ref ?? ''),
+                speaker_ref: String(opp?.speaker_ref ?? ''),
+                target_ref: typeof opp?.target_ref === 'string' ? opp.target_ref : null,
+                original_text: String(opp?.original_text ?? ''),
+                response_eligible_reason: String(opp?.response_eligible_reason ?? ''),
+                trigger_context: typeof opp?.trigger_context === 'string' ? opp.trigger_context : null,
+                created_turn: typeof opp?.created_turn === 'number' ? opp.created_turn : null,
+                created_round: typeof opp?.created_round === 'number' ? opp.created_round : null,
+                status: String(opp?.status ?? 'unknown'),
+            }))
+            : [];
+        ui_state.timed_event_debug.initiative_order = Array.isArray(data?.initiative_order)
+            ? data.initiative_order.map((entry: any) => ({
+                actor_ref: String(entry?.actor_ref ?? ''),
+                initiative_roll: Number(entry?.initiative_roll ?? 0) || 0,
+                actions_remaining: Number(entry?.actions_remaining ?? 0) || 0,
+                partial_actions_remaining: Number(entry?.partial_actions_remaining ?? 0) || 0,
+                movement_remaining: Number(entry?.movement_remaining ?? 0) || 0,
+                movement_budgets: entry?.movement_budgets && typeof entry.movement_budgets === 'object'
+                    ? {
+                        walk: Number(entry.movement_budgets.walk ?? 0) || 0,
+                        climb: Number(entry.movement_budgets.climb ?? 0) || 0,
+                        swim: Number(entry.movement_budgets.swim ?? 0) || 0,
+                        fly: Number(entry.movement_budgets.fly ?? 0) || 0,
+                    }
+                    : null,
+                status: String(entry?.status ?? 'unknown'),
+            }))
+            : [];
+        debug_log('[TIMED_EVENT_DEBUG_UI] state applied', {
+            active: ui_state.timed_event_debug.active,
+            type: ui_state.timed_event_debug.type,
+            phase: ui_state.timed_event_debug.phase,
+            trigger_kind: ui_state.timed_event_debug.trigger_kind,
+            turn: ui_state.timed_event_debug.current_turn,
+            round: ui_state.timed_event_debug.current_round,
+            active_actor_ref: ui_state.timed_event_debug.active_actor_ref,
+            initiative_count: ui_state.timed_event_debug.initiative_order.length,
+        });
+        const timed_event_toggled = prev_timed_event_active !== ui_state.timed_event_debug.active;
+        const active_actor_changed = prev_active_actor_ref !== ui_state.timed_event_debug.active_actor_ref;
+        if (!ui_state.place_painter.active && (timed_event_toggled || active_actor_changed)) {
+            if (ui_state.timed_event_debug.phase === 'world_sim_interstitial' || (ui_state.timed_event_debug.active && !ui_state.timed_event_debug.active_actor_ref)) {
+                center_camera_on_current_place();
+            } else {
+                const follow_place_id = resolve_follow_camera_entity_place_id(get_follow_camera_entity_ref());
+                if (follow_place_id && follow_place_id !== ui_state.place.scene_selected_place_id) {
+                    await set_scene_selected_place(follow_place_id, { refresh: false, center_camera: true });
+                } else {
+                    snap_place_camera_follow_to_actor();
+                }
+            }
+        }
+        refresh_debug_window_messages();
+    }
+
+    function get_input_actor_ref(): string {
+        return `actor.${APP_CONFIG.input_actor_id}`;
+    }
+
+    function get_follow_camera_entity_ref(): string {
+        if (ui_state.timed_event_debug.active && ui_state.timed_event_debug.phase === 'world_sim_interstitial') {
+            return '';
+        }
+        if (ui_state.timed_event_debug.active && typeof ui_state.timed_event_debug.active_actor_ref === 'string' && ui_state.timed_event_debug.active_actor_ref.length > 0) {
+            return ui_state.timed_event_debug.active_actor_ref;
+        }
+        return get_input_actor_ref();
+    }
+
+    function find_entity_in_place(place: Place | null | undefined, entity_ref: string): any | null {
+        if (!place || !entity_ref) return null;
+        if (entity_ref.startsWith('actor.')) {
+            return Array.isArray(place.contents?.actors_present)
+                ? place.contents.actors_present.find((actor: any) => String(actor?.actor_ref ?? '') === entity_ref) ?? null
+                : null;
+        }
+        if (entity_ref.startsWith('npc.')) {
+            return Array.isArray(place.contents?.npcs_present)
+                ? place.contents.npcs_present.find((npc: any) => String(npc?.npc_ref ?? '') === entity_ref) ?? null
+                : null;
+        }
+        return null;
+    }
+
+    function get_entity_focus_tile_in_place(place: Place | null | undefined, entity_ref: string): { x: number; y: number; z: number } | null {
+        const entity = find_entity_in_place(place, entity_ref);
+        if (!entity || !place) return null;
+        const base_z = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
+        return get_character_camera_focus_tile({
+            entity,
+            entity_ref,
+            fallback_world_z: base_z,
+        });
+    }
+
+    function get_input_actor_timed_event_entry(): {
+        actor_ref: string;
+        actions_remaining: number;
+        partial_actions_remaining: number;
+        movement_remaining: number;
+        movement_budgets: { walk: number; climb: number; swim: number; fly: number } | null;
+        status: string;
+    } | null {
+        const actor_ref = get_input_actor_ref();
+        return ui_state.timed_event_debug.initiative_order.find((entry) => entry.actor_ref === actor_ref) ?? null;
+    }
+
+    function get_default_action_cost_for_verb(verb: 'COMMUNICATE' | 'INSPECT'): 'FREE' | 'PARTIAL' | 'FULL' | 'EXTENDED' {
+        if (ui_state.timed_event_debug.active) return 'PARTIAL';
+        return 'FULL';
+    }
+
+    function get_effective_action_cost_for_verb(verb: 'COMMUNICATE' | 'INSPECT'): 'FREE' | 'PARTIAL' | 'FULL' | 'EXTENDED' {
+        const raw = String(ui_state.controls.override_cost ?? '').toUpperCase();
+        if (raw === 'FREE' || raw === 'PARTIAL' || raw === 'FULL' || raw === 'EXTENDED') return raw;
+        return get_default_action_cost_for_verb(verb);
+    }
+
+    function get_timed_event_action_gate(verb: 'COMMUNICATE' | 'INSPECT'): {
+        locked: boolean;
+        reason: string | null;
+        action_cost: 'FREE' | 'PARTIAL' | 'FULL' | 'EXTENDED';
+    } {
+        const action_cost = get_effective_action_cost_for_verb(verb);
+        if (!ui_state.timed_event_debug.active) {
+            return { locked: false, reason: null, action_cost };
+        }
+
+        const actor_ref = get_input_actor_ref();
+        if (!ui_state.timed_event_debug.active_actor_ref) {
+            return { locked: true, reason: 'no_timed_event_actor', action_cost };
+        }
+        if (ui_state.timed_event_debug.active_actor_ref !== actor_ref) {
+            return { locked: true, reason: 'not_your_turn', action_cost };
+        }
+
+        const entry = get_input_actor_timed_event_entry();
+        if (!entry) {
+            return { locked: true, reason: 'no_timed_event_actor', action_cost };
+        }
+
+        switch (action_cost) {
+            case 'FREE':
+                return { locked: false, reason: null, action_cost };
+            case 'PARTIAL':
+                return entry.partial_actions_remaining > 0
+                    ? { locked: false, reason: null, action_cost }
+                    : { locked: true, reason: 'cannot_afford_partial', action_cost };
+            case 'FULL':
+                return entry.actions_remaining > 0
+                    ? { locked: false, reason: null, action_cost }
+                    : { locked: true, reason: 'cannot_afford_full', action_cost };
+            case 'EXTENDED':
+                return (entry.actions_remaining > 0 && entry.partial_actions_remaining > 0)
+                    ? { locked: false, reason: null, action_cost }
+                    : { locked: true, reason: 'cannot_afford_extended', action_cost };
+        }
+    }
+
+    function format_action_gate_reason(reason: string | null, action_cost?: string): string {
+        switch (reason) {
+            case 'not_your_turn': return 'Waiting for your turn';
+            case 'no_timed_event_actor': return 'No active timed-event actor';
+            case 'cannot_afford_partial': return 'No PARTIAL actions left';
+            case 'cannot_afford_full': return 'No FULL actions left';
+            case 'cannot_afford_extended': return 'No EXT actions left';
+            default: return action_cost ? `${action_cost} action unavailable` : 'Action unavailable';
+        }
+    }
+
+    function get_submit_action_gate(): { locked: boolean; reason: string | null; action_cost: string | null } {
+        const draft = String(ui_state.controls.draft ?? '');
+        const hint = infer_action_verb_hint(draft);
+        const verb_effective = ui_state.controls.override_intent ?? hint.verb;
+        if (verb_effective === 'COMMUNICATE' || verb_effective === 'INSPECT') {
+            const gate = get_timed_event_action_gate(verb_effective);
+            return gate;
+        }
+        return { locked: false, reason: null, action_cost: null };
     }
 
     const debug_pause_controller = create_current_place_pause_controller('debug_pause');
@@ -3693,6 +3988,72 @@ export function create_app_state(): AppState {
         return place?.region_id ?? ui_state.place.current_region_id ?? null;
     }
 
+    function build_place_ref_from_place_id(place_id: string | null): string | null {
+        if (!place_id) return null;
+        return `place.${String(place_id)}`;
+    }
+
+    function build_place_tile_ref(place_id: string | null, tile_x: number, tile_y: number): string | null {
+        if (!Number.isFinite(tile_x) || !Number.isFinite(tile_y)) return null;
+        if (!place_id) return null;
+        return `place_tile.${String(place_id)}.${Math.floor(tile_x)}.${Math.floor(tile_y)}`;
+    }
+
+    function normalize_inspect_target(target: {
+        type: "npc" | "actor" | "structure" | "item" | "item_pile" | "tile" | "place" | "adjacent_place";
+        ref?: string;
+        place_id?: string;
+        tile_position: TilePosition;
+    }): { target_ref: string | null; target_desc: string; ui_target_tile?: { x: number; y: number; z?: number } } {
+        const place = get_current_place();
+        const place_id = target.place_id ?? place?.id ?? null;
+        const tile_x = Math.floor(Number(target.tile_position?.x ?? 0));
+        const tile_y = Math.floor(Number(target.tile_position?.y ?? 0));
+        const tile_z = Number.isFinite(Number((target.tile_position as any)?.z))
+            ? Math.floor(Number((target.tile_position as any)?.z))
+            : (Number.isFinite(Number((target as any)?.world_z)) ? Math.floor(Number((target as any).world_z)) : undefined);
+        const ui_target_tile = Number.isFinite(tile_x) && Number.isFinite(tile_y)
+            ? { x: tile_x, y: tile_y, z: tile_z }
+            : undefined;
+
+        if (target.type === 'npc' || target.type === 'actor' || target.type === 'structure' || target.type === 'item') {
+            const target_ref = String(target.ref ?? '').trim() || null;
+            return {
+                target_ref,
+                target_desc: target_ref ? (target_ref.split('.').pop() ?? target.type) : target.type,
+                ui_target_tile,
+            };
+        }
+
+        if (target.type === 'tile' || target.type === 'item_pile') {
+            const target_ref = build_place_tile_ref(place_id, tile_x, tile_y);
+            return {
+                target_ref,
+                target_desc: `${target.type === 'item_pile' ? 'pile' : 'tile'} ${tile_x},${tile_y}`,
+                ui_target_tile,
+            };
+        }
+
+        if (target.type === 'place' || target.type === 'adjacent_place') {
+            const explicit_ref = String(target.ref ?? '').trim();
+            const normalized_place_id = explicit_ref && !explicit_ref.startsWith('place.') ? explicit_ref : (explicit_ref.startsWith('place.') ? explicit_ref.replace(/^place\./, '') : place_id);
+            const target_ref = explicit_ref.startsWith('place.')
+                ? explicit_ref
+                : build_place_ref_from_place_id(normalized_place_id ?? null);
+            return {
+                target_ref,
+                target_desc: target.type === 'adjacent_place' ? 'adjacent place' : 'place',
+                ui_target_tile,
+            };
+        }
+
+        return {
+            target_ref: null,
+            target_desc: target.type,
+            ui_target_tile,
+        };
+    }
+
     async function fetch_place_snapshot(place_id: string): Promise<Place | null> {
         try {
             const url = `${APP_CONFIG.place_endpoint}?slot=${APP_CONFIG.selected_data_slot}&place_id=${encodeURIComponent(place_id)}`;
@@ -3961,6 +4322,36 @@ export function create_app_state(): AppState {
             dbg.push(`[intent] ${ui_state.controls.override_intent ?? ui_state.controls.suggested_intent ?? '(none)'}`);
             dbg.push(`[cost] ${ui_state.controls.override_cost ?? '(auto)'}`);
             dbg.push(`[target] ${ui_state.controls.selected_target ?? '(none)'}`);
+            const com_gate = get_timed_event_action_gate('COMMUNICATE');
+            const ins_gate = get_timed_event_action_gate('INSPECT');
+            dbg.push(`[gate talk] ${com_gate.locked ? format_action_gate_reason(com_gate.reason, com_gate.action_cost) : `ok (${com_gate.action_cost})`}`);
+            dbg.push(`[gate look] ${ins_gate.locked ? format_action_gate_reason(ins_gate.reason, ins_gate.action_cost) : `ok (${ins_gate.action_cost})`}`);
+            const timed_event = ui_state.timed_event_debug;
+            if (timed_event.active) {
+                dbg.push(`[timed_event] ${timed_event.type ?? 'active'} phase:${timed_event.phase ?? 'initiative_turn'} turn:${timed_event.current_turn ?? '?'} round:${timed_event.current_round ?? '?'} active:${timed_event.active_actor_ref ?? '(none)'}`);
+                dbg.push(`[turn_window] breaths:${timed_event.turn_breaths_remaining ?? '?'} / ${timed_event.turn_window_breaths ?? '?'}`);
+                const trigger_kind = String(timed_event.trigger_kind ?? 'unknown');
+                dbg.push(`[initiative] trigger:${trigger_kind}`);
+                const pending = Array.isArray(timed_event.pending_communication_opportunities)
+                    ? timed_event.pending_communication_opportunities
+                    : [];
+                dbg.push(`[comm_queue] ${pending.length} pending`);
+                for (const opp of pending.slice(0, 4)) {
+                    const text = opp.original_text.length > 26 ? `${opp.original_text.slice(0, 26)}...` : opp.original_text;
+                    dbg.push(`[comm] ${opp.npc_ref} <= ${opp.speaker_ref} t${opp.created_turn ?? '?'} ${opp.response_eligible_reason} "${text}"`);
+                }
+                const order = Array.isArray(timed_event.initiative_order) ? timed_event.initiative_order : [];
+                for (const entry of order.slice(0, 8)) {
+                    const marker = entry.actor_ref === timed_event.active_actor_ref ? '>' : ' ';
+                    const mb = entry.movement_budgets;
+                    const move_summary = mb
+                        ? `w:${mb.walk} c:${mb.climb} s:${mb.swim} f:${mb.fly}`
+                        : `all:${entry.movement_remaining}`;
+                    dbg.push(`[init]${marker} ${entry.actor_ref} roll:${entry.initiative_roll} full:${entry.actions_remaining} part:${entry.partial_actions_remaining} move:${move_summary} ${entry.status}`);
+                }
+            } else {
+                dbg.push('[timed_event] inactive');
+            }
             if (ui_state.controls.last_sent_input_id) dbg.push(`[last_input] ${ui_state.controls.last_sent_input_id}`);
             if (ui_state.character.hovered_item) {
                 dbg.push(`[hover] ${ui_state.character.hovered_item.name} (${ui_state.character.hovered_item.source})`);
@@ -3978,6 +4369,7 @@ export function create_app_state(): AppState {
     function maybe_refresh_debug_window_messages(force = false): void {
         const now = Date.now();
         if (!force && (now - last_debug_window_refresh_ms) < DEBUG_WINDOW_REFRESH_MS) return;
+        void refresh_timed_event_debug_state();
         refresh_debug_window_messages();
     }
 
@@ -4436,16 +4828,19 @@ export function create_app_state(): AppState {
 
                 const actor_place_id = ui_state.place.actor_current_place_id;
                 const selected_place_id = ui_state.place.scene_selected_place_id;
+                const follow_entity_ref = get_follow_camera_entity_ref();
+                const desired_follow_place_id = ui_state.timed_event_debug.active
+                    ? resolve_follow_camera_entity_place_id(follow_entity_ref)
+                    : actor_place_id;
                 if (
-                    actor_place_id
-                    && selected_place_id
-                    && actor_place_id !== selected_place_id
-                    && !!get_scene_place(actor_place_id)
+                    desired_follow_place_id
+                    && desired_follow_place_id !== selected_place_id
+                    && !!get_scene_place(desired_follow_place_id)
                     && !ui_state.place_painter.active
                 ) {
-                    const switched = await set_scene_selected_place(actor_place_id, { refresh: false, center_camera: true });
+                    const switched = await set_scene_selected_place(desired_follow_place_id, { refresh: false, center_camera: true });
                     if (switched) {
-                        debug_log(`[PLACE_SCENE] auto-follow actor place applied ${JSON.stringify({ actor_current_place_id: actor_place_id, previous_selected_place_id: selected_place_id })}`);
+                        debug_log(`[PLACE_SCENE] auto-follow actor place applied ${JSON.stringify({ actor_current_place_id: actor_place_id, follow_entity_ref, desired_follow_place_id, previous_selected_place_id: selected_place_id })}`);
                     }
                 }
 
@@ -4619,6 +5014,13 @@ export function create_app_state(): AppState {
             }
 
             const verb_effective = ui_state.controls.override_intent ?? hint.verb;
+            if (verb_effective === 'COMMUNICATE' || verb_effective === 'INSPECT') {
+                const gate = get_timed_event_action_gate(verb_effective);
+                if (gate.locked) {
+                    flash_status([format_action_gate_reason(gate.reason, gate.action_cost)], 1200);
+                    return;
+                }
+            }
             const intent_subtype = (
                 verb_effective === 'COMMUNICATE' ||
                 (!verb_effective && !!target_ref)
@@ -4981,8 +5383,7 @@ export function create_app_state(): AppState {
         ui_state.place.focus_z = best_i;
     }
 
-    function resolve_follow_actor_camera_focus_region(): { place_id: string; region_x: number; region_y: number; world_z: number; local_x: number; local_y: number } | null {
-        const actor_ref = `actor.${APP_CONFIG.input_actor_id}`;
+    function get_candidate_follow_camera_places(): Place[] {
         const candidate_place_ids = [
             ui_state.place.actor_current_place_id,
             ui_state.place.current_place_id,
@@ -5004,15 +5405,47 @@ export function create_app_state(): AppState {
         }
         if (ui_state.place.current_place?.id && !visited.has(ui_state.place.current_place.id)) ordered_places.push(ui_state.place.current_place);
 
-        for (const place of ordered_places) {
-            const actor: any = place?.contents?.actors_present?.find((a: any) => a.actor_ref === actor_ref) ?? null;
-            if (!actor) continue;
-            const base_z = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
-            const focus = get_character_camera_focus_tile({
-                entity: actor,
-                entity_ref: actor_ref,
-                fallback_world_z: base_z,
-            });
+        return ordered_places;
+    }
+
+    function resolve_follow_camera_entity_place_id(entity_ref: string): string | null {
+        if (!entity_ref) return null;
+        for (const place of get_candidate_follow_camera_places()) {
+            if (find_entity_in_place(place, entity_ref)) return place.id;
+        }
+        return null;
+    }
+
+    function get_place_center_tile(place: Place | null | undefined): { x: number; y: number } | null {
+        if (!place) return null;
+        const origin = get_place_region_origin(place);
+        const size_x = Math.max(1, Math.floor(Number((place as any)?.region_bounds?.size?.x ?? (place as any)?.tile_grid?.width ?? 1)) || 1);
+        const size_y = Math.max(1, Math.floor(Number((place as any)?.region_bounds?.size?.y ?? (place as any)?.tile_grid?.height ?? 1)) || 1);
+        if (origin) {
+            return {
+                x: origin.x + Math.floor((size_x - 1) / 2),
+                y: origin.y + Math.floor((size_y - 1) / 2),
+            };
+        }
+        return {
+            x: Math.floor((size_x - 1) / 2),
+            y: Math.floor((size_y - 1) / 2),
+        };
+    }
+
+    function center_camera_on_current_place(): void {
+        const center = get_place_center_tile(get_current_place());
+        if (!center) return;
+        set_place_camera_target_position(center, 'free');
+    }
+
+    function resolve_follow_actor_camera_focus_region(): { place_id: string; region_x: number; region_y: number; world_z: number; local_x: number; local_y: number } | null {
+        const actor_ref = get_follow_camera_entity_ref();
+        if (!actor_ref) return null;
+
+        for (const place of get_candidate_follow_camera_places()) {
+            const focus = get_entity_focus_tile_in_place(place, actor_ref);
+            if (!focus) continue;
             const origin = get_place_region_origin(place);
             if (!origin) {
                 return {
@@ -5052,10 +5485,11 @@ export function create_app_state(): AppState {
 
     function update_place_camera_follow(now_ms: number): void {
         if (ui_state.place.camera_target.mode === 'free') return;
-        const actor_ref = `actor.${APP_CONFIG.input_actor_id}`;
+        const actor_ref = get_follow_camera_entity_ref();
         const recently_changed_ms = Math.max(0, now_ms - Math.max(0, renderer_debug.last_actor_pos_changed_ms || 0));
         const actor_is_repositioning = recently_changed_ms <= 220;
-        if (!is_entity_moving(actor_ref) && !actor_is_repositioning) return;
+        const always_track_follow_target = ui_state.timed_event_debug.active;
+        if (!always_track_follow_target && !is_entity_moving(actor_ref) && !actor_is_repositioning) return;
         const target = resolve_follow_actor_camera_focus_region();
         if (!target) return;
         const last_ms = Math.max(0, Math.floor(Number(ui_state.place.camera_target.last_follow_update_ms) || 0));
@@ -5093,14 +5527,8 @@ export function create_app_state(): AppState {
             };
         }
 
-        const actor: any = place?.contents?.actors_present?.find((a: any) => a.actor_ref === `actor.${APP_CONFIG.input_actor_id}`) ?? null;
-        if (!actor) return null;
-        const base_z = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
-        const focus = get_character_camera_focus_tile({
-            entity: actor,
-            entity_ref: String(actor?.actor_ref ?? `actor.${APP_CONFIG.input_actor_id}`),
-            fallback_world_z: base_z,
-        });
+        const focus = get_entity_focus_tile_in_place(place, get_follow_camera_entity_ref());
+        if (!focus) return null;
         return { x: focus.x, y: focus.y };
     }
 
@@ -5225,6 +5653,7 @@ export function create_app_state(): AppState {
     }
 
     const modules: Module[] = [
+        // Action lock helpers for communicate/inspect during timed events.
         make_fill_module({
             id: 'bg',
             rect: { x0: 0, y0: 0, x1: APP_CONFIG.grid_width - 1, y1: APP_CONFIG.grid_height - 1 },
@@ -5357,22 +5786,22 @@ export function create_app_state(): AppState {
                     return;
                 }
 
-                let target_ref = String(target.ref ?? '').trim();
-                if (target.type === 'tile') {
-                    // Use terrain id; backend expects target_ref format: tile.<tile_id>
-                    const terrain = String(place.environment?.terrain ?? '').trim();
-                    const tile_id = terrain.startsWith('tile.') ? terrain.slice('tile.'.length) : terrain;
-                    if (tile_id) target_ref = `tile.${tile_id}`;
-                }
+                const normalized = normalize_inspect_target(target);
+                const target_ref = normalized.target_ref;
 
                 if (!target_ref) {
                     flash_status(['Cannot inspect - no target'], 1200);
                     return;
                 }
 
-                const target_desc = target.type === 'tile'
-                    ? (target_ref.split('.').pop() ?? 'tile')
-                    : (target_ref.split('.').pop() ?? 'target');
+                const target_desc = normalized.target_desc;
+
+                const gate = get_timed_event_action_gate('INSPECT');
+                if (gate.locked) {
+                    flash_status([format_action_gate_reason(gate.reason, gate.action_cost)], 1200);
+                    return;
+                }
+
                 flash_status([`Inspecting ${target_desc}...`], 1200);
 
                 try {
@@ -5384,7 +5813,7 @@ export function create_app_state(): AppState {
                             sender: APP_CONFIG.input_actor_id,
                             intent_verb: 'INSPECT',
                             target_ref,
-                            ui_target_tile: target.tile_position ? { x: target.tile_position.x, y: target.tile_position.y } : undefined,
+                            ui_target_tile: normalized.ui_target_tile,
                             action_cost: ui_state.controls.override_cost ?? undefined,
                         }),
                     });
@@ -6178,9 +6607,18 @@ export function create_app_state(): AppState {
             rect: { x0: BTN_X0, y0: BTN_Y0, x1: BTN_X0 + 12, y1: BTN_Y0 + 2 },
             label: 'send',
             rgb: get_color_by_name('pale_orange').rgb,
+            get_rgb: () => {
+                const gate = get_submit_action_gate();
+                return gate.locked ? get_color_by_name('dark_gray').rgb : get_color_by_name('pale_orange').rgb;
+            },
             bg: { char: '-', rgb: get_color_by_name('dark_gray').rgb },
             base_weight_index: 3,
             OnPress() {
+                const gate = get_submit_action_gate();
+                if (gate.locked) {
+                    flash_status([format_action_gate_reason(gate.reason, gate.action_cost ?? undefined)], 1200);
+                    return;
+                }
                 input_submit?.();
             },
         }),
@@ -6271,9 +6709,9 @@ export function create_app_state(): AppState {
         // - MOVE (movement)
         // - INSPECT (looking at things)
         make_button_module({ id: 'verb_use', rect: { x0: BTN_X0, y0: BTN_Y0 + 9, x1: BTN_X0 + 7, y1: BTN_Y0 + 11 }, label: 'USE', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'USE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'USE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, base_weight_index: 3, OnPress() { ui_state.controls.override_intent = 'USE'; flash_status(['intent: USE'], 800); } }),
-        make_button_module({ id: 'verb_com', rect: { x0: BTN_X0 + 8, y0: BTN_Y0 + 9, x1: BTN_X0 + 15, y1: BTN_Y0 + 11 }, label: 'TALK', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'COMMUNICATE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'COMMUNICATE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, base_weight_index: 3, OnPress() { ui_state.controls.override_intent = 'COMMUNICATE'; flash_status(['intent: COMMUNICATE'], 800); } }),
+        make_button_module({ id: 'verb_com', rect: { x0: BTN_X0 + 8, y0: BTN_Y0 + 9, x1: BTN_X0 + 15, y1: BTN_Y0 + 11 }, label: 'TALK', rgb: WHITE, get_rgb: () => { const gate = get_timed_event_action_gate('COMMUNICATE'); return gate.locked ? get_color_by_name('dark_gray').rgb : (ui_state.controls.override_intent === 'COMMUNICATE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'COMMUNICATE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)); }, bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, base_weight_index: 3, OnPress() { const gate = get_timed_event_action_gate('COMMUNICATE'); if (gate.locked) { flash_status([format_action_gate_reason(gate.reason, gate.action_cost)], 1200); return; } ui_state.controls.override_intent = 'COMMUNICATE'; flash_status(['intent: COMMUNICATE'], 800); } }),
         make_button_module({ id: 'verb_mov', rect: { x0: BTN_X0 + 16, y0: BTN_Y0 + 9, x1: BTN_X0 + 23, y1: BTN_Y0 + 11 }, label: 'MOVE', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'MOVE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'MOVE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, base_weight_index: 3, OnPress() { ui_state.controls.override_intent = 'MOVE'; flash_status(['intent: MOVE'], 800); } }),
-        make_button_module({ id: 'verb_ins', rect: { x0: BTN_X0 + 24, y0: BTN_Y0 + 9, x1: BTN_X1, y1: BTN_Y0 + 11 }, label: 'LOOK', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'INSPECT' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'INSPECT' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, base_weight_index: 3, OnPress() { ui_state.controls.override_intent = 'INSPECT'; flash_status(['intent: INSPECT'], 800); } }),
+        make_button_module({ id: 'verb_ins', rect: { x0: BTN_X0 + 24, y0: BTN_Y0 + 9, x1: BTN_X1, y1: BTN_Y0 + 11 }, label: 'LOOK', rgb: WHITE, get_rgb: () => { const gate = get_timed_event_action_gate('INSPECT'); return gate.locked ? get_color_by_name('dark_gray').rgb : (ui_state.controls.override_intent === 'INSPECT' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'INSPECT' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)); }, bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, base_weight_index: 3, OnPress() { const gate = get_timed_event_action_gate('INSPECT'); if (gate.locked) { flash_status([format_action_gate_reason(gate.reason, gate.action_cost)], 1200); return; } ui_state.controls.override_intent = 'INSPECT'; flash_status(['intent: INSPECT'], 800); } }),
         make_button_module({ id: 'verb_clear', rect: { x0: BTN_X0 + 28, y0: BTN_Y0 + 12, x1: BTN_X1, y1: BTN_Y0 + 14 }, label: 'CLR', rgb: get_color_by_name('pale_yellow').rgb, bg: { char: '.', rgb: get_color_by_name('dark_gray').rgb }, base_weight_index: 3, OnPress() { ui_state.controls.override_intent = null; ui_state.controls.override_cost = null; flash_status(['overrides cleared'], 800); } }),
 
         // COMMUNICATE volume buttons (non-debug)
@@ -6455,7 +6893,7 @@ export function create_app_state(): AppState {
         // Debug overlays toggle (vision/hearing/broadcast + facing). Replaces hotkeys.
         make_button_module({
             id: 'debug_toggle_overlays',
-            rect: debug_button_rect(5, 1),
+            rect: { x0: DEBUG_X0 + 60, y0: DEBUG_Y_TEST, x1: DEBUG_X1 + 60, y1: DEBUG_Y_TEST + 1 },
             label: 'OVR',
             rgb: get_color_by_name('pale_yellow').rgb,
             bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
@@ -6465,6 +6903,45 @@ export function create_app_state(): AppState {
                 set_ui_debug_enabled(next);
                 set_debug_bundle_enabled(next);
                 flash_status([next ? 'Debug overlays ON' : 'Debug overlays off'], 900);
+            },
+        }),
+
+        make_button_module({
+            id: 'debug_move_refresh',
+            rect: { x0: DEBUG_X0 + 36, y0: DEBUG_Y_TEST, x1: DEBUG_X1 + 36, y1: DEBUG_Y_TEST + 1 },
+            label: 'MOVE',
+            rgb: get_color_by_name('pale_orange').rgb,
+            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
+            async OnPress() {
+                const result = await debug_move_refresh();
+                if (!result.ok) {
+                    flash_status([`MOVE failed: ${result.error ?? 'unknown'}`], 1800);
+                    return;
+                }
+                flash_status([
+                    `MOVE refresh used`,
+                    `${result.actor_ref ?? '(active actor)'}`,
+                ], 1500);
+                void refresh_timed_event_debug_state();
+            },
+        }),
+
+        make_button_module({
+            id: 'debug_end_timed_event',
+            rect: { x0: DEBUG_X0 + 48, y0: DEBUG_Y_TEST, x1: DEBUG_X1 + 48, y1: DEBUG_Y_TEST + 1 },
+            label: 'END',
+            rgb: get_color_by_name('pale_orange').rgb,
+            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
+            base_weight_index: 3,
+            async OnPress() {
+                const result = await debug_end_timed_event();
+                if (!result.ok) {
+                    flash_status([`END failed: ${result.error ?? 'unknown'}`], 1800);
+                    return;
+                }
+                flash_status(['Timed event ended'], 1500);
+                void refresh_timed_event_debug_state();
             },
         }),
 
@@ -6696,72 +7173,52 @@ export function create_app_state(): AppState {
         // Note: legacy debug movement buttons that used /api/actor/move were removed.
         // Movement is now server-authoritative via /api/movement/* only.
 
-        // Toggle GRAVITY tag on the actor (needed for falling tests).
+        // Debug button: start timed event in current place.
         make_button_module({
-            id: 'debug_gravity',
-            rect: { x0: DEBUG_X0 + 24, y0: DEBUG_Y_TEST, x1: DEBUG_X1 + 24, y1: DEBUG_Y_TEST + 1 },
-            label: 'GRAV',
-            rgb: get_color_by_name('vivid_cyan').rgb,
+            id: 'debug_start_timed_event',
+            rect: { x0: DEBUG_X0, y0: DEBUG_Y_TEST, x1: DEBUG_X1, y1: DEBUG_Y_TEST + 1 },
+            label: 'TEVT',
+            rgb: get_color_by_name('pale_orange').rgb,
             bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
             base_weight_index: 3,
             async OnPress() {
-                const actor_id = APP_CONFIG.input_actor_id;
-                const slot = APP_CONFIG.selected_data_slot;
-                const actor_ref = `actor.${actor_id}`;
-
-                const actor_res = await fetch(`http://localhost:8787/api/actor?id=${encodeURIComponent(actor_id)}&slot=${slot}`);
-                if (!actor_res.ok) return;
-                const actor_data = await actor_res.json();
-                const tags = Array.isArray(actor_data?.actor?.tags) ? actor_data.actor.tags : [];
-                const has_grav = tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'GRAVITY');
-
-                if (has_grav) {
-                    await fetch(`http://localhost:8787/api/tag/remove?slot=${slot}`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ slot, entity_ref: actor_ref, tag_name: 'GRAVITY' }),
-                    });
-                    flash_status(['GRAVITY removed'], 1200);
-                } else {
-                    await fetch(`http://localhost:8787/api/tag/add?slot=${slot}`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ slot, entity_ref: actor_ref, tag_name: 'GRAVITY', mag: 1, meta: [] }),
-                    });
-                    flash_status(['GRAVITY added'], 1200);
-                }
-
                 const place = get_current_place();
-                if (place) await update_current_place(place.id, { source: 'debug_gravity_toggle' });
+                if (!place?.id) {
+                    flash_status(['No place loaded'], 1200);
+                    return;
+                }
+                const result = await start_debug_timed_event(place.id, 'combat');
+                if (!result.ok) {
+                    flash_status([`Timed event failed: ${result.error ?? 'unknown'}`], 1800);
+                    return;
+                }
+                flash_status([
+                    'Timed event queued',
+                    `participants: ${result.participants?.length ?? 0}`,
+                ], 1500);
+                void refresh_timed_event_debug_state();
             },
         }),
 
+        // Debug button: advance to next timed-event turn.
         make_button_module({
-            id: 'debug_ascend',
-            rect: { x0: DEBUG_X0 + 36, y0: DEBUG_Y_TEST, x1: DEBUG_X1 + 36, y1: DEBUG_Y_TEST + 1 },
-            label: 'ASC',
-            rgb: get_color_by_name('vivid_cyan').rgb,
+            id: 'debug_next_timed_turn',
+            rect: { x0: DEBUG_X0 + 12, y0: DEBUG_Y_TEST, x1: DEBUG_X1 + 12, y1: DEBUG_Y_TEST + 1 },
+            label: 'NEXT',
+            rgb: get_color_by_name('pale_orange').rgb,
             bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
             base_weight_index: 3,
             async OnPress() {
-                const actor_id = APP_CONFIG.input_actor_id;
-                const slot = APP_CONFIG.selected_data_slot;
-                try {
-                    const res = await fetch(`http://localhost:8787/api/actor/debug/ascend?slot=${slot}`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ slot, actor_id, vz_delta: 3 }),
-                    });
-                    const data = await res.json().catch(() => null);
-                    if (!res.ok || !data?.ok) {
-                        flash_status([`ASC failed: ${data?.error ?? `HTTP ${res.status}`}`], 1800);
-                        return;
-                    }
-                    flash_status([`ASC +3 vz`, `vz=${data.velocity?.vz ?? '?'}`], 1200);
-                } catch (err) {
-                    console.error('[DEBUG BUTTON] ASC error:', err);
-                    flash_status(['ASC error'], 1500);
+                const result = await debug_advance_timed_event_turn();
+                if (!result.ok) {
+                    flash_status([`Next turn failed: ${result.error ?? 'unknown'}`], 1800);
+                    return;
                 }
+                flash_status([
+                    `Turn ${result.new_turn ?? '?'}`,
+                    `active: ${result.active_actor ?? '(none)'}`,
+                ], 1500);
+                void refresh_timed_event_debug_state();
             },
         }),
 
@@ -6770,7 +7227,7 @@ export function create_app_state(): AppState {
         // Toggle test body model for self-exclusion test.
         make_button_module({
             id: 'debug_body',
-            rect: { x0: DEBUG_X0 + 48, y0: DEBUG_Y_TEST, x1: DEBUG_X1 + 48, y1: DEBUG_Y_TEST + 1 },
+            rect: { x0: DEBUG_X0 + 24, y0: DEBUG_Y_TEST, x1: DEBUG_X1 + 24, y1: DEBUG_Y_TEST + 1 },
             label: 'BOD',
             rgb: get_color_by_name('vivid_yellow').rgb,
             bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },

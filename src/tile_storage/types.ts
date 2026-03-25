@@ -4,6 +4,7 @@
 import type { TagInstance } from "../tag_system/registry.js";
 import type { BodyModelVoxel } from "../shared/body_model.js";
 import type { RenderShaderBindings } from "../render_shaders/definitions.js";
+import type { InspectFeatureDef, InspectProfile } from "../inspection/types.js";
 
 export type TileCategory = "structures" | "foliage" | "terrain" | "water" | "features" | "special";
 
@@ -11,31 +12,13 @@ export type TileSenseType = "light" | "pressure" | "aroma" | "thaumic";
 
 export type ClarityLevel = "clear" | "vague" | "obscured";
 
-export interface TileFeature {
-  id: string;
-  name: string;
-  keywords: string[];
-  description: string;
-  requires_sense: TileSenseType;
-  min_clarity: ClarityLevel;
-  hidden?: boolean;
-  discovery_cr?: number;
-  relevant_prof?: string;
-  relevant_stat?: string;
-}
+export type TileFeature = InspectFeatureDef & {
+  name?: string;
+  description?: string;
+  requires_sense?: TileSenseType;
+};
 
-export interface TileInspection {
-  short: string;
-  full: string;
-  features: TileFeature[];
-  sensory?: {
-    light?: string[];
-    pressure?: string[];
-    aroma?: string[];
-    thaumic?: string[];
-    touch?: string[];
-  };
-}
+export type TileInspection = InspectProfile;
 
 export interface TileDefinition {
     id: string;                    // Unique identifier

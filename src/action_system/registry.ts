@@ -225,7 +225,7 @@ export const ACTION_REGISTRY: Record<ActionVerb, ActionDefinition> = {
     targetRange: 10,
     allowSelf: false,
     allowMultipleTargets: true,
-    defaultCost: "FREE",
+    defaultCost: "PARTIAL",
     requiresTool: false,
     defaultTool: "voice",
     validToolTypes: ["voice", "item"],
@@ -271,7 +271,7 @@ export const ACTION_REGISTRY: Record<ActionVerb, ActionDefinition> = {
   INSPECT: createAction({
     verb: "INSPECT",
     category: "utility",
-    targetTypes: ["character", "item", "tile", "place", "body_slot"],
+    targetTypes: ["character", "item", "tile", "place", "place_tile", "body_slot"],
     targetRequired: true,
     targetRange: 5,
     allowSelf: true,
@@ -286,8 +286,7 @@ export const ACTION_REGISTRY: Record<ActionVerb, ActionDefinition> = {
     },
     effectTemplate: "SYSTEM.INSPECT(inspector={actor}, target={target})",
     aiPriority: 30,
-    aiConditions: ["unknown_entity_nearby", "investigator_role"],
-    canUseInCombat: false
+    aiConditions: ["unknown_entity_nearby", "investigator_role"]
   }),
 
   USE: createAction({

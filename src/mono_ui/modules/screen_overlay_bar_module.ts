@@ -134,7 +134,10 @@ export function make_screen_overlay_bar_module(opts: OverlayBarOptions): Module 
 
   function get_handle_bounds(rect: Rect): { x0: number; x1: number; y: number } {
     const x0 = rect.x0 + Math.floor(((rect.x1 - rect.x0 + 1) - HANDLE_WIDTH) / 2);
-    return { x0, x1: x0 + HANDLE_WIDTH - 1, y: rect.y1 - 1 };
+    const handle_y = (opts.anchor ?? 'bottom') === 'top'
+      ? rect.y0 + 1
+      : rect.y1 - 1;
+    return { x0, x1: x0 + HANDLE_WIDTH - 1, y: handle_y };
   }
 
   function get_visible_content_rows(rect: Rect): number {
@@ -142,11 +145,17 @@ export function make_screen_overlay_bar_module(opts: OverlayBarOptions): Module 
   }
 
   function get_button_row_y(rect: Rect): number | null {
-    return get_visible_content_rows(rect) >= 2 ? rect.y0 + 1 : null;
+    if (get_visible_content_rows(rect) < 2) return null;
+    return (opts.anchor ?? 'bottom') === 'top'
+      ? rect.y1 - 1
+      : rect.y0 + 1;
   }
 
   function get_status_row_y(rect: Rect): number | null {
-    return get_visible_content_rows(rect) >= 3 ? rect.y0 + 2 : null;
+    if (get_visible_content_rows(rect) < 3) return null;
+    return (opts.anchor ?? 'bottom') === 'top'
+      ? rect.y1 - 2
+      : rect.y0 + 2;
   }
 
   function get_button_layout(rect: Rect): Array<{ button: OverlayButton; x0: number; x1: number }> {

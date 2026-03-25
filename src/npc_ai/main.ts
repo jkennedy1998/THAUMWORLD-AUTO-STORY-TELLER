@@ -26,7 +26,7 @@ import { summarize_for_npc, get_important_memories } from "../conversation_manag
 import { get_memories_about, remembers_entity, get_relationship_status, add_conversation_memory, get_formatted_memories } from "../npc_storage/memory.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { is_timed_event_active, get_timed_event_state, get_region_by_coords } from "../world_storage/store.js";
+import { complete_pending_communication_opportunity, get_active_actor_ref, get_timed_event_state, get_region_by_coords, is_timed_event_active, mark_actor_done, queue_pending_communication_opportunity, release_pending_communication_opportunity } from "../world_storage/store.js";
 import { load_place, save_place } from "../place_storage/store.js";
 import { consolidate_npc_memory_journal_if_needed, append_non_timed_conversation_journal } from "./timed_event_journal.js";
 import {
@@ -43,6 +43,7 @@ import { updateEngagement, initEngagementService } from "./engagement_service.js
 import { send_wander_command, send_sense_broadcast_command } from "./movement_command_sender.js";
 import { is_in_conversation } from "./conversation_state.js";
 import { is_in_conversation_presence } from "../shared/conversation_presence_store.js";
+import { resolve_npc_behavior } from "./behavior.js";
 
 const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
 const POLL_MS = SERVICE_CONFIG.POLL_MS.NPC_AI;
@@ -429,6 +430,9 @@ function can_npc_perceive_player(npc: any, player_location: any, player_ref: str
 
 // Determine if NPC should respond based on personality
 function should_npc_respond(npc: any, is_direct_target: boolean): boolean {
+    const behavior = resolve_npc_behavior(`npc.${String(npc?.id ?? npc?.npc_id ?? "unknown")}`, npc);
+    if (behavior.resolved !== "idle_wander") return false;
+
     // Direct target always responds
     if (is_direct_target) return true;
     
@@ -489,6 +493,12 @@ async function process_communication(
             .map((r: string) => r.startsWith('npc.') ? r.replace('npc.', '') : r)
             .filter((id: string) => id.length > 0)
     );
+    const forced_npc_id = typeof meta?.force_npc_ref === "string" && meta.force_npc_ref.startsWith("npc.")
+        ? meta.force_npc_ref.replace("npc.", "")
+        : null;
+    const forced_pending_opportunity_id = typeof meta?.timed_event_pending_opportunity_id === "string"
+        ? meta.timed_event_pending_opportunity_id
+        : null;
     
     // NEW: Handle direct COMMUNICATE messages from ActionPipeline
     // These have meta.intent_verb === "COMMUNICATE" and content in msg.content
@@ -618,6 +628,8 @@ async function process_communication(
         // (Empty observed_by means nobody perceived it.)
         if (pipeline_driven && !observed_npc_ids.has(npc_hit.id)) return false;
 
+        if (forced_npc_id && npc_hit.id !== forced_npc_id) return false;
+
         const npc_result = load_npc(data_slot_number, npc_hit.id);
         if (!npc_result.ok) {
             debug_log("NPC_AI", `Failed to load NPC ${npc_hit.id}`);
@@ -669,6 +681,13 @@ async function process_communication(
     });
 
     if (pipeline_driven && response_eligible_npc_ids.size === 0) {
+        if (forced_pending_opportunity_id) {
+            const released = release_pending_communication_opportunity(data_slot_number, forced_pending_opportunity_id);
+            debug_pipeline("NPC_AI", "Released forced pending communication opportunity - no eligible responders", {
+                opportunity_id: forced_pending_opportunity_id,
+                released,
+            });
+        }
         debug_pipeline("NPC_AI", "No eligible responders (witness-driven conversation state)", {
             id: msg.id,
             intent_id: meta?.intent_id ?? meta?.intentId ?? msg.id,
@@ -687,14 +706,34 @@ async function process_communication(
     const communication_key = `${correlation_id}:${original_text}`;
     if (last_communication_id !== communication_key) {
         // New communication round, reset tracking
+        debug_log("NPC_AI", "communication round reset", {
+            previous_key: last_communication_id,
+            next_key: communication_key,
+            correlation_id: correlation_id ?? null,
+            original_text,
+            cleared_responded_npcs: Array.from(responded_npcs),
+        });
         responded_npcs.clear();
         last_communication_id = communication_key;
+    } else {
+        debug_log("NPC_AI", "communication round reused existing key", {
+            communication_key,
+            correlation_id: correlation_id ?? null,
+            original_text,
+            responded_npcs: Array.from(responded_npcs),
+        });
     }
     
     // Process each nearby NPC
     for (const npc_hit of nearby_npcs) {
         // Skip if already responded in this round
-        if (responded_npcs.has(npc_hit.id)) {
+        if (!forced_npc_id && responded_npcs.has(npc_hit.id)) {
+            debug_log("NPC_AI", "skipping NPC already marked responded for communication key", {
+                npc_id: npc_hit.id,
+                communication_key,
+                correlation_id: correlation_id ?? null,
+                original_text,
+            });
             continue;
         }
         
@@ -702,6 +741,7 @@ async function process_communication(
         if (!npc_result.ok) continue;
         
         const npc = npc_result.npc;
+        const behavior = resolve_npc_behavior(`npc.${npc_hit.id}`, npc);
         const is_direct_target = direct_targets.includes(npc_hit.id);
 
         // If a timed event is active and this NPC is being engaged, consolidate its memory journal before the conversation continues.
@@ -748,14 +788,57 @@ async function process_communication(
         
         // Mark as responded IMMEDIATELY to prevent duplicate processing in rapid ticks
         responded_npcs.add(npc_hit.id);
-        
+
+        const npc_ref = `npc.${npc_hit.id}`;
+        if (!forced_npc_id && is_timed_event_active(data_slot_number)) {
+            const active_actor_ref = get_active_actor_ref(data_slot_number);
+            if (active_actor_ref && active_actor_ref !== npc_ref) {
+                const queued = queue_pending_communication_opportunity(data_slot_number, {
+                    event_id: get_timed_event_state(data_slot_number)?.timed_event_id,
+                    source_message_id: msg.id,
+                    npc_ref,
+                    speaker_ref: player_ref,
+                    target_ref: direct_targets.length > 0 ? `npc.${direct_targets[0]}` : undefined,
+                    participants: [player_ref, npc_ref],
+                    original_text,
+                    response_eligible_reason: is_direct_target ? "direct_target" : "witness_eligible",
+                    trigger_context: typeof get_timed_event_state(data_slot_number)?.timed_event_trigger?.kind === "string"
+                        ? get_timed_event_state(data_slot_number)!.timed_event_trigger!.kind
+                        : undefined,
+                    created_turn: get_timed_event_state(data_slot_number)?.current_turn,
+                    created_round: get_timed_event_state(data_slot_number)?.current_round,
+                    volume: typeof meta?.intent_subtype === "string" ? meta.intent_subtype : undefined,
+                    conversation_id: typeof msg.conversation_id === "string" ? msg.conversation_id : undefined,
+                    correlation_id: typeof correlation_id === "string" ? correlation_id : undefined,
+                });
+                debug_pipeline("NPC_AI", `Queued pending communication opportunity for ${npc_ref}`, {
+                    source_message_id: msg.id,
+                    active_actor_ref,
+                    queued: queued.ok,
+                });
+                debug_log("NPC_AI", "timed-event communication deferred into pending opportunity", {
+                    npc_ref,
+                    source_message_id: msg.id,
+                    active_actor_ref,
+                    communication_key,
+                    correlation_id: correlation_id ?? null,
+                    original_text,
+                    queued: queued.ok,
+                    opportunity_id: queued.ok ? queued.opportunity_id : null,
+                });
+                continue;
+            }
+        }
+
         // Witness reactions are handled by ActionPipeline perception broadcast
         // (witness_handler). Avoid duplicating real-time reactions here.
         
         debug_pipeline("NPC_AI", `Generating response for ${npc.name}`, {
             npc_id: npc_hit.id,
             is_direct_target,
-            can_perceive: perception.can_perceive
+            can_perceive: perception.can_perceive,
+            behavior_requested: behavior.requested,
+            behavior_resolved: behavior.resolved,
         });
         
         // ===== PHASE 3: DECISION HIERARCHY =====
@@ -964,6 +1047,13 @@ async function process_communication(
                     );
                 } catch (err) {
                     debug_error("NPC_AI", `AI call failed for ${npc.name}`, err);
+                    if (forced_pending_opportunity_id) {
+                        const released = release_pending_communication_opportunity(data_slot_number, forced_pending_opportunity_id);
+                        debug_pipeline("NPC_AI", `Released forced timed-event communication after AI failure for npc.${npc_hit.id}`, {
+                            opportunity_id: forced_pending_opportunity_id,
+                            released,
+                        });
+                    }
                     // Fallback to template if available, otherwise generic
                     const fallback_template = findTemplate(String(npc.role || "villager"), "greeting", {
                         is_combat: false,
@@ -979,7 +1069,6 @@ async function process_communication(
         
         // Store to session (for all response types)
         const session_key = get_session_key(npc_hit.id, correlation_id);
-        const npc_ref = `npc.${npc_hit.id}`;
         const npc_name = typeof (npc as any).name === "string" ? ((npc as any).name as string) : npc_hit.id;
         const npc_personality = (npc as any).personality ? JSON.stringify((npc as any).personality) : "";
         await append_session_turn(session_key, original_text, npc_response, player_ref, npc_ref, npc_name, npc_personality);
@@ -1089,6 +1178,19 @@ async function process_communication(
 
         // Note: npc_ai logs its own npc_response envelopes.
         // Avoid writing extra "display-only" log lines elsewhere.
+
+        if (forced_npc_id && forced_npc_id === npc_hit.id) {
+            const completed = forced_pending_opportunity_id
+                ? complete_pending_communication_opportunity(data_slot_number, forced_pending_opportunity_id)
+                : false;
+            const done_ok = mark_actor_done(data_slot_number, `npc.${npc_hit.id}`);
+            debug_pipeline("NPC_AI", `Completed forced timed-event communication for npc.${npc_hit.id}`, {
+                source_message_id: msg.id,
+                pending_opportunity_id: forced_pending_opportunity_id,
+                completed,
+                marked_done: done_ok,
+            });
+        }
 
         // Persist conversation context to NPC memory_sheet
         // Stores hierarchical conversation threads (summary + recent turns) for continuity

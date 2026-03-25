@@ -13,6 +13,56 @@ import { SERVICE_CONFIG } from "../shared/constants.js";
 import { DEBUG_LEVEL } from "../shared/debug.js";
 import { debug_event } from "../shared/debug_event.js";
 
+function parsePlaceTileRef(targetRef: string): { place_id: string; x: number; y: number } | null {
+  const parts = targetRef.split('.');
+  if (parts.length < 4 || parts[0] !== 'place_tile') return null;
+  const x = Number(parts[parts.length - 2]);
+  const y = Number(parts[parts.length - 1]);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  const place_id = parts.slice(1, parts.length - 2).join('.');
+  if (!place_id) return null;
+  return { place_id, x: Math.floor(x), y: Math.floor(y) };
+}
+
+function parsePlaceRef(targetRef: string): { place_id: string } | null {
+  if (!targetRef.startsWith('place.')) return null;
+  const place_id = targetRef.slice('place.'.length).trim();
+  if (!place_id) return null;
+  return { place_id };
+}
+
+function buildExplicitTargetLocation(targetRef: string, actorLocation: Location): Location | undefined {
+  if (targetRef.startsWith('place_tile.')) {
+    const parsed = parsePlaceTileRef(targetRef);
+    if (!parsed) return undefined;
+    return {
+      world_x: actorLocation.world_x,
+      world_y: actorLocation.world_y,
+      region_x: actorLocation.region_x,
+      region_y: actorLocation.region_y,
+      x: parsed.x,
+      y: parsed.y,
+      place_id: parsed.place_id,
+    };
+  }
+
+  if (targetRef.startsWith('place.')) {
+    const parsed = parsePlaceRef(targetRef);
+    if (!parsed) return undefined;
+    return {
+      world_x: actorLocation.world_x,
+      world_y: actorLocation.world_y,
+      region_x: actorLocation.region_x,
+      region_y: actorLocation.region_y,
+      x: actorLocation.x,
+      y: actorLocation.y,
+      place_id: parsed.place_id,
+    };
+  }
+
+  return undefined;
+}
+
 // Context for target resolution
 export interface TargetResolutionContext {
   actorRef: string;
@@ -336,11 +386,26 @@ export async function resolveTarget(
     );
     
     if (validation.valid) {
+      const explicitLocation = buildExplicitTargetLocation(intent.targetRef, intent.actorLocation);
+      if (DEBUG_LEVEL >= 3 && intent.verb === "INSPECT") {
+        debug_event("TARGET_RESOLUTION", "inspect.explicit_target_valid", {
+          target_ref: intent.targetRef,
+          validation_type: validation.type,
+          explicit_in_available_targets: !!explicit,
+          explicit_location: explicitLocation ?? null,
+        });
+      }
       return {
         ...intent,
         targetType: validation.type ?? explicit?.type,
-        targetLocation: explicit?.location ?? intent.targetLocation,
+        targetLocation: explicit?.location ?? intent.targetLocation ?? explicitLocation,
       };
+    }
+    if (DEBUG_LEVEL >= 3 && intent.verb === "INSPECT") {
+      debug_event("TARGET_RESOLUTION", "inspect.explicit_target_invalid", {
+        target_ref: intent.targetRef,
+        reason: validation.reason ?? "unknown",
+      });
     }
     
     // Target invalid, try to resolve

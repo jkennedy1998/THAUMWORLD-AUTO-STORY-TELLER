@@ -55,6 +55,35 @@ export function get_place_tile_at_world_z(place: Place | null | undefined, tile_
   }
 }
 
+export function get_place_tile_kind_at_world_z(place: Place | null | undefined, tile_x: number, tile_y: number, world_z: number): string | null {
+  try {
+    const p: any = place as any;
+    if (!p) return null;
+    const structure = Array.isArray(p.structures)
+      ? p.structures.find((s: any) => {
+          const origin = s?.origin;
+          if (!origin) return false;
+          const ox = Math.floor(Number(origin.x) || 0);
+          const oy = Math.floor(Number(origin.y) || 0);
+          const oz = Math.floor(Number(origin.z) || 0);
+          const phys = Array.isArray(s?.body_model?.physical) ? s.body_model.physical : [{ dx: 0, dy: 0, dz: 0 }];
+          return phys.some((v: any) => (
+            ox + Math.floor(Number(v?.dx ?? 0)) === tile_x &&
+            oy + Math.floor(Number(v?.dy ?? 0)) === tile_y &&
+            oz + Math.floor(Number(v?.dz ?? 0)) === world_z
+          ));
+        })
+      : null;
+    if (structure) return String((structure as any)?.def_id ?? (structure as any)?.kind ?? '').trim() || null;
+
+    const tile = get_place_tile_at_world_z(place, tile_x, tile_y, world_z);
+    const kind = String((tile as any)?.kind ?? '').trim();
+    return kind || null;
+  } catch {
+    return null;
+  }
+}
+
 export function get_place_tile_at_world_voxel(place: Place | null | undefined, voxel: Voxel3): PlaceTile | null {
   return get_place_tile_at_world_z(place, voxel.x, voxel.y, voxel.z);
 }

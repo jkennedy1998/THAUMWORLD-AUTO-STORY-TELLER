@@ -15,7 +15,7 @@ This plan focuses on the verbs currently in active development:
 - `MOVE`
 - `INSPECT`
 - `USE`
-- `ATTACK`
+- `COMMUNICATE`
 
 The goal is not to replace the existing breath-driven movement runtime. The goal is to make breaths, action economy, turn permission, movement permission, and observer broadcasting feel like one integrated system.
 
@@ -43,6 +43,7 @@ This plan chooses one owner per concern.
 
 - owner: `src/world_storage/store.ts`
 - owns whether a timed event exists, who participates, which actor is active, event type, region, and restart-safe persistence
+- also owns trigger-context metadata so the system can remember why the timed event started
 
 ### Turn Phase Workflow
 
@@ -81,6 +82,27 @@ The purpose of this plan is to bridge these systems, not to create parallel repl
 - Timed turns should control when actions may be initiated and when movement input may spend movement budget.
 - Once an entity has no remaining action economy and no remaining movement economy, it is done acting until refreshed by turn progression.
 
+### Timed Events Start With Initiative
+
+- Timed events always start with initiative.
+- Initiative is rolled at timed-event start to determine who acts first.
+- Participants are ordered highest to lowest by initiative according to the initiative rules already present in the system.
+- After a turn, that actor goes to the end of the list and the next highest initiative'd participant acts.
+- The old hold clarification is out of scope for this plan because `HOLD` is not being implemented yet.
+
+### One Timed-Event Container, Different Trigger Contexts
+
+- Conversation-style escalation and hostile/injurious escalation should use the same timed-event infrastructure.
+- The important distinction is trigger context and NPC motive, not a separate turn/initiative system.
+- Timed events should retain metadata about what triggered them so later systems can derive motive and behavior.
+
+### Temporary Timed-Event Exit Policy
+
+- For the current development phase, timed events end only when the debug `END` control is used.
+- Automatic end conditions are intentionally disabled for now.
+- Real event-state-based ending will come later once communication, inspect, and other action integrations are more mature.
+- This keeps turn-mode stable while verbs and NPC turn behavior are still being integrated.
+
 ### MOVE Is A Control / Movement-Budget Action
 
 - `MOVE` is not primarily a one-tile discrete boardgame step in runtime code.
@@ -116,6 +138,7 @@ The purpose of this plan is to bridge these systems, not to create parallel repl
 - Timed-event movement should be spread across those breaths in a manner similar to free-roam throttling rather than resolving as an instant burst.
 - NPC control pacing during timed events should derive from the same scalable breath-budgeting idea rather than a separate custom scheduler.
 - This keeps free roam and timed events parallel, scalable, and easier to reason about.
+- Later target: global breaths should slow in timed-event mode so the world is exposed to time equivalently rather than remaining at full free-roam cadence.
 
 ### Reuse Current Systems Aggressively
 
@@ -164,11 +187,13 @@ This plan does not preserve those overlaps as permanent architecture.
 - Reuse `src/turn_manager/state_machine.ts` as the turn-phase engine.
 - Extend it instead of preserving legacy one-off advancement logic in parallel.
 - Long term, phase progression should be expressed there rather than duplicated in world-store helpers.
+- Reuse the existing initiative roll + ordering flow at timed-event start rather than inventing a second initiative system.
 
 ### Witness-Driven Communication Flow
 
 - Reuse `src/npc_ai/witness_handler.ts` and `src/npc_ai/conversation_state.ts` as the canonical communication reaction path.
 - Do not preserve interface-side responder fallback heuristics once witness eligibility is trustworthy.
+- The detailed NPC communication scheduler/refactor work is tracked in `docs/plans/2026_02_13_advanced_npc_interactions_scheduler.md`.
 
 ### Breath-Driven Movement Runtime
 
@@ -282,21 +307,37 @@ This plan does not preserve those overlaps as permanent architecture.
 - Movement-cost `USE` cases should spend from the same movement pool used for locomotion during the turn.
 - Can later affect movement state indirectly through statuses/tags, but not by bypassing the pipeline.
 
-### ATTACK
+### COMMUNICATE
 
-- Should follow the same pipeline gates as `USE`.
-- Should consume action economy authoritatively when wired.
-- If an `ATTACK` roll is allowed as `PARTIAL`, it should use only the natural outcome.
-- If an `ATTACK` roll is allowed as `PARTIAL`, it should still allow negative modifiers against the acting entity where applicable.
-- If an `ATTACK` roll is allowed as `FULL`, it may use modifiers.
-- Some attack forms may require `FULL`.
-- Should keep observer/witness integration through the same perception path.
+- Uses pipeline validation + observer broadcasting.
+- Uses action economy once costs are wired.
+- Can trigger the same class of timed event as hostile or injurious `USE` interactions.
+- Multiple people talking can escalate into a timed event.
+- `COMMUNICATE` should continue using witness/conversation systems as its reaction and eligibility substrate.
 
-### COMMUNICATE Dependency
+### Hostile Or Injurious USE
 
-- This plan is focused on `MOVE`, `INSPECT`, `USE`, and `ATTACK`.
-- But `COMMUNICATE` already owns useful witness/timed-event behavior and must be treated as a dependency.
-- Do not regress or bypass the witness/conversation pipeline while refining the current verbs.
+- `ATTACK` is no longer a separately supported verb in this plan.
+- Hostile or injurious actions now live under `USE`.
+- An attempt to injure health from one character to another should be treated as a timed-event trigger condition.
+- Observer and witness behavior for hostile `USE` should use the same general observer model as other current verbs.
+
+## First-Pass Rules Matrix
+
+This matrix is the current implementation target unless a later plan update changes it explicitly.
+
+| Verb | Free Roam | Timed Event | Roll Rule | Notes |
+| --- | --- | --- | --- | --- |
+| `MOVE` | Breath-throttled movement input | Turn-window movement/control budget | No standard action roll | Uses the existing movement runtime; timed events suppress control input when movement is depleted |
+| `INSPECT` | `FULL` | Player chooses supported cost mode | `PARTIAL`: no positive modifiers for actor, negatives still apply; `FULL`: modifiers allowed | Meaningful combat cost even if realtime feel is lighter |
+| `USE` | Context-driven, usually permissive | Costs action, movement, or both depending on the interaction | Some uses roll, some do not; `PARTIAL` means no positive modifiers for actor, negatives still apply | Movement-cost `USE` spends from the same movement pool as locomotion |
+| `COMMUNICATE` | Uses pipeline path without timed turn gating | Costs action economy according to first-pass communication rules | If a communication roll exists, `PARTIAL` means no positive modifiers for actor, negatives still apply; `FULL` means modifiers allowed | Multiple participants talking can trigger a timed event |
+
+### Matrix Notes
+
+- `PARTIAL` never shields the acting entity from negative modifiers.
+- `PARTIAL` also does not suppress allowed positive modifiers on opposing/contesting rolls.
+- Timed-event movement should be spread across comparable physics breaths for actors and NPCs with turns.
 
 ## Non-Goals For This Plan
 
@@ -325,18 +366,19 @@ Purpose: define the behavior clearly enough that implementation work does not dr
 
 ### Deliverables
 
-- [ ] Define the timed-event action economy contract for current verbs only: `MOVE`, `INSPECT`, `USE`, `ATTACK`.
-- [ ] Define which resources each current verb spends: action budget, movement budget, or both.
-- [ ] Define the initial timed-event movement resource model in concrete engine terms.
+- [x] Define the timed-event action economy contract for current verbs only: `MOVE`, `INSPECT`, `USE`, `COMMUNICATE`.
+- [x] Define which resources each current verb spends: action budget, movement budget, or both.
+- [x] Define the initial timed-event movement resource model in concrete engine terms.
 - [ ] Decide the first-pass refill behavior for `MOVE` as a `FULL` action.
 - [ ] Define how timed-event depletion maps onto suppression in the live movement controller.
 - [ ] Define exactly which existing runtime fields are reused and which fields are only transitional.
-- [ ] Define what stays permissive in free roam versus what becomes authoritative in timed events.
-- [ ] Define how `INSPECT` cost selection works in timed events versus free roam.
-- [ ] Define how `USE` can spend movement instead of action budget for specific interaction cases.
+- [x] Define what stays permissive in free roam versus what becomes authoritative in timed events.
+- [x] Define how `INSPECT` cost selection works in timed events versus free roam.
+- [x] Define how `USE` can spend movement instead of action budget for specific interaction cases.
 - [ ] Define how timed-event breath exposure is normalized across actors and NPCs with turns.
 - [ ] Define exactly how `FULL` versus `PARTIAL` affects current-verb rolls in first-pass runtime rules.
 - [ ] Define which current verbs/interactions may only be used as `FULL`.
+- [x] Define the first-pass debug path for manually starting a timed event during development.
 
 ### Exit Criteria
 
@@ -361,6 +403,7 @@ Purpose: define the behavior clearly enough that implementation work does not dr
 - [ ] Rule check: `PARTIAL` rolls still suffer negative modifiers where applicable.
 - [ ] Rule check: `PARTIAL` does not suppress allowed positive modifiers on opposing/contesting rolls.
 - [ ] Rule check: `FULL` rolls can apply modifiers.
+- [ ] Rule check: timed events start by rolling initiative and selecting a first actor.
 
 ## Phase 2 - Make Timed-Event State The Real Query Surface
 
@@ -368,8 +411,8 @@ Purpose: make the pipeline and runtime ask the same source of truth about timed-
 
 ### Deliverables
 
-- [ ] Replace the `isInCombat()` stub in `src/interface_program/action_integration.ts` with real timed-event state.
-- [ ] Replace the `getCurrentActor()` stub in `src/interface_program/action_integration.ts` with real active-actor lookup.
+- [x] Replace the `isInCombat()` stub in `src/interface_program/action_integration.ts` with real timed-event state.
+- [x] Replace the `getCurrentActor()` stub in `src/interface_program/action_integration.ts` with real active-actor lookup.
 - [ ] Decide whether `src/turn_manager/validator.ts` is promoted into the real adapter path or reduced to reference/policy code.
 - [ ] Document which timed-event fields in `src/world_storage/store.ts` remain canonical and which are transitional.
 - [ ] Ensure turn-phase reads and action-pipeline reads agree on active event and active actor.
@@ -389,6 +432,7 @@ Purpose: make the pipeline and runtime ask the same source of truth about timed-
 - [ ] Start a timed event and verify the action pipeline sees timed-event-active state.
 - [ ] Start a timed event and verify the current actor reported to the action pipeline matches the turn manager.
 - [ ] Verify free-roam action usage still works when no timed event is active.
+- [ ] Start a timed event through the debug path and verify initiative is rolled immediately.
 
 ## Phase 3 - Wire Action Economy Without Overbuilding
 
@@ -396,12 +440,12 @@ Purpose: make turn permission and current-verb action costs real in the pipeline
 
 ### Deliverables
 
-- [ ] Replace `checkActionCost()` stub logic with live timed-event checks for `MOVE`, `INSPECT`, `USE`, and `ATTACK`.
-- [ ] Replace `consumeActionCost()` stub logic with live budget consumption for the same verbs.
-- [ ] Enable pipeline cost checks when the adapter layer is trustworthy.
-- [ ] Decide first-pass runtime costs for `USE` and `ATTACK`.
-- [ ] Support the first-pass timed-event cost selection path for `INSPECT`.
-- [ ] Support `USE` actions that spend movement instead of a standard action where applicable.
+- [x] Replace `checkActionCost()` stub logic with live timed-event checks for `MOVE`, `INSPECT`, `USE`, and `COMMUNICATE`.
+- [x] Replace `consumeActionCost()` stub logic with live budget consumption for the same verbs.
+- [x] Enable pipeline cost checks when the adapter layer is trustworthy.
+- [ ] Decide first-pass runtime costs for `USE` and `COMMUNICATE`.
+- [x] Support the first-pass timed-event cost selection path for `INSPECT`.
+- [x] Support `USE` actions that spend movement instead of a standard action where applicable.
 - [ ] Support first-pass `FULL` vs `PARTIAL` roll behavior for current verbs where rolls apply.
 
 ### Dependencies
@@ -418,10 +462,10 @@ Purpose: make turn permission and current-verb action costs real in the pipeline
 
 - [ ] Timed-event active actor can spend a legal `INSPECT` action and receive success from the pipeline.
 - [ ] Free-roam `INSPECT` consumes a `FULL` action according to the first-pass rule.
-- [ ] Timed-event non-active actor is rejected for `USE` or `ATTACK` because it is not their turn.
+- [ ] Timed-event non-active actor is rejected for `USE` or `COMMUNICATE` because it is not their turn.
 - [ ] Timed-event active actor can deplete partial/full economy and then receives a rejection for a further action.
 - [ ] Timed-event active actor can perform a movement-cost `USE` action and lose movement from the same pool used for locomotion.
-- [ ] Free-roam `INSPECT`/`USE`/`ATTACK` still route through the pipeline without turn-based rejection.
+- [ ] Free-roam `INSPECT`/`USE`/`COMMUNICATE` still route through the pipeline without turn-based rejection.
 - [ ] A `PARTIAL` rolled action uses only the natural outcome.
 - [ ] A `PARTIAL` rolled action does not gain positive modifiers for the acting entity.
 - [ ] A `PARTIAL` rolled action still suffers negative modifiers where applicable.
@@ -434,12 +478,12 @@ Purpose: add movement depletion and suppression without creating a second locomo
 
 ### Deliverables
 
-- [ ] Add timed-event movement budget state alongside existing breath movement runtime state.
+- [x] Add timed-event movement budget state alongside existing breath movement runtime state.
 - [ ] Define how movement capacity is initialized at turn start.
-- [ ] Define how `MOVE` refills movement capacity.
+- [x] Define how `MOVE` refills movement capacity.
 - [ ] Define how movement capacity is drained by held intent / path following across breaths.
-- [ ] Define suppression behavior when movement capacity hits zero.
-- [ ] Wire suppression in the canonical movement controller in `src/interface_program/main.ts`.
+- [x] Define suppression behavior when movement capacity hits zero.
+- [x] Wire suppression in the canonical movement controller in `src/interface_program/main.ts`.
 - [ ] Define how many physics breaths an acting entity is exposed to during a timed turn window.
 - [ ] Define how that turn-window breath exposure should stay comparable across actors and NPCs.
 
@@ -468,7 +512,7 @@ Purpose: make timed-event `MOVE` interact correctly with movement permission wit
 
 ### Deliverables
 
-- [ ] Add a proper action-side bridge for `MOVE` approval in timed events.
+- [x] Add a proper action-side bridge for `MOVE` approval in timed events.
 - [ ] Keep free-roam movement responsive while allowing timed-event gating.
 - [ ] Make click-to-move and held intent respect timed-event movement suppression.
 - [ ] Ensure runtime stepping still happens in the canonical breath loop.
@@ -505,7 +549,7 @@ Purpose: keep action visibility and NPC reactions consistent while timed-event r
 
 ### Deliverables
 
-- [ ] Keep `INSPECT`, `USE`, and `ATTACK` on the normal action-pipeline perception path.
+- [ ] Keep `INSPECT`, `USE`, and `COMMUNICATE` on the normal action-pipeline perception path.
 - [ ] Align `MOVE` broadcasts with the same observer semantics used by the action pipeline.
 - [ ] Ensure timed-event movement suppression does not break witness updates for actual motion that still occurs.
 - [ ] Preserve `observedBy` style outputs for downstream systems where useful.
@@ -523,7 +567,7 @@ Purpose: keep action visibility and NPC reactions consistent while timed-event r
 
 ### Test Cases
 
-- [ ] `ATTACK` produces observer/witness data for nearby NPCs in timed events.
+- [ ] `COMMUNICATE` produces observer/witness data for nearby NPCs in timed events.
 - [ ] `INSPECT` and `USE` continue to produce action-pipeline observer results.
 - [ ] Actual movement that occurs in a timed event still produces witness-visible motion events.
 - [ ] Communication responders come from witness/conversation eligibility rather than interface fallback logic for covered cases.
@@ -537,10 +581,11 @@ Purpose: finish the first coherent gameplay slice for the four current verbs.
 - [ ] Define first-pass action-economy rules for `MOVE`.
 - [ ] Define first-pass action-economy rules for `INSPECT`.
 - [ ] Define first-pass action-economy rules for `USE`.
-- [ ] Define first-pass action-economy rules for `ATTACK`.
+- [ ] Define first-pass action-economy rules for `COMMUNICATE`.
 - [ ] Verify these rules against the current tabletop notes and runtime constraints.
 - [ ] Define first-pass movement-cost `USE` examples that must work.
 - [ ] Define which first-pass verb variants are `FULL`-only.
+- [~] Keep inspect-target normalization explicitly in scope while `INSPECT` is being integrated alongside `COMMUNICATE`.
 
 ### Consolidation Rules
 
@@ -563,11 +608,11 @@ Purpose: finish the first coherent gameplay slice for the four current verbs.
   - action-economy verb with normal pipeline execution
   - may sometimes spend movement instead of a standard action
   - some variants may be `FULL`-only
-- `ATTACK`
+- `COMMUNICATE`
   - action-economy verb with normal pipeline execution
-  - `PARTIAL`: no positive modifiers for the acting entity; negative modifiers still apply when allowed
-  - `FULL`: modifiers allowed
-  - some variants may be `FULL`-only
+  - may trigger timed events when multiple people are talking
+  - if a roll exists, `PARTIAL` means no positive modifiers for the acting entity; negative modifiers still apply
+  - if a roll exists, `FULL` means modifiers allowed
 
 ### Exit Criteria
 
@@ -636,7 +681,7 @@ Purpose: prove the integrated model actually matches the game rules and goals.
 
 ### Witness / Broadcast Verification
 
-- [ ] `MOVE`, `INSPECT`, `USE`, and `ATTACK` all produce observer-facing behavior consistent with their path.
+- [ ] `MOVE`, `INSPECT`, `USE`, and `COMMUNICATE` all produce observer-facing behavior consistent with their path.
 - [ ] NPC witness reactions continue to function for observable actions.
 - [ ] Communication eligibility comes from witness/conversation state rather than interface fallbacks.
 
@@ -657,10 +702,13 @@ These are the scenario-level checks that should keep implementation honest.
 - [ ] In free roam, the player can click-to-move without turn-based rejection.
 - [ ] In free roam, `INSPECT` and `USE` still function through their normal action path.
 
-### Scenario B - Timed Attack Starts Event
+### Scenario B - Timed Event Triggers
 
-- [ ] An `ATTACK` can trigger a timed event.
+- [ ] Multiple participants talking can trigger a timed event.
+- [ ] A hostile or injurious `USE` can trigger a timed event.
+- [ ] The debug timed-event button can trigger a timed event during development.
 - [ ] The timed event establishes an active actor.
+- [ ] Initiative is rolled at timed-event start to determine who acts first.
 - [ ] A non-active participant is rejected for acting out of turn.
 
 ### Scenario C - Timed Movement Depletion
@@ -717,7 +765,7 @@ These are the scenario-level checks that should keep implementation honest.
 
 This plan is complete when all of the following are true:
 
-- Timed-event action permission is real for `MOVE`, `INSPECT`, `USE`, and `ATTACK`.
+- Timed-event action permission is real for `MOVE`, `INSPECT`, `USE`, and `COMMUNICATE`.
 - Timed-event movement depletion suppresses control movement while still allowing gravity/falling.
 - `MOVE` as a `FULL` action meaningfully restores timed-event movement capacity.
 - Free-roam movement still runs on breaths and remains responsive.

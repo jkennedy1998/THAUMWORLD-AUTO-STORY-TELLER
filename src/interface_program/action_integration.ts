@@ -7,6 +7,7 @@ import { find_npcs, load_npc } from "../npc_storage/store.js";
 import { get_npc_location } from "../npc_storage/location.js";
 import { getAvailableTargets } from "../action_system/target_resolution.js";
 import { debug_log, debug_warn } from "../shared/debug.js";
+import { can_actor_afford_action_cost, can_actor_afford_movement_cost, consume_actor_action_cost, consume_actor_movement_cost, finalize_timed_event_turn_if_exhausted, get_active_actor_ref, is_timed_event_active } from "../world_storage/store.js";
 
 let pipeline: ActionPipeline | null = null;
 
@@ -15,6 +16,24 @@ let pipeline: ActionPipeline | null = null;
  * These connect the pipeline to game storage
  */
 function createPipelineDependencies(dataSlot: number) {
+  const classifyUseCost = (intent: ActionIntent | undefined): "movement" | "action" => {
+    if (!intent || intent.verb !== "USE") return "action";
+
+    const subtype = String(intent.parameters?.subtype ?? "").toUpperCase();
+    if (subtype === "IMPACT_SINGLE" || subtype === "PROJECTILE_SINGLE") return "action";
+
+    const original = String(intent.originalInput ?? "").toLowerCase();
+    if (/\b(attack|hit|strike|stab|shoot|throw at|harm|injure|damage|kill|punch|slash|swing)\b/.test(original)) {
+      return "action";
+    }
+
+    if (/\b(pick up|pickup|drop|equip|unequip|wear|wield|put on|take off|transfer|move item|stash|store|withdraw|deposit|press|push|pull|open|close|activate|use|drink|eat|consume|light|ignite)\b/.test(original)) {
+      return "movement";
+    }
+
+    return "movement";
+  };
+
   return {
     // Get available targets at a location
     getAvailableTargets: async (location: any, radius: number) => {
@@ -50,15 +69,29 @@ function createPipelineDependencies(dataSlot: number) {
     },
     
     // Check if actor can afford action cost
-    checkActionCost: async (actorRef: string, cost: any) => {
-      // Not implemented: action point/cost enforcement.
-      return true; // Default to affordable for now
+    checkActionCost: async (actorRef: string, cost: any, intent?: ActionIntent) => {
+      if (!is_timed_event_active(dataSlot)) return true;
+
+      if (intent?.verb === "USE" && classifyUseCost(intent) === "movement") {
+        return can_actor_afford_movement_cost(dataSlot, actorRef, 1);
+      }
+
+      return can_actor_afford_action_cost(dataSlot, actorRef, cost);
     },
     
     // Consume action cost
-    consumeActionCost: async (actorRef: string, cost: any) => {
-      // Not implemented: action point/cost consumption.
-      return true; // Default to success for now
+    consumeActionCost: async (actorRef: string, cost: any, intent?: ActionIntent) => {
+      if (!is_timed_event_active(dataSlot)) return true;
+
+      if (intent?.verb === "USE" && classifyUseCost(intent) === "movement") {
+        const ok = consume_actor_movement_cost(dataSlot, actorRef, 1);
+        if (ok) void finalize_timed_event_turn_if_exhausted(dataSlot, actorRef);
+        return ok;
+      }
+
+      const ok = consume_actor_action_cost(dataSlot, actorRef, cost);
+      if (ok) void finalize_timed_event_turn_if_exhausted(dataSlot, actorRef);
+      return ok;
     },
     
     // Get actor data for tool validation
@@ -88,8 +121,8 @@ function createPipelineDependencies(dataSlot: number) {
     },
     
     // Combat checks
-    isInCombat: () => false,
-    getCurrentActor: () => null,
+    isInCombat: () => is_timed_event_active(dataSlot),
+    getCurrentActor: () => get_active_actor_ref(dataSlot),
     
     // Logging
     log: (message: string, data?: any) => {
@@ -108,7 +141,7 @@ export function initializeActionPipeline(dataSlot: number): ActionPipeline {
   pipeline = new ActionPipeline(deps, {
     enablePerception: true,
     enableValidation: true,
-    enableCostCheck: false, // Disabled until implemented
+    enableCostCheck: true,
     enableRulesCheck: true,
     requireAwareness: false, // Disabled until implemented
     debug: process.env.DEBUG_ACTIONS === "1"

@@ -19,6 +19,7 @@ import {
 import { find_path } from "../shared/pathfinding.js";
 import { is_in_conversation } from "./conversation_state.js";
 import { send_wander_command, send_stop_command } from "./movement_command_sender.js";
+import { should_behavior_auto_wander } from "./behavior.js";
 
 // Store place data
 const place_data = new Map<string, Place>();
@@ -72,6 +73,10 @@ export function init_place_movement(place_id: string, place: Place): void {
 
   // Start wandering behavior for all NPCs (skip those in conversation)
   for (const npc of place.contents.npcs_present) {
+    if (!should_behavior_auto_wander(npc.npc_ref, npc)) {
+      debug_log("NPC_Movement", `${npc.npc_ref} skipping initial wander - behavior does not auto-wander`);
+      continue;
+    }
     if (!is_in_conversation(npc.npc_ref)) {
       start_npc_wandering(place_id, npc.npc_ref);
     } else {
@@ -132,6 +137,10 @@ function start_npc_wandering(place_id: string, npc_ref: string): void {
   // Find NPC
   const npc = place.contents.npcs_present.find(n => n.npc_ref === npc_ref);
   if (!npc) return;
+  if (!should_behavior_auto_wander(npc_ref, npc)) {
+    debug_log("NPC_Movement", `${npc_ref} skipping wander - behavior does not auto-wander`);
+    return;
+  }
 
   // Pick random destination
   const width = place.tile_grid.width;
@@ -253,6 +262,11 @@ export function resume_npc_wandering(npc_ref: string): void {
   for (const place_id of active_place_ids) {
     const place = place_data.get(place_id);
     if (place?.contents.npcs_present.some(n => n.npc_ref === npc_ref)) {
+      const npc = place.contents.npcs_present.find(n => n.npc_ref === npc_ref);
+      if (npc && !should_behavior_auto_wander(npc_ref, npc)) {
+        debug_log("NPC_Movement", `${npc_ref} not resuming wander - behavior does not auto-wander`);
+        return;
+      }
       // Cancel any existing timeout first
       const existing_timeout = wandering_timeouts.get(npc_ref);
       if (existing_timeout) {

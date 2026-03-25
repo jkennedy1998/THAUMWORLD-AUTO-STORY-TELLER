@@ -7,6 +7,7 @@ export type TurnPhase =
     | "ACTION_SELECTION"
     | "ACTION_RESOLUTION"
     | "TURN_END"
+    | "WORLD_SIM_INTERSTITIAL"
     | "EVENT_END_CHECK"
     | "EVENT_END";
 
@@ -55,7 +56,8 @@ const VALID_TRANSITIONS: Record<TurnPhase, TurnPhase[]> = {
     "ACTION_SELECTION": ["ACTION_RESOLUTION", "TURN_END"],
     "ACTION_RESOLUTION": ["TURN_END", "ACTION_SELECTION"], // Can chain actions
     "TURN_END": ["TURN_START", "EVENT_END_CHECK"],
-    "EVENT_END_CHECK": ["TURN_START", "EVENT_END"],
+    "WORLD_SIM_INTERSTITIAL": ["TURN_START", "EVENT_END"],
+    "EVENT_END_CHECK": ["TURN_START", "WORLD_SIM_INTERSTITIAL", "EVENT_END"],
     "EVENT_END": [] // Terminal state
 };
 
@@ -158,16 +160,15 @@ export function transition_phase(
                 state.completed_actors.add(state.current_actor_ref);
             }
             break;
+
+        case "WORLD_SIM_INTERSTITIAL":
+            break;
             
         case "EVENT_END_CHECK":
             // Check if all actors have completed
             if (state.completed_actors.size >= state.initiative_order.length) {
-                // New round
-                state.round_number++;
-                state.completed_actors.clear();
-                state.current_turn = 1;
-                state.current_actor_ref = state.initiative_order[0] ?? null;
-                state.phase = "TURN_START";
+                state.current_actor_ref = null;
+                state.phase = "WORLD_SIM_INTERSTITIAL";
             } else {
                 // Next actor's turn
                 const next_index = state.initiative_order.findIndex(

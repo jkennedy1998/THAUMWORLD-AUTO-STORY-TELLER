@@ -1,0 +1,23 @@
+sheet,row_id,token,codepoint,layer_role,min_weight,max_weight,notes
+tiles,tile_void,VOID,,fg,1,6,draw at least w1 and w2
+tiles,tile_floor,FLR,,fg,1,6,draw at least w1 and w2
+tiles,tile_dirt,DIRT,,fg,1,6,draw at least w1 and w2
+tiles,tile_grass,GRS,,fg,1,6,draw at least w1 and w2
+tiles,tile_stone,STN,,fg,1,6,draw at least w1 and w2
+tiles,tile_water,WTR,,fg,1,6,draw at least w1 and w2
+tiles,tile_sand,SND,,fg,1,6,draw at least w1 and w2
+tiles,tile_path,PATH,,fg,1,6,draw at least w1 and w2
+tiles,tile_wall,WALL,,fg,1,6,draw at least w1 and w2
+tiles,tile_door_closed,DCL,,fg,1,6,draw at least w1 and w2
+tiles,tile_door_open,DOP,,fg,1,6,draw at least w1 and w2
+tiles,tile_chest_closed,CCL,,fg,1,6,draw at least w1 and w2
+tiles,tile_chest_open,COP,,fg,1,6,draw at least w1 and w2
+tiles,tile_bush,BSH,,fg,1,6,draw at least w1 and w2
+tiles,tile_tree,TREE,,fg,1,6,draw at least w1 and w2
+tiles,tile_fence,FNC,,fg,1,6,draw at least w1 and w2
+tiles,tile_window,WND,,fg,1,6,draw at least w1 and w2
+tiles,tile_shadow,SHD,,fg,1,6,draw at least w1 and w2
+tiles,tile_selection,SEL,,fg,1,6,draw at least w1 and w2
+tiles,tile_hover,HOV,,fg,1,6,draw at least w1 and w2
+tiles,tile_target,TGT,,fg,1,6,draw at least w1 and w2
+tiles,tile_damage,DMG,,fg,1,6,draw at least w1 and w2

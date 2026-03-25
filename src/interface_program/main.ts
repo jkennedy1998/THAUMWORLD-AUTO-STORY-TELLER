@@ -23,7 +23,7 @@ import { ensure_roller_status_exists, read_roller_status, write_roller_status } 
 import { ensure_actor_exists, find_actors, load_actor, save_actor, create_actor_from_kind } from "../actor_storage/store.js";
 import { create_npc_from_kind, find_npcs, save_npc } from "../npc_storage/store.js";
 import { load_kind_definitions } from "../kind_storage/store.js";
-import { get_timed_event_state, get_region_by_coords, is_timed_event_active, load_region, save_region } from "../world_storage/store.js";
+import { advance_timed_event_world_breaths, advance_turn, can_actor_afford_movement_cost, consume_actor_movement_cost, end_timed_event, finalize_timed_event_turn_if_exhausted, finalize_world_sim_interstitial, get_active_actor_ref, get_current_turn_breaths_remaining, get_timed_event_phase, get_timed_event_state, get_timed_event_turn_window_breaths, get_timed_event_world_breath_index, get_region_by_coords, is_current_turn_window_expired, is_timed_event_active, is_timed_event_world_sim_interstitial, load_region, mark_actor_done, note_current_turn_started_breath, perform_move_action_refresh, save_region, start_timed_event, timed_event_stat_to_bps, TIMED_EVENT_TURN_WINDOW_BREATHS } from "../world_storage/store.js";
 import { travel_between_places } from "../travel/movement.js";
 import { load_npc } from "../npc_storage/store.js";
 import { load_place, list_all_places, list_places_in_region, save_place, create_basic_place, compute_connected_place_bounds, region_bounds_conflict, create_place_connector_record, delete_place } from "../place_storage/store.js";
@@ -123,6 +123,11 @@ type PlaceBreathState = {
     tile_physics_cache_dirty: boolean;
     tile_updates: Array<{ place_id: string; kind: string; from: { x: number; y: number; z: number }; to: { x: number; y: number; z: number } }>;
     item_refresh_intents: ItemMutationRefreshIntent[];
+};
+
+type MovementPulseOptions = {
+    entity_filter_ref?: string | null;
+    pulse_breath_index?: number;
 };
 
 const BREATH_MS = 33; // Fast fixed tick; most entities won't step every breath.
@@ -313,6 +318,7 @@ type PersistedMovementPhysicsState = {
     velocity: { vx: number; vy: number; vz: number };
     move_budget: MovementBudgetState;
     move_debt: MovementBudgetState;
+    next_control_breath?: Record<MoveModality, number>;
     last_intent: { dx: number; dy: number; modality: MoveModality; mode: MoveMode };
     transient_selection?: {
         movement_verb: "move" | null;
@@ -366,6 +372,7 @@ type MovementPhysicsRuntimeState = {
     } | null;
     move_budget: MovementBudgetState;
     move_debt: MovementBudgetState;
+    next_control_breath: Record<MoveModality, number>;
     goal: { x: number; y: number } | null;
     advisory_path: Array<{ x: number; y: number; z?: number }> | null;
     advisory_path_index: number;
@@ -450,6 +457,18 @@ function clear_entity_goal_and_path(slot: number, entity_ref: string, place_id: 
     return ctl;
 }
 
+function clear_entity_controller_for_blocked_turn(slot: number, entity_ref: string, place_id: string): EntityMoveController {
+    const ctl = get_or_init_move_controller(slot, entity_ref, place_id);
+    ctl.intent = null;
+    ctl.goal = null;
+    ctl.path = null;
+    ctl.path_index = 0;
+    ctl.need_repath = false;
+    ctl.updated_at_ms = Date.now();
+    move_ctl.set(move_ctl_key(slot, entity_ref), ctl);
+    return ctl;
+}
+
 function queue_entity_goal(
     slot: number,
     entity_ref: string,
@@ -493,6 +512,7 @@ function normalize_movement_physics_state(any_entity: any): PersistedMovementPhy
     const velocity = (mp && typeof mp.velocity === 'object') ? mp.velocity : {};
     const move_budget = (mp && typeof mp.move_budget === 'object') ? mp.move_budget : {};
     const move_debt = (mp && typeof mp.move_debt === 'object') ? mp.move_debt : {};
+    const next_control_breath = (mp && typeof mp.next_control_breath === 'object') ? mp.next_control_breath : {};
     const last_intent = (mp && typeof mp.last_intent === 'object') ? mp.last_intent : {};
     const out: PersistedMovementPhysicsState = {
         velocity: {
@@ -511,6 +531,12 @@ function normalize_movement_physics_state(any_entity: any): PersistedMovementPhy
             climb: Math.floor(Number((move_debt as any).climb ?? 0)) || 0,
             swim: Math.floor(Number((move_debt as any).swim ?? 0)) || 0,
             fly: Math.floor(Number((move_debt as any).fly ?? 0)) || 0,
+        },
+        next_control_breath: {
+            walk: Math.floor(Number((next_control_breath as any).walk ?? 0)) || 0,
+            climb: Math.floor(Number((next_control_breath as any).climb ?? 0)) || 0,
+            swim: Math.floor(Number((next_control_breath as any).swim ?? 0)) || 0,
+            fly: Math.floor(Number((next_control_breath as any).fly ?? 0)) || 0,
         },
         last_intent: {
             dx: clamp_intent((last_intent as any).dx),
@@ -571,6 +597,12 @@ function get_or_init_movement_physics_state(entity_ref: string, place_id: string
         } : null,
         move_budget: { ...persisted.move_budget },
         move_debt: { ...persisted.move_debt },
+        next_control_breath: {
+            walk: Number(persisted.next_control_breath?.walk ?? 0) || 0,
+            climb: Number(persisted.next_control_breath?.climb ?? 0) || 0,
+            swim: Number(persisted.next_control_breath?.swim ?? 0) || 0,
+            fly: Number(persisted.next_control_breath?.fly ?? 0) || 0,
+        },
         goal: ctl?.goal ? { ...ctl.goal } : null,
         advisory_path: ctl?.path ? ctl.path.map((p) => ({ ...p })) : null,
         advisory_path_index: Math.max(0, Math.floor(Number(ctl?.path_index ?? 0)) || 0),
@@ -585,6 +617,7 @@ function persist_entity_movement_state(any_entity: any, runtime: MovementPhysics
     persisted.velocity = { ...runtime.velocity };
     persisted.move_budget = { ...runtime.move_budget };
     persisted.move_debt = { ...runtime.move_debt };
+    persisted.next_control_breath = { ...runtime.next_control_breath };
     if (runtime.latest_intent) {
         persisted.last_intent = {
             dx: clamp_intent(runtime.latest_intent.dx),
@@ -637,6 +670,25 @@ function spend_move_budget(runtime: MovementPhysicsRuntimeState, modality: MoveM
     const overspent = Math.ceil(Math.abs(next_budget));
     runtime.move_budget[modality] = 0;
     runtime.move_debt[modality] = Math.max(0, Math.floor(Number(runtime.move_debt[modality])) || 0) + overspent;
+}
+
+function get_walk_breaths_per_step(any_entity: any, mode: MoveMode): number {
+    const base_stat = Number(any_entity?.movement?.walk);
+    const base_bps = timed_event_stat_to_bps(base_stat);
+    const mult = mode === "SPRINT" ? 1.8 : mode === "SNEAK" ? 0.6 : 1.0;
+    return Math.max(1, Math.round(base_bps / mult));
+}
+
+function is_control_breath_ready(runtime: MovementPhysicsRuntimeState, modality: MoveModality, breath_index: number): boolean {
+    const next = Math.floor(Number(runtime.next_control_breath[modality] ?? 0)) || 0;
+    const current = Math.floor(Number(breath_index) || 0);
+    return current >= next;
+}
+
+function set_next_control_breath(runtime: MovementPhysicsRuntimeState, modality: MoveModality, breath_index: number, breaths_per_step: number): void {
+    const current = Math.floor(Number(breath_index) || 0);
+    const cadence = Math.max(1, Math.floor(Number(breaths_per_step) || 1));
+    runtime.next_control_breath[modality] = current + cadence;
 }
 
 function hash_entity_ref(entity_ref: string): number {
@@ -1212,6 +1264,59 @@ function normalize_move_mode(mode_raw: any): MoveMode {
     return "WALK";
 }
 
+function get_timed_event_movement_gate(slot: number, entity_ref: string): {
+    active: boolean;
+    allowed: boolean;
+    reason?: 'not_your_turn' | 'movement_depleted';
+} {
+    if (!is_timed_event_active(slot)) return { active: false, allowed: true };
+    const active_actor_ref = get_active_actor_ref(slot);
+    if (is_timed_event_world_sim_interstitial(slot)) {
+        debug_log('TIMED_EVENT_MOVE', 'movement gate blocked during interstitial', {
+            slot,
+            entity_ref,
+            active_actor_ref,
+            reason: 'not_your_turn',
+            timed_event_phase: get_timed_event_phase(slot),
+            world_breath_index: get_timed_event_world_breath_index(slot),
+        });
+        return { active: true, allowed: false, reason: 'not_your_turn' };
+    }
+    if (!active_actor_ref) {
+        debug_log('TIMED_EVENT_MOVE', 'movement gate blocked without active actor', {
+            slot,
+            entity_ref,
+            reason: 'not_your_turn',
+            timed_event_phase: get_timed_event_phase(slot),
+            world_breath_index: get_timed_event_world_breath_index(slot),
+        });
+        return { active: true, allowed: false, reason: 'not_your_turn' };
+    }
+    if (active_actor_ref && active_actor_ref !== entity_ref) {
+        debug_log('TIMED_EVENT_MOVE', 'movement gate blocked for inactive actor', {
+            slot,
+            entity_ref,
+            active_actor_ref,
+            reason: 'not_your_turn',
+            timed_event_phase: get_timed_event_phase(slot),
+            world_breath_index: get_timed_event_world_breath_index(slot),
+        });
+        return { active: true, allowed: false, reason: 'not_your_turn' };
+    }
+    if (!can_actor_afford_movement_cost(slot, entity_ref, 1)) {
+        debug_log('TIMED_EVENT_MOVE', 'movement gate blocked by depleted movement', {
+            slot,
+            entity_ref,
+            active_actor_ref,
+            reason: 'movement_depleted',
+            timed_event_phase: get_timed_event_phase(slot),
+            world_breath_index: get_timed_event_world_breath_index(slot),
+        });
+        return { active: true, allowed: false, reason: 'movement_depleted' };
+    }
+    return { active: true, allowed: true };
+}
+
 function normalize_intent_reason(reason_raw: any): 'change' | 'resend' | 'release' | 'move_to' | 'unknown' {
     const r = String(reason_raw ?? '').toLowerCase();
     if (r === 'change') return 'change';
@@ -1353,13 +1458,14 @@ function build_place_contents_for_legality(slot: number, place_id: string, place
     }
 }
 
-function apply_movement_action_phase_one_breath(state: PlaceBreathState): void {
+function apply_movement_action_phase_one_breath(state: PlaceBreathState, options?: MovementPulseOptions): void {
     const place_any: any = state.place_base;
     if (!place_any) return;
 
     build_place_contents_for_legality(state.slot, state.place_id, place_any);
 
-    const place_bi = Math.floor(Number(state.breath_index ?? 0)) || 0;
+    const place_bi = Math.floor(Number(options?.pulse_breath_index ?? state.breath_index ?? 0)) || 0;
+    const entity_filter_ref = String(options?.entity_filter_ref ?? '').trim() || null;
     const actors: any[] = Array.isArray(place_any?.contents?.actors_present) ? place_any.contents.actors_present : [];
     const npcs: any[] = Array.isArray(place_any?.contents?.npcs_present) ? place_any.contents.npcs_present : [];
 
@@ -1393,11 +1499,14 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState): void {
         const cur_y = Math.floor(Number(any_entity?.location?.tile?.y ?? 0)) || 0;
         const cur_z = Math.floor(Number(any_entity?.location?.elevation ?? any_entity?.location?.tile?.elevation ?? place_any?.coordinates?.elevation ?? 0)) || 0;
         const desired = desired_step_from_controller(ctl, cur_x, cur_y);
+        const timed_movement_gate = get_timed_event_movement_gate(state.slot, entity_ref);
+        const walk_breaths_per_step = get_walk_breaths_per_step(any_entity, ctl.mode);
         const incline_preferred_axis = Math.abs(Number(runtime.velocity.vx) || 0) >= Math.abs(Number(runtime.velocity.vy) || 0) ? 'x' : 'y';
         const incline = try_select_walk_incline(place_any, entity_ref, runtime.entity_type, cur_x, cur_y, cur_z, desired, incline_preferred_axis);
         const unsupported = is_entity_unsupported(place_any, entity_ref, runtime.entity_type, cur_x, cur_y, cur_z);
         const airborne_horizontal_allowed = unsupported && desired !== null && !incline;
         const airborne_horizontal_can_spend = !airborne_horizontal_allowed || should_allow_airborne_horizontal_control(entity_ref, place_bi);
+        const timed_control_ready = !timed_movement_gate.active || is_control_breath_ready(runtime, 'walk', place_bi);
 
         if (walk_accel) {
             const spend_gate = refill_move_budget_and_apply_debt(runtime, 'walk', walk_accel);
@@ -1421,6 +1530,22 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState): void {
                     latest_intent: runtime.latest_intent,
                     desired,
                 });
+            } else if (timed_movement_gate.active && !timed_movement_gate.allowed && desired && !debug_ascend_active) {
+                runtime.velocity.vx = 0;
+                runtime.velocity.vy = 0;
+                runtime.transient_selection = null;
+                if (place_bi % 10 === 0) {
+                    debug_log('TIMED_EVENT', 'movement control suppressed', {
+                        entity_ref,
+                        place_id: state.place_id,
+                        breath_index: place_bi,
+                        reason: timed_movement_gate.reason,
+                    });
+                }
+            } else if (timed_movement_gate.active && desired && !timed_control_ready && !debug_ascend_active) {
+                runtime.velocity.vx = 0;
+                runtime.velocity.vy = 0;
+                runtime.transient_selection = null;
             } else if (spend_gate.can_spend && desired && airborne_horizontal_can_spend && !debug_ascend_active) {
                 apply_entity_control_steering(runtime, desired, incline);
                 let moves_applied = 0;
@@ -1433,8 +1558,9 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState): void {
                         runtime.velocity.vx = 0;
                         runtime.velocity.vy = clamp_intent(desired?.dy ?? 0);
                     }
-                    spend_move_budget(runtime, 'walk', 2);
-                    moves_applied = 2;
+                    const incline_spend = timed_movement_gate.active ? 1 : 2;
+                    spend_move_budget(runtime, 'walk', incline_spend);
+                    moves_applied = incline_spend;
                     runtime.transient_selection = {
                         movement_verb: 'move',
                         movement_subtype: `move.walk.${incline.subtype}`,
@@ -1445,7 +1571,7 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState): void {
                     };
                 } else {
                     let loop_guard = 0;
-                    const spend_cap = max_move_spend_per_breath('walk');
+                    const spend_cap = timed_movement_gate.active ? 1 : max_move_spend_per_breath('walk');
                     while ((Number(runtime.move_budget.walk) || 0) >= 1 && loop_guard < spend_cap) {
                         apply_move_acceleration(runtime, desired);
                         spend_move_budget(runtime, 'walk', 1);
@@ -1458,6 +1584,52 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState): void {
                         modality: 'walk',
                         composite_target: null,
                     };
+                }
+                if (timed_movement_gate.active && moves_applied > 0) {
+                    set_next_control_breath(runtime, 'walk', place_bi, walk_breaths_per_step);
+                    debug_log('TIMED_EVENT_MOVE', 'timed-event movement effort applied before physics resolution', {
+                        entity_ref,
+                        place_id: state.place_id,
+                        breath_index: place_bi,
+                        moves_applied,
+                        breaths_per_step: walk_breaths_per_step,
+                        velocity: runtime.velocity,
+                        transient_selection: runtime.transient_selection ?? null,
+                        note: 'movement should only count when net position changes; compare with subsequent physics logs',
+                    });
+                    const spent_ok = consume_actor_movement_cost(state.slot, entity_ref, moves_applied);
+                    if (!spent_ok) {
+                        debug_warn('TIMED_EVENT', 'failed to consume movement budget after control spend', {
+                            entity_ref,
+                            place_id: state.place_id,
+                            breath_index: place_bi,
+                            moves_applied,
+                        });
+                    }
+                    debug_log('TIMED_EVENT', 'timed movement control cadence applied', {
+                        entity_ref,
+                        place_id: state.place_id,
+                        breath_index: place_bi,
+                        breaths_per_step: walk_breaths_per_step,
+                        next_control_breath: runtime.next_control_breath.walk,
+                        breaths_remaining: get_current_turn_breaths_remaining(state.slot, place_bi),
+                    });
+                    const finalize_result = finalize_timed_event_turn_if_exhausted(state.slot, entity_ref);
+                    if (!finalize_result.ok && finalize_result.error !== 'no_active_timed_event' && finalize_result.error !== 'not_your_turn') {
+                        debug_warn('TIMED_EVENT', 'failed to auto-end exhausted turn after movement spend', {
+                            entity_ref,
+                            place_id: state.place_id,
+                            breath_index: place_bi,
+                            error: finalize_result.error,
+                        });
+                    } else if (finalize_result.ok && finalize_result.exhausted) {
+                        debug_log('TIMED_EVENT', 'marked turn done after exhausting actions and movement', {
+                            entity_ref,
+                            place_id: state.place_id,
+                            breath_index: place_bi,
+                            advanced: finalize_result.advanced,
+                        });
+                    }
                 }
                 debug_log('MOVE_VEL_TEST', 'action phase move acceleration', {
                     entity_ref,
@@ -1502,16 +1674,18 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState): void {
 
     for (const a of actors) {
         const ref = String(a?.actor_ref ?? '');
+        if (entity_filter_ref && ref !== entity_filter_ref) continue;
         if (ref) touch_entity(ref);
     }
     for (const n of npcs) {
         const ref = String(n?.npc_ref ?? '');
+        if (entity_filter_ref && ref !== entity_filter_ref) continue;
         if (ref) touch_entity(ref);
     }
 }
 
-function apply_movement_physics_phase_one_breath(state: PlaceBreathState, movement_updates: any[]): MovementBreathProfile {
-    return apply_server_movement_one_breath(state, movement_updates);
+function apply_movement_physics_phase_one_breath(state: PlaceBreathState, movement_updates: any[], options?: MovementPulseOptions): MovementBreathProfile {
+    return apply_server_movement_one_breath(state, movement_updates, options);
 }
 
 function run_place_breaths(state: PlaceBreathState, ticks_to_run: number, now: number, movement_updates: any[], cause?: string): Array<{ slot: number; place_id: string; breath_index: number }> {
@@ -1815,6 +1989,13 @@ function flush_place_breath_outputs(now: number, breath_ticks: Array<{ slot: num
 }
 
 function maybe_run_immediate_visible_place_pulse(slot: number, place_id: string, cause: 'intent' | 'move_to' | 'debug_ascend'): void {
+    if (is_timed_event_active(slot)) {
+        const active_actor_ref = get_active_actor_ref(slot);
+        if (active_actor_ref) {
+            run_timed_event_entity_pulse(slot, place_id, active_actor_ref, cause);
+        }
+        return;
+    }
     const key = place_breath_key(slot, place_id);
     const state = place_breath.get(key);
     if (!state?.realtime_visible || !state.place_base) return;
@@ -1835,6 +2016,134 @@ function maybe_run_immediate_visible_place_pulse(slot: number, place_id: string,
         movement_updates: movement_updates.length,
     });
     flush_place_breath_outputs(now, breath_ticks, movement_updates, state.tile_updates.splice(0), state.item_refresh_intents.splice(0));
+    if (state.place_dirty) {
+        persist_place_breath_if_needed(state);
+    }
+}
+
+function run_timed_event_entity_pulse(slot: number, place_id: string, entity_ref: string, reason: 'intent' | 'move_to' | 'debug_ascend'): void {
+    if (!is_timed_event_active(slot) || is_timed_event_world_sim_interstitial(slot)) return;
+    const now = Date.now();
+    const active_actor_ref = get_active_actor_ref(slot);
+    if (!active_actor_ref || active_actor_ref !== entity_ref) {
+        debug_log('TIMED_EVENT_PULSE', 'rejected entity pulse for non-active actor', {
+            slot,
+            place_id,
+            entity_ref,
+            active_actor_ref,
+            reason,
+            timed_event_phase: get_timed_event_phase(slot),
+        });
+        return;
+    }
+
+    const key = place_breath_key(slot, place_id);
+    const state = place_breath.get(key);
+    if (!state?.place_base) return;
+
+    const any_entity = get_entity_any_cached_or_load(slot, entity_ref);
+    if (!any_entity) return;
+
+    const ctl = move_ctl.get(move_ctl_key(slot, entity_ref));
+    if (!ctl || ctl.place_id !== place_id) return;
+
+    debug_log('TIMED_EVENT_PULSE', 'starting entity-only timed-event pulse', {
+        slot,
+        place_id,
+        entity_ref,
+        reason,
+        active_actor_ref,
+        timed_event_phase: get_timed_event_phase(slot),
+        world_breath_index: get_timed_event_world_breath_index(slot),
+        controller_mode: ctl.mode,
+        has_intent: !!(ctl.intent && (((ctl.intent as any).dx ?? 0) !== 0 || ((ctl.intent as any).dy ?? 0) !== 0)),
+        has_goal: !!ctl.goal,
+        path_remaining: Array.isArray(ctl.path) ? Math.max(0, ctl.path.length - Math.max(0, ctl.path_index)) : 0,
+    });
+
+    const movement_updates: any[] = [];
+    const start_x = Math.floor(Number(any_entity?.location?.tile?.x ?? 0)) || 0;
+    const start_y = Math.floor(Number(any_entity?.location?.tile?.y ?? 0)) || 0;
+    const start_z = Math.floor(Number(any_entity?.location?.elevation ?? any_entity?.location?.tile?.elevation ?? 0)) || 0;
+    const max_pulses = Math.max(1, Math.min(24, (get_walk_breaths_per_step(any_entity, ctl.mode) * 2) + 1));
+    let pulse_breath_index = Math.max(
+        0,
+        Math.floor(Number((any_entity as any)?.movement_physics?.last_breath_processed ?? 0)) || 0,
+        Math.floor(Number((any_entity as any)?.breath_last_processed ?? 0)) || 0,
+        Math.floor(Number((any_entity as any)?.breath_index ?? 0)) || 0,
+    );
+    let pulses_run = 0;
+    let stepped = false;
+
+    for (let i = 0; i < max_pulses; i += 1) {
+        pulse_breath_index += 1;
+        pulses_run += 1;
+        const before_updates = movement_updates.length;
+        const before_pos = {
+            x: Math.floor(Number(any_entity?.location?.tile?.x ?? 0)) || 0,
+            y: Math.floor(Number(any_entity?.location?.tile?.y ?? 0)) || 0,
+            z: Math.floor(Number(any_entity?.location?.elevation ?? any_entity?.location?.tile?.elevation ?? 0)) || 0,
+        };
+        const before_runtime = get_or_init_movement_physics_state(entity_ref, place_id, any_entity, ctl, pulse_breath_index);
+        const before_velocity = { ...before_runtime.velocity };
+        const before_transient = before_runtime.transient_selection ? { ...before_runtime.transient_selection } : null;
+        apply_movement_action_phase_one_breath(state, { entity_filter_ref: entity_ref, pulse_breath_index });
+        apply_movement_physics_phase_one_breath(state, movement_updates, { entity_filter_ref: entity_ref, pulse_breath_index });
+        const after_runtime = get_or_init_movement_physics_state(entity_ref, place_id, any_entity, ctl, pulse_breath_index);
+        const after_pos = {
+            x: Math.floor(Number(any_entity?.location?.tile?.x ?? 0)) || 0,
+            y: Math.floor(Number(any_entity?.location?.tile?.y ?? 0)) || 0,
+            z: Math.floor(Number(any_entity?.location?.elevation ?? any_entity?.location?.tile?.elevation ?? 0)) || 0,
+        };
+        const net_change = before_pos.x !== after_pos.x || before_pos.y !== after_pos.y || before_pos.z !== after_pos.z;
+        const motion_changed = before_velocity.vx !== after_runtime.velocity.vx
+            || before_velocity.vy !== after_runtime.velocity.vy
+            || before_velocity.vz !== after_runtime.velocity.vz
+            || JSON.stringify(before_transient) !== JSON.stringify(after_runtime.transient_selection ?? null);
+        debug_log('TIMED_EVENT_PULSE', net_change ? 'pulse produced net movement' : motion_changed ? 'pulse changed motion state without net movement' : 'pulse had no motion effect', {
+            slot,
+            place_id,
+            entity_ref,
+            reason,
+            pulse_index: pulses_run,
+            pulse_breath_index,
+            net_change,
+            motion_changed,
+            before_pos,
+            after_pos,
+            before_velocity,
+            after_velocity: after_runtime.velocity,
+            before_transient,
+            after_transient: after_runtime.transient_selection ?? null,
+            updates_added: movement_updates.length - before_updates,
+            world_breath_index: get_timed_event_world_breath_index(slot),
+        });
+        if (movement_updates.length > before_updates) {
+            stepped = true;
+            break;
+        }
+    }
+
+    const end_x = Math.floor(Number(any_entity?.location?.tile?.x ?? 0)) || 0;
+    const end_y = Math.floor(Number(any_entity?.location?.tile?.y ?? 0)) || 0;
+    const end_z = Math.floor(Number(any_entity?.location?.elevation ?? any_entity?.location?.tile?.elevation ?? 0)) || 0;
+
+    debug_log('TIMED_EVENT_PULSE', 'executed entity-only timed-event pulse', {
+        slot,
+        place_id,
+        entity_ref,
+        reason,
+        pulses_run,
+        max_pulses,
+        stepped,
+        from: { x: start_x, y: start_y, z: start_z },
+        to: { x: end_x, y: end_y, z: end_z },
+        timed_event_phase: get_timed_event_phase(slot),
+        world_breath_index: get_timed_event_world_breath_index(slot),
+        movement_updates_emitted: movement_updates.length,
+    });
+
+    flush_place_breath_outputs(now, [], movement_updates, state.tile_updates.splice(0), state.item_refresh_intents.splice(0));
     if (state.place_dirty) {
         persist_place_breath_if_needed(state);
     }
@@ -2745,7 +3054,7 @@ function apply_pending_connector_transition(state: PlaceBreathState, pending: Pe
     return { ok: true };
 }
 
-function apply_server_movement_one_breath(state: PlaceBreathState, movement_updates: any[]): MovementBreathProfile {
+function apply_server_movement_one_breath(state: PlaceBreathState, movement_updates: any[], options?: MovementPulseOptions): MovementBreathProfile {
     const profile = make_empty_movement_breath_profile();
     const place_any: any = state.place_base;
     if (!place_any) return profile;
@@ -2767,7 +3076,8 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
     build_place_contents_for_legality(state.slot, state.place_id, place_any);
     profile.contents_ms += Math.max(0, Date.now() - contents_started_ms);
 
-    const place_bi = Math.floor(Number(state.breath_index ?? 0)) || 0;
+    const place_bi = Math.floor(Number(options?.pulse_breath_index ?? state.breath_index ?? 0)) || 0;
+    const entity_filter_ref = String(options?.entity_filter_ref ?? '').trim() || null;
     const bz = Math.floor(Number(place_any?.coordinates?.elevation ?? 0)) || 0;
     const pending_connector_transitions: PendingConnectorTransition[] = [];
 
@@ -3098,6 +3408,19 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
                 reasons,
                 attempts: failed_attempts.length,
             });
+            debug_log('TIMED_EVENT_MOVE', 'timed-event physics resolved with no net movement', {
+                entity_ref,
+                place_id: state.place_id,
+                breath_index: place_bi,
+                intent_active,
+                has_goal,
+                has_path,
+                pending_followthrough,
+                failed_attempts,
+                velocity: runtime.velocity,
+                transient_selection: runtime.transient_selection ?? null,
+                note: 'if movement budget changed before this point, that is a mismatch with desired semantics',
+            });
             return;
         }
 
@@ -3294,16 +3617,28 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
             breath_index: place_bi,
             seq: ctl.move_seq,
         });
+        debug_log('TIMED_EVENT_MOVE', 'timed-event physics resolved net movement', {
+            entity_ref,
+            place_id: state.place_id,
+            breath_index: place_bi,
+            from: { x: cur_x, y: cur_y, z: cur_z },
+            to: { x: target.x, y: target.y, z: target.z },
+            axis: target.axis,
+            velocity: runtime.velocity,
+            transient_selection: runtime.transient_selection ?? null,
+        });
     };
 
     const entity_loop_started_ms = Date.now();
     for (const a of actors) {
         const ref = String(a?.actor_ref ?? "");
+        if (entity_filter_ref && ref !== entity_filter_ref) continue;
         if (!ref) continue;
         step_entity(ref, 'actor', a);
     }
     for (const n of npcs) {
         const ref = String(n?.npc_ref ?? "");
+        if (entity_filter_ref && ref !== entity_filter_ref) continue;
         if (!ref) continue;
         step_entity(ref, 'npc', n);
     }
@@ -5656,6 +5991,7 @@ function get_tile_velocity_attempts(tile: any, tx: number, ty: number, wz: numbe
         latest_intent: null,
         move_budget: { walk: 0, climb: 0, swim: 0, fly: 0 },
         move_debt: { walk: 0, climb: 0, swim: 0, fly: 0 },
+        next_control_breath: { walk: 0, climb: 0, swim: 0, fly: 0 },
         goal: null,
         advisory_path: null,
         advisory_path_index: 0,
@@ -6595,6 +6931,165 @@ function apply_gravity_to_place_characters(state: PlaceBreathState): void {
     }
 }
 
+function run_timed_event_world_sim_interstitial_if_needed(
+    slot: number,
+    now: number,
+    breath_ticks: Array<{ slot: number; place_id: string; breath_index: number }>,
+    movement_updates: any[],
+): void {
+    if (!is_timed_event_world_sim_interstitial(slot)) return;
+    const interstitial_remaining = Math.max(0, Math.floor(Number(get_current_turn_breaths_remaining(slot) ?? 0)) || 0);
+    if (interstitial_remaining <= 0) {
+        const finalized = finalize_world_sim_interstitial(slot);
+        if (!finalized.ok) {
+            debug_warn('TIMED_EVENT_BREATH', 'failed to finalize empty world sim interstitial', { slot, error: finalized.error });
+            return;
+        }
+        debug_log('TIMED_EVENT_BREATH', 'world sim interstitial complete', {
+            slot,
+            applied_breaths: 0,
+            world_breath_index: get_timed_event_world_breath_index(slot),
+            new_turn: finalized.new_turn,
+            active_actor: finalized.active_actor,
+        });
+        return;
+    }
+
+    const interstitial_states = Array.from(place_breath.values()).filter((state) => state.slot === slot);
+    if (interstitial_states.length === 0) {
+        const advanced = advance_timed_event_world_breaths(slot, 1);
+        if (!advanced.ok) {
+            debug_warn('TIMED_EVENT_BREATH', 'failed to advance empty world sim interstitial', { slot, error: advanced.error });
+            return;
+        }
+        const finalized = finalize_world_sim_interstitial(slot);
+        if (!finalized.ok) {
+            debug_warn('TIMED_EVENT_BREATH', 'failed to finalize world sim interstitial without active places', { slot, error: finalized.error });
+            return;
+        }
+        debug_log('TIMED_EVENT_BREATH', 'world sim interstitial advanced without loaded places', {
+            slot,
+            applied_breaths: 1,
+            world_breath_index: advanced.world_breath_index,
+            remaining_interstitial_breaths: advanced.remaining_interstitial_breaths,
+            new_turn: finalized.new_turn,
+            active_actor: finalized.active_actor,
+        });
+        return;
+    }
+
+    debug_log('TIMED_EVENT_BREATH', 'running world sim interstitial breath', {
+        slot,
+        place_count: interstitial_states.length,
+        remaining_interstitial_breaths: interstitial_remaining,
+    });
+
+    let applied_any = false;
+    for (const state of interstitial_states) {
+        state.last_seen_ms = now;
+        state.last_tick_ms = now;
+        const before_breath = state.breath_index;
+        const ticks = run_place_breaths(state, 1, now, movement_updates, 'timed_event_world_sim');
+        breath_ticks.push(...ticks);
+        applied_any = applied_any || ticks.length > 0;
+        if (state.place_dirty) {
+            persist_place_breath_if_needed(state);
+        }
+        debug_log('TIMED_EVENT_BREATH', 'applied world interstitial breath to place', {
+            slot,
+            place_id: state.place_id,
+            before_breath,
+            after_breath: state.breath_index,
+            applied_ticks: ticks.length,
+        });
+    }
+
+    const advanced = advance_timed_event_world_breaths(slot, applied_any ? 1 : 0);
+    if (!advanced.ok) {
+        debug_warn('TIMED_EVENT_BREATH', 'failed to advance world breath during interstitial', { slot, error: advanced.error });
+        return;
+    }
+
+    debug_log('TIMED_EVENT_BREATH', 'world sim interstitial breath complete', {
+        slot,
+        applied_breaths: applied_any ? 1 : 0,
+        world_breath_index: advanced.world_breath_index,
+        remaining_interstitial_breaths: advanced.remaining_interstitial_breaths,
+    });
+
+    if ((advanced.remaining_interstitial_breaths ?? 0) > 0) return;
+
+    const finalized = finalize_world_sim_interstitial(slot);
+    if (!finalized.ok) {
+        debug_warn('TIMED_EVENT_BREATH', 'failed to finalize world sim interstitial', { slot, error: finalized.error });
+        return;
+    }
+
+    debug_log('TIMED_EVENT_BREATH', 'world sim interstitial complete', {
+        slot,
+        applied_breaths: applied_any ? 1 : 0,
+        world_breath_index: advanced.world_breath_index,
+        new_turn: finalized.new_turn,
+        active_actor: finalized.active_actor,
+    });
+}
+
+function process_timed_event_turn_window(slot: number): void {
+    if (!is_timed_event_active(slot) || is_timed_event_world_sim_interstitial(slot)) return;
+
+    const active_actor_ref = get_active_actor_ref(slot);
+    if (!active_actor_ref) return;
+
+    const state = get_timed_event_state(slot);
+    const active_index = state?.active_actor_index ?? -1;
+    const active_entry = active_index >= 0 ? state?.initiative_order?.[active_index] ?? null : null;
+    if (!active_entry || active_entry.actor_ref !== active_actor_ref) return;
+    if (active_entry.status === 'done' || active_entry.status === 'left_region') return;
+
+    const breath_index = get_timed_event_world_breath_index(slot);
+    if (breath_index === null) return;
+
+    note_current_turn_started_breath(slot, breath_index);
+    if (!is_current_turn_window_expired(slot, breath_index)) return;
+
+    const marked = mark_actor_done(slot, active_actor_ref);
+    if (!marked) return;
+
+    debug_log('TIMED_EVENT', 'breath turn window expired', {
+        slot,
+        actor_ref: active_actor_ref,
+        world_breath_index: breath_index,
+        turn: state?.current_turn ?? null,
+        round: state?.current_round ?? null,
+    });
+}
+
+let last_timed_event_breath_state_key = '';
+
+function emit_timed_event_breath_state_if_needed(slot: number, now: number): void {
+    const state = get_timed_event_state(slot);
+    const payload = {
+        sent_at_ms: now,
+        timed_event_active: !!state?.timed_event_active,
+        timed_event_phase: get_timed_event_phase(slot),
+        timed_event_world_breath_index: get_timed_event_world_breath_index(slot),
+        turn_breaths_remaining: get_current_turn_breaths_remaining(slot),
+        current_turn: state?.current_turn ?? null,
+        current_round: state?.current_round ?? null,
+        active_actor_ref: state?.timed_event_active && typeof state.active_actor_index === 'number'
+            ? (state.initiative_order?.[state.active_actor_index]?.actor_ref ?? null)
+            : null,
+    };
+    const key = JSON.stringify(payload);
+    const changed = key !== last_timed_event_breath_state_key;
+    if (!payload.timed_event_active && !changed) return;
+    last_timed_event_breath_state_key = key;
+    void emitBridgeMessage('TIMED_EVENT_BREATH_STATE', payload);
+    if (changed) {
+        debug_log('TIMED_EVENT_BREATH', 'emitted timed event breath state', payload);
+    }
+}
+
 setInterval(() => {
     const interval_started_ms = Date.now();
     const now = interval_started_ms;
@@ -6611,6 +7106,21 @@ setInterval(() => {
         if (active) {
             active_places_processed += 1;
             if (state.realtime_visible) visible_places_processed += 1;
+
+            if (is_timed_event_active(state.slot)) {
+                if (state.realtime_visible && breath_interval_sample_count % 30 === 0) {
+                    debug_log('TIMED_EVENT_BREATH', 'suppressing normal place breaths during timed event', {
+                        slot: state.slot,
+                        place_id: state.place_id,
+                        timed_event_phase: get_timed_event_phase(state.slot),
+                        place_breath_index: state.breath_index,
+                        world_breath_index: get_timed_event_world_breath_index(state.slot),
+                    });
+                }
+                state.last_tick_ms = now;
+                state.sim_accum_ms = 0;
+                continue;
+            }
 
             // Fixed-step simulation with catch-up.
             // Accumulate wall-clock time scaled by time_scale (0=paused, 1=normal).
@@ -6687,6 +7197,10 @@ setInterval(() => {
             });
         }
     }
+
+    run_timed_event_world_sim_interstitial_if_needed(data_slot_number, now, breath_ticks, movement_updates);
+    process_timed_event_turn_window(data_slot_number);
+    emit_timed_event_breath_state_if_needed(data_slot_number, now);
 
     const flush_started_ms = Date.now();
     const tile_updates: any[] = [];
@@ -7462,7 +7976,7 @@ import {
 } from "./action_integration.js";
 import { createIntent } from "../action_system/intent.js";
 import { 
-    format_inspection_result, type InspectorData, type InspectionResult 
+    type InspectorData, type InspectionResult 
 } from "../inspection/data_service.js";
 import type { InlineItem } from "../types/inline_item.js";
 import { extract_feature_keywords_for_inspection, extract_body_slot_for_inspection } from "../inspection/text_parser.js";
@@ -8489,14 +9003,19 @@ function start_http_server(log_path: string): void {
                 const target_ref = typeof parsed?.target_ref === "string" ? parsed.target_ref.trim() : "";
 
                 const ui_target_tile = (parsed as any)?.ui_target_tile;
-                const ui_target_tile_xy = (ui_target_tile && typeof ui_target_tile === "object")
+                const ui_target_tile_xyz = (ui_target_tile && typeof ui_target_tile === "object")
                     ? {
                         x: Number((ui_target_tile as any).x),
                         y: Number((ui_target_tile as any).y),
+                        z: Number((ui_target_tile as any).z),
                     }
                     : null;
-                const ui_target_tile_safe = (ui_target_tile_xy && Number.isFinite(ui_target_tile_xy.x) && Number.isFinite(ui_target_tile_xy.y))
-                    ? { x: Math.round(ui_target_tile_xy.x), y: Math.round(ui_target_tile_xy.y) }
+                const ui_target_tile_safe = (ui_target_tile_xyz && Number.isFinite(ui_target_tile_xyz.x) && Number.isFinite(ui_target_tile_xyz.y))
+                    ? {
+                        x: Math.round(ui_target_tile_xyz.x),
+                        y: Math.round(ui_target_tile_xyz.y),
+                        z: Number.isFinite(ui_target_tile_xyz.z) ? Math.round(ui_target_tile_xyz.z) : undefined,
+                    }
                     : null;
 
                 const creation_path = get_creation_state_path(data_slot_number);
@@ -9357,6 +9876,354 @@ function start_http_server(log_path: string): void {
             return;
         }
 
+        if (url.pathname === "/api/timed_event/debug/start") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+            if (!Number.isFinite(slot) || slot <= 0) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+            req.on("end", async () => {
+                try {
+                    if (is_timed_event_active(slot)) {
+                        res.writeHead(409, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "timed_event_already_active" }));
+                        return;
+                    }
+
+                    const data = body ? JSON.parse(body) : {};
+                    const place_id = String(data?.place_id ?? "").trim();
+                    const requested_type = String(data?.event_type ?? "combat").toLowerCase();
+                    const event_type = requested_type === "conversation" ? "conversation" : "combat";
+                    if (!place_id) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_place_id" }));
+                        return;
+                    }
+
+                    const entity_refs = get_entities_in_place(slot, place_id);
+                    const participants = Array.from(new Set([
+                        ...entity_refs.actors.filter((ref) => typeof ref === "string" && ref.length > 0),
+                        ...entity_refs.npcs.filter((ref) => typeof ref === "string" && ref.length > 0),
+                    ]));
+
+                    if (participants.length < 2) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "not_enough_participants", participants }));
+                        return;
+                    }
+
+                    const place_res = load_place(slot, place_id);
+                    if (!place_res.ok || !place_res.place) {
+                        res.writeHead(404, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "place_not_found", place_id }));
+                        return;
+                    }
+
+                    const place = place_res.place;
+                    const location = {
+                        world_x: Math.floor(Number((place as any)?.coordinates?.world_tile?.x ?? 0)),
+                        world_y: Math.floor(Number((place as any)?.coordinates?.world_tile?.y ?? 0)),
+                        region_x: Math.floor(Number((place as any)?.coordinates?.region_tile?.x ?? 0)),
+                        region_y: Math.floor(Number((place as any)?.coordinates?.region_tile?.y ?? 0)),
+                    };
+
+                    debug_log("API", "Direct debug timed event start requested", {
+                        slot,
+                        place_id,
+                        event_type,
+                        participants,
+                        location,
+                        already_active: is_timed_event_active(slot),
+                    });
+
+                    const started = start_timed_event(slot, event_type, participants, location, {
+                        trigger: {
+                            kind: "debug_ui",
+                            source_ref: "debug_ui",
+                            target_refs: participants,
+                            summary: `Debug timed event start requested for ${place_id}`,
+                        },
+                    });
+
+                    if (!started.ok) {
+                        debug_warn("API", "Direct debug timed event start failed", {
+                            slot,
+                            place_id,
+                            event_type,
+                            participants,
+                            error: started.error,
+                        });
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: started.error ?? "debug_timed_event_start_failed" }));
+                        return;
+                    }
+
+                    const outbox_path = get_outbox_path(slot);
+                    ensure_outbox_exists(outbox_path);
+                    const debug_msg = create_message({
+                        sender: "debug_ui",
+                        content: `Debug timed event start requested for ${place_id}`,
+                        stage: "debug_timed_event_start",
+                        status: "done",
+                        meta: {
+                            place_id,
+                            event_type,
+                            participants,
+                        },
+                    });
+                    append_outbox_message(outbox_path, debug_msg);
+
+                    debug_log("API", "Direct debug timed event start succeeded", {
+                        slot,
+                        place_id,
+                        event_type,
+                        participants,
+                        event_id: started.event_id,
+                        timed_event_state: get_timed_event_state(slot),
+                    });
+
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, queued: false, event_id: started.event_id, place_id, event_type, participants, timed_event_active: true }));
+                } catch (err: any) {
+                    debug_error("API", "/api/timed_event/debug/start error", err);
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? "debug_timed_event_start_failed" }));
+                }
+            });
+            return;
+        }
+
+        if (url.pathname === "/api/timed_event/state") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+            if (!Number.isFinite(slot) || slot <= 0) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
+                return;
+            }
+
+            const state = get_timed_event_state(slot);
+            const timed_event_phase = get_timed_event_phase(slot);
+            const active_actor_ref = state?.timed_event_active && typeof state.active_actor_index === "number"
+                ? (state.initiative_order?.[state.active_actor_index]?.actor_ref ?? null)
+                : null;
+
+            debug_log("API", "Timed event state fetched", {
+                slot,
+                timed_event_active: !!state?.timed_event_active,
+                timed_event_id: state?.timed_event_id ?? null,
+                timed_event_type: state?.timed_event_type ?? null,
+                timed_event_phase,
+                current_turn: state?.current_turn ?? null,
+                current_round: state?.current_round ?? null,
+                active_actor_ref,
+                initiative_count: Array.isArray(state?.initiative_order) ? state!.initiative_order.length : 0,
+            });
+
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+                ok: true,
+                timed_event_active: !!state?.timed_event_active,
+                timed_event_id: state?.timed_event_id ?? null,
+                timed_event_type: state?.timed_event_type ?? null,
+                timed_event_phase,
+                trigger: state?.timed_event_trigger ?? null,
+                current_turn: state?.current_turn ?? null,
+                current_round: state?.current_round ?? null,
+                active_actor_ref,
+                turn_window_breaths: state?.timed_event_active ? get_timed_event_turn_window_breaths(slot) : null,
+                turn_breaths_remaining: state?.timed_event_active ? get_current_turn_breaths_remaining(slot) : null,
+                timed_event_world_breath_index: state?.timed_event_active ? get_timed_event_world_breath_index(slot) : null,
+                pending_communication_opportunities: Array.isArray(state?.pending_communication_opportunities)
+                    ? state!.pending_communication_opportunities.map((opp) => ({
+                        opportunity_id: opp.opportunity_id,
+                        npc_ref: opp.npc_ref,
+                        speaker_ref: opp.speaker_ref,
+                        target_ref: opp.target_ref ?? null,
+                        original_text: opp.original_text,
+                        response_eligible_reason: opp.response_eligible_reason,
+                        trigger_context: opp.trigger_context ?? null,
+                        created_turn: opp.created_turn ?? null,
+                        created_round: opp.created_round ?? null,
+                        status: opp.status,
+                    }))
+                    : [],
+                initiative_order: Array.isArray(state?.initiative_order)
+                    ? state!.initiative_order.map((entry) => ({
+                        actor_ref: entry.actor_ref,
+                        initiative_roll: entry.initiative_roll,
+                        dex_score: entry.dex_score,
+                        actions_remaining: entry.actions_remaining,
+                        partial_actions_remaining: entry.partial_actions_remaining,
+                        movement_remaining: entry.movement_remaining,
+                        movement_budgets: entry.movement_budgets ?? null,
+                        status: entry.status,
+                    }))
+                    : [],
+            }));
+            return;
+        }
+
+        if (url.pathname === "/api/timed_event/debug/next_turn") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+            if (!Number.isFinite(slot) || slot <= 0) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
+                return;
+            }
+
+            const result = advance_turn(slot);
+            if (!result.ok) {
+                if (result.error === 'world_sim_interstitial_started') {
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, interstitial_started: true, timed_event_phase: get_timed_event_phase(slot) }));
+                    return;
+                }
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify(result));
+                return;
+            }
+
+            debug_log("API", "Advanced timed event turn via debug", { slot, ...result });
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(result));
+            return;
+        }
+
+        if (url.pathname === "/api/timed_event/debug/move") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+            if (!Number.isFinite(slot) || slot <= 0) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+            req.on("end", () => {
+                try {
+                    const data = body ? JSON.parse(body) : {};
+                    const actor_ref = String(data?.actor_ref ?? get_active_actor_ref(slot) ?? "").trim();
+                    const cost_raw = String(data?.action_cost ?? "FULL").toUpperCase();
+                    const action_cost = (cost_raw === "FREE" || cost_raw === "FULL" || cost_raw === "PARTIAL" || cost_raw === "EXTENDED")
+                        ? cost_raw as any
+                        : "FULL";
+
+                    if (!actor_ref) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_actor_ref" }));
+                        return;
+                    }
+
+                    const result = perform_move_action_refresh(slot, actor_ref, action_cost);
+                    if (!result.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify(result));
+                        return;
+                    }
+
+                    const finalize_result = finalize_timed_event_turn_if_exhausted(slot, actor_ref);
+                    if (!finalize_result.ok && finalize_result.error !== 'no_active_timed_event' && finalize_result.error !== 'not_your_turn') {
+                        debug_warn('API', 'Timed-event MOVE refresh auto-end failed', { slot, actor_ref, action_cost, error: finalize_result.error });
+                    }
+
+                    const state = get_timed_event_state(slot);
+                    const entry = state?.initiative_order?.find((it) => it.actor_ref === actor_ref);
+                    debug_log("API", "Timed-event MOVE refresh via debug", { slot, actor_ref, action_cost });
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({
+                        ok: true,
+                        actor_ref,
+                        action_cost,
+                        movement_budgets: entry?.movement_budgets ?? null,
+                        actions_remaining: entry?.actions_remaining ?? null,
+                        partial_actions_remaining: entry?.partial_actions_remaining ?? null,
+                        turn_auto_ended: finalize_result.ok ? finalize_result.exhausted : false,
+                    }));
+                } catch (err: any) {
+                    debug_error("API", "/api/timed_event/debug/move error", err);
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? "timed_event_move_failed" }));
+                }
+            });
+            return;
+        }
+
+        if (url.pathname === "/api/timed_event/debug/end") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+            if (!Number.isFinite(slot) || slot <= 0) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
+                return;
+            }
+
+            const state = get_timed_event_state(slot);
+            if (!state?.timed_event_active) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "no_active_timed_event" }));
+                return;
+            }
+
+            const event_id = state.timed_event_id ?? null;
+            debug_log("API", "Timed event end requested", {
+                slot,
+                event_id,
+                timed_event_type: state.timed_event_type ?? null,
+                current_turn: state.current_turn ?? null,
+                current_round: state.current_round ?? null,
+                initiative_count: Array.isArray(state.initiative_order) ? state.initiative_order.length : 0,
+            });
+            const ended = end_timed_event(slot);
+            if (!ended) {
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "failed_to_end_timed_event" }));
+                return;
+            }
+
+            debug_log("API", "Ended timed event via debug", { slot, event_id, timed_event_state: get_timed_event_state(slot) });
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, event_id }));
+            return;
+        }
+
         if (url.pathname === "/api/place/travel") {
             if (req.method !== "POST") {
                 res.writeHead(405, { "Content-Type": "application/json" });
@@ -9648,6 +10515,38 @@ function start_http_server(log_path: string): void {
                 const mode = normalize_move_mode((data as any)?.mode);
                 const intent_reason = normalize_intent_reason((data as any)?.reason);
 
+                const movement_gate = get_timed_event_movement_gate(slot, entity_ref);
+                const is_release = dx === 0 && dy === 0;
+                if (!is_release && movement_gate.active && !movement_gate.allowed) {
+                    debug_log('TIMED_EVENT_MOVE', 'movement intent blocked by gate', {
+                        slot,
+                        entity_ref,
+                        place_id,
+                        dx,
+                        dy,
+                        mode,
+                        reason: movement_gate.reason ?? 'movement_blocked',
+                        release: is_release,
+                        timed_event_phase: get_timed_event_phase(slot),
+                        world_breath_index: get_timed_event_world_breath_index(slot),
+                    });
+                    clear_entity_controller_for_blocked_turn(slot, entity_ref, place_id);
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, ignored: true, blocked: true, error: movement_gate.reason ?? 'movement_blocked', slot, entity_ref, place_id, release: is_release }));
+                    return;
+                }
+                if (is_release && movement_gate.active && !movement_gate.allowed) {
+                    debug_log('TIMED_EVENT_MOVE', 'movement release allowed despite gate block', {
+                        slot,
+                        entity_ref,
+                        place_id,
+                        mode,
+                        blocked_reason: movement_gate.reason ?? 'movement_blocked',
+                        timed_event_phase: get_timed_event_phase(slot),
+                        world_breath_index: get_timed_event_world_breath_index(slot),
+                    });
+                }
+
                 // Blended directional intent: allow diagonals so acceleration can split 50/50 across axes.
                 const want_dx = dx;
                 const want_dy = dy;
@@ -9718,6 +10617,18 @@ function start_http_server(log_path: string): void {
                     maybe_run_immediate_visible_place_pulse(slot, place_id, 'intent');
                 }
 
+                debug_log('TIMED_EVENT_MOVE', 'movement intent accepted', {
+                    slot,
+                    entity_ref,
+                    place_id,
+                    dx,
+                    dy,
+                    mode,
+                    reason: intent_reason,
+                    timed_event_phase: get_timed_event_phase(slot),
+                    world_breath_index: get_timed_event_world_breath_index(slot),
+                });
+
                 res.writeHead(200, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ ok: true, slot, entity_ref, place_id, intent: ctl.intent, mode, reason: intent_reason }));
             });
@@ -9771,6 +10682,26 @@ function start_http_server(log_path: string): void {
                 const z_raw = Number((data as any)?.z);
                 const z = Number.isFinite(z_raw) ? Math.floor(z_raw) : undefined;
                 const mode = normalize_move_mode((data as any)?.mode);
+
+                const movement_gate = get_timed_event_movement_gate(slot, entity_ref);
+                if (movement_gate.active && !movement_gate.allowed) {
+                    debug_log('TIMED_EVENT_MOVE', 'move_to blocked by gate', {
+                        slot,
+                        entity_ref,
+                        place_id,
+                        x,
+                        y,
+                        z: z ?? null,
+                        mode,
+                        reason: movement_gate.reason ?? 'movement_blocked',
+                        timed_event_phase: get_timed_event_phase(slot),
+                        world_breath_index: get_timed_event_world_breath_index(slot),
+                    });
+                    clear_entity_controller_for_blocked_turn(slot, entity_ref, place_id);
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, queued: false, ignored: true, blocked: true, error: movement_gate.reason ?? 'movement_blocked', slot, entity_ref, place_id }));
+                    return;
+                }
 
                 if (!entity_ref || !place_id || !Number.isFinite(x) || !Number.isFinite(y)) {
                     res.writeHead(400, { "Content-Type": "application/json" });
@@ -9923,6 +10854,15 @@ function start_http_server(log_path: string): void {
                     requested_goal,
                     active_goal: ctl.goal,
                     mode,
+                });
+                debug_log('TIMED_EVENT_MOVE', 'move_to accepted', {
+                    slot,
+                    entity_ref,
+                    place_id,
+                    requested_goal,
+                    mode,
+                    timed_event_phase: get_timed_event_phase(slot),
+                    world_breath_index: get_timed_event_world_breath_index(slot),
                 });
 
                 res.writeHead(200, { "Content-Type": "application/json" });
@@ -17241,12 +18181,7 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
             // Exclude system messages like position updates
             const isUserInput = 
                 msg.type === "user_input" ||
-                msg.sender?.toLowerCase() === "j" ||
-                (msg.type !== "npc_position_update" &&
-                 msg.stage !== "npc_response" && 
-                 msg.stage !== "rendered_1" &&
-                 !msg.sender?.startsWith("npc.") &&
-                 msg.sender !== "renderer_ai");
+                msg.sender?.toLowerCase() === "j";
 
             if (isDisplayable) {
                 // Displayable messages (renderer_ai output, npc_response) are already written to log.jsonc
@@ -17329,6 +18264,7 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
 
                     const inspector_data: InspectorData = {
                         ref: actor_ref,
+                        data_slot: data_slot_number,
                         location: {
                             world_x: actorLocation.world_x,
                             world_y: actorLocation.world_y,
@@ -17367,7 +18303,7 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
                     const cost_raw = typeof meta_any.action_cost === "string" ? meta_any.action_cost.trim().toUpperCase() : "";
                     const actionCost = (cost_raw === "FREE" || cost_raw === "FULL" || cost_raw === "PARTIAL" || cost_raw === "EXTENDED")
                         ? (cost_raw as any)
-                        : "PARTIAL";
+                        : (is_timed_event_active(data_slot_number) ? "PARTIAL" : "FULL");
 
                     const intent = createIntent(actor_ref, "INSPECT" as any, "player_input", {
                         actorType: "player",
@@ -17377,6 +18313,7 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
                         actionCost,
                         parameters: {
                             inspector_data,
+                            target_world_z: has_ui_xy && Number.isFinite(Number((ui_target_tile as any)?.z)) ? Math.round(Number((ui_target_tile as any).z)) : undefined,
                             requested_keywords,
                             body_slot,
                             max_features: 5,
@@ -17404,24 +18341,17 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
                         const inspect_result = eff?.parameters?.inspection_result as InspectionResult | undefined;
 
                         if (inspect_result) {
-                            const formatted = format_inspection_result(inspect_result);
-                            const findings = create_message({
-                                sender: "inspection",
-                                content: formatted,
-                                stage: "inspection_result",
-                                status: "sent",
-                                reply_to: msg.id,
-                                correlation_id: msg.correlation_id,
-                                meta: {
-                                    ...getSessionMeta(),
-                                    action_verb: "INSPECT",
-                                    actor_ref,
-                                    target_ref,
-                                    clarity: inspect_result.clarity,
-                                    sense_used: inspect_result.sense_used,
-                                },
+                            debug_log("INSPECT", "Structured inspect result ready for renderer narration", {
+                                actor_ref,
+                                target_ref,
+                                target_kind: inspect_result.target.type,
+                                clarity: inspect_result.clarity,
+                                sense_used: inspect_result.sense_used,
+                                short_description: inspect_result.content.short_description,
+                                scene_focus: inspect_result.narration_context?.scene_focus ?? null,
+                                selected_facts: inspect_result.narration_context?.selected_facts ?? [],
+                                nearby_facts: inspect_result.narration_context?.nearby_facts ?? [],
                             });
-                            append_log_envelope(log_path, findings);
                         }
 
                         // Also queue a renderer narration pass that is constrained to the structured inspect result.

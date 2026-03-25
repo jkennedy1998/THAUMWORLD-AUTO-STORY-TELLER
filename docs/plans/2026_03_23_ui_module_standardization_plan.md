@@ -77,6 +77,7 @@ This plan is complete only when all of the following are true:
 - `character_module` and `container_module` now route their shell behavior through the shared floating-panel integration while preserving their bespoke slot, drag/drop, sidebar, and panning logic.
 - durable hidden modules are being stabilized around registry visibility; the hidden inventory panel path now syncs its open/closed state through the shared module visibility system so hidden panels do not remain interactive in hit-testing.
 - a shared screen-locked overlay bar implementation now exists for fixed viewport-position shortcut/status bars, keeping them on the type grid, non-pannable, and reusable across painter and place-painter contexts.
+- place inspection now routes away from legacy environment terrain fallback and toward authored scene/tile context, with curated narration facts intended for target-first inspect prose.
 
 ### What Is Still Split
 

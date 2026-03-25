@@ -1,4 +1,4 @@
-import type { InspectionResult } from "./data_service.js";
+import type { InspectionResult } from "./types.js";
 
 type InspectPromptParams = {
   original_text: string;
@@ -42,8 +42,13 @@ export function build_inspect_narrative_prompt(params: InspectPromptParams): str
     const full_desc = String(ir?.content?.full_description ?? "").trim();
     const feature_lines = get_discovered_feature_lines(ir);
     const sensory = get_sensory_lines(ir);
+    const narration = ir.narration_context;
+    const selected = Array.isArray(narration?.selected_facts) ? narration.selected_facts.map((s) => `- ${s}`).join("\n") : "";
+    const nearby = Array.isArray(narration?.nearby_facts) ? narration.nearby_facts.map((s) => `- ${s}`).join("\n") : "";
+    const guidance = Array.isArray(narration?.guidance) ? narration.guidance.map((s) => `- ${s}`).join("\n") : "";
 
-    return `The player inspects a target. Use ONLY the provided inspection result.
+    return `You are a literary game narrator writing close inner observation from the inspecting actor's point of view.
+Use ONLY the provided inspection result and curated context.
 
 INSPECTION RESULT:
 Clarity: ${clarity}
@@ -54,7 +59,32 @@ Sensory: ${sensory || "(none)"}
 Notable features (discovered only):
 ${feature_lines || "- (none)"}
 
-Write 1-2 concise sentences in second person.
+PRIMARY SUBJECT:
+${narration?.primary_subject || short_desc || "(none)"}
+
+TARGET KIND:
+${narration?.target_kind || ir.target.type}
+
+SCENE FOCUS:
+${narration?.scene_focus || "(none)"}
+
+CURATED FACTS:
+${selected || "- (none)"}
+
+NEARBY CONTEXT:
+${nearby || "- (none)"}
+
+GUIDANCE:
+${guidance || "- Describe the most interesting thing first."}
+
+Write 1-3 concise sentences in close observational inner-monologue style.
+Lead with the most interesting subject first, then fold in nearby context only if it supports that subject.
+Describe the scene in reference to the inspected target, not as a flat inventory list.
+You do not need to mention every provided detail.
+If nearby details imply a relationship, you may mention that relationship, but do not invent unsupported facts.
+Do NOT describe the actor performing inspection actions like touching, lifting, bringing closer, stepping into, or explicitly saying "you see" / "you notice" / "you inspect" unless the supplied facts require it.
+Avoid second-person framing when a direct observational line works better.
+Prefer direct observational wording, like a quiet inner monologue.
 Do NOT invent new features, items, identities, or facts.
 If clarity is vague/obscured, keep it restrained and do not add extra detail beyond Short/Sensory/Notable features.`;
   }

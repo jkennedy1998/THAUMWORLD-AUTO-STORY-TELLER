@@ -217,7 +217,7 @@ export type PlaceModuleConfig = {
   // Right-click cycles: Characters -> Items -> Tile
   // Shift+Right-click forces tile inspection
   on_inspect?: (target: {
-    type: "npc" | "actor" | "structure" | "item" | "tile";
+    type: "npc" | "actor" | "structure" | "item" | "item_pile" | "tile" | "place" | "adjacent_place";
     ref?: string;
     place_id?: string;
     tile_position: TilePosition;
@@ -1961,7 +1961,10 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     function draw_place(canvas: Canvas, place: Place): void {
       const inner = inner_rect();
       const { width, height } = inner_size();
-      const breath_index = Math.floor(Number((place as any)?.breath_index ?? 0)) || 0;
+      const place_breath_index = Math.floor(Number((place as any)?.breath_index ?? 0)) || 0;
+      const timed_event_active = !!((place as any)?.timed_event_active);
+      const timed_event_world_breath_index = Math.floor(Number((place as any)?.timed_event_world_breath_index ?? place_breath_index)) || 0;
+      const breath_index = timed_event_active ? timed_event_world_breath_index : place_breath_index;
       const scene_places = get_scene_places(place);
 
        // 3-layer window of absolute world-z values.
@@ -3171,6 +3174,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
   let place_breath_tick_applied_count = 0;
   let last_place_breath_tick_applied_ms = 0;
+  let timed_event_breath_state_applied_count = 0;
+  let last_timed_event_breath_state_ms = 0;
   let last_local_move_batch_applied_ms = 0;
   
   wsClient.on('TAG_CHANGED', (event: TagChangeEvent) => {
@@ -3193,12 +3198,53 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     updateCacheFromEvent(event);
   });
 
+  wsClient.on('TIMED_EVENT_BREATH_STATE', (msg: any) => {
+    try {
+      const place = config.get_place();
+      if (!place) return;
+      (place as any).timed_event_active = !!msg?.timed_event_active;
+      (place as any).timed_event_phase = typeof msg?.timed_event_phase === 'string' ? msg.timed_event_phase : null;
+      (place as any).timed_event_world_breath_index = (typeof msg?.timed_event_world_breath_index === 'number' && Number.isFinite(msg.timed_event_world_breath_index))
+        ? Math.floor(msg.timed_event_world_breath_index)
+        : undefined;
+      (place as any).timed_event_turn_breaths_remaining = (typeof msg?.turn_breaths_remaining === 'number' && Number.isFinite(msg.turn_breaths_remaining))
+        ? Math.floor(msg.turn_breaths_remaining)
+        : null;
+      timed_event_breath_state_applied_count++;
+      const nowMs = Date.now();
+      if (timed_event_breath_state_applied_count % 30 === 0) {
+        console.log(
+          '[TIMED_EVENT_BREATH] renderer applied state ' +
+            JSON.stringify({
+              timed_event_active: !!(place as any).timed_event_active,
+              timed_event_phase: (place as any).timed_event_phase ?? null,
+              timed_event_world_breath_index: (place as any).timed_event_world_breath_index ?? null,
+              turn_breaths_remaining: (place as any).timed_event_turn_breaths_remaining ?? null,
+              applied_count: timed_event_breath_state_applied_count,
+              delta_ms: last_timed_event_breath_state_ms > 0 ? Math.max(0, nowMs - last_timed_event_breath_state_ms) : 0,
+            })
+        );
+      }
+      last_timed_event_breath_state_ms = nowMs;
+    } catch {
+      // ignore
+    }
+  });
+
   wsClient.on('PLACE_BREATH_TICK', (msg: any) => {
     try {
       const place = config.get_place();
       if (!place) return;
       const ticks: any[] = Array.isArray(msg?.ticks) ? msg.ticks : [];
-      const hit = ticks.find((t: any) => String(t?.place_id ?? '') === String(place.id));
+      const hit = ticks.reduce((best: any, tick: any) => {
+        if (String(tick?.place_id ?? '') !== String(place.id)) return best;
+        if (!best) return tick;
+        const bestIndex = Number(best?.breath_index);
+        const tickIndex = Number(tick?.breath_index);
+        if (!Number.isFinite(tickIndex)) return best;
+        if (!Number.isFinite(bestIndex) || tickIndex >= bestIndex) return tick;
+        return best;
+      }, null as any);
       if (!hit) return;
 
       const bi = Number(hit?.breath_index);
@@ -4401,9 +4447,17 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         const connector_hit = get_connector_from_screen(place, place, e.x, e.y, focus_world_z);
         if (connector_hit && config.on_inspect) {
           config.on_inspect({
-            type: "tile",
+            type: "adjacent_place",
+            ref: connector_hit.target_place_id,
             place_id: place.id,
-            tile_position: { x: connector_hit.border_x, y: connector_hit.border_y },
+            tile_position: { x: connector_hit.border_x, y: connector_hit.border_y, z: focus_world_z },
+          });
+        } else if (config.on_inspect) {
+          config.on_inspect({
+            type: "place",
+            ref: place.id,
+            place_id: place.id,
+            tile_position: { x: Math.max(0, Math.floor(view.offset_x)), y: Math.max(0, Math.floor(view.offset_y)), z: focus_world_z },
           });
         }
         return;
@@ -4422,14 +4476,14 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           config.on_inspect({
             type: "tile",
             place_id: active_place.id,
-            tile_position: { x: tile.x, y: tile.y }
+            tile_position: { x: tile.x, y: tile.y, z: local_focus_world_z },
           });
           return;
         }
         
         // Normal right-click: cycle through inspectable targets
         // Order: Characters -> Structures -> Items -> Tile
-        const inspectable_targets: Array<{ type: "npc" | "actor" | "structure" | "item" | "tile"; ref?: string }> = [];
+        const inspectable_targets: Array<{ type: "npc" | "actor" | "structure" | "item" | "item_pile" | "tile"; ref?: string }> = [];
 
         // No pick-topmost: inspection targets come only from the focused world layer.
         // 1. Add characters (NPCs/Actors)
@@ -4447,21 +4501,24 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         // 2. Add structure instances
         const structs = get_structures_at_world_z(tile.x, tile.y, active_place, local_focus_world_z);
         for (const s of structs) {
-          const def_id = String((s as any)?.def_id ?? '').trim();
-          if (!def_id) continue;
+          const structure_id = String((s as any)?.id ?? '').trim();
+          if (!structure_id) continue;
           inspectable_targets.push({
             type: "structure",
-            ref: def_id.startsWith('tile.') ? def_id : `tile.${def_id}`,
+            ref: structure_id.startsWith('structure.') ? structure_id : `structure.${structure_id}`,
           });
         }
 
         // 3. Add items on ground (focused world layer)
         const item_ids = get_items_on_ground_at_world_z(active_place, tile.x, tile.y, local_focus_world_z);
-        for (const id of item_ids) {
+        if (item_ids.length > 1) {
           inspectable_targets.push({
-            type: "item",
-            ref: id,
+            type: "item_pile",
+            ref: item_ids.join(','),
           });
+        }
+        for (const id of item_ids) {
+          inspectable_targets.push({ type: "item", ref: id.startsWith('item.') ? id : `item.${id}` });
         }
 
         // 4. Add tile itself
@@ -4482,7 +4539,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
               type: target.type,
               ref: target.ref,
               place_id: active_place.id,
-              tile_position: { x: tile.x, y: tile.y }
+              tile_position: { x: tile.x, y: tile.y, z: local_focus_world_z }
             });
             
             // Advance cycle for next click
