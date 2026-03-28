@@ -38,21 +38,30 @@ export async function ollama_chat(request: OllamaChatRequest): Promise<OllamaCha
     const timeout_ms = request.timeout_ms ?? 60_000;
     const controller = new AbortController();
     const started = Date.now();
-    const timeout = setTimeout(() => controller.abort(), timeout_ms);
+    let timeout_handle: ReturnType<typeof setTimeout> | null = null;
+    const timeout_promise = new Promise<never>((_, reject) => {
+        timeout_handle = setTimeout(() => {
+            controller.abort();
+            reject(new Error(`ollama_timeout_${timeout_ms}`));
+        }, timeout_ms);
+    });
 
     try {
-        const res = await fetch(`${host}/api/chat`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                model: request.model,
-                messages: request.messages,
-                stream: false,
-                options: request.options,
-                keep_alive: request.keep_alive,
+        const res = await Promise.race([
+            fetch(`${host}/api/chat`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    model: request.model,
+                    messages: request.messages,
+                    stream: false,
+                    options: request.options,
+                    keep_alive: request.keep_alive,
+                }),
+                signal: controller.signal,
             }),
-            signal: controller.signal,
-        });
+            timeout_promise,
+        ]);
 
         if (!res.ok) {
             const text = await res.text().catch(() => "");
@@ -71,6 +80,6 @@ export async function ollama_chat(request: OllamaChatRequest): Promise<OllamaCha
             duration_ms: Date.now() - started,
         };
     } finally {
-        clearTimeout(timeout);
+        if (timeout_handle) clearTimeout(timeout_handle);
     }
 }

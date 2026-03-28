@@ -67,7 +67,7 @@ export function make_slot_payload(opts: {
 
 export function make_widget_payload(opts: {
     id: string;
-    widget: 'close' | 'move' | 'save_position' | 'resize';
+    widget: 'close' | 'move' | 'save_position' | 'resize' | 'seamless';
     widget_state?: 'idle' | 'active' | 'disabled';
     base_fg?: Rgb;
 }): DiscriminatedRenderPayload {

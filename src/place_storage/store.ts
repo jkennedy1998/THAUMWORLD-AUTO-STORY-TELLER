@@ -15,6 +15,7 @@ import { resolve_place_tile } from "../tile_storage/resolve.js";
 import { rotate_offset_xy } from "../shared/body_model.js";
 import { compute_adjacent_place_bounds, region_bounds_overlap as shared_region_bounds_overlap } from "../shared/place_adjacency.js";
 import { sanitize_place_for_save } from "../shared/defs_deltas_sanitize.js";
+import { normalize_place_character_presence_records } from "../shared/place_character_presence.js";
 import { normalize_ground_scattered } from "./ground_normalize.js";
 import { get_region_place_index_record, list_place_ids_in_region_index, list_region_place_index_records, remove_place_from_region_place_index, sync_place_to_region_place_index } from "./region_place_index.js";
 import { sync_region_place_graph_for_place } from "./region_place_graph.js";
@@ -230,6 +231,13 @@ export function load_place(slot: number, place_id: string): PlaceResult {
       // ignore
     }
 
+    try {
+      const normalized_presence = normalize_place_character_presence_records(place as any);
+      if (normalized_presence) dirty = true;
+    } catch {
+      // ignore
+    }
+
     // 3dification: migrate ground scattered keys to voxel keys (x_y_z).
     try {
       const migrated = normalize_ground_scattered(place as any);
@@ -351,6 +359,7 @@ export function save_place(slot: number, place: Place): string {
   const previous_record = get_region_place_index_record(slot, place.id);
   const persisted = JSON.parse(JSON.stringify(place)) as Place;
   normalize_place_region_bounds_to_content(persisted);
+  normalize_place_character_presence_records(persisted as any);
 
   // defs+deltas migration: strip derived/legacy inline fields before persisting.
   // (Important because some API paths augment tiles/items for UI and may later save.)

@@ -25,7 +25,7 @@ export type BrushPreviewOptions = {
 
 export function make_brush_preview_module(opts: BrushPreviewOptions): Module {
   const gizmo_config: ModuleGizmosConfig = {
-    enabled: ['move', 'close'],
+    enabled: ['move', 'close', 'seamless'],
     can_close: true,
     can_move: true,
     can_save_position: false,

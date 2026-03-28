@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { parse } from "jsonc-parser";
-import { ensure_dir_exists, rand_base32_rfc } from "../engine/log_store.js";
+import { ensure_dir_exists } from "../engine/log_store.js";
 import { get_actor_dir, get_actor_path, get_default_actor_path, get_legacy_default_actor_path } from "../engine/paths.js";
 import { find_kind } from "../kind_storage/store.js";
 import { find_language } from "../language_storage/store.js";
@@ -11,6 +11,7 @@ import { initialize_equipment_slots, normalize_body_slots } from "../types/body_
 import { sanitize_actor_for_save } from "../shared/defs_deltas_sanitize.js";
 import { resolve_character_body_model_id } from "../shared/body_model.js";
 import { DEFAULT_CHARACTER_BODY_SLOT_REPRESENTATION } from "../shared/body_slot_representation.js";
+import { make_opaque_entity_id } from "../shared/entity_ids.js";
 
 export type ActorLookupResult =
     | { ok: true; actor: Record<string, unknown>; path: string }
@@ -40,17 +41,17 @@ export type CreateActorFromKindInput = {
     age?: number;
 };
 
-function slugify_name(name: string): string {
-    return name
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "_")
-        .replace(/^_+|_+$/g, "");
-}
+const RESERVED_ACTOR_IDS = new Set([
+    "default_actor",
+    "player",
+    "self",
+    "npc",
+    "hands",
+    "voice",
+]);
 
-export function make_actor_id(name: string): string {
-    const slug = slugify_name(name || "actor");
-    const rand = rand_base32_rfc(6);
-    return `${slug}_${rand}`;
+export function make_actor_id(_name?: string): string {
+    return make_opaque_entity_id("actor");
 }
 
 function read_jsonc(pathname: string): Record<string, unknown> {
@@ -181,7 +182,7 @@ export function ensure_actor_exists(slot: number, actor_id: string): ActorLookup
     if (existing.ok) return existing;
     const template = load_default_actor();
     if (!template.ok) return template;
-    const actor = { ...template.actor, id: actor_id, name: actor_id };
+    const actor = { ...template.actor, id: actor_id, name: "Player" };
     const actor_path = save_actor(slot, actor_id, actor);
     return { ok: true, actor, path: actor_path };
 }
@@ -352,6 +353,24 @@ export function find_actors(slot: number, query: ActorSearchQuery): ActorSearchH
     }
 
     return hits;
+}
+
+export function resolve_runtime_player_actor_id(slot: number, preferred_id?: string | null): string {
+    const preferred = String(preferred_id ?? "").trim();
+    if (preferred) {
+        const hit = load_actor(slot, preferred);
+        if (hit.ok) return preferred;
+    }
+
+    const actors = find_actors(slot, {});
+    const non_reserved = actors.find((actor) => !RESERVED_ACTOR_IDS.has(String(actor.id ?? "").trim().toLowerCase()));
+    if (non_reserved?.id) return non_reserved.id;
+
+    const player_like = actors.find((actor) => String(actor.id ?? "").trim().toLowerCase() === "player");
+    if (player_like?.id) return player_like.id;
+
+    const first = actors.find((actor) => String(actor.id ?? "").trim().length > 0);
+    return first?.id ?? "player";
 }
 
 // Apply body slots from kind.parts to actor

@@ -7,6 +7,7 @@
 
 import type { Place, TilePosition } from "../types/place.js";
 import { debug_log } from "../shared/debug.js";
+import { SERVICE_CONFIG } from "../shared/constants.js";
 import {
   init_movement_engine,
   start_entity_movement,
@@ -17,9 +18,15 @@ import {
   type MovementGoal,
 } from "../shared/movement_engine.js";
 import { find_path } from "../shared/pathfinding.js";
-import { is_in_conversation } from "./conversation_state.js";
+import { is_in_conversation_presence } from "../shared/conversation_presence_store.js";
 import { send_wander_command, send_stop_command } from "./movement_command_sender.js";
 import { should_behavior_auto_wander } from "./behavior.js";
+
+const data_slot = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+
+function is_conversation_blocking_wander(npc_ref: string): boolean {
+  return is_in_conversation_presence(data_slot, npc_ref);
+}
 
 // Store place data
 const place_data = new Map<string, Place>();
@@ -77,7 +84,7 @@ export function init_place_movement(place_id: string, place: Place): void {
       debug_log("NPC_Movement", `${npc.npc_ref} skipping initial wander - behavior does not auto-wander`);
       continue;
     }
-    if (!is_in_conversation(npc.npc_ref)) {
+    if (!is_conversation_blocking_wander(npc.npc_ref)) {
       start_npc_wandering(place_id, npc.npc_ref);
     } else {
       debug_log("NPC_Movement", `${npc.npc_ref} skipping initial wander - in conversation`);
@@ -126,7 +133,7 @@ export function stop_place_movement(place_id: string): void {
  */
 function start_npc_wandering(place_id: string, npc_ref: string): void {
   // Don't wander if NPC is in conversation
-  if (is_in_conversation(npc_ref)) {
+  if (is_conversation_blocking_wander(npc_ref)) {
     debug_log("NPC_Movement", `${npc_ref} skipping wander - in conversation`);
     return;
   }

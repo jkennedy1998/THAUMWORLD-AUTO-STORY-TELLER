@@ -83,7 +83,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
   let rect = opts.rect;
   
   const gizmo_config: ModuleGizmosConfig = {
-    enabled: ['move', 'resize', 'close'],
+    enabled: ['move', 'resize', 'close', 'seamless'],
     can_close: true,
     can_move: true,
     can_save_position: false,

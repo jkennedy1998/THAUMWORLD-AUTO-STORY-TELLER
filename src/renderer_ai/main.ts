@@ -13,7 +13,9 @@ import { ollama_chat, type OllamaMessage } from "../shared/ollama_client.js";
 import { append_metric } from "../engine/metrics_store.js";
 import { get_region_by_coords } from "../world_storage/store.js";
 import { load_place } from "../place_storage/store.js";
-import { load_actor } from "../actor_storage/store.js";
+import { load_actor, resolve_runtime_player_actor_id } from "../actor_storage/store.js";
+import { get_or_bind_controlled_actor_ref } from "../shared/session_control.js";
+import { load_npc } from "../npc_storage/store.js";
 import { build_inspect_narrative_prompt } from "../inspection/prompts.js";
 
 const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
@@ -181,8 +183,7 @@ function getPlaceDetails(target: string, playerActorId?: string): { name: string
     
     // If target is a region_tile and player is provided, check if player is in a place in that region
     if (!placeId && target.includes("region_tile.")) {
-        // Try to get the player's current place - default to henry_actor if not specified
-        const actorToCheck = playerActorId || "henry_actor";
+        const actorToCheck = playerActorId || (get_or_bind_controlled_actor_ref(data_slot_number).slice("actor.".length) || resolve_runtime_player_actor_id(data_slot_number));
         const actorResult = load_actor(data_slot_number, actorToCheck);
         if (actorResult.ok) {
             const actorPlaceId = (actorResult.actor as any)?.location?.place_id;
@@ -292,10 +293,10 @@ function generateCommunicateNarrativePrompt(params: {
     const observed_by = Array.isArray((ctx as any).observed_by) ? ((ctx as any).observed_by as unknown[]) : [];
     const heard_by = observed_by
         .filter((r) => typeof r === "string")
-        .map((r) => (r as string).split(".").pop() ?? (r as string));
+        .map((r) => get_entity_display_name(r as string) ?? "someone nearby");
 
     const actor_id = actor_ref.startsWith("actor.") ? actor_ref.slice("actor.".length) : actor_ref;
-    const target_name = target_ref ? target_ref.split(".").pop() ?? target_ref : null;
+    const target_name = get_entity_display_name(target_ref);
 
     let locationContext = "";
     let placeDetailsText = "";
@@ -778,3 +779,26 @@ debug_log("Renderer: booted", { outbox_path, inbox_path });
 setInterval(() => {
     void tick(outbox_path, inbox_path, log_path);
 }, POLL_MS);
+function get_entity_display_name(entity_ref: string | null | undefined): string | null {
+    const ref = typeof entity_ref === "string" ? entity_ref.trim() : "";
+    if (!ref) return null;
+    if (ref.startsWith("npc.")) {
+        const npc_id = ref.slice(4);
+        const result = load_npc(data_slot_number, npc_id);
+        if (result.ok && typeof (result.npc as any)?.name === "string") {
+            const name = String((result.npc as any).name).trim();
+            if (name) return name;
+        }
+        return null;
+    }
+    if (ref.startsWith("actor.")) {
+        const actor_id = ref.slice(6);
+        const result = load_actor(data_slot_number, actor_id);
+        if (result.ok && typeof (result.actor as any)?.name === "string") {
+            const name = String((result.actor as any).name).trim();
+            if (name) return name;
+        }
+        return null;
+    }
+    return null;
+}

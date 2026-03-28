@@ -10,6 +10,7 @@ import type { Container } from "./container.js";
 import type { InlineItem } from "./inline_item.js";
 import type { TagInstance } from "../tag_system/registry.js";
 import type { BodyModelVoxel } from "../shared/body_model.js";
+import type { PlaceCharacterPresenceBase } from "../shared/character_storage.js";
 import type { EntityRenderProfile, RenderShaderBindings } from "../render_shaders/definitions.js";
 import type { Bounds3, Point2, Size3, Voxel3, WorldVoxel } from "../shared/coords.js";
 
@@ -298,63 +299,19 @@ export type PlaceContents = {
 /**
  * NPC present in a place
  */
-export type PlaceNPC = {
+export type PlaceNPC = PlaceCharacterPresenceBase & {
   npc_ref: string;               // "npc.gunther"
-  tile_position: TilePosition;
-  // Optional current facing in place state.
-  // Kept in the place snapshot so legality/rendering/interaction can consult it.
-  facing?: string;
-  kind_id?: string;              // Kind id (used for body models + rendering)
-  // Existing sheet movement speeds (voluntary locomotion).
-  // Higher values are faster.
-  movement?: { walk?: number; climb?: number; swim?: number; fly?: number };
-  body_model_id?: string;        // Body model id for multi-voxel occupancy/render
-  body_slot_representation?: Record<string, any>; // Kind-driven body slot mapping (optional)
-  // 3Dification: vertical position in place/world space.
-  // For now this is sourced from npc.location.elevation when available.
-  elevation?: number;
-  // Breath timekeeping (used for catch-up aging and movement scheduling).
-  breath_index?: number;
-  breath_last_processed?: number;
-  breath_last_processed_ms?: number;
-  // Movement cadence scheduling (per locomotion mode).
-  movement_schedule?: any;
-  weight?: number;
   status: "present" | "moving" | "busy" | "sleeping";
   activity: string;              // "sitting at the bar", "whittling by the fire"
-  tags?: Array<{ name: string; mag: number; meta: string[] }>;  // Optional tags for visual effects
-  entity_render?: EntityRenderProfile;
   body_slots?: EquipmentSlots;        // Equipment slots for inventory interactions
 };
 
 /**
  * Actor (player character) present in a place
  */
-export type PlaceActor = {
+export type PlaceActor = PlaceCharacterPresenceBase & {
   actor_ref: string;             // "actor.henry_actor"
-  tile_position: TilePosition;
-  // Optional current facing in place state.
-  // Kept in the place snapshot so legality/rendering/interaction can consult it.
-  facing?: string;
-  kind_id?: string;              // Kind id (used for body models + rendering)
-  // Existing sheet movement speeds (voluntary locomotion).
-  // Higher values are faster.
-  movement?: { walk?: number; climb?: number; swim?: number; fly?: number };
-  body_model_id?: string;        // Body model id for multi-voxel occupancy/render
-  body_slot_representation?: Record<string, any>; // Kind-driven body slot mapping (optional)
-  // 3Dification: vertical position in place/world space.
-  // For now this is sourced from actor.location.elevation when available.
-  elevation?: number;
-  // Breath timekeeping (used for catch-up aging and movement scheduling).
-  breath_index?: number;
-  breath_last_processed?: number;
-  breath_last_processed_ms?: number;
-  // Movement cadence scheduling (per locomotion mode).
-  movement_schedule?: any;
-  weight?: number;
   status: "present" | "moving" | "busy";
-  tags?: Array<{ name: string; mag: number; meta: string[] }>;  // Optional tags for visual effects
-  entity_render?: EntityRenderProfile;
 };
 
 /**

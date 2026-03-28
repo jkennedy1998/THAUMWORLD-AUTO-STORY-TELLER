@@ -6,12 +6,15 @@ import { make_roller_module } from '../mono_ui/modules/roller_module.js';
 import { make_place_module } from '../mono_ui/modules/place_module.js';
 import { make_container_module, type SlotItem } from '../mono_ui/modules/container_module.js';
 import { make_character_module, type CharacterDropTarget } from '../mono_ui/modules/character_module.js';
+import { make_character_editor_module } from '../mono_ui/modules/character_editor_module.js';
+import { make_option_picker_module, type OptionPickerEntry } from '../mono_ui/modules/option_picker_module.js';
+import { make_initiative_module } from '../mono_ui/modules/initiative_module.js';
 import { make_toolbox_module } from '../mono_ui/modules/toolbox_module.js';
 import { makeLayerPaletteModule } from '../ascii_painter/layer_palette_module.js';
 import type { SlotType } from '../equipment/body_slot_resolver.js';
 import type { Canvas, Module, PointerEvent, Rgb, Rect } from '../mono_ui/types.js';
 import { create_module_registry, type ModuleRegistry } from '../mono_ui/module_registry.js';
-import { handleEntityClick } from '../interface_program/frontend_api.js';
+import { handleEntityClick, set_current_actor_ref } from '../interface_program/frontend_api.js';
 import type { Place, TilePosition } from '../types/place.js';
 import { debug_warn, debug_log } from '../shared/debug.js';
 import { resolve_char } from '../render_shaders/resolver.js';
@@ -42,6 +45,7 @@ import { get_flood_fill_points, get_line_points, get_rect_fill_points, get_rect_
 import { play_sfx } from '../mono_ui/sfx/sfx_player.js';
 import { format_interval_avg, format_interval_min, get_movement_debug_snapshot } from '../shared/movement_debug_state.js';
 import { has_tag_name } from '../shared/physics_tags.js';
+import { get_character_id_from_ref } from '../shared/character_storage.js';
 import { compute_adjacent_place_bounds, get_place_region_bounds, region_bounds_overlap, select_place_resize_face } from '../shared/place_adjacency.js';
 import {
     api_transfer_inline,
@@ -61,15 +65,15 @@ export const APP_CONFIG = {
     grid_width: 200,  // Expanded: 160 for main UI + 40 for debug button column
     grid_height: 50,
 
-    interpreter_endpoint: 'http://localhost:8787/api/input',
-    interpreter_log_endpoint: 'http://localhost:8787/api/log',
-    interpreter_status_endpoint: 'http://localhost:8787/api/status',
-    interpreter_targets_endpoint: 'http://localhost:8787/api/targets',
+    action_input_endpoint: 'http://localhost:8787/api/input',
+    action_log_endpoint: 'http://localhost:8787/api/log',
+    action_status_endpoint: 'http://localhost:8787/api/status',
+    action_targets_endpoint: 'http://localhost:8787/api/targets',
     place_endpoint: 'http://localhost:8787/api/place',
     roller_status_endpoint: 'http://localhost:8787/api/roller_status',
     roller_roll_endpoint: 'http://localhost:8787/api/roll',
     selected_data_slot: 1,
-    input_actor_id: 'henry_actor',
+    input_actor_id: '',
 } as const;
 
 const APP_PLACE_TIMING_VERSION = '2026-03-14-visible-pulse-v1';
@@ -85,6 +89,7 @@ type PlacePainterTool =
     | 'rect_stroke'
     | 'rect_fill'
     | 'bucket'
+    | 'character'
     | 'move'
     | 'place_create'
     | 'place_delete'
@@ -187,13 +192,14 @@ export function create_app_state(): AppState {
             active_actor_ref: null as string | null,
             turn_window_breaths: null as number | null,
             turn_breaths_remaining: null as number | null,
+            timed_event_world_breath_index: null as number | null,
             pending_communication_opportunities: [] as Array<{
                 opportunity_id: string;
                 npc_ref: string;
-                speaker_ref: string;
-                target_ref: string | null;
-                original_text: string;
-                response_eligible_reason: string;
+                conversation_id: string | null;
+                queue_entry_id: string | null;
+                queue_stable_order: number | null;
+                source_message_id: string;
                 trigger_context: string | null;
                 created_turn: number | null;
                 created_round: number | null;
@@ -362,6 +368,7 @@ export function create_app_state(): AppState {
         },
         character: {
             is_visible: true,  // Always visible for now
+            display_name: '',
             body_slots: {} as EquipmentSlots,
             equipped_items: new Map() as Map<string, { instance: ItemInstance; definition: ItemDefinition }>,
             weight: { current: 0, max: 100 },
@@ -371,6 +378,31 @@ export function create_app_state(): AppState {
             hovered_item: null as { name: string; source: string } | null,  // Currently hovered item for debug display
             hovered_slot: null as string | null,  // Currently hovered body slot
             highlighted_items: [] as Array<{ container_id: string; slot_index: number }>,  // Items highlighted when hovering slot
+        },
+        character_editor: {
+            is_visible: false,
+            character_ref: null as string | null,
+            role: null as 'actor' | 'npc' | null,
+            original: null as Record<string, unknown> | null,
+            draft: {
+                name: '',
+                title: '',
+                kind: '',
+                sex: '',
+                age: '',
+            },
+            status_lines: ['Place painter only'],
+            dirty: false,
+            saving: false,
+        },
+        option_picker: {
+            is_visible: false,
+            title: 'PICKER',
+            target_kind: null as null | 'character_editor',
+            target_field: null as string | null,
+            options: [] as OptionPickerEntry[],
+            selected_value: null as string | null,
+            status_lines: [] as string[],
         },
         // Module management (Phase 7.5)
         modules: {
@@ -1310,12 +1342,14 @@ export function create_app_state(): AppState {
             const list = entity_type === 'actor' ? (place?.contents?.actors_present ?? []) : (place?.contents?.npcs_present ?? []);
             const match = list.find((entry: any) => String(entity_type === 'actor' ? entry?.actor_ref ?? '' : entry?.npc_ref ?? '') === entity_ref) ?? null;
             return match ? {
-                display_char: String(match?.display_char ?? (entity_type === 'actor' ? '@' : 'n')),
+                display_char: String(match?.display_char ?? (typeof match?.name === 'string' && String(match.name).trim().length > 0 ? String(match.name).trim().charAt(0).toUpperCase() : (entity_type === 'actor' ? '@' : 'N'))),
                 display_color: String(match?.display_color ?? '#ffffff'),
                 body_model: null,
                 body_model_id: typeof match?.body_model_id === 'string' ? String(match.body_model_id) : undefined,
                 facing: typeof match?.facing === 'string' ? String(match.facing) : get_facing(entity_ref),
-                name: String(match?.name ?? entity_ref.split('.').pop() ?? entity_ref),
+                name: typeof match?.name === 'string' && String(match.name).trim().length > 0
+                    ? String(match.name)
+                    : (entity_type === 'actor' ? 'Unknown Actor' : 'Unknown NPC'),
                 tags: Array.isArray(match?.tags) ? match.tags : [],
                 kind_id: typeof match?.kind_id === 'string' ? String(match.kind_id) : undefined,
                 entity_render: match?.entity_render,
@@ -1775,14 +1809,17 @@ export function create_app_state(): AppState {
         ui_state.timed_event_debug.active_actor_ref = typeof data?.active_actor_ref === 'string' ? data.active_actor_ref : null;
         ui_state.timed_event_debug.turn_window_breaths = typeof data?.turn_window_breaths === 'number' ? data.turn_window_breaths : null;
         ui_state.timed_event_debug.turn_breaths_remaining = typeof data?.turn_breaths_remaining === 'number' ? data.turn_breaths_remaining : null;
+        ui_state.timed_event_debug.timed_event_world_breath_index = typeof data?.timed_event_world_breath_index === 'number'
+            ? data.timed_event_world_breath_index
+            : null;
         ui_state.timed_event_debug.pending_communication_opportunities = Array.isArray(data?.pending_communication_opportunities)
             ? data.pending_communication_opportunities.map((opp: any) => ({
                 opportunity_id: String(opp?.opportunity_id ?? ''),
                 npc_ref: String(opp?.npc_ref ?? ''),
-                speaker_ref: String(opp?.speaker_ref ?? ''),
-                target_ref: typeof opp?.target_ref === 'string' ? opp.target_ref : null,
-                original_text: String(opp?.original_text ?? ''),
-                response_eligible_reason: String(opp?.response_eligible_reason ?? ''),
+                conversation_id: typeof opp?.conversation_id === 'string' ? opp.conversation_id : null,
+                queue_entry_id: typeof opp?.queue_entry_id === 'string' ? opp.queue_entry_id : null,
+                queue_stable_order: typeof opp?.queue_stable_order === 'number' ? opp.queue_stable_order : null,
+                source_message_id: String(opp?.source_message_id ?? ''),
                 trigger_context: typeof opp?.trigger_context === 'string' ? opp.trigger_context : null,
                 created_turn: typeof opp?.created_turn === 'number' ? opp.created_turn : null,
                 created_round: typeof opp?.created_round === 'number' ? opp.created_round : null,
@@ -1815,6 +1852,7 @@ export function create_app_state(): AppState {
             turn: ui_state.timed_event_debug.current_turn,
             round: ui_state.timed_event_debug.current_round,
             active_actor_ref: ui_state.timed_event_debug.active_actor_ref,
+            world_breath_index: ui_state.timed_event_debug.timed_event_world_breath_index,
             initiative_count: ui_state.timed_event_debug.initiative_order.length,
         });
         const timed_event_toggled = prev_timed_event_active !== ui_state.timed_event_debug.active;
@@ -1835,7 +1873,12 @@ export function create_app_state(): AppState {
     }
 
     function get_input_actor_ref(): string {
-        return `actor.${APP_CONFIG.input_actor_id}`;
+        const actor_id = get_controlled_actor_id();
+        return actor_id ? `actor.${actor_id}` : '';
+    }
+
+    function get_controlled_actor_id(): string {
+        return String(APP_CONFIG.input_actor_id ?? '').trim();
     }
 
     function get_follow_camera_entity_ref(): string {
@@ -1982,7 +2025,7 @@ export function create_app_state(): AppState {
                     ui_state.place_painter.selected_palette_entry_id = active_entries[0]?.id ?? ui_state.place_painter.tile_palette_entries[0]?.id ?? null;
                 }
             }
-            const actor_tile = get_current_place()?.contents?.actors_present?.find((a: any) => a.actor_ref === `actor.${APP_CONFIG.input_actor_id}`)?.tile_position;
+            const actor_tile = get_current_place()?.contents?.actors_present?.find((a: any) => a.actor_ref === get_input_actor_ref())?.tile_position;
             if (actor_tile) set_place_camera_target_position(actor_tile, 'free');
             set_place_painter_modules_visible(true);
             return true;
@@ -2097,7 +2140,7 @@ export function create_app_state(): AppState {
         const tool = get_place_painter_tool_for_button(target.button);
         ui_state.place_painter.selected_tool = tool;
         const target_label = target.entity_ref
-            ? `${target.entity_ref} @ ${target.tile_position.x},${target.tile_position.y},${target.world_z}`
+            ? `${get_entity_display_name(target.entity_ref)} @ ${target.tile_position.x},${target.tile_position.y},${target.world_z}`
             : `${target.tile_position.x},${target.tile_position.y},${target.world_z}`;
         debug_log(`[PLACE_PAINTER] primary action ${JSON.stringify({ tool, button: target.button ?? 0, palette_kind: ui_state.place_painter.selected_palette_kind, target_label })}`);
 
@@ -2320,6 +2363,15 @@ export function create_app_state(): AppState {
             return;
         }
 
+        if (tool === 'character') {
+            if (!target.entity_ref || (target.entity_type !== 'npc' && target.entity_type !== 'actor')) {
+                flash_status(['Character tool: click an actor or npc'], 1200);
+                return;
+            }
+            await open_character_editor_module(target.entity_ref);
+            return;
+        }
+
         if (tool === 'place_create') {
             if (!active_place || !is_selected_place) {
                 flash_status(['Place create only works from the selected place'], 1500);
@@ -2381,13 +2433,19 @@ export function create_app_state(): AppState {
         ], 1200);
     }
 
-    function place_painter_module_ids(): string[] {
-        return ['place_painter_toolbar', 'place_painter_tools', 'place_painter_palette', 'place_painter_layers', 'place_painter_status'];
+    function place_painter_module_ids(include_auxiliary: boolean = false): string[] {
+        const ids = ['place_painter_toolbar', 'place_painter_tools', 'place_painter_palette', 'place_painter_layers', 'place_painter_status'];
+        if (include_auxiliary) ids.push('character_editor_module', 'option_picker_module');
+        return ids;
     }
 
     function set_place_painter_modules_visible(visible: boolean): void {
         for (const id of place_painter_module_ids()) {
             set_module_visible(id, visible);
+        }
+        if (!visible) {
+            close_character_editor_module();
+            close_option_picker();
         }
     }
 
@@ -2404,7 +2462,7 @@ export function create_app_state(): AppState {
         on_pointer_down_content?: (e: PointerEvent, rect: Rect) => void;
     }): Module {
         const gizmo_config: ModuleGizmosConfig = {
-            enabled: ['move', 'resize', 'close'],
+            enabled: ['move', 'resize', 'close', 'seamless'],
             can_close: true,
             can_move: true,
             can_save_position: false,
@@ -2438,6 +2496,7 @@ export function create_app_state(): AppState {
             { tool: 'rect_stroke', label: 'Rect', icon: '□' },
             { tool: 'rect_fill', label: 'Fill', icon: '■' },
             { tool: 'bucket', label: 'Bucket', icon: '▧' },
+            { tool: 'character', label: 'Char', icon: '@' },
             { tool: 'move', label: 'Move', icon: '◎' },
             { tool: 'place_create', label: 'Create', icon: '+' },
             { tool: 'place_delete', label: 'Delete', icon: '-' },
@@ -2848,7 +2907,7 @@ export function create_app_state(): AppState {
         can_drag(item_id: string, definition: ItemDefinition): { can: boolean; reason?: string } {
             // Prevent dragging open containers
             if (is_container_item(definition)) {
-                const actor_nested = `actor.item.${APP_CONFIG.input_actor_id}.${item_id}`;
+                const actor_nested = `actor.item.${get_controlled_actor_id()}.${item_id}`;
                 const open = ui_state.container.open_containers;
                 const open_place_container = Array.from(open).some((cid) =>
                     cid.startsWith('place.item.') && cid.endsWith(`.${item_id}`)
@@ -3057,7 +3116,7 @@ export function create_app_state(): AppState {
     // Calls backend API for tag-based compatibility (single source of truth)
     async function get_compatible_slots(item_def: ItemDefinition): Promise<Array<{ slot_name: string; slot_type: SlotType; garb_index?: number }>> {
         try {
-            const response = await fetch(`http://localhost:8787/api/item/compatible_slots?item_def_id=${item_def.id}&actor_id=${APP_CONFIG.input_actor_id}`);
+            const response = await fetch(`http://localhost:8787/api/item/compatible_slots?item_def_id=${item_def.id}&actor_id=${get_controlled_actor_id()}`);
             if (response.ok) {
                 const data = await response.json();
                 if (data.ok && data.compatible_slots) {
@@ -3129,7 +3188,7 @@ export function create_app_state(): AppState {
                     if (data.ok && data.compatible_slots) return data.compatible_slots;
                 }
             } else {
-                const res = await fetch(`http://localhost:8787/api/item_instance/compatible_slots?actor_id=${encodeURIComponent(APP_CONFIG.input_actor_id)}&item_id=${encodeURIComponent(item_instance_id)}`);
+                const res = await fetch(`http://localhost:8787/api/item_instance/compatible_slots?actor_id=${encodeURIComponent(get_controlled_actor_id())}&item_id=${encodeURIComponent(item_instance_id)}`);
                 if (res.ok) {
                     const data = await res.json();
                     if (data.ok && data.compatible_slots) return data.compatible_slots;
@@ -3203,6 +3262,400 @@ export function create_app_state(): AppState {
         return compatible_items;
     }
 
+    function get_character_weight_from_body_slots(body_slots: EquipmentSlots): number {
+        let total_weight = 0;
+
+        function add_weight(item: any): number {
+            if (!item) return 0;
+            const qty = typeof item.qty === 'number' ? item.qty : 1;
+            const w = typeof item.weight === 'number' ? item.weight : 0;
+            let sum = w * qty;
+            if (Array.isArray(item.contents)) {
+                for (const child of item.contents) {
+                    sum += add_weight(child);
+                }
+            }
+            return sum;
+        }
+
+        for (const slot_data of Object.values(body_slots ?? {})) {
+            const s = slot_data as any;
+            if (s?.armor) total_weight += add_weight(s.armor);
+            if (s?.tool) total_weight += add_weight(s.tool);
+            if (Array.isArray(s?.garb)) {
+                for (const it of s.garb) total_weight += add_weight(it);
+            }
+        }
+
+        return total_weight;
+    }
+
+    function get_character_equipped_items_from_body_slots(body_slots: EquipmentSlots): Map<string, { instance: ItemInstance; definition: ItemDefinition }> {
+        const equipped = new Map<string, { instance: ItemInstance; definition: ItemDefinition }>();
+
+        for (const [slot_name, slot_data] of Object.entries(body_slots ?? {})) {
+            const s = slot_data as any;
+            for (const [slot_type, value] of Object.entries({ armor: s.armor, tool: s.tool })) {
+                if (value && typeof (value as any).id === 'string') {
+                    const item = value as any;
+                    equipped.set(item.id, {
+                        instance: { id: item.id, def_id: item.def_id, qty: item.qty || 1, tags: item.tags || [] } as ItemInstance,
+                        definition: {
+                            id: item.def_id,
+                            name: item.name,
+                            weight: item.weight || 0,
+                            tags: item.tags || [],
+                            display_char: (typeof item.display_char === 'string' && item.display_char.length > 0) ? String(item.display_char).charAt(0) : '·',
+                        } as ItemDefinition,
+                    });
+                    debug_log(`[LOAD_EQUIPPED] ${slot_name}.${slot_type}: ${item.name} (${item.id})`);
+                }
+            }
+            if (Array.isArray(s.garb)) {
+                for (let i = 0; i < s.garb.length; i++) {
+                    const item = s.garb[i];
+                    if (item && typeof item.id === 'string') {
+                        equipped.set(item.id, {
+                            instance: { id: item.id, def_id: item.def_id, qty: item.qty || 1, tags: item.tags || [] } as ItemInstance,
+                            definition: {
+                                id: item.def_id,
+                                name: item.name,
+                                weight: item.weight || 0,
+                                tags: item.tags || [],
+                                display_char: (typeof (item as any).display_char === 'string' && String((item as any).display_char).length > 0) ? String((item as any).display_char).charAt(0) : '·',
+                            } as ItemDefinition,
+                        });
+                        debug_log(`[LOAD_EQUIPPED] ${slot_name}.garb.${i}: ${item.name} (${item.id})`);
+                    }
+                }
+            }
+        }
+
+        return equipped;
+    }
+
+    async function load_character_module_data(character_ref: string): Promise<{
+        character: any;
+        body_slots: EquipmentSlots;
+        equipped_items: Map<string, { instance: ItemInstance; definition: ItemDefinition }>;
+        weight_data: { current: number; max: number };
+    }> {
+        const slot = APP_CONFIG.selected_data_slot;
+        const response = await fetch(`http://localhost:8787/api/character?ref=${encodeURIComponent(character_ref)}&slot=${slot}`);
+        if (!response.ok) {
+            throw new Error(`character_fetch_failed:${response.status}`);
+        }
+
+        const payload = await response.json();
+        if (!payload?.ok || !payload?.character) {
+            throw new Error(String(payload?.error ?? 'character_payload_invalid'));
+        }
+
+        const character = payload.character as any;
+        const body_slots = (character?.body_slots && typeof character.body_slots === 'object')
+            ? character.body_slots as EquipmentSlots
+            : {};
+        const equipped_items = get_character_equipped_items_from_body_slots(body_slots);
+        const strength = Number((character?.stats as Record<string, number> | undefined)?.str ?? 40);
+        return {
+            character,
+            body_slots,
+            equipped_items,
+            weight_data: {
+                current: get_character_weight_from_body_slots(body_slots),
+                max: strength * 2.5,
+            },
+        };
+    }
+
+    function get_entity_display_name(entity_ref: string, fallback?: string | null): string {
+        const place = get_current_place();
+        if (place) {
+            if (entity_ref.startsWith('npc.')) {
+                const npc = Array.isArray(place.contents?.npcs_present)
+                    ? place.contents.npcs_present.find((entry: any) => String(entry?.npc_ref ?? '') === entity_ref) ?? null
+                    : null;
+                const name = typeof (npc as any)?.name === 'string' ? String((npc as any).name).trim() : '';
+                if (name) return name;
+            }
+            if (entity_ref.startsWith('actor.')) {
+                const actor = Array.isArray(place.contents?.actors_present)
+                    ? place.contents.actors_present.find((entry: any) => String(entry?.actor_ref ?? '') === entity_ref) ?? null
+                    : null;
+                const name = typeof (actor as any)?.name === 'string' ? String((actor as any).name).trim() : '';
+                if (name) return name;
+            }
+        }
+        const target = ui_state.controls.targets.find((entry) => entry.ref === entity_ref);
+        if (target?.label) return target.label;
+        if (fallback && fallback.trim()) return fallback;
+        if (entity_ref.startsWith('npc.')) return 'Unknown NPC';
+        if (entity_ref.startsWith('actor.')) return 'Unknown Actor';
+        return 'Unknown Target';
+    }
+
+    function get_npc_module_id(npc_ref: string): string {
+        const npc_id = get_character_id_from_ref(npc_ref) ?? npc_ref.replace(/^npc\./, '');
+        return `npc_character_${npc_id}`;
+    }
+
+    function get_character_editor_subject_label(character_ref: string | null): string {
+        if (!character_ref) return 'no target';
+        const id = get_character_id_from_ref(character_ref);
+        return id ? `id: ${id}` : character_ref;
+    }
+
+    function get_transcript_speaker_name(sender: string): string {
+        const ref = String(sender ?? '').trim();
+        if (!ref) return 'Unknown';
+        if (ref.startsWith('npc.') || ref.startsWith('actor.')) {
+            return get_entity_display_name(ref);
+        }
+        return ref;
+    }
+
+    function sync_character_display_name_in_loaded_state(character_ref: string, next_name_raw: unknown): void {
+        const next_name = typeof next_name_raw === 'string' ? next_name_raw.trim() : '';
+        if (!next_name) return;
+        const next_initial = next_name.charAt(0).toUpperCase();
+
+        for (const target of ui_state.controls.targets) {
+            if (target.ref === character_ref) target.label = next_name;
+        }
+
+        const patch_place = (place: any): void => {
+            if (!place?.contents) return;
+            if (character_ref.startsWith('npc.') && Array.isArray(place.contents.npcs_present)) {
+                for (const npc of place.contents.npcs_present) {
+                    if (String(npc?.npc_ref ?? '') === character_ref) {
+                        npc.name = next_name;
+                        (npc as any).display_char = next_initial;
+                    }
+                }
+            }
+            if (character_ref.startsWith('actor.') && Array.isArray(place.contents.actors_present)) {
+                for (const actor of place.contents.actors_present) {
+                    if (String(actor?.actor_ref ?? '') === character_ref) {
+                        actor.name = next_name;
+                        (actor as any).display_char = next_initial;
+                    }
+                }
+            }
+        };
+
+        patch_place(ui_state.place.current_place as any);
+        for (const place of ui_state.place.scene_places) patch_place(place as any);
+
+        if (character_ref === get_input_actor_ref()) {
+            ui_state.character.display_name = next_name;
+        }
+    }
+
+    function populate_character_editor_state(character_ref: string, character: Record<string, unknown>): void {
+        ui_state.character_editor.character_ref = character_ref;
+        ui_state.character_editor.role = character_ref.startsWith('npc.') ? 'npc' : 'actor';
+        ui_state.character_editor.original = JSON.parse(JSON.stringify(character ?? {}));
+        ui_state.character_editor.draft = {
+            name: String(character?.name ?? ''),
+            title: String(character?.title ?? ''),
+            kind: String((character as any)?.kind ?? (character as any)?.kind_id ?? ''),
+            sex: String(character?.sex ?? ''),
+            age: String(character?.age ?? ''),
+        };
+        ui_state.character_editor.dirty = false;
+        ui_state.character_editor.status_lines = [
+            get_character_editor_subject_label(character_ref),
+            'type to edit selected field',
+            'ctrl+s save / esc unfocus',
+        ];
+    }
+
+    async function open_character_editor_module(character_ref: string): Promise<void> {
+        if (!ui_state.place_painter.active) {
+            flash_status(['Character editor is place-painter only'], 1200);
+            return;
+        }
+        try {
+            const data = await load_character_module_data(character_ref);
+            populate_character_editor_state(character_ref, data.character as Record<string, unknown>);
+            ui_state.character_editor.is_visible = true;
+            set_module_visible('character_editor_module', true);
+            flash_status([`Editing ${get_character_editor_subject_label(character_ref)}`], 1200);
+        } catch (err) {
+            debug_warn('[CharacterEditor] open failed', err);
+            flash_status([`Character load failed`, String(character_ref)], 1500);
+        }
+    }
+
+    function build_character_editor_patch(): Record<string, unknown> {
+        const original = ui_state.character_editor.original ?? {};
+        const draft = ui_state.character_editor.draft;
+        const patch: Record<string, unknown> = {};
+        if (draft.name !== String((original as any)?.name ?? '')) patch.name = draft.name;
+        if (draft.title !== String((original as any)?.title ?? '')) patch.title = draft.title;
+        const original_kind = String((original as any)?.kind ?? (original as any)?.kind_id ?? '');
+        if (draft.kind !== original_kind) patch.kind = draft.kind;
+        if (draft.sex !== String((original as any)?.sex ?? '')) patch.sex = draft.sex;
+        const original_age = String((original as any)?.age ?? '');
+        if (draft.age !== original_age) {
+            const parsed = Number(draft.age);
+            patch.age = Number.isFinite(parsed) ? parsed : draft.age;
+        }
+        return patch;
+    }
+
+    async function save_character_editor_module(): Promise<void> {
+        const character_ref = ui_state.character_editor.character_ref;
+        if (!character_ref) return;
+        const patch = build_character_editor_patch();
+        if (Object.keys(patch).length < 1) {
+            ui_state.character_editor.status_lines = [get_character_editor_subject_label(character_ref), 'no changes to save'];
+            ui_state.character_editor.dirty = false;
+            return;
+        }
+        ui_state.character_editor.saving = true;
+        ui_state.character_editor.status_lines = [get_character_editor_subject_label(character_ref), 'saving...'];
+        try {
+            const res = await fetch('http://localhost:8787/api/character/update', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    slot: APP_CONFIG.selected_data_slot,
+                    ref: character_ref,
+                    patch,
+                }),
+            });
+            const data = await res.json().catch(() => null as any);
+            if (!res.ok || !data?.ok || !data?.character) {
+                throw new Error(String(data?.error ?? `HTTP ${res.status}`));
+            }
+            sync_character_display_name_in_loaded_state(character_ref, (data.character as any)?.name);
+            populate_character_editor_state(character_ref, data.character as Record<string, unknown>);
+            ui_state.character_editor.status_lines = [
+                get_character_editor_subject_label(character_ref),
+                `saved: ${String((data.character as any)?.name ?? '(unnamed)')}`,
+                `file: ${String(data?.path ?? 'unknown')}`,
+            ];
+            ui_state.controls.targets_ready = false;
+            last_targets_poll_ms = 0;
+            void poll_window_feeds();
+            void refresh_character_data(true);
+            const current_place_id = ui_state.place.scene_selected_place_id ?? ui_state.place.current_place_id;
+            if (current_place_id) void update_current_place(current_place_id, { source: 'character_editor_save', preserve_place_painter: true });
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            ui_state.character_editor.status_lines = [get_character_editor_subject_label(character_ref), `save failed: ${message}`];
+            debug_warn('[CharacterEditor] save failed', err);
+        } finally {
+            ui_state.character_editor.saving = false;
+        }
+    }
+
+    async function reload_character_editor_module(): Promise<void> {
+        const character_ref = ui_state.character_editor.character_ref;
+        if (!character_ref) return;
+        try {
+            const data = await load_character_module_data(character_ref);
+            populate_character_editor_state(character_ref, data.character as Record<string, unknown>);
+            ui_state.character_editor.status_lines = [get_character_editor_subject_label(character_ref), 'reloaded'];
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            ui_state.character_editor.status_lines = [get_character_editor_subject_label(character_ref), `reload failed: ${message}`];
+        }
+    }
+
+    function close_character_editor_module(): void {
+        ui_state.character_editor.is_visible = false;
+        close_option_picker();
+        set_module_visible('character_editor_module', false);
+    }
+
+    async function open_option_picker(args: {
+        title: string;
+        target_kind: 'character_editor';
+        target_field: string;
+        selected_value?: string | null;
+        options?: OptionPickerEntry[];
+        fetch_url?: string;
+    }): Promise<void> {
+        try {
+            let options = args.options ?? [];
+            let selected_value = args.selected_value ?? null;
+            if (args.fetch_url) {
+                const res = await fetch(args.fetch_url);
+                const data = await res.json().catch(() => null as any);
+                if (!res.ok || !data?.ok || !Array.isArray(data?.options)) {
+                    throw new Error(String(data?.error ?? `HTTP ${res.status}`));
+                }
+                options = data.options.map((option: any) => ({
+                    value: String(option?.value ?? ''),
+                    label: String(option?.label ?? option?.value ?? ''),
+                    description: typeof option?.description === 'string' ? option.description : undefined,
+                }));
+                selected_value = typeof data?.selected_value === 'string' ? data.selected_value : selected_value;
+            }
+            ui_state.option_picker.is_visible = true;
+            ui_state.option_picker.title = args.title;
+            ui_state.option_picker.target_kind = args.target_kind;
+            ui_state.option_picker.target_field = args.target_field;
+            ui_state.option_picker.options = options;
+            ui_state.option_picker.selected_value = selected_value;
+            ui_state.option_picker.status_lines = ['enter/select to apply', 'esc to close'];
+            set_module_visible('option_picker_module', true);
+        } catch (err) {
+            debug_warn('[OptionPicker] open failed', err);
+            flash_status([`Picker failed`, args.title], 1400);
+        }
+    }
+
+    function close_option_picker(): void {
+        ui_state.option_picker.is_visible = false;
+        ui_state.option_picker.target_kind = null;
+        ui_state.option_picker.target_field = null;
+        ui_state.option_picker.options = [];
+        set_module_visible('option_picker_module', false);
+    }
+
+    async function open_character_editor_field_picker(field_key: string): Promise<void> {
+        const character_ref = ui_state.character_editor.character_ref;
+        if (!character_ref) return;
+        if (field_key === 'kind') {
+            await open_option_picker({
+                title: 'PICK KIND',
+                target_kind: 'character_editor',
+                target_field: 'kind',
+                selected_value: ui_state.character_editor.draft.kind,
+                fetch_url: `http://localhost:8787/api/character/editor/options?field=kind&ref=${encodeURIComponent(character_ref)}&slot=${APP_CONFIG.selected_data_slot}`,
+            });
+            return;
+        }
+        if (field_key === 'sex') {
+            await open_option_picker({
+                title: 'PICK SEX',
+                target_kind: 'character_editor',
+                target_field: 'sex',
+                selected_value: ui_state.character_editor.draft.sex,
+                fetch_url: `http://localhost:8787/api/character/editor/options?field=sex&ref=${encodeURIComponent(character_ref)}&slot=${APP_CONFIG.selected_data_slot}`,
+            });
+        }
+    }
+
+    function apply_option_picker_selection(value: string): void {
+        if (ui_state.option_picker.target_kind === 'character_editor' && ui_state.option_picker.target_field) {
+            const key = ui_state.option_picker.target_field;
+            if (key in ui_state.character_editor.draft) {
+                (ui_state.character_editor.draft as any)[key] = value;
+                ui_state.character_editor.dirty = true;
+                ui_state.character_editor.status_lines = [
+                    get_character_editor_subject_label(ui_state.character_editor.character_ref),
+                    `picked ${key}: ${value}`,
+                ];
+            }
+        }
+        ui_state.option_picker.selected_value = value;
+        close_option_picker();
+    }
+
     // Load character data (body slots, equipped items, weight) - Phase 5 Inline System
     async function refresh_character_data(force: boolean = false): Promise<void> {
         if (refresh_character_data_in_flight) return;
@@ -3212,87 +3665,25 @@ export function create_app_state(): AppState {
         }
         refresh_character_data_in_flight = true;
         try {
-            const actor_id = APP_CONFIG.input_actor_id;
-            const slot = APP_CONFIG.selected_data_slot;
-            
-            // Load actor via API
-            const actor_res = await fetch(`http://localhost:8787/api/actor?id=${actor_id}&slot=${slot}`);
-            if (!actor_res.ok) return;
-            
-            const actor_data = await actor_res.json();
-            if (!actor_data.ok || !actor_data.actor) return;
-            
-            const actor = actor_data.actor;
+            const actor_id = get_controlled_actor_id();
+            if (!actor_id) return;
+            const actor_data = await load_character_module_data(`actor.${actor_id}`);
+            const actor = actor_data.character;
+            ui_state.character.display_name = String(actor?.name ?? actor_id);
 
             // View centering is derived from the loaded place (not actor elevation).
 
             // Phase 5: Inline body_slots are authoritative
-            const body_slots = (actor.body_slots as any) || {};
+            const body_slots = actor_data.body_slots;
             ui_state.character.body_slots = body_slots;
 
             // Rebuild equipped_items directly from body_slots inline objects
-            ui_state.character.equipped_items.clear();
-            let total_weight = 0;
-
-            function add_weight(item: any): number {
-                if (!item) return 0;
-                const qty = typeof item.qty === 'number' ? item.qty : 1;
-                const w = typeof item.weight === 'number' ? item.weight : 0;
-                let sum = w * qty;
-                if (Array.isArray(item.contents)) {
-                    for (const child of item.contents) {
-                        sum += add_weight(child);
-                    }
-                }
-                return sum;
-            }
-
+            ui_state.character.equipped_items = actor_data.equipped_items;
             debug_log(`[LOAD_EQUIPPED] === REBUILD FROM INLINE BODY_SLOTS ===`);
-            for (const [slot_name, slot_data] of Object.entries(body_slots)) {
-                const s = slot_data as any;
-                for (const [slot_type, value] of Object.entries({ armor: s.armor, tool: s.tool })) {
-                    if (value && typeof (value as any).id === 'string') {
-                        const item = value as any;
-                        ui_state.character.equipped_items.set(item.id, {
-                            instance: { id: item.id, def_id: item.def_id, qty: item.qty || 1, tags: item.tags || [] } as ItemInstance,
-                            definition: {
-                                id: item.def_id,
-                                name: item.name,
-                                weight: item.weight || 0,
-                                tags: item.tags || [],
-                                display_char: (typeof item.display_char === 'string' && item.display_char.length > 0) ? String(item.display_char).charAt(0) : '·',
-                            } as ItemDefinition,
-                        });
-                        total_weight += add_weight(item);
-                        debug_log(`[LOAD_EQUIPPED] ${slot_name}.${slot_type}: ${item.name} (${item.id})`);
-                    }
-                }
-                if (Array.isArray(s.garb)) {
-                    for (let i = 0; i < s.garb.length; i++) {
-                        const item = s.garb[i];
-                        if (item && typeof item.id === 'string') {
-                            ui_state.character.equipped_items.set(item.id, {
-                                instance: { id: item.id, def_id: item.def_id, qty: item.qty || 1, tags: item.tags || [] } as ItemInstance,
-                                definition: {
-                                    id: item.def_id,
-                                    name: item.name,
-                                    weight: item.weight || 0,
-                                    tags: item.tags || [],
-                                    display_char: (typeof (item as any).display_char === 'string' && String((item as any).display_char).length > 0) ? String((item as any).display_char).charAt(0) : '·',
-                                } as ItemDefinition,
-                            });
-                            total_weight += add_weight(item);
-                            debug_log(`[LOAD_EQUIPPED] ${slot_name}.garb.${i}: ${item.name} (${item.id})`);
-                        }
-                    }
-                }
-            }
+            ui_state.character.weight.current = actor_data.weight_data.current;
+            ui_state.character.weight.max = actor_data.weight_data.max;
 
-            ui_state.character.weight.current = total_weight;
-            const strength = (actor.stats as Record<string, number>)?.str || 50;
-            ui_state.character.weight.max = strength * 2.5;
-
-            debug_log(`[LOAD_EQUIPPED] Equipped rebuilt: ${ui_state.character.equipped_items.size} items, weight=${total_weight}`);
+            debug_log(`[LOAD_EQUIPPED] Equipped rebuilt: ${ui_state.character.equipped_items.size} items, weight=${actor_data.weight_data.current}`);
             debug_log(`[LOAD_EQUIPPED] === END REBUILD ===`);
             
             // Helper to find item by ID across all containers (including nested) - DEPRECATED
@@ -3334,7 +3725,7 @@ export function create_app_state(): AppState {
     // Phase 1: Get main inventory container (equipped sack)
     // MIGRATED: Now uses new inline system with body_slots paths
     async function get_main_inventory_container(): Promise<{ container_id: string; container_data: any } | null> {
-        const actor_id = APP_CONFIG.input_actor_id;
+        const actor_id = get_controlled_actor_id();
         const slot = APP_CONFIG.selected_data_slot;
         
         debug_log(`[MainInventory] === LOOKING FOR MAIN INVENTORY (INLINE SYSTEM) ===`);
@@ -3347,22 +3738,9 @@ export function create_app_state(): AppState {
         }
         
         try {
-            // Load actor to check body slots (inline system)
-            const actor_res = await fetch(`http://localhost:8787/api/actor?id=${actor_id}&slot=${slot}`);
-            debug_log(`[MainInventory] Actor API response: ${actor_res.status}`);
-            if (!actor_res.ok) {
-                debug_log(`[MainInventory] ERROR: Actor API returned ${actor_res.status}`);
-                return null;
-            }
-            
-            const actor_data = await actor_res.json();
-            if (!actor_data.ok || !actor_data.actor) {
-                debug_log(`[MainInventory] ERROR: Actor data invalid - ok: ${actor_data.ok}, has actor: ${!!actor_data.actor}`);
-                return null;
-            }
-            
-            const actor = actor_data.actor;
-            const body_slots = actor.body_slots || {};
+            const actor_data = await load_character_module_data(`actor.${actor_id}`);
+            const actor = actor_data.character;
+            const body_slots = actor_data.body_slots || {};
             debug_log(`[MainInventory] Actor loaded. Body slots: ${Object.keys(body_slots).join(', ')}`);
             
             // Priority order: leg_left, leg_right, torso, head
@@ -3379,9 +3757,10 @@ export function create_app_state(): AppState {
                 }
                 
                 // Check armor slot for CONTAINER tag
-                if (body_slot.armor) {
-                    const is_container = has_tag(body_slot.armor.tags, 'CONTAINER');
-                    debug_log(`[MainInventory]   ${slot_name}.armor: ${body_slot.armor.name}, is_container=${is_container}`);
+                const armor_item = (body_slot.armor && typeof body_slot.armor === 'object') ? body_slot.armor as any : null;
+                if (armor_item) {
+                    const is_container = has_tag(armor_item.tags, 'CONTAINER');
+                    debug_log(`[MainInventory]   ${slot_name}.armor: ${armor_item.name}, is_container=${is_container}`);
                     if (is_container) {
                         const container_id = `body_slots.${slot_name}.armor`;
                         debug_log(`[MainInventory] SUCCESS: Found container at ${container_id}`);
@@ -3390,18 +3769,19 @@ export function create_app_state(): AppState {
                             container_data: {
                                 id: container_id,
                                 kind: 'inline_body_slot',
-                                name: body_slot.armor.name,
+                                name: armor_item.name,
                                 path: `${slot_name}.armor`,
-                                contents: body_slot.armor.contents || []
+                                contents: armor_item.contents || []
                             }
                         };
                     }
                 }
                 
                 // Check tool slot for CONTAINER tag
-                if (body_slot.tool) {
-                    const is_container = has_tag(body_slot.tool.tags, 'CONTAINER');
-                    debug_log(`[MainInventory]   ${slot_name}.tool: ${body_slot.tool.name}, is_container=${is_container}`);
+                const tool_item = (body_slot.tool && typeof body_slot.tool === 'object') ? body_slot.tool as any : null;
+                if (tool_item) {
+                    const is_container = has_tag(tool_item.tags, 'CONTAINER');
+                    debug_log(`[MainInventory]   ${slot_name}.tool: ${tool_item.name}, is_container=${is_container}`);
                     if (is_container) {
                         const container_id = `body_slots.${slot_name}.tool`;
                         debug_log(`[MainInventory] SUCCESS: Found container at ${container_id}`);
@@ -3410,9 +3790,9 @@ export function create_app_state(): AppState {
                             container_data: {
                                 id: container_id,
                                 kind: 'inline_body_slot',
-                                name: body_slot.tool.name,
+                                name: tool_item.name,
                                 path: `${slot_name}.tool`,
-                                contents: body_slot.tool.contents || []
+                                contents: tool_item.contents || []
                             }
                         };
                     }
@@ -3422,7 +3802,8 @@ export function create_app_state(): AppState {
                 if (body_slot.garb && Array.isArray(body_slot.garb)) {
                     for (let i = 0; i < body_slot.garb.length; i++) {
                         const garb_item = body_slot.garb[i];
-                        const is_container = has_tag(garb_item.tags, 'CONTAINER');
+                        if (!garb_item || typeof garb_item !== 'object') continue;
+                        const is_container = has_tag((garb_item as any).tags, 'CONTAINER');
                         debug_log(`[MainInventory]   ${slot_name}.garb.${i}: ${garb_item.name}, is_container=${is_container}`);
                         if (is_container) {
                             const container_id = `body_slots.${slot_name}.garb.${i}`;
@@ -3578,7 +3959,7 @@ export function create_app_state(): AppState {
 
                 // Inline body_slots container
                 else if (container_id.startsWith('body_slots.')) {
-                    const actor_id = APP_CONFIG.input_actor_id;
+                    const actor_id = get_controlled_actor_id();
                     const path = container_id.split('.').slice(1).join('.');
                     const api_res = await fetch(`http://localhost:8787/api/body_slot/container?actor_id=${encodeURIComponent(actor_id)}&path=${encodeURIComponent(path)}`);
                     if (!api_res.ok) {
@@ -3884,49 +4265,6 @@ export function create_app_state(): AppState {
                         debug_warn('3DIFICATION_TEST', `FAIL ground item cache missing elevated items (place=${next_place.id} z=${want_z})`);
                     }
 
-                    const by_xy = new Map<string, Set<number>>();
-                    for (const [xy, ids] of ui_state.place.ground_items_by_position.entries()) {
-                        const s = by_xy.get(xy) ?? new Set<number>();
-                        for (const id of ids) {
-                            const meta: any = ui_state.place.ground_items_by_id.get(id) ?? null;
-                            const iz = (typeof meta?.elevation === 'number' && Number.isFinite(meta.elevation)) ? Math.floor(meta.elevation) : base_z;
-                            s.add(iz);
-                        }
-                        by_xy.set(xy, s);
-                    }
-                    const multi = Array.from(by_xy.values()).some((s) => s.size >= 2);
-                    if (multi) {
-                        debug_log('3DIFICATION_TEST', `PASS ground item cache supports multi-z piles (place=${next_place.id})`);
-                    } else {
-                        debug_warn('3DIFICATION_TEST', `FAIL ground item cache missing multi-z pile scenario (place=${next_place.id})`);
-                    }
-
-                    const by_xy_z_count = new Map<string, Map<number, number>>();
-                    for (const [voxel_key, ids] of ui_state.place.ground_items_by_voxel.entries()) {
-                        const parts = String(voxel_key).split('_');
-                        if (parts.length !== 3) continue;
-                        const x = Number(parts[0]);
-                        const y = Number(parts[1]);
-                        const z = Number(parts[2]);
-                        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
-                        const xy = `${x}_${y}`;
-                        const mz = by_xy_z_count.get(xy) ?? new Map<number, number>();
-                        mz.set(Math.floor(z), (mz.get(Math.floor(z)) ?? 0) + ids.length);
-                        by_xy_z_count.set(xy, mz);
-                    }
-                    const stacked_piles = Array.from(by_xy_z_count.values()).some((mz) => {
-                        let pile_layers = 0;
-                        for (const c of mz.values()) {
-                            if (c >= 2) pile_layers++;
-                            if (pile_layers >= 2) return true;
-                        }
-                        return false;
-                    });
-                    if (stacked_piles) {
-                        debug_log('3DIFICATION_TEST', `PASS ground item cache supports stacked piles (place=${next_place.id})`);
-                    } else {
-                        debug_warn('3DIFICATION_TEST', `FAIL ground item cache missing stacked piles (place=${next_place.id})`);
-                    }
                 }
             } catch {
                 // ignore
@@ -3973,7 +4311,7 @@ export function create_app_state(): AppState {
             if (scopes.includes('container_contents')) refresh_containers = true;
             if (scopes.includes('character_render')) {
                 const actor_id = String(intent?.actor_id ?? '').trim();
-                if (!actor_id || actor_id === APP_CONFIG.input_actor_id) refresh_character = true;
+                if (!actor_id || actor_id === get_controlled_actor_id()) refresh_character = true;
             }
         }
         for (const place_id of place_ids) {
@@ -4020,7 +4358,7 @@ export function create_app_state(): AppState {
             const target_ref = String(target.ref ?? '').trim() || null;
             return {
                 target_ref,
-                target_desc: target_ref ? (target_ref.split('.').pop() ?? target.type) : target.type,
+                target_desc: target_ref ? get_entity_display_name(target_ref, target.type) : target.type,
                 ui_target_tile,
             };
         }
@@ -4249,7 +4587,7 @@ export function create_app_state(): AppState {
             }
         }
         if (opts?.center_camera) {
-            const actor_tile = selected.contents?.actors_present?.find((a: any) => a.actor_ref === `actor.${APP_CONFIG.input_actor_id}`)?.tile_position;
+            const actor_tile = selected.contents?.actors_present?.find((a: any) => a.actor_ref === get_input_actor_ref())?.tile_position;
             if (had_painter && actor_tile) set_place_camera_target_position(actor_tile, 'free');
             else if (!had_painter) snap_place_camera_follow_to_actor();
         }
@@ -4321,7 +4659,7 @@ export function create_app_state(): AppState {
             dbg.push(`[move] ${ui_state.controls.move_mode}`);
             dbg.push(`[intent] ${ui_state.controls.override_intent ?? ui_state.controls.suggested_intent ?? '(none)'}`);
             dbg.push(`[cost] ${ui_state.controls.override_cost ?? '(auto)'}`);
-            dbg.push(`[target] ${ui_state.controls.selected_target ?? '(none)'}`);
+            dbg.push(`[target] ${ui_state.controls.selected_target ? get_entity_display_name(ui_state.controls.selected_target) : '(none)'}`);
             const com_gate = get_timed_event_action_gate('COMMUNICATE');
             const ins_gate = get_timed_event_action_gate('INSPECT');
             dbg.push(`[gate talk] ${com_gate.locked ? format_action_gate_reason(com_gate.reason, com_gate.action_cost) : `ok (${com_gate.action_cost})`}`);
@@ -4330,24 +4668,16 @@ export function create_app_state(): AppState {
             if (timed_event.active) {
                 dbg.push(`[timed_event] ${timed_event.type ?? 'active'} phase:${timed_event.phase ?? 'initiative_turn'} turn:${timed_event.current_turn ?? '?'} round:${timed_event.current_round ?? '?'} active:${timed_event.active_actor_ref ?? '(none)'}`);
                 dbg.push(`[turn_window] breaths:${timed_event.turn_breaths_remaining ?? '?'} / ${timed_event.turn_window_breaths ?? '?'}`);
-                const trigger_kind = String(timed_event.trigger_kind ?? 'unknown');
-                dbg.push(`[initiative] trigger:${trigger_kind}`);
+                if (timed_event.phase === 'world_sim_interstitial') {
+                    dbg.push(`[world_turn] breath:${timed_event.timed_event_world_breath_index ?? 0}`);
+                }
                 const pending = Array.isArray(timed_event.pending_communication_opportunities)
                     ? timed_event.pending_communication_opportunities
                     : [];
-                dbg.push(`[comm_queue] ${pending.length} pending`);
+                dbg.push(`[comm_transport] ${pending.length} pending transport item(s)`);
                 for (const opp of pending.slice(0, 4)) {
-                    const text = opp.original_text.length > 26 ? `${opp.original_text.slice(0, 26)}...` : opp.original_text;
-                    dbg.push(`[comm] ${opp.npc_ref} <= ${opp.speaker_ref} t${opp.created_turn ?? '?'} ${opp.response_eligible_reason} "${text}"`);
-                }
-                const order = Array.isArray(timed_event.initiative_order) ? timed_event.initiative_order : [];
-                for (const entry of order.slice(0, 8)) {
-                    const marker = entry.actor_ref === timed_event.active_actor_ref ? '>' : ' ';
-                    const mb = entry.movement_budgets;
-                    const move_summary = mb
-                        ? `w:${mb.walk} c:${mb.climb} s:${mb.swim} f:${mb.fly}`
-                        : `all:${entry.movement_remaining}`;
-                    dbg.push(`[init]${marker} ${entry.actor_ref} roll:${entry.initiative_roll} full:${entry.actions_remaining} part:${entry.partial_actions_remaining} move:${move_summary} ${entry.status}`);
+                    const queue_label = opp.queue_entry_id ? `${opp.queue_entry_id.slice(0, 12)}@${opp.queue_stable_order ?? '?'}` : 'no_queue_entry';
+                    dbg.push(`[comm_transport] ${opp.npc_ref} ${opp.status} t${opp.created_turn ?? '?'} ${queue_label} src:${opp.source_message_id.slice(0, 12)}`);
                 }
             } else {
                 dbg.push('[timed_event] inactive');
@@ -4602,51 +4932,6 @@ export function create_app_state(): AppState {
                                         debug_warn('3DIFICATION_TEST', `FAIL ground item cache missing elevated items (place=${next_place.id} z=${want_z})`);
                                     }
 
-                                    // Verify voxelized piles: same (x,y) can hold items at multiple z.
-                                    const by_xy = new Map<string, Set<number>>();
-                                    for (const [xy, ids] of ui_state.place.ground_items_by_position.entries()) {
-                                        const s = by_xy.get(xy) ?? new Set<number>();
-                                        for (const id of ids) {
-                                            const meta: any = ui_state.place.ground_items_by_id.get(id) ?? null;
-                                            const iz = (typeof meta?.elevation === 'number' && Number.isFinite(meta.elevation)) ? Math.floor(meta.elevation) : base_z;
-                                            s.add(iz);
-                                        }
-                                        by_xy.set(xy, s);
-                                    }
-                                    const multi = Array.from(by_xy.values()).some((s) => s.size >= 2);
-                                    if (multi) {
-                                        debug_log('3DIFICATION_TEST', `PASS ground item cache supports multi-z piles (place=${next_place.id})`);
-                                    } else {
-                                        debug_warn('3DIFICATION_TEST', `FAIL ground item cache missing multi-z pile scenario (place=${next_place.id})`);
-                                    }
-
-                                    // Verify stacked piles: same (x,y) has 2+ items at two distinct z.
-                                    const by_xy_z_count = new Map<string, Map<number, number>>();
-                                    for (const [voxel_key, ids] of ui_state.place.ground_items_by_voxel.entries()) {
-                                        const parts = String(voxel_key).split('_');
-                                        if (parts.length !== 3) continue;
-                                        const x = Number(parts[0]);
-                                        const y = Number(parts[1]);
-                                        const z = Number(parts[2]);
-                                        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
-                                        const xy = `${x}_${y}`;
-                                        const mz = by_xy_z_count.get(xy) ?? new Map<number, number>();
-                                        mz.set(Math.floor(z), (mz.get(Math.floor(z)) ?? 0) + ids.length);
-                                        by_xy_z_count.set(xy, mz);
-                                    }
-                                    const stacked_piles = Array.from(by_xy_z_count.values()).some((mz) => {
-                                        let pile_layers = 0;
-                                        for (const c of mz.values()) {
-                                            if (c >= 2) pile_layers++;
-                                            if (pile_layers >= 2) return true;
-                                        }
-                                        return false;
-                                    });
-                                    if (stacked_piles) {
-                                        debug_log('3DIFICATION_TEST', `PASS ground item cache supports stacked piles (place=${next_place.id})`);
-                                    } else {
-                                        debug_warn('3DIFICATION_TEST', `FAIL ground item cache missing stacked piles (place=${next_place.id})`);
-                                    }
                                 }
                             } catch {
                                 // ignore
@@ -4724,6 +5009,29 @@ export function create_app_state(): AppState {
         window_feeds.push(feed);
     }
 
+    async function refresh_controlled_actor_binding(force: boolean = false): Promise<void> {
+        const current_actor_id = get_controlled_actor_id();
+        if (!force && current_actor_id) return;
+        const res = await fetch(`http://localhost:8787/api/session/control?slot=${APP_CONFIG.selected_data_slot}`);
+        if (!res.ok) throw new Error(`session_control_fetch_failed:${res.status}`);
+        const data = await res.json();
+        if (!data?.ok || typeof data?.controlled_actor_ref !== 'string') {
+            throw new Error(String(data?.error ?? 'session_control_invalid'));
+        }
+        const actor_ref = String(data.controlled_actor_ref).trim();
+        const actor_id = get_character_id_from_ref(actor_ref);
+        if (!actor_id) throw new Error('session_control_missing_actor_id');
+        const changed = actor_id !== current_actor_id;
+        (APP_CONFIG as any).input_actor_id = actor_id;
+        set_current_actor_ref(actor_ref);
+        if (changed) {
+            ui_state.character.display_name = typeof data?.controlled_actor_name === 'string' && data.controlled_actor_name.trim().length > 0
+                ? data.controlled_actor_name.trim()
+                : ui_state.character.display_name;
+            void refresh_character_data(true);
+        }
+    }
+
     async function poll_window_feeds(): Promise<void> {
         if (poll_window_feeds_in_flight) return;
         poll_window_feeds_in_flight = true;
@@ -4769,11 +5077,12 @@ export function create_app_state(): AppState {
         // Fetch target list (nearby NPCs / region)
         tasks.push((async () => {
             try {
+                await refresh_controlled_actor_binding();
                 if (movement_active && (now - last_targets_poll_ms) < 2400) {
                     maybe_refresh_debug_window_messages();
                     return;
                 }
-                const url = `${APP_CONFIG.interpreter_targets_endpoint}?slot=${APP_CONFIG.selected_data_slot}&actor_id=${APP_CONFIG.input_actor_id}`;
+                const url = `${APP_CONFIG.action_targets_endpoint}?slot=${APP_CONFIG.selected_data_slot}&actor_id=${get_controlled_actor_id()}`;
                 const res = await fetch(url);
                 if (!res.ok) return;
                 const data = (await res.json()) as {
@@ -4881,7 +5190,7 @@ export function create_app_state(): AppState {
         }, interval_ms);
     }
 
-    async function send_to_interpreter(message: string): Promise<void> {
+    async function send_action_input(message: string): Promise<void> {
         try {
             // Ensure targets are loaded at least once before sending so targeting is reliable.
             if (!ui_state.controls.targets_ready) {
@@ -4925,6 +5234,30 @@ export function create_app_state(): AppState {
                 return hit ? { ref: hit.ref, label: hit.label } : null;
             };
 
+            const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const findMentionedTargetInText = (text: string): { ref: string; label: string } | null => {
+                const lowered = text.toLowerCase();
+                const candidates = targets_npc
+                    .map(t => ({
+                        ref: t.ref,
+                        label: t.label,
+                        names: [t.label, t.ref.replace(/^npc\./i, '')]
+                            .map(name => name.trim())
+                            .filter(name => name.length > 0),
+                    }))
+                    .sort((a, b) => Math.max(...b.names.map(n => n.length)) - Math.max(...a.names.map(n => n.length)));
+
+                for (const candidate of candidates) {
+                    for (const name of candidate.names) {
+                        const pattern = new RegExp(`(^|[^a-z0-9])${escapeRegex(name.toLowerCase())}([^a-z0-9]|$)`, 'i');
+                        if (pattern.test(lowered)) {
+                            return { ref: candidate.ref, label: candidate.label };
+                        }
+                    }
+                }
+                return null;
+            };
+
             // Scan tokens for @ mentions; support multi-word like "@Old Moss".
             for (let i = 0; i < words.length; i++) {
                 const w = words[i] ?? "";
@@ -4960,6 +5293,15 @@ export function create_app_state(): AppState {
                 break; // one target per message for now
             }
 
+            if (!target_ref) {
+                const matched = findMentionedTargetInText(outgoing);
+                if (matched) {
+                    target_ref = matched.ref;
+                    ui_state.controls.selected_target = matched.ref;
+                    flash_status([`target: ${matched.label}`], 800);
+                }
+            }
+
             // Validate target immediately before sending
             if (target_ref) {
                 const valid = ui_state.controls.targets.some(t => t.ref.toLowerCase() === target_ref!.toLowerCase());
@@ -4976,7 +5318,7 @@ export function create_app_state(): AppState {
             // (ActionPipeline runs in the backend, so renderer-only particles must be spawned here.)
             if (DEBUG_VISION.enabled && DEBUG_VISION.show_sense_broadcasts) {
                 const place = get_current_place();
-                const actor_ref = `actor.${APP_CONFIG.input_actor_id}`;
+                const actor_ref = get_input_actor_ref();
                 const actor = place?.contents?.actors_present?.find(a => a.actor_ref === actor_ref);
                 const pos = actor?.tile_position;
 
@@ -5026,14 +5368,22 @@ export function create_app_state(): AppState {
                 (!verb_effective && !!target_ref)
             ) ? ui_state.controls.volume : undefined;
 
+            debug_log('[mono_ui] action input targeting resolved', {
+                text_preview: outgoing.slice(0, 80),
+                selected_target: ui_state.controls.selected_target,
+                final_target_ref: target_ref,
+                inferred_intent: verb_effective ?? null,
+                intent_subtype: intent_subtype ?? null,
+            });
+
             // arm pending speech SFX once we have an input id from backend
 
-            const res = await fetch(APP_CONFIG.interpreter_endpoint, {
+            const res = await fetch(APP_CONFIG.action_input_endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     text: outgoing,
-                    sender: APP_CONFIG.input_actor_id,
+                    sender: get_controlled_actor_id(),
                     // Send inferred verb when available (not just explicit override).
                     intent_verb: verb_effective ?? undefined,
                     intent_subtype,
@@ -5065,13 +5415,13 @@ export function create_app_state(): AppState {
             // Return status line to neutral
             flash_status(['waiting for actor response'], 900);
         } catch (err) {
-            debug_warn('[mono_ui] failed to send to interpreter', err);
-            append_text_window_message('transcript', '[system] failed to reach interpreter');
+            debug_warn('[mono_ui] failed to send text input to action backend', err);
+            append_text_window_message('transcript', '[system] failed to reach action backend');
         }
     }
 
     async function fetch_log_messages(slot: number): Promise<(string | TextWindowMessage)[]> {
-    const res = await fetch(`${APP_CONFIG.interpreter_log_endpoint}?slot=${slot}`);
+    const res = await fetch(`${APP_CONFIG.action_log_endpoint}?slot=${slot}`);
     if (!res.ok) {
         debug_warn(`[fetch_log_messages] HTTP error: ${res.status}`);
         throw new Error(`HTTP ${res.status}`);
@@ -5138,7 +5488,7 @@ export function create_app_state(): AppState {
         if (sender.startsWith('npc.')) return true;
 
         // User input sender can be "j" or the configured actor id ("henry_actor").
-        if (sender === 'j' || sender === APP_CONFIG.input_actor_id.toLowerCase()) return true;
+        if (sender === 'j' || sender === get_controlled_actor_id().toLowerCase()) return true;
         if (sender === 'renderer_ai') {
             // Prefer dedup by reply_to (one narration per applied message).
             const replyKey = (m as any).reply_to ?? '';
@@ -5193,7 +5543,7 @@ export function create_app_state(): AppState {
          const msgs = groups.get(key) ?? [];
          const user = msgs.filter(m => {
              const s = (m.sender ?? '').toLowerCase();
-             return s === 'j' || s === APP_CONFIG.input_actor_id.toLowerCase();
+             return s === 'j' || s === get_controlled_actor_id().toLowerCase();
          });
          const narr = msgs.filter(m => (m.sender ?? '').toLowerCase() === 'renderer_ai');
           const npcs = msgs.filter(m => (m.sender ?? '').toLowerCase().startsWith('npc.'));
@@ -5204,7 +5554,7 @@ export function create_app_state(): AppState {
               if (kind === 'user') out.push({ content, sender: 'user', id: mid });
               else if (kind === 'assistant') out.push({ content, sender: 'assistant', id: mid });
               else if (kind === 'npc') {
-                  const npcName = sender.toLowerCase().replace('npc.', '').toUpperCase();
+                  const npcName = get_transcript_speaker_name(sender);
                   out.push({ content: `${npcName}: ${content}`, sender: 'npc', id: mid });
               } else if (kind === 'inspection') {
                   out.push({ content, sender: 'inspection', id: mid });
@@ -5252,7 +5602,7 @@ export function create_app_state(): AppState {
             // Status window is 1-line tall; collapse overrides into a single line.
             return [ui_state.status_override.lines.join(' | ')];
         }
-        const res = await fetch(`${APP_CONFIG.interpreter_status_endpoint}?slot=${slot}`);
+        const res = await fetch(`${APP_CONFIG.action_status_endpoint}?slot=${slot}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
         const data = (await res.json()) as { ok: boolean; status?: { line?: string }; time_short?: string | null; day?: number | null };
@@ -5630,7 +5980,7 @@ export function create_app_state(): AppState {
 
         // One endpoint for everything: route through /api/transfer.
         const tx = await api_transfer_inline({
-            actor_id: APP_CONFIG.input_actor_id,
+            actor_id: get_controlled_actor_id(),
             item_instance_id: String(drag_state.item_instance_id ?? ''),
             from_container: src,
             to_container: dest_container_id,
@@ -5744,6 +6094,7 @@ export function create_app_state(): AppState {
             get_camera_target_position: get_place_camera_target_position,
             get_camera_target_mode: () => ui_state.place.camera_target.mode,
             set_camera_target_position: set_place_camera_target_position,
+            get_display_name_for_ref: (entity_ref: string) => get_entity_display_name(entity_ref),
             on_select_target: (target_ref: string): boolean => {
                 // Check if this target exists in the available targets list
                 const target = ui_state.controls.targets.find(t => 
@@ -5752,7 +6103,7 @@ export function create_app_state(): AppState {
                 
                 if (target) {
                     ui_state.controls.selected_target = target.ref;
-                    flash_status([`Target: ${target.label || target_ref}`], 1200);
+                    flash_status([`Target: ${get_entity_display_name(target.ref, target.label)}`], 1200);
                     
                     // Wire to backend communication system
                     // Determine entity type from ref
@@ -5805,12 +6156,12 @@ export function create_app_state(): AppState {
                 flash_status([`Inspecting ${target_desc}...`], 1200);
 
                 try {
-                    const res = await fetch(APP_CONFIG.interpreter_endpoint, {
+                    const res = await fetch(APP_CONFIG.action_input_endpoint, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             text: 'inspect',
-                            sender: APP_CONFIG.input_actor_id,
+                            sender: get_controlled_actor_id(),
                             intent_verb: 'INSPECT',
                             target_ref,
                             ui_target_tile: normalized.ui_target_tile,
@@ -5877,7 +6228,7 @@ export function create_app_state(): AppState {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
-                                entity_ref: `actor.${APP_CONFIG.input_actor_id}`,
+                                entity_ref: get_input_actor_ref(),
                                 target_place_id: target_place_id
                             })
                         }
@@ -5906,7 +6257,7 @@ export function create_app_state(): AppState {
                         if (refreshed) {
                             const actor_place = get_scene_place(target_place_id) ?? null;
                             if (actor_place && !ui_state.place_painter.active) {
-                                const actor_tile = actor_place.contents?.actors_present?.find((a: any) => a.actor_ref === `actor.${APP_CONFIG.input_actor_id}`)?.tile_position;
+                                const actor_tile = actor_place.contents?.actors_present?.find((a: any) => a.actor_ref === get_input_actor_ref())?.tile_position;
                                 if (actor_tile) snap_place_camera_follow_to_actor();
                             }
                         } else {
@@ -5944,9 +6295,9 @@ export function create_app_state(): AppState {
                 if (!place) return;
                 const npc = place.contents.npcs_present.find((n: any) => n.npc_ref === npc_ref);
                 if (!npc) return;
-                const npc_name = npc_ref.replace('npc.', '').replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                const npc_name = get_entity_display_name(npc_ref);
                 // Open NPC character module
-                void open_npc_character_module(npc_ref.replace('npc.', ''), npc_name);
+                void open_npc_character_module(npc_ref, npc_name);
             },
             on_double_click_ground: (tile_x: number, tile_y: number) => {
                 debug_log(`[PlaceModule] === DOUBLE-CLICK ON GROUND at (${tile_x}, ${tile_y}) ===`);
@@ -6005,7 +6356,7 @@ export function create_app_state(): AppState {
 
                         const from_container = `place.ground.${place.id}.${voxel_key}`;
                         const data = await api_transfer_inline({
-                            actor_id: APP_CONFIG.input_actor_id,
+                            actor_id: get_controlled_actor_id(),
                             item_instance_id: String(item_id),
                             from_container,
                             to_container: target,
@@ -6220,7 +6571,7 @@ export function create_app_state(): AppState {
                     try {
                         const to_key = `${tile_x}_${tile_y}_${target_z}`;
                         const mv = await api_transfer_inline({
-                            actor_id: APP_CONFIG.input_actor_id,
+                            actor_id: get_controlled_actor_id(),
                             item_instance_id: String(drag_state.item_instance_id ?? ''),
                             from_container: src_container_id,
                             to_container: `place.ground.${place_id}.${to_key}`,
@@ -6272,7 +6623,7 @@ export function create_app_state(): AppState {
                     try {
                         const to_key = `${tile_x}_${tile_y}_${target_z}`;
                         const mv = await api_transfer_inline({
-                            actor_id: APP_CONFIG.input_actor_id,
+                            actor_id: get_controlled_actor_id(),
                             item_instance_id: String(drag_state.item_instance_id ?? ''),
                             from_container: src,
                             to_container: `place.ground.${place_id}.${to_key}`,
@@ -6334,7 +6685,7 @@ export function create_app_state(): AppState {
                             // One endpoint for everything: route through /api/transfer.
                             const dest = `place.item.${place.id}.${ground_item_id}`;
                             const tx = await api_transfer_inline({
-                                actor_id: APP_CONFIG.input_actor_id,
+                                actor_id: get_controlled_actor_id(),
                                 item_instance_id: String(drag_state.item_instance_id ?? ''),
                                 from_container: src,
                                 to_container: dest,
@@ -6368,7 +6719,7 @@ export function create_app_state(): AppState {
                         const to_z = get_drag_source_ground_elevation() ?? get_focus_world_z_for_current_place();
                         const to_container = `place.ground.${place.id}.${tile_x}_${tile_y}_${to_z}`;
                         const sp = await api_transfer_inline({
-                            actor_id: APP_CONFIG.input_actor_id,
+                            actor_id: get_controlled_actor_id(),
                             item_instance_id: String(drag_state.item_instance_id ?? ''),
                             from_container: spill_src,
                             to_container,
@@ -6396,7 +6747,7 @@ export function create_app_state(): AppState {
                         const to_z = get_focus_world_z_for_current_place();
                         const to_container = `place.ground.${place.id}.${tile_x}_${tile_y}_${to_z}`;
                         const sp = await api_transfer_inline({
-                            actor_id: APP_CONFIG.input_actor_id,
+                            actor_id: get_controlled_actor_id(),
                             item_instance_id: String(drag_state.item_instance_id ?? ''),
                             from_container: spill_src,
                             to_container,
@@ -6431,7 +6782,7 @@ export function create_app_state(): AppState {
                 // Frontend accepts drops anywhere and lets backend validate
 
                 try {
-                    const actor_id = APP_CONFIG.input_actor_id;
+                    const actor_id = get_controlled_actor_id();
                     const to_z = get_drag_source_ground_elevation() ?? get_focus_world_z_for_current_place();
                     const to_container = `place.ground.${place.id}.${tile_x}_${tile_y}_${to_z}`;
                     const drop_res = await api_transfer_inline({
@@ -6513,7 +6864,7 @@ export function create_app_state(): AppState {
                     return false;
                 }
 
-                const actor_id = APP_CONFIG.input_actor_id;
+                const actor_id = get_controlled_actor_id();
                 const to_z = get_focus_world_z_for_current_place();
                 const to_container = `place.ground.${place.id}.${tile_x}_${tile_y}_${to_z}`;
 
@@ -6579,7 +6930,7 @@ export function create_app_state(): AppState {
             rect: { x0: L_X0, y0: Y_INPUT0, x1: L_X1, y1: Y_INPUT1 },
             target_id: 'transcript',
             on_submit: (target_id, message) => {
-                void send_to_interpreter(message);
+                void send_action_input(message);
             },
             on_change: (message) => {
                 ui_state.controls.draft = message;
@@ -6637,7 +6988,7 @@ export function create_app_state(): AppState {
             state_rgb: get_color_by_name('dark_gray').rgb,
             title: 'DEBUG',
             gizmos: {
-                enabled: ['close', 'move', 'resize'],
+                enabled: ['close', 'move', 'resize', 'seamless'],
                 can_close: true,
                 can_move: true,
                 can_save_position: false,
@@ -6661,6 +7012,39 @@ export function create_app_state(): AppState {
                     ui_state.modules.positions.set('debug', final_rect);
                     persist_module_layout_debounced();
                 },
+            },
+        }),
+
+        make_initiative_module({
+            id: 'initiative',
+            rect: get_persisted_rect('initiative', { x0: R_X0 + 4, y0: Y_PLACE0 + 8, x1: R_X1, y1: Y_PLACE1 }),
+            get_state: () => ({
+                active: ui_state.timed_event_debug.active,
+                type: ui_state.timed_event_debug.type,
+                phase: ui_state.timed_event_debug.phase,
+                current_turn: ui_state.timed_event_debug.current_turn,
+                current_round: ui_state.timed_event_debug.current_round,
+                active_actor_ref: ui_state.timed_event_debug.active_actor_ref,
+                turn_window_breaths: ui_state.timed_event_debug.turn_window_breaths,
+                turn_breaths_remaining: ui_state.timed_event_debug.turn_breaths_remaining,
+                timed_event_world_breath_index: ui_state.timed_event_debug.timed_event_world_breath_index,
+                initiative_order: ui_state.timed_event_debug.initiative_order.map((entry) => ({
+                    actor_ref: entry.actor_ref,
+                    initiative_roll: entry.initiative_roll,
+                    status: entry.status,
+                })),
+            }),
+            on_close: () => {
+                set_module_visible('initiative', false);
+                flash_status(['Initiative hidden'], 800);
+            },
+            on_move: (new_rect) => {
+                ui_state.modules.positions.set('initiative', new_rect);
+                persist_module_layout_debounced();
+            },
+            on_resize: (new_rect) => {
+                ui_state.modules.positions.set('initiative', new_rect);
+                persist_module_layout_debounced();
             },
         }),
 
@@ -6794,7 +7178,7 @@ export function create_app_state(): AppState {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
-                            entity_ref: 'actor.henry_actor',
+                            entity_ref: get_input_actor_ref() || 'actor.player',
                             tag_name: 'FIRE!',
                             mag: 5,
                             meta: ['DISPERSING']
@@ -6826,7 +7210,7 @@ export function create_app_state(): AppState {
             async OnPress() {
                 console.log('[DEBUG BUTTON] INV button pressed');
                 try {
-                    const actor_id = APP_CONFIG.input_actor_id;
+                    const actor_id = get_controlled_actor_id();
                     console.log('[DEBUG BUTTON] Fetching inline items for actor:', actor_id);
                     
                     // Get inline items from new API
@@ -7019,7 +7403,7 @@ export function create_app_state(): AppState {
                 debug_log(`[DEBUG BUTTON] NPCs present: ${place.contents.npcs_present?.length || 0}`);
                 
                 // Get actor position
-                const actor_ref = `actor.${APP_CONFIG.input_actor_id}`;
+                const actor_ref = get_input_actor_ref();
                 const actor = place.contents.actors_present.find((a: any) => a.actor_ref === actor_ref);
                 if (!actor) {
                     debug_log(`[DEBUG BUTTON] Actor ${actor_ref} not found in place`);
@@ -7061,17 +7445,14 @@ export function create_app_state(): AppState {
                 }
                 
                 // Extract NPC name from npc_ref (e.g., "npc.grenda" -> "Grenda")
-                const npc_id = nearest_npc.npc_ref.replace('npc.', '');
-                const npc_name = npc_id.split('_').map((word: string) => 
-                    word.charAt(0).toUpperCase() + word.slice(1)
-                ).join(' ');
+                const npc_name = get_entity_display_name(nearest_npc.npc_ref);
                 
                 debug_log(`[DEBUG BUTTON] Selected nearest NPC: ${npc_name} (${nearest_npc.npc_ref}) at distance ${min_distance.toFixed(1)}`);
                 flash_status([`Opening ${npc_name}'s inventory (${min_distance.toFixed(0)} tiles)`], 1500);
                 
                 // Open NPC inventory
                 try {
-                    await open_npc_character_module(npc_id, npc_name);
+                    await open_npc_character_module(nearest_npc.npc_ref, npc_name);
                 } catch (err) {
                     debug_log(`[DEBUG BUTTON] Error opening NPC module:`, err);
                     flash_status([`Error opening ${npc_name}'s inventory`], 1500);
@@ -7092,7 +7473,7 @@ export function create_app_state(): AppState {
                 debug_log('[DEBUG BUTTON] === DUMPING BODY SLOTS STATE ===');
                 
                 try {
-                    const actor_id = APP_CONFIG.input_actor_id;
+                    const actor_id = get_controlled_actor_id();
                     debug_log(`[DEBUG BUTTON] Actor ID: ${actor_id}`);
                     
                     // Fetch actor data directly
@@ -7235,7 +7616,7 @@ export function create_app_state(): AppState {
             async OnPress() {
                 const place = get_current_place();
                 if (!place) return;
-                const actor_id = APP_CONFIG.input_actor_id;
+                const actor_id = get_controlled_actor_id();
                 const actor_ref = `actor.${actor_id}`;
                 const actor = place.contents.actors_present.find((a: any) => a.actor_ref === actor_ref) as any;
                 if (!actor) return;
@@ -7278,8 +7659,8 @@ export function create_app_state(): AppState {
         make_character_module({
             id: 'character_module',
             rect: get_persisted_rect('character_module', { x0: 160, y0: 2, x1: 198, y1: 17 }),
-            get_actor_name: () => APP_CONFIG.input_actor_id.split('_')[0] || 'Actor',
-            get_actor_id: () => APP_CONFIG.input_actor_id,
+            get_actor_name: () => ui_state.character.display_name || get_entity_display_name(get_input_actor_ref()),
+            get_actor_id: () => get_controlled_actor_id(),
             get_body_slots: () => ui_state.character.body_slots,
             get_equipped_items: () => ui_state.character.equipped_items,
             get_weight_data: () => ui_state.character.weight,
@@ -7331,7 +7712,7 @@ export function create_app_state(): AppState {
                 // Check if there's an active drag
                 if (!drag_state.is_dragging) return false;
 
-                const actor_id = APP_CONFIG.input_actor_id;
+                const actor_id = get_controlled_actor_id();
                 const resolved_target = target ?? {
                     kind: 'body_slot',
                     slot_name,
@@ -7666,7 +8047,7 @@ export function create_app_state(): AppState {
 
                     try {
                         const transfer_data = await api_transfer_inline({
-                            actor_id: APP_CONFIG.input_actor_id,
+                            actor_id: get_controlled_actor_id(),
                             item_instance_id: String(drag_state.item_instance_id ?? ''),
                             from_container: String(drag_state.source_container_id ?? ''),
                             to_container: container.id,
@@ -7702,7 +8083,7 @@ export function create_app_state(): AppState {
             border_rgb: get_color_by_name('light_gray').rgb,
             // Player character module: standard widgets
             gizmos: {
-                enabled: ['close', 'move', 'resize'],
+                enabled: ['close', 'move', 'resize', 'seamless'],
                 can_close: true,
                 can_move: true,
                 can_save_position: false,
@@ -7828,6 +8209,58 @@ export function create_app_state(): AppState {
             get_open_containers: () => ui_state.container.open_containers,
         }),
 
+        make_character_editor_module({
+            id: 'character_editor_module',
+            rect: get_persisted_rect('character_editor_module', { x0: 126, y0: 4, x1: 158, y1: 20 }),
+            get_is_visible: () => ui_state.place_painter.active && ui_state.character_editor.is_visible,
+            get_title: () => 'CHAR EDIT',
+            get_subtitle: () => get_character_editor_subject_label(ui_state.character_editor.character_ref),
+            get_fields: () => [
+                { key: 'name', label: 'name', value: ui_state.character_editor.draft.name },
+                { key: 'title', label: 'title', value: ui_state.character_editor.draft.title },
+                { key: 'kind', label: 'kind', value: ui_state.character_editor.draft.kind },
+                { key: 'sex', label: 'sex', value: ui_state.character_editor.draft.sex },
+                { key: 'age', label: 'age', value: ui_state.character_editor.draft.age },
+            ],
+            get_status_lines: () => {
+                const lines = [...ui_state.character_editor.status_lines];
+                if (ui_state.character_editor.dirty) lines.push('unsaved changes');
+                if (ui_state.character_editor.saving) lines.push('saving in progress');
+                return lines;
+            },
+            on_update_field: (key, value) => {
+                if (!(key in ui_state.character_editor.draft)) return;
+                (ui_state.character_editor.draft as any)[key] = value;
+                ui_state.character_editor.dirty = true;
+                ui_state.character_editor.status_lines = [
+                    get_character_editor_subject_label(ui_state.character_editor.character_ref),
+                    `editing ${key}`,
+                ];
+            },
+            on_select_field: (key: string) => {
+                if (key === 'kind' || key === 'sex') {
+                    void open_character_editor_field_picker(key);
+                }
+            },
+            on_save: async () => await save_character_editor_module(),
+            on_reload: async () => await reload_character_editor_module(),
+            on_close: () => close_character_editor_module(),
+            on_move: (new_rect) => persist_module_rect('character_editor_module', new_rect),
+        }),
+
+        make_option_picker_module({
+            id: 'option_picker_module',
+            rect: get_persisted_rect('option_picker_module', { x0: 94, y0: 4, x1: 124, y1: 20 }),
+            get_is_visible: () => ui_state.place_painter.active && ui_state.option_picker.is_visible,
+            get_title: () => ui_state.option_picker.title,
+            get_options: () => ui_state.option_picker.options,
+            get_selected_value: () => ui_state.option_picker.selected_value,
+            get_status_lines: () => ui_state.option_picker.status_lines,
+            on_select: (value) => apply_option_picker_selection(value),
+            on_close: () => close_option_picker(),
+            on_move: (new_rect) => persist_module_rect('option_picker_module', new_rect),
+        }),
+
         // Inventory Container Module - BOTTOM
         // Shows sack contents
         make_container_module({
@@ -7919,7 +8352,7 @@ export function create_app_state(): AppState {
             },
             get_open_containers: () => ui_state.container.open_containers,
             get_open_container_id_for_item: (item_instance_id: string): string | null => {
-                const actor_id = String(APP_CONFIG.input_actor_id ?? '');
+                const actor_id = get_controlled_actor_id();
                 if (!actor_id) return null;
                 return `actor.item.${actor_id}.${item_instance_id}`;
             },
@@ -7929,7 +8362,7 @@ export function create_app_state(): AppState {
                 if (place && parent_container_id.startsWith('place.pile.')) {
                     void open_container_module(`place.item.${place.id}.${item.id}`, definition.name);
                 } else {
-                    void open_container_module(`actor.item.${APP_CONFIG.input_actor_id}.${item.id}`, definition.name);
+                    void open_container_module(`actor.item.${get_controlled_actor_id()}.${item.id}`, definition.name);
                 }
             },
             on_slot_hover: async (slot_index: number, item: ItemInstance, definition: ItemDefinition | null) => {
@@ -7998,7 +8431,7 @@ export function create_app_state(): AppState {
                         drag_state.reject_drag();
                         return false;
                     }
-                    target_container_id = `actor.item.${APP_CONFIG.input_actor_id}.${target_item.instance.id}`;
+                    target_container_id = `actor.item.${get_controlled_actor_id()}.${target_item.instance.id}`;
                     target_name = target_item.definition?.name || 'container';
                 }
 
@@ -8015,7 +8448,7 @@ export function create_app_state(): AppState {
                 if (src.startsWith('place.item.')) {
                     try {
                         const wd = await api_transfer_inline({
-                            actor_id: APP_CONFIG.input_actor_id,
+                            actor_id: get_controlled_actor_id(),
                             item_instance_id: String(drag_state.item_instance_id ?? ''),
                             from_container: src,
                             to_container: target_container_id,
@@ -8056,7 +8489,7 @@ export function create_app_state(): AppState {
                         }
 
                         const tx = await api_transfer_inline({
-                            actor_id: APP_CONFIG.input_actor_id,
+                            actor_id: get_controlled_actor_id(),
                             item_instance_id: String(drag_state.item_instance_id ?? ''),
                             from_container: src,
                             to_container: target_container_id,
@@ -8086,7 +8519,7 @@ export function create_app_state(): AppState {
 
                 try {
                     const transfer_data = await api_transfer_inline({
-                        actor_id: APP_CONFIG.input_actor_id,
+                        actor_id: get_controlled_actor_id(),
                         item_instance_id: String(drag_state.item_instance_id ?? ''),
                         from_container: String(drag_state.source_container_id ?? ''),
                         to_container: target_container_id,
@@ -8228,7 +8661,7 @@ export function create_app_state(): AppState {
                     console.log(`[Inventory] Determined slot type: ${target_slot_type}${target_garb_index !== null ? '.' + target_garb_index : ''}`);
 
                     // Determine target container based on slot
-                    const actor_id = APP_CONFIG.input_actor_id;
+                    const actor_id = get_controlled_actor_id();
                     
                     // Build inline target path (Phase 5)
                     let target_container_id = `body_slots.${target_slot_name}.${target_slot_type}`;
@@ -8242,7 +8675,7 @@ export function create_app_state(): AppState {
 
                     try {
                         const transfer_data = await api_transfer_inline({
-                            actor_id: APP_CONFIG.input_actor_id,
+                            actor_id: get_controlled_actor_id(),
                             item_instance_id: String(drag_state.item_instance_id ?? ''),
                             from_container: String(drag_state.source_container_id ?? ''),
                             to_container: target_container_id,
@@ -8280,7 +8713,7 @@ export function create_app_state(): AppState {
             text_rgb: get_color_by_name('off_white').rgb,
             // Phase 8: Enable gizmos (close X, move #)
             gizmos: {
-                enabled: ['close', 'move', 'resize'],
+                enabled: ['close', 'move', 'resize', 'seamless'],
                 can_close: true,
                 can_move: true,
                 can_save_position: false,
@@ -8369,7 +8802,10 @@ export function create_app_state(): AppState {
     if (!ui_state.modules.visibility.has('debug')) {
         ui_state.modules.visibility.set('debug', module_registry.is_visible('debug'));
     }
-    for (const id of place_painter_module_ids()) {
+    if (!ui_state.modules.visibility.has('initiative')) {
+        ui_state.modules.visibility.set('initiative', module_registry.is_visible('initiative'));
+    }
+    for (const id of place_painter_module_ids(true)) {
         ui_state.modules.visibility.set(id, false);
         module_registry.set_visibility(id, false);
     }
@@ -8413,7 +8849,7 @@ export function create_app_state(): AppState {
         try {
             const entity_ref = String(payload?.entity_ref ?? '');
             const target_place_id = String(payload?.to_place_id ?? '').trim();
-            if (entity_ref !== `actor.${APP_CONFIG.input_actor_id}` || !target_place_id) return;
+            if (entity_ref !== get_input_actor_ref() || !target_place_id) return;
             remove_actor_from_non_target_scene_places(entity_ref, target_place_id);
             const prev_actor_place_id = ui_state.place.actor_current_place_id;
             const prev_selected_place_id = ui_state.place.scene_selected_place_id;
@@ -8426,7 +8862,7 @@ export function create_app_state(): AppState {
             ui_state.place.actor_current_place_id = target_place_id;
             const cached_target_place = get_scene_place(target_place_id);
             if (cached_target_place) {
-                const actor_ref = `actor.${APP_CONFIG.input_actor_id}`;
+                const actor_ref = get_input_actor_ref();
                 const actor_x = Math.floor(Number(payload?.x));
                 const actor_y = Math.floor(Number(payload?.y));
                 const actor_z = (typeof payload?.z === 'number' && Number.isFinite(payload.z)) ? Math.floor(payload.z) : null;
@@ -8448,7 +8884,7 @@ export function create_app_state(): AppState {
                     ui_state.place.current_place_id = cached_target_place.id;
                     ui_state.place.current_place = cached_target_place;
                     set_command_handler_place(cached_target_place);
-                    const actor_tile = cached_target_place.contents?.actors_present?.find((a: any) => a.actor_ref === `actor.${APP_CONFIG.input_actor_id}`)?.tile_position;
+                    const actor_tile = cached_target_place.contents?.actors_present?.find((a: any) => a.actor_ref === get_input_actor_ref())?.tile_position;
                     if (actor_tile) snap_place_camera_follow_to_actor();
                 }
                 debug_log(`[PLACE_SCENE] actor place transition local handoff ${JSON.stringify({ target_place_id, used_cached_scene_place: true, next_selected_place_id, mirror_to_current_place: !painter_lock_selection, scene_places: ui_state.place.scene_places.map((p) => p.id) })}`);
@@ -8489,117 +8925,13 @@ export function create_app_state(): AppState {
         debug_log(`[ModuleFlash] Flashing ${module_id} with ${color} for ${duration_ms}ms`);
     }
 
-    /**
-     * Get NPC body slots for a given NPC ID
-     * Uses place data instead of API call (workaround for missing /api/npc endpoint)
-     */
-    function get_npc_body_slots(npc_id: string): EquipmentSlots {
-        const place = get_current_place();
-        if (!place) {
-            debug_log(`[NPC Module] Error: No place loaded when getting body slots for ${npc_id}`);
-            return {};
-        }
-        
-        const npc_ref = `npc.${npc_id}`;
-        const place_npc = place.contents.npcs_present.find((npc: any) => npc.npc_ref === npc_ref);
-        
-        if (!place_npc) {
-            debug_log(`[NPC Module] Error: NPC ${npc_ref} not found in place ${place.id}`);
-            return {};
-        }
-        
-        if (!place_npc.body_slots || Object.keys(place_npc.body_slots).length === 0) {
-            debug_log(`[NPC Module] Warning: NPC ${npc_ref} has no body_slots in place data`);
-            return {};
-        }
-        
-        debug_log(`[NPC Module] Found body_slots for ${npc_ref}: ${Object.keys(place_npc.body_slots).length} slots`);
-        return place_npc.body_slots;
-    }
-
-    /**
-     * Get NPC equipped items with definitions
-     */
-    async function get_npc_equipped_items(npc_id: string): Promise<Map<string, { instance: ItemInstance; definition: ItemDefinition }>> {
-        const equipped = new Map<string, { instance: ItemInstance; definition: ItemDefinition }>();
-
-        try {
-            const body_slots = get_npc_body_slots(npc_id) as any;
-            for (const [slot_name, slot_data] of Object.entries(body_slots ?? {})) {
-                const s = slot_data as any;
-                for (const [slot_type, value] of Object.entries({ armor: s.armor, tool: s.tool })) {
-                    if (value && typeof (value as any).id === 'string') {
-                        const item = value as any;
-                        equipped.set(slot_name, {
-                            instance: { id: item.id, def_id: item.def_id, qty: item.qty || 1, tags: item.tags || [] } as any,
-                            definition: {
-                                id: item.def_id,
-                                name: item.name,
-                                weight: item.weight || 0,
-                                tags: item.tags || [],
-                                display_char: (typeof item.display_char === 'string' && item.display_char.length > 0) ? String(item.display_char).charAt(0) : '·',
-                            } as any,
-                        });
-                    }
-                }
-                if (Array.isArray(s.garb)) {
-                    for (let i = 0; i < s.garb.length; i++) {
-                        const item = s.garb[i];
-                        if (item && typeof item.id === 'string') {
-                            equipped.set(`${slot_name}.garb.${i}`, {
-                                instance: { id: item.id, def_id: item.def_id, qty: item.qty || 1, tags: item.tags || [] } as any,
-                                definition: {
-                                    id: item.def_id,
-                                    name: item.name,
-                                    weight: item.weight || 0,
-                                    tags: item.tags || [],
-                                    display_char: (typeof (item as any).display_char === 'string' && String((item as any).display_char).length > 0) ? String((item as any).display_char).charAt(0) : '·',
-                                } as any,
-                            });
-                        }
-                    }
-                }
-            }
-        } catch (err) {
-            debug_log(`[NPC Module] Error loading equipped items for ${npc_id}:`, err);
-        }
-
-        return equipped;
-    }
-
-    /**
-     * Get NPC weight data
-     */
-    async function get_npc_weight_data(npc_id: string): Promise<{ current: number; max: number }> {
-        try {
-            const body_slots = get_npc_body_slots(npc_id) as any;
-            let total_weight = 0;
-
-            function add_weight(item: any): number {
-                if (!item) return 0;
-                const qty = typeof item.qty === 'number' ? item.qty : 1;
-                const w = typeof item.weight === 'number' ? item.weight : 0;
-                let sum = w * qty;
-                if (Array.isArray(item.contents)) {
-                    for (const child of item.contents) sum += add_weight(child);
-                }
-                return sum;
-            }
-
-            for (const slot_data of Object.values(body_slots ?? {})) {
-                const s = slot_data as any;
-                if (s?.armor) total_weight += add_weight(s.armor);
-                if (s?.tool) total_weight += add_weight(s.tool);
-                if (Array.isArray(s?.garb)) {
-                    for (const it of s.garb) total_weight += add_weight(it);
-                }
-            }
-
-            return { current: total_weight, max: 100 };
-        } catch (err) {
-            debug_log(`[NPC Module] Error calculating weight for ${npc_id}:`, err);
-            return { current: 0, max: 100 };
-        }
+    async function load_npc_character_data(npc_ref: string): Promise<{
+        character: any;
+        body_slots: EquipmentSlots;
+        equipped_items: Map<string, { instance: ItemInstance; definition: ItemDefinition }>;
+        weight_data: { current: number; max: number };
+    }> {
+        return load_character_module_data(npc_ref);
     }
 
      /**
@@ -8825,7 +9157,7 @@ export function create_app_state(): AppState {
             else if (container_id.startsWith('body_slots.')) {
                 debug_log(`[ContainerOpener] NEW INLINE SYSTEM: Opening body_slots container: ${container_id}`);
                 
-                const actor_id = APP_CONFIG.input_actor_id;
+                const actor_id = get_controlled_actor_id();
                 if (!actor_id) {
                     debug_log(`[ContainerOpener] ERROR: No actor selected`);
                     flash_status([`No actor selected`], 1500);
@@ -9073,7 +9405,7 @@ export function create_app_state(): AppState {
                         // Nested container-items inside a ground container-item are not yet addressable.
                         flash_status(['Nested ground containers not supported yet'], 1500);
                     } else {
-                        void open_container_module(`actor.item.${APP_CONFIG.input_actor_id}.${item.id}`, definition.name);
+                        void open_container_module(`actor.item.${get_controlled_actor_id()}.${item.id}`, definition.name);
                     }
                 },
                 on_slot_hover: async (slot_index: number, item: ItemInstance, definition: ItemDefinition | null) => {
@@ -9158,7 +9490,7 @@ export function create_app_state(): AppState {
                                 }
 
                                 const mv = await api_transfer_inline({
-                                    actor_id: APP_CONFIG.input_actor_id,
+                                    actor_id: get_controlled_actor_id(),
                                     item_instance_id: String(drag_state.item_instance_id ?? ''),
                                     from_container: container_id,
                                     to_container: container_id,
@@ -9198,7 +9530,7 @@ export function create_app_state(): AppState {
                             const from_z = parseInt(fzs || '', 10);
                             try {
                                 const mv = await api_transfer_inline({
-                                    actor_id: APP_CONFIG.input_actor_id,
+                                    actor_id: get_controlled_actor_id(),
                                     item_instance_id: String(drag_state.item_instance_id ?? ''),
                                     from_container: src,
                                     to_container: container_id,
@@ -9259,7 +9591,7 @@ export function create_app_state(): AppState {
 
                                     const dest = `place.item.${place_id}.${String(target_item_id)}`;
                                     const tx = await api_transfer_inline({
-                                        actor_id: APP_CONFIG.input_actor_id,
+                                        actor_id: get_controlled_actor_id(),
                                         item_instance_id: String(drag_state.item_instance_id ?? ''),
                                         from_container: src,
                                         to_container: dest,
@@ -9298,7 +9630,7 @@ export function create_app_state(): AppState {
                             try {
                                 const to_container = `place.ground.${place_id}.${x}_${y}_${to_elevation}`;
                                 const sp = await api_transfer_inline({
-                                    actor_id: APP_CONFIG.input_actor_id,
+                                    actor_id: get_controlled_actor_id(),
                                     item_instance_id: String(drag_state.item_instance_id ?? ''),
                                     from_container: src,
                                     to_container,
@@ -9326,7 +9658,7 @@ export function create_app_state(): AppState {
                             try {
                                 const to_container = `place.ground.${place_id}.${x}_${y}_${to_elevation}`;
                                 const sp = await api_transfer_inline({
-                                    actor_id: APP_CONFIG.input_actor_id,
+                                    actor_id: get_controlled_actor_id(),
                                     item_instance_id: String(drag_state.item_instance_id ?? ''),
                                     from_container: src,
                                     to_container,
@@ -9352,7 +9684,7 @@ export function create_app_state(): AppState {
                         try {
                             const to_container = `place.ground.${place_id}.${x}_${y}_${to_elevation}`;
                             const drop_data = await api_transfer_inline({
-                                actor_id: APP_CONFIG.input_actor_id,
+                                actor_id: get_controlled_actor_id(),
                                 item_instance_id: String(drag_state.item_instance_id ?? ''),
                                 from_container: src,
                                 to_container,
@@ -9401,7 +9733,7 @@ export function create_app_state(): AppState {
                             }
 
                             const tx = await api_transfer_inline({
-                                actor_id: APP_CONFIG.input_actor_id,
+                                actor_id: get_controlled_actor_id(),
                                 item_instance_id: String(drag_state.item_instance_id ?? ''),
                                 from_container: src,
                                 to_container: container_id,
@@ -9447,7 +9779,7 @@ export function create_app_state(): AppState {
                             const src = src0;
 
                             const tx = await api_transfer_inline({
-                                actor_id: APP_CONFIG.input_actor_id,
+                                actor_id: get_controlled_actor_id(),
                                 item_instance_id: String(drag_state.item_instance_id ?? ''),
                                 from_container: src,
                                 to_container: container_id,
@@ -9510,7 +9842,7 @@ export function create_app_state(): AppState {
                                     drag_state.reject_drag();
                                     return false;
                                 }
-                                target_container_id = `actor.item.${APP_CONFIG.input_actor_id}.${target_entry.instance.id}`;
+                                target_container_id = `actor.item.${get_controlled_actor_id()}.${target_entry.instance.id}`;
                                 target_name = target_entry.definition?.name || 'container';
                             }
                         }
@@ -9528,7 +9860,7 @@ export function create_app_state(): AppState {
                         
                         // Build transfer request body
                         const transfer_body: any = {
-                            actor_id: APP_CONFIG.input_actor_id,
+                            actor_id: get_controlled_actor_id(),
                             item_instance_id: drag_state.item_instance_id,
                             from_container: drag_state.source_container_id,
                             to_container: target_container_id,
@@ -9555,7 +9887,7 @@ export function create_app_state(): AppState {
                         debug_log(`[DEBUG-GRID] Request body:`, JSON.stringify(transfer_body, null, 2));
                         
                         const transfer_data = await api_transfer_inline({
-                            actor_id: String(transfer_body.actor_id ?? APP_CONFIG.input_actor_id),
+                            actor_id: String(transfer_body.actor_id ?? get_controlled_actor_id()),
                             item_instance_id: String(transfer_body.item_instance_id ?? ''),
                             from_container: String(transfer_body.from_container ?? ''),
                             to_container: String(transfer_body.to_container ?? ''),
@@ -9595,7 +9927,7 @@ export function create_app_state(): AppState {
                     }
                 },
                 gizmos: {
-                    enabled: ['close', 'move', 'resize'],
+                    enabled: ['close', 'move', 'resize', 'seamless'],
                     can_close: true,
                     can_move: true,
                     can_save_position: false,
@@ -9708,8 +10040,15 @@ export function create_app_state(): AppState {
     /**
      * Open an NPC character module
      */
-    async function open_npc_character_module(npc_id: string, npc_name: string): Promise<void> {
-        debug_log(`[NPC Module] Starting to open ${npc_name} (${npc_id})`);
+    async function open_npc_character_module(npc_ref: string, npc_name?: string): Promise<void> {
+        const npc_id = get_character_id_from_ref(npc_ref);
+        if (!npc_id) {
+            debug_log(`[NPC Module] Error: Invalid NPC ref ${npc_ref}`);
+            flash_status(['Error: Invalid NPC ref'], 1500);
+            return;
+        }
+        const display_name = npc_name || get_entity_display_name(npc_ref);
+        debug_log(`[NPC Module] Starting to open ${display_name} (${npc_ref})`);
         
         if (!module_registry) {
             debug_log('[NPC Module] Error: Module registry not initialized');
@@ -9717,13 +10056,13 @@ export function create_app_state(): AppState {
             return;
         }
         
-        const module_id = `npc_character_${npc_id}`;
+        const module_id = get_npc_module_id(npc_ref);
         
         // Check if already open
-        if (ui_state.modules.open_npc_modules.has(npc_id)) {
-            debug_log(`[NPC Module] ${npc_name} already open, flashing existing module`);
+        if (ui_state.modules.open_npc_modules.has(npc_ref)) {
+            debug_log(`[NPC Module] ${display_name} already open, flashing existing module`);
             flash_module_border(module_id, 'yellow', 500);
-            flash_status([`${npc_name}'s inventory already open`], 1500);
+            flash_status([`${display_name}'s inventory already open`], 1500);
             return;
         }
         
@@ -9745,24 +10084,33 @@ export function create_app_state(): AppState {
 
         const npc_rect = get_persisted_rect(module_id, npc_rect_default);
         
-        debug_log(`[NPC Module] Calculated position for ${npc_name}: x0=${npc_rect.x0}, y0=${npc_rect.y0} (player at x0=${player_rect.x0})`);
+        debug_log(`[NPC Module] Calculated position for ${display_name}: x0=${npc_rect.x0}, y0=${npc_rect.y0} (player at x0=${player_rect.x0})`);
         
         // Load NPC data
-        debug_log(`[NPC Module] Loading data for ${npc_name}...`);
-        let body_slots, equipped_items, weight_data;
+        debug_log(`[NPC Module] Loading data for ${display_name}...`);
+        let body_slots: EquipmentSlots = {};
+        let equipped_items = new Map<string, { instance: ItemInstance; definition: ItemDefinition }>();
+        let weight_data = { current: 0, max: 100 };
+
+        async function refresh_npc_module_data(): Promise<void> {
+            const npc_data = await load_npc_character_data(npc_ref);
+            body_slots = npc_data.body_slots;
+            equipped_items = npc_data.equipped_items;
+            weight_data = npc_data.weight_data;
+            const live_name = String((npc_data.character as any)?.name ?? '').trim();
+            if (live_name) {
+                if (module_registry.has(module_id)) {
+                    // title callback reads latest closure value
+                }
+            }
+        }
+
         try {
-            // Get body_slots synchronously from place data
-            body_slots = get_npc_body_slots(npc_id);
-            
-            // Get equipped items and weight via API
-            [equipped_items, weight_data] = await Promise.all([
-                get_npc_equipped_items(npc_id),
-                get_npc_weight_data(npc_id)
-            ]);
-            debug_log(`[NPC Module] Loaded data for ${npc_name}: ${Object.keys(body_slots).length} body slots, ${equipped_items.size} equipped items`);
+            await refresh_npc_module_data();
+            debug_log(`[NPC Module] Loaded data for ${display_name}: ${Object.keys(body_slots).length} body slots, ${equipped_items.size} equipped items`);
         } catch (err) {
-            debug_log(`[NPC Module] Error loading data for ${npc_name}:`, err);
-            flash_status([`Error loading ${npc_name}'s data`], 1500);
+            debug_log(`[NPC Module] Error loading data for ${display_name}:`, err);
+            flash_status([`Error loading ${display_name}'s data`], 1500);
             return;
         }
         
@@ -9770,7 +10118,7 @@ export function create_app_state(): AppState {
         const npc_module = make_character_module({
             id: module_id,
             rect: npc_rect,
-            get_actor_name: () => npc_name,
+            get_actor_name: () => get_entity_display_name(npc_ref, display_name),
             get_actor_id: () => npc_id,
             get_body_slots: () => body_slots,
             get_equipped_items: () => equipped_items,
@@ -9802,14 +10150,15 @@ export function create_app_state(): AppState {
                 
                 try {
                     const transfer_data = await api_transfer_inline({
-                        actor_id: APP_CONFIG.input_actor_id,
+                        actor_id: get_controlled_actor_id(),
                         item_instance_id: String(drag_state.item_instance_id ?? ''),
                         from_container: String(drag_state.source_container_id ?? ''),
                         to_container: target_container_id,
                     });
                     
                     if (transfer_data.ok) {
-                        flash_status([`${drag_state.item_definition?.name} given to ${npc_name}`], 1500);
+                        await refresh_npc_module_data();
+                        flash_status([`${drag_state.item_definition?.name} given to ${get_entity_display_name(npc_ref, display_name)}`], 1500);
                         drag_state.end_drag();
                         return true;
                     } else {
@@ -9841,14 +10190,15 @@ export function create_app_state(): AppState {
                     
                     try {
                         const transfer_data = await api_transfer_inline({
-                            actor_id: APP_CONFIG.input_actor_id,
+                            actor_id: get_controlled_actor_id(),
                             item_instance_id: String(drag_state.item_instance_id ?? ''),
                             from_container: String(drag_state.source_container_id ?? ''),
                             to_container: container.id,
                         });
                         
                         if (transfer_data.ok) {
-                            flash_status([`${drag_state.item_definition?.name} taken from ${npc_name}`], 1500);
+                            await refresh_npc_module_data();
+                            flash_status([`${drag_state.item_definition?.name} taken from ${get_entity_display_name(npc_ref, display_name)}`], 1500);
                             drag_state.end_drag();
                             return true;
                         } else {
@@ -9868,26 +10218,26 @@ export function create_app_state(): AppState {
             },
             // NPC character module: can close and move
             gizmos: {
-                enabled: ['close', 'move'],
+                enabled: ['close', 'move', 'seamless'],
                 can_close: true,
                 can_move: true,
                 can_save_position: false,
                 on_close: () => {
-                    debug_log(`[NPC Module] Close gizmo clicked - closing ${npc_name}`);
-                    close_npc_module(npc_id);
-                    flash_status([`${npc_name}'s inventory closed`], 1000);
+                    debug_log(`[NPC Module] Close gizmo clicked - closing ${display_name}`);
+                    close_npc_module(npc_ref);
+                    flash_status([`${get_entity_display_name(npc_ref, display_name)}'s inventory closed`], 1000);
                 },
                 on_move_start: () => {
-                    debug_log(`[NPC Module] Move mode started for ${npc_name}`);
+                    debug_log(`[NPC Module] Move mode started for ${display_name}`);
                 },
                 on_move: (new_rect) => {
                     ui_state.modules.positions.set(module_id, new_rect);
-                    debug_log(`[NPC Module] Moving ${npc_name} to (${new_rect.x0},${new_rect.y0})`);
+                    debug_log(`[NPC Module] Moving ${display_name} to (${new_rect.x0},${new_rect.y0})`);
                     persist_module_layout_debounced();
                 },
                 on_move_end: (final_rect) => {
                     ui_state.modules.positions.set(module_id, final_rect);
-                    flash_status([`${npc_name}'s panel moved`], 1000);
+                    flash_status([`${get_entity_display_name(npc_ref, display_name)}'s panel moved`], 1000);
                     persist_module_layout_debounced();
                 },
             },
@@ -9971,12 +10321,12 @@ export function create_app_state(): AppState {
             on_container_click: (container_id: string) => {
                 debug_log(`[NPC Module] Container clicked: ${container_id}`);
                 // Phase 7: Open container in new ContainerModule
-                void open_container_module(container_id, `${npc_name}'s container`);
+                void open_container_module(container_id, `${get_entity_display_name(npc_ref, display_name)}'s container`);
             },
             // Phase 7: Right-click container opening
             on_open_container: async (container_id: string, slot_name: string) => {
                 debug_log(`[NPC Module] Opening container via right-click: ${container_id}`);
-                await open_container_module(container_id, `${npc_name}'s ${slot_name}`);
+                await open_container_module(container_id, `${get_entity_display_name(npc_ref, display_name)}'s ${slot_name}`);
             },
             get_open_containers: () => ui_state.container.open_containers,
         });
@@ -9984,24 +10334,23 @@ export function create_app_state(): AppState {
         // Register the module
         module_registry.register(npc_module);
         ui_state.modules.positions.set(module_id, npc_rect);
-        ui_state.modules.open_npc_modules.add(npc_id);
+        ui_state.modules.open_npc_modules.add(npc_ref);
         
         const total_modules = module_registry.get_all().length;
-        debug_log(`[NPC Module] Successfully opened ${npc_name} (${module_id}) at position (${npc_rect.x0},${npc_rect.y0})`);
+        debug_log(`[NPC Module] Successfully opened ${display_name} (${module_id}) at position (${npc_rect.x0},${npc_rect.y0})`);
         debug_log(`[NPC Module] Total modules in registry: ${total_modules}`);
-        flash_status([`Opened ${npc_name}'s inventory`], 1500);
+        flash_status([`Opened ${get_entity_display_name(npc_ref, display_name)}'s inventory`], 1500);
     }
 
     /**
      * Close an NPC character module
      */
-    function close_npc_module(npc_id: string): void {
+    function close_npc_module(npc_ref: string): void {
         if (!module_registry) return;
-        
-        const module_id = `npc_character_${npc_id}`;
+        const module_id = get_npc_module_id(npc_ref);
         
         module_registry.unregister(module_id);
-        ui_state.modules.open_npc_modules.delete(npc_id);
+        ui_state.modules.open_npc_modules.delete(npc_ref);
         // Keep last rect persisted so reopening restores it.
         persist_module_layout_debounced();
         
@@ -10137,7 +10486,7 @@ export function create_app_state(): AppState {
                 const actor_tile = actor?.tile_position ?? null;
                 const actor_z = get_entity_camera_anchor_world_z(
                     actor,
-                    String(actor?.actor_ref ?? `actor.${APP_CONFIG.input_actor_id}`),
+                    String(actor?.actor_ref ?? get_input_actor_ref()),
                     Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0,
                 ) + 1;
                 const actor_key = (actor && actor_tile) ? `${actor.actor_ref}:${actor_tile.x},${actor_tile.y},${actor_z}` : null;

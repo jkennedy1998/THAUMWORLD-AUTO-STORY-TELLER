@@ -148,7 +148,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
   
   // Gizmo configuration - enable resize
   const gizmo_config: ModuleGizmosConfig = {
-    enabled: ['move', 'resize', 'close'],
+    enabled: ['move', 'resize', 'close', 'seamless'],
     can_close: true,
     can_move: true,
     can_save_position: false,

@@ -11,7 +11,8 @@ import { parse_machine_text } from "../system_syntax/index.js";
 import { resolve_references } from "../reference_resolver/resolver.js";
 import { apply_effects } from "./apply.js";
 import { find_npcs, load_npc, save_npc } from "../npc_storage/store.js";
-import { load_actor } from "../actor_storage/store.js";
+import { load_actor, resolve_runtime_player_actor_id } from "../actor_storage/store.js";
+import { get_or_bind_controlled_actor_ref } from "../shared/session_control.js";
 import { add_event_to_memory, get_working_memory, build_working_memory } from "../context_manager/index.js";
 import { get_timed_event_state } from "../world_storage/store.js";
 import { MetaTagProcessor } from "../tag_system/meta_processor.js";
@@ -317,7 +318,7 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
             const participants = extract_participants_from_events(events);
             
             // Ensure player actor is always included
-            const player_ref = "actor.henry_actor";
+            const player_ref = get_or_bind_controlled_actor_ref(data_slot_number);
             if (!participants.includes(player_ref)) {
                 participants.unshift(player_ref);
             }
@@ -594,7 +595,9 @@ function extract_participants_from_events(events: string[]): string[] {
 
 function get_current_region(slot: number): string {
     // Get player location
-    const result = load_actor(slot, "henry_actor");
+    const controlled_actor_ref = get_or_bind_controlled_actor_ref(slot);
+    const controlled_actor_id = controlled_actor_ref.startsWith("actor.") ? controlled_actor_ref.slice(6) : resolve_runtime_player_actor_id(slot);
+    const result = load_actor(slot, controlled_actor_id);
     if (!result.ok || !result.actor.location) {
         return "eden_crossroads"; // Default fallback
     }

@@ -24,7 +24,7 @@ import { pasteImageFromClipboard } from '../../ascii_painter/image_import.js';
 import type { GradiatorState } from '../../ascii_painter/gradiator.js';
 import { scaleCopyData, scaleTextToCopyData } from '../../ascii_painter/gradiator.js';
 import type { ModuleGizmosConfig, GizmoState } from '../module_gizmos.js';
-import { draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area, handle_move_drag, get_resize_edge, handle_resize_drag, handle_global_pointer_down_for_gizmos } from '../module_gizmos.js';
+import { clear_gizmo_hover_state, draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area, handle_move_drag, get_resize_edge, handle_resize_drag, handle_global_pointer_down_for_gizmos, should_draw_module_chrome, update_gizmo_hover_state } from '../module_gizmos.js';
 import type { VoxelSpace } from '../../ascii_painter/voxel_space.js';
 import { getVisibleLayers } from '../../ascii_painter/voxel_space.js';
 
@@ -273,7 +273,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
   // Gizmo configuration - enable move, resize, and close like other modules
   const gizmo_config: ModuleGizmosConfig = {
-    enabled: ['move', 'resize', 'close'],
+    enabled: ['move', 'resize', 'close', 'seamless'],
     can_close: true,
     can_move: true,
     can_save_position: false,
@@ -803,7 +803,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       }
 
       // Draw canvas border (standard double border; resize mode only tints it).
-      {
+      if (should_draw_module_chrome(gizmo_config, gizmo_state)) {
         const border_color = get_color_by_name('medium_gray').rgb;
         const viewport_width = rect.x1 - rect.x0 + 1;
         const viewport_height = rect.y1 - rect.y0 + 1;
@@ -973,7 +973,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       }
 
       // Draw gizmos LAST so they appear on top (including resize borders)
-      draw_module_gizmos(c, rect, gizmo_config, gizmo_state);
+      if (should_draw_module_chrome(gizmo_config, gizmo_state)) {
+        draw_module_gizmos(c, rect, gizmo_config, gizmo_state);
+      }
     },
 
     OnPointerDown(e: PointerEvent): void {
@@ -992,7 +994,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       (module as any).last_click = { x: e.x, y: e.y, grid_x, grid_y };
 
       // Handle gizmo clicks first
-      if (is_in_gizmo_area(e.x, e.y, rect)) {
+      update_gizmo_hover_state(e.x, e.y, rect, gizmo_config, gizmo_state);
+      if (is_in_gizmo_area(e.x, e.y, rect, gizmo_config)) {
         const gizmo = handle_gizmo_click(e.x, e.y, rect, gizmo_config, gizmo_state);
         if (gizmo === 'move') {
           gizmo_state.move_start_x = e.x;
@@ -1827,6 +1830,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     OnPointerMove(e: PointerEvent): void {
       // Track current mouse position for visual debug
       current_mouse_pos = { x: e.x, y: e.y };
+      update_gizmo_hover_state(e.x, e.y, rect, gizmo_config, gizmo_state);
       
       // Handle resize edge detection when in resize mode but not dragging
       if (gizmo_state.is_resize_mode && !gizmo_state.is_dragging_resize) {
@@ -2074,6 +2078,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         case 'ArrowLeft': panBy(-pan_step, 0); break;
         case 'ArrowRight': panBy(pan_step, 0); break;
       }
+    },
+
+    OnPointerLeave(): void {
+      clear_gizmo_hover_state(gizmo_state);
     },
 
     OnGlobalPointerDown(e: PointerEvent): void {

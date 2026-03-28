@@ -7,13 +7,15 @@ import { make_widget_payload } from "../render_shaders/payload_builders.js";
 
 // NOTE: Date.now() used here to match other UI draw paths.
 
-export type GizmoType = 'close' | 'move' | 'save_position' | 'resize';
+export type GizmoType = 'close' | 'move' | 'save_position' | 'resize' | 'seamless';
 
 export type ResizeEdge = 'left' | 'right' | 'top' | 'bottom' | null;
 
 export type GizmoState = {
   is_move_mode: boolean;
   is_resize_mode: boolean;
+  is_seamless: boolean;
+  is_hovering_gizmos: boolean;
   resize_edge: ResizeEdge;
   is_dragging_resize: boolean;
   move_start_x: number;
@@ -88,9 +90,22 @@ const GIZMO_COLORS = {
   close: { r: 255, g: 50, b: 50 } as Rgb,     // Red
   save: { r: 50, g: 255, b: 50 } as Rgb,      // Green
   resize: { r: 255, g: 150, b: 0 } as Rgb,    // Orange
+  seamless: { r: 150, g: 255, b: 255 } as Rgb, // Cyan
   hover: { r: 255, g: 255, b: 255 } as Rgb,   // White
   active: { r: 200, g: 200, b: 200 } as Rgb,  // Gray
 };
+
+const GIZMO_ORDER: GizmoType[] = ['move', 'close', 'save_position', 'resize', 'seamless'];
+
+function get_enabled_gizmo_types(config: ModuleGizmosConfig): GizmoType[] {
+  return GIZMO_ORDER.filter((gizmo) => {
+    if (!config.enabled?.includes(gizmo)) return false;
+    if (gizmo === 'move') return config.can_move;
+    if (gizmo === 'close') return config.can_close;
+    if (gizmo === 'save_position') return config.can_save_position;
+    return true;
+  });
+}
 
 // Resize border colors
 export const RESIZE_COLORS = {
@@ -114,6 +129,30 @@ function is_in_gizmo_hitbox(x: number, y: number, pos: { x: number; y: number })
   return y === pos.y && x >= pos.x && x <= pos.x + 1;
 }
 
+export function should_draw_module_chrome(config: ModuleGizmosConfig | undefined, gizmo_state: GizmoState): boolean {
+  if (!config?.enabled?.includes('seamless')) return true;
+  if (!gizmo_state.is_seamless) return true;
+  if (gizmo_state.is_hovering_gizmos) return true;
+  if (gizmo_state.is_move_mode) return true;
+  if (gizmo_state.is_resize_mode) return true;
+  if (gizmo_state.is_dragging_resize) return true;
+  return false;
+}
+
+export function update_gizmo_hover_state(
+  x: number,
+  y: number,
+  rect: Rect,
+  config: ModuleGizmosConfig | undefined,
+  gizmo_state: GizmoState,
+): void {
+  gizmo_state.is_hovering_gizmos = !!config && is_in_gizmo_area(x, y, rect, config);
+}
+
+export function clear_gizmo_hover_state(gizmo_state: GizmoState): void {
+  gizmo_state.is_hovering_gizmos = false;
+}
+
 /**
  * Draw module gizmos (close X, move #, save $)
  * Optionally draws module name to the right of gizmos
@@ -130,9 +169,10 @@ export function draw_module_gizmos(
   }
 
   let gizmo_index = 0;
+  const enabled_gizmos = get_enabled_gizmo_types(config);
 
   // Draw move gizmo (#) - Yellow
-  if (config.enabled.includes('move') && config.can_move) {
+  if (enabled_gizmos.includes('move')) {
     const pos = get_gizmo_rect(rect, gizmo_index++);
     const color = gizmo_state.is_move_mode ? GIZMO_COLORS.active : GIZMO_COLORS.move;
 
@@ -156,7 +196,7 @@ export function draw_module_gizmos(
   }
 
   // Draw close gizmo (X) - Red
-  if (config.enabled.includes('close') && config.can_close) {
+  if (enabled_gizmos.includes('close')) {
     const pos = get_gizmo_rect(rect, gizmo_index++);
 
     const shaded = resolve_cell(
@@ -178,7 +218,7 @@ export function draw_module_gizmos(
   }
 
   // Draw save gizmo ($) - Green (future feature)
-  if (config.enabled.includes('save_position') && config.can_save_position) {
+  if (enabled_gizmos.includes('save_position')) {
     const pos = get_gizmo_rect(rect, gizmo_index++);
 
     const shaded = resolve_cell(
@@ -200,7 +240,7 @@ export function draw_module_gizmos(
   }
 
   // Draw resize gizmo (╋) - Orange
-  if (config.enabled.includes('resize')) {
+  if (enabled_gizmos.includes('resize')) {
     const pos = get_gizmo_rect(rect, gizmo_index++);
     const color = gizmo_state.is_resize_mode ? GIZMO_COLORS.active : GIZMO_COLORS.resize;
 
@@ -209,6 +249,29 @@ export function draw_module_gizmos(
         id: `gizmo:resize:${rect.x0}:${rect.y1}`,
         widget: 'resize',
         widget_state: gizmo_state.is_resize_mode ? 'active' : 'idle',
+        base_fg: color,
+      }),
+      {
+        where: 'debug',
+        space: 'ui',
+        x: pos.x,
+        y: pos.y,
+        time_ms: Date.now(),
+      },
+    );
+    c.set(pos.x, pos.y, { ...shaded, render_index: MODULE_CHROME_RENDER_INDEX });
+  }
+
+  // Draw seamless gizmo (S) - Cyan
+  if (enabled_gizmos.includes('seamless')) {
+    const pos = get_gizmo_rect(rect, gizmo_index++);
+    const color = gizmo_state.is_seamless ? GIZMO_COLORS.active : GIZMO_COLORS.seamless;
+
+    const shaded = resolve_cell(
+      make_widget_payload({
+        id: `gizmo:seamless:${rect.x0}:${rect.y1}`,
+        widget: 'seamless',
+        widget_state: gizmo_state.is_seamless ? 'active' : 'idle',
         base_fg: color,
       }),
       {
@@ -328,9 +391,10 @@ export function handle_gizmo_click(
   }
 
   let gizmo_index = 0;
+  const enabled_gizmos = get_enabled_gizmo_types(config);
 
   // Check move gizmo (#)
-  if (config.enabled.includes('move') && config.can_move) {
+  if (enabled_gizmos.includes('move')) {
     const pos = get_gizmo_rect(rect, gizmo_index++);
     if (is_in_gizmo_hitbox(x, y, pos)) {
       debug_log('[Gizmos] Move gizmo clicked');
@@ -356,7 +420,7 @@ export function handle_gizmo_click(
   }
 
   // Check close gizmo (X)
-  if (config.enabled.includes('close') && config.can_close) {
+  if (enabled_gizmos.includes('close')) {
     const pos = get_gizmo_rect(rect, gizmo_index++);
     if (is_in_gizmo_hitbox(x, y, pos)) {
       debug_log('[Gizmos] Close gizmo clicked');
@@ -368,7 +432,7 @@ export function handle_gizmo_click(
   }
 
   // Check save gizmo ($)
-  if (config.enabled.includes('save_position') && config.can_save_position) {
+  if (enabled_gizmos.includes('save_position')) {
     const pos = get_gizmo_rect(rect, gizmo_index++);
     if (is_in_gizmo_hitbox(x, y, pos)) {
       debug_log('[Gizmos] Save gizmo clicked');
@@ -377,7 +441,7 @@ export function handle_gizmo_click(
   }
 
   // Check resize gizmo (╋)
-  if (config.enabled.includes('resize')) {
+  if (enabled_gizmos.includes('resize')) {
     const pos = get_gizmo_rect(rect, gizmo_index++);
     if (is_in_gizmo_hitbox(x, y, pos)) {
       debug_log('[Gizmos] Resize gizmo clicked');
@@ -397,6 +461,16 @@ export function handle_gizmo_click(
       }
       
       return 'resize';
+    }
+  }
+
+  // Check seamless gizmo (S)
+  if (enabled_gizmos.includes('seamless')) {
+    const pos = get_gizmo_rect(rect, gizmo_index++);
+    if (is_in_gizmo_hitbox(x, y, pos)) {
+      debug_log('[Gizmos] Seamless gizmo clicked');
+      gizmo_state.is_seamless = !gizmo_state.is_seamless;
+      return 'seamless';
     }
   }
 
@@ -445,6 +519,8 @@ export function create_gizmo_state(): GizmoState {
   return {
     is_move_mode: false,
     is_resize_mode: false,
+    is_seamless: false,
+    is_hovering_gizmos: false,
     resize_edge: null,
     is_dragging_resize: false,
     move_start_x: 0,
@@ -456,8 +532,11 @@ export function create_gizmo_state(): GizmoState {
 /**
  * Check if point is in the gizmo area (top row of module)
  */
-export function is_in_gizmo_area(x: number, y: number, rect: Rect): boolean {
-  return y === rect.y1 - 1 && x >= rect.x0 + 1 && x <= rect.x0 + 8;  // Up to 4 gizmos
+export function is_in_gizmo_area(x: number, y: number, rect: Rect, config: ModuleGizmosConfig): boolean {
+  const gizmo_count = get_enabled_gizmo_types(config).length;
+  if (gizmo_count < 1) return false;
+  const max_x = rect.x0 + (gizmo_count * 2);
+  return y === rect.y1 - 1 && x >= rect.x0 + 1 && x <= max_x;
 }
 
 /**

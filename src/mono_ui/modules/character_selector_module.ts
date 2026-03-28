@@ -115,7 +115,7 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
   
   // Gizmo configuration
   const gizmo_config: ModuleGizmosConfig = {
-    enabled: ['move', 'resize', 'close'],
+    enabled: ['move', 'resize', 'close', 'seamless'],
     can_close: true,
     can_move: true,
     can_save_position: false,

@@ -15,9 +15,14 @@ let current_volume: VolumeLevel = "NORMAL";
 let current_target: { ref: string; type: "npc" | "actor" | "item"; name?: string } | null = null;
 let current_message: string = "";
 
-// NOTE: actor_ref is currently hardcoded for slot-1 local testing.
-const actor_ref = "actor.henry_actor";
+let actor_ref = "actor.player";
 const API_BASE = "http://localhost:8787/api";
+
+export function set_current_actor_ref(next_actor_ref: string): void {
+    const ref = typeof next_actor_ref === "string" ? next_actor_ref.trim() : "";
+    if (!ref) return;
+    actor_ref = ref;
+}
 
 /**
  * Handle left click on entity (select target)
@@ -26,14 +31,10 @@ const API_BASE = "http://localhost:8787/api";
 export function handleEntityClick(entity_ref: string, entity_type: "npc" | "actor" | "item"): void {
     console.log("[FrontendAPI] Left click on", entity_type, entity_ref);
     
-    // Extract name from ref (e.g., "npc.grenda" -> "Grenda")
-    const name = entity_ref.split('.').pop() || entity_ref;
-    
     // Set local target state
     current_target = {
         ref: entity_ref,
         type: entity_type,
-        name: name
     };
     
     // Send to backend via HTTP API
@@ -44,7 +45,6 @@ export function handleEntityClick(entity_ref: string, entity_type: "npc" | "acto
             actor_ref: actor_ref,
             target_ref: entity_ref,
             target_type: entity_type,
-            target_name: name
         })
     }).then(res => res.json())
       .then(data => {
@@ -141,4 +141,3 @@ export function clearCurrentTarget(): void {
 export function hasValidTarget(): boolean {
     return current_target !== null;
 }
-

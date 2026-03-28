@@ -10,11 +10,14 @@ export function shade_entity_default(payload: EntityPayload, _ctx: RenderContext
     const nm = String(payload.name ?? payload.id ?? '');
     const part = String(_ctx.body_part ?? 'body');
     const profile = payload.entity_render;
+    const npc_initial_char = payload.kind === 'npc' ? get_initial(nm) : '';
     const base_char = typeof profile?.body_part_chars?.[part] === 'string' && profile.body_part_chars[part]!.length > 0
         ? profile.body_part_chars[part]!.charAt(0)
-        : (typeof profile?.default_char === 'string' && profile.default_char.length > 0
-            ? profile.default_char.charAt(0)
-            : get_initial(nm));
+        : (npc_initial_char
+            ? npc_initial_char
+            : (typeof profile?.default_char === 'string' && profile.default_char.length > 0
+                ? profile.default_char.charAt(0)
+                : get_initial(nm)));
     const binding = profile?.body_part_shaders?.[part] ?? profile?.render_shader ?? payload.render_shader;
     const shaded = apply_shader_bindings({
         char: base_char,

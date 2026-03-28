@@ -74,7 +74,7 @@ export function debug_broker_content(label: string, content: string): void {
 // AI I/O Logging - Terminal summary (DEBUG_LEVEL >= 3) and file logging (DEBUG_LEVEL >= 4)
 export type AIIOLogEntry = {
     timestamp: string;
-    service: 'interpreter' | 'renderer';
+    service: 'npc_dialogue' | 'renderer';
     session_id?: string;
     input_summary: string;
     output_summary: string;
@@ -93,7 +93,7 @@ function normalize_for_terminal(text: string, maxLen: number): string {
 }
 
 export function log_ai_io_terminal(
-    service: 'interpreter' | 'renderer',
+    service: 'npc_dialogue' | 'renderer',
     input: string,
     output: string,
     duration_ms: number,
@@ -103,8 +103,8 @@ export function log_ai_io_terminal(
 ): void {
     if (DEBUG_LEVEL < 3) return;
     
-    const serviceColor = service === 'interpreter' ? ANSI.cyan : ANSI.magenta;
-    const serviceName = service === 'interpreter' ? 'InterpreterAI' : 'RendererAI';
+    const serviceColor = service === 'npc_dialogue' ? ANSI.cyan : ANSI.magenta;
+    const serviceName = service === 'npc_dialogue' ? 'NPCDialogueAI' : 'RendererAI';
     
     console.log(`${serviceColor}┌────────────────────────────────────────────────────────────┐${ANSI.reset}`);
     console.log(`${serviceColor}│ ${serviceName}${ANSI.reset}`);

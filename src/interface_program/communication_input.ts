@@ -7,6 +7,7 @@ import { load_actor } from "../actor_storage/store.js";
 import { getActorTarget, hasValidTarget } from "./target_state.js";
 import { debug_log } from "../shared/debug.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
+import { get_or_bind_controlled_actor_ref } from "../shared/session_control.js";
 
 const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
 
@@ -68,10 +69,11 @@ export function setMessage(message: string): void {
  * This is called when user hits Enter or clicks Send
  */
 export function createCommunicationIntent(): CommunicationIntent | null {
-  const actor_ref = "actor.henry_actor"; // TODO: Get from session
+  const actor_ref = get_or_bind_controlled_actor_ref(data_slot_number);
+  const actor_id = actor_ref.startsWith("actor.") ? actor_ref.slice(6) : actor_ref;
   
   // Load actor
-  const actor_result = load_actor(data_slot_number, "henry_actor");
+  const actor_result = load_actor(data_slot_number, actor_id);
   if (!actor_result.ok || !actor_result.actor) {
     debug_log("[INPUT]", "Failed to load actor");
     return null;
@@ -86,8 +88,9 @@ export function createCommunicationIntent(): CommunicationIntent | null {
   }
   
   // Get target from target state
+  const target_state = getActorTarget(actor_ref);
   const target_ref = hasValidTarget(actor_ref) 
-    ? getActorTarget(actor_ref)?.target_ref 
+    ? target_state?.target_ref 
     : undefined;
   
   if (!current_message.trim()) {
@@ -98,6 +101,8 @@ export function createCommunicationIntent(): CommunicationIntent | null {
   debug_log("[INPUT]", `Creating COMMUNICATE intent`, {
     actor: actor_ref,
     target: target_ref || "(none - broadcast)",
+    target_state_target: target_state?.target_ref || null,
+    target_state_valid: !!target_state?.is_valid,
     volume: current_volume,
     message: current_message.slice(0, 50)
   });
@@ -144,6 +149,13 @@ export function handleCommunicationSubmit(
   processIntentFn: (intent: any) => void
 ): void {
   setMessage(text);
+  const actor_ref = get_or_bind_controlled_actor_ref(data_slot_number);
+  debug_log("[INPUT]", "Submitting communication text for intent creation", {
+    actor: actor_ref,
+    text_preview: text.slice(0, 80),
+    target_state_target: getActorTarget(actor_ref)?.target_ref || null,
+    has_valid_target: hasValidTarget(actor_ref),
+  });
   const intent = createCommunicationIntent();
   
   if (intent) {

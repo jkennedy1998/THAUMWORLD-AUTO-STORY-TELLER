@@ -56,10 +56,19 @@ export function enterEngagement(
   target_ref: string,
   type: EngagementType
 ): void {
+  const attention_span = type === "participant" 
+    ? DEFAULT_ATTENTION_SPAN_MS 
+    : BYSTANDER_ATTENTION_SPAN_MS;
+  const max_distance = type === "participant" ? 3 : 8;
+
   // Check if already engaged
   if (engagements.has(npc_ref)) {
     // Update existing engagement
     const existing = engagements.get(npc_ref)!;
+    existing.engaged_with = [target_ref];
+    existing.type = type;
+    existing.attention_span_ms = attention_span;
+    existing.max_distance_tiles = max_distance;
     existing.last_interaction_at = Date.now();
     existing.state = "engaged";
     debug_log("[ENGAGEMENT]", `${npc_ref} refreshed engagement`);
@@ -67,12 +76,6 @@ export function enterEngagement(
   }
   
   // Create new engagement
-  const attention_span = type === "participant" 
-    ? DEFAULT_ATTENTION_SPAN_MS 
-    : BYSTANDER_ATTENTION_SPAN_MS;
-  
-  const max_distance = type === "participant" ? 3 : 8;
-  
   const engagement: Engagement = {
     npc_ref,
     engaged_with: [target_ref],

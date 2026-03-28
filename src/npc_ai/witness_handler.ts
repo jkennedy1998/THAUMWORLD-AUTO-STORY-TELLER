@@ -16,10 +16,10 @@ import { debug_event } from "../shared/debug_event.js";
 import { get_senses_for_action } from "../action_system/sense_broadcast.js";
 
 import {
-  start_conversation,
   end_conversation,
   is_in_conversation,
   get_conversation,
+  sync_conversation_restore_metadata,
   update_conversation_timeout,
   update_conversations as update_conversations_state,
   get_conversation_count,
@@ -67,41 +67,11 @@ import {
 const last_command_time = new Map<string, number>();
 const MIN_COMMAND_INTERVAL_MS = 3000; // Minimum 3 seconds between commands
 const active_conversations = new Set<string>(); // Track NPCs already in conversation
-
-// Response eligibility tracking (single communication pipeline)
-// Keyed by ActionPipeline actionId (== intent.id). Only NPCs that are participants
-// in the witness-driven conversation state are allowed to respond.
-const response_eligible_by_action = new Map<string, { created_at_ms: number; npcs: Set<string> }>();
-const RESPONSE_ELIGIBILITY_TTL_MS = 30_000;
-
-function prune_response_eligibility(now_ms: number = Date.now()): void {
-  for (const [action_id, entry] of response_eligible_by_action) {
-    if (now_ms - entry.created_at_ms > RESPONSE_ELIGIBILITY_TTL_MS) {
-      response_eligible_by_action.delete(action_id);
-    }
-  }
-}
-
-function note_response_eligible(action_id: string | undefined, npc_ref: string): void {
-  if (!action_id) return;
-  const now = Date.now();
-  prune_response_eligibility(now);
-  const existing = response_eligible_by_action.get(action_id);
-  if (existing) {
-    existing.npcs.add(npc_ref);
-    return;
-  }
-  response_eligible_by_action.set(action_id, {
-    created_at_ms: now,
-    npcs: new Set([npc_ref]),
-  });
-}
-
-export function get_response_eligible_by_action(action_id: string): string[] {
-  prune_response_eligibility();
-  const entry = response_eligible_by_action.get(action_id);
-  return entry ? Array.from(entry.npcs) : [];
-}
+// Minimal prewarm restore data kept only until canonical session projection arrives.
+const pending_restore_metadata = new Map<string, {
+  previous_goal: any | null;
+  previous_path_state: { path: Array<{ x: number; y: number }>; path_index: number } | null;
+}>();
 
 function ensure_movement_state(observer_ref: string) {
   const existing = get_movement_state(observer_ref);
@@ -141,6 +111,77 @@ function mark_conversation_starting(npc_ref: string): void {
 
 function mark_conversation_ended(npc_ref: string): void {
   active_conversations.delete(npc_ref);
+  pending_restore_metadata.delete(npc_ref);
+}
+
+function get_active_conversation_target(observer_ref: string): string | null {
+  const session_alignment = get_session_alignment_for_participant(data_slot, observer_ref, get_observer_place_id(observer_ref));
+  if (session_alignment?.target_ref) return session_alignment.target_ref;
+  const presence = get_conversation_presence(data_slot, observer_ref);
+  if (presence?.target_ref) return presence.target_ref;
+  const conv = get_conversation(observer_ref);
+  if (conv?.target_entity) return conv.target_entity;
+  const engagement = getEngagement(observer_ref);
+  const engaged_with = engagement?.engaged_with?.[0];
+  return typeof engaged_with === "string" && engaged_with.length > 0 ? engaged_with : null;
+}
+
+function has_active_conversation_alignment(observer_ref: string): boolean {
+  return get_active_conversation_target(observer_ref) !== null || is_starting_conversation(observer_ref);
+}
+
+function sync_witness_alignment_state(observer_ref: string, reason: string, fallback_target_ref?: string | null, fallback_type?: "participant" | "bystander"): void {
+  const place_id = get_observer_place_id(observer_ref);
+  const session_alignment = get_session_alignment_for_participant(data_slot, observer_ref, place_id);
+  const target_ref = session_alignment?.target_ref ?? get_active_conversation_target(observer_ref) ?? (typeof fallback_target_ref === "string" && fallback_target_ref.length > 0 ? fallback_target_ref : null);
+  if (!target_ref) {
+    debug_event("WITNESS", "alignment.sync", {
+      npc_ref: observer_ref,
+      reason,
+      place_id,
+      session_role: session_alignment?.role ?? null,
+      target_ref: null,
+      result: "cleared",
+    });
+    set_conversation_visual_state(observer_ref, "present", reason);
+    endEngagement(observer_ref, `${reason}:no_alignment`);
+    pending_restore_metadata.delete(observer_ref);
+    return;
+  }
+
+  if (session_alignment?.role === "observer" || fallback_type === "bystander") {
+    debug_event("WITNESS", "alignment.sync", {
+      npc_ref: observer_ref,
+      reason,
+      place_id,
+      session_role: session_alignment?.role ?? fallback_type ?? null,
+      target_ref,
+      result: "observer",
+    });
+    set_conversation_visual_state(observer_ref, "present", reason);
+    enterEngagement(observer_ref, target_ref, "bystander");
+    return;
+  }
+
+  debug_event("WITNESS", "alignment.sync", {
+    npc_ref: observer_ref,
+    reason,
+    place_id,
+    session_role: session_alignment?.role ?? fallback_type ?? null,
+    target_ref,
+    result: "participant",
+  });
+  set_conversation_visual_state(observer_ref, "busy", reason);
+  enterEngagement(observer_ref, target_ref, "participant");
+}
+
+function set_conversation_visual_state(
+  npc_ref: string,
+  status: "present" | "busy",
+  reason: string
+): void {
+  update_npc_status_in_place(npc_ref, status);
+  send_status_command(npc_ref, status, reason);
 }
 
 import { get_outbox_path } from "../engine/paths.js";
@@ -172,11 +213,13 @@ import {
 } from "./social_checks.js";
 
 import {
-  set_conversation_presence,
+  get_conversation_presence,
   clear_conversation_presence,
 } from "../shared/conversation_presence_store.js";
 
 import type { VolumeLevel } from "../interface_program/communication_input.js";
+import { get_all_conversation_sessions, get_session_alignment_for_participant } from "../conversation_manager/session_state.js";
+import { get_conversation_session } from "../conversation_manager/session_state.js";
 
 import {
   load_place,
@@ -411,8 +454,8 @@ function handle_communication_perception(
     const is_addressed = event.targetRef === observer_ref;
     const engagement = getEngagement(observer_ref);
     const engaged_with_speaker = !!engagement?.engaged_with?.includes(event.actorRef);
-    const conv = get_conversation(observer_ref);
-    const talking_to_speaker = !!conv && conv.target_entity === event.actorRef;
+    const active_target = get_active_conversation_target(observer_ref);
+    const talking_to_speaker = active_target === event.actorRef;
 
     if (is_addressed || engaged_with_speaker || talking_to_speaker) {
       debug_log("[Witness]", `Ending conversation for ${observer_ref} (farewell)`);
@@ -443,49 +486,46 @@ function handle_communication_perception(
     return;
   }
   
-  debug_log("[Witness]", `${observer_ref} SHOULD respond to ${event.actorRef}`);
+  debug_log("[Witness]", `${observer_ref} may respond to ${event.actorRef}`);
   
   // Already in conversation
-  if (is_in_conversation(observer_ref)) {
-    const conv = get_conversation(observer_ref);
-    debug_log("[Witness]", `${observer_ref} already in conversation with ${conv?.target_entity}`);
+  const active_target = get_active_conversation_target(observer_ref);
+  if (active_target) {
+    debug_log("[Witness]", `${observer_ref} already aligned with conversation target ${active_target}`);
     
-    // If talking to this same person, extend conversation
-    if (conv && conv.target_entity === event.actorRef) {
+      // If talking to this same person, extend conversation
+      if (active_target === event.actorRef) {
       debug_log("[Witness]", `Extending conversation for ${observer_ref}`);
       update_conversation_timeout(observer_ref);
       updateEngagement(observer_ref); // Also extend engagement
+      sync_witness_alignment_state(observer_ref, "Conversation extended");
       face_actor(observer_ref, event);
 
-      // Sync cross-process conversation presence for movement decisions.
-      const updated = get_conversation(observer_ref);
-      if (updated) {
-        set_conversation_presence(data_slot, observer_ref, updated.target_entity, updated.timeout_at_ms);
-      }
-
-      // This NPC is a conversation participant and is therefore eligible to respond.
-      note_response_eligible(event.actionId, observer_ref);
       // Note: NPC responses are handled by process_communication() in the main loop,
       // which reads the original COMMUNICATE message from the outbox and generates
       // contextual LLM responses using build_npc_prompt() and the full decision hierarchy.
     }
-    // If talking to someone else, check if we should switch
-    else if (conv && is_addressed) {
-      debug_log("[Witness]", `Switching conversation for ${observer_ref} to ${event.actorRef}`);
-      // Switch to new speaker
-      const ended_conv = end_conversation(observer_ref);
-      restore_previous_goal(observer_ref, ended_conv);
-      start_conversation_with_actor(observer_ref, event);
-    }
-    return;
+      // If talking to someone else, check if we should switch
+      else if (is_addressed) {
+        debug_log("[Witness]", `Switching conversation for ${observer_ref} to ${event.actorRef}`);
+        start_conversation_with_actor(observer_ref, event);
+      } else {
+        debug_log("[Witness]", `${observer_ref} is nearby but not directly addressed; waiting for session admission/projection`);
+        face_actor(observer_ref, event);
+      }
+      return;
   }
   
-  // Not in conversation - check if NPC should engage
-  debug_log("[Witness]", `Starting conversation for ${observer_ref} with ${event.actorRef}`);
-  start_conversation_with_actor(observer_ref, event);
-  
-  // Also enter engagement state for better tracking
-  enterEngagement(observer_ref, event.actorRef, "participant");
+  // Not in conversation - direct address gets immediate prewarm.
+  if (is_addressed) {
+    debug_log("[Witness]", `Directly addressed; prewarming conversation for ${observer_ref} with ${event.actorRef}`);
+    start_conversation_with_actor(observer_ref, event);
+    return;
+  }
+
+  // Nearby-only initiation is now session-driven; witness stays lightweight.
+  debug_log("[Witness]", `${observer_ref} is close enough to care, but waiting for canonical session admission`);
+  face_actor(observer_ref, event);
 }
 
 /**
@@ -497,7 +537,7 @@ function handle_bystander_reaction(
   event: PerceptionEvent
 ): void {
   // Skip if already in conversation
-  if (is_in_conversation(observer_ref) || isEngaged(observer_ref)) {
+  if (has_active_conversation_alignment(observer_ref) || isEngaged(observer_ref)) {
     return;
   }
   
@@ -556,10 +596,8 @@ function handle_bystander_reaction(
   // Handle based on interest level
   switch (result.response_type) {
     case "join":
-      // High interest - join as participant
-      debug_log("[Witness]", `${observer_ref} is interested (${result.interest_level}) - joining conversation`);
-      start_conversation_with_actor(observer_ref, event);
-      enterEngagement(observer_ref, event.actorRef, "participant");
+      // High interest - visually attend, but let canonical session admission decide participation.
+      debug_log("[Witness]", `${observer_ref} is interested (${result.interest_level}) - waiting for session-driven join`);
       face_actor(observer_ref, event);
 
       // Store a lightweight memory for joiners (they're attentive by choice).
@@ -599,9 +637,9 @@ function handle_bystander_reaction(
       break;
       
     case "eavesdrop":
-      // Medium interest - eavesdrop as bystander
-      debug_log("[Witness]", `${observer_ref} is curious (${result.interest_level}) - eavesdropping`);
-      enterEngagement(observer_ref, event.actorRef, "bystander");
+      // Medium interest - witness only reacts lightly; observer state should come from session projection.
+      debug_log("[Witness]", `${observer_ref} is curious (${result.interest_level}) - waiting for observer projection`);
+      face_actor(observer_ref, event);
       
       // Determine if should remember this
       if (shouldRemember(result.interest_level, false)) {
@@ -664,7 +702,7 @@ function handle_movement_perception(
   if (event.distance > 5) return;
   
   // Don't interrupt conversations or engagements
-  if (is_in_conversation(observer_ref) || isEngaged(observer_ref)) return;
+  if (has_active_conversation_alignment(observer_ref) || isEngaged(observer_ref)) return;
   
   // Face the moving entity
   face_actor(observer_ref, event);
@@ -682,6 +720,15 @@ function start_conversation_with_actor(
     actor_ref: event.actorRef,
   });
   debug_log("[Witness]", `start_conversation_with_actor called for ${observer_ref}`);
+
+  const active_target = get_active_conversation_target(observer_ref);
+  if (active_target === event.actorRef) {
+    update_conversation_timeout(observer_ref);
+    updateEngagement(observer_ref);
+    face_actor(observer_ref, event);
+    debug_log("[Witness]", `Conversation already aligned for ${observer_ref} with ${event.actorRef}`);
+    return;
+  }
   
   // Check if we already started a conversation with this NPC recently
   if (is_starting_conversation(observer_ref)) {
@@ -697,9 +744,6 @@ function start_conversation_with_actor(
   
   // Mark that we're starting a conversation (prevents duplicate calls)
   mark_conversation_starting(observer_ref);
-  
-  // Get message from event details
-  const message_text = (event.details as any)?.messageText || "";
   
   // Note: NPC responses are handled by process_communication() in the main NPC_AI loop,
   // which reads the original COMMUNICATE message from outbox and generates contextual
@@ -733,29 +777,24 @@ function start_conversation_with_actor(
     send_face_command(observer_ref, event.actorRef, "Face speaker during conversation");
   }, 50);
 
-  // Save current goal
-  const previous_goal = state.current_goal;
-  const previous_path_state = state.path.length > 0 ? {
+  const existing_conv = get_conversation(observer_ref);
+  const previous_goal = existing_conv?.previous_goal ?? state.current_goal;
+  const previous_path_state = existing_conv?.previous_path_state ?? (state.path.length > 0 ? {
     path: state.path,
     path_index: state.path_index
-  } : null;
+  } : null);
 
-  // Start conversation tracking
-  debug_log("[Witness]", `Calling start_conversation for ${observer_ref}`);
-  start_conversation(
-    observer_ref,
-    event.actorRef,
-    [observer_ref, event.actorRef],
+  pending_restore_metadata.set(observer_ref, {
     previous_goal,
-    previous_path_state
-  );
+    previous_path_state,
+  });
+  debug_event("WITNESS", "conversation.prewarmed", {
+    npc_ref: observer_ref,
+    actor_ref: event.actorRef,
+    has_previous_goal: !!previous_goal,
+    has_previous_path_state: !!previous_path_state,
+  });
 
-  // Sync presence to disk so other processes (npc_ai) treat this NPC as in-conversation.
-  const conv = get_conversation(observer_ref);
-  if (conv) {
-    set_conversation_presence(data_slot, observer_ref, conv.target_entity, conv.timeout_at_ms);
-  }
-  
   // Set conversation goal
   const target_pos = { x: event.location.x ?? 0, y: event.location.y ?? 0 };
   debug_log("[Witness]", `Generating conversation goal for ${observer_ref} at (${target_pos.x}, ${target_pos.y})`);
@@ -764,22 +803,16 @@ function start_conversation_with_actor(
   set_goal(observer_ref, converse_goal);
   face_actor(observer_ref, event);
   
-  // Update NPC status to "busy" in place data so renderer shows conversation state
+  // Update NPC status to "busy" so renderer shows conversation state
   debug_event("WITNESS", "npc_status.set", {
     npc_ref: observer_ref,
     status: "busy",
-    reason: "enter_conversation",
+    reason: "awaiting_session_admission",
   });
-  update_npc_status_in_place(observer_ref, "busy");
-  
-  // Send status command to renderer for real-time visual indicator
-  send_status_command(observer_ref, "busy", "Entering conversation");
+  set_conversation_visual_state(observer_ref, "busy", "Awaiting session admission");
   // Status commands are the renderer-visible source of truth for conversation visuals.
+  // Participant/bystander engagement is projected from session admission, not assumed here.
 
-  // Single pipeline: if the witness system put this NPC into conversation, they are eligible
-  // to respond to this COMMUNICATE action.
-  note_response_eligible(event.actionId, observer_ref);
-  
   debug_log("[Witness]", `${observer_ref} started conversation with ${event.actorRef}`);
 }
 
@@ -798,6 +831,13 @@ function face_actor(observer_ref: string, event: PerceptionEvent): void {
   debug_log("Witness", `${observer_ref} facing ${event.actorRef}`);
 }
 
+function get_observer_place_id(observer_ref: string): string | null {
+  const npc_id = observer_ref.replace("npc.", "");
+  const npc_result = load_npc(data_slot, npc_id);
+  if (!npc_result.ok) return null;
+  return get_npc_location(npc_result.npc)?.place_id ?? null;
+}
+
 /**
  * Restore previous goal after conversation ends
  */
@@ -805,8 +845,7 @@ function restore_previous_goal(npc_ref: string, ended_conv?: any | null): void {
   const conv = ended_conv ?? get_conversation(npc_ref);
   if (!conv) {
     // Even if we lost the conversation record, always clear the visual/engagement state.
-    update_npc_status_in_place(npc_ref, "present");
-    send_status_command(npc_ref, "present", "Exiting conversation");
+    set_conversation_visual_state(npc_ref, "present", "Exiting conversation");
     clear_conversation_presence(data_slot, npc_ref);
     endEngagement(npc_ref, "conversation ended");
     mark_conversation_ended(npc_ref);
@@ -829,12 +868,9 @@ function restore_previous_goal(npc_ref: string, ended_conv?: any | null): void {
     debug_log("Witness", `${npc_ref} resumed wandering after conversation`);
   }
   
-  // Update NPC status back to "present" in place data
-  update_npc_status_in_place(npc_ref, "present");
+  // Update NPC status back to "present"
+  set_conversation_visual_state(npc_ref, "present", "Exiting conversation");
   clear_conversation_presence(data_slot, npc_ref);
-   
-  // Send status command to renderer to update visual indicator
-  send_status_command(npc_ref, "present", "Exiting conversation");
   
   // End engagement tracking
   endEngagement(npc_ref, "conversation ended");
@@ -853,13 +889,65 @@ export function update_conversations(): void {
   for (const conv of ended) {
     restore_previous_goal(conv.npc_ref, conv);
   }
+
+  for (const session of get_all_conversation_sessions(data_slot)) {
+    project_witness_state_for_conversation(session.conversation_id, "Session alignment projection");
+  }
+
+  for (const npc_ref of active_conversations) {
+    if (!has_active_conversation_alignment(npc_ref)) {
+      mark_conversation_ended(npc_ref);
+      sync_witness_alignment_state(npc_ref, "Conversation alignment cleared");
+    }
+  }
+}
+
+export function project_witness_state_for_conversation(conversation_id: string, reason: string = "Session alignment projection"): void {
+  const session = get_conversation_session(data_slot, conversation_id);
+  if (!session) return;
+  const session_npcs = new Set<string>([
+    ...session.participants.filter((ref) => ref.startsWith("npc.")),
+    ...session.active_participants.filter((ref) => ref.startsWith("npc.")),
+    ...session.observers.filter((ref) => ref.startsWith("npc.")),
+    ...session.queued_speakers.map((entry) => entry.participant_ref).filter((ref) => ref.startsWith("npc.")),
+  ]);
+  for (const npc_ref of session_npcs) {
+    const alignment = get_session_alignment_for_participant(data_slot, npc_ref, session.place_id);
+    if (!alignment?.target_ref) continue;
+    const pending_restore = pending_restore_metadata.get(npc_ref);
+    debug_event("WITNESS", "session.projection", {
+      conversation_id,
+      npc_ref,
+      place_id: session.place_id,
+      role: alignment.role,
+      target_ref: alignment.target_ref,
+      pending_restore: !!pending_restore,
+      queue_depth: session.queued_speakers.length,
+      active_participants: session.active_participants.length,
+      observers: session.observers.length,
+      reason,
+    });
+    if (alignment.role === "participant" || alignment.role === "queued") {
+      sync_conversation_restore_metadata(
+        npc_ref,
+        alignment.target_ref,
+        session.participants.filter((ref) => ref.startsWith("npc.") || ref.startsWith("actor.")),
+        session.place_id,
+        pending_restore?.previous_goal ?? null,
+        pending_restore?.previous_path_state ?? null,
+      );
+      pending_restore_metadata.delete(npc_ref);
+      mark_conversation_starting(npc_ref);
+    }
+    sync_witness_alignment_state(npc_ref, reason, alignment.target_ref, alignment.role === "observer" ? "bystander" : "participant");
+  }
 }
 
 /**
  * Force end a conversation (for admin/debug)
  */
 export function force_end_conversation(npc_ref: string): void {
-  if (is_in_conversation(npc_ref)) {
+  if (has_active_conversation_alignment(npc_ref)) {
     const ended_conv = end_conversation(npc_ref);
     restore_previous_goal(npc_ref, ended_conv);
     debug_log("Witness", `Force-ended conversation for ${npc_ref}`);
@@ -873,7 +961,9 @@ export function force_end_conversation(npc_ref: string): void {
 export function end_conversations_involving_entity(entity_ref: string, reason: string): void {
   // End conversations tracked in conversation_state
   for (const conv of get_all_conversations()) {
-    if (conv.target_entity === entity_ref || conv.participants.includes(entity_ref)) {
+    const session_alignment = get_session_alignment_for_participant(data_slot, conv.npc_ref, conv.place_id ?? null);
+    const aligned_target = session_alignment?.target_ref ?? conv.target_entity;
+    if (aligned_target === entity_ref || conv.participants.includes(entity_ref)) {
       const ended_conv = end_conversation(conv.npc_ref);
       restore_previous_goal(conv.npc_ref, ended_conv);
       debug_log("Witness", `Ended conversation for ${conv.npc_ref} because ${entity_ref} (${reason})`);

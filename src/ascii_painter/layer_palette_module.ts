@@ -115,7 +115,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
   
   // Gizmo configuration
   const gizmo_config: ModuleGizmosConfig = {
-    enabled: ['move', 'resize', 'close'],
+    enabled: ['move', 'resize', 'close', 'seamless'],
     can_close: true,
     can_move: true,
     can_save_position: false,

@@ -1,7 +1,7 @@
 import type { Canvas, Module, Rect, Rgb, WheelEvent, DragEvent } from "../types.js";
 import { rect_width, rect_height } from "../types.js";
 import { get_color_by_name } from "../colors.js";
-import { draw_module_border, PANEL_BORDER_PRESETS } from "../module_borders.js";
+import { PANEL_BORDER_PRESETS } from "../module_borders.js";
 import type { ModuleGizmosConfig } from "../module_gizmos.js";
 import { make_floating_panel_module } from "./floating_panel_module.js";
 
@@ -234,6 +234,15 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
         scroll_y = clamp(scroll_y + dy_lines, 0, max_scroll);
     }
 
+    function get_border_markers(current_rect: Rect): BorderMarkers {
+        const text_h = rect_height({ x0: current_rect.x0 + 1, y0: current_rect.y0 + 1, x1: current_rect.x1 - 1, y1: current_rect.y1 - 2 });
+        const total = cached_lines.length;
+        return {
+            top: scroll_y > 0 ? "^" : undefined,
+            bottom: scroll_y + text_h < total ? "v" : undefined,
+        };
+    }
+
     return make_floating_panel_module({
         id: opts.id,
         rect: opts.rect,
@@ -244,6 +253,7 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
             border_rgb: opts.border_rgb ?? get_color_by_name("light_gray").rgb,
             weight_index: PANEL_BORDER_PRESETS.default_double.weight_index,
             style: PANEL_BORDER_PRESETS.default_double.style,
+            markers: (current_rect: Rect) => get_border_markers(current_rect),
         },
         resize: gizmo_config ? {
             min_width: 20,
@@ -265,10 +275,6 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
             }
 
             ensure_layout(text_w);
-
-            const total = cached_lines.length;
-            const has_up = scroll_y > 0;
-            const has_down = scroll_y + text_h < total;
 
             if (opts.bg) {
                 c.fill_rect(text_r, { char: opts.bg.char, rgb: opts.bg.rgb, style: "regular", weight_index: w_base });
@@ -299,22 +305,6 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
             if (npcLinesRendered > 0) {
                 console.log(`[window_module:${opts.id}] Rendered ${text_h} lines, ${npcLinesRendered} NPC lines visible (scroll: ${scroll_y}/${cached_lines.length})`);
             }
-
-            const markers: BorderMarkers = {};
-            if (has_up) markers.top = "^";
-            if (has_down) markers.bottom = "v";
-
-            draw_module_border(c, {
-                rect,
-                style: PANEL_BORDER_PRESETS.default_double.style,
-                border_rgb: opts.border_rgb ?? get_color_by_name("light_gray").rgb,
-                weight_index: PANEL_BORDER_PRESETS.default_double.weight_index,
-                markers: { top: markers.top, bottom: markers.bottom },
-                header: {
-                    text: (opts.title ?? opts.id).toUpperCase(),
-                    reserve_left_cols: 2 + ((gizmo_config?.enabled?.length ?? 0) * 2),
-                },
-            });
         },
         on_drag_start_content(e: DragEvent): void {
             if (e.buttons & 1) {

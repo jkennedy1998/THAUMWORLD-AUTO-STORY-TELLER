@@ -72,7 +72,7 @@ export type UiSlotPayload = UiPayload & {
 
 export type UiWidgetPayload = UiPayload & {
     ui_kind: 'widget';
-    widget: 'close' | 'move' | 'save_position' | 'resize';
+    widget: 'close' | 'move' | 'save_position' | 'resize' | 'seamless';
     widget_state?: 'idle' | 'active' | 'disabled';
 };
 

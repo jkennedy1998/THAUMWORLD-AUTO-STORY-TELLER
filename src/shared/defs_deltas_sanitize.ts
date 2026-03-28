@@ -129,8 +129,16 @@ export function sanitize_place_for_save(place_any: any): boolean {
 }
 
 export function sanitize_actor_for_save(actor_any: any): void {
-  if (!is_obj(actor_any)) return;
-  const body_slots = (actor_any as any).body_slots;
+  sanitize_character_for_save(actor_any);
+}
+
+export function sanitize_npc_for_save(npc_any: any): void {
+  sanitize_character_for_save(npc_any);
+}
+
+function sanitize_character_for_save(character_any: any): void {
+  if (!is_obj(character_any)) return;
+  const body_slots = (character_any as any).body_slots;
   if (!body_slots || typeof body_slots !== 'object') return;
 
   for (const slot of Object.values(body_slots)) {
@@ -138,5 +146,10 @@ export function sanitize_actor_for_save(actor_any: any): void {
     sanitize_inline_item_tree((slot as any).armor);
     sanitize_inline_item_tree((slot as any).tool);
     if (Array.isArray((slot as any).garb)) sanitize_inline_item_tree((slot as any).garb);
+  }
+
+  const equipped_items = (character_any as any).equipped_items;
+  if (equipped_items && typeof equipped_items === 'object') {
+    sanitize_inline_item_tree(Object.values(equipped_items));
   }
 }

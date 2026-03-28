@@ -156,6 +156,10 @@ export function get_creation_state_path(slot: number): string {
     return path.join(process.cwd(), "local_data", `data_slot_${slot}`, "creation.jsonc");
 }
 
+export function get_session_control_path(slot: number): string {
+    return path.join(get_data_slot_dir(slot), "session_control.jsonc");
+}
+
 // Item instance paths
 export function get_item_instances_dir(slot: number): string {
     return path.join(get_data_slot_dir(slot), "item_instances");

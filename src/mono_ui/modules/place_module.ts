@@ -208,6 +208,7 @@ export type PlaceModuleConfig = {
   // Target selection callback - called when user right-clicks an entity
   // Returns true if target was valid and selected, false otherwise
   on_select_target?: (target_ref: string) => boolean;
+  get_display_name_for_ref?: (entity_ref: string) => string;
 
   // Actor movement callback - called when actor completes movement to a new tile
   // Allows persisting position change to storage
@@ -413,7 +414,7 @@ type Particle = {
   op?: 'set' | 'tint_fg';
 };
 
-type PlacePainterTool = 'paint' | 'erase' | 'eyedropper' | 'line' | 'rect_stroke' | 'rect_fill' | 'bucket' | 'move' | 'place_create' | 'place_delete' | 'place_resize' | 'region_tool';
+type PlacePainterTool = 'paint' | 'erase' | 'eyedropper' | 'line' | 'rect_stroke' | 'rect_fill' | 'bucket' | 'character' | 'move' | 'place_create' | 'place_delete' | 'place_resize' | 'region_tool';
 
 function is_shape_painter_tool(tool: string | null | undefined): tool is 'line' | 'rect_stroke' | 'rect_fill' {
   return tool === 'line' || tool === 'rect_stroke' || tool === 'rect_fill';
@@ -2405,7 +2406,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         const scene_offset = ent.scene_offset;
         const scene_base_z = ent.scene_base_z;
 
-        const name = entityRef.split(".").pop() ?? (is_npc ? "N" : "A");
+        const name = typeof (entity as any)?.name === 'string' && String((entity as any).name).trim().length > 0
+          ? String((entity as any).name).trim()
+          : (is_npc ? "Unknown NPC" : "Unknown Actor");
         const defaultRgb = is_npc ? npc_rgb : actor_rgb;
         const cachedTags = entityTagCache.get(entityRef) ?? [];
 
@@ -2733,7 +2736,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
     // Target/hover info at bottom.
     if (targeted) {
-      const display_name = targeted.ref.split('.').pop() || targeted.ref;
+      const display_name = config.get_display_name_for_ref?.(targeted.ref) ?? 'Unknown Target';
       const target_text = `Talking to: ${display_name}`;
       const y = inner.y0;
       let x = inner.x0;
@@ -2753,7 +2756,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const is_npc = 'npc_ref' in hovered.entity;
       const ref = is_npc ? (hovered.entity as PlaceNPC).npc_ref : (hovered.entity as PlaceActor).actor_ref;
       const status = is_npc ? (hovered.entity as PlaceNPC).status : (hovered.entity as PlaceActor).status;
-      const hover_text = `[${ref}] ${status}`;
+      const display_name = config.get_display_name_for_ref?.(ref) ?? 'Unknown Target';
+      const hover_text = `${display_name} - ${status}`;
       const y = inner.y0;
       let x = inner.x0;
       for (const ch of hover_text) {

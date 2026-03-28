@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { parse } from "jsonc-parser";
-import { ensure_dir_exists, rand_base32_rfc } from "../engine/log_store.js";
+import { ensure_dir_exists } from "../engine/log_store.js";
 import { get_default_npc_path, get_legacy_default_npc_path, get_npc_dir, get_npc_path } from "../engine/paths.js";
 import { find_kind, load_kind_definitions } from "../kind_storage/store.js";
 import { find_language } from "../language_storage/store.js";
@@ -9,6 +9,8 @@ import { apply_level1_derived } from "../character_rules/derived.js";
 import { apply_prof_picks, make_empty_profs, random_prof_picks, random_stat_assignment, shuffle } from "../character_rules/creation.js";
 import { resolve_character_body_model_id } from "../shared/body_model.js";
 import { DEFAULT_CHARACTER_BODY_SLOT_REPRESENTATION } from "../shared/body_slot_representation.js";
+import { sanitize_npc_for_save } from "../shared/defs_deltas_sanitize.js";
+import { make_opaque_entity_id } from "../shared/entity_ids.js";
 import { initialize_equipment_slots, normalize_body_slots } from "../types/body_slots.js";
 
 export type NpcLookupResult =
@@ -27,17 +29,8 @@ export type NpcSearchQuery = {
     tag_name?: string;
 };
 
-function slugify_name(name: string): string {
-    return name
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "_")
-        .replace(/^_+|_+$/g, "");
-}
-
-export function make_npc_id(name: string): string {
-    const slug = slugify_name(name || "npc");
-    const rand = rand_base32_rfc(6);
-    return `${slug}_${rand}`;
+export function make_npc_id(_name?: string): string {
+    return make_opaque_entity_id("npc");
 }
 
 function read_jsonc(pathname: string): Record<string, unknown> {
@@ -173,6 +166,7 @@ export function save_npc(slot: number, npc_id: string, npc: Record<string, unkno
     ensure_npc_dir(slot);
     const npc_path = get_npc_path(slot, npc_id);
     (npc as any).body_slots = normalize_body_slots((npc as any).body_slots);
+    sanitize_npc_for_save(npc as any);
     fs.writeFileSync(npc_path, JSON.stringify(npc, null, 2), "utf-8");
     return npc_path;
 }

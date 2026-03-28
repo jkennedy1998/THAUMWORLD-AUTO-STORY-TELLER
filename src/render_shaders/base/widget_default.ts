@@ -5,6 +5,7 @@ function pick_widget_char(widget: UiWidgetPayload['widget']): string {
     if (widget === 'close') return 'X';
     if (widget === 'save_position') return '$';
     if (widget === 'resize') return '╋';
+    if (widget === 'seamless') return 'S';
     return '?';
 }
 

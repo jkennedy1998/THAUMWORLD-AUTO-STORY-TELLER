@@ -3,6 +3,36 @@
 
 import { debug_log } from "../shared/debug.js";
 import { send_highlight_command, send_target_command } from "../npc_ai/movement_command_sender.js";
+import { load_actor } from "../actor_storage/store.js";
+import { load_npc } from "../npc_storage/store.js";
+import { SERVICE_CONFIG } from "../shared/constants.js";
+
+const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+
+function resolve_target_display_name(target_ref: string, target_type: "npc" | "actor" | "item" | "terrain", fallback?: string): string | undefined {
+  const clean_fallback = typeof fallback === "string" ? fallback.trim() : "";
+  if (clean_fallback.length > 0) return clean_fallback;
+
+  if (target_type === "npc" && target_ref.startsWith("npc.")) {
+    const npc_id = target_ref.slice(4);
+    const result = load_npc(data_slot_number, npc_id);
+    if (result.ok && typeof (result.npc as any)?.name === "string" && String((result.npc as any).name).trim().length > 0) {
+      return String((result.npc as any).name).trim();
+    }
+    return undefined;
+  }
+
+  if (target_type === "actor" && target_ref.startsWith("actor.")) {
+    const actor_id = target_ref.slice(6);
+    const result = load_actor(data_slot_number, actor_id);
+    if (result.ok && typeof (result.actor as any)?.name === "string" && String((result.actor as any).name).trim().length > 0) {
+      return String((result.actor as any).name).trim();
+    }
+    return undefined;
+  }
+
+  return undefined;
+}
 
 export interface ActorTargetState {
   actor_ref: string;
@@ -57,7 +87,7 @@ export function setActorTarget(
   send_highlight_command(target_ref, true, "yellow", "Target selected");
   
   // Update target display UI
-  send_target_command(actor_ref, target_ref, target_name || target_ref, "Target selected");
+  send_target_command(actor_ref, target_ref, resolve_target_display_name(target_ref, target_type, target_name), "Target selected");
 }
 
 /**

@@ -16,6 +16,7 @@ import type {
 } from "../types/place.js";
 import { load_place, save_place } from "./store.js";
 import { get_place_region_bounds, get_places_face_adjacency, is_region_voxel_inside_place, region_voxel_to_local_voxel } from "../shared/place_adjacency.js";
+import { normalize_place_actor_presence, normalize_place_npc_presence } from "../shared/place_character_presence.js";
 
 /**
  * Calculate distance between two tile positions (in tiles)
@@ -167,10 +168,12 @@ export function add_npc_to_place(
   );
   
   const npc_data: PlaceNPC = {
-    npc_ref,
-    tile_position: position,
-    status: "present",
-    activity: activity ?? "standing here"
+    ...normalize_place_npc_presence({
+      npc_ref,
+      tile_position: position,
+      status: "present",
+      activity: activity ?? "standing here"
+    })
   };
   
   if (existing_index >= 0) {
@@ -216,9 +219,11 @@ export function add_actor_to_place(
   );
   
   const actor_data: PlaceActor = {
-    actor_ref,
-    tile_position: position,
-    status: "present"
+    ...normalize_place_actor_presence({
+      actor_ref,
+      tile_position: position,
+      status: "present"
+    })
   };
   
   if (existing_index >= 0) {

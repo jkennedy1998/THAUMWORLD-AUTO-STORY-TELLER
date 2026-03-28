@@ -4,6 +4,7 @@ import type { ModuleBorderConfig } from '../module_borders.js';
 import { PANEL_BORDER_PRESETS, draw_module_border } from '../module_borders.js';
 import type { GizmoState, ModuleGizmosConfig } from '../module_gizmos.js';
 import {
+  clear_gizmo_hover_state,
   create_gizmo_state,
   draw_module_gizmos,
   get_resize_edge,
@@ -12,6 +13,8 @@ import {
   handle_move_drag,
   handle_resize_drag,
   is_in_gizmo_area,
+  should_draw_module_chrome,
+  update_gizmo_hover_state,
 } from '../module_gizmos.js';
 
 type BorderOptions = {
@@ -110,26 +113,30 @@ export function make_floating_panel_module(opts: FloatingPanelOptions): Module {
     Draw(c: Canvas): void {
       if (opts.is_visible && !opts.is_visible()) return;
       const title = resolve_title(opts.title);
+      const draw_chrome = should_draw_module_chrome(gizmos, gizmo_state);
       draw_panel_background(c, rect, opts.background);
       opts.draw_content(c, rect);
-      draw_module_border(c, {
-        rect,
-        style: opts.border?.style ?? PANEL_BORDER_PRESETS.default_double.style,
-        border_rgb: opts.border?.border_rgb ?? get_color_by_name('medium_gray').rgb,
-        weight_index: opts.border?.weight_index ?? PANEL_BORDER_PRESETS.default_double.weight_index,
-        markers: resolve_border_markers(opts.border, rect),
-        header: title ? {
-          text: title,
-          text_rgb: opts.border?.text_rgb,
-          reserve_left_cols: opts.border?.reserve_left_cols ?? (2 + ((gizmos.enabled?.length ?? 0) * 2)),
-          divider_at_col: opts.border?.divider_at_col,
-          divider_mode: opts.border?.divider_mode,
-        } : undefined,
-      });
-      draw_module_gizmos(c, rect, gizmos, gizmo_state);
+      if (draw_chrome) {
+        draw_module_border(c, {
+          rect,
+          style: opts.border?.style ?? PANEL_BORDER_PRESETS.default_double.style,
+          border_rgb: opts.border?.border_rgb ?? get_color_by_name('medium_gray').rgb,
+          weight_index: opts.border?.weight_index ?? PANEL_BORDER_PRESETS.default_double.weight_index,
+          markers: resolve_border_markers(opts.border, rect),
+          header: title ? {
+            text: title,
+            text_rgb: opts.border?.text_rgb,
+            reserve_left_cols: opts.border?.reserve_left_cols ?? (2 + ((gizmos.enabled?.length ?? 0) * 2)),
+            divider_at_col: opts.border?.divider_at_col,
+            divider_mode: opts.border?.divider_mode,
+          } : undefined,
+        });
+        draw_module_gizmos(c, rect, gizmos, gizmo_state);
+      }
     },
 
     OnPointerEnter(e: PointerEvent): void {
+      update_gizmo_hover_state(e.x, e.y, rect, gizmos, gizmo_state);
       opts.on_pointer_enter_content?.(e, rect);
     },
 
@@ -141,7 +148,8 @@ export function make_floating_panel_module(opts: FloatingPanelOptions): Module {
 
     OnPointerDown(e: PointerEvent): void {
       if (opts.is_visible && !opts.is_visible()) return;
-      if (is_in_gizmo_area(e.x, e.y, rect)) {
+      update_gizmo_hover_state(e.x, e.y, rect, gizmos, gizmo_state);
+      if (is_in_gizmo_area(e.x, e.y, rect, gizmos)) {
         const gizmo = handle_gizmo_click(e.x, e.y, rect, gizmos, gizmo_state);
         if (gizmo === 'move' || gizmo === 'resize') {
           gizmo_state.move_start_x = e.x;
@@ -175,6 +183,7 @@ export function make_floating_panel_module(opts: FloatingPanelOptions): Module {
 
     OnPointerMove(e: PointerEvent): void {
       if (opts.is_visible && !opts.is_visible()) return;
+      update_gizmo_hover_state(e.x, e.y, rect, gizmos, gizmo_state);
       if (gizmo_state.is_resize_mode && !gizmo_state.is_dragging_resize) {
         gizmo_state.resize_edge = get_resize_edge(e.x, e.y, rect);
       }
@@ -258,6 +267,7 @@ export function make_floating_panel_module(opts: FloatingPanelOptions): Module {
 
     OnPointerLeave(e: PointerEvent): void {
       if (opts.is_visible && !opts.is_visible()) return;
+      clear_gizmo_hover_state(gizmo_state);
       opts.on_pointer_leave_content?.(e, rect);
     },
 
