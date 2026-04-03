@@ -4,7 +4,9 @@
 
 import { roll_expr, type DiceRoll } from "../rules_lawyer/dice.js";
 import { effectorRegistry, applyEffectors, type Effector } from "../effectors/index.js";
-import type { TaggedItem, ActionCapability } from "../tag_system/index.js";
+import type { TaggedItem } from "../tag_system/registry.js";
+import type { ActionCapability } from "../tag_system/capabilities.js";
+import { get_damage_dice_from_mag } from "../mag/damage.js";
 
 /**
  * Proficiency levels
@@ -223,7 +225,7 @@ export function performPotencyRoll(
   effectors: Effector[] = []
 ): PotencyResult {
   // Get dice for MAG level
-  const dice = getDamageDice(mag);
+  const dice = get_damage_dice_from_mag(mag);
   
   // Roll the dice
   const rollResult = roll_expr(dice);
@@ -240,20 +242,6 @@ export function performPotencyRoll(
     effector_shift: modified.shift,
     effector_scale: modified.scale
   };
-}
-
-/**
- * Get damage dice based on MAG
- */
-function getDamageDice(mag: number): string {
-  if (mag <= 0) return "1";
-  if (mag === 1) return "1d2";
-  if (mag === 2) return "1d4";
-  if (mag === 3) return "1d6";
-  if (mag === 4) return "1d8";
-  if (mag === 5) return "2d4";
-  if (mag === 6) return "1d10";
-  return `${Math.floor(mag / 2)}d6`;
 }
 
 /**

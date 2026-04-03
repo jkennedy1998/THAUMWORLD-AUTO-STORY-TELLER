@@ -67,6 +67,7 @@ export function load_master_tile(def_id: string): TileDefLookupResult {
                 id: String(raw.id ?? def_id),
                 name: String(raw.name ?? def_id),
                 description: String(raw.description ?? ""),
+                base_value_mag: Number((raw as any).base_value_mag ?? 0),
                 weight: Number(raw.weight),
                 display_char: String(raw.display_char ?? "?"),
                 display_color: String(raw.display_color ?? "#888888"),

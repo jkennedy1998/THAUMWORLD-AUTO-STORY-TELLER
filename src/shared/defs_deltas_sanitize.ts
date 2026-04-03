@@ -26,6 +26,8 @@ export function sanitize_inline_item_tree(root: any): boolean {
     changed = del(it, 'weight') || changed;
     changed = del(it, 'unit_weight') || changed;
     changed = del(it, 'tags') || changed;
+    changed = del(it, 'resolved_tag_states') || changed;
+    changed = del(it, 'value_mag') || changed;
     changed = del(it, 'display_char') || changed;
     changed = del(it, '__derived_runtime') || changed;
 
@@ -49,6 +51,8 @@ export function sanitize_place_tile_instance(tile: any): boolean {
 
   // Derived/runtime-only.
   changed = del(tile, 'tags') || changed;
+  changed = del(tile, 'resolved_tag_states') || changed;
+  changed = del(tile, 'value_mag') || changed;
   changed = del(tile, 'display_char') || changed;
   changed = del(tile, 'display_color') || changed;
   changed = del(tile, 'container_glyphs') || changed;
@@ -62,6 +66,11 @@ export function sanitize_place_tile_instance(tile: any): boolean {
   // Tile contents are inline items.
   if (Array.isArray((tile as any).contents)) {
     changed = sanitize_inline_item_tree((tile as any).contents) || changed;
+  }
+  if (Array.isArray((tile as any).grow_surfaces)) {
+    for (const surface of (tile as any).grow_surfaces) {
+      if (Array.isArray((surface as any)?.contents)) changed = sanitize_inline_item_tree((surface as any).contents) || changed;
+    }
   }
 
   return changed;
@@ -113,12 +122,15 @@ export function sanitize_place_for_save(place_any: any): boolean {
       for (const s of structs) {
         if (!is_obj(s)) continue;
         changed = del(s, 'tags') || changed;
+        changed = del(s, 'resolved_tag_states') || changed;
+        changed = del(s, 'value_mag') || changed;
         changed = del(s, 'display_char') || changed;
         changed = del(s, 'display_color') || changed;
         changed = del(s, 'container_glyphs') || changed;
         changed = del(s, 'render_shader') || changed;
         changed = del(s, 'body_model') || changed;
         changed = del(s, '__derived_runtime') || changed;
+        if (Array.isArray((s as any).contents)) changed = sanitize_inline_item_tree((s as any).contents) || changed;
       }
     }
   } catch {
@@ -138,6 +150,10 @@ export function sanitize_npc_for_save(npc_any: any): void {
 
 function sanitize_character_for_save(character_any: any): void {
   if (!is_obj(character_any)) return;
+  del(character_any, 'tags');
+  del(character_any, 'resolved_tag_states');
+  del(character_any, 'tag_value_mag');
+  del(character_any, 'total_value_mag');
   const body_slots = (character_any as any).body_slots;
   if (!body_slots || typeof body_slots !== 'object') return;
 

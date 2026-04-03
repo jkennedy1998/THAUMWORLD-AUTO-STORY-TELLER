@@ -15,8 +15,7 @@
     {
       "name": "GARB",
       "mag": 1,
-      "meta": ["torso"],
-      "info": [1]
+      "meta": ["torso"]
     }
   ]
 }

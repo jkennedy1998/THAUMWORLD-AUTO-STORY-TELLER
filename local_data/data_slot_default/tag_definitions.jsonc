@@ -3,19 +3,6 @@
   // info_schema entries are refs; numeric values should be stored as referenced properties.
   "tags": [
     {
-      "name": "DISPERSING",
-      "proficiency": null,
-      "meta": [],
-      "stacking": "sum",
-      "scope": ["CHARACTER", "ITEM", "TILE"],
-      "requires_info": false,
-      "info_schema": [],
-      "triggers": ["end_turn"],
-      "effects": [
-        {"verb": "SYSTEM.REMOVE_TAG", "trigger": "end_turn", "args": {"target": "ref:holder", "tag_name": "ref:host_tag.name", "mag": 1}}
-      ]
-    },
-    {
       "name": "DISEASE",
       "proficiency": "PAIN",
       "meta": [],
@@ -40,12 +27,25 @@
     {
       "name": "DAMAGE",
       "proficiency": "PAIN",
+      "base_tag_value_mag": 0,
+      "quantity_dimension_id": "damage_amount_mag",
       "meta": [],
       "stacking": "sum",
       "scope": ["ITEM"],
       "requires_info": false,
       "info_schema": [],
       "triggers": ["on_attack", "on_use"],
+      "dimensions": [
+        {
+          "id": "damage_amount_mag",
+          "label": "Damage Amount",
+          "default_mag": 1,
+          "min_mag": 0,
+          "description": "How much damage quantity this DAMAGE tag carries.",
+          "value_up_per_mag": 1,
+          "value_down_per_mag": -1
+        }
+      ],
       "effects": [
         {"verb": "SYSTEM.APPLY_TAG", "trigger": "on_attack", "args": {"target": "ref:action.damage", "tag_name": "DAMAGE", "mag": "ref:tag.mag"}},
         {"verb": "SYSTEM.APPLY_TAG", "trigger": "on_use", "args": {"target": "ref:action.damage", "tag_name": "DAMAGE", "mag": "ref:tag.mag"}}
@@ -54,6 +54,7 @@
     {
       "name": "TOOL",
       "proficiency": null,
+      "editor_visible": false,
       "meta": [],
       "stacking": "sum",
       "scope": ["ITEM", "CHARACTER"],
@@ -66,14 +67,94 @@
       ]
     },
     {
+      "name": "DAGGER",
+      "proficiency": "BRAWN",
+      "base_tag_value_mag": 0,
+      "quantity_dimension_id": "potency_roll_mag",
+      "meta": ["tool", "weapon"],
+      "stacking": "sum",
+      "scope": ["ITEM"],
+      "requires_info": false,
+      "info_schema": [],
+      "dimensions": [
+        {
+          "id": "potency_roll_mag",
+          "label": "Potency Roll",
+          "default_mag": 2,
+          "min_mag": 0,
+          "max_mag": 8,
+          "description": "Canonical MAG for this dagger's potency roll.",
+          "value_up_per_mag": 1,
+          "value_down_per_mag": -1,
+          "runtime_projection": {
+            "kind": "formula",
+            "value_type": "dice",
+            "formula": "damage_dice_from_mag"
+          }
+        }
+      ],
+      "item_stack": {
+        "presence": "both_required",
+        "dimensions_match": "exact",
+        "info_match": "exact",
+        "merge_quantity": "preserve",
+        "ticker": {
+          "kind": "none",
+          "source": "tag_lifecycle"
+        }
+      },
+      "triggers": [],
+      "effects": []
+    },
+    {
+      "name": "CONTAINER",
+      "proficiency": null,
+      "base_tag_value_mag": 1,
+      "meta": [],
+      "stacking": "sum",
+      "scope": ["ITEM", "TILE"],
+      "requires_info": false,
+      "info_schema": [],
+      "dimensions": [
+        {
+          "id": "container_capacity_mag",
+          "label": "Container Capacity",
+          "default_mag": 1,
+          "min_mag": -1,
+          "description": "How many storage slots this container contributes.",
+          "value_up_per_mag": 1,
+          "value_down_per_mag": -1,
+          "runtime_projection": {
+            "kind": "formula",
+            "value_type": "slots",
+            "formula": "container_slots_from_capacity_mag"
+          }
+        }
+      ],
+      "triggers": [],
+      "effects": []
+    },
+    {
       "name": "OVERENCUMBERED",
       "proficiency": "BRAWN",
+      "base_tag_value_mag": -1,
+      "quantity_dimension_id": "overencumbered_penalty_mag",
       "meta": [],
       "stacking": "sum",
       "scope": ["CHARACTER"],
       "requires_info": false,
       "info_schema": [],
       "triggers": ["on_apply"],
+      "dimensions": [
+        {
+          "id": "overencumbered_penalty_mag",
+          "label": "Penalty",
+          "default_mag": 1,
+          "min_mag": 0,
+          "value_up_per_mag": -1,
+          "value_down_per_mag": 1
+        }
+      ],
       "effects": [
         {"verb": "SYSTEM.ADJUST_MOVEMENT_SPEED", "trigger": "on_apply", "args": {"target": "ref:holder", "mode": "walk", "mag_formula": "-1 * ref:tag.mag"}},
         {"verb": "SYSTEM.ADJUST_MOVEMENT_SPEED", "trigger": "on_apply", "args": {"target": "ref:holder", "mode": "climb", "mag_formula": "-1 * ref:tag.mag"}},
@@ -86,7 +167,7 @@
     {
       "name": "KNOCKED",
       "proficiency": "BRAWN",
-      "meta": ["DISPERSING"],
+      "meta": [],
       "stacking": "sum",
       "scope": ["CHARACTER"],
       "requires_info": false,
@@ -118,6 +199,7 @@
     {
       "name": "AWARENESS",
       "proficiency": "INSTINCT",
+      "editor_visible": false,
       "meta": [],
       "stacking": "custom",
       "scope": ["CHARACTER"],
@@ -145,12 +227,24 @@
     {
       "name": "FLINCH",
       "proficiency": "PAIN",
+      "base_tag_value_mag": -1,
+      "quantity_dimension_id": "flinch_mag",
       "meta": [],
       "stacking": "sum",
       "scope": ["CHARACTER"],
       "requires_info": false,
       "info_schema": [],
       "triggers": ["start_turn"],
+      "dimensions": [
+        {
+          "id": "flinch_mag",
+          "label": "Flinch",
+          "default_mag": 1,
+          "min_mag": 0,
+          "value_up_per_mag": -1,
+          "value_down_per_mag": 1
+        }
+      ],
       "effects": [
         {"verb": "SYSTEM.ADJUST_ACTIONS", "trigger": "start_turn", "args": {"target": "ref:holder", "mag_formula": "-1 ACTION per 2 TAG MAG"}},
         {"verb": "SYSTEM.ADJUST_PARTIAL_ACTIONS", "trigger": "start_turn", "args": {"target": "ref:holder", "mag_formula": "-1 PARTIAL ACTION per remaining 1 TAG MAG"}},
@@ -161,12 +255,24 @@
     {
       "name": "BROKEN",
       "proficiency": "MECHANICS",
+      "base_tag_value_mag": -1,
+      "quantity_dimension_id": "broken_severity_mag",
       "meta": [],
       "stacking": "sum",
       "scope": ["CHARACTER", "ITEM", "TILE"],
       "requires_info": false,
       "info_schema": [],
       "triggers": ["on_apply"],
+      "dimensions": [
+        {
+          "id": "broken_severity_mag",
+          "label": "Broken Severity",
+          "default_mag": 1,
+          "min_mag": 0,
+          "value_up_per_mag": -1,
+          "value_down_per_mag": 1
+        }
+      ],
       "effects": [
         {"verb": "SYSTEM.APPLY_ACTION_CONSTRAINT", "trigger": "on_apply", "args": {"target": "ref:holder", "constraint": {"type": "ITEM_FUNCTION_MAG_REDUCTION", "value": "ref:tag.mag"}}},
         {"verb": "SYSTEM.APPLY_ACTION_CONSTRAINT", "trigger": "on_apply", "args": {"target": "ref:holder", "constraint": {"type": "EQUIP_BLOCKED", "value": "ref:tag.mag"}}}
@@ -175,11 +281,58 @@
     {
       "name": "FIRE!",
       "proficiency": "HEARTH",
-      "meta": ["DISPERSING"],
+      "base_tag_value_mag": 1,
+      "quantity_dimension_id": "fire_intensity_mag",
+      "meta": [],
       "stacking": "sum",
       "scope": ["CHARACTER", "ITEM", "TILE"],
       "requires_info": false,
       "info_schema": [],
+      "dimensions": [
+        {
+          "id": "fire_intensity_mag",
+          "label": "Fire Intensity",
+          "default_mag": 1,
+          "min_mag": 0,
+          "value_up_per_mag": 1,
+          "value_down_per_mag": -1
+        },
+        {
+          "id": "disperse_time_mag",
+          "label": "Disperse Time",
+          "default_mag": 0,
+          "min_mag": -5,
+          "max_mag": 8,
+          "description": "Canonical time MAG for how quickly this fire intensity fades toward nothing.",
+          "value_up_per_mag": 0,
+          "value_down_per_mag": 0,
+          "runtime_projection": {
+            "kind": "formula",
+            "value_type": "duration",
+            "formula": "disperse_period_breaths_from_time_mag"
+          }
+        }
+      ],
+      "lifecycle": {
+        "dispersal": {
+          "time_dimension_id": "disperse_time_mag",
+          "target_dimension_id": "fire_intensity_mag",
+          "target_value": 0,
+          "step": 1,
+          "remove_on_target": true
+        },
+        "expiry": false
+      },
+      "item_stack": {
+        "presence": "either_allowed",
+        "dimensions_match": "exact_except_quantity",
+        "info_match": "exact",
+        "merge_quantity": "sum",
+        "ticker": {
+          "kind": "average",
+          "source": "tag_lifecycle"
+        }
+      },
       "triggers": ["on_apply", "end_turn", "end_round", "on_adjacent"],
       "effects": [
         {"verb": "SYSTEM.APPLY_DAMAGE", "trigger": "end_turn", "args": {"target": "ref:holder", "mag": "ref:tag.mag", "scope": "CHARACTER"}},
@@ -190,13 +343,154 @@
       ]
     },
     {
+      "name": "GROW",
+      "proficiency": null,
+      "base_tag_value_mag": 1,
+      "meta": [],
+      "stacking": "none",
+      "scope": ["TILE"],
+      "requires_info": true,
+      "info_schema": ["grow_config"],
+      // Slice 1 canonical multidimensional example.
+      // Runtime still has legacy readers until later slices, but this is now the
+      // authoritative definition shape for future resolved-tag helpers.
+      "dimensions": [
+        {
+          "id": "grow_speed_mag",
+          "label": "Grow Speed",
+          "default_mag": 0,
+          "min_mag": -5,
+          "max_mag": 5,
+          "description": "Canonical MAG for how quickly this grow stream produces harvest output.",
+          "value_up_per_mag": 1,
+          "value_down_per_mag": -1,
+          "runtime_projection": {
+            "kind": "formula",
+            "value_type": "duration",
+            "formula": "grow_period_breaths_from_speed_mag"
+          },
+          "value_weight": 1
+        },
+        {
+          "id": "grow_capacity_mag",
+          "label": "Grow Capacity",
+          "default_mag": 2,
+          "min_mag": 0,
+          "max_mag": 20,
+          "description": "Canonical MAG for how many harvest slots this tag contributes at once.",
+          "value_up_per_mag": 1,
+          "value_down_per_mag": -1,
+          "runtime_projection": {
+            "kind": "formula",
+            "value_type": "slots",
+            "formula": "grow_slots_from_capacity_mag"
+          },
+          "value_weight": 1
+        },
+        {
+          "id": "grow_yield_mag",
+          "label": "Grow Yield",
+          "default_mag": 1,
+          "min_mag": 0,
+          "max_mag": 5,
+          "description": "Canonical MAG for how much item quantity is produced when growth resolves.",
+          "value_up_per_mag": 1,
+          "value_down_per_mag": -1,
+          "runtime_projection": {
+            "kind": "formula",
+            "value_type": "integer",
+            "formula": "grow_yield_from_yield_mag"
+          },
+          "value_weight": 1
+        }
+      ],
+      "value_model": {
+        "mode": "formula",
+        "formula": "grow_tag_value_mag"
+      },
+      "contributes_surfaces": [
+        {
+          "surface_kind": "grow",
+          "contributor_name": "GROW",
+          "projection_kind": "definition"
+        }
+      ],
+      "lifecycle": {
+        "dispersal": null,
+        "expiry": false
+      },
+      "item_stack": {
+        "presence": "both_required",
+        "dimensions_match": "exact",
+        "info_match": "exact",
+        "merge_quantity": "preserve",
+        "ticker": {
+          "kind": "average",
+          "source": "tag_lifecycle"
+        }
+      },
+      "triggers": [],
+      "effects": []
+    },
+    {
+      "name": "SPOILS",
+      "proficiency": null,
+      "base_tag_value_mag": 0,
+      "meta": [],
+      "stacking": "none",
+      "scope": ["ITEM"],
+      "requires_info": true,
+      "info_schema": ["result_item_def_id"],
+      "dimensions": [
+        {
+          "id": "spoil_time_mag",
+          "label": "Spoil Time",
+          "default_mag": 0,
+          "min_mag": -5,
+          "max_mag": 8,
+          "description": "Canonical time MAG for how long this item takes to spoil into its configured result.",
+          "value_up_per_mag": 0,
+          "value_down_per_mag": 0,
+          "runtime_projection": {
+            "kind": "formula",
+            "value_type": "duration",
+            "formula": "spoil_period_breaths_from_time_mag"
+          }
+        }
+      ],
+      "item_stack": {
+        "presence": "both_required",
+        "dimensions_match": "exact",
+        "info_match": "exact",
+        "merge_quantity": "preserve",
+        "ticker": {
+          "kind": "minimum",
+          "source": "item_last_breath_processed"
+        }
+      },
+      "triggers": [],
+      "effects": []
+    },
+    {
       "name": "FLAMMABLE",
       "proficiency": "HEARTH",
+      "base_tag_value_mag": 0,
+      "quantity_dimension_id": "flammable_fuel_mag",
       "meta": [],
       "stacking": "sum",
       "scope": ["CHARACTER", "ITEM", "TILE"],
       "requires_info": false,
       "info_schema": [],
+      "dimensions": [
+        {
+          "id": "flammable_fuel_mag",
+          "label": "Fuel",
+          "default_mag": 1,
+          "min_mag": 0,
+          "value_up_per_mag": 1,
+          "value_down_per_mag": -1
+        }
+      ],
       "triggers": ["on_adjacent"],
       "effects": [
         {"verb": "SYSTEM.APPLY_TAG", "trigger": "on_adjacent", "args": {"target": "ref:holder", "tag_name": "FIRE!", "mag": "ref:tag.mag", "condition": "adjacent_has_tag:FIRE!"}},
@@ -206,11 +500,58 @@
     {
       "name": "FROST!",
       "proficiency": "HEARTH",
-      "meta": ["DISPERSING"],
+      "base_tag_value_mag": 1,
+      "quantity_dimension_id": "frost_intensity_mag",
+      "meta": [],
       "stacking": "sum",
       "scope": ["CHARACTER", "ITEM", "TILE"],
       "requires_info": false,
       "info_schema": [],
+      "dimensions": [
+        {
+          "id": "frost_intensity_mag",
+          "label": "Frost Intensity",
+          "default_mag": 1,
+          "min_mag": 0,
+          "value_up_per_mag": 1,
+          "value_down_per_mag": -1
+        },
+        {
+          "id": "disperse_time_mag",
+          "label": "Disperse Time",
+          "default_mag": 0,
+          "min_mag": -5,
+          "max_mag": 8,
+          "description": "Canonical time MAG for how quickly this frost intensity fades toward nothing.",
+          "value_up_per_mag": 0,
+          "value_down_per_mag": 0,
+          "runtime_projection": {
+            "kind": "formula",
+            "value_type": "duration",
+            "formula": "disperse_period_breaths_from_time_mag"
+          }
+        }
+      ],
+      "lifecycle": {
+        "dispersal": {
+          "time_dimension_id": "disperse_time_mag",
+          "target_dimension_id": "frost_intensity_mag",
+          "target_value": 0,
+          "step": 1,
+          "remove_on_target": true
+        },
+        "expiry": false
+      },
+      "item_stack": {
+        "presence": "either_allowed",
+        "dimensions_match": "exact_except_quantity",
+        "info_match": "exact",
+        "merge_quantity": "sum",
+        "ticker": {
+          "kind": "average",
+          "source": "tag_lifecycle"
+        }
+      },
       "triggers": ["on_apply", "end_turn"],
       "effects": [
         {"verb": "SYSTEM.APPLY_DAMAGE", "trigger": "end_turn", "args": {"target": "ref:holder", "mag": "ref:tag.mag", "scope": "CHARACTER"}},
@@ -220,11 +561,23 @@
     {
       "name": "HYPOTHERMIA",
       "proficiency": "PAIN",
+      "base_tag_value_mag": -1,
+      "quantity_dimension_id": "hypothermia_severity_mag",
       "meta": [],
       "stacking": "sum",
       "scope": ["CHARACTER", "ITEM", "TILE"],
       "requires_info": false,
       "info_schema": [],
+      "dimensions": [
+        {
+          "id": "hypothermia_severity_mag",
+          "label": "Hypothermia Severity",
+          "default_mag": 1,
+          "min_mag": 0,
+          "value_up_per_mag": -1,
+          "value_down_per_mag": 1
+        }
+      ],
       "triggers": ["on_temperature_tick"],
       "effects": [
         {"verb": "SYSTEM.APPLY_DAMAGE", "trigger": "on_temperature_tick", "args": {"target": "ref:holder", "mag": "ref:tag.mag", "condition": "outside_safe_range"}},
@@ -234,11 +587,23 @@
     {
       "name": "HEATSTROKE",
       "proficiency": "PAIN",
+      "base_tag_value_mag": -1,
+      "quantity_dimension_id": "heatstroke_severity_mag",
       "meta": [],
       "stacking": "sum",
       "scope": ["CHARACTER", "ITEM", "TILE"],
       "requires_info": false,
       "info_schema": [],
+      "dimensions": [
+        {
+          "id": "heatstroke_severity_mag",
+          "label": "Heatstroke Severity",
+          "default_mag": 1,
+          "min_mag": 0,
+          "value_up_per_mag": -1,
+          "value_down_per_mag": 1
+        }
+      ],
       "triggers": ["on_temperature_tick"],
       "effects": [
         {"verb": "SYSTEM.APPLY_DAMAGE", "trigger": "on_temperature_tick", "args": {"target": "ref:holder", "mag": "ref:tag.mag", "condition": "outside_safe_range"}},
@@ -261,14 +626,37 @@
     {
       "name": "ARMOR",
       "proficiency": "BRAWN",
+      "base_tag_value_mag": 0,
+      "quantity_dimension_id": "armor_value_mag",
       "meta": ["equipment", "armor", "protection"],
       "stacking": "sum",
       "scope": ["ITEM"],
       "requires_info": true,
-      "info_schema": ["ref:armor_value", "ref:coverage_slots"],
+      "info_schema": ["ref:coverage_slots"],
+      "dimensions": [
+        {
+          "id": "armor_value_mag",
+          "label": "Armor Value",
+          "default_mag": 1,
+          "min_mag": 0,
+          "description": "How much damage this armor subtracts when the equipped body slot is hit.",
+          "value_up_per_mag": 1,
+          "value_down_per_mag": -1
+        }
+      ],
+      "item_stack": {
+        "presence": "both_required",
+        "dimensions_match": "exact",
+        "info_match": "exact",
+        "merge_quantity": "preserve",
+        "ticker": {
+          "kind": "none",
+          "source": "tag_lifecycle"
+        }
+      },
       "triggers": ["on_hit", "on_equip", "on_unequip"],
       "effects": [
-        {"verb": "SYSTEM.REDUCE_DAMAGE", "trigger": "on_hit", "args": {"target": "ref:holder", "reduction": "ref:info[0]"}}
+        {"verb": "SYSTEM.REDUCE_DAMAGE", "trigger": "on_hit", "args": {"target": "ref:holder", "reduction": "ref:tag.mag"}}
       ]
     },
     {
@@ -277,12 +665,20 @@
       "meta": ["equipment", "clothing", "apparel"],
       "stacking": "sum",
       "scope": ["ITEM"],
-      "requires_info": true,
-      "info_schema": ["ref:style_value"],
-      "triggers": ["on_equip", "on_social_check"],
-      "effects": [
-        {"verb": "SYSTEM.ADJUST_SOCIAL", "trigger": "on_social_check", "args": {"bonus": "ref:info[0]"}}
-      ]
+      "requires_info": false,
+      "info_schema": [],
+      "item_stack": {
+        "presence": "both_required",
+        "dimensions_match": "exact",
+        "info_match": "exact",
+        "merge_quantity": "preserve",
+        "ticker": {
+          "kind": "none",
+          "source": "tag_lifecycle"
+        }
+      },
+      "triggers": ["on_equip"],
+      "effects": []
     }
   ]
 }

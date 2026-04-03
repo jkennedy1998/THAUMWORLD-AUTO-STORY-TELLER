@@ -22,12 +22,13 @@ import {
 import { load_actor, save_actor } from "../actor_storage/store.js";
 import { load_npc, find_npcs, type NpcSearchHit } from "../npc_storage/store.js";
 import { get_npc_location } from "../npc_storage/location.js";
+import { get_configured_data_slot } from "../shared/boot_env.js";
 import { is_timed_event_active, get_timed_event_state, get_region_by_coords } from "../world_storage/store.js";
 import { debug_log, debug_warn } from "../shared/debug.js";
 import type { ActionVerb, ActionCost } from "../shared/constants.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
 
-const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+const data_slot_number = get_configured_data_slot();
 
 // ============================================================================
 // Pipeline Dependencies Implementation

@@ -11,16 +11,17 @@ import { parse_machine_text } from "../system_syntax/index.js";
 import { resolve_references } from "../reference_resolver/resolver.js";
 import { apply_effects } from "./apply.js";
 import { find_npcs, load_npc, save_npc } from "../npc_storage/store.js";
-import { load_actor, resolve_runtime_player_actor_id } from "../actor_storage/store.js";
-import { get_or_bind_controlled_actor_ref } from "../shared/session_control.js";
+import { load_actor, save_actor } from "../actor_storage/store.js";
 import { add_event_to_memory, get_working_memory, build_working_memory } from "../context_manager/index.js";
 import { get_timed_event_state } from "../world_storage/store.js";
-import { MetaTagProcessor } from "../tag_system/meta_processor.js";
+import { has_awareness_target } from "../tag_system/canonical_readers.js";
+import { set_awareness_entry } from "../shared/awareness.js";
+import { get_configured_data_slot } from "../shared/boot_env.js";
 import { parse } from "jsonc-parser";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+const data_slot_number = get_configured_data_slot();
 const POLL_MS = SERVICE_CONFIG.POLL_MS.STATE_APPLIER;
 
 // Track last logged state to prevent spam
@@ -129,26 +130,14 @@ function apply_awareness_tags(events: string[] | undefined): number {
             if (!npcResult.ok) continue;
             
             const npc = npcResult.npc as Record<string, unknown>;
-            const tags = (npc.tags || []) as Array<Record<string, unknown>>;
             
             // Check if already has awareness of this actor (case-insensitive)
             const actorRef = `actor.${actorId}`;
-            const hasAwareness = tags.some(tag =>
-                String(tag.name ?? "").toUpperCase() === "AWARENESS" &&
-                Array.isArray(tag.info) &&
-                tag.info.includes(actorRef)
-            );
+            const hasAwareness = has_awareness_target(npc, actorRef);
             
             if (!hasAwareness) {
                 // Add AWARENESS tag
-                const newTag = {
-                    name: "AWARENESS",
-                    info: [actorRef],
-                    created_at: new Date().toISOString()
-                };
-                
-                tags.push(newTag);
-                npc.tags = tags;
+                set_awareness_entry(npc, actorRef, null);
                 
                 // Save updated NPC
                 save_npc(data_slot_number, npcHit.id, npc);
@@ -165,29 +154,18 @@ function apply_awareness_tags(events: string[] | undefined): number {
         
         // Also apply bidirectional awareness: player gains awareness of NPCs
         // This is done by adding tags to the actor as well
-        const actorTags = (actor.tags || []) as Array<Record<string, unknown>>;
+        let actorAwarenessChanged = false;
         for (const npcHit of nearbyNpcs) {
             const npcRef = `npc.${npcHit.id}`;
-            const hasNpcAwareness = actorTags.some(tag =>
-                String(tag.name ?? "").toUpperCase() === "AWARENESS" &&
-                Array.isArray(tag.info) &&
-                tag.info.includes(npcRef)
-            );
+            const hasNpcAwareness = has_awareness_target(actor as Record<string, unknown>, npcRef);
             
             if (!hasNpcAwareness) {
-                const newTag = {
-                    name: "AWARENESS",
-                    info: [npcRef],
-                    created_at: new Date().toISOString()
-                };
-                actorTags.push(newTag);
+                set_awareness_entry(actor as Record<string, unknown>, npcRef, null);
+                actorAwarenessChanged = true;
             }
         }
-        
-        const originalTagsLen = Array.isArray((actor as any).tags) ? ((actor as any).tags as any[]).length : 0;
-        if (actorTags.length > originalTagsLen) {
-            actor.tags = actorTags;
-            // Actor tags updated - save_actor function is available in actor_storage/store.ts
+        if (actorAwarenessChanged) {
+            save_actor(data_slot_number, actorId, actor as Record<string, unknown>);
         }
     }
     
@@ -309,18 +287,16 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
     if (memory_lookup_id && events && events.length > 0) {
         // Try to find working memory by the correct lookup key
         let memory = get_working_memory(data_slot_number, memory_lookup_id);
+        const primary_subject_ref = extract_primary_subject_ref(events);
         
         // If no memory exists and no timed event is active, create it on-demand
         // (If timed event is active, turn_manager should have created the memory)
         if (!memory && !is_timed_event_active) {
-            // Get region from current player location
-            const region_id = get_current_region(data_slot_number);
+            const region_id = get_current_region(data_slot_number, primary_subject_ref);
             const participants = extract_participants_from_events(events);
             
-            // Ensure player actor is always included
-            const player_ref = get_or_bind_controlled_actor_ref(data_slot_number);
-            if (!participants.includes(player_ref)) {
-                participants.unshift(player_ref);
+            if (primary_subject_ref && !participants.includes(primary_subject_ref)) {
+                participants.unshift(primary_subject_ref);
             }
             
             memory = await build_working_memory(
@@ -555,13 +531,6 @@ async function tick(outbox_path: string, log_path: string): Promise<void> {
             }
         }
         
-        // Process dispersing tags after handling all messages
-        // This ensures meta tags like [DISPERSING] decrease over time
-        try {
-            await MetaTagProcessor.processDispersingTags(data_slot_number);
-        } catch (err) {
-            debug_error("StateApplier", "Failed to process dispersing tags", err);
-        }
     } catch (err) {
         debug_error("StateApplier", "Tick failed", err);
     }
@@ -593,16 +562,35 @@ function extract_participants_from_events(events: string[]): string[] {
     return Array.from(participants);
 }
 
-function get_current_region(slot: number): string {
-    // Get player location
-    const controlled_actor_ref = get_or_bind_controlled_actor_ref(slot);
-    const controlled_actor_id = controlled_actor_ref.startsWith("actor.") ? controlled_actor_ref.slice(6) : resolve_runtime_player_actor_id(slot);
-    const result = load_actor(slot, controlled_actor_id);
-    if (!result.ok || !result.actor.location) {
+function extract_primary_subject_ref(events: string[]): string | null {
+    for (const event of events) {
+        const actor_match = event.match(/^(actor|npc)\.([^\.]+)/);
+        if (actor_match?.[1] && actor_match?.[2]) {
+            return `${actor_match[1]}.${actor_match[2]}`;
+        }
+    }
+    return null;
+}
+
+function get_current_region(slot: number, subject_ref: string | null): string {
+    const ref = String(subject_ref ?? "").trim();
+    if (!ref) {
+        return "eden_crossroads"; // Default fallback
+    }
+
+    const loaded = ref.startsWith("actor.")
+        ? load_actor(slot, ref.slice("actor.".length))
+        : ref.startsWith("npc.")
+            ? load_npc(slot, ref.slice("npc.".length))
+            : null;
+    const entity = loaded?.ok
+        ? (ref.startsWith("actor.") ? (loaded as any).actor : (loaded as any).npc)
+        : null;
+    if (!entity?.location) {
         return "eden_crossroads"; // Default fallback
     }
     
-    const location = result.actor.location as { 
+    const location = entity.location as {
         world_tile?: { x: number; y: number }; 
         region_tile?: { x: number; y: number };
     };

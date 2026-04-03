@@ -2,7 +2,8 @@
 // Phase 5: Effector application for rolls and ranges
 // Integrates with existing rules_lawyer effector system
 
-import type { TaggedItem, TagInstance } from "../tag_system/index.js";
+import type { TaggedItem, TagInstance } from "../tag_system/registry.js";
+import { get_resolved_tag_stored_mag, has_resolved_tag } from "../tag_system/canonical_readers.js";
 
 /**
  * Effector types
@@ -73,13 +74,16 @@ export class EffectorRegistry {
       const tagEffectors = this.getEffectors(`tag:${tag.name}`);
       allEffectors.push(...tagEffectors);
       
-      // Add mag-based effectors (more mag = stronger effect)
-      if (tag.mag > 1) {
+      const resolved_mag = get_resolved_tag_stored_mag(item as any, tag.name);
+      const tag_mag = resolved_mag > 0
+        ? resolved_mag
+        : Math.max(0, Math.floor(Number(tag.mag ?? 0) || 0));
+      if (tag_mag > 1) {
         for (const eff of tagEffectors) {
           allEffectors.push({
             ...eff,
-            value: eff.value * (tag.mag - 1),  // Additional mag adds more
-            source: `${eff.source} (mag ${tag.mag})`
+            value: eff.value * (tag_mag - 1),
+            source: `${eff.source} (mag ${tag_mag})`
           });
         }
       }
@@ -285,7 +289,9 @@ export function toRulesLawyerFormat(effectors: Effector[]): Array<{
 export function hasEffectorTag(item: TaggedItem, effectorType: EffectorType): boolean {
   return item.tags.some(tag => {
     const tagEffectors = effectorRegistry.getEffectors(`tag:${tag.name}`);
-    return tagEffectors.some(eff => eff.type === effectorType);
+    const has_tag = has_resolved_tag(item as any, tag.name)
+      || item.tags.some((entry) => String(entry?.name ?? '').trim().toUpperCase() === String(tag.name ?? '').trim().toUpperCase());
+    return has_tag && tagEffectors.some(eff => eff.type === effectorType);
   });
 }
 

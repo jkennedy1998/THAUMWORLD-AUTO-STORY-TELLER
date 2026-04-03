@@ -4,6 +4,7 @@ import { parse } from "jsonc-parser";
 import { ensure_dir_exists } from "../engine/log_store.js";
 import { get_item_dir, get_item_path, get_default_item_path, get_legacy_default_item_path, get_master_items_dir } from "../engine/paths.js";
 import type { TagInstance } from "../tag_system/registry.js";
+import { get_max_stack_size_from_size_mag, is_size_mag_stackable, normalize_size_mag } from "../mag/size.js";
 
 export type ItemDefLookupResult =
     | { ok: true; item: ItemDefinition; path: string }
@@ -13,6 +14,7 @@ export interface ItemDefinition {
     id: string;
     name: string;
     description: string;
+    base_value_mag?: number;
     weight: number;
     weight_mag: number;
     mag: number;
@@ -38,6 +40,36 @@ export interface ItemDefinition {
         open: string;
     };
     notes?: string;
+}
+
+function apply_item_runtime_defaults(raw: Record<string, unknown>, def_id: string): ItemDefinition {
+    const size_mag = normalize_size_mag(raw.size_mag ?? 0, 0);
+    const derived_max_stack_size = get_max_stack_size_from_size_mag(size_mag);
+    const derived_stackable = is_size_mag_stackable(size_mag);
+    return {
+        ...raw,
+        id: String(raw.id ?? def_id),
+        name: String(raw.name ?? def_id),
+        description: String(raw.description ?? ""),
+        base_value_mag: Number((raw as any).base_value_mag ?? raw.mag ?? 0),
+        weight: Number(raw.weight ?? 0),
+        weight_mag: Number(raw.weight_mag ?? 0),
+        mag: Number(raw.mag ?? 1),
+        size_mag,
+        hardness_mag: Number(raw.hardness_mag ?? 0),
+        conductivity_mag: Number(raw.conductivity_mag ?? 0),
+        tags: (raw.tags as TagInstance[]) ?? [],
+        max_stack_size: derived_max_stack_size,
+        display_char: String(raw.display_char ?? "·"),
+        display_color: typeof (raw as any).display_color === 'string' ? String((raw as any).display_color) : undefined,
+        occupies_slots: (raw.occupies_slots as string[]) ?? [],
+        slot_shape: (raw.slot_shape as number[][]) ?? [[1]],
+        fits_actor_kind: (raw.fits_actor_kind as string[]) ?? ["*"],
+        stackable: derived_stackable,
+        container: raw.container as { capacity_weight?: number; capacity_slots?: number } | undefined,
+        container_glyphs: (raw as any).container_glyphs as any,
+        notes: raw.notes as string | undefined,
+    };
 }
 
 function read_jsonc(pathname: string): Record<string, unknown> {
@@ -89,29 +121,7 @@ export function load_item_def(slot: number, def_id: string): ItemDefLookupResult
     const raw = read_jsonc(item_path);
     
     // Apply defaults for new inventory system fields
-    const item: ItemDefinition = {
-        ...raw,
-        id: String(raw.id ?? def_id),
-        name: String(raw.name ?? def_id),
-        description: String(raw.description ?? ""),
-        weight: Number(raw.weight ?? 0),
-        weight_mag: Number(raw.weight_mag ?? 0),
-        mag: Number(raw.mag ?? 1),
-        size_mag: Number(raw.size_mag ?? 0),
-        hardness_mag: Number(raw.hardness_mag ?? 0),
-        conductivity_mag: Number(raw.conductivity_mag ?? 0),
-        tags: (raw.tags as TagInstance[]) ?? [],
-        // New fields with defaults
-        max_stack_size: Number(raw.max_stack_size ?? 1),
-        display_char: String(raw.display_char ?? "·"),
-        occupies_slots: (raw.occupies_slots as string[]) ?? [],
-        slot_shape: (raw.slot_shape as number[][]) ?? [[1]],
-        fits_actor_kind: (raw.fits_actor_kind as string[]) ?? ["*"],
-        // Optional fields
-        stackable: raw.stackable as boolean | undefined,
-        container: raw.container as { capacity_weight?: number; capacity_slots?: number } | undefined,
-        notes: raw.notes as string | undefined,
-    };
+    const item: ItemDefinition = apply_item_runtime_defaults(raw, def_id);
     
     return { ok: true, item, path: item_path };
 }
@@ -131,27 +141,7 @@ export function load_master_item(def_id: string): ItemDefLookupResult {
             const raw = read_jsonc(item_path);
             
             // Apply defaults
-            const item: ItemDefinition = {
-                ...raw,
-                id: String(raw.id ?? def_id),
-                name: String(raw.name ?? def_id),
-                description: String(raw.description ?? ""),
-                weight: Number(raw.weight ?? 0),
-                weight_mag: Number(raw.weight_mag ?? 0),
-                mag: Number(raw.mag ?? 1),
-                size_mag: Number(raw.size_mag ?? 0),
-                hardness_mag: Number(raw.hardness_mag ?? 0),
-                conductivity_mag: Number(raw.conductivity_mag ?? 0),
-                tags: (raw.tags as TagInstance[]) ?? [],
-                max_stack_size: Number(raw.max_stack_size ?? 1),
-                display_char: String(raw.display_char ?? "·"),
-                display_color: typeof (raw as any).display_color === 'string' ? String((raw as any).display_color) : undefined,
-                occupies_slots: [],
-                slot_shape: [[1]],
-                fits_actor_kind: ["*"],
-                container: (raw as any).container as any,
-                container_glyphs: (raw as any).container_glyphs as any,
-            };
+            const item: ItemDefinition = apply_item_runtime_defaults(raw, def_id);
             
             return { ok: true, item, path: item_path };
         }

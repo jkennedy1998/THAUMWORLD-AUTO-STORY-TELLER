@@ -9,8 +9,9 @@ import { debug_log, debug_roll } from "../shared/debug.js";
 import { roll_expr } from "../rules_lawyer/dice.js";
 import { ensure_roller_status_exists, read_roller_status, write_roller_status } from "../engine/roller_status_store.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
+import { get_configured_data_slot } from "../shared/boot_env.js";
 
-const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+const data_slot_number = get_configured_data_slot();
 const POLL_MS = SERVICE_CONFIG.POLL_MS.ROLLER;
 const SPINNER_FRAMES = ["|", "/", "-", "\\"];
 

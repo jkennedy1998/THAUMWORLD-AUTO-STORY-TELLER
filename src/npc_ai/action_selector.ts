@@ -2,6 +2,7 @@
 // Based on their equipment, status, and current situation
 
 import type { ActionVerb } from "../shared/constants.js";
+import { get_status_effect_names } from "../tag_system/canonical_readers.js";
 
 // Available action with requirements
 export type AvailableAction = {
@@ -467,9 +468,7 @@ export function buildNPCState(
     }
     
     // Extract status effects
-    const statusEffects = (npc.tags || [])
-        .filter(tag => tag.name && tag.name !== "AWARENESS")
-        .map(tag => tag.name.toLowerCase());
+    const statusEffects = get_status_effect_names(npc as any);
     
     // Check for specific equipment types
     const hasRanged = equipment.some(e => 

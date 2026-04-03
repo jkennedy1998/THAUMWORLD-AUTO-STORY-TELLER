@@ -11,6 +11,7 @@
 import type { PerceptionEvent } from "../action_system/perception.js";
 import { is_timed_event_active } from "../world_storage/store.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
+import { get_configured_data_slot } from "../shared/boot_env.js";
 import { debug_log } from "../shared/debug.js";
 import { debug_event } from "../shared/debug_event.js";
 import { get_senses_for_action } from "../action_system/sense_broadcast.js";
@@ -230,7 +231,7 @@ import {
   get_npc_location
 } from "../npc_storage/location.js";
 
-const data_slot = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+const data_slot = get_configured_data_slot();
 const outbox_path = get_outbox_path(data_slot);
 
 // Pattern to detect farewells

@@ -3,19 +3,20 @@
 
 import type { ActionVerb } from "../shared/constants.js";
 import {
-  TagResolver,
   tagRegistry,
   initializeDefaultRules,
-  type TaggedItem,
+} from "../tag_system/registry.js";
+import type { TaggedItem, TagInstance } from "../tag_system/registry.js";
+import {
+  check_ammo_compatibility,
+  get_action_capability,
+  get_enabled_actions,
   type ActionCapability,
-  type TagInstance
-} from "../tag_system/index.js";
+  validate_throw,
+} from "../tag_system/capabilities.js";
 
 // Initialize default rules
 initializeDefaultRules();
-
-// Create resolver instance
-const resolver = new TagResolver(tagRegistry);
 
 /**
  * Actor interface for validation
@@ -118,7 +119,7 @@ export function validateToolRequirement(
   const equippedTools = getEquippedTools(actor);
   
   for (const equipped of equippedTools) {
-    const capability = resolver.getActionCapability(equipped.item, fullActionType);
+    const capability = get_action_capability(equipped.item, fullActionType);
     
     if (capability) {
       // Tool supports this action
@@ -267,7 +268,7 @@ export function validateAmmo(
   const equippedTools = getEquippedTools(actor);
   
   for (const equipped of equippedTools) {
-    const compatibility = resolver.checkAmmoCompatibility(
+    const compatibility = check_ammo_compatibility(
       equipped.item,
       ammo,
       fullActionType
@@ -278,7 +279,7 @@ export function validateAmmo(
     }
     
     // If this tool supports the action but ammo is incompatible
-    const capability = resolver.getActionCapability(equipped.item, fullActionType);
+    const capability = get_action_capability(equipped.item, fullActionType);
     if (capability && !compatibility.compatible) {
       return { 
         valid: false, 
@@ -310,7 +311,7 @@ export function validateThrow(
   const equippedTools = getEquippedTools(actor);
   const tool = equippedTools[0]; // Use first equipped tool
   
-  const validation = resolver.validateThrow(str, item, tool?.item);
+  const validation = validate_throw(str, item, tool?.item);
   
   return {
     can_throw: validation.can_throw,
@@ -330,7 +331,7 @@ export function getEnabledActions(actor: Actor): ActionCapability[] {
   const allCapabilities: ActionCapability[] = [];
   
   for (const equipped of equippedTools) {
-    const capabilities = resolver.getEnabledActions(equipped.item);
+    const capabilities = get_enabled_actions(equipped.item);
     allCapabilities.push(...capabilities);
   }
   
@@ -357,4 +358,5 @@ export function formatValidationResult(
 }
 
 // Re-export types
-export type { TaggedItem, ActionCapability } from "../tag_system/index.js";
+export type { TaggedItem } from "../tag_system/registry.js";
+export type { ActionCapability } from "../tag_system/capabilities.js";

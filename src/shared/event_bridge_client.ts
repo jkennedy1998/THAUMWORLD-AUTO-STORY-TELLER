@@ -10,6 +10,10 @@ import type { TagChangeEvent } from './event_emitter.js';
 
 const BRIDGE_URL = 'http://localhost:8788';
 
+export type BridgeDeliveryScope =
+  | { scope?: 'public' }
+  | { scope: 'connection'; connection_id: string };
+
 /**
  * Send event to event bridge via HTTP POST
  * This allows cross-process event broadcasting
@@ -61,14 +65,14 @@ export async function emitToBridge(event: TagChangeEvent): Promise<void> {
  * Send a generic message to the event bridge.
  * Used for non-tag high-frequency events like breath ticks.
  */
-export async function emitBridgeMessage(type: string, data?: any): Promise<void> {
+export async function emitBridgeMessage(type: string, data?: any, delivery?: BridgeDeliveryScope): Promise<void> {
   const t = String(type ?? '').trim();
   if (!t) return;
   try {
     const response = await fetch(`${BRIDGE_URL}/api/events/emit_any`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: t, data }),
+      body: JSON.stringify({ type: t, data, delivery: delivery ?? { scope: 'public' } }),
     });
 
     // Avoid per-tick spam; only log errors.

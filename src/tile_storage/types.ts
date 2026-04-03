@@ -24,6 +24,7 @@ export interface TileDefinition {
     id: string;                    // Unique identifier
     name: string;                  // Display name
     description: string;           // Flavor text
+    base_value_mag?: number;       // Canonical base MAG value before tag contributions
     weight: number;                // Base physical weight for tile physics
     
     // Visual properties

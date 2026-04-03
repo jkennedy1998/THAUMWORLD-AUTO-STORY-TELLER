@@ -3,19 +3,14 @@
 
 import type { Location } from "../action_system/intent.js";
 import {
-  TagResolver,
-  tagRegistry,
   initializeDefaultRules,
-  calculateWeightMAG,
   type TaggedItem,
-  type ActionCapability
-} from "../tag_system/index.js";
+} from "../tag_system/registry.js";
+import { get_action_capability, type ActionCapability } from "../tag_system/capabilities.js";
+import { calculate_weight_mag } from "../mag/weight.js";
 
 // Initialize default rules
 initializeDefaultRules();
-
-// Create resolver
-const resolver = new TagResolver(tagRegistry);
 
 /**
  * Range types
@@ -90,7 +85,7 @@ export function calculateEffectiveRange(
   actionType: string,
   throwerSTR?: number
 ): number {
-  const capability = resolver.getActionCapability(tool, actionType);
+  const capability = get_action_capability(tool, actionType);
   
   if (!capability) {
     // Default to THROWN if no capability found
@@ -171,7 +166,7 @@ export function getRangeType(
   tool: TaggedItem,
   actionType: string
 ): RangeType {
-  const capability = resolver.getActionCapability(tool, actionType);
+  const capability = get_action_capability(tool, actionType);
   
   if (!capability) {
     return "THROWN"; // Default
@@ -199,7 +194,7 @@ export function getOptimalRange(
   tool: TaggedItem,
   actionType: string
 ): number {
-  const capability = resolver.getActionCapability(tool, actionType);
+  const capability = get_action_capability(tool, actionType);
   
   if (!capability) {
     return RANGE_CATEGORIES.THROWN.baseRange;
@@ -270,5 +265,5 @@ export function validateRange(
   };
 }
 
-export { calculateWeightMAG };
+export { calculate_weight_mag as calculateWeightMAG };
 export type { TaggedItem, ActionCapability };

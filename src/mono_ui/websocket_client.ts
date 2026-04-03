@@ -14,12 +14,39 @@ import type { TagChangeEvent } from '../shared/event_emitter.js';
 export class WebSocketClient {
   private ws: WebSocket | null = null;
   private url: string;
+  private sessionToken: string | null = null;
+  private slot: number = 1;
   private reconnectInterval: number = 5000;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatInterval: number = 10000;
+  private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatAckTimer: ReturnType<typeof setTimeout> | null = null;
+  private connectionId: string | null = null;
   private eventHandlers: Map<string, ((event: any) => void)[]> = new Map();
 
   constructor(port: number = 8789) {
     this.url = `ws://localhost:${port}`;
+  }
+
+  private buildUrl(): string | null {
+    const token = String(this.sessionToken ?? '').trim();
+    if (!token) return null;
+    return `${this.url}?slot=${encodeURIComponent(String(this.slot))}&session_token=${encodeURIComponent(token)}`;
+  }
+
+  updateConnectionOptions(options: { sessionToken?: string | null; slot?: number | null }): void {
+    if (typeof options.sessionToken === 'string') {
+      this.sessionToken = options.sessionToken.trim() || null;
+    }
+    if (typeof options.slot === 'number' && Number.isFinite(options.slot) && options.slot > 0) {
+      this.slot = Math.floor(options.slot);
+    }
+    if (!this.ws || this.ws.readyState === WebSocket.CLOSED) {
+      this.connect();
+      return;
+    }
+    this.disconnect();
+    this.connect();
   }
 
   /**
@@ -27,8 +54,13 @@ export class WebSocketClient {
    */
   connect(): void {
     try {
-      console.log('[WebSocketClient] Connecting to', this.url);
-      this.ws = new WebSocket(this.url);
+      const connectionUrl = this.buildUrl();
+      if (!connectionUrl) {
+        console.log('[WebSocketClient] Waiting for multiplayer session before connecting');
+        return;
+      }
+      console.log('[WebSocketClient] Connecting to', connectionUrl.replace(/session_token=[^&]+/, 'session_token=[redacted]'));
+      this.ws = new WebSocket(connectionUrl);
 
       this.ws.onopen = () => {
         console.log('[WebSocketClient] Connected successfully');
@@ -49,6 +81,7 @@ export class WebSocketClient {
       };
 
       this.ws.onclose = () => {
+        this.clearHeartbeatTimers();
         console.log('[WebSocketClient] Connection closed, reconnecting in', this.reconnectInterval, 'ms');
         this.scheduleReconnect();
       };
@@ -72,6 +105,18 @@ export class WebSocketClient {
 
     if (t === 'CONNECTED') {
       console.log('[WebSocketClient] Server says:', data.message);
+      this.connectionId = typeof data?.connection_id === 'string' ? data.connection_id : null;
+      this.startHeartbeat();
+      return;
+    }
+
+    if (t === 'SESSION_HEARTBEAT_ACK') {
+      this.clearHeartbeatAckTimer();
+      return;
+    }
+
+    if (t === 'SESSION_INVALIDATED' || t === 'CLAIM_INVALIDATED') {
+      this.emit(t, (data as any)?.data);
       return;
     }
 
@@ -107,6 +152,54 @@ export class WebSocketClient {
     }
   }
 
+  private send(type: string, data?: any): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify({ type, data }));
+  }
+
+  private clearHeartbeatAckTimer(): void {
+    if (this.heartbeatAckTimer) {
+      clearTimeout(this.heartbeatAckTimer);
+      this.heartbeatAckTimer = null;
+    }
+  }
+
+  private clearHeartbeatTimers(): void {
+    if (this.heartbeatTimer) {
+      clearTimeout(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+    this.clearHeartbeatAckTimer();
+  }
+
+  private scheduleHeartbeat(): void {
+    this.heartbeatTimer = setTimeout(() => {
+      this.sendHeartbeat();
+    }, this.heartbeatInterval);
+  }
+
+  private startHeartbeat(): void {
+    this.clearHeartbeatTimers();
+    this.sendHeartbeat();
+  }
+
+  private sendHeartbeat(): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.send('SESSION_HEARTBEAT', {
+      connection_id: this.connectionId,
+      sent_at_ms: Date.now(),
+    });
+    this.clearHeartbeatAckTimer();
+    this.heartbeatAckTimer = setTimeout(() => {
+      try {
+        this.ws?.close();
+      } catch {
+        // ignore close failure
+      }
+    }, 4000);
+    this.scheduleHeartbeat();
+  }
+
   /**
    * Subscribe to tag events
    */
@@ -134,6 +227,7 @@ export class WebSocketClient {
    * Disconnect from WebSocket server
    */
   disconnect(): void {
+    this.clearHeartbeatTimers();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -154,11 +248,12 @@ let client: WebSocketClient | null = null;
 /**
  * Initialize WebSocket client (call from renderer startup)
  */
-export function initWebSocketClient(port?: number): WebSocketClient {
+export function initWebSocketClient(port?: number, options?: { sessionToken?: string | null; slot?: number | null }): WebSocketClient {
   if (!client) {
     client = new WebSocketClient(port);
-    client.connect();
   }
+  if (options) client.updateConnectionOptions(options);
+  else client.connect();
   return client;
 }
 

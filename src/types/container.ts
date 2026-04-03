@@ -228,25 +228,15 @@ export function calculate_grid_dimensions(total_slots: number): { cols: number; 
 
 /**
  * Get total slot count for a container
- * Uses capacity.max_slots if available, otherwise calculates from tags
- * Formula: slots = 5 * CONTAINER_MAG tag value
+ * Uses explicit capacity when available, otherwise falls back to the legacy default.
  * 
  * @param container - The container to get slot count for
  * @returns Total number of slots
  */
 export function get_container_slot_count(container: Container): number {
-    // If capacity.max_slots is set, use it
     if (container.capacity?.max_slots !== undefined) {
         return container.capacity.max_slots;
     }
-    
-    // Otherwise calculate from CONTAINER_MAG tag
-    const container_mag_tag = container.tags.find(tag => tag.name === "CONTAINER_MAG");
-    if (container_mag_tag) {
-        return 5 * container_mag_tag.mag;
-    }
-    
-    // Default: 5 slots (MAG 1)
     return 5;
 }
 

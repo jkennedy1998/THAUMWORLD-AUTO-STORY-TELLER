@@ -3,7 +3,8 @@
 // Uses existing src/inspection system
 
 import type { Location } from "../action_system/intent.js";
-import type { TaggedItem } from "../tag_system/index.js";
+import type { TaggedItem } from "../tag_system/registry.js";
+import { has_resolved_tag } from "../tag_system/canonical_readers.js";
 import type { ActionContext, ActionResult } from "./core.js";
 import { inspect_target, type InspectorData, type InspectionTarget, type InspectionResult } from "../inspection/data_service.js";
 import {
@@ -321,9 +322,9 @@ export function calculateInspectRange(actor: {
         const item = slot.item as TaggedItem;
         
         // Check for sense-enhancing items
-        const hasSightEnhancement = item.tags?.some(t => 
-          t.name === "spyglass" || t.name === "eagle_eye"
-        );
+        const raw_tags = Array.isArray((item as any)?.tags) ? (item as any).tags : [];
+        const hasRawTag = (want: string) => raw_tags.some((tag: any) => String(tag?.name ?? '').trim().toUpperCase() === String(want ?? '').trim().toUpperCase());
+        const hasSightEnhancement = has_resolved_tag(item as any, "spyglass") || has_resolved_tag(item as any, "eagle_eye") || hasRawTag("spyglass") || hasRawTag("eagle_eye");
         
         if (hasSightEnhancement) {
           maxRange += 5; // +5 tiles per enhancement

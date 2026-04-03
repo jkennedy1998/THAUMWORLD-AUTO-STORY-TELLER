@@ -30,8 +30,9 @@ import { ensure_outbox_exists, read_outbox, write_outbox } from "../engine/outbo
 import { debug_log } from "../shared/debug.js";
 import type { AnyMovementCommand, AnyMovementCommandInput, MovementCommandMessage } from "../shared/movement_commands.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
+import { get_configured_data_slot } from "../shared/boot_env.js";
 
-const data_slot = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+const data_slot = get_configured_data_slot();
 
 /**
  * Send a movement command to the renderer

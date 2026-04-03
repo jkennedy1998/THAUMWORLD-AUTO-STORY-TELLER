@@ -288,6 +288,7 @@ export interface ToolProperties {
   // Tool assignments
   left_click_tool: string;
   right_click_tool: string;
+  active_property_side: 'left' | 'right';
 }
 
 /**
@@ -316,6 +317,7 @@ const DEFAULT_TOOL_PROPERTIES: ToolProperties = {
   paste_ignore_white: false,
   left_click_tool: 'pencil',
   right_click_tool: 'eraser',
+  active_property_side: 'left',
 };
 
 /**

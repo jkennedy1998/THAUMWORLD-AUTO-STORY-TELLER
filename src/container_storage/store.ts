@@ -12,12 +12,19 @@ import { load_place, save_place } from "../place_storage/store.js";
 import { load_actor, save_actor } from "../actor_storage/store.js";
 import { load_master_item } from "../item_storage/store.js";
 import { can_stack_items_with_spoil_policy, merge_item_stack_into_target } from "../item_storage/stacking.js";
-import { 
+import {
     check_tag_compatibility, 
     has_equipment_tags,
     get_primary_slot_type,
     get_compatible_slot_types
 } from "../equipment/tag_validation.js";
+
+// LEGACY MODULE
+//
+// This file still supports older container-oriented flows, but it is no longer the
+// canonical source of truth for item tag behavior. Active runtime item tags should
+// come from item definitions + tag deltas resolved through `src/item_storage/resolve.ts`.
+// Avoid using this module as the model for new tag or container architecture work.
 
 // Re-export Container for backward compatibility
 export type { Container };

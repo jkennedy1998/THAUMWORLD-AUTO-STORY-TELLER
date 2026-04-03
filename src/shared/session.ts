@@ -3,6 +3,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { get_host_session_file_path } from './boot_env.js';
 
 interface SessionFile {
   session_id: string;
@@ -17,7 +18,7 @@ function generateSessionId(): string {
 
 function readSessionFile(): SessionFile | null {
   try {
-    const sessionFilePath = path.join(process.cwd(), '.session_id');
+    const sessionFilePath = get_host_session_file_path();
     if (!fs.existsSync(sessionFilePath)) {
       return null;
     }
@@ -49,7 +50,8 @@ function initializeSessionId(): string {
 // This allows long-running services to follow updates to `.session_id`.
 export let SESSION_ID = initializeSessionId();
 
-// Poll session file every 5 seconds to detect late starters or updates
+// Poll host session file every 5 seconds to detect controlled host restarts.
+// Client-only boots must never rewrite this file.
 setInterval(() => {
   const sessionFile = readSessionFile();
   if (sessionFile && sessionFile.session_id && sessionFile.session_id !== SESSION_ID) {

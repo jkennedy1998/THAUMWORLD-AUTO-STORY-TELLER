@@ -12,4 +12,5 @@ export {
   type ToolValidationResult
 } from "./tool_validator.js";
 
-export type { TaggedItem, ActionCapability } from "../tag_system/index.js";
+export type { TaggedItem } from "../tag_system/registry.js";
+export type { ActionCapability } from "../tag_system/capabilities.js";

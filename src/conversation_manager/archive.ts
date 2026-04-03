@@ -81,6 +81,11 @@ function get_archive_path(slot: number): string {
     return path.join(get_conversations_dir(slot), ARCHIVE_FILE);
 }
 
+function conversation_id_to_filename(conversation_id: string): string {
+    const raw = String(conversation_id ?? "").trim() || "conversation_unknown";
+    return `${encodeURIComponent(raw)}.jsonc`;
+}
+
 function ensure_conversations_dir(slot: number): void {
     const dir = get_conversations_dir(slot);
     if (!fs.existsSync(dir)) {
@@ -357,7 +362,7 @@ export function end_conversation(
  */
 function save_conversation(slot: number, conversation: ConversationArchive): void {
     ensure_conversations_dir(slot);
-    const file_path = path.join(get_conversations_dir(slot), `${conversation.conversation_id}.jsonc`);
+    const file_path = path.join(get_conversations_dir(slot), conversation_id_to_filename(conversation.conversation_id));
     fs.writeFileSync(file_path, JSON.stringify(conversation, null, 2), "utf-8");
 }
 
@@ -365,7 +370,7 @@ function save_conversation(slot: number, conversation: ConversationArchive): voi
  * Load conversation from disk
  */
 function load_conversation(slot: number, conversation_id: string): ConversationArchive | null {
-    const file_path = path.join(get_conversations_dir(slot), `${conversation_id}.jsonc`);
+    const file_path = path.join(get_conversations_dir(slot), conversation_id_to_filename(conversation_id));
     if (!fs.existsSync(file_path)) return null;
     
     try {

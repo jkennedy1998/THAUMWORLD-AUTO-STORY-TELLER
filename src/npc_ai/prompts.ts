@@ -1,16 +1,33 @@
+import { load_actor } from "../actor_storage/store.js";
+import { load_npc } from "../npc_storage/store.js";
+import { SERVICE_CONFIG } from "../shared/constants.js";
+import { get_configured_data_slot } from "../shared/boot_env.js";
+
 type RelationshipStatus = "friendly" | "hostile" | "neutral" | "unknown";
+
+const data_slot_number = get_configured_data_slot();
 
 type NpcDialoguePromptParams = {
     npc: any;
     player_text: string;
     can_perceive: boolean;
     memory_context?: string;
+    conversation_mode?: string;
+    social_role?: string;
+    transcript_recent?: Array<{ speaker_ref: string; text: string }>;
+    transcript_summary?: string;
+    participant_factoids?: string[];
     player_location_name?: string;
     npc_location_name?: string;
     relationship_status?: RelationshipStatus;
     relationship_memory_count?: number;
-    place?: any;
-    region?: any;
+    template_situation?: string;
+    template_context_lines?: string[];
+    template_examples?: string[];
+    response_constraints?: string[];
+    selected_personality_lines?: string[];
+    selected_world_lines?: string[];
+    selected_place_summary_lines?: string[];
 };
 
 type PromptPair = { system: string; user: string };
@@ -19,101 +36,40 @@ function safe_text(v: unknown): string {
     return typeof v === "string" ? v.trim() : "";
 }
 
-function extract_keywords(text: string): string[] {
-    const words = text
-        .toLowerCase()
-        .replace(/[^a-z0-9\s]/g, " ")
-        .split(/\s+/)
-        .map((w) => w.trim())
-        .filter((w) => w.length >= 4);
-    const dedup = Array.from(new Set(words));
-    return dedup.slice(0, 12);
-}
-
-function score_line(line: string, keywords: string[]): number {
-    if (!line) return 0;
-    const lower = line.toLowerCase();
-    let score = 0;
-    for (const kw of keywords) {
-        if (lower.includes(kw)) score += 2;
+function get_speaker_display_name(speaker_ref: string): string {
+    const ref = safe_text(speaker_ref);
+    if (ref.startsWith("npc.")) {
+        const result = load_npc(data_slot_number, ref.slice(4));
+        if (result.ok) {
+            const name = safe_text((result.npc as any)?.name);
+            if (name) return name;
+        }
+        return "Unknown NPC";
     }
-    if (score === 0 && /rumor|secret|history|danger|guard|tavern|trade|road|shrine/.test(lower)) {
-        score = 1;
+    if (ref.startsWith("actor.")) {
+        const result = load_actor(data_slot_number, ref.slice(6));
+        if (result.ok) {
+            const name = safe_text((result.actor as any)?.name);
+            if (name) return name;
+        }
+        return "Unknown Actor";
     }
-    return score;
-}
-
-function pick_relevant(lines: string[], query: string, max_items: number): string[] {
-    const keywords = extract_keywords(query);
-    const scored = lines
-        .map((line) => ({ line: line.trim(), score: score_line(line, keywords) }))
-        .filter((x) => x.line.length > 0)
-        .sort((a, b) => b.score - a.score);
-    const picked = scored.slice(0, max_items).map((x) => x.line);
-    return Array.from(new Set(picked));
-}
-
-function build_lore_shards(player_text: string, place: any, region: any): string[] {
-    const lore_candidates: string[] = [];
-
-    const place_name = safe_text(place?.name);
-    const place_short = safe_text(place?.description?.short);
-    const place_full = safe_text(place?.description?.full);
-    const place_sight = Array.isArray(place?.description?.sensory?.sight) ? place.description.sensory.sight : [];
-    const place_sound = Array.isArray(place?.description?.sensory?.sound) ? place.description.sensory.sound : [];
-
-    if (place_name) lore_candidates.push(`Place: ${place_name}`);
-    if (place_short) lore_candidates.push(`Local detail: ${place_short}`);
-    if (place_full) lore_candidates.push(`Local detail: ${place_full}`);
-    for (const s of place_sight.slice(0, 3)) lore_candidates.push(`Seen nearby: ${safe_text(s)}`);
-    for (const s of place_sound.slice(0, 2)) lore_candidates.push(`Heard nearby: ${safe_text(s)}`);
-
-    const region_name = safe_text(region?.name);
-    const region_atmosphere = safe_text(region?.description?.atmosphere);
-    const region_history = safe_text(region?.lore?.history);
-    const region_rumors = Array.isArray(region?.lore?.rumors) ? region.lore.rumors : [];
-    const region_events = Array.isArray(region?.state?.current_events) ? region.state.current_events : [];
-
-    if (region_name) lore_candidates.push(`Region: ${region_name}`);
-    if (region_atmosphere) lore_candidates.push(`Atmosphere: ${region_atmosphere}`);
-    if (region_history) lore_candidates.push(`History: ${region_history}`);
-    for (const r of region_rumors.slice(0, 4)) lore_candidates.push(`Rumor: ${safe_text(r)}`);
-    for (const e of region_events.slice(0, 3)) lore_candidates.push(`Current event: ${safe_text(e)}`);
-
-    return pick_relevant(lore_candidates, player_text, 4);
-}
-
-function build_personality_card(npc: any, player_text: string): string[] {
-    const personality = (npc?.personality ?? {}) as Record<string, unknown>;
-    const lines: string[] = [];
-    const goal = safe_text(personality.story_goal);
-    const passion = safe_text(personality.passion);
-    const flaw = safe_text(personality.flaw);
-    const fear = safe_text(personality.fear);
-    const happy = safe_text(personality.happy_triggers);
-    const angry = safe_text(personality.angry_triggers);
-    const lower = player_text.toLowerCase();
-
-    if (goal && safe_text(npc?.role) !== "villager") lines.push(`Goal: ${goal}`);
-    if (passion && (lower.includes(passion.toLowerCase()) || Math.random() < 0.25)) lines.push(`Passion: ${passion}`);
-    if (flaw) lines.push(`Flaw: ${flaw}`);
-    if (fear && (lower.includes("fear") || lower.includes("afraid") || lower.includes("threat"))) lines.push(`Fear: ${fear}`);
-    if (happy && lower.includes(happy.toLowerCase())) lines.push(`Positive trigger: ${happy}`);
-    if (angry && lower.includes(angry.toLowerCase())) lines.push(`Negative trigger: ${angry}`);
-
-    return lines.slice(0, 5);
+    return ref || "unknown";
 }
 
 export function build_npc_dialogue_prompts(params: NpcDialoguePromptParams): PromptPair {
     const npc_name = safe_text(params.npc?.name) || "Unknown NPC";
     const title = safe_text(params.npc?.title);
     const features = safe_text(params.npc?.appearance?.distinguishing_features);
-    const personality_lines = build_personality_card(params.npc, params.player_text);
-    const lore_lines = build_lore_shards(params.player_text, params.place, params.region);
+    const personality_lines = Array.isArray(params.selected_personality_lines) ? params.selected_personality_lines : [];
+    const lore_lines = Array.isArray(params.selected_world_lines) ? params.selected_world_lines : [];
     const relationship = params.relationship_status ?? "unknown";
     const relationship_memories = Number.isFinite(params.relationship_memory_count)
         ? Math.max(0, Math.floor(params.relationship_memory_count as number))
         : 0;
+    const place_summary_lines = Array.isArray(params.selected_place_summary_lines) && params.selected_place_summary_lines.length > 0
+        ? params.selected_place_summary_lines
+        : [];
 
     const system = [
         "You are roleplaying a tabletop NPC in THAUMWORLD.",
@@ -121,6 +77,8 @@ export function build_npc_dialogue_prompts(params: NpcDialoguePromptParams): Pro
         "Never mention game mechanics, prompts, tokens, or being an AI.",
         "Use short natural dialogue unless the user clearly asks for detail.",
         "Treat memories as subjective recollection, not perfect objective records.",
+        "Answer the speaker's actual point directly before adding flavor.",
+        "Prefer spoken dialogue over narrated gestures or stage directions.",
     ].join("\n");
 
     const user_lines: string[] = [];
@@ -137,6 +95,11 @@ export function build_npc_dialogue_prompts(params: NpcDialoguePromptParams): Pro
         user_lines.push(`Location context: you are in ${npc_loc}; speaker location is ${player_loc}.`);
     }
 
+    if (place_summary_lines.length > 0) {
+        user_lines.push("Place summary:");
+        for (const line of place_summary_lines) user_lines.push(`- ${line}`);
+    }
+
     user_lines.push(`Relationship stance toward speaker: ${relationship} (based on ${relationship_memories} memories).`);
 
     if (!params.can_perceive) {
@@ -144,7 +107,7 @@ export function build_npc_dialogue_prompts(params: NpcDialoguePromptParams): Pro
     }
 
     if (lore_lines.length > 0) {
-        user_lines.push("Relevant setting lore:");
+        user_lines.push("Grounded world context:");
         for (const lore of lore_lines) user_lines.push(`- ${lore}`);
     }
 
@@ -153,8 +116,61 @@ export function build_npc_dialogue_prompts(params: NpcDialoguePromptParams): Pro
         user_lines.push(params.memory_context.trim());
     }
 
+    if (params.conversation_mode) {
+        user_lines.push(`Conversation mode: ${params.conversation_mode}`);
+    }
+    if (params.social_role) {
+        user_lines.push(`Your social role in this reply: ${params.social_role}`);
+    }
+    if (params.template_situation) {
+        user_lines.push(`Reply situation: ${params.template_situation}`);
+    }
+    if (Array.isArray(params.template_context_lines) && params.template_context_lines.length > 0) {
+        user_lines.push("Reply guidance:");
+        for (const line of params.template_context_lines.slice(0, 5)) {
+            const text = safe_text(line);
+            if (text) user_lines.push(`- ${text}`);
+        }
+    }
+    if (Array.isArray(params.response_constraints) && params.response_constraints.length > 0) {
+        user_lines.push("Constraints:");
+        for (const line of params.response_constraints.slice(0, 4)) {
+            const text = safe_text(line);
+            if (text) user_lines.push(`- ${text}`);
+        }
+    }
+    if (Array.isArray(params.template_examples) && params.template_examples.length > 0) {
+        user_lines.push("Voice examples for tone only (do not copy them exactly):");
+        for (const line of params.template_examples.slice(0, 3)) {
+            const text = safe_text(line);
+            if (text) user_lines.push(`- ${text}`);
+        }
+    }
+    if (params.transcript_summary && params.transcript_summary.trim().length > 0) {
+        user_lines.push("Conversation summary so far:");
+        user_lines.push(params.transcript_summary.trim());
+    }
+    if (Array.isArray(params.participant_factoids) && params.participant_factoids.length > 0) {
+        user_lines.push("What you particularly remember:");
+        for (const fact of params.participant_factoids.slice(-4)) {
+            const text = safe_text(fact);
+            if (text) user_lines.push(`- ${text}`);
+        }
+    }
+    if (Array.isArray(params.transcript_recent) && params.transcript_recent.length > 0) {
+        user_lines.push("Most recent conversation turns:");
+        for (const line of params.transcript_recent.slice(-6)) {
+            const speaker = get_speaker_display_name(safe_text(line?.speaker_ref));
+            const text = safe_text(line?.text);
+            if (text) user_lines.push(`- ${speaker}: ${text}`);
+        }
+    }
+
     user_lines.push(`Player says: "${params.player_text}"`);
     user_lines.push("Respond with 1-3 sentences in your own voice.");
+    user_lines.push("If this is an ongoing exchange, continue it instead of restarting it.");
+    user_lines.push("If the speaker asks for something concrete, address that concrete thing first.");
+    user_lines.push("Use gesture or physical action only if it genuinely helps the line; otherwise keep the reply as spoken dialogue.");
     user_lines.push("If uncertain, ask one grounded follow-up question instead of inventing facts.");
 
     return {

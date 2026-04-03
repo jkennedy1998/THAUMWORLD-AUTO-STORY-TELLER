@@ -15,9 +15,6 @@
       "weight_bands": [2, 4]
     }
   },
-  "container_capacity": {
-    "max_slots": 5
-  },
   "tags": [
     {
       "name": "FLORA",
@@ -26,19 +23,18 @@
       "scope": ["TILE"]
     },
     {
-      "name": "CONTAINER",
-      "mag": 1,
-      "meta": [],
-      "scope": ["TILE"]
-    },
-    {
       "name": "GROW",
       "mag": 1,
+      "rank_mag": 1,
+      "dim_mag": {
+        "grow_speed_mag": 0,
+        "grow_capacity_mag": 2,
+        "grow_yield_mag": 1
+      },
       "meta": [],
       "info": [
         {
-          "item_def_ids": ["snowberries"],
-          "period_breaths": 300
+          "item_def_ids": ["snowberries"]
         }
       ],
       "scope": ["TILE"]

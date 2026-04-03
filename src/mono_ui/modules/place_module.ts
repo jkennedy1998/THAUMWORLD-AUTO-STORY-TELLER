@@ -22,7 +22,7 @@ import { can_place_volume } from "../../place_storage/movement_legality.js";
 import { find_path as shared_find_path } from "../../shared/pathfinding.js";
 import { set_npc_tracked_position, get_npc_visual_status } from "./movement_command_handler.js";
 import { play_sfx } from "../sfx/sfx_player.js";
-import { make_entity_payload, make_ground_items_tile_payload, make_item_like_payload, make_pile_payload, make_simple_tile_payload } from "../../render_shaders/payload_builders.js";
+import { make_entity_payload, make_ground_items_tile_payload, make_item_like_payload, make_item_payload, make_pile_payload, make_simple_tile_payload } from "../../render_shaders/payload_builders.js";
 import { draw_render_queue, select_flash_index, type RenderRequest } from "../../render_shaders/render_queue.js";
 import { ctx_place_tile } from "../../render_shaders/context_builders.js";
 import { PlaceDomLayers } from "../place_dom_layers.js";
@@ -33,6 +33,8 @@ import { compute_dom_viewport_for_rect } from "../runtime/dom_viewport.js";
 import { create_place_camera_controller } from "../runtime/place_camera_controller.js";
 import { get_move_intent, is_jump_down, subscribe_move_intent_changes, type MoveIntent, type MoveIntentChangeMeta } from "../runtime/input_actions.js";
 import { get_character_camera_focus_tile } from "../../shared/character_camera_focus.js";
+import type { ItemInstance } from "../../item_instances/store.js";
+import type { ItemDefinition } from "../../item_storage/store.js";
 import { get_defined_place_world_zs as get_authored_place_world_zs, get_place_base_z, get_place_tile_at_world_z as get_shared_place_tile_at_world_z, tile_offset_to_layer_key } from "../../shared/place_layers.js";
 import { compute_adjacent_place_bounds, find_place_containing_region_voxel, get_local_volume_boundary_info, get_place_region_bounds, get_places_face_adjacency, region_bounds_overlap, select_place_resize_face } from "../../shared/place_adjacency.js";
 import {
@@ -262,6 +264,9 @@ export type PlaceModuleConfig = {
   on_double_click_npc?: (npc_ref: string) => void;  // Open NPC character module
   on_double_click_ground?: (tile_x: number, tile_y: number) => void;  // Open scattered container
   on_open_tile_container?: (tile_x: number, tile_y: number, world_z: number) => void;  // Open a tile container (harvestable, planter, etc.)
+  get_controlled_actor_ref?: () => string | null;
+  get_session_token?: () => string | null;
+  request_scene_place_refresh?: (place_id: string) => void;
   get_actor_position?: () => { x: number; y: number } | null;  // For distance checking
   get_camera_target_position?: () => { x: number; y: number } | null;
   get_camera_target_mode?: () => 'follow_actor' | 'free';
@@ -1220,7 +1225,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   }
 
   function get_primary_actor_focus_position(place: Place): { x: number; y: number } | null {
-    const actor: any = place.contents?.actors_present?.[0] ?? null;
+    const actor: any = get_controlled_place_actor(place);
     if (!actor) return null;
     const ref = String(actor?.actor_ref ?? '');
     const focus = get_entity_focus_tile(actor, place, ref);
@@ -1382,10 +1387,19 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     return Math.floor(Number(visible_planes_z[focus_slot]));
   }
 
+  function get_controlled_place_actor(place: Place | null | undefined): PlaceActor | null {
+    if (!place) return null;
+    const actor_ref = String(config.get_controlled_actor_ref?.() ?? '').trim();
+    if (!actor_ref) return null;
+    return Array.isArray(place.contents?.actors_present)
+      ? (place.contents.actors_present.find((actor: any) => String(actor?.actor_ref ?? '') === actor_ref) ?? null)
+      : null;
+  }
+
   function get_player_actor_world_pos(place: Place): { x: number; y: number; z: number } | null {
     try {
       const base_z = get_place_base_z(place);
-      const a: any = (place.contents?.actors_present ?? [])[0] ?? null;
+      const a: any = get_controlled_place_actor(place);
       const tp = a?.tile_position;
       if (!tp || typeof tp.x !== 'number' || typeof tp.y !== 'number') return null;
       const z = get_entity_world_z(a, base_z);
@@ -1580,6 +1594,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          session_token: config.get_session_token?.() ?? undefined,
           entity_ref: meta.actor_ref,
           place_id: meta.place_id,
           dx: meta.dx,
@@ -1603,7 +1618,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   async function trigger_actor_ascend(): Promise<void> {
     const place = config.get_place();
     if (!place) return;
-    const actor = place.contents.actors_present[0];
+    const actor = get_controlled_place_actor(place);
     if (!actor) return;
     try {
       const actor_id = String(actor.actor_ref).replace(/^actor\./, '');
@@ -1640,7 +1655,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   function dispatch_transition_intent(intent: MoveIntent, meta: MoveIntentChangeMeta): void {
     const place = config.get_place();
     if (!place) return;
-    const actor = place.contents.actors_present[0];
+    const actor = get_controlled_place_actor(place);
     if (!actor) return;
     const mode = get_move_mode();
     const now_ms = Date.now();
@@ -2573,13 +2588,18 @@ export function make_place_module(config: PlaceModuleConfig): Module {
                 y: screen_y,
                 order: 0,
                 key: item_container_id,
-                payload: make_item_like_payload({
+                payload: make_item_payload({
                   id: String(meta.id ?? item_ids[0]),
                   def_id: meta.def_id ? String(meta.def_id) : undefined,
-                  name: meta.name ? String(meta.name) : undefined,
-                  qty: typeof meta.qty === 'number' ? meta.qty : undefined,
+                  qty: typeof meta.qty === 'number' ? meta.qty : 1,
                   display_char: typeof meta.display_char === 'string' ? meta.display_char : undefined,
                   tags: Array.isArray(meta.tags) ? meta.tags : [],
+                } as unknown as ItemInstance, {
+                  id: meta.def_id ? String(meta.def_id) : String(meta.id ?? item_ids[0]),
+                  name: meta.name ? String(meta.name) : undefined,
+                  display_char: typeof meta.display_char === 'string' ? meta.display_char : undefined,
+                  tags: Array.isArray(meta.tags) ? meta.tags : [],
+                } as ItemDefinition, {
                   base_fg: typeof meta.display_color === 'string' ? hex_to_rgb(meta.display_color) : undefined,
                 }) as any,
                 ctx: ctx_place_tile({
@@ -3319,7 +3339,10 @@ export function make_place_module(config: PlaceModuleConfig): Module {
             other_place.contents.actors_present = other_place.contents.actors_present.filter((a0: any) => a0.actor_ref !== ref);
           }
           const a: any = target_place.contents.actors_present.find((a0: any) => a0.actor_ref === ref);
-          if (!a) continue;
+          if (!a) {
+            config.request_scene_place_refresh?.(pid);
+            continue;
+          }
           const prevZ = (typeof (a as any).elevation === 'number' && Number.isFinite((a as any).elevation))
             ? Math.floor((a as any).elevation)
             : null;
@@ -3608,7 +3631,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       // This removes reliance on event timing for movement.
       const INTENT_RESEND_INTERVAL_MS = 750;
       const intent = get_move_intent();
-      const actor = place.contents.actors_present[0];
+      const actor = get_controlled_place_actor(place);
       if (actor && !painter_active) {
         const mode = get_move_mode();
         record_intent_observed(intent, { mode, place_id: place.id, actor_ref: actor.actor_ref });
@@ -4242,6 +4265,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         const t = get_place_tile_at_world_z(active_place, active_tile.x, active_tile.y, local_focus_world_z) as any;
         const is_container_tile =
           Array.isArray(t?.contents) ||
+          Array.isArray((t as any)?.grow_surfaces) ||
+          tile_has_tag(t as any, 'GROW') ||
           !!t?.container_capacity ||
           !!t?.container_glyphs;
 
@@ -4265,7 +4290,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       // PRIORITY 2: Connector travel
       const connector_hit = (local_focus_world_z === get_place_base_z(active_place)) ? get_connector_at_tile(place, active_place, active_tile.x, active_tile.y, local_focus_world_z) : null;
       if (connector_hit) {
-        const player = place.contents.actors_present[0];
+        const player = get_controlled_place_actor(place);
         if (!player) return;
 
         const dist_to_connector = Math.sqrt(
@@ -4378,7 +4403,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
       // Find the actor (player) to move
       // For now, move the first actor found
-      const actor = place.contents.actors_present[0];
+      const actor = get_controlled_place_actor(place);
       if (!actor) {
         debug_log_place("Click-to-move: No actor to move");
         return;
@@ -4403,9 +4428,10 @@ export function make_place_module(config: PlaceModuleConfig): Module {
          method: 'POST',
          headers: { 'Content-Type': 'application/json' },
          body: JSON.stringify({
-           entity_ref: actor.actor_ref,
-           place_id: place.id,
-            x: active_tile.x,
+            session_token: config.get_session_token?.() ?? undefined,
+            entity_ref: actor.actor_ref,
+            place_id: place.id,
+             x: active_tile.x,
             y: active_tile.y,
             z: local_focus_world_z,
             mode,

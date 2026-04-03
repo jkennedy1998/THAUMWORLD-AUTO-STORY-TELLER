@@ -13,6 +13,7 @@ import {
 } from "./log_capture.js";
 import * as path from "path";
 import * as fs from "fs";
+import { get_host_session_file_path } from "../shared/boot_env.js";
 
 // Determine if running from compiled executable
 const is_packaged = typeof process !== "undefined" && (process as any).pkg !== undefined;
@@ -23,6 +24,7 @@ const base_dir = is_packaged
   : process.cwd();
 
 const data_slot = parseInt(process.env.DATA_SLOT || "1");
+const launch_mode = String(process.env.THAUM_LAUNCH_MODE || "smart").trim().toLowerCase();
 
 /**
  * Check if Ollama is running
@@ -34,6 +36,37 @@ async function check_ollama(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function detect_local_host(): Promise<boolean> {
+  try {
+    const response = await fetch(`http://localhost:8787/api/host/status?slot=${data_slot}`);
+    if (!response.ok) return false;
+    const data = await response.json();
+    return Boolean(data?.ok);
+  } catch {
+    return false;
+  }
+}
+
+async function detect_vite(): Promise<boolean> {
+  try {
+    const response = await fetch("http://localhost:5173");
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+function write_host_session_file(): void {
+  const filePath = get_host_session_file_path(data_slot);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify({
+    session_id: `session_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+    boot_time: new Date().toISOString(),
+    boot_timestamp: Date.now(),
+    version: 1,
+  }, null, 2));
 }
 
 /**
@@ -51,19 +84,22 @@ async function main(): Promise<void> {
   console.log(`📦 Packaged: ${is_packaged}`);
   console.log(`📁 Base directory: ${base_dir}`);
   console.log(`💾 Data slot: ${data_slot}`);
+  console.log(`🧭 Launch mode: ${launch_mode}`);
   console.log("");
 
   // Check prerequisites
   console.log("🔍 Checking prerequisites...");
 
-  const ollama_running = await check_ollama();
-  if (!ollama_running) {
-    console.error("❌ Ollama not detected!");
-    console.error("   Please start Ollama first: https://ollama.ai");
-    console.error("   Once Ollama is running, restart this launcher.");
-    process.exit(1);
+  if (launch_mode !== 'client') {
+    const ollama_running = await check_ollama();
+    if (!ollama_running) {
+      console.error("❌ Ollama not detected!");
+      console.error("   Please start Ollama first: https://ollama.ai");
+      console.error("   Once Ollama is running, restart this launcher.");
+      process.exit(1);
+    }
+    console.log("✅ Ollama detected");
   }
-  console.log("✅ Ollama detected");
 
   // Check data directory exists
   const data_dir = path.join(base_dir, "local_data", `data_slot_${data_slot}`);
@@ -96,6 +132,9 @@ async function main(): Promise<void> {
  * Launch all game services
  */
 async function launch_services(session: LogSession): Promise<void> {
+  const hostExists = await detect_local_host();
+  const viteRunning = await detect_vite();
+
   const services = [
     { name: "event_bridge", delay: 0 },  // Start first - other services need it
     { name: "data_broker", delay: 500 },
@@ -107,10 +146,33 @@ async function launch_services(session: LogSession): Promise<void> {
     { name: "state_applier", delay: 500 },
     { name: "turn_manager", delay: 500 },
     { name: "interface", delay: 1000 },
-    { name: "electron", delay: 2000 }
+  ];
+  const clientServices = [
+    { name: "vite", delay: viteRunning ? -1 : 0 },
+    { name: "electron", delay: 2000 },
   ];
 
+  if (launch_mode === 'client') {
+    await launch_named_services(session, clientServices, 'client');
+    return;
+  }
+
+  if (launch_mode === 'host') {
+    write_host_session_file();
+    await launch_named_services(session, services, 'host');
+    return;
+  }
+
+  if (!hostExists) {
+    write_host_session_file();
+    await launch_named_services(session, services, 'host');
+  }
+  await launch_named_services(session, clientServices, 'client');
+}
+
+async function launch_named_services(session: LogSession, services: Array<{ name: string; delay: number }>, role: 'host' | 'client'): Promise<void> {
   for (const service of services) {
+    if (service.delay < 0) continue;
     await sleep(service.delay);
 
     const exe_path = is_packaged
@@ -135,7 +197,8 @@ async function launch_services(session: LogSession): Promise<void> {
           env: {
             ...process.env,
             DATA_SLOT: data_slot.toString(),
-            NODE_ENV: "production"
+            NODE_ENV: "production",
+            THAUM_BOOT_ROLE: role,
           },
           cwd: base_dir
         }

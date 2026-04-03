@@ -1,4 +1,5 @@
 import { resolve_inline_item } from "../item_storage/resolve.js";
+import { hydrate_character_tags } from "./character_tags.js";
 
 function patch_inline_item_for_api(item: any): void {
   if (!item || typeof item !== "object") return;
@@ -8,6 +9,8 @@ function patch_inline_item_for_api(item: any): void {
     item.name = resolved.name;
     item.weight = resolved.unit_weight;
     item.tags = resolved.effective_tags;
+    item.resolved_tag_states = resolved.resolved_tag_states;
+    item.value_mag = resolved.value_mag;
     item.display_char = resolved.display_char;
     if (resolved.display_color) item.display_color = resolved.display_color;
     item.__derived_runtime = true;
@@ -19,6 +22,7 @@ function patch_inline_item_for_api(item: any): void {
 
 export function augment_inline_character_items_for_api(character: any): void {
   if (!character || typeof character !== "object") return;
+  hydrate_character_tags(character);
 
   const body_slots = character.body_slots;
   if (body_slots && typeof body_slots === "object") {

@@ -10,6 +10,7 @@ import { load_npc } from "../npc_storage/store.js";
 import { load_actor } from "../actor_storage/store.js";
 import { get_npc_location } from "../npc_storage/location.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
+import { get_configured_data_slot } from "../shared/boot_env.js";
 import { DEBUG_LEVEL } from "../shared/debug.js";
 import { debug_event } from "../shared/debug_event.js";
 
@@ -453,7 +454,7 @@ export async function getAvailableTargets(
   location: Location,
   radius: number = 50
 ): Promise<AvailableTarget[]> {
-  const data_slot = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+  const data_slot = get_configured_data_slot();
   const targets: AvailableTarget[] = [];
   
   // Need place_id to look up entities

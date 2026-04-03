@@ -5,18 +5,10 @@
   "weight": 5,
   "weight_mag": 1,
   "mag": 1,
-  "size_mag": 1,
+  "size_mag": -2,
   "hardness_mag": 2,
   "conductivity_mag": 3,
-  "max_stack_size": 99,
   "display_char": "$",
   "display_color": "#e36325",
-  "tags": [
-    {
-      "name": "CURRENCY",
-      "mag": 1,
-      "meta": [],
-      "scope": ["ITEM"]
-    }
-  ]
+  "tags": []
 }

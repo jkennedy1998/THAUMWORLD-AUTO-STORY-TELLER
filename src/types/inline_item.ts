@@ -20,11 +20,14 @@ export interface InlineItem {
     // Instance stores only deltas (remove+add) for tag mutations.
     tag_add?: TagInstance[];
     tag_remove?: Array<{ key: string; mag: number }>;
+    tag_lifecycle?: Record<string, { last_processed_breath?: number }>;
     contents?: InlineItem[];       // Nested items (only present if CONTAINER tag exists)
     container_capacity?: {         // Capacity limits (only for containers)
         max_slots?: number;
         max_weight?: number;
     };
+    resolved_tag_states?: unknown[];
+    value_mag?: unknown;
     display_color?: string;        // Runtime color override (hex code)
 }
 

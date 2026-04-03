@@ -18,6 +18,7 @@ import { handleAction, type ActionContext } from "../action_handlers/index.js";
 import { performResultRoll, performPotencyRoll, calculateCR, createRollContext, type RollContext, type ProficiencyType } from "../roll_system/index.js";
 import { DEBUG_LEVEL } from "../shared/debug.js";
 import { debug_event } from "../shared/debug_event.js";
+import { resolve_use_result_cr, type UseTargetData } from "./use_resolution.js";
 
 // Pipeline stage types
 export type PipelineStage = 
@@ -64,7 +65,10 @@ export interface PipelineDependencies {
     body_slots?: Record<string, { name: string; critical?: boolean; item?: string | { ref: string; name: string; mag: number; tags: string[] } }>;
     hand_slots?: Record<string, string>;
     inventory?: Record<string, unknown>;
+    proficiencies?: Record<string, number>;
+    stats?: Record<string, number>;
   } | null>;
+  getTargetData?: (targetRef: string) => Promise<UseTargetData | null>;
   
   // Effect execution
   executeEffect: (effect: ActionEffect) => Promise<boolean>;
@@ -394,14 +398,26 @@ export class ActionPipeline {
       return markIntentFailed(intent, "Not your turn");
     }
     
+    let effectiveCost = intent.actionCost;
+    if (intent.verb === "USE" && typeof intent.parameters?.subtype === "string") {
+      const actorData = await this.deps.getActorData(intent.actorRef);
+      const validation = validateToolRequirement(
+        actorData || { ref: intent.actorRef, hand_slots: {}, body_slots: {} },
+        intent.verb,
+        intent.parameters.subtype,
+      );
+      const runtimeCost = validation.tool?.capability?.runtime?.action_cost;
+      if (runtimeCost) effectiveCost = runtimeCost;
+    }
+
     // Check if actor can afford the cost
-    const canAfford = await this.deps.checkActionCost(intent.actorRef, intent.actionCost, intent);
+    const canAfford = await this.deps.checkActionCost(intent.actorRef, effectiveCost, { ...intent, actionCost: effectiveCost });
     if (!canAfford) {
-      return markIntentFailed(intent, `Cannot afford ${intent.actionCost} action`);
+      return markIntentFailed(intent, `Cannot afford ${effectiveCost} action`);
     }
     
     // Consume the cost
-    const consumed = await this.deps.consumeActionCost(intent.actorRef, intent.actionCost, intent);
+    const consumed = await this.deps.consumeActionCost(intent.actorRef, effectiveCost, { ...intent, actionCost: effectiveCost });
     if (!consumed) {
       return markIntentFailed(intent, "Failed to consume action cost");
     }
@@ -463,30 +479,46 @@ export class ActionPipeline {
   ): Promise<ActionResult> {
     // Get actor data and tool
     const actorData = await this.deps.getActorData(intent.actorRef);
-    const toolData = actorData ? getActionTool(actorData, intent.verb) : null;
+    const subtype = typeof intent.parameters.subtype === "string" ? intent.parameters.subtype : undefined;
+    const toolData = actorData ? getActionTool(actorData, intent.verb, subtype) : null;
     
     // Get tool capability
     const validation = validateToolRequirement(
       actorData || { ref: intent.actorRef, hand_slots: {}, body_slots: {} },
       intent.verb,
-      intent.parameters.subtype
+      subtype
     );
     
     const capability = validation.valid ? validation.tool?.capability : undefined;
     
-    // Movement should not require an outcome roll by default.
-    // Future terrain tags can opt-in by setting a difficulty or explicit requires_roll.
-    const requiresOutcomeRoll =
-      intent.verb !== "MOVE" ||
-      intent.parameters.requires_roll === true ||
-      typeof intent.parameters.difficulty === "number";
+    const targetData = intent.targetRef && this.deps.getTargetData
+      ? await this.deps.getTargetData(intent.targetRef)
+      : null;
+    const distance = intent.targetLocation
+      ? Math.sqrt(
+          Math.pow((intent.actorLocation.x || 0) - (intent.targetLocation.x || 0), 2) +
+          Math.pow((intent.actorLocation.y || 0) - (intent.targetLocation.y || 0), 2)
+        )
+      : undefined;
+    const useRollPlan = intent.verb === "USE" && subtype && capability
+      ? resolve_use_result_cr({
+          targetRef: intent.targetRef,
+          targetData: targetData ?? undefined,
+          distanceTiles: distance,
+          resultAgainst: capability.runtime.result_against,
+          autoHitTargetTypes: capability.runtime.auto_hit_target_types,
+        })
+      : null;
+    const requiresOutcomeRoll = useRollPlan
+      ? capability?.runtime.requires_result_roll === true && useRollPlan.requires_roll
+      : (intent.verb !== "MOVE" || intent.parameters.requires_roll === true || typeof intent.parameters.difficulty === "number");
 
     // Create roll context only when we need it (rolls and/or potency).
-    const needsRollContext = requiresOutcomeRoll || (intent.verb === "USE" && !!intent.parameters.subtype);
+    const needsRollContext = requiresOutcomeRoll || (intent.verb === "USE" && !!subtype && capability?.runtime.requires_potency_roll);
     const rollContext = needsRollContext
       ? createRollContext(
           intent.actorRef,
-          intent.parameters.subtype ? `${intent.verb}.${intent.parameters.subtype}` : intent.verb,
+          subtype ? `${intent.verb}.${subtype}` : intent.verb,
           toolData || undefined,
           capability,
           {
@@ -497,30 +529,18 @@ export class ActionPipeline {
       : null;
 
     // Calculate CR + roll only when required
-    const cr = requiresOutcomeRoll
-      ? calculateCR(10, {
-          distance: intent.targetLocation
-            ? Math.sqrt(
-                Math.pow(intent.actorLocation.x || 0 - (intent.targetLocation.x || 0), 2) +
-                  Math.pow(intent.actorLocation.y || 0 - (intent.targetLocation.y || 0), 2)
-              )
-            : undefined,
-          maxRange: capability?.range?.effective,
-          targetDefense: 0, // Would come from target data
-          difficulty: intent.parameters.difficulty,
-        })
-      : null;
+    const cr = useRollPlan
+      ? useRollPlan.cr
+      : requiresOutcomeRoll
+        ? calculateCR(10, {
+            distance,
+            maxRange: capability?.range?.effective,
+            targetDefense: 0,
+            difficulty: intent.parameters.difficulty,
+          })
+        : null;
 
     const resultRoll = requiresOutcomeRoll && rollContext && cr !== null ? performResultRoll(rollContext, cr) : null;
-    
-    // Perform potency roll for damage (if applicable)
-    let potencyRoll = null;
-    if (intent.verb === "USE" && intent.parameters.subtype && rollContext) {
-      const baseMAG = toolData?.tags?.find(t => 
-        capability?.source_tag && t.name === capability.source_tag
-      )?.mag || 1;
-      potencyRoll = performPotencyRoll(baseMAG, rollContext.effectors);
-    }
     
     // Build action context with roll results
     const context: ActionContext = {
@@ -536,15 +556,15 @@ export class ActionPipeline {
         distance: intent.parameters.distance,
         ammo: intent.parameters.ammo,
         // Pass roll results to handlers
-        hit: resultRoll ? resultRoll.success : (intent.parameters.hit ?? true),
+        hit: useRollPlan?.auto_hit ? true : (resultRoll ? resultRoll.success : (intent.parameters.hit ?? true)),
+        auto_hit: useRollPlan?.auto_hit ?? false,
+        target_kind: useRollPlan?.target_kind ?? targetData?.kind,
         roll: resultRoll ? resultRoll.total : intent.parameters.roll,
         nat: resultRoll ? resultRoll.nat : intent.parameters.nat,
         cr: resultRoll ? resultRoll.cr : intent.parameters.cr,
         margin: resultRoll ? resultRoll.margin : intent.parameters.margin,
         prof_bonus: resultRoll ? resultRoll.prof_bonus : intent.parameters.prof_bonus,
         stat_bonus: resultRoll ? resultRoll.stat_bonus : intent.parameters.stat_bonus,
-        damageMAG: potencyRoll?.total || intent.parameters.damageMAG,
-        potency_roll: potencyRoll?.roll || 0,
         sticks: intent.parameters.sticks
       }
     };
@@ -563,8 +583,10 @@ export class ActionPipeline {
         `Result Roll: ${resultRoll.nat} (D20) +${resultRoll.prof_bonus} prof +${resultRoll.stat_bonus} stat = ${resultRoll.total} vs CR ${cr} - ${resultRoll.success ? "SUCCESS" : "FAIL"}`
       );
     }
-    if (potencyRoll) {
-      this.log(`Potency Roll: MAG ${potencyRoll.mag} (${potencyRoll.dice}) = ${potencyRoll.roll} damage`);
+    const potency_log = handlerResult.effects.find((effect) => effect.parameters?.potency_roll_total || effect.parameters?.damage_mag);
+    if (potency_log) {
+      const potency_roll_total = Number(potency_log.parameters?.potency_roll_total ?? potency_log.parameters?.damage_mag ?? 0);
+      if (Number.isFinite(potency_roll_total) && potency_roll_total > 0) this.log(`Potency Roll Total: ${potency_roll_total}`);
     }
     
     // Convert handler effects to pipeline effects

@@ -2,6 +2,13 @@ import type { TagInstance } from "../tag_system/registry.js";
 import type { ContainerContentEntry } from "../types/container.js";
 
 /**
+ * LEGACY MODULE
+ *
+ * This file remains only for backward-compatibility utility flows.
+ * Canonical runtime item tags now come from item definitions + `tag_add` / `tag_remove`
+ * resolved through `src/item_storage/resolve.ts` and `src/tag_system/resolved.ts`.
+ * Do not use this module as the reference architecture for new tag work.
+ *
  * @deprecated ItemInstanceLookupResult is no longer needed with inline storage.
  * Items are now directly accessed from container.contents arrays.
  */

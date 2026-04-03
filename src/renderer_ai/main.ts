@@ -13,12 +13,12 @@ import { ollama_chat, type OllamaMessage } from "../shared/ollama_client.js";
 import { append_metric } from "../engine/metrics_store.js";
 import { get_region_by_coords } from "../world_storage/store.js";
 import { load_place } from "../place_storage/store.js";
-import { load_actor, resolve_runtime_player_actor_id } from "../actor_storage/store.js";
-import { get_or_bind_controlled_actor_ref } from "../shared/session_control.js";
+import { load_actor } from "../actor_storage/store.js";
 import { load_npc } from "../npc_storage/store.js";
 import { build_inspect_narrative_prompt } from "../inspection/prompts.js";
+import { get_configured_data_slot } from "../shared/boot_env.js";
 
-const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+const data_slot_number = get_configured_data_slot();
 const POLL_MS = SERVICE_CONFIG.POLL_MS.RENDERER;
 const OLLAMA_HOST = process.env.OLLAMA_HOST ?? "http://localhost:11434";
 const RENDERER_MODEL = process.env.RENDERER_MODEL ?? "llama3.2:latest";
@@ -182,9 +182,8 @@ function getPlaceDetails(target: string, playerActorId?: string): { name: string
     }
     
     // If target is a region_tile and player is provided, check if player is in a place in that region
-    if (!placeId && target.includes("region_tile.")) {
-        const actorToCheck = playerActorId || (get_or_bind_controlled_actor_ref(data_slot_number).slice("actor.".length) || resolve_runtime_player_actor_id(data_slot_number));
-        const actorResult = load_actor(data_slot_number, actorToCheck);
+    if (!placeId && target.includes("region_tile.") && playerActorId) {
+        const actorResult = load_actor(data_slot_number, playerActorId);
         if (actorResult.ok) {
             const actorPlaceId = (actorResult.actor as any)?.location?.place_id;
             if (actorPlaceId) {

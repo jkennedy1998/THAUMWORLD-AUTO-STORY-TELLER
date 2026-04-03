@@ -16,12 +16,20 @@ let current_target: { ref: string; type: "npc" | "actor" | "item"; name?: string
 let current_message: string = "";
 
 let actor_ref = "actor.player";
+let session_token = "";
 const API_BASE = "http://localhost:8787/api";
 
 export function set_current_actor_ref(next_actor_ref: string): void {
     const ref = typeof next_actor_ref === "string" ? next_actor_ref.trim() : "";
-    if (!ref) return;
     actor_ref = ref;
+    if (!ref) {
+        current_target = null;
+    }
+}
+
+export function set_session_token(next_session_token: string): void {
+    const token = typeof next_session_token === "string" ? next_session_token.trim() : "";
+    session_token = token;
 }
 
 /**
@@ -42,6 +50,7 @@ export function handleEntityClick(entity_ref: string, entity_type: "npc" | "acto
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+            session_token,
             actor_ref: actor_ref,
             target_ref: entity_ref,
             target_type: entity_type,
@@ -127,6 +136,7 @@ export function clearCurrentTarget(): void {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+            session_token,
             actor_ref: actor_ref,
             target_ref: null
         })

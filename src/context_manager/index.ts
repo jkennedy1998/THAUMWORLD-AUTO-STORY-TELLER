@@ -10,6 +10,7 @@ import { load_actor } from "../actor_storage/store.js";
 import { load_npc } from "../npc_storage/store.js";
 import { load_region } from "../world_storage/store.js";
 import { SERVICE_CONFIG, MEMORY_BUDGETS } from "../shared/constants.js";
+import { get_status_effect_names } from "../tag_system/canonical_readers.js";
 import type { Region } from "../world_storage/store.js";
 
 const WORKING_MEMORY_FILE = "working_memory.jsonc";
@@ -257,12 +258,7 @@ function extract_notable_features(entity: Record<string, unknown>): string[] {
     }
     
     // Status-based
-    const tags = (entity.tags || []) as Array<Record<string, unknown>>;
-    for (const tag of tags) {
-        if (tag.name && tag.name !== "AWARENESS") {
-            features.push(String(tag.name).toLowerCase());
-        }
-    }
+    for (const status of get_status_effect_names(entity)) features.push(status);
     
     // Wound status
     const health = (((entity as any).resources?.health || {}) as Record<string, number>);
@@ -278,11 +274,7 @@ function extract_notable_features(entity: Record<string, unknown>): string[] {
 
 // Extract status effects
 function extract_status_effects(entity: Record<string, unknown>): string[] {
-    const tags = (entity.tags || []) as Array<Record<string, unknown>>;
-    return tags
-        .filter(tag => tag.name && tag.name !== "AWARENESS")
-        .map(tag => String(tag.name).toLowerCase())
-        .slice(0, 3);
+    return get_status_effect_names(entity);
 }
 
 // Extract personality summary

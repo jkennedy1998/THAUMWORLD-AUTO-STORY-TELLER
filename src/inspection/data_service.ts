@@ -13,6 +13,10 @@ import { load_npc } from "../npc_storage/store.js";
 import { load_item_def, extract_item_id } from "../item_storage/store.js";
 import { resolve_inline_item } from "../item_storage/resolve.js";
 import type { TagInstance } from "../tag_system/registry.js";
+import { resolve_grow_tag_configs } from "../mag/grow.js";
+import { get_damage_dice_from_mag } from "../mag/damage.js";
+import { resolve_spoils_tag_config_from_states } from "../tag_system/spoils.js";
+import { get_tag_dim_mag, resolve_tag_states_from_instances, type ResolvedTagState } from "../tag_system/resolved.js";
 import type { Place, PlaceStructureInstance, PlaceTile, PlaceItem, PlaceActor, PlaceNPC } from "../types/place.js";
 import type { InlineItem } from "../types/inline_item.js";
 import type { InspectionFeature, InspectionResult, InspectionTarget, InspectorData } from "./types.js";
@@ -52,6 +56,7 @@ type ItemInspectData = {
   description: string;
   quantity: number;
   effective_tags: TagInstance[];
+  resolved_tag_states?: ResolvedTagState[];
   sensory_details: Record<string, string[]>;
 };
 
@@ -232,22 +237,15 @@ function has_tag(tags: TagInstance[], name: string): boolean {
   return Array.isArray(tags) && tags.some((tag) => String(tag?.name ?? '').toUpperCase() === up);
 }
 
-function get_grow_product_names(slot: number, tags: TagInstance[]): string[] {
-  const grow_tag = Array.isArray(tags)
-    ? tags.find((tag) => String(tag?.name ?? '').toUpperCase() === 'GROW')
-    : null;
+function get_grow_product_names(slot: number, tags: TagInstance[], resolved_tag_states?: ResolvedTagState[]): string[] {
+  const resolved_states = Array.isArray(resolved_tag_states) && resolved_tag_states.length > 0
+    ? resolved_tag_states
+    : resolve_tag_states_from_instances(tags);
+  const grow_configs = resolve_grow_tag_configs(resolved_states);
   const seen = new Set<string>();
   const names: string[] = [];
-  const info_entries = Array.isArray(grow_tag?.info) ? grow_tag!.info : [];
-
-  for (const entry of info_entries) {
-    const raw_ids = [
-      ...(Array.isArray((entry as any)?.item_def_ids) ? (entry as any).item_def_ids : []),
-      ...(Array.isArray((entry as any)?.def_ids) ? (entry as any).def_ids : []),
-      ...(typeof (entry as any)?.item_def_id === 'string' ? [(entry as any).item_def_id] : []),
-      ...(typeof (entry as any)?.def_id === 'string' ? [(entry as any).def_id] : []),
-    ];
-    for (const raw_id of raw_ids) {
+  for (const config of grow_configs) {
+    for (const raw_id of config.item_def_ids) {
       const def_id = String(raw_id ?? '').trim();
       if (!def_id) continue;
       const loaded = load_item_def(slot, def_id);
@@ -262,6 +260,38 @@ function get_grow_product_names(slot: number, tags: TagInstance[]): string[] {
   return names;
 }
 
+function get_spoil_result_name(slot: number, tags: TagInstance[], resolved_tag_states?: ResolvedTagState[]): string | null {
+  const resolved_states = Array.isArray(resolved_tag_states) && resolved_tag_states.length > 0
+    ? resolved_tag_states
+    : resolve_tag_states_from_instances(tags);
+  const config = resolve_spoils_tag_config_from_states(resolved_states);
+  const def_id = String(config?.result_item_def_id ?? '').trim();
+  if (!config) return null;
+  if (!def_id) return 'nothing';
+  const loaded = load_item_def(slot, def_id);
+  return loaded.ok ? String(loaded.item.name ?? def_id) : title_case_from_ref(def_id, 'item');
+}
+
+function get_tool_potency_summary(tags: TagInstance[], resolved_tag_states?: ResolvedTagState[]): { tool_name: string; potency_mag: number; potency_dice: string } | null {
+  const resolved_states = Array.isArray(resolved_tag_states) && resolved_tag_states.length > 0
+    ? resolved_tag_states
+    : resolve_tag_states_from_instances(tags);
+  const tool_state = resolved_states.find((state) => String(state?.name ?? '').toUpperCase() === 'TOOL') ?? null;
+  if (!tool_state) return null;
+  const subtype = resolved_states.find((state) => {
+    if (String(state?.name ?? '').toUpperCase() === 'TOOL') return false;
+    const meta = Array.isArray(state?.definition?.meta) ? state.definition.meta.map((entry) => String(entry ?? '').trim().toLowerCase()) : [];
+    return meta.includes('tool') || state.definition?.dimensions.some((dimension) => dimension.id === 'potency_roll_mag');
+  }) ?? null;
+  if (!subtype) return null;
+  const potency_mag = get_tag_dim_mag(subtype, 'potency_roll_mag') || Math.floor(Number(subtype.stored_mag ?? 0) || 0);
+  return {
+    tool_name: String(subtype.name ?? 'TOOL').trim(),
+    potency_mag,
+    potency_dice: get_damage_dice_from_mag(potency_mag),
+  };
+}
+
 function create_tag_feature(id: string, name: string, description: string, clarity: ClarityLevel): InspectionFeature {
   return {
     id,
@@ -273,7 +303,7 @@ function create_tag_feature(id: string, name: string, description: string, clari
   };
 }
 
-function build_tile_tag_inspection_data(slot: number, tags: TagInstance[], clarity: ClarityLevel): TileTagInspectionData {
+function build_tile_tag_inspection_data(slot: number, tags: TagInstance[], clarity: ClarityLevel, resolved_tag_states?: ResolvedTagState[]): TileTagInspectionData {
   if (!Array.isArray(tags) || tags.length === 0 || clarity === 'obscured') {
     return { detail_lines: [], features: [], fact_lines: [] };
   }
@@ -281,7 +311,7 @@ function build_tile_tag_inspection_data(slot: number, tags: TagInstance[], clari
   const detail_lines: string[] = [];
   const features: InspectionFeature[] = [];
   const fact_lines: string[] = [];
-  const product_names = get_grow_product_names(slot, tags);
+  const product_names = get_grow_product_names(slot, tags, resolved_tag_states);
 
   const add = (id: string, name: string, description: string, detail?: string): void => {
     features.push(create_tag_feature(id, name, description, clarity));
@@ -345,30 +375,35 @@ function build_tile_tag_inspection_data(slot: number, tags: TagInstance[], clari
   return { detail_lines, features, fact_lines };
 }
 
-function build_item_tag_inspection_data(slot: number, tags: TagInstance[], clarity: ClarityLevel): ItemTagInspectionData {
+function build_item_tag_inspection_data(slot: number, tags: TagInstance[], clarity: ClarityLevel, resolved_tag_states?: ResolvedTagState[]): ItemTagInspectionData {
   if (!Array.isArray(tags) || tags.length === 0 || clarity === 'obscured') {
     return { detail_lines: [], features: [] };
   }
 
   const detail_lines: string[] = [];
   const features: InspectionFeature[] = [];
-  const product_names = get_grow_product_names(slot, tags);
+  const spoil_result_name = get_spoil_result_name(slot, tags, resolved_tag_states);
+  const tool_summary = get_tool_potency_summary(tags, resolved_tag_states);
   const add = (id: string, name: string, description: string, detail?: string): void => {
     features.push(create_tag_feature(id, name, description, clarity));
     if (clarity === 'clear') detail_lines.push((detail ?? description).trim());
   };
 
-  if (has_tag(tags, 'FOOD')) {
-    add('tag:food', 'Edible Matter', 'It reads as something meant to be eaten.', 'Its form and scent suggest it was meant for eating.');
-  }
   if (has_tag(tags, 'SPOILS')) {
-    const product_text = product_names.length === 1
-      ? `It looks prone to breaking down into ${product_names[0]!.toLowerCase()} over time.`
-      : 'It looks prone to breaking down as it sits.';
+    const product_text = spoil_result_name && spoil_result_name !== 'nothing'
+      ? `It looks prone to breaking down into ${spoil_result_name.toLowerCase()} over time.`
+      : spoil_result_name === 'nothing'
+        ? 'It looks prone to breaking down until nothing usable remains.'
+        : 'It looks prone to breaking down as it sits.';
     add('tag:spoils', 'Perishable', product_text, product_text);
   }
   if (has_tag(tags, 'CONTAINER')) {
     add('tag:container', 'Can Hold Things', 'It seems made to carry or hold other things.', 'Its shape and seams suggest it was made to hold other things.');
+  }
+  if (tool_summary) {
+    const description = `It is balanced for ${tool_summary.tool_name.toLowerCase()} work, with a potency roll of ${tool_summary.potency_dice}.`;
+    const detail = `Tool profile: ${tool_summary.tool_name.toLowerCase()} | potency ${tool_summary.potency_dice} (mag ${tool_summary.potency_mag}).`;
+    add(`tag:tool:${tool_summary.tool_name.toLowerCase()}`, title_case_from_ref(tool_summary.tool_name, 'tag'), description, detail);
   }
 
   return { detail_lines, features };
@@ -384,6 +419,7 @@ function build_item_inspect_data_from_inline_item(item_ref: string, inline: Inli
     description,
     quantity: Math.max(1, Number((inline as any)?.qty ?? 1) || 1),
     effective_tags: Array.isArray(resolved?.effective_tags) ? resolved!.effective_tags : [],
+    resolved_tag_states: Array.isArray(resolved?.resolved_tag_states) ? resolved!.resolved_tag_states : [],
     sensory_details: build_item_sensory_details(description, sense_used, clarity),
   };
 }
@@ -869,7 +905,12 @@ async function build_place_narration_context(inspector: InspectorData, target: I
 
   const itemNames = items.map((item) => format_tile_item_label(item));
   const structureNames = structures.map((structure) => get_structure_name(structure));
-  const tileTagData = build_tile_tag_inspection_data(slot, Array.isArray(tile_resolved?.effective_tags) ? tile_resolved!.effective_tags : [], result.clarity);
+  const tileTagData = build_tile_tag_inspection_data(
+    slot,
+    Array.isArray(tile_resolved?.effective_tags) ? tile_resolved!.effective_tags : [],
+    result.clarity,
+    tile_resolved?.resolved_tag_states ?? [],
+  );
 
   for (const actor of actors) {
     const name = actorNames[actors.indexOf(actor)] ?? title_case_from_ref(actor.actor_ref, 'Actor');
@@ -1108,6 +1149,7 @@ async function inspect_tile(
   const slot = Math.max(0, Math.floor(Number(inspector.data_slot ?? 1)));
   let tile_id = target.ref;
   let effective_tile_tags: TagInstance[] = [];
+  let resolved_tile_states: ResolvedTagState[] = [];
   debug_log("Inspection", "inspect_tile.start", {
     target_ref: target.ref,
     place_id: target.place_id ?? null,
@@ -1141,6 +1183,7 @@ async function inspect_tile(
           target.ref = tile_id;
           const resolved_tile = tile ? resolve_place_tile(String(resolved_kind), tile as any) : null;
           effective_tile_tags = Array.isArray(resolved_tile?.effective_tags) ? resolved_tile!.effective_tags : [];
+          resolved_tile_states = Array.isArray(resolved_tile?.resolved_tag_states) ? resolved_tile!.resolved_tag_states : [];
           debug_log("Inspection", "inspect_tile.resolved_place_tile", {
             tile_x,
             tile_y,
@@ -1223,7 +1266,7 @@ async function inspect_tile(
   }
   const inspection = tile_def.inspection ?? { short: tile_def.name, full: tile_def.description, features: [] };
   const inspection_features = Array.isArray(inspection.features) ? inspection.features : [];
-  const tileTagData = build_tile_tag_inspection_data(slot, effective_tile_tags, clarity);
+  const tileTagData = build_tile_tag_inspection_data(slot, effective_tile_tags, clarity, resolved_tile_states);
 
   debug_log("Inspection", `Found tile definition: ${tile_def.name} (${inspection_features.length} features)`);
 
@@ -1564,7 +1607,7 @@ async function inspect_item(
     effective_tags: Array.isArray(definition?.tags) ? definition.tags as TagInstance[] : [],
     sensory_details: build_item_sensory_details(String(definition?.description ?? ''), sense_used, clarity),
   };
-  const itemTagData = build_item_tag_inspection_data(data_slot, resolved_item.effective_tags, clarity);
+  const itemTagData = build_item_tag_inspection_data(data_slot, resolved_item.effective_tags, clarity, resolved_item.resolved_tag_states);
   
   // Build description based on clarity
   let short_description: string;

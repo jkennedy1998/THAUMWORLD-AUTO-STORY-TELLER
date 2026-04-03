@@ -3,6 +3,8 @@ import * as fs from "node:fs";
 import { make_log_id } from "../engine/log_store.js";
 import type { CommandNode, ValueNode } from "../system_syntax/index.js";
 import type { ApplyResult, AppliedDiff } from "./types.js";
+import { has_awareness_target } from "../tag_system/canonical_readers.js";
+import { set_awareness_entry } from "../shared/awareness.js";
 
 const applied_effect_ids = new Set<string>();
 
@@ -98,26 +100,16 @@ function apply_awareness(effect_id: string, observer_path: string, observer_ref:
     }
 
     const data = read_jsonc(observer_path);
-    const tags = Array.isArray(data.tags) ? data.tags : [];
-
-    // Check for existing awareness tag (case-insensitive) with same target
-    const hasExistingAwareness = tags.some((tag: Record<string, unknown>) => {
-        if (String(tag.name ?? "").toUpperCase() !== "AWARENESS") return false;
-        const info = Array.isArray(tag.info) ? (tag.info as unknown[]) : [];
-        return info.some((entry) => String(entry) === target_ref);
-    });
+    const hasExistingAwareness = has_awareness_target(data, target_ref);
 
     // Skip if duplicate
     if (hasExistingAwareness) {
         return;
     }
 
-    const info: string[] = [target_ref];
-    if (clarity === "obscured") info.push("obscured");
-    tags.push({ name: "AWARENESS", mag: 1, info });
-    data.tags = tags;
+    set_awareness_entry(data, target_ref, clarity);
     write_jsonc(observer_path, data);
-    diffs.push({ effect_id, target: data.id ?? observer_path, field: "tags", delta: 1, reason: "SYSTEM.SET_AWARENESS" });
+    diffs.push({ effect_id, target: data.id ?? observer_path, field: "awareness", delta: 1, reason: "SYSTEM.SET_AWARENESS" });
 }
 
 // Parse tile reference and extract coordinates

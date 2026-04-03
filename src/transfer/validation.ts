@@ -2,7 +2,7 @@ import type { ItemInstance } from "../item_instances/store.js";
 import type { ItemDefinition } from "../item_storage/store.js";
 import { check_tag_compatibility } from "../equipment/tag_validation.js";
 import { debug_log, debug_error } from "../shared/debug.js";
-import { can_stack_items_with_spoil_policy } from "../item_storage/stacking.js";
+import { evaluate_item_stack_policy } from "../item_storage/stacking.js";
 
 /**
  * Transfer operation types
@@ -21,6 +21,7 @@ export interface TransferValidationResult {
     operation: TransferOperation;
     ok: boolean;
     error?: string;
+    detail?: Record<string, unknown>;
 }
 
 /**
@@ -36,14 +37,16 @@ export function can_stack(
     def_a: ItemDefinition,
     item_b: ItemInstance,
     def_b: ItemDefinition
-): boolean {
-    if (!can_stack_items_with_spoil_policy(item_a, def_a, item_b, def_b)) {
-        debug_log("transfer", `Cannot stack: policy rejected merge for ${def_a.id} and ${def_b.id}`);
-        return false;
+): { ok: boolean; detail?: Record<string, unknown> } {
+    const result = evaluate_item_stack_policy(item_a, def_a, item_b, def_b);
+    if (!result.ok) {
+        debug_log("transfer", `Cannot stack: ${String(result.reason ?? 'policy_rejected')} for ${def_a.id} and ${def_b.id}`);
+        if (result.detail) debug_log("transfer", `Stack reject detail: ${JSON.stringify(result.detail)}`);
+        return { ok: false, detail: { stack_reason: result.reason, ...(result.detail ?? {}) } };
     }
-    
+
     debug_log("transfer", `Can stack: ${def_a.id} (${item_a.qty || 1} + ${item_b.qty || 1} <= ${def_a.max_stack_size || 1})`);
-    return true;
+    return { ok: true };
 }
 
 /**
@@ -124,7 +127,8 @@ export function validate_transfer(
     }
     
     // Destination occupied - check for stacking
-    if (can_stack(item, item_def, target_item, target_def)) {
+    const stack_check = can_stack(item, item_def, target_item, target_def);
+    if (stack_check.ok) {
         const merged_qty = (item.qty || 1) + (target_item.qty || 1);
         return {
             operation: {
@@ -167,7 +171,8 @@ export function validate_transfer(
             reason: `Cannot stack ${item_def.id} with ${target_def.id} and swap not valid` 
         },
         ok: false,
-        error: `Cannot place ${item_def.name || item_def.id} here. Target slot occupied by incompatible item.`
+        error: `Cannot place ${item_def.name || item_def.id} here. Target slot occupied by incompatible item.`,
+        detail: stack_check.detail,
     };
 }
 

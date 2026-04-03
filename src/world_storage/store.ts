@@ -41,10 +41,7 @@ export const DEFAULT_TIMED_EVENT_MOVEMENT_PER_TURN = 6;
 export const TIMED_EVENT_TURN_WINDOW_BREATHS = 18;
 
 export function timed_event_stat_to_bps(speed: number): number {
-    const s = Math.floor(Number(speed));
-    if (!Number.isFinite(s) || s <= 0) return 8;
-    if (s >= 8) return 1;
-    return Math.max(1, 9 - s);
+    return timed_event_stat_to_bps_mag(speed);
 }
 
 function create_default_timed_event_movement_budgets() {
@@ -125,13 +122,10 @@ type TimedEventTriggerContext = {
 export type PendingCommunicationOpportunity = {
     opportunity_id: string;
     event_id?: string;
+    queue_entry_id?: string;
+    queue_stable_order?: number;
     source_message_id: string;
     npc_ref: string;
-    speaker_ref: string;
-    target_ref?: string;
-    participants: string[];
-    original_text: string;
-    response_eligible_reason: string;
     trigger_context?: string;
     created_turn?: number;
     created_round?: number;
@@ -1054,7 +1048,13 @@ export function can_actor_afford_movement_cost(slot: number, actor_ref: string, 
     if (!entry) return false;
     const cost = Math.max(0, Math.floor(Number(movement_cost) || 0));
     const budgets = normalize_initiative_entry_movement(entry).movement_budgets!;
-    return budgets.walk >= cost;
+    const available = Math.max(
+        Math.floor(Number(budgets.walk ?? 0)) || 0,
+        Math.floor(Number(budgets.climb ?? 0)) || 0,
+        Math.floor(Number(budgets.swim ?? 0)) || 0,
+        Math.floor(Number(budgets.fly ?? 0)) || 0,
+    );
+    return available >= cost;
 }
 
 export function consume_actor_action_cost(slot: number, actor_ref: string, cost: ActionCost): boolean {
@@ -1113,9 +1113,9 @@ export function consume_actor_movement_cost(slot: number, actor_ref: string, mov
     const before_budgets = { ...normalized.movement_budgets! };
     normalized.movement_budgets = {
         walk: Math.max(0, normalized.movement_budgets!.walk - cost),
-        climb: Math.max(0, normalized.movement_budgets!.climb),
-        swim: Math.max(0, normalized.movement_budgets!.swim),
-        fly: Math.max(0, normalized.movement_budgets!.fly),
+        climb: Math.max(0, normalized.movement_budgets!.climb - cost),
+        swim: Math.max(0, normalized.movement_budgets!.swim - cost),
+        fly: Math.max(0, normalized.movement_budgets!.fly - cost),
     };
     normalize_initiative_entry_movement(normalized);
     entry.has_acted_this_turn = true;
@@ -1176,22 +1176,26 @@ export function queue_pending_communication_opportunity(slot: number, opp: Omit<
 
     const already_exists = list.some((existing) =>
         existing.status === "pending" &&
-        existing.source_message_id === opp.source_message_id &&
-        existing.npc_ref === opp.npc_ref,
+        (
+            (typeof opp.queue_entry_id === "string" && opp.queue_entry_id.length > 0 && existing.queue_entry_id === opp.queue_entry_id) ||
+            (existing.source_message_id === opp.source_message_id && existing.npc_ref === opp.npc_ref)
+        ),
     );
     if (already_exists) {
-        const existing_opp = list.find((e) => e.source_message_id === opp.source_message_id && e.npc_ref === opp.npc_ref) ?? null;
+        const existing_opp = list.find((e) =>
+            (typeof opp.queue_entry_id === "string" && opp.queue_entry_id.length > 0 && e.queue_entry_id === opp.queue_entry_id) ||
+            (e.source_message_id === opp.source_message_id && e.npc_ref === opp.npc_ref)
+        ) ?? null;
         debug_log("TIMED_EVENT_COMM", "queue skipped duplicate pending opportunity", {
             slot,
             npc_ref: opp.npc_ref,
-            speaker_ref: opp.speaker_ref,
-            target_ref: opp.target_ref ?? null,
             source_message_id: opp.source_message_id,
+            queue_entry_id: opp.queue_entry_id ?? null,
+            queue_stable_order: opp.queue_stable_order ?? null,
             correlation_id: opp.correlation_id ?? null,
             conversation_id: opp.conversation_id ?? null,
             opportunity_id: existing_opp?.opportunity_id ?? opportunity_id,
             existing_status: existing_opp?.status ?? null,
-            original_text: opp.original_text,
         });
         return { ok: true, opportunity_id: existing_opp?.opportunity_id ?? opportunity_id };
     }
@@ -1206,16 +1210,15 @@ export function queue_pending_communication_opportunity(slot: number, opp: Omit<
     debug_log("TIMED_EVENT_COMM", saved ? "queued pending communication opportunity" : "failed to queue pending communication opportunity", {
         slot,
         npc_ref: opp.npc_ref,
-        speaker_ref: opp.speaker_ref,
-        target_ref: opp.target_ref ?? null,
         source_message_id: opp.source_message_id,
+        queue_entry_id: opp.queue_entry_id ?? null,
+        queue_stable_order: opp.queue_stable_order ?? null,
         correlation_id: opp.correlation_id ?? null,
         conversation_id: opp.conversation_id ?? null,
         opportunity_id,
         created_turn: opp.created_turn ?? null,
         created_round: opp.created_round ?? null,
         trigger_context: opp.trigger_context ?? null,
-        original_text: opp.original_text,
     });
     return saved ? { ok: true, opportunity_id } : { ok: false, error: "save_failed" };
 }
@@ -1226,7 +1229,22 @@ export function consume_pending_communication_opportunity(slot: number, npc_ref:
 
     const store = world.world as WorldStore;
     const list = Array.isArray(store.pending_communication_opportunities) ? store.pending_communication_opportunities : [];
-    const idx = list.findIndex((opp) => opp.npc_ref === npc_ref && opp.status === "pending");
+    const candidates = list
+        .map((opp, index) => ({ opp, index }))
+        .filter(({ opp }) => opp.npc_ref === npc_ref && opp.status === "pending")
+        .sort((a, b) => {
+            const orderA = Math.floor(Number(a.opp.queue_stable_order ?? Number.MAX_SAFE_INTEGER));
+            const orderB = Math.floor(Number(b.opp.queue_stable_order ?? Number.MAX_SAFE_INTEGER));
+            if (orderA !== orderB) return orderA - orderB;
+            const roundA = Math.floor(Number(a.opp.created_round ?? Number.MAX_SAFE_INTEGER));
+            const roundB = Math.floor(Number(b.opp.created_round ?? Number.MAX_SAFE_INTEGER));
+            if (roundA !== roundB) return roundA - roundB;
+            const turnA = Math.floor(Number(a.opp.created_turn ?? Number.MAX_SAFE_INTEGER));
+            const turnB = Math.floor(Number(b.opp.created_turn ?? Number.MAX_SAFE_INTEGER));
+            if (turnA !== turnB) return turnA - turnB;
+            return a.index - b.index;
+        });
+    const idx = candidates[0]?.index ?? -1;
     if (idx < 0) {
         debug_log("TIMED_EVENT_COMM", "no pending communication opportunity to consume", {
             slot,
@@ -1235,8 +1253,9 @@ export function consume_pending_communication_opportunity(slot: number, npc_ref:
                 opportunity_id: opp.opportunity_id,
                 status: opp.status,
                 source_message_id: opp.source_message_id,
+                queue_entry_id: opp.queue_entry_id ?? null,
+                queue_stable_order: opp.queue_stable_order ?? null,
                 correlation_id: opp.correlation_id ?? null,
-                original_text: opp.original_text,
             })),
         });
         return null;
@@ -1259,11 +1278,10 @@ export function consume_pending_communication_opportunity(slot: number, npc_ref:
         npc_ref,
         opportunity_id: opp.opportunity_id,
         source_message_id: opp.source_message_id,
-        speaker_ref: opp.speaker_ref,
-        target_ref: opp.target_ref ?? null,
+        queue_entry_id: opp.queue_entry_id ?? null,
+        queue_stable_order: opp.queue_stable_order ?? null,
         correlation_id: opp.correlation_id ?? null,
         conversation_id: opp.conversation_id ?? null,
-        original_text: opp.original_text,
     });
     return { ...opp };
 }
@@ -1287,8 +1305,9 @@ export function complete_pending_communication_opportunity(slot: number, opportu
         opportunity_id,
         npc_ref: opp.npc_ref,
         source_message_id: opp.source_message_id,
+        queue_entry_id: opp.queue_entry_id ?? null,
+        queue_stable_order: opp.queue_stable_order ?? null,
         correlation_id: opp.correlation_id ?? null,
-        original_text: opp.original_text,
     });
     return saved;
 }
@@ -1312,10 +1331,84 @@ export function release_pending_communication_opportunity(slot: number, opportun
         opportunity_id,
         npc_ref: opp.npc_ref,
         source_message_id: opp.source_message_id,
+        queue_entry_id: opp.queue_entry_id ?? null,
+        queue_stable_order: opp.queue_stable_order ?? null,
         correlation_id: opp.correlation_id ?? null,
-        original_text: opp.original_text,
     });
     return saved;
+}
+
+export function cancel_pending_communication_opportunity(slot: number, opportunity_id: string, reason?: string): boolean {
+    const world = ensure_world_exists(slot);
+    if (!world.ok) return false;
+    const store = world.world as WorldStore;
+    const list = Array.isArray(store.pending_communication_opportunities) ? store.pending_communication_opportunities : [];
+    const idx = list.findIndex((opp) => opp.opportunity_id === opportunity_id);
+    if (idx < 0) {
+        debug_log("TIMED_EVENT_COMM", "attempted to cancel missing communication opportunity", { slot, opportunity_id, reason: reason ?? null });
+        return false;
+    }
+    const opp = list[idx]!;
+    opp.status = "cancelled";
+    store.pending_communication_opportunities = list.filter((item) => item.status === "pending" || item.status === "in_flight");
+    const saved = save_world_store(slot, store);
+    debug_log("TIMED_EVENT_COMM", saved ? "cancelled communication opportunity" : "failed to cancel communication opportunity", {
+        slot,
+        opportunity_id,
+        npc_ref: opp.npc_ref,
+        source_message_id: opp.source_message_id,
+        queue_entry_id: opp.queue_entry_id ?? null,
+        queue_stable_order: opp.queue_stable_order ?? null,
+        correlation_id: opp.correlation_id ?? null,
+        reason: reason ?? null,
+    });
+    return saved;
+}
+
+export function get_pending_communication_opportunities(slot: number, conversation_id?: string): PendingCommunicationOpportunity[] {
+    const store = get_timed_event_state(slot);
+    if (!store?.timed_event_active) return [];
+    const list = Array.isArray(store.pending_communication_opportunities) ? store.pending_communication_opportunities : [];
+    const filtered = typeof conversation_id === "string" && conversation_id.length > 0
+        ? list.filter((opp) => opp.conversation_id === conversation_id)
+        : list;
+    return filtered
+        .map((opp) => ({ ...opp }))
+        .sort((a, b) => {
+            const orderA = Math.floor(Number(a.queue_stable_order ?? Number.MAX_SAFE_INTEGER));
+            const orderB = Math.floor(Number(b.queue_stable_order ?? Number.MAX_SAFE_INTEGER));
+            if (orderA !== orderB) return orderA - orderB;
+            return String(a.opportunity_id).localeCompare(String(b.opportunity_id));
+        });
+}
+
+export function sync_pending_communication_opportunities_with_queue(slot: number, params: {
+    conversation_id: string;
+    valid_queue_entry_ids: string[];
+}): { ok: boolean; removed_opportunity_ids: string[] } {
+    const world = ensure_world_exists(slot);
+    if (!world.ok) return { ok: false, removed_opportunity_ids: [] };
+    const store = world.world as WorldStore;
+    const list = Array.isArray(store.pending_communication_opportunities) ? store.pending_communication_opportunities : [];
+    const valid = new Set((params.valid_queue_entry_ids ?? []).filter((id) => typeof id === "string" && id.length > 0));
+    const removed: string[] = [];
+    const next = list.filter((opp) => {
+        if (opp.conversation_id !== params.conversation_id) return true;
+        if (!opp.queue_entry_id) return true;
+        if (valid.has(opp.queue_entry_id)) return true;
+        removed.push(opp.opportunity_id);
+        return false;
+    });
+    if (removed.length === 0) return { ok: true, removed_opportunity_ids: [] };
+    store.pending_communication_opportunities = next;
+    const saved = save_world_store(slot, store);
+    debug_log("TIMED_EVENT_COMM", saved ? "synced pending communication opportunities with session queue" : "failed syncing pending communication opportunities with session queue", {
+        slot,
+        conversation_id: params.conversation_id,
+        valid_queue_entry_ids: Array.from(valid),
+        removed_opportunity_ids: removed,
+    });
+    return { ok: saved, removed_opportunity_ids: removed };
 }
 
 export function has_pending_communication_opportunity(slot: number, npc_ref: string): boolean {
@@ -1462,3 +1555,4 @@ export function mark_actor_left_region(slot: number, actor_ref: string): boolean
     entry.status = "left_region";
     return save_world_store(slot, store);
 }
+import { timed_event_stat_to_bps as timed_event_stat_to_bps_mag } from "../mag/timed_event.js";

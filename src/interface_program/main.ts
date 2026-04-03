@@ -20,10 +20,10 @@ import type { MessageEnvelope } from "../engine/types.js";
 import type { LogFile } from "../engine/types.js";
 import { ensure_status_exists, read_status, write_status_line } from "../engine/status_store.js";
 import { ensure_roller_status_exists, read_roller_status, write_roller_status } from "../engine/roller_status_store.js";
-import { ensure_actor_exists, find_actors, load_actor, save_actor, create_actor_from_kind } from "../actor_storage/store.js";
+import { ensure_actor_exists, ensure_actor_has_spawn_location, find_actors, load_actor, load_default_actor, save_actor, create_actor_from_kind, make_actor_id, resolve_runtime_player_actor_id } from "../actor_storage/store.js";
 import { create_npc_from_kind, find_npcs, save_npc } from "../npc_storage/store.js";
-import { load_kind_definitions } from "../kind_storage/store.js";
-import { advance_timed_event_world_breaths, advance_turn, can_actor_afford_movement_cost, consume_actor_movement_cost, end_timed_event, finalize_timed_event_turn_if_exhausted, finalize_world_sim_interstitial, get_active_actor_ref, get_current_turn_breaths_remaining, get_timed_event_phase, get_timed_event_state, get_timed_event_turn_window_breaths, get_timed_event_world_breath_index, get_region_by_coords, is_current_turn_window_expired, is_timed_event_active, is_timed_event_world_sim_interstitial, load_region, mark_actor_done, note_current_turn_started_breath, perform_move_action_refresh, save_region, start_timed_event, timed_event_stat_to_bps, TIMED_EVENT_TURN_WINDOW_BREATHS } from "../world_storage/store.js";
+import { find_kind, load_kind_definitions } from "../kind_storage/store.js";
+import { advance_timed_event_world_breaths, advance_turn, can_actor_afford_action_cost, can_actor_afford_movement_cost, consume_actor_action_cost, consume_actor_movement_cost, end_timed_event, finalize_timed_event_turn_if_exhausted, finalize_world_sim_interstitial, get_active_actor_ref, get_current_turn_breaths_remaining, get_timed_event_phase, get_timed_event_state, get_timed_event_turn_window_breaths, get_timed_event_world_breath_index, get_region_by_coords, is_current_turn_window_expired, is_timed_event_active, is_timed_event_world_sim_interstitial, load_region, mark_actor_done, note_current_turn_started_breath, perform_move_action_refresh, save_region, start_timed_event, TIMED_EVENT_TURN_WINDOW_BREATHS } from "../world_storage/store.js";
 import { travel_between_places } from "../travel/movement.js";
 import { load_npc } from "../npc_storage/store.js";
 import { load_place, list_all_places, list_places_in_region, save_place, create_basic_place, compute_connected_place_bounds, region_bounds_conflict, create_place_connector_record, delete_place } from "../place_storage/store.js";
@@ -38,9 +38,25 @@ import { get_all_tile_ids, load_master_tile } from "../tile_storage/store.js";
 import { resolve_inline_item, has_effective_tag } from "../item_storage/resolve.js";
 import { can_stack_items_with_spoil_policy, merge_item_stack_into_target } from "../item_storage/stacking.js";
 import { emitBridgeMessage } from "../shared/event_bridge_client.js";
+import { issue_or_resume_multiplayer_session, resolve_multiplayer_session_by_client_session_id, resolve_multiplayer_session_by_token, touch_multiplayer_session_by_token } from "../shared/multiplayer_session.js";
+import { get_conversation_sessions_debug_snapshot } from "../conversation_manager/session_state.js";
 import { tile_layer_key_to_offset, tile_offset_to_layer_key } from "../shared/place_layers.js";
 import { resolve_place_tile } from "../tile_storage/resolve.js";
+import { tag_key } from "../tag_system/tag_key.js";
+import {
+    GROW_DEFAULT_MAX_SLOTS,
+    GROW_MAX_EVENTS_PER_PULSE,
+    resolve_grow_tag_config_from_instance,
+    resolve_grow_tag_configs,
+} from "../mag/grow.js";
+import { build_spoils_tag_config, type SpoilsTagConfig } from "../tag_system/spoils.js";
+import { resolve_tag_state_from_instance } from "../tag_system/resolved.js";
+import { get_tag_definition, list_tag_definitions } from "../tag_system/index.js";
+import { get_tag_stacking_mode, is_tag_editor_visible } from "../tag_system/definitions.js";
+import { MetaTagProcessor } from "../tag_system/meta_processor.js";
+import { clamp_mag, project_container_max_slots, resolve_container_capacity_mag_from_states, timed_event_stat_to_bps } from "../mag/index.js";
 import { build_physics_tag_flags, has_tag_name, resolve_structure_physics_tags, resolve_tile_physics_tags } from "../shared/physics_tags.js";
+import { get_awareness_list } from "../shared/awareness.js";
 import {
     load_actor_with_items,
     save_actor_with_items,
@@ -69,6 +85,16 @@ import {
     drop_item_to_ground
 } from "../place_storage/ground_store.js";
 import { emitTagChange } from "../shared/event_emitter.js";
+import { augment_inline_character_items_for_api } from "../shared/character_payload.js";
+import { apply_character_patch, load_character_by_ref, save_character_by_ref } from "../shared/character_store.js";
+import { remove_character_tag, remove_character_tag_by_selector, upsert_character_tag, upsert_character_tag_by_selector } from "../shared/character_tags.js";
+import { get_character_id_from_ref, get_character_role_from_ref } from "../shared/character_storage.js";
+import { assign_controlled_actor_ref_for_client_session, get_claiming_client_session_id_for_actor_ref, get_controlled_actor_ref_for_client_session, list_controlled_actor_claims, release_controlled_actor_ref_for_client_session, set_controlled_actor_ref_for_client_session, touch_controlled_actor_ref_for_client_session } from "../shared/session_control.js";
+import { normalize_place_actor_presence, normalize_place_npc_presence, project_public_place_actor_presence, project_public_place_npc_presence } from "../shared/place_character_presence.js";
+import { build_actor_owner_inventory_view, build_npc_owner_inventory_view } from "../inventory_surfaces/actor_owner_view.js";
+import { build_container_owner_inventory_view } from "../inventory_surfaces/container_owner_view.js";
+import { build_tile_owner_inventory_view } from "../inventory_surfaces/tile_owner_view.js";
+import { resolve_inventory_target_id } from "../inventory_surfaces/transfer_targets.js";
 import type { PlaceItem, PlaceConnectorDirection } from "../types/place.js";
 import { DEFAULT_CHARACTER_BODY_SLOT_REPRESENTATION } from "../shared/body_slot_representation.js";
 import { can_place_volume, get_place_world_z_bounds } from "../place_storage/movement_legality.js";
@@ -135,8 +161,6 @@ const ACTIVE_PLACE_TIMEOUT_MS = 10_000;
 const PLACE_PERSIST_COOLDOWN_MS = 5_000;
 const CATCHUP_MAX_BREATHS = 300;
 const CATCHUP_MAX_GRAVITY_STEPS = 64;
-const GROW_DEFAULT_PERIOD_BREATHS = 300;
-const GROW_MAX_EVENTS_PER_PULSE = 200;
 const MOVE_TIMING_INVESTIGATION_VERSION = '2026-03-14-visible-pulse-v2';
 const MOVE_INTERVAL_HOT_THRESHOLD_MS = 25;
 const MOVE_PLACE_HOT_THRESHOLD_MS = 12;
@@ -1410,17 +1434,26 @@ function build_place_contents_for_legality(slot: number, place_id: string, place
                 npc_cache.set(entity_key(slot, npc_id), npc_any);
                 queue_save_npc(slot, npc_id);
             }
-            snap_npcs.push({
+            snap_npcs.push(normalize_place_npc_presence({
                 npc_ref: String(npc_ref).startsWith('npc.') ? String(npc_ref) : `npc.${npc_id}`,
+                name: typeof npc_any?.name === 'string' ? String(npc_any.name) : npc_id,
                 tile_position: { x: clamped_x, y: clamped_y },
                 elevation: (typeof loc.elevation === 'number' && Number.isFinite(loc.elevation)) ? Math.floor(loc.elevation) : Math.floor(Number(place_any?.coordinates?.elevation ?? 0)) || 0,
                 weight: get_entity_effective_weight(npc_any),
                 facing: typeof npc_any?.facing === 'string' ? String(npc_any.facing).toLowerCase() : get_facing(`npc.${npc_id}`),
                 body_model_id: typeof npc_any?.body_model_id === 'string' ? String(npc_any.body_model_id) : undefined,
+                kind_id: typeof npc_any?.kind === 'string' ? String(npc_any.kind) : (typeof npc_any?.kind_id === 'string' ? String(npc_any.kind_id) : undefined),
+                movement: npc_any?.movement,
                 status: 'present',
                 tags: Array.isArray(npc_any?.tags) ? npc_any.tags : [],
-                __any: npc_any,
-            });
+                resolved_tag_states: Array.isArray((npc_any as any)?.resolved_tag_states) ? (npc_any as any).resolved_tag_states : [],
+                value_mag: (npc_any as any)?.value_mag ?? null,
+                breath_index: npc_any?.breath_index,
+                breath_last_processed: npc_any?.breath_last_processed,
+                breath_last_processed_ms: npc_any?.breath_last_processed_ms,
+                movement_schedule: npc_any?.movement_schedule,
+                entity_render: npc_any?.entity_render,
+            }));
         }
 
         for (const actor_ref of entity_refs.actors) {
@@ -1437,17 +1470,26 @@ function build_place_contents_for_legality(slot: number, place_id: string, place
                 actor_cache.set(entity_key(slot, actor_id), actor_any);
                 queue_save_actor(slot, actor_id);
             }
-            snap_actors.push({
+            snap_actors.push(normalize_place_actor_presence({
                 actor_ref: String(actor_ref).startsWith('actor.') ? String(actor_ref) : `actor.${actor_id}`,
+                name: typeof actor_any?.name === 'string' ? String(actor_any.name) : actor_id,
                 tile_position: { x: clamped_x, y: clamped_y },
                 elevation: (typeof loc.elevation === 'number' && Number.isFinite(loc.elevation)) ? Math.floor(loc.elevation) : Math.floor(Number(place_any?.coordinates?.elevation ?? 0)) || 0,
                 weight: get_entity_effective_weight(actor_any),
                 facing: typeof actor_any?.facing === 'string' ? String(actor_any.facing).toLowerCase() : get_facing(`actor.${actor_id}`),
                 body_model_id: typeof actor_any?.body_model_id === 'string' ? String(actor_any.body_model_id) : undefined,
+                kind_id: typeof actor_any?.kind === 'string' ? String(actor_any.kind) : (typeof actor_any?.kind_id === 'string' ? String(actor_any.kind_id) : undefined),
+                movement: actor_any?.movement,
                 status: 'present',
                 tags: Array.isArray(actor_any?.tags) ? actor_any.tags : [],
-                __any: actor_any,
-            });
+                resolved_tag_states: Array.isArray((actor_any as any)?.resolved_tag_states) ? (actor_any as any).resolved_tag_states : [],
+                value_mag: (actor_any as any)?.value_mag ?? null,
+                breath_index: actor_any?.breath_index,
+                breath_last_processed: actor_any?.breath_last_processed,
+                breath_last_processed_ms: actor_any?.breath_last_processed_ms,
+                movement_schedule: actor_any?.movement_schedule,
+                entity_render: actor_any?.entity_render,
+            }));
         }
 
         if (!place_any.contents) place_any.contents = { npcs_present: [], actors_present: [], items_on_ground: [], features: [] };
@@ -1719,6 +1761,7 @@ function run_place_breaths(state: PlaceBreathState, ticks_to_run: number, now: n
     for (let i = 0; i < ticks; i += 1) {
         state.breath_index += 1;
         state.breath_last_processed = state.breath_index;
+        set_free_roam_place_breath(state.slot, state.place_id, state.breath_index);
 
         breath_ticks.push({ slot: state.slot, place_id: state.place_id, breath_index: state.breath_index });
 
@@ -1969,6 +2012,17 @@ function flush_place_breath_outputs(now: number, breath_ticks: Array<{ slot: num
             sent_at_ms: now,
             intents: item_refresh_intents,
         });
+        const private_actor_refreshes = new Set<string>();
+        for (const intent of item_refresh_intents) {
+            const actor_id = String(intent?.actor_id ?? '').trim();
+            const scopes = Array.isArray(intent?.scopes) ? intent.scopes : [];
+            if (actor_id && (scopes.includes('character_render') || scopes.includes('container_contents'))) {
+                private_actor_refreshes.add(`actor.${actor_id}`);
+            }
+        }
+        for (const actor_ref of private_actor_refreshes) {
+            emit_actor_private_state_changed(actor_ref, ['item_mutation']);
+        }
         item_refresh_emit_duration_ms = Math.max(0, Date.now() - emit_started_ms);
     }
 
@@ -2833,10 +2887,10 @@ function resolve_connector_entry_tile(
 ): { ok: true; tile: { x: number; y: number; z: number } } | { ok: false; error: string; tile: { x: number; y: number; z: number } } {
     const width = Math.max(1, Math.floor(Number(place_any?.tile_grid?.width ?? 1)) || 1);
     const height = Math.max(1, Math.floor(Number(place_any?.tile_grid?.height ?? 1)) || 1);
-    const min_x = 0;
-    const max_x = Math.max(0, width - 1);
-    const min_y = 0;
-    const max_y = Math.max(0, height - 1);
+    const min_x = width > 2 ? 1 : 0;
+    const max_x = width > 2 ? Math.max(1, width - 2) : Math.max(0, width - 1);
+    const min_y = height > 2 ? 1 : 0;
+    const max_y = height > 2 ? Math.max(1, height - 2) : Math.max(0, height - 1);
     const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
     const target = {
         x: clamp(Math.floor(Number(hint.x) || 0), min_x, max_x),
@@ -2854,8 +2908,10 @@ function resolve_connector_entry_tile(
         debug_log('MOVE_UNIFY_TEST', 'connector entry tile resolved', {
             entity_ref,
             place_id: String(place_any?.id ?? ''),
+            hint,
             preferred: target,
             chosen: target,
+            interior_bounds: { min_x, max_x, min_y, max_y },
             linear_mapping: true,
         });
         return { ok: true, tile: target };
@@ -2889,8 +2945,10 @@ function resolve_connector_entry_tile(
                 debug_log('MOVE_UNIFY_TEST', 'connector entry tile resolved with vertical snap', {
                     entity_ref,
                     place_id: String(place_any?.id ?? ''),
+                    hint,
                     preferred: target,
                     chosen,
+                    interior_bounds: { min_x, max_x, min_y, max_y },
                     linear_mapping: true,
                 });
                 return { ok: true, tile: chosen };
@@ -2901,9 +2959,11 @@ function resolve_connector_entry_tile(
     debug_warn('MOVE_UNIFY_TEST', 'connector entry tile invalid for linear transfer', {
         entity_ref,
         place_id: String(place_any?.id ?? ''),
+        hint,
         preferred: target,
         reason: check.reason ?? 'blocked',
         detail: check.detail ?? null,
+        interior_bounds: { min_x, max_x, min_y, max_y },
         linear_mapping: true,
     });
     return { ok: false, error: 'connector_transfer_invalid_target_stance', tile: target };
@@ -3953,6 +4013,32 @@ function queue_save_npc(slot: number, npc_id: string): void {
     npc_save_timer.set(key, t);
 }
 
+function sync_entity_cache_after_character_save(slot: number, ref: string, character: Record<string, unknown>): void {
+    const role = get_character_role_from_ref(ref);
+    const id = get_character_id_from_ref(ref);
+    if (!role || !id) return;
+
+    const key = entity_key(slot, id);
+    const cloned = JSON.parse(JSON.stringify(character ?? {}));
+
+    if (role === 'actor') {
+        const pending = actor_save_timer.get(key);
+        if (pending) {
+            clearTimeout(pending);
+            actor_save_timer.delete(key);
+        }
+        actor_cache.set(key, cloned);
+        return;
+    }
+
+    const pending = npc_save_timer.get(key);
+    if (pending) {
+        clearTimeout(pending);
+        npc_save_timer.delete(key);
+    }
+    npc_cache.set(key, cloned);
+}
+
 // Lightweight counters for /api/place/touch heartbeats (debuggable, low-volume).
 const place_touch_heartbeat_count = new Map<string, number>();
 
@@ -4111,6 +4197,8 @@ function ensure_place_runtime_augmented(place_any: any, place_id: string): void 
                         tile.display_char = resolved.display_char;
                         tile.display_color = resolved.display_color;
                         tile.tags = resolved.effective_tags;
+                        (tile as any).resolved_tag_states = resolved.resolved_tag_states;
+                        (tile as any).value_mag = resolved.value_mag;
                         (tile as any).render_shader = resolved.render_shader ?? undefined;
                         tile.__derived_runtime = true;
                         augmentedTiles++;
@@ -4166,6 +4254,8 @@ function ensure_place_runtime_augmented(place_any: any, place_id: string): void 
             (s as any).display_char = resolved.display_char;
             (s as any).display_color = resolved.display_color;
             (s as any).tags = resolved.effective_tags;
+            (s as any).resolved_tag_states = resolved.resolved_tag_states;
+            (s as any).value_mag = resolved.value_mag;
             (s as any).container_glyphs = resolved.container_glyphs ?? null;
             (s as any).render_shader = resolved.render_shader ?? undefined;
 
@@ -4696,16 +4786,17 @@ function build_place_scene_topology(slot: number, place_id: string): { ok: true;
         if (!place_res.ok) continue;
         const place_any: any = place_res.place as any;
         build_place_contents_for_legality(slot, id, place_any);
+        const public_place = project_public_place_payload(place_any);
         places.push({
-            id: String(place_any.id ?? ''),
-            name: String(place_any.name ?? ''),
-            region_id: String(place_any.region_id ?? ''),
-            coordinates: clone_for_api(place_any.coordinates ?? null),
-            region_bounds: clone_for_api(place_any.region_bounds ?? null),
-            tile_grid: clone_for_api(place_any.tile_grid ?? null),
-            place_connectors: clone_for_api(Array.isArray(place_any.place_connectors) ? place_any.place_connectors : []),
-            region_connectors: clone_for_api(Array.isArray(place_any.region_connectors) ? place_any.region_connectors : []),
-            place: clone_for_api(place_any),
+            id: String(public_place.id ?? ''),
+            name: String(public_place.name ?? ''),
+            region_id: String(public_place.region_id ?? ''),
+            coordinates: clone_for_api(public_place.coordinates ?? null),
+            region_bounds: clone_for_api(public_place.region_bounds ?? null),
+            tile_grid: clone_for_api(public_place.tile_grid ?? null),
+            place_connectors: clone_for_api(Array.isArray(public_place.place_connectors) ? public_place.place_connectors : []),
+            region_connectors: clone_for_api(Array.isArray(public_place.region_connectors) ? public_place.region_connectors : []),
+            place: public_place,
         });
     }
     return { ok: true, selected_place_id: place_id, graph_version, visible_place_ids: ids, places };
@@ -4857,6 +4948,7 @@ function touch_place_breath(slot: number, place_any: any, opts?: { realtime_visi
             // Keep place snapshot in sync with authoritative in-memory breath.
             place_any.breath_index = existing.breath_index;
             place_any.breath_last_processed = existing.breath_last_processed;
+            set_free_roam_place_breath(slot, place_id, existing.breath_index);
 
             // Refresh base snapshot (clone) for breath processing.
             try {
@@ -4991,6 +5083,9 @@ function touch_place_breath_by_id(slot: number, place_id: string, opts?: { realt
 
     touch_place_breath(slot, place_res.place as any, opts);
     const created = place_breath.get(key);
+    if (created) {
+        set_free_roam_place_breath(slot, pid, created.breath_index);
+    }
     return { ok: true, breath_index: created?.breath_index ?? 0 };
 }
 
@@ -5227,9 +5322,7 @@ function create_authored_ground_item(def_id: string, qty: number = 1, owner_ref:
     if (!normalized_id) return null;
     const def_result = load_master_item(normalized_id);
     if (!def_result.ok) return null;
-    const item = create_inline_item(normalized_id, Math.max(1, Math.floor(Number(qty) || 1)), owner_ref, '');
-    item.tags = Array.isArray(def_result.item?.tags) ? clone_for_api(def_result.item.tags) : [];
-    return item;
+    return create_inline_item(normalized_id, Math.max(1, Math.floor(Number(qty) || 1)), owner_ref, '');
 }
 
 function connector_volume_points(volume: any): Array<{ x: number; y: number; z: number }> {
@@ -5430,6 +5523,263 @@ function mutate_place_tile_and_sync(
     return { ok: true, place: place_any };
 }
 
+function normalize_editor_mag(value: unknown, fallback: number): number {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(0, Math.min(99, Math.floor(n)));
+}
+
+function normalize_editor_dim_mag_for_tag(tag_name: string, dim_mag: unknown): Record<string, number> | undefined {
+    if (!dim_mag || typeof dim_mag !== "object" || Array.isArray(dim_mag)) return undefined;
+    const definition = get_tag_definition(tag_name);
+    const dimensions = definition?.dimensions ?? [];
+    const out: Record<string, number> = {};
+    for (const [key, raw_value] of Object.entries(dim_mag as Record<string, unknown>)) {
+        const dim_id = String(key ?? "").trim();
+        if (!dim_id) continue;
+        const dimension = dimensions.find((entry) => entry.id === dim_id) ?? null;
+        const fallback = dimension?.default_mag ?? 0;
+        const value = clamp_mag(raw_value, dimension?.min_mag ?? null, dimension?.max_mag ?? null, fallback);
+        out[dim_id] = value;
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function normalize_editor_tag_mag_for_definition(tag_name: string, value: unknown, fallback: number = 1): number {
+    const definition = get_tag_definition(tag_name);
+    if (definition?.quantity_dimension_id) {
+        return normalize_editor_mag(value, fallback);
+    }
+    return 1;
+}
+
+function find_item_in_contents_for_editor(contents: any[], item_id: string, base_path: string): { item: any; path: string } | null {
+    for (let i = 0; i < contents.length; i += 1) {
+        const item = contents[i];
+        if (!item) continue;
+        if (String(item?.id ?? '') === item_id) return { item, path: `${base_path}.${i}` };
+        if (Array.isArray(item?.contents)) {
+            const found = find_item_in_contents_for_editor(item.contents, item_id, `${base_path}.${i}.contents`);
+            if (found) return found;
+        }
+    }
+    return null;
+}
+
+function find_item_in_place_for_editor(place_any: any, item_id: string): { item: any; path: string } | null {
+    const ground_main = Array.isArray(place_any?.ground?.main) ? place_any.ground.main : [];
+    const found_main = find_item_in_contents_for_editor(ground_main, item_id, 'ground.main');
+    if (found_main) return found_main;
+    const scattered = place_any?.ground?.scattered;
+    if (scattered && typeof scattered === 'object') {
+        for (const [key, value] of Object.entries(scattered as Record<string, any[]>)) {
+            const found = find_item_in_contents_for_editor(Array.isArray(value) ? value : [], item_id, `ground.scattered.${key}`);
+            if (found) return found;
+        }
+    }
+    const search_tiles = (tiles: any, label: string): { item: any; path: string } | null => {
+        const cells = Array.isArray(tiles?.cells) ? tiles.cells : [];
+        for (let y = 0; y < cells.length; y += 1) {
+            const row = Array.isArray(cells[y]) ? cells[y] : [];
+            for (let x = 0; x < row.length; x += 1) {
+                const tile = row[x];
+                if (!tile) continue;
+                if (Array.isArray(tile?.contents)) {
+                    const found = find_item_in_contents_for_editor(tile.contents, item_id, `${label}.cells.${y}.${x}.contents`);
+                    if (found) return found;
+                }
+                if (Array.isArray(tile?.grow_surfaces)) {
+                    for (let i = 0; i < tile.grow_surfaces.length; i += 1) {
+                        const surface = tile.grow_surfaces[i];
+                        const found = find_item_in_contents_for_editor(Array.isArray(surface?.contents) ? surface.contents : [], item_id, `${label}.cells.${y}.${x}.grow_surfaces.${i}.contents`);
+                        if (found) return found;
+                    }
+                }
+            }
+        }
+        return null;
+    };
+    const in_tiles = search_tiles(place_any?.tiles, 'tiles');
+    if (in_tiles) return in_tiles;
+    const in_tiles_z0 = search_tiles(place_any?.tiles_z0, 'tiles_z0');
+    if (in_tiles_z0) return in_tiles_z0;
+    const structures = Array.isArray(place_any?.structures) ? place_any.structures : [];
+    for (let i = 0; i < structures.length; i += 1) {
+        const structure = structures[i];
+        if (!structure) continue;
+        const found = find_item_in_contents_for_editor(Array.isArray(structure?.contents) ? structure.contents : [], item_id, `structures.${i}.contents`);
+        if (found) return found;
+    }
+    return null;
+}
+
+function build_item_editor_payload(item: any, owner_kind: 'actor' | 'npc' | 'place', owner_id: string, current_breath_index?: number): Record<string, unknown> {
+    const resolved = resolve_inline_item(String(item?.def_id ?? ''), item);
+    if (!resolved) throw new Error('item_definition_not_found');
+    const qty = Math.max(1, Math.floor(Number(item?.qty ?? 1) || 1));
+    const single_value_mag = Number(resolved.value_mag?.total_value_mag ?? 0);
+    const single_weight = Number(resolved.unit_weight ?? resolved.def.weight ?? 0);
+    return {
+        item_ref: `item.${String(item?.id ?? '')}`,
+        owner_kind,
+        owner_id,
+        id: String(item?.id ?? ''),
+        def_id: String(item?.def_id ?? ''),
+        name: String(resolved.name ?? item?.def_id ?? ''),
+        qty,
+        size_mag: Number(resolved.def.size_mag ?? 0),
+        single_value_mag,
+        stack_value_mag: single_value_mag * qty,
+        single_weight,
+        stack_weight: single_weight * qty,
+        last_breath_processed: Number.isFinite(Number(item?.last_breath_processed)) ? Math.floor(Number(item.last_breath_processed)) : null,
+        current_breath_index: Number.isFinite(Number(current_breath_index)) ? Math.floor(Number(current_breath_index)) : null,
+        tags: resolved.effective_tags,
+        resolved_tag_states: resolved.resolved_tag_states,
+        value_mag: resolved.value_mag,
+    };
+}
+
+function apply_item_effective_tags(item: any, desired_tags: any[]): Record<string, unknown> {
+    const resolved = resolve_inline_item(String(item?.def_id ?? ''), item);
+    if (!resolved) throw new Error('item_definition_not_found');
+    const delta = build_editor_delta_from_base_and_desired(resolved.def.tags ?? [], normalize_editor_tags(desired_tags));
+    item.tag_add = delta.tag_add;
+    item.tag_remove = delta.tag_remove;
+    return build_item_editor_payload(item, 'actor', '');
+}
+
+function get_owner_current_breath_index(slot: number, owner_kind: 'actor' | 'npc' | 'place', owner_id: string): number | null {
+    if (owner_kind === 'place') {
+        const place_state = get_active_place_breath_state(slot, owner_id);
+        if (place_state) return Math.floor(Number(place_state.breath_index ?? 0)) || 0;
+        const place_result = load_place_with_ground(slot, owner_id);
+        if (!place_result.ok) return null;
+        return Math.floor(Number((place_result.place as any)?.breath_index ?? (place_result.place as any)?.breath_last_processed ?? 0)) || 0;
+    }
+    if (owner_kind === 'actor') {
+        const actor_result = load_actor_with_items(slot, owner_id);
+        if (!actor_result.ok) return null;
+        return Math.floor(Number((actor_result.actor as any)?.breath_index ?? (actor_result.actor as any)?.breath_last_processed ?? 0)) || 0;
+    }
+    const npc_result = load_npc(slot, owner_id);
+    if (!npc_result.ok) return null;
+    return Math.floor(Number((npc_result.npc as any)?.breath_index ?? (npc_result.npc as any)?.breath_last_processed ?? 0)) || 0;
+}
+
+function should_emit_grow_yield(tag_key_value: string, breath_index: number, event_index: number, denominator: number): boolean {
+    const denom = Math.max(1, Math.floor(Number(denominator) || 1));
+    if (denom <= 1) return true;
+    const seed = `${String(tag_key_value ?? '')}:${Math.floor(Number(breath_index) || 0)}:${Math.floor(Number(event_index) || 0)}`;
+    let hash = 2166136261;
+    for (let i = 0; i < seed.length; i += 1) {
+        hash ^= seed.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+    }
+    return Math.abs(hash >>> 0) % denom === 0;
+}
+
+function clone_editor_tag(tag: any): any {
+    return JSON.parse(JSON.stringify(tag ?? {}));
+}
+
+function normalize_editor_tags(tags: unknown): any[] {
+    if (!Array.isArray(tags)) return [];
+    return tags
+        .filter((tag) => !!tag && typeof tag === 'object' && String((tag as any)?.name ?? '').trim().length > 0)
+        .map((tag) => {
+            const next = clone_editor_tag(tag);
+            next.name = String(next?.name ?? '').trim().toUpperCase();
+            next.mag = normalize_editor_tag_mag_for_definition(next.name, next?.mag, 1);
+            delete next.rank_mag;
+            next.meta = Array.isArray(next?.meta) ? next.meta.map((entry: unknown) => String(entry ?? '').trim().toUpperCase()).filter(Boolean) : [];
+            return next;
+        });
+}
+
+function build_editor_delta_from_base_and_desired(base_tags: any[], desired_tags: any[]): { tag_add: any[]; tag_remove: Array<{ key: string; mag: number }> } {
+    const tag_add: any[] = [];
+    const tag_remove: Array<{ key: string; mag: number }> = [];
+    const desired_by_key = new Map<string, any[]>();
+    const base_by_key = new Map<string, any[]>();
+
+    for (const tag of desired_tags) {
+        const key = tag_key(tag);
+        const list = desired_by_key.get(key) ?? [];
+        list.push(tag);
+        desired_by_key.set(key, list);
+    }
+    for (const tag of base_tags) {
+        const key = tag_key(tag);
+        const list = base_by_key.get(key) ?? [];
+        list.push(tag);
+        base_by_key.set(key, list);
+    }
+
+    const all_keys = new Set<string>([...base_by_key.keys(), ...desired_by_key.keys()]);
+    for (const key of all_keys) {
+        const base_list = base_by_key.get(key) ?? [];
+        const desired_list = desired_by_key.get(key) ?? [];
+        const name = String((desired_list[0] ?? base_list[0])?.name ?? '');
+        const stacking = get_tag_stacking_mode(name);
+        if (stacking === 'sum') {
+            const base_mag = base_list.reduce((sum, tag) => sum + normalize_editor_mag(tag?.mag, 1), 0);
+            const desired_mag = desired_list.reduce((sum, tag) => sum + normalize_editor_mag(tag?.mag, 1), 0);
+            if (desired_mag > base_mag) {
+                const seed = desired_list[0] ?? base_list[0];
+                if (seed) {
+                    const add_tag = clone_editor_tag(seed);
+                    add_tag.mag = desired_mag - base_mag;
+                    tag_add.push(add_tag);
+                }
+            } else if (desired_mag < base_mag) {
+                tag_remove.push({ key, mag: base_mag - desired_mag });
+            }
+            continue;
+        }
+
+        const base_tag = base_list[0] ?? null;
+        const desired_tag = desired_list[0] ?? null;
+        const base_raw = base_tag ? JSON.stringify(base_tag) : null;
+        const desired_raw = desired_tag ? JSON.stringify(desired_tag) : null;
+        if (base_tag && !desired_tag) {
+            tag_remove.push({ key, mag: Math.max(1, normalize_editor_mag(base_tag?.mag, 1)) });
+            continue;
+        }
+        if (!base_tag && desired_tag) {
+            tag_add.push(clone_editor_tag(desired_tag));
+            continue;
+        }
+        if (base_tag && desired_tag && base_raw !== desired_raw) {
+            tag_remove.push({ key, mag: Math.max(1, normalize_editor_mag(base_tag?.mag, 1)) });
+            tag_add.push(clone_editor_tag(desired_tag));
+        }
+    }
+
+    return { tag_add, tag_remove };
+}
+
+function matches_editor_selector(tag: any, selector: { key?: string | null; name?: string | null }): boolean {
+    const want_key = String(selector?.key ?? '').trim();
+    if (want_key) return tag_key(tag) === want_key;
+    const want_name = String(selector?.name ?? '').trim().toUpperCase();
+    if (!want_name) return false;
+    return String(tag?.name ?? '').trim().toUpperCase() === want_name;
+}
+
+function apply_tile_effective_tags(tile: any, desired_tags: any[]): any {
+    const resolved = resolve_place_tile(String(tile?.kind ?? ''), tile as any);
+    if (!resolved) throw new Error('tile_resolve_failed');
+    const delta = build_editor_delta_from_base_and_desired(resolved.def.tags ?? [], normalize_editor_tags(desired_tags));
+    tile.tag_add = delta.tag_add;
+    tile.tag_remove = delta.tag_remove;
+    const refreshed = resolve_place_tile(String(tile?.kind ?? ''), tile as any);
+    if (!refreshed) throw new Error('tile_resolve_failed');
+    tile.tags = refreshed.effective_tags;
+    (tile as any).resolved_tag_states = refreshed.resolved_tag_states;
+    return refreshed;
+}
+
 function mutate_place_tiles_and_sync(
     slot: number,
     place_id: string,
@@ -5588,6 +5938,54 @@ function mutate_place_ground_item_add_and_sync(
     if (!placed.ok) return { ok: false, error: placed.error };
     save_place_with_ground_and_sync_active(slot, normalized_place_id, place_any, { merge_active_runtime: false });
     return { ok: true, place: place_any, item };
+}
+
+function mutate_place_painter_erase_and_sync(
+    slot: number,
+    place_id: string,
+    entity_type: 'npc' | 'actor' | 'item' | 'pile',
+    entity_ref: string,
+    source: { x: number; y: number; z: number },
+): { ok: true; deleted_count: number } | { ok: false; error: string } {
+    const normalized_place_id = String(place_id ?? '').trim();
+    if (!normalized_place_id) return { ok: false, error: 'missing_place_id' };
+
+    if (entity_type === 'actor' || entity_type === 'npc') {
+        return { ok: false, error: 'character_erase_not_implemented' };
+    }
+
+    const place_res = load_place_with_ground(slot, normalized_place_id);
+    if (!place_res.ok) return { ok: false, error: 'place_not_found' };
+    const place_any: any = place_res.place as any;
+    merge_active_place_runtime_mutations(slot, normalized_place_id, place_any);
+
+    if (entity_type === 'item') {
+        const item_id = String(entity_ref ?? '').replace(/^item\./, '').trim();
+        if (!item_id) return { ok: false, error: 'invalid_item_ref' };
+        const removed = remove_item_from_ground(place_any, item_id);
+        if (!removed.ok) return { ok: false, error: removed.error };
+        save_place_with_ground_and_sync_active(slot, normalized_place_id, place_any, { merge_active_runtime: false });
+        return { ok: true, deleted_count: 1 };
+    }
+
+    if (entity_type === 'pile') {
+        const sx = Math.floor(Number(source.x));
+        const sy = Math.floor(Number(source.y));
+        const sz = Math.floor(Number(source.z));
+        if (!Number.isFinite(sx) || !Number.isFinite(sy) || !Number.isFinite(sz)) return { ok: false, error: 'invalid_source' };
+        const src_norm = normalize_voxel_position_key(place_any, `${sx}_${sy}_${sz}`);
+        if (!src_norm) return { ok: false, error: 'invalid_source_voxel' };
+        if (!place_any.ground) place_any.ground = { main: [], scattered: {} };
+        if (!place_any.ground.scattered) place_any.ground.scattered = {};
+        const from_items: any[] = Array.isArray(place_any.ground.scattered[src_norm.key]) ? place_any.ground.scattered[src_norm.key] : [];
+        if (from_items.length < 1) return { ok: false, error: 'pile_empty' };
+        const deleted_count = from_items.length;
+        delete place_any.ground.scattered[src_norm.key];
+        save_place_with_ground_and_sync_active(slot, normalized_place_id, place_any, { merge_active_runtime: false });
+        return { ok: true, deleted_count };
+    }
+
+    return { ok: false, error: 'unsupported_entity_type' };
 }
 
 function mutate_place_painter_move_and_sync(
@@ -5946,7 +6344,7 @@ function is_empty_tile_destination(place_any: any, to: { x: number; y: number; z
 
 function reset_tavern_push_fixture(slot: number): { ok: boolean; place_id: string; actor_ref: string; actor_at: { x: number; y: number; z: number } } {
     const place_id = 'eden_crossroads_tavern';
-    const actor_id = 'henry_actor';
+    const actor_id = resolve_runtime_player_actor_id(slot);
     const actor_ref = `actor.${actor_id}`;
     const place_res = load_place(slot, place_id);
     if (!place_res.ok) throw new Error(`place_not_found:${place_id}`);
@@ -6225,7 +6623,8 @@ function apply_gravity_to_place_tiles(state: PlaceBreathState): GravityBreathPro
 }
 
 function has_simple_tag(tags: any, name: string): boolean {
-    return has_tag_name(tags, name);
+    const want = String(name ?? '').trim().toUpperCase();
+    return Array.isArray(tags) && tags.some((tag) => String((tag as any)?.name ?? '').trim().toUpperCase() === want);
 }
 
 type BreathReactiveTarget =
@@ -6252,22 +6651,13 @@ type ItemMutationRefreshIntent = {
     reasons: string[];
 };
 
-type GrowConfig = {
-    item_def_ids: string[];
-    period_breaths: number;
-};
-
-type SpoilsConfig = {
-    period_breaths: number;
-    result_item_def_id: string | null;
-};
-
 type BreathTagHandler = (ctx: BreathReactiveRouteContext, target: BreathReactiveTarget, tag: any) => void;
 
 const tile_breath_tag_handlers = new Map<string, BreathTagHandler>();
 const item_breath_tag_handlers = new Map<string, BreathTagHandler>();
 const warned_missing_grow_item_defs = new Set<string>();
 const warned_missing_spoil_item_defs = new Set<string>();
+const warned_missing_canonical_item_payload_fields = new Set<string>();
 
 function record_item_mutation_refresh(ctx: BreathReactiveRouteContext, reason: string): void {
     const place_id = String(ctx?.state?.place_id ?? '').trim() || null;
@@ -6306,10 +6696,28 @@ function get_layer_world_z(place_any: any, layer_key: string): number {
 function ensure_tile_container_capacity(tile: any): number {
     if (!tile || typeof tile !== 'object') return 1;
     if (!Array.isArray(tile.contents)) tile.contents = [];
+    const resolved = resolve_place_tile(String(tile?.kind ?? ''), tile);
+    const dim_mag = resolve_container_capacity_mag_from_states(resolved?.resolved_tag_states ?? []);
     const raw = Number(tile?.container_capacity?.max_slots);
-    const max_slots = (Number.isFinite(raw) && raw >= 1) ? Math.floor(raw) : 12;
+    const max_slots = dim_mag !== null
+        ? project_container_max_slots(dim_mag)
+        : (Number.isFinite(raw) && raw >= 1) ? Math.floor(raw) : 4;
     if (!tile.container_capacity || typeof tile.container_capacity !== 'object') tile.container_capacity = {};
     tile.container_capacity.max_slots = max_slots;
+    return max_slots;
+}
+
+function ensure_resolved_container_capacity(container_obj: any, def_id: string): number {
+    if (!container_obj || typeof container_obj !== 'object') return 1;
+    if (!Array.isArray(container_obj.contents)) container_obj.contents = [];
+    const resolved = resolve_place_tile(String(def_id ?? ''), { kind: def_id, tag_add: container_obj?.tag_add, tag_remove: container_obj?.tag_remove } as any);
+    const dim_mag = resolve_container_capacity_mag_from_states(resolved?.resolved_tag_states ?? []);
+    const raw = Number(container_obj?.container_capacity?.max_slots);
+    const max_slots = dim_mag !== null
+        ? project_container_max_slots(dim_mag)
+        : (Number.isFinite(raw) && raw >= 1) ? Math.floor(raw) : 4;
+    if (!container_obj.container_capacity || typeof container_obj.container_capacity !== 'object') container_obj.container_capacity = {};
+    container_obj.container_capacity.max_slots = max_slots;
     return max_slots;
 }
 
@@ -6338,36 +6746,6 @@ function drop_inline_item_to_ground_stacking(place_any: any, gx: number, gy: num
     delete item.grid_x;
     delete item.grid_y;
     place_any.ground.scattered[key].push(item);
-}
-
-function parse_grow_configs(info: any): GrowConfig[] {
-    const entries = Array.isArray(info) ? info : [info];
-    const out: GrowConfig[] = [];
-    for (const entry of entries) {
-        if (typeof entry === 'string') {
-            const id = String(entry ?? '').trim();
-            if (!id) continue;
-            out.push({ item_def_ids: [id], period_breaths: GROW_DEFAULT_PERIOD_BREATHS });
-            continue;
-        }
-        if (!entry || typeof entry !== 'object') continue;
-        const any_entry: any = entry;
-        const ids = [
-            ...(Array.isArray(any_entry.item_def_ids) ? any_entry.item_def_ids : []),
-            ...(Array.isArray(any_entry.def_ids) ? any_entry.def_ids : []),
-            ...(typeof any_entry.item_def_id === 'string' ? [any_entry.item_def_id] : []),
-            ...(typeof any_entry.def_id === 'string' ? [any_entry.def_id] : []),
-        ]
-            .map((v: any) => String(v ?? '').trim())
-            .filter((v: string) => v.length > 0);
-        if (ids.length <= 0) continue;
-        const raw_period = Number(any_entry.period_breaths ?? any_entry.period_ticks ?? any_entry.period ?? GROW_DEFAULT_PERIOD_BREATHS);
-        const period_breaths = (Number.isFinite(raw_period) && raw_period > 0)
-            ? Math.floor(raw_period)
-            : GROW_DEFAULT_PERIOD_BREATHS;
-        out.push({ item_def_ids: ids, period_breaths: Math.max(1, period_breaths) });
-    }
-    return out;
 }
 
 function get_valid_grow_item_defs(def_ids: string[]): string[] {
@@ -6402,15 +6780,36 @@ function get_valid_spoil_item_def(def_id: unknown): string | null {
     return String(def_res.item.id ?? id);
 }
 
-function parse_spoils_config(info: any): SpoilsConfig | null {
-    const entry = Array.isArray(info) ? info[0] : info;
-    if (!entry || typeof entry !== 'object') return null;
-    const any_entry: any = entry;
-    const raw_period = Number(any_entry.period_breaths ?? any_entry.period_ticks ?? any_entry.period);
-    const period_breaths = (Number.isFinite(raw_period) && raw_period > 0) ? Math.max(1, Math.floor(raw_period)) : 0;
-    if (period_breaths <= 0) return null;
-    const result_item_def_id = get_valid_spoil_item_def(any_entry.result_item_def_id ?? any_entry.result_def_id ?? any_entry.def_id);
-    return { period_breaths, result_item_def_id };
+function ensure_tile_grow_surface(tile: any, stream_index: number, max_slots: number): { contents: any[]; max_slots: number; last_breath_processed?: number } {
+    if (!Array.isArray(tile.grow_surfaces)) tile.grow_surfaces = [];
+    while (tile.grow_surfaces.length <= stream_index) tile.grow_surfaces.push({ contents: [], max_slots: GROW_DEFAULT_MAX_SLOTS });
+    const surface = tile.grow_surfaces[stream_index] as any;
+    if (!Array.isArray(surface.contents)) surface.contents = [];
+    const next_max = Math.max(1, Math.floor(Number(max_slots) || GROW_DEFAULT_MAX_SLOTS));
+    surface.max_slots = next_max;
+    return surface;
+}
+
+function resolve_tile_grow_surface(place_any: any, place_id: string, tx: number, ty: number, wz: number, grow_index: number): { tile: any; surface: any } | null {
+    let tile: any = null;
+    try {
+        tile = get_place_tile_at_world_z(place_any, tx, ty, wz) as any;
+    } catch {
+        tile = null;
+    }
+    if (!tile || typeof tile !== 'object') return null;
+    if (!Array.isArray(tile.grow_surfaces)) return null;
+    const surface = tile.grow_surfaces[grow_index] as any;
+    if (!surface || !Array.isArray(surface.contents)) return null;
+    return { tile, surface };
+}
+
+function normalize_spoils_config(config: SpoilsTagConfig | null): SpoilsTagConfig | null {
+    if (!config) return null;
+    return {
+        period_breaths: config.period_breaths,
+        result_item_def_id: get_valid_spoil_item_def(config.result_item_def_id),
+    };
 }
 
 function handle_tile_grow_tag_breath(ctx: BreathReactiveRouteContext, target: BreathReactiveTarget, tag: any): void {
@@ -6418,10 +6817,23 @@ function handle_tile_grow_tag_breath(ctx: BreathReactiveRouteContext, target: Br
     const tile = target.tile;
     if (!tile || typeof tile !== 'object') return;
 
+    const raw_config = resolve_grow_tag_config_from_instance(tag as any);
+    if (!raw_config) return;
+    const active_config = {
+        ...raw_config,
+        item_def_ids: get_valid_grow_item_defs(raw_config.item_def_ids),
+    };
+    if (active_config.item_def_ids.length <= 0) return;
+
+    const grow_tags = Array.isArray(target.tags) ? target.tags.filter((t: any) => String(t?.name ?? '').toUpperCase() === 'GROW') : [];
+    const current_key = tag_key(tag as any);
+    const stream_index = Math.max(0, grow_tags.findIndex((entry: any) => tag_key(entry as any) === current_key));
+    const grow_surface = ensure_tile_grow_surface(tile, stream_index, active_config.max_grow_slots);
+
     const current_breath = Math.floor(Number(ctx.breath_index ?? 0)) || 0;
-    const last_raw = Number(tile.last_breath_processed);
+    const last_raw = Number(grow_surface.last_breath_processed);
     if (!Number.isFinite(last_raw)) {
-        tile.last_breath_processed = current_breath;
+        grow_surface.last_breath_processed = current_breath;
         ctx.mark_dirty();
         return;
     }
@@ -6429,101 +6841,65 @@ function handle_tile_grow_tag_breath(ctx: BreathReactiveRouteContext, target: Br
     const delta = current_breath - last;
     if (delta <= 0) return;
 
-    const configs = parse_grow_configs(tag?.info);
-    if (configs.length <= 0) {
-        tile.last_breath_processed = current_breath;
-        ctx.mark_dirty();
-        return;
-    }
-
-    const normalized_configs = configs
-        .map((config) => ({
-            item_def_ids: get_valid_grow_item_defs(config.item_def_ids),
-            period_breaths: Math.max(1, config.period_breaths),
-        }))
-        .filter((config) => config.item_def_ids.length > 0);
-    if (normalized_configs.length <= 0) {
-        tile.last_breath_processed = current_breath;
-        ctx.mark_dirty();
-        return;
-    }
-    const active_config = normalized_configs[0]!;
-
-    const is_container = has_simple_tag(target.tags, 'CONTAINER');
-    const max_slots = is_container ? ensure_tile_container_capacity(tile) : 0;
+    const max_slots = Math.max(1, Math.floor(Number(grow_surface.max_slots ?? active_config.max_grow_slots) || active_config.max_grow_slots));
     const events = Math.min(GROW_MAX_EVENTS_PER_PULSE, Math.floor(delta / active_config.period_breaths));
     if (events <= 0) return;
 
     for (let i = 0; i < events; i += 1) {
+        if (!should_emit_grow_yield(active_config.tag_key, ctx.breath_index, i, active_config.yield_chance_denominator)) {
+            continue;
+        }
         const def_id = active_config.item_def_ids[i % active_config.item_def_ids.length] as string;
         const def_res = load_master_item(def_id);
         if (!def_res.ok) continue;
-        const created = create_inline_item_from_store(def_id, 1);
+        const created = create_inline_item_from_store(def_id, active_config.yield_qty);
+        const has_space = grow_surface.contents.length < max_slots;
 
-        const can_put_in_container = is_container && Array.isArray(tile.contents);
-        const stack_target = can_put_in_container
-            ? tile.contents.find((existing: any) => {
-                const existing_resolved = resolve_inline_item(String(existing?.def_id ?? ''), existing);
-                return can_stack_items_with_spoil_policy(existing, existing_resolved, created, def_res.item);
-            })
-            : null;
-        const has_space = can_put_in_container ? (tile.contents.length < Math.max(1, max_slots)) : false;
-
-        if (stack_target) {
-            merge_item_stack_into_target(stack_target, created);
-            debug_log('GROW', 'tile container growth stacked item', {
-                place_id: ctx.state.place_id,
-                tile_kind: String(tile?.kind ?? ''),
-                tile_x: target.x,
-                tile_y: target.y,
-                tile_z: target.z,
-                item_def_id: def_id,
-                destination: 'tile.contents.stack',
-                stacked_qty: Number(stack_target?.qty ?? 1),
-                breath_index: ctx.breath_index,
-            });
-        } else if (can_put_in_container && has_space) {
-            tile.contents.push(created);
-            const normalized = normalize_inline_container_grid(tile.contents, Math.max(1, max_slots), `grow_tile_container:${ctx.state.place_id}:${target.x},${target.y}`);
+        if (has_space) {
+            grow_surface.contents.push(created);
+            const normalized = normalize_inline_container_grid(grow_surface.contents, Math.max(1, max_slots), `grow_tile_surface:${ctx.state.place_id}:${target.x},${target.y}:${stream_index}`);
             const coords_by_id = new Map<string, { x: number; y: number }>();
             for (const e of normalized) coords_by_id.set(String(e.item?.id ?? ''), { x: e.grid_x, y: e.grid_y });
-            for (const it of tile.contents) {
+            for (const it of grow_surface.contents) {
                 const c = coords_by_id.get(String(it?.id ?? ''));
                 if (c) {
                     (it as any).grid_x = c.x;
                     (it as any).grid_y = c.y;
                 }
             }
-            debug_log('GROW', 'tile container growth created item', {
+            debug_log('GROW', 'tile growth created item in grow surface', {
                 place_id: ctx.state.place_id,
                 tile_kind: String(tile?.kind ?? ''),
                 tile_x: target.x,
                 tile_y: target.y,
                 tile_z: target.z,
                 item_def_id: def_id,
-                destination: 'tile.contents',
-                tile_contents_count: tile.contents.length,
+                destination: `tile.grow_surfaces.${stream_index}`,
+                grow_surface_count: grow_surface.contents.length,
+                yield_qty: active_config.yield_qty,
+                yield_chance_denominator: active_config.yield_chance_denominator,
                 breath_index: ctx.breath_index,
             });
         } else {
-            drop_inline_item_to_ground_stacking(ctx.place_any, target.x, target.y, target.z, created, def_res.item as any);
-            debug_log('GROW', 'tile growth dropped item to ground', {
+            debug_log('GROW', 'tile growth skipped item due to grow slot cap', {
                 place_id: ctx.state.place_id,
                 tile_kind: String(tile?.kind ?? ''),
                 tile_x: target.x,
                 tile_y: target.y,
                 tile_z: target.z,
                 item_def_id: def_id,
-                destination: 'ground.scattered',
-                can_put_in_container,
+                destination: `tile.grow_surfaces.${stream_index}.full`,
                 has_space,
-                tile_contents_count: Array.isArray(tile.contents) ? tile.contents.length : 0,
+                grow_surface_count: grow_surface.contents.length,
+                max_slots,
+                yield_qty: active_config.yield_qty,
+                yield_chance_denominator: active_config.yield_chance_denominator,
                 breath_index: ctx.breath_index,
             });
         }
     }
 
-    tile.last_breath_processed = last + (events * active_config.period_breaths);
+    grow_surface.last_breath_processed = last + (events * active_config.period_breaths);
     ctx.mark_dirty();
 }
 
@@ -6547,7 +6923,7 @@ function handle_item_spoils_tag_breath(ctx: BreathReactiveRouteContext, target: 
     let active_tag = tag;
 
     while (transitions < 8) {
-        const config = parse_spoils_config(active_tag?.info);
+        const config = normalize_spoils_config(build_spoils_tag_config(resolve_tag_state_from_instance(active_tag as any)));
         if (!config) {
             item.last_breath_processed = current_breath;
             ctx.mark_dirty();
@@ -6626,6 +7002,10 @@ function route_breath_target_tags(ctx: BreathReactiveRouteContext, target: Breat
 
 function route_breath_tags_for_inline_item(ctx: BreathReactiveRouteContext, item: any, replace: (next: any | null) => void): void {
     if (!item || typeof item !== 'object') return;
+    if (MetaTagProcessor.processInlineItemLifecycle(item, ctx.breath_index)) {
+        ctx.mark_dirty();
+        record_item_mutation_refresh(ctx, 'item_lifecycle');
+    }
     const def_id = String(item?.def_id ?? '');
     const tags = (resolve_inline_item(def_id, item) ?? null)?.effective_tags ?? (Array.isArray(item?.tags) ? item.tags : []);
     const target: Extract<BreathReactiveTarget, { kind: 'item' }> = {
@@ -6703,6 +7083,9 @@ function apply_place_breath_reactive_tags(state: PlaceBreathState, breath_index_
             for (let x = 0; x < row.length; x += 1) {
                 const tile = row[x];
                 if (!tile) continue;
+                if (MetaTagProcessor.processTileLifecycle(tile, breath_index)) {
+                    state.place_dirty = true;
+                }
                 const tags = (resolve_place_tile(String(tile.kind ?? ''), tile) ?? null)?.effective_tags ?? (Array.isArray(tile.tags) ? tile.tags : []);
                 route_breath_target_tags(ctx, { kind: 'tile', tile, x, y, z: layer_z, tags });
                 if (Array.isArray(tile.contents)) {
@@ -6714,6 +7097,9 @@ function apply_place_breath_reactive_tags(state: PlaceBreathState, breath_index_
 
     const structures = Array.isArray(place_any?.structures) ? place_any.structures : [];
     for (const structure of structures) {
+        if (MetaTagProcessor.processStructureLifecycle(structure, breath_index)) {
+            state.place_dirty = true;
+        }
         if (Array.isArray(structure?.contents)) route_breath_tags_for_inline_item_array({ ...ctx, owner_container_kind: 'structure' }, structure.contents);
     }
 
@@ -6738,15 +7124,19 @@ function apply_entity_owned_item_breath_reactive_tags(state: PlaceBreathState): 
     const apply_owner = (kind: 'actor' | 'npc', id: string): void => {
         const owner_any: any = kind === 'actor' ? get_actor_any_cached(state.slot, id) : get_npc_any_cached(state.slot, id);
         if (!owner_any || typeof owner_any !== 'object') return;
+        let owner_dirty = MetaTagProcessor.processCharacterLifecycle(`${kind}.${id}`, owner_any, breath_index);
         const body_slots_any = owner_any.body_slots;
         if (!body_slots_any || typeof body_slots_any !== 'object') {
             owner_any.breath_index = breath_index;
             owner_any.breath_last_processed = breath_index;
             owner_any.breath_last_processed_ms = now_ms;
+            if (owner_dirty) {
+                if (kind === 'actor') queue_save_actor(state.slot, id);
+                else queue_save_npc(state.slot, id);
+            }
             return;
         }
 
-        let owner_dirty = false;
         const ctx: BreathReactiveRouteContext = {
             state,
             place_any,
@@ -6801,6 +7191,8 @@ function apply_gravity_to_place_characters(state: PlaceBreathState): void {
             facing: typeof npc_any?.facing === 'string' ? String(npc_any.facing).toLowerCase() : undefined,
             body_model_id: typeof npc_any?.body_model_id === 'string' ? String(npc_any.body_model_id) : undefined,
             tags: Array.isArray(npc_any?.tags) ? npc_any.tags : [],
+            resolved_tag_states: Array.isArray((npc_any as any)?.resolved_tag_states) ? (npc_any as any).resolved_tag_states : [],
+            value_mag: (npc_any as any)?.value_mag ?? null,
             __npc_id: npc_id,
             __npc_any: npc_any,
         });
@@ -6818,14 +7210,17 @@ function apply_gravity_to_place_characters(state: PlaceBreathState): void {
             facing: typeof actor_any?.facing === 'string' ? String(actor_any.facing).toLowerCase() : undefined,
             body_model_id: typeof actor_any?.body_model_id === 'string' ? String(actor_any.body_model_id) : undefined,
             tags: Array.isArray(actor_any?.tags) ? actor_any.tags : [],
+            resolved_tag_states: Array.isArray((actor_any as any)?.resolved_tag_states) ? (actor_any as any).resolved_tag_states : [],
+            value_mag: (actor_any as any)?.value_mag ?? null,
             __actor_id: actor_id,
             __actor_any: actor_any,
         });
     }
 
     if (!place_any.contents) place_any.contents = { npcs_present: [], actors_present: [], items_on_ground: [], features: [] };
-    place_any.contents.npcs_present = snap_npcs.map((n: any) => ({
+    place_any.contents.npcs_present = snap_npcs.map((n: any) => normalize_place_npc_presence({
         npc_ref: n.npc_ref,
+        name: n.name,
         tile_position: n.tile_position,
         elevation: n.elevation,
         facing: n.facing,
@@ -6833,15 +7228,20 @@ function apply_gravity_to_place_characters(state: PlaceBreathState): void {
         status: 'present',
         activity: 'standing here',
         tags: n.tags,
+        resolved_tag_states: n.resolved_tag_states,
+        value_mag: n.value_mag,
     }));
-    place_any.contents.actors_present = snap_actors.map((a: any) => ({
+    place_any.contents.actors_present = snap_actors.map((a: any) => normalize_place_actor_presence({
         actor_ref: a.actor_ref,
+        name: a.name,
         tile_position: a.tile_position,
         elevation: a.elevation,
         facing: a.facing,
         body_model_id: a.body_model_id,
         status: 'present',
         tags: a.tags,
+        resolved_tag_states: a.resolved_tag_states,
+        value_mag: a.value_mag,
     }));
 
     const bz = Math.floor(Number(place_any?.coordinates?.elevation ?? 0)) || 0;
@@ -6962,16 +7362,24 @@ function run_timed_event_world_sim_interstitial_if_needed(
             debug_warn('TIMED_EVENT_BREATH', 'failed to advance empty world sim interstitial', { slot, error: advanced.error });
             return;
         }
-        const finalized = finalize_world_sim_interstitial(slot);
-        if (!finalized.ok) {
-            debug_warn('TIMED_EVENT_BREATH', 'failed to finalize world sim interstitial without active places', { slot, error: finalized.error });
-            return;
-        }
         debug_log('TIMED_EVENT_BREATH', 'world sim interstitial advanced without loaded places', {
             slot,
             applied_breaths: 1,
             world_breath_index: advanced.world_breath_index,
             remaining_interstitial_breaths: advanced.remaining_interstitial_breaths,
+        });
+
+        if ((advanced.remaining_interstitial_breaths ?? 0) > 0) return;
+
+        const finalized = finalize_world_sim_interstitial(slot);
+        if (!finalized.ok) {
+            debug_warn('TIMED_EVENT_BREATH', 'failed to finalize world sim interstitial without active places', { slot, error: finalized.error });
+            return;
+        }
+        debug_log('TIMED_EVENT_BREATH', 'world sim interstitial complete without loaded places', {
+            slot,
+            applied_breaths: 1,
+            world_breath_index: advanced.world_breath_index,
             new_turn: finalized.new_turn,
             active_actor: finalized.active_actor,
         });
@@ -7080,14 +7488,20 @@ function emit_timed_event_breath_state_if_needed(slot: number, now: number): voi
             ? (state.initiative_order?.[state.active_actor_index]?.actor_ref ?? null)
             : null,
     };
-    const key = JSON.stringify(payload);
-    const changed = key !== last_timed_event_breath_state_key;
-    if (!payload.timed_event_active && !changed) return;
-    last_timed_event_breath_state_key = key;
+    const comparison_key = JSON.stringify({
+        timed_event_active: payload.timed_event_active,
+        timed_event_phase: payload.timed_event_phase,
+        timed_event_world_breath_index: payload.timed_event_world_breath_index,
+        turn_breaths_remaining: payload.turn_breaths_remaining,
+        current_turn: payload.current_turn,
+        current_round: payload.current_round,
+        active_actor_ref: payload.active_actor_ref,
+    });
+    const changed = comparison_key !== last_timed_event_breath_state_key;
+    if (!changed) return;
+    last_timed_event_breath_state_key = comparison_key;
     void emitBridgeMessage('TIMED_EVENT_BREATH_STATE', payload);
-    if (changed) {
-        debug_log('TIMED_EVENT_BREATH', 'emitted timed event breath state', payload);
-    }
+    debug_log('TIMED_EVENT_BREATH', 'emitted timed event breath state', payload);
 }
 
 setInterval(() => {
@@ -7303,7 +7717,12 @@ function resolve_inline_container_capacity(container_item: any, contents_len: nu
     let max_weight: number | null = null;
 
     const cap = container_item?.container_capacity;
-    if (cap && typeof cap.max_slots === 'number' && Number.isFinite(cap.max_slots) && cap.max_slots >= 1) {
+    const resolved = resolve_inline_item(String(container_item?.def_id ?? ''), container_item);
+    const dim_mag = resolve_container_capacity_mag_from_states(resolved?.resolved_tag_states ?? []);
+    if (dim_mag !== null) {
+        max_slots = project_container_max_slots(dim_mag);
+        if (typeof cap?.max_weight === 'number' && Number.isFinite(cap.max_weight)) max_weight = cap.max_weight;
+    } else if (cap && typeof cap.max_slots === 'number' && Number.isFinite(cap.max_slots) && cap.max_slots >= 1) {
         max_slots = Math.floor(cap.max_slots);
         if (typeof cap.max_weight === 'number' && Number.isFinite(cap.max_weight)) {
             max_weight = cap.max_weight;
@@ -7311,7 +7730,7 @@ function resolve_inline_container_capacity(container_item: any, contents_len: nu
     }
 
     if (max_slots === null) {
-        // Try item definition (legacy items may be missing container_capacity)
+        // Try item definition (legacy items may be missing container tags/dimensions)
         const def_id = String(container_item?.def_id ?? '');
         if (def_id) {
             const def_result = load_master_item(def_id);
@@ -7363,6 +7782,8 @@ function resolve_inline_item_payload_for_api(item_any: any): {
     display_char: string;
     display_color: string | null;
     tags: any[];
+    resolved_tag_states: any[];
+    value_mag: any;
 } {
     const id = String(item_any?.id ?? '');
     const def_id = String(item_any?.def_id ?? '');
@@ -7376,6 +7797,21 @@ function resolve_inline_item_payload_for_api(item_any: any): {
     const name = r?.name ?? (def_id || String(item_any?.name ?? 'item'));
     const unit_weight = r?.unit_weight ?? (typeof item_any?.weight === 'number' ? item_any.weight : 0);
     const tags = r?.effective_tags ?? (Array.isArray(item_any?.tags) ? item_any.tags : []);
+    const resolved_tag_states = r?.resolved_tag_states ?? (Array.isArray(item_any?.resolved_tag_states) ? item_any.resolved_tag_states : []);
+    const value_mag = r?.value_mag ?? item_any?.value_mag ?? null;
+
+    if (r && (resolved_tag_states.length <= 0 || !value_mag)) {
+        const warn_key = `${def_id}:${id || 'no-id'}`;
+        if (!warned_missing_canonical_item_payload_fields.has(warn_key)) {
+            warned_missing_canonical_item_payload_fields.add(warn_key);
+            debug_warn('TAG_DEBUG', 'resolved inline item payload missing canonical fields', {
+                id,
+                def_id,
+                has_resolved_tag_states: resolved_tag_states.length > 0,
+                has_value_mag: Boolean(value_mag),
+            });
+        }
+    }
 
     const base_char = typeof r?.display_char === 'string' ? r.display_char : '';
     const display_char = base_char && base_char.length > 0
@@ -7386,7 +7822,7 @@ function resolve_inline_item_payload_for_api(item_any: any): {
         ? r.display_color
         : (typeof item_any?.display_color === 'string' ? item_any.display_color : null);
 
-    return { id, def_id, qty, name, unit_weight, display_char, display_color, tags };
+    return { id, def_id, qty, name, unit_weight, display_char, display_color, tags, resolved_tag_states, value_mag };
 }
 
 function is_inline_item_container(item_any: any): boolean {
@@ -7538,7 +7974,7 @@ function resolve_tile_container_target(place_any: any, place_id: string, tx: num
             const tags = (resolve_place_tile(String(tile.kind ?? ''), tile) ?? null)?.effective_tags ?? (Array.isArray(tile.tags) ? tile.tags : []);
             const is_container = build_physics_tag_flags(tags).container || Array.isArray(tile.contents);
             if (is_container) {
-                return { kind: 'tile', tile, save: () => save_place_and_sync_active(data_slot_number, place_any as any) };
+                return { kind: 'tile', tile, save: () => save_place_and_sync_active(data_slot_number, place_any as any, { merge_active_runtime: false }) };
             }
         }
     } catch {
@@ -7552,7 +7988,7 @@ function resolve_tile_container_target(place_any: any, place_id: string, tx: num
         const tags = get_structure_effective_tags(s);
         const is_container = build_physics_tag_flags(tags).container || Array.isArray(s.contents);
         if (!is_container) return null;
-        return { kind: 'structure', structure: s, save: () => save_place_and_sync_active(data_slot_number, place_any as any) };
+        return { kind: 'structure', structure: s, save: () => save_place_and_sync_active(data_slot_number, place_any as any, { merge_active_runtime: false }) };
     } catch {
         return null;
     }
@@ -7742,10 +8178,7 @@ function try_deposit_into_tile_container(place_any: any, place_id: string, tx: n
     if (!is_container) return { ok: false, error: 'not_a_container' };
 
     if (!Array.isArray(tile.contents)) tile.contents = [];
-    if (!tile.container_capacity || typeof tile.container_capacity.max_slots !== 'number' || tile.container_capacity.max_slots < 1) {
-        tile.container_capacity = { max_slots: Math.max(12, tile.contents.length + 1) };
-    }
-    const max_slots = Math.floor(tile.container_capacity.max_slots);
+    const max_slots = ensure_tile_container_capacity(tile);
     if (tile.contents.length >= max_slots) return { ok: false, error: 'container_full' };
 
     // Ensure top-level entry and let normalizer assign grid.
@@ -7992,16 +8425,19 @@ import {
   handleCommunicationSubmit 
 } from "./communication_input.js";
 import type { VolumeLevel } from "./communication_input.js";
+import { apply_level1_derived } from "../character_rules/derived.js";
 import { is_in_conversation as is_in_conversation_state } from "../npc_ai/conversation_state.js";
 import { choose_follow_tile } from "./conversation_follow.js";
 import {
-  get_response_eligible_by_action,
   process_witness_event,
   update_conversations as update_witness_conversations,
 } from "../npc_ai/witness_handler.js";
 import { load_time, format_short_time, type GameTime } from "../time_system/tracker.js";
+import { set_free_roam_place_breath } from "../shared/free_roam_breath_store.js";
+import { get_boot_role, get_configured_data_slot, should_manage_ollama, should_run_host_cli } from "../shared/boot_env.js";
+import { get_host_session_file_path } from "../shared/boot_env.js";
 
-const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+const data_slot_number = get_configured_data_slot();
 const visual_log_limit = 12;
 const HTTP_PORT = 8787;
 
@@ -8205,9 +8641,9 @@ function render_visual_log(_log: LogFile, _last_n: number): void {}
 function ensure_minimum_game_data(slot: number): void {
     const actors = find_actors(slot, {});
     if (actors.length === 0) {
-        const created = ensure_actor_exists(slot, "henry_actor");
+        const created = ensure_actor_exists(slot, make_actor_id());
         if (created.ok) {
-            debug_log("Boot: created default actor", { id: "henry_actor" });
+            debug_log("Boot: created default actor", { id: created.actor.id });
         } else {
             debug_warn("Boot: failed to create default actor", { error: created.error, todo: created.todo });
         }
@@ -8215,7 +8651,7 @@ function ensure_minimum_game_data(slot: number): void {
 
     const npcs = find_npcs(slot, {}).filter((n) => n.id !== "default_npc");
     if (npcs.length === 0) {
-        const actor_id = actors[0]?.id ?? "henry_actor";
+        const actor_id = actors[0]?.id ?? resolve_runtime_player_actor_id(slot);
         const actor = load_actor(slot, actor_id);
         const actor_location = actor.ok
             ? (actor.actor.location as Record<string, unknown>)
@@ -8447,11 +8883,16 @@ async function warmup_renderer_model(): Promise<void> {
 }
 
 async function boot_ai_services(): Promise<void> {
+    if (!should_manage_ollama()) {
+        debug_log("Ollama: host startup management disabled for this boot", { role: get_boot_role() });
+        return;
+    }
     await ensure_ollama_running();
     await warmup_renderer_model();
 }
 
 function shutdown_ollama_if_spawned(): void {
+    if (!should_manage_ollama()) return;
     if (!ollama_spawned || !ollama_process) return;
     debug_log("Ollama: stopping spawned server");
     try {
@@ -8470,12 +8911,194 @@ function log_ai_config(): void {
 
 type InputRequest = {
     text: string;
+    session_token?: string;
     sender?: string;
     intent_verb?: string;
     intent_subtype?: string;
     action_cost?: string;
     target_ref?: string;
 };
+
+type MultiplayerRequestContext = {
+    client_session_id: string;
+    connection_id: string | null;
+    session_token: string | null;
+};
+
+function resolve_multiplayer_request_context(slot: number, auth: { session_token?: unknown; client_session_id?: unknown }): MultiplayerRequestContext {
+    const session_token = typeof auth.session_token === "string" ? auth.session_token.trim() : "";
+    if (!session_token) {
+        throw new Error("invalid_session_token");
+    }
+    const session = touch_multiplayer_session_by_token(slot, session_token) ?? resolve_multiplayer_session_by_token(slot, session_token);
+    if (!session) {
+        throw new Error("invalid_session_token");
+    }
+    return {
+        client_session_id: session.client_session_id,
+        connection_id: session.connection_id,
+        session_token,
+    };
+}
+
+function require_request_client_session_id(slot: number, auth: { session_token?: unknown; client_session_id?: unknown }): string {
+    return resolve_multiplayer_request_context(slot, auth).client_session_id;
+}
+
+function require_bound_actor_ref(slot: number, client_session_id: string): string {
+    const actor_ref = touch_controlled_actor_ref_for_client_session(slot, client_session_id)
+        ?? get_controlled_actor_ref_for_client_session(slot, client_session_id);
+    if (!actor_ref) {
+        throw new Error("controlled_actor_binding_required");
+    }
+    return actor_ref;
+}
+
+function require_authorized_actor_ref(slot: number, client_session_id: string, requested_actor_ref?: unknown): string {
+    const bound_actor_ref = require_bound_actor_ref(slot, client_session_id);
+    const requested = typeof requested_actor_ref === "string" ? requested_actor_ref.trim() : "";
+    if (requested && requested !== bound_actor_ref) {
+        throw new Error("actor_ref_not_authorized");
+    }
+    return bound_actor_ref;
+}
+
+function is_actor_claim_slot_visible(slot: number, actor_id: string): boolean {
+    const normalized_actor_id = String(actor_id ?? "").trim();
+    if (!normalized_actor_id) return false;
+    const result = load_actor(slot, normalized_actor_id);
+    if (!result.ok) return false;
+    const actor = result.actor as any;
+    if (String(actor?.claim_slot_visibility ?? "show").trim().toLowerCase() === "hide") return false;
+    if (actor?.system_actor === true) return false;
+    return normalized_actor_id.toLowerCase() !== "default_actor";
+}
+
+function build_creation_preview(kind_id: string): {
+    kind_id: string;
+    kind_name: string;
+    size_mag: number;
+    carry_capacity: number;
+    base_stats: Record<string, number>;
+    effective_stats: Record<string, number>;
+    kind_stat_changes: Record<string, number>;
+} | null {
+    const kind = find_kind(kind_id);
+    const template = load_default_actor();
+    if (!kind || !template.ok) return null;
+    const actor = { ...template.actor } as Record<string, unknown>;
+    actor.kind = kind.id;
+    if (typeof kind.size_mag === "number") actor.size_mag = kind.size_mag;
+    const base_stats = { ...(((actor as any).stats as Record<string, unknown>) ?? {}) } as Record<string, unknown>;
+    const stat_changes = (kind.stat_changes as Record<string, number> | undefined) ?? {};
+    const stats = { ...base_stats } as Record<string, unknown>;
+    for (const [key, delta] of Object.entries(stat_changes)) {
+        const current = Number(stats[key] ?? 0);
+        stats[key] = current + delta;
+    }
+    actor.stats = stats;
+    apply_level1_derived(actor, { set_current_to_max: true });
+    return {
+        kind_id: kind.id,
+        kind_name: String(kind.name ?? kind.id),
+        size_mag: Number((actor as any).size_mag ?? kind.size_mag ?? 0) || 0,
+        carry_capacity: Number((actor as any)?.derived?.carry_capacity ?? 0) || 0,
+        base_stats: {
+            con: Number(base_stats.con ?? 0) || 0,
+            str: Number(base_stats.str ?? 0) || 0,
+            dex: Number(base_stats.dex ?? 0) || 0,
+            wis: Number(base_stats.wis ?? 0) || 0,
+            int: Number(base_stats.int ?? 0) || 0,
+            cha: Number(base_stats.cha ?? 0) || 0,
+        },
+        effective_stats: {
+            con: Number((actor as any)?.stats?.con ?? 0) || 0,
+            str: Number((actor as any)?.stats?.str ?? 0) || 0,
+            dex: Number((actor as any)?.stats?.dex ?? 0) || 0,
+            wis: Number((actor as any)?.stats?.wis ?? 0) || 0,
+            int: Number((actor as any)?.stats?.int ?? 0) || 0,
+            cha: Number((actor as any)?.stats?.cha ?? 0) || 0,
+        },
+        kind_stat_changes: { ...stat_changes },
+    };
+}
+
+function project_public_place_payload(place_any: any): any {
+    const place = clone_for_api(place_any ?? null) as any;
+    if (!place || typeof place !== "object") return place;
+    if (!place.contents || typeof place.contents !== "object") {
+        place.contents = { npcs_present: [], actors_present: [], items_on_ground: [], features: [] };
+        return place;
+    }
+    place.contents.npcs_present = Array.isArray(place.contents.npcs_present)
+        ? place.contents.npcs_present.map((entry: any) => project_public_place_npc_presence(entry))
+        : [];
+    place.contents.actors_present = Array.isArray(place.contents.actors_present)
+        ? place.contents.actors_present.map((entry: any) => project_public_place_actor_presence(entry))
+        : [];
+    return place;
+}
+
+function emit_actor_private_state_changed(actor_ref: string, reasons: string[] = []): void {
+    const normalized_actor_ref = String(actor_ref ?? "").trim();
+    if (!normalized_actor_ref.startsWith("actor.")) return;
+    const client_session_id = get_claiming_client_session_id_for_actor_ref(data_slot_number, normalized_actor_ref);
+    if (!client_session_id) return;
+    const session = resolve_multiplayer_session_by_client_session_id(data_slot_number, client_session_id);
+    if (!session?.connection_id) return;
+    void emitBridgeMessage('ACTOR_PRIVATE_STATE_CHANGED', {
+        actor_ref: normalized_actor_ref,
+        reasons: Array.isArray(reasons) ? reasons : [],
+        sent_at_ms: Date.now(),
+    }, {
+        scope: 'connection',
+        connection_id: session.connection_id,
+    });
+}
+
+function emit_place_presence_changed(place_id: string, actor_ref: string, reason: string): void {
+    const normalized_place_id = String(place_id ?? '').trim();
+    const normalized_actor_ref = String(actor_ref ?? '').trim();
+    if (!normalized_place_id || !normalized_actor_ref) return;
+    void emitBridgeMessage('PLACE_PRESENCE_CHANGED', {
+        place_id: normalized_place_id,
+        actor_ref: normalized_actor_ref,
+        reason,
+        sent_at_ms: Date.now(),
+    });
+}
+
+function ensure_claimed_actor_ready(slot: number, actor_ref: string): { ok: true; actor: any; actor_id: string } | { ok: false; error: string } {
+    const actor_id = get_character_id_from_ref(actor_ref);
+    if (!actor_id) return { ok: false, error: 'invalid_controlled_actor_ref' };
+    const ensured = ensure_actor_has_spawn_location(slot, actor_id);
+    if (!ensured.ok) return { ok: false, error: ensured.error };
+    return { ok: true, actor: ensured.actor, actor_id };
+}
+
+function list_claimable_actors(slot: number, client_session_id: string): Array<{
+    actor_ref: string;
+    actor_id: string;
+    actor_name: string;
+    claimed_by_self: boolean;
+    claimed_by_other: boolean;
+}> {
+    const claims = new Map(list_controlled_actor_claims(slot).map((entry) => [entry.actor_ref, entry.client_session_id]));
+    return find_actors(slot, {})
+        .filter((actor) => is_actor_claim_slot_visible(slot, actor.id))
+        .map((actor) => {
+            const actor_id = String(actor.id ?? "").trim();
+            const actor_ref = `actor.${actor_id}`;
+            const claimed_by_client_session_id = claims.get(actor_ref) ?? null;
+            return {
+                actor_ref,
+                actor_id,
+                actor_name: String(actor.name ?? actor_id).trim() || actor_id,
+                claimed_by_self: claimed_by_client_session_id === client_session_id,
+                claimed_by_other: !!claimed_by_client_session_id && claimed_by_client_session_id !== client_session_id,
+            };
+        });
+}
 
 type CreationState = {
     schema_version: 1;
@@ -8993,9 +9616,18 @@ function start_http_server(log_path: string): void {
                     return;
                 }
 
-                const sender = typeof parsed?.sender === "string" && parsed.sender.trim().length > 0
-                    ? parsed.sender.trim()
-                    : "J";
+                let sender = "";
+                try {
+                    const client_session_id = require_request_client_session_id(data_slot_number, { session_token: parsed?.session_token });
+                    const actor_ref = require_authorized_actor_ref(data_slot_number, client_session_id, typeof parsed?.sender === "string" && parsed.sender.trim().length > 0 ? `actor.${parsed.sender.trim().replace(/^actor\./, "")}` : undefined);
+                    sender = get_character_id_from_ref(actor_ref) ?? "";
+                } catch (err: any) {
+                    const error = err?.message ?? "invalid_client_session";
+                    const status = error === "actor_ref_not_authorized" ? 403 : 400;
+                    res.writeHead(status, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error }));
+                    return;
+                }
 
                 const intent_verb = typeof parsed?.intent_verb === "string" ? parsed.intent_verb.trim() : "";
                 const intent_subtype = typeof parsed?.intent_subtype === "string" ? parsed.intent_subtype.trim() : "";
@@ -9045,6 +9677,13 @@ function start_http_server(log_path: string): void {
                 // Default to COMMUNICATE if no intent specified but we have a target and text
                 // This handles "hello grenda" style messages without explicit intent buttons
                 const effective_intent = intent_verb || (target_ref ? "COMMUNICATE" : undefined);
+                debug_log("HTTP action input parsed", {
+                    sender,
+                    text_preview: text.slice(0, 80),
+                    target_ref: target_ref || null,
+                    intent_verb: effective_intent || null,
+                    intent_subtype: intent_subtype || null,
+                });
                 
                 const inbound = create_message({
                     sender,
@@ -9073,7 +9712,13 @@ function start_http_server(log_path: string): void {
 
                 write_status_line(get_status_path(data_slot_number), "received actor input");
 
-                debug_log("HTTP input received", { sender, length: text.length, id: inbound.id });
+                debug_log("HTTP input received", {
+                    sender,
+                    length: text.length,
+                    id: inbound.id,
+                    target_ref: target_ref || null,
+                    intent_verb: effective_intent || null,
+                });
 
                 res.writeHead(200, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ ok: true, id: inbound.id }));
@@ -9398,8 +10043,9 @@ function start_http_server(log_path: string): void {
                     const kind_id = typeof (npc_any as any)?.kind === 'string' ? String((npc_any as any).kind) : undefined;
                     const kind_def = get_kind_def(kind_id);
 
-                    place.contents.npcs_present.push({
+                    place.contents.npcs_present.push(project_public_place_npc_presence({
                         npc_ref,
+                        name: typeof (npc_any as any)?.name === 'string' ? String((npc_any as any).name) : undefined,
                         tile_position: clamped_location,
                         facing: get_facing(npc_ref),
                         kind_id,
@@ -9432,11 +10078,13 @@ function start_http_server(log_path: string): void {
                         status: npc_status,
                         activity: "standing here",
                         tags: (npc_any as any).tags || [],
+                        resolved_tag_states: Array.isArray((npc_any as any)?.resolved_tag_states) ? (npc_any as any).resolved_tag_states : [],
+                        value_mag: (npc_any as any)?.value_mag ?? null,
                         entity_render: ((kind_def as any)?.entity_render && typeof (kind_def as any).entity_render === 'object')
                             ? (kind_def as any).entity_render
                             : undefined,
                         body_slots: (npc_any as any).body_slots || {}
-                    } as any);
+                    } as any) as any);
 
                     try {
                         (place.contents.npcs_present[place.contents.npcs_present.length - 1] as any).move_seq =
@@ -9504,8 +10152,9 @@ function start_http_server(log_path: string): void {
                     const kind_id = typeof (actor as any)?.kind === 'string' ? String((actor as any).kind) : undefined;
                     const kind_def = get_kind_def(kind_id);
 
-                    place.contents.actors_present.push({
+                    place.contents.actors_present.push(project_public_place_actor_presence({
                         actor_ref,
+                        name: typeof (actor as any)?.name === 'string' ? String((actor as any).name) : undefined,
                         tile_position: clamped_location,
                         facing: get_facing(actor_ref),
                         kind_id,
@@ -9537,10 +10186,12 @@ function start_http_server(log_path: string): void {
                             : undefined,
                         status: "present",
                         tags: (actor as any).tags || [],
+                        resolved_tag_states: Array.isArray((actor as any)?.resolved_tag_states) ? (actor as any).resolved_tag_states : [],
+                        value_mag: (actor as any)?.value_mag ?? null,
                         entity_render: ((kind_def as any)?.entity_render && typeof (kind_def as any).entity_render === 'object')
                             ? (kind_def as any).entity_render
                             : undefined,
-                    } as any);
+                    } as any) as any);
 
                     try {
                         (place.contents.actors_present[place.contents.actors_present.length - 1] as any).move_seq =
@@ -10051,14 +10702,15 @@ function start_http_server(log_path: string): void {
                 turn_window_breaths: state?.timed_event_active ? get_timed_event_turn_window_breaths(slot) : null,
                 turn_breaths_remaining: state?.timed_event_active ? get_current_turn_breaths_remaining(slot) : null,
                 timed_event_world_breath_index: state?.timed_event_active ? get_timed_event_world_breath_index(slot) : null,
+                // Timed-event transport shim only; canonical speech state lives in session queue data.
                 pending_communication_opportunities: Array.isArray(state?.pending_communication_opportunities)
                     ? state!.pending_communication_opportunities.map((opp) => ({
                         opportunity_id: opp.opportunity_id,
                         npc_ref: opp.npc_ref,
-                        speaker_ref: opp.speaker_ref,
-                        target_ref: opp.target_ref ?? null,
-                        original_text: opp.original_text,
-                        response_eligible_reason: opp.response_eligible_reason,
+                        conversation_id: opp.conversation_id ?? null,
+                        queue_entry_id: opp.queue_entry_id ?? null,
+                        queue_stable_order: opp.queue_stable_order ?? null,
+                        source_message_id: opp.source_message_id,
                         trigger_context: opp.trigger_context ?? null,
                         created_turn: opp.created_turn ?? null,
                         created_round: opp.created_round ?? null,
@@ -10078,6 +10730,32 @@ function start_http_server(log_path: string): void {
                     }))
                     : [],
             }));
+            return;
+        }
+
+        if (url.pathname === "/api/conversation_sessions/state") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+            if (!Number.isFinite(slot) || slot <= 0) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
+                return;
+            }
+
+            const sessions = get_conversation_sessions_debug_snapshot(slot);
+            debug_log("API", "Conversation session state fetched", {
+                slot,
+                conversation_session_count: sessions.length,
+                active_ids: sessions.filter((session) => session.status === "active").map((session) => session.conversation_id),
+            });
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, slot, sessions }));
             return;
         }
 
@@ -10255,7 +10933,8 @@ function start_http_server(log_path: string): void {
             req.on("end", async () => {
                 try {
                     const data = JSON.parse(body);
-                    const entity_ref = data.entity_ref;
+                    const client_session_id = require_request_client_session_id(slot, { session_token: data?.session_token });
+                    const entity_ref = require_authorized_actor_ref(slot, client_session_id, data?.entity_ref);
                     const target_place_id = data.target_place_id;
 
                     if (!entity_ref || !target_place_id) {
@@ -10290,8 +10969,10 @@ function start_http_server(log_path: string): void {
                     }
                 } catch (err: any) {
                     debug_error("API", `/api/place/travel request error`, err);
-                    res.writeHead(500, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ ok: false, error: err?.message ?? "travel_failed" }));
+                    const error = err?.message ?? "travel_failed";
+                    const status = error === "actor_ref_not_authorized" ? 403 : error === "invalid_session_token" || error === "controlled_actor_binding_required" ? 401 : 500;
+                    res.writeHead(status, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error }));
                 }
             });
             return;
@@ -10488,7 +11169,17 @@ function start_http_server(log_path: string): void {
                     return;
                 }
 
-                const entity_ref = String((data as any)?.entity_ref ?? "").trim();
+                let entity_ref = "";
+                try {
+                    const client_session_id = require_request_client_session_id(slot, { session_token: (data as any)?.session_token });
+                    entity_ref = require_authorized_actor_ref(slot, client_session_id, (data as any)?.entity_ref);
+                } catch (err: any) {
+                    const error = err?.message ?? "invalid_client_session";
+                    const status = error === "actor_ref_not_authorized" ? 403 : 400;
+                    res.writeHead(status, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error }));
+                    return;
+                }
                 const place_id = String((data as any)?.place_id ?? "").trim();
                 if (!entity_ref || !place_id) {
                     res.writeHead(400, { "Content-Type": "application/json" });
@@ -10675,7 +11366,17 @@ function start_http_server(log_path: string): void {
                     return;
                 }
 
-                const entity_ref = String((data as any)?.entity_ref ?? "").trim();
+                let entity_ref = "";
+                try {
+                    const client_session_id = require_request_client_session_id(slot, { session_token: (data as any)?.session_token });
+                    entity_ref = require_authorized_actor_ref(slot, client_session_id, (data as any)?.entity_ref);
+                } catch (err: any) {
+                    const error = err?.message ?? "invalid_client_session";
+                    const status = error === "actor_ref_not_authorized" ? 403 : 400;
+                    res.writeHead(status, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error }));
+                    return;
+                }
                 const place_id = String((data as any)?.place_id ?? "").trim();
                 const x = Math.floor(Number((data as any)?.x));
                 const y = Math.floor(Number((data as any)?.y));
@@ -10915,29 +11616,16 @@ function start_http_server(log_path: string): void {
                             return;
                         }
                         const npc = npc_any as Record<string, any>;
-                        if (!Array.isArray(npc.tags)) npc.tags = [];
+                        const prior_tags = Array.isArray(npc.tags) ? [...npc.tags] : [];
+                        const existing = prior_tags.find((t: any) => String(t?.name ?? '').toUpperCase() === String(tag_name).toUpperCase()) ?? null;
+                        const oldMag = Number(existing?.mag ?? 0) || 0;
+                        const result = upsert_character_tag(npc, {
+                            name: String(tag_name).toUpperCase(),
+                            mag: next_mag,
+                            meta: next_meta,
+                        } as any);
+                        const isNewTag = !existing;
                          
-                        // Check if tag already exists - update it instead of creating duplicate
-                        const existingTagIndex = (npc.tags as any[]).findIndex((t: any) => t.name === tag_name);
-                        let isNewTag = false;
-                        let oldMag = 0;
-                         
-                        if (existingTagIndex >= 0) {
-                            // Update existing tag
-                            oldMag = npc.tags[existingTagIndex].mag;
-                            npc.tags[existingTagIndex].mag = next_mag;
-                            npc.tags[existingTagIndex].meta = next_meta;
-                        } else {
-                            // Add new tag
-                            isNewTag = true;
-                            const tagData = {
-                                name: tag_name,
-                                mag: next_mag,
-                                meta: next_meta
-                            };
-                            (npc.tags as any[]).push(tagData);
-                        }
-                        
                         npc_cache.set(entity_key(slot, entity_id), npc);
                         queue_save_npc(slot, entity_id);
                          
@@ -10972,28 +11660,15 @@ function start_http_server(log_path: string): void {
                             return;
                         }
                         const actor = actor_any as Record<string, any>;
-                        if (!Array.isArray(actor.tags)) actor.tags = [];
-                         
-                        // Check if tag already exists - update it instead of creating duplicate
-                        const existingTagIndex = (actor.tags as any[]).findIndex((t: any) => t.name === tag_name);
-                        let isNewTag = false;
-                        let oldMag = 0;
-                        
-                        if (existingTagIndex >= 0) {
-                            // Update existing tag
-                            oldMag = actor.tags[existingTagIndex].mag;
-                            actor.tags[existingTagIndex].mag = next_mag;
-                            actor.tags[existingTagIndex].meta = next_meta;
-                        } else {
-                            // Add new tag
-                            isNewTag = true;
-                            const tagData = {
-                                name: tag_name,
-                                mag: next_mag,
-                                meta: next_meta
-                            };
-                            (actor.tags as any[]).push(tagData);
-                        }
+                        const prior_tags = Array.isArray(actor.tags) ? [...actor.tags] : [];
+                        const existing = prior_tags.find((t: any) => String(t?.name ?? '').toUpperCase() === String(tag_name).toUpperCase()) ?? null;
+                        const oldMag = Number(existing?.mag ?? 0) || 0;
+                        upsert_character_tag(actor, {
+                            name: String(tag_name).toUpperCase(),
+                            mag: next_mag,
+                            meta: next_meta,
+                        } as any);
+                        const isNewTag = !existing;
                         
                         actor_cache.set(entity_key(slot, entity_id), actor);
                         queue_save_actor(slot, entity_id);
@@ -11076,19 +11751,18 @@ function start_http_server(log_path: string): void {
                             return;
                         }
                         const npc = npc_any as Record<string, any>;
-                        if (!Array.isArray(npc.tags)) npc.tags = [];
-
-                        const idx = (npc.tags as any[]).findIndex((t: any) => t && t.name === want);
-                        if (idx < 0) {
+                        const existing = Array.isArray(npc.tags)
+                            ? (npc.tags as any[]).find((t: any) => t && String(t.name ?? '').toUpperCase() === want.toUpperCase())
+                            : null;
+                        if (!existing) {
                             res.writeHead(200, { "Content-Type": "application/json" });
                             res.end(JSON.stringify({ ok: true, entity_ref, tag_name: want, removed: false }));
                             return;
                         }
 
-                        const old = npc.tags[idx];
-                        const oldMag = Number(old?.mag ?? 0) || 0;
-                        const meta = Array.isArray(old?.meta) ? old.meta : [];
-                        (npc.tags as any[]).splice(idx, 1);
+                        const oldMag = Number(existing?.mag ?? 0) || 0;
+                        const meta = Array.isArray(existing?.meta) ? existing.meta : [];
+                        remove_character_tag(npc, want);
                         npc_cache.set(entity_key(slot, entity_id), npc);
                         queue_save_npc(slot, entity_id);
 
@@ -11110,19 +11784,18 @@ function start_http_server(log_path: string): void {
                             return;
                         }
                         const actor = actor_any as Record<string, any>;
-                        if (!Array.isArray(actor.tags)) actor.tags = [];
-
-                        const idx = (actor.tags as any[]).findIndex((t: any) => t && t.name === want);
-                        if (idx < 0) {
+                        const existing = Array.isArray(actor.tags)
+                            ? (actor.tags as any[]).find((t: any) => t && String(t.name ?? '').toUpperCase() === want.toUpperCase())
+                            : null;
+                        if (!existing) {
                             res.writeHead(200, { "Content-Type": "application/json" });
                             res.end(JSON.stringify({ ok: true, entity_ref, tag_name: want, removed: false }));
                             return;
                         }
 
-                        const old = actor.tags[idx];
-                        const oldMag = Number(old?.mag ?? 0) || 0;
-                        const meta = Array.isArray(old?.meta) ? old.meta : [];
-                        (actor.tags as any[]).splice(idx, 1);
+                        const oldMag = Number(existing?.mag ?? 0) || 0;
+                        const meta = Array.isArray(existing?.meta) ? existing.meta : [];
+                        remove_character_tag(actor, want);
                         actor_cache.set(entity_key(slot, entity_id), actor);
                         queue_save_actor(slot, entity_id);
 
@@ -11249,46 +11922,17 @@ function start_http_server(log_path: string): void {
             const slot = slot_raw ? Number(slot_raw) : data_slot_number;
 
             try {
-                const actor_result = load_actor(slot, actor_id);
+                const actor_result = ensure_actor_has_spawn_location(slot, actor_id);
                 if (!actor_result.ok) {
                     res.writeHead(404, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ ok: false, error: "actor_not_found" }));
+                    res.end(JSON.stringify({ ok: false, error: actor_result.error }));
                     return;
                 }
 
                 // Response-only augmentation: attach derived item props from database for consistent UI rendering.
                 // (Do not persist these fields.)
                 try {
-                    const patch_inline_item = (it: any): void => {
-                        if (!it || typeof it !== 'object') return;
-                        const def_id = typeof it.def_id === 'string' ? it.def_id : '';
-                        const resolved = def_id ? resolve_inline_item(def_id, it as any) : null;
-                        if (resolved) {
-                            it.name = resolved.name;
-                            it.weight = resolved.unit_weight;
-                            it.tags = resolved.effective_tags;
-                            it.display_char = resolved.display_char;
-                            if (resolved.display_color) it.display_color = resolved.display_color;
-                            it.__derived_runtime = true;
-                        }
-                        if (Array.isArray(it.contents)) {
-                            for (const child of it.contents) patch_inline_item(child);
-                        }
-                    };
-
-                    const actor_any: any = actor_result.actor as any;
-                    const body_slots_any: any = actor_any?.body_slots;
-                    if (body_slots_any && typeof body_slots_any === 'object') {
-                        for (const v of Object.values(body_slots_any)) {
-                            const s: any = v as any;
-                            if (!s || typeof s !== 'object') continue;
-                            patch_inline_item(s.armor);
-                            patch_inline_item(s.tool);
-                            if (Array.isArray(s.garb)) {
-                                for (const g of s.garb) patch_inline_item(g);
-                            }
-                        }
-                    }
+                    augment_inline_character_items_for_api(actor_result.actor as any);
                 } catch {
                     // Non-fatal: actor data still returns even if augmentation fails.
                 }
@@ -11304,6 +11948,1193 @@ function start_http_server(log_path: string): void {
                 res.writeHead(500, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ ok: false, error: err?.message ?? "actor_load_failed" }));
             }
+            return;
+        }
+
+        // GET /api/inventory/actor_view?id=xxx - Get actor owner-view inventory payload
+        if (url.pathname === "/api/inventory/actor_view") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const actor_id = url.searchParams.get("id") ?? url.searchParams.get("actor_id");
+            if (!actor_id) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_actor_id" }));
+                return;
+            }
+
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+
+            try {
+                const actor_result = load_actor(slot, actor_id);
+                if (!actor_result.ok) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "actor_not_found" }));
+                    return;
+                }
+
+                const view = build_actor_owner_inventory_view(actor_id, actor_result.actor as any);
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, view }));
+            } catch (err: any) {
+                debug_error("API", `/api/inventory/actor_view error for ${actor_id}`, err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: err?.message ?? "actor_inventory_view_failed" }));
+            }
+            return;
+        }
+
+        if (url.pathname === "/api/actor/private_state") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+            try {
+                const ctx = resolve_multiplayer_request_context(slot, {
+                    session_token: url.searchParams.get("session_token"),
+                });
+                const actor_ref = require_authorized_actor_ref(slot, ctx.client_session_id, url.searchParams.get("actor_ref") ?? undefined);
+                const actor_id = get_character_id_from_ref(actor_ref);
+                if (!actor_id) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "invalid_actor_ref" }));
+                    return;
+                }
+                const actor_result = load_actor(slot, actor_id);
+                if (!actor_result.ok) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "actor_not_found" }));
+                    return;
+                }
+                const actor = actor_result.actor as any;
+                try { augment_inline_character_items_for_api(actor); } catch {}
+                const view = build_actor_owner_inventory_view(actor_id, actor);
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, actor_ref, actor, view }));
+            } catch (err: any) {
+                const error = err?.message ?? "actor_private_state_failed";
+                const status = error === "invalid_session_token" ? 401 : error === "actor_ref_not_authorized" ? 403 : error === "controlled_actor_binding_required" ? 400 : 500;
+                res.writeHead(status, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error }));
+            }
+            return;
+        }
+
+        // GET /api/npc?id=xxx - Get NPC data
+        if (url.pathname === "/api/npc") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const npc_id = url.searchParams.get("id");
+            if (!npc_id) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_npc_id" }));
+                return;
+            }
+
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+
+            try {
+                const npc_result = load_npc(slot, npc_id);
+                if (!npc_result.ok) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "npc_not_found" }));
+                    return;
+                }
+
+                try {
+                    augment_inline_character_items_for_api(npc_result.npc as any);
+                } catch {
+                    // Non-fatal: NPC data still returns even if augmentation fails.
+                }
+
+                debug_log("API", `/api/npc: Loaded ${npc_id}`);
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({
+                    ok: true,
+                    npc: npc_result.npc
+                }));
+            } catch (err: any) {
+                debug_error("API", `/api/npc error for ${npc_id}`, err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: err?.message ?? "npc_load_failed" }));
+            }
+            return;
+        }
+
+        // GET /api/inventory/npc_view?id=xxx - Get npc owner-view inventory payload
+        if (url.pathname === "/api/inventory/npc_view") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const npc_id = url.searchParams.get("id") ?? url.searchParams.get("npc_id");
+            if (!npc_id) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_npc_id" }));
+                return;
+            }
+
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+
+            try {
+                const npc_result = load_npc(slot, npc_id);
+                if (!npc_result.ok) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "npc_not_found" }));
+                    return;
+                }
+
+                const view = build_npc_owner_inventory_view(npc_id, npc_result.npc as any);
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, view }));
+            } catch (err: any) {
+                debug_error("API", `/api/inventory/npc_view error for ${npc_id}`, err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: err?.message ?? "npc_inventory_view_failed" }));
+            }
+            return;
+        }
+
+        // GET /api/character?ref=actor.xxx|npc.xxx - Get canonical character data by ref
+        if (url.pathname === "/api/character") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const ref = url.searchParams.get("ref");
+            if (!ref) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_character_ref" }));
+                return;
+            }
+
+            const role = get_character_role_from_ref(ref);
+            const id = get_character_id_from_ref(ref);
+            if (!role || !id) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "invalid_character_ref" }));
+                return;
+            }
+
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+
+            try {
+                const result = load_character_by_ref(slot, ref);
+                if (!result.ok) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: result.error }));
+                    return;
+                }
+                try {
+                    augment_inline_character_items_for_api(result.character as any);
+                } catch {
+                    // ignore augmentation failure
+                }
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, role, ref, character: result.character }));
+            } catch (err: any) {
+                debug_error("API", `/api/character error for ${ref}`, err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: err?.message ?? "character_load_failed" }));
+            }
+            return;
+        }
+
+        if (url.pathname === "/api/connect") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+            let body = "";
+            req.on("data", (chunk) => { body += chunk; });
+            req.on("end", () => {
+                try {
+                    const data = JSON.parse(body || "{}");
+                    const slot = Number.isFinite(Number(data?.slot)) ? Number(data.slot) : data_slot_number;
+                    const reconnect_token = typeof data?.reconnect_token === "string" ? data.reconnect_token.trim() : "";
+                    const session = issue_or_resume_multiplayer_session(slot, reconnect_token || null);
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({
+                        ok: true,
+                        connection_id: session.connection_id,
+                        session_token: session.session_token,
+                        reconnect_token: session.reconnect_token,
+                        created_at: session.created_at,
+                        last_seen_at: session.last_seen_at,
+                        lease_expires_at: session.lease_expires_at,
+                        boot_session_id: session.boot_session_id,
+                    }));
+                } catch (err: any) {
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? "connect_failed" }));
+                }
+            });
+            return;
+        }
+
+        if (url.pathname === "/api/host/status") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+                ok: true,
+                slot,
+                host_boot_id: SESSION_ID,
+                world_label: `Local World Slot ${slot}`,
+                host_mode: process.env.THAUM_BOOT_ROLE === 'host' ? 'host_only' : 'host_with_client_or_unknown',
+                join_mode: 'local_attach_ready',
+                supports_join: true,
+                host_session_file: get_host_session_file_path(slot),
+                manages_ollama: should_manage_ollama(),
+                host_cli_enabled: should_run_host_cli(),
+                services: [
+                    'event_bridge',
+                    'interface',
+                    'data_broker',
+                    'rules_lawyer',
+                    'renderer_ai',
+                    'roller',
+                    'state_applier',
+                    'npc_ai',
+                    'turn_manager',
+                ],
+            }));
+            return;
+        }
+
+        if (url.pathname === "/api/actors/claimable") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            try {
+                const slot_raw = url.searchParams.get("slot");
+                const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+                const client_session_id = require_request_client_session_id(slot, {
+                    session_token: url.searchParams.get("session_token"),
+                });
+                const current_actor_ref = touch_controlled_actor_ref_for_client_session(slot, client_session_id)
+                    ?? get_controlled_actor_ref_for_client_session(slot, client_session_id);
+                const actors = list_claimable_actors(slot, client_session_id);
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({
+                    ok: true,
+                    current_actor_ref,
+                    actors,
+                }));
+            } catch (err: any) {
+                const error = err?.message ?? "claimable_actors_failed";
+                const status = error === "invalid_session_token" ? 401 : 500;
+                res.writeHead(status, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error }));
+            }
+            return;
+        }
+
+        if (url.pathname === "/api/character/create/bootstrap") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+            try {
+                const selected_kind_id = String(url.searchParams.get("kind_id") ?? "").trim();
+                const defs = load_kind_definitions();
+                const kinds = defs.kinds
+                    .filter((kind) => String(kind.id ?? "").trim().toUpperCase() !== "DEFAULT_KIND")
+                    .map((kind) => {
+                        const preview = build_creation_preview(String(kind.id ?? "").trim());
+                        return {
+                            value: String(kind.id ?? "").trim(),
+                            label: String(kind.name ?? kind.id ?? "").trim(),
+                            description: preview ? `size ${preview.size_mag} carry ${preview.carry_capacity}` : undefined,
+                            preview,
+                        };
+                    });
+                const selected_value = selected_kind_id || String(kinds[0]?.value ?? "").trim() || null;
+                const selected_preview = selected_value ? build_creation_preview(selected_value) : null;
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({
+                    ok: true,
+                    selected_value,
+                    sex_options: [
+                        { value: "female", label: "female" },
+                        { value: "male", label: "male" },
+                    ],
+                    kinds,
+                    preview: selected_preview,
+                }));
+            } catch (err: any) {
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: err?.message ?? "character_create_bootstrap_failed" }));
+            }
+            return;
+        }
+
+        if (url.pathname === "/api/character/create") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+            let body = "";
+            req.on("data", (chunk) => { body += chunk; });
+            req.on("end", () => {
+                try {
+                    const data = JSON.parse(body || "{}");
+                    const slot = Number.isFinite(Number(data?.slot)) ? Number(data.slot) : data_slot_number;
+                    const name = String(data?.name ?? "").trim();
+                    const title = String(data?.title ?? "").trim();
+                    const kind_id = String(data?.kind_id ?? "").trim();
+                    const sex = String(data?.sex ?? "").trim();
+                    if (!name) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_name" }));
+                        return;
+                    }
+                    if (!kind_id || !find_kind(kind_id)) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "invalid_kind_id" }));
+                        return;
+                    }
+                    const preview = build_creation_preview(kind_id);
+                    const created = create_actor_from_kind(slot, {
+                        name,
+                        title,
+                        sex,
+                        kind_id,
+                        gift_kind_choices: [],
+                        gift_greater_choice: null,
+                        stats: preview?.base_stats,
+                    });
+                    if (!created.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: created.error }));
+                        return;
+                    }
+                    const actor = created.actor as any;
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({
+                        ok: true,
+                        actor_ref: `actor.${String(actor.id ?? "").trim()}`,
+                        actor_id: String(actor.id ?? "").trim(),
+                        actor_name: String(actor.name ?? name).trim() || name,
+                        actor: {
+                            id: String(actor.id ?? "").trim(),
+                            name: String(actor.name ?? name).trim() || name,
+                            title: String(actor.title ?? "").trim(),
+                            sex: String(actor.sex ?? "").trim(),
+                            kind_id: String(actor.kind ?? kind_id).trim(),
+                            stat_source: (actor as any)?.stat_source ?? null,
+                        },
+                    }));
+                } catch (err: any) {
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? "character_create_failed" }));
+                }
+            });
+            return;
+        }
+
+        if (url.pathname === "/api/actors/claim") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", (chunk) => { body += chunk; });
+            req.on("end", () => {
+                try {
+                    const data = JSON.parse(body || "{}");
+                    const slot = Number.isFinite(Number(data?.slot)) ? Number(data.slot) : data_slot_number;
+                    const client_session_id = require_request_client_session_id(slot, { session_token: data?.session_token });
+                    const actor_ref = String(data?.actor_ref ?? "").trim();
+                    const actor_id = get_character_id_from_ref(actor_ref);
+                    if (!actor_id) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "invalid_controlled_actor_ref" }));
+                        return;
+                    }
+                    const existing_actor_ref = get_controlled_actor_ref_for_client_session(slot, client_session_id);
+                    if (existing_actor_ref && existing_actor_ref !== actor_ref) {
+                        res.writeHead(409, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "controlled_actor_release_required", controlled_actor_ref: existing_actor_ref }));
+                        return;
+                    }
+                    const actor_ready = ensure_claimed_actor_ready(slot, actor_ref);
+                    if (!actor_ready.ok) {
+                        res.writeHead(404, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: actor_ready.error }));
+                        return;
+                    }
+                    const bound_ref = set_controlled_actor_ref_for_client_session(slot, client_session_id, actor_ref);
+                    const place_id = String((actor_ready.actor as any)?.location?.place_id ?? '').trim();
+                    if (place_id) emit_place_presence_changed(place_id, bound_ref, 'claim');
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({
+                        ok: true,
+                        controlled_actor_ref: bound_ref,
+                        controlled_actor_id: actor_id,
+                        controlled_actor_name: String((actor_ready.actor as any)?.name ?? actor_id).trim() || actor_id,
+                    }));
+                } catch (err: any) {
+                    const error = err?.message ?? "actor_claim_failed";
+                    const status = error === "controlled_actor_already_claimed"
+                        ? 409
+                        : error === "invalid_session_token"
+                            ? 401
+                            : error === "invalid_controlled_actor_ref"
+                                ? 400
+                            : 500;
+                    res.writeHead(status, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error }));
+                }
+            });
+            return;
+        }
+
+        if (url.pathname === "/api/actors/release") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", (chunk) => { body += chunk; });
+            req.on("end", () => {
+                try {
+                    const data = JSON.parse(body || "{}");
+                    const slot = Number.isFinite(Number(data?.slot)) ? Number(data.slot) : data_slot_number;
+                    const client_session_id = require_request_client_session_id(slot, { session_token: data?.session_token });
+                    const released = release_controlled_actor_ref_for_client_session(slot, client_session_id);
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, released }));
+                } catch (err: any) {
+                    const error = err?.message ?? "actor_release_failed";
+                    const status = error === "invalid_session_token" ? 401 : 500;
+                    res.writeHead(status, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error }));
+                }
+            });
+            return;
+        }
+
+        // GET/POST /api/session/control - persisted controlled actor binding for current session
+        if (url.pathname === "/api/session/control") {
+            if (req.method === "GET") {
+                try {
+                    const slot_raw = url.searchParams.get("slot");
+                    const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+                    const client_session_id = require_request_client_session_id(slot, { session_token: url.searchParams.get("session_token") });
+                    const preferred_actor_ref = url.searchParams.get("actor_ref");
+                    const actor_ref = assign_controlled_actor_ref_for_client_session(slot, client_session_id, preferred_actor_ref);
+                    const actor_ready = ensure_claimed_actor_ready(slot, actor_ref);
+                    if (!actor_ready.ok) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: actor_ready.error }));
+                        return;
+                    }
+                    const actor_id = actor_ready.actor_id;
+                    const actor_name = String((actor_ready.actor as any)?.name ?? "").trim();
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({
+                        ok: true,
+                        boot_session_id: SESSION_ID,
+                        controlled_actor_ref: actor_ref,
+                        controlled_actor_id: actor_id,
+                        controlled_actor_name: actor_name || null,
+                    }));
+                } catch (err: any) {
+                    debug_error("API", "/api/session/control GET error", err);
+                    const error = err?.message ?? "session_control_get_failed";
+                    const status = error === "controlled_actor_already_claimed" || error === "controlled_actor_release_required"
+                        ? 409
+                        : error === "controlled_actor_binding_required"
+                            ? 400
+                            : error === "invalid_session_token"
+                                ? 401
+                            : 500;
+                    res.writeHead(status, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error }));
+                }
+                return;
+            }
+
+            if (req.method === "POST") {
+                let body = "";
+                req.on("data", (chunk) => { body += chunk; });
+                req.on("end", () => {
+                    try {
+                        const data = JSON.parse(body || "{}");
+                        const slot = Number.isFinite(Number(data?.slot)) ? Number(data.slot) : data_slot_number;
+                        const client_session_id = require_request_client_session_id(slot, { session_token: data?.session_token });
+                        const actor_ref = String(data?.actor_ref ?? "").trim();
+                        const existing_actor_ref = get_controlled_actor_ref_for_client_session(slot, client_session_id);
+                        if (existing_actor_ref && existing_actor_ref !== actor_ref) {
+                            throw new Error("controlled_actor_release_required");
+                        }
+                        const bound_ref = set_controlled_actor_ref_for_client_session(slot, client_session_id, actor_ref);
+                        const actor_ready = ensure_claimed_actor_ready(slot, bound_ref);
+                        if (!actor_ready.ok) throw new Error(actor_ready.error);
+                        const actor_id = actor_ready.actor_id;
+                        res.writeHead(200, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: true, boot_session_id: SESSION_ID, controlled_actor_ref: bound_ref, controlled_actor_id: actor_id }));
+                    } catch (err: any) {
+                        debug_error("API", "/api/session/control POST error", err);
+                        const error = err?.message ?? "session_control_set_failed";
+                        const status = error === "controlled_actor_already_claimed" || error === "controlled_actor_release_required"
+                            ? 409
+                            : error === "invalid_session_token"
+                                ? 401
+                                : error === "invalid_controlled_actor_ref"
+                                    ? 400
+                                : 500;
+                        res.writeHead(status, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error }));
+                    }
+                });
+                return;
+            }
+
+            res.writeHead(405, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+            return;
+        }
+
+        // GET /api/character/editor/options?field=kind|sex&ref=actor.xxx|npc.xxx
+        if (url.pathname === "/api/character/editor/options") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const field = String(url.searchParams.get("field") ?? "").trim().toLowerCase();
+            const ref = String(url.searchParams.get("ref") ?? "").trim();
+            const slot_raw = url.searchParams.get("slot");
+            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+
+            try {
+                const character_result = ref ? load_character_by_ref(slot, ref) : null;
+                const character = character_result?.ok ? character_result.character as any : null;
+                const current_kind = String(character?.kind ?? character?.kind_id ?? "").trim();
+
+                if (field === "kind") {
+                    const defs = load_kind_definitions();
+                    const options = defs.kinds
+                        .filter((kind) => String(kind?.id ?? "").trim().length > 0)
+                        .map((kind) => ({
+                            value: String(kind.id),
+                            label: String(kind.name ?? kind.id),
+                            description: String(kind.id),
+                        }));
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, field, options, selected_value: current_kind || null }));
+                    return;
+                }
+
+                if (field === "sex") {
+                    const options = [
+                        { value: "male", label: "Male", description: current_kind ? `${current_kind} option` : "standard option" },
+                        { value: "female", label: "Female", description: current_kind ? `${current_kind} option` : "standard option" },
+                    ];
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, field, options, selected_value: String(character?.sex ?? "") || null }));
+                    return;
+                }
+
+                if (field === "tag_name") {
+                    const options = list_tag_definitions()
+                        .filter((definition) => definition.scope.includes("CHARACTER"))
+                        .map((definition) => ({
+                            value: definition.name,
+                            label: definition.name,
+                            description: definition.dimensions.length > 0
+                                ? `${definition.scope.join(",")} dims:${definition.dimensions.length}`
+                                : definition.scope.join(","),
+                        }));
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, field, options, selected_value: null }));
+                    return;
+                }
+
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "unsupported_editor_field" }));
+            } catch (err: any) {
+                debug_error("API", "/api/character/editor/options error", err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: err?.message ?? "character_editor_options_failed" }));
+            }
+            return;
+        }
+
+        if (url.pathname === "/api/tag/options") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+            try {
+                const scope = String(url.searchParams.get("scope") ?? "CHARACTER").trim().toUpperCase();
+                const options = list_tag_definitions()
+                    .filter((definition) => definition.scope.includes(scope as any) && definition.editor_visible)
+                    .map((definition) => ({
+                        value: definition.name,
+                        label: definition.name,
+                        description: definition.dimensions.length > 0
+                            ? `${definition.scope.join(",")} dims:${definition.dimensions.length}`
+                            : definition.scope.join(","),
+                    }));
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, scope, options, selected_value: null }));
+            } catch (err: any) {
+                debug_error("API", "/api/tag/options error", err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: err?.message ?? "tag_options_failed" }));
+            }
+            return;
+        }
+
+        if (url.pathname === "/api/tag/definition") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+            try {
+                const raw_name = String(url.searchParams.get("name") ?? "").trim();
+                if (!raw_name) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "missing_tag_name" }));
+                    return;
+                }
+                const definition = get_tag_definition(raw_name);
+                if (!definition) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "tag_definition_not_found" }));
+                    return;
+                }
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, definition }));
+            } catch (err: any) {
+                debug_error("API", "/api/tag/definition error", err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: err?.message ?? "tag_definition_failed" }));
+            }
+            return;
+        }
+
+        if (url.pathname === "/api/tile/editor") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+            try {
+                const slot = Number.isFinite(Number(url.searchParams.get("slot"))) ? Number(url.searchParams.get("slot")) : data_slot_number;
+                const place_id = String(url.searchParams.get("place_id") ?? "").trim();
+                const x = Math.floor(Number(url.searchParams.get("x") ?? NaN));
+                const y = Math.floor(Number(url.searchParams.get("y") ?? NaN));
+                const z = Math.floor(Number(url.searchParams.get("z") ?? NaN));
+                if (!place_id || !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "invalid_tile_request" }));
+                    return;
+                }
+                const place_res = load_place(slot, place_id);
+                if (!place_res.ok) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "place_not_found" }));
+                    return;
+                }
+                const place_any: any = place_res.place as any;
+                merge_active_place_runtime_mutations(slot, place_id, place_any);
+                const tile = get_place_tile_at_world_z(place_any, x, y, z) as any;
+                if (!tile || typeof tile !== "object") {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "tile_not_found" }));
+                    return;
+                }
+                const resolved = resolve_place_tile(String(tile.kind ?? ""), tile);
+                if (!resolved) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "tile_definition_not_found" }));
+                    return;
+                }
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({
+                    ok: true,
+                    tile: {
+                        kind: String(tile.kind ?? ""),
+                        place_id,
+                        x,
+                        y,
+                        z,
+                        tag_add: tile.tag_add ?? [],
+                        tag_remove: tile.tag_remove ?? [],
+                        tags: resolved.effective_tags,
+                        resolved_tag_states: resolved.resolved_tag_states,
+                        value_mag: resolved.value_mag,
+                    },
+                }));
+            } catch (err: any) {
+                debug_error("API", "/api/tile/editor error", err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: err?.message ?? "tile_editor_failed" }));
+            }
+            return;
+        }
+
+        if (url.pathname === "/api/tile/tag/update") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+            let body = "";
+            req.on("data", (chunk) => { body += chunk; });
+            req.on("end", () => {
+                try {
+                    const data = JSON.parse(body || "{}");
+                    const slot = Number.isFinite(Number(data?.slot)) ? Number(data.slot) : data_slot_number;
+                    const place_id = String(data?.place_id ?? "").trim();
+                    const x = Math.floor(Number(data?.x ?? NaN));
+                    const y = Math.floor(Number(data?.y ?? NaN));
+                    const z = Math.floor(Number(data?.z ?? NaN));
+                    const mode = String(data?.mode ?? "upsert").trim().toLowerCase();
+                    const previous_key = String(data?.previous_key ?? "").trim();
+                    const previous_tag_name = String(data?.previous_tag_name ?? "").trim();
+                    if (!place_id || !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "invalid_tile_request" }));
+                        return;
+                    }
+                    const place_res = load_place(slot, place_id);
+                    if (!place_res.ok) {
+                        res.writeHead(404, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "place_not_found" }));
+                        return;
+                    }
+                    const place_any: any = place_res.place as any;
+                    merge_active_place_runtime_mutations(slot, place_id, place_any);
+                    const tile = get_place_tile_at_world_z(place_any, x, y, z) as any;
+                    if (!tile || typeof tile !== "object") {
+                        res.writeHead(404, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "tile_not_found" }));
+                        return;
+                    }
+                    const resolved = resolve_place_tile(String(tile.kind ?? ""), tile);
+                    if (!resolved) {
+                        res.writeHead(404, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "tile_definition_not_found" }));
+                        return;
+                    }
+
+                    const current_effective = normalize_editor_tags(resolved.effective_tags);
+                    let desired = [...current_effective];
+                    if (mode === "remove") {
+                        const tag_name = String(data?.tag_name ?? previous_tag_name ?? "").trim();
+                        if (!tag_name && !previous_key) {
+                            res.writeHead(400, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: false, error: "missing_tag_selector" }));
+                            return;
+                        }
+                        desired = current_effective.filter((tag) => !matches_editor_selector(tag, { key: previous_key, name: tag_name || null }));
+                    } else {
+                        const tag_any = clone_editor_tag(data?.tag ?? {});
+                        const next_name = String(tag_any?.name ?? "").trim().toUpperCase();
+                        if (!next_name) {
+                            res.writeHead(400, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: false, error: "missing_tag_name" }));
+                            return;
+                        }
+                        tag_any.name = next_name;
+                        tag_any.mag = normalize_editor_tag_mag_for_definition(next_name, tag_any?.mag, 1);
+                        delete tag_any.rank_mag;
+                        tag_any.meta = Array.isArray(tag_any?.meta) ? tag_any.meta.map((entry: unknown) => String(entry ?? "").trim().toUpperCase()).filter(Boolean) : [];
+                        tag_any.dim_mag = normalize_editor_dim_mag_for_tag(next_name, tag_any?.dim_mag);
+                        if (previous_key) {
+                            desired = current_effective.filter((tag) => !matches_editor_selector(tag, { key: previous_key, name: previous_tag_name || next_name }));
+                            desired.push(tag_any);
+                        } else if (previous_tag_name && previous_tag_name.toUpperCase() !== next_name) {
+                            desired = current_effective.filter((tag) => !matches_editor_selector(tag, { name: previous_tag_name }));
+                            desired.push(tag_any);
+                        } else {
+                            desired.push(tag_any);
+                        }
+                    }
+
+                    const refreshed = apply_tile_effective_tags(tile, desired);
+                    save_place_and_sync_active(slot, place_any, { merge_active_runtime: false });
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({
+                        ok: true,
+                        tile: {
+                            kind: String(tile.kind ?? ""),
+                            place_id,
+                            x,
+                            y,
+                            z,
+                            tag_add: tile.tag_add ?? [],
+                            tag_remove: tile.tag_remove ?? [],
+                            tags: refreshed.effective_tags,
+                            resolved_tag_states: refreshed.resolved_tag_states,
+                            value_mag: refreshed.value_mag,
+                        },
+                    }));
+                } catch (err: any) {
+                    debug_error("API", "/api/tile/tag/update error", err);
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? "tile_tag_update_failed" }));
+                }
+            });
+            return;
+        }
+
+        if (url.pathname === "/api/item/editor") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+            let body = "";
+            req.on("data", (chunk) => { body += chunk; });
+            req.on("end", () => {
+                try {
+                    const data = JSON.parse(body || "{}");
+                    const slot = Number.isFinite(Number(data?.slot)) ? Number(data.slot) : data_slot_number;
+                    const item_ref = String(data?.item_ref ?? "").trim();
+                    const owner_kind = String(data?.owner_kind ?? "").trim();
+                    const owner_id = String(data?.owner_id ?? "").trim();
+                    const item_id = item_ref.replace(/^item\./, '').trim();
+                    if (!item_id || !owner_id || !["actor", "npc", "place"].includes(owner_kind)) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "invalid_item_editor_request" }));
+                        return;
+                    }
+                    let item: any = null;
+                    if (owner_kind === 'actor') {
+                        const actor_result = load_actor_with_items(slot, owner_id);
+                        if (!actor_result.ok) throw new Error(actor_result.error);
+                        item = find_actor_item_by_id(actor_result.actor, item_id)?.item ?? null;
+                    } else if (owner_kind === 'npc') {
+                        const npc_result = load_npc(slot, owner_id);
+                        if (!npc_result.ok) throw new Error(npc_result.error);
+                        item = find_actor_item_by_id(npc_result.npc as any, item_id)?.item ?? null;
+                    } else {
+                        const place_result = load_place_with_ground(slot, owner_id);
+                        if (!place_result.ok) throw new Error(place_result.error);
+                        const place_any: any = place_result.place;
+                        merge_active_place_runtime_mutations(slot, owner_id, place_any);
+                        item = find_item_in_place_for_editor(place_any, item_id)?.item ?? null;
+                    }
+                    if (!item) {
+                        res.writeHead(404, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "item_not_found" }));
+                        return;
+                    }
+                    const current_breath_index = get_owner_current_breath_index(slot, owner_kind as any, owner_id);
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, item: build_item_editor_payload(item, owner_kind as any, owner_id, current_breath_index ?? undefined) }));
+                } catch (err: any) {
+                    debug_error("API", "/api/item/editor error", err);
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? "item_editor_failed" }));
+                }
+            });
+            return;
+        }
+
+        if (url.pathname === "/api/item/tag/update") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+            let body = "";
+            req.on("data", (chunk) => { body += chunk; });
+            req.on("end", () => {
+                try {
+                    const data = JSON.parse(body || "{}");
+                    const slot = Number.isFinite(Number(data?.slot)) ? Number(data.slot) : data_slot_number;
+                    const item_ref = String(data?.item_ref ?? "").trim();
+                    const owner_kind = String(data?.owner_kind ?? "").trim();
+                    const owner_id = String(data?.owner_id ?? "").trim();
+                    const mode = String(data?.mode ?? 'upsert').trim().toLowerCase();
+                    const previous_key = String(data?.previous_key ?? '').trim();
+                    const previous_tag_name = String(data?.previous_tag_name ?? '').trim();
+                    const item_id = item_ref.replace(/^item\./, '').trim();
+                    if (!item_id || !owner_id || !["actor", "npc", "place"].includes(owner_kind)) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "invalid_item_tag_request" }));
+                        return;
+                    }
+                    let item: any = null;
+                    let save_owner: (() => void) | null = null;
+                    if (owner_kind === 'actor') {
+                        const actor_result = load_actor_with_items(slot, owner_id);
+                        if (!actor_result.ok) throw new Error(actor_result.error);
+                        item = find_actor_item_by_id(actor_result.actor, item_id)?.item ?? null;
+                        save_owner = () => { const saved = save_actor_with_items(slot, owner_id, actor_result.actor); if (!saved.ok) throw new Error(saved.error); };
+                    } else if (owner_kind === 'npc') {
+                        const npc_result = load_npc(slot, owner_id);
+                        if (!npc_result.ok) throw new Error(npc_result.error);
+                        item = find_actor_item_by_id(npc_result.npc as any, item_id)?.item ?? null;
+                        save_owner = () => { save_npc(slot, owner_id, npc_result.npc as any); };
+                    } else {
+                        const place_result = load_place_with_ground(slot, owner_id);
+                        if (!place_result.ok) throw new Error(place_result.error);
+                        const place_any: any = place_result.place;
+                        merge_active_place_runtime_mutations(slot, owner_id, place_any);
+                        item = find_item_in_place_for_editor(place_any, item_id)?.item ?? null;
+                        save_owner = () => { const saved = save_place_with_ground_and_sync_active(slot, owner_id, place_any, { merge_active_runtime: false }); if (!saved.ok) throw new Error(saved.error); };
+                    }
+                    if (!item || !save_owner) {
+                        res.writeHead(404, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "item_not_found" }));
+                        return;
+                    }
+                    const resolved = resolve_inline_item(String(item?.def_id ?? ''), item);
+                    if (!resolved) throw new Error('item_definition_not_found');
+                    let desired = [...normalize_editor_tags(resolved.effective_tags)];
+                    if (mode === 'remove') {
+                        const tag_name = String(data?.tag_name ?? previous_tag_name ?? '').trim();
+                        desired = desired.filter((tag) => !matches_editor_selector(tag, { key: previous_key, name: tag_name || null }));
+                    } else {
+                        const tag_any = clone_editor_tag(data?.tag ?? {});
+                        const next_name = String(tag_any?.name ?? '').trim().toUpperCase();
+                        if (!next_name) throw new Error('missing_tag_name');
+                        tag_any.name = next_name;
+                        tag_any.mag = normalize_editor_tag_mag_for_definition(next_name, tag_any?.mag, 1);
+                        delete tag_any.rank_mag;
+                        tag_any.meta = Array.isArray(tag_any?.meta) ? tag_any.meta.map((entry: unknown) => String(entry ?? '').trim().toUpperCase()).filter(Boolean) : [];
+                        tag_any.dim_mag = normalize_editor_dim_mag_for_tag(next_name, tag_any?.dim_mag);
+                        desired = desired.filter((tag) => !matches_editor_selector(tag, { key: previous_key, name: previous_tag_name || next_name }));
+                        desired.push(tag_any);
+                    }
+                    const delta = build_editor_delta_from_base_and_desired(resolved.def.tags ?? [], normalize_editor_tags(desired));
+                    item.tag_add = delta.tag_add;
+                    item.tag_remove = delta.tag_remove;
+                    save_owner();
+                    const current_breath_index = get_owner_current_breath_index(slot, owner_kind as any, owner_id);
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, item: build_item_editor_payload(item, owner_kind as any, owner_id, current_breath_index ?? undefined) }));
+                } catch (err: any) {
+                    debug_error("API", "/api/item/tag/update error", err);
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? "item_tag_update_failed" }));
+                }
+            });
+            return;
+        }
+
+        if (url.pathname === "/api/character/tag/update") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", (chunk) => { body += chunk; });
+            req.on("end", () => {
+                try {
+                    const data = JSON.parse(body || "{}");
+                    const ref = String(data?.ref ?? "").trim();
+                    const mode = String(data?.mode ?? "upsert").trim().toLowerCase();
+                    const previous_tag_name = String(data?.previous_tag_name ?? "").trim();
+                    const previous_key = String(data?.previous_key ?? "").trim();
+                    const slot = Number.isFinite(Number(data?.slot)) ? Number(data.slot) : data_slot_number;
+                    if (!ref) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_character_ref" }));
+                        return;
+                    }
+
+                    const current = load_character_by_ref(slot, ref);
+                    if (!current.ok) {
+                        res.writeHead(404, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: current.error }));
+                        return;
+                    }
+
+                    const character = current.character as Record<string, any>;
+                    if (mode === "remove") {
+                        const tag_name = String(data?.tag_name ?? previous_tag_name ?? "").trim();
+                        if (!tag_name && !previous_key) {
+                            res.writeHead(400, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: false, error: "missing_tag_selector" }));
+                            return;
+                        }
+                        if (previous_key) {
+                            remove_character_tag_by_selector(character, { key: previous_key, name: tag_name || null });
+                        } else {
+                            remove_character_tag(character, tag_name);
+                        }
+                    } else {
+                        const tag_any = data?.tag ?? {};
+                        const next_name = String(tag_any?.name ?? "").trim().toUpperCase();
+                        if (!next_name) {
+                            res.writeHead(400, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: false, error: "missing_tag_name" }));
+                            return;
+                        }
+                        const next_mag = normalize_editor_tag_mag_for_definition(next_name, tag_any?.mag, 1);
+                        const next_meta = Array.isArray(tag_any?.meta)
+                            ? tag_any.meta.map((entry: unknown) => String(entry ?? "").trim().toUpperCase()).filter(Boolean)
+                            : [];
+                        const next_dim_mag = normalize_editor_dim_mag_for_tag(next_name, tag_any?.dim_mag);
+                        const next_scope = Array.isArray(tag_any?.scope)
+                            ? tag_any.scope
+                                .map((entry: unknown) => String(entry ?? "").trim().toUpperCase())
+                                .filter((entry: string) => entry === "CHARACTER" || entry === "ITEM" || entry === "TILE" || entry === "TAG")
+                            : undefined;
+                        const next_tag = {
+                            name: next_name,
+                            mag: next_mag,
+                            dim_mag: next_dim_mag,
+                            meta: next_meta,
+                            info: Array.isArray(tag_any?.info) ? JSON.parse(JSON.stringify(tag_any.info)) : undefined,
+                            source: typeof tag_any?.source === "string" ? String(tag_any.source) : undefined,
+                            expiry: Number.isFinite(Number(tag_any?.expiry)) ? Math.floor(Number(tag_any.expiry)) : undefined,
+                            scope: next_scope as any,
+                        } as any;
+                        if (previous_key) {
+                            upsert_character_tag_by_selector(character, { key: previous_key, name: previous_tag_name || next_name }, next_tag);
+                        } else if (previous_tag_name && previous_tag_name.toUpperCase() !== next_name) {
+                            remove_character_tag(character, previous_tag_name);
+                            upsert_character_tag(character, next_tag);
+                        } else {
+                            upsert_character_tag(character, next_tag);
+                        }
+                    }
+
+                    const saved = save_character_by_ref(slot, ref, character);
+                    if (!saved.ok) {
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: saved.error }));
+                        return;
+                    }
+                    sync_entity_cache_after_character_save(slot, ref, saved.character);
+                    try {
+                        augment_inline_character_items_for_api(saved.character as any);
+                    } catch {
+                        // ignore augmentation failure
+                    }
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, ref: saved.ref, role: saved.role, character: saved.character, path: saved.path }));
+                } catch (err: any) {
+                    debug_error("API", "/api/character/tag/update error", err);
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? "character_tag_update_failed" }));
+                }
+            });
+            return;
+        }
+
+        // POST /api/character/update - Apply canonical top-level patch to actor/npc storage
+        if (url.pathname === "/api/character/update") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", (chunk) => { body += chunk; });
+            req.on("end", () => {
+                try {
+                    const data = JSON.parse(body || "{}");
+                    const ref = String(data?.ref ?? "").trim();
+                    const patch = data?.patch;
+                    const slot = Number.isFinite(Number(data?.slot)) ? Number(data.slot) : data_slot_number;
+
+                    if (!ref) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "missing_character_ref" }));
+                        return;
+                    }
+                    if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "invalid_patch" }));
+                        return;
+                    }
+
+                    const current = load_character_by_ref(slot, ref);
+                    if (!current.ok) {
+                        res.writeHead(404, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: current.error }));
+                        return;
+                    }
+
+                    const next = apply_character_patch(current.character, patch as Record<string, unknown>);
+                    const saved = save_character_by_ref(slot, ref, next);
+                    if (!saved.ok) {
+                        res.writeHead(500, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: saved.error }));
+                        return;
+                    }
+
+                    const reloaded = load_character_by_ref(slot, ref);
+                    const persisted_character = reloaded.ok ? reloaded.character : saved.character;
+                    const persisted_path = reloaded.ok ? reloaded.path : saved.path;
+                    sync_entity_cache_after_character_save(slot, ref, persisted_character);
+
+                    try {
+                        augment_inline_character_items_for_api(persisted_character as any);
+                    } catch {
+                        // ignore augmentation failure
+                    }
+
+                    debug_log("API", "/api/character/update saved", {
+                        slot,
+                        ref: saved.ref,
+                        id: saved.id,
+                        path: persisted_path,
+                        patched_keys: Object.keys(patch as Record<string, unknown>),
+                    });
+
+                    if (saved.ref.startsWith('actor.')) {
+                        emit_actor_private_state_changed(saved.ref, ['character_update']);
+                    }
+
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, role: saved.role, ref: saved.ref, path: persisted_path, character: persisted_character }));
+                } catch (err: any) {
+                    debug_error("API", "/api/character/update error", err);
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? "character_update_failed" }));
+                }
+            });
             return;
         }
 
@@ -11362,7 +13193,12 @@ function start_http_server(log_path: string): void {
             }
 
             const item_def_id = url.searchParams.get("item_def_id");
-            const actor_id = url.searchParams.get("actor_id") || "henry_actor";
+            const actor_id = url.searchParams.get("actor_id");
+            if (!actor_id) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_actor_id" }));
+                return;
+            }
             
             if (!item_def_id) {
                 res.writeHead(400, { "Content-Type": "application/json" });
@@ -11404,7 +13240,12 @@ function start_http_server(log_path: string): void {
                 return;
             }
 
-            const actor_id = url.searchParams.get("actor_id") || "henry_actor";
+            const actor_id = url.searchParams.get("actor_id");
+            if (!actor_id) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_actor_id" }));
+                return;
+            }
             const item_id = url.searchParams.get("item_id");
             if (!item_id) {
                 res.writeHead(400, { "Content-Type": "application/json" });
@@ -11431,7 +13272,7 @@ function start_http_server(log_path: string): void {
 
                 // NEW INLINE SYSTEM: resolve tags from defs + deltas (do not rely on stored item.tags)
                 const resolved = resolve_inline_item(String(item_any?.def_id ?? ''), item_any as any);
-                const tags = (resolved?.effective_tags ?? (Array.isArray(item_any?.tags) ? item_any.tags : [])) as any[];
+                const tags = (resolved?.effective_tags ?? []) as any[];
                 const compatible_slots = compute_compatible_slots_from_tags(tags, `inst:${actor_id}:${item_id}`);
 
                 res.writeHead(200, { "Content-Type": "application/json" });
@@ -11480,7 +13321,7 @@ function start_http_server(log_path: string): void {
 
                 // NEW INLINE SYSTEM: resolve tags from defs + deltas (do not rely on stored item.tags)
                 const resolved = resolve_inline_item(String(item_any?.def_id ?? ''), item_any as any);
-                const tags = (resolved?.effective_tags ?? (Array.isArray(item_any?.tags) ? item_any.tags : [])) as any[];
+                const tags = (resolved?.effective_tags ?? []) as any[];
                 const compatible_slots = compute_compatible_slots_from_tags(tags, `place:${place_id}:${item_id}`);
                 res.writeHead(200, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ ok: true, place_id, item_id, compatible_slots }));
@@ -11507,7 +13348,12 @@ function start_http_server(log_path: string): void {
                 return;
             }
 
-            const actor_id = url.searchParams.get("actor_id") || "henry_actor";
+            const actor_id = url.searchParams.get("actor_id");
+            if (!actor_id) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_actor_id" }));
+                return;
+            }
             try {
                 const actor_res = load_actor(slot, actor_id);
                 if (!actor_res.ok) {
@@ -11528,22 +13374,12 @@ function start_http_server(log_path: string): void {
                 targets.push({ ref: `actor.${actor_id}`, label: actor_label, type: "actor" });
 
                 // Awareness set: only include NPCs the actor is aware of.
-                const awareness = new Set<string>();
-                const tags = (actor_res.actor as any)?.tags;
-                if (Array.isArray(tags)) {
-                    for (const tag of tags) {
-                        if (tag?.name !== "AWARENESS") continue;
-                        const info = tag?.info;
-                        if (!Array.isArray(info)) continue;
-                        for (const entry of info) {
-                            if (typeof entry !== "string") continue;
-                            const norm = entry.toLowerCase();
-                            // Normalize npc.Gunther -> npc.gunther
-                            const fixed = norm.startsWith("npc.") ? `npc.${norm.slice(4).replace(/[^a-z0-9_]/g, "_")}` : norm;
-                            awareness.add(fixed);
-                        }
-                    }
-                }
+                const awareness = new Set<string>(
+                    get_awareness_list(actor_res.actor as any)
+                        .map((entry) => String(entry.target_ref ?? "").toLowerCase())
+                        .filter(Boolean)
+                        .map((ref) => ref.startsWith("npc.") ? `npc.${ref.slice(4).replace(/[^a-z0-9_]/g, "_")}` : ref)
+                );
 
                 if (region_res.ok) {
                     targets.push({ ref: `region_tile.${wx}.${wy}.${rx}.${ry}`, label: region_res.region.name ?? region_res.region_id, type: "region" });
@@ -11673,7 +13509,8 @@ function start_http_server(log_path: string): void {
             req.on("end", () => {
                 try {
                     const data = JSON.parse(body);
-                    const actor_ref = data.actor_ref || "actor.henry_actor";
+                    const client_session_id = require_request_client_session_id(data_slot_number, { session_token: data?.session_token });
+                    const actor_ref = require_authorized_actor_ref(data_slot_number, client_session_id, data?.actor_ref);
                     const target_ref = data.target_ref;
                     const target_type = data.target_type || "npc";
                     const target_name = data.target_name;
@@ -11699,8 +13536,10 @@ function start_http_server(log_path: string): void {
                         target_type 
                     }));
                 } catch (err: any) {
-                    res.writeHead(400, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ ok: false, error: err?.message ?? "invalid_request" }));
+                    const error = err?.message ?? "invalid_request";
+                    const status = error === "actor_ref_not_authorized" ? 403 : error === "invalid_session_token" || error === "controlled_actor_binding_required" ? 401 : 500;
+                    res.writeHead(status, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error }));
                 }
             });
             return;
@@ -12039,6 +13878,73 @@ function start_http_server(log_path: string): void {
                     }));
                 } catch (err: any) {
                     debug_error('API', '/api/place_painter/move error', err);
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: false, error: err?.message ?? 'internal_error' }));
+                }
+            });
+            return;
+        }
+
+        if (url.pathname === "/api/place_painter/erase") {
+            if (req.method !== 'POST') {
+                res.writeHead(405, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' }));
+                return;
+            }
+            let body = '';
+            req.on('data', (chunk) => { body += chunk; });
+            req.on('end', () => {
+                try {
+                    const data = body ? JSON.parse(body) : {};
+                    const slot = Number(data?.slot ?? data_slot_number);
+                    const place_id = String(data?.place_id ?? '');
+                    const entity_ref = String(data?.entity_ref ?? '');
+                    const entity_type = String(data?.entity_type ?? '') as 'npc' | 'actor' | 'item' | 'pile';
+                    const source = {
+                        x: Number(data?.source?.x),
+                        y: Number(data?.source?.y),
+                        z: Number(data?.source?.z),
+                    };
+                    if (!Number.isFinite(slot) || slot <= 0) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'invalid_slot' }));
+                        return;
+                    }
+                    if (!place_id || !entity_ref || !['npc', 'actor', 'item', 'pile'].includes(entity_type)) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'invalid_erase_request' }));
+                        return;
+                    }
+                    if (!Number.isFinite(source.x) || !Number.isFinite(source.y) || !Number.isFinite(source.z)) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'invalid_source' }));
+                        return;
+                    }
+
+                    const result = mutate_place_painter_erase_and_sync(
+                        slot,
+                        place_id,
+                        entity_type,
+                        entity_ref,
+                        { x: source.x, y: source.y, z: source.z },
+                    );
+                    if (!result.ok) {
+                        const status = result.error === 'place_not_found' ? 404 : 400;
+                        res.writeHead(status, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: result.error }));
+                        return;
+                    }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        ok: true,
+                        deleted: result.deleted_count,
+                        place_id,
+                        entity_ref,
+                        entity_type,
+                        source: { x: Math.floor(source.x), y: Math.floor(source.y), z: Math.floor(source.z) },
+                    }));
+                } catch (err: any) {
+                    debug_error('API', '/api/place_painter/erase error', err);
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ ok: false, error: err?.message ?? 'internal_error' }));
                 }
@@ -12647,7 +14553,12 @@ function start_http_server(log_path: string): void {
                 return;
             }
 
-            const actor_id = url.searchParams.get("actor_id") || "henry_actor";
+            const actor_id = url.searchParams.get("actor_id");
+            if (!actor_id) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_actor_id" }));
+                return;
+            }
 
             try {
                 const result = load_actor_with_items(data_slot_number, actor_id);
@@ -12923,7 +14834,7 @@ function start_http_server(log_path: string): void {
                         } else {
                             add_item_to_main_ground(place_result.place, remove_result.item);
                         }
-                        save_place_with_ground_and_sync_active(data_slot_number, place_id, place_result.place);
+                        save_place_with_ground_and_sync_active(data_slot_number, place_id, place_result.place, { merge_active_runtime: false });
                         res.writeHead(500, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: add_result.error }));
                         return;
@@ -12937,7 +14848,7 @@ function start_http_server(log_path: string): void {
                         return;
                     }
 
-                    const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, place_id, place_result.place);
+                    const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, place_id, place_result.place, { merge_active_runtime: false });
                     if (!save_place_result.ok) {
                         const rollback = save_actor_with_items(data_slot_number, actor_id, actor_before);
                         if (!rollback.ok) {
@@ -13630,11 +15541,9 @@ function start_http_server(log_path: string): void {
                     const container_obj: any = tgt.kind === 'tile' ? tgt.tile : tgt.structure;
 
                     if (!Array.isArray(container_obj.contents)) container_obj.contents = [];
-                    if (!container_obj.container_capacity || typeof container_obj.container_capacity.max_slots !== 'number' || container_obj.container_capacity.max_slots < 1) {
-                        container_obj.container_capacity = { max_slots: Math.max(12, container_obj.contents.length + 1) };
-                    }
-
-                    const max_slots = Math.floor(container_obj.container_capacity.max_slots);
+                    const max_slots = tgt.kind === 'tile'
+                        ? ensure_tile_container_capacity(container_obj)
+                        : ensure_resolved_container_capacity(container_obj, String(tgt.structure?.def_id ?? ''));
                     if (container_obj.contents.length >= max_slots) {
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: "container_full" }));
@@ -13892,10 +15801,9 @@ function start_http_server(log_path: string): void {
                     const dst_container: any = dst_tgt.kind === 'tile' ? dst_tgt.tile : dst_tgt.structure;
                     if (!Array.isArray(src_container.contents)) src_container.contents = [];
                     if (!Array.isArray(dst_container.contents)) dst_container.contents = [];
-                    if (!dst_container.container_capacity || typeof dst_container.container_capacity.max_slots !== 'number' || dst_container.container_capacity.max_slots < 1) {
-                        dst_container.container_capacity = { max_slots: Math.max(12, dst_container.contents.length + 1) };
-                    }
-                    const max_slots = Math.floor(dst_container.container_capacity.max_slots);
+                    const max_slots = dst_tgt.kind === 'tile'
+                        ? ensure_tile_container_capacity(dst_container)
+                        : ensure_resolved_container_capacity(dst_container, String(dst_tgt.structure?.def_id ?? ''));
 
                     const idx = src_container.contents.findIndex((it: any) => String(it?.id ?? '') === String(item_id));
                     if (idx < 0) {
@@ -15719,13 +17627,27 @@ function start_http_server(log_path: string): void {
                         transfer_mode,
                         actor_id,
                         item_instance_id,
-                        from_container,
-                        to_container,
+                        from_container: from_container_raw,
+                        to_container: to_container_raw,
+                        from_target_id,
+                        to_target_id,
                         from_slot_index,
                         to_slot_index,
                         target_grid_x,
                         target_grid_y,
                     } = data;
+
+                    function resolve_transfer_surface_target(input: any): { container_id: string; slot_index: number | null } | null {
+                        if (typeof input !== 'string' || input.trim().length < 1) return null;
+                        const resolved = resolve_inventory_target_id(String(input));
+                        if (resolved) return { container_id: resolved.container_id, slot_index: null };
+                        return { container_id: String(input), slot_index: null };
+                    }
+
+                    const from_surface_target = resolve_transfer_surface_target(from_target_id ?? from_container_raw);
+                    const to_surface_target = resolve_transfer_surface_target(to_target_id ?? to_container_raw);
+                    const from_container = from_surface_target?.container_id ?? null;
+                    const to_container = to_surface_target?.container_id ?? null;
 
                     debug_log("transfer", `[INLINE] /api/transfer request`, data);
 
@@ -15755,32 +17677,65 @@ function start_http_server(log_path: string): void {
 
                     const mode = typeof transfer_mode === 'string' ? String(transfer_mode).toLowerCase().trim() : 'touch';
                     const is_throw_mode = mode === 'throw';
+                    const intent_subtype = typeof data?.intent_subtype === 'string' ? String(data.intent_subtype).trim().toUpperCase() : '';
+                    const inferred_transfer_subtype = !is_throw_mode && (String(from_container ?? '').startsWith('body_slots.') || String(to_container ?? '').startsWith('body_slots.'))
+                        ? 'EQUIP_ITEM'
+                        : 'TRANSFER_ITEM';
+                    const timed_transfer_subtype = intent_subtype || (is_throw_mode ? '' : inferred_transfer_subtype);
+                    const actor_ref = `actor.${String(actor_id).trim().replace(/^actor\./, '')}`;
+
+                    if ((timed_transfer_subtype === 'TRANSFER_ITEM' || timed_transfer_subtype === 'EQUIP_ITEM') && is_timed_event_active(data_slot_number)) {
+                        const active_actor_ref = get_active_actor_ref(data_slot_number);
+                        if (!active_actor_ref) {
+                            res.writeHead(400, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: false, error: 'no_active_timed_event' }));
+                            return;
+                        }
+                        if (active_actor_ref !== actor_ref) {
+                            res.writeHead(400, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: false, error: 'not_your_turn' }));
+                            return;
+                        }
+                        const can_afford = timed_transfer_subtype === 'TRANSFER_ITEM'
+                            ? can_actor_afford_movement_cost(data_slot_number, actor_ref, 1)
+                            : can_actor_afford_action_cost(data_slot_number, actor_ref, 'PARTIAL');
+                        if (!can_afford) {
+                            res.writeHead(400, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: false, error: timed_transfer_subtype === 'TRANSFER_ITEM' ? 'cannot_afford_movement' : 'cannot_afford_partial' }));
+                            return;
+                        }
+                    }
+
+                    const send_transfer_success = async (payload: Record<string, unknown> = {}): Promise<void> => {
+                        if ((timed_transfer_subtype === 'TRANSFER_ITEM' || timed_transfer_subtype === 'EQUIP_ITEM') && is_timed_event_active(data_slot_number)) {
+                            const spent_ok = timed_transfer_subtype === 'TRANSFER_ITEM'
+                                ? consume_actor_movement_cost(data_slot_number, actor_ref, 1)
+                                : consume_actor_action_cost(data_slot_number, actor_ref, 'PARTIAL');
+                            if (!spent_ok) {
+                                res.writeHead(400, { "Content-Type": "application/json" });
+                                res.end(JSON.stringify({ ok: false, error: timed_transfer_subtype === 'TRANSFER_ITEM' ? 'failed_to_consume_movement' : 'failed_to_consume_partial' }));
+                                return;
+                            }
+                            const finalize_result = finalize_timed_event_turn_if_exhausted(data_slot_number, actor_ref);
+                            if (!finalize_result.ok) {
+                                debug_warn('transfer', '[INLINE] finalize_timed_event_turn_if_exhausted failed after transfer cost', {
+                                    actor_ref,
+                                    subtype: timed_transfer_subtype,
+                                    error: finalize_result.error,
+                                });
+                            }
+                        }
+                        res.writeHead(200, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: true, ...payload }));
+                    };
 
                     function get_slot(slot_name: string): any {
                         return (actor.body_slots as any)[slot_name];
                     }
 
-                    function parse_body_slots_path(p: string): { slot_name: string; slot_type: 'armor'|'tool'|'garb'; garb_index: number | null } | null {
-                        const parts = p.split('.');
-                        if (parts[0] !== 'body_slots') return null;
-                        if (!parts[1] || !parts[2]) return null;
-                        const slot_name = parts[1];
-                        const slot_type = parts[2] as any;
-                        const garb_index = (slot_type === 'garb' && parts[3] !== undefined) ? parseInt(parts[3], 10) : null;
-                        return { slot_name, slot_type, garb_index: isNaN(garb_index as any) ? null : garb_index };
-                    }
-
-                    function parse_actor_item_container_id(p: string): { actor_id: string; item_id: string } | null {
-                        const parts = p.split('.');
-                        // actor.item.<actor_id>.<item_id>
-                        if (parts[0] !== 'actor' || parts[1] !== 'item') return null;
-                        if (!parts[2] || !parts[3]) return null;
-                        return { actor_id: parts[2], item_id: parts[3] };
-                    }
-
                     // Prevent depositing a container into itself.
-                    const self_dest = parse_actor_item_container_id(String(to_container));
-                    if (self_dest && self_dest.actor_id === actor_id && self_dest.item_id === item_instance_id) {
+                    const self_dest = resolve_inventory_target_id(String(to_container))?.target;
+                    if (self_dest?.kind === 'actor_item' && self_dest.actor_id === actor_id && self_dest.item_id === item_instance_id) {
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: 'self_deposit' }));
                         return;
@@ -15789,56 +17744,16 @@ function start_http_server(log_path: string): void {
                     // /api/transfer is actor-authoritative only.
                     // Place-sourced moves are supported (single endpoint for everything).
 
-                    const is_place_path = (p: any) => String(p ?? '').startsWith('place.');
-
-                    type PlaceTilePath = { kind: 'place_tile'; place_id: string; x: number; y: number; z: number };
-                    type PlaceGroundPath = { kind: 'place_ground'; place_id: string; x: number; y: number; z: number };
-                    type PlaceItemPath = { kind: 'place_item'; place_id: string; item_id: string };
-
-                    function parse_place_tile_container_id(p: string): PlaceTilePath | null {
-                        const parts = String(p ?? '').split('.');
-                        // place.tile.<place_id>.<x>_<y>_<z>
-                        if (parts[0] !== 'place' || parts[1] !== 'tile') return null;
-                        if (!parts[2] || !parts[3]) return null;
-                        const place_id = parts[2];
-                        const [xs, ys, zs] = String(parts[3]).split('_');
-                        const x = Number(xs);
-                        const y = Number(ys);
-                        const z = Number(zs);
-                        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
-                        return { kind: 'place_tile', place_id, x: Math.floor(x), y: Math.floor(y), z: Math.floor(z) };
-                    }
-
-                    function parse_place_ground_container_id(p: string): PlaceGroundPath | null {
-                        const parts = String(p ?? '').split('.');
-                        // place.ground.<place_id>.<x>_<y>_<z>
-                        // place.pile.<place_id>.<x>_<y>_<z> (alias)
-                        if (parts[0] !== 'place') return null;
-                        if (parts[1] !== 'ground' && parts[1] !== 'pile') return null;
-                        if (!parts[2] || !parts[3]) return null;
-                        const place_id = parts[2];
-                        const [xs, ys, zs] = String(parts[3]).split('_');
-                        const x = Number(xs);
-                        const y = Number(ys);
-                        const z = Number(zs);
-                        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
-                        return { kind: 'place_ground', place_id, x: Math.floor(x), y: Math.floor(y), z: Math.floor(z) };
-                    }
-
-                    function parse_place_item_container_id(p: string): PlaceItemPath | null {
-                        const parts = String(p ?? '').split('.');
-                        // place.item.<place_id>.<item_id>
-                        if (parts[0] !== 'place' || parts[1] !== 'item') return null;
-                        if (!parts[2] || !parts[3]) return null;
-                        return { kind: 'place_item', place_id: parts[2], item_id: parts[3] };
-                    }
-
-                    function parse_place_path(p: string): PlaceTilePath | PlaceGroundPath | PlaceItemPath | null {
-                        return parse_place_tile_container_id(p) || parse_place_ground_container_id(p) || parse_place_item_container_id(p);
-                    }
-
-                    const from_place = is_place_path(from_container) ? parse_place_path(String(from_container)) : null;
-                    const to_place = is_place_path(to_container) ? parse_place_path(String(to_container)) : null;
+                    const from_path_target = resolve_inventory_target_id(String(from_container))?.target ?? null;
+                    const to_path_target = resolve_inventory_target_id(String(to_container))?.target ?? null;
+                    const is_place_target = (t: any): t is { place_id: string; kind: 'place_tile' | 'place_ground' | 'place_item' | 'place_grow' } => !!t && (t.kind === 'place_tile' || t.kind === 'place_ground' || t.kind === 'place_item' || t.kind === 'place_grow');
+                    const from_place = is_place_target(from_path_target) ? (from_path_target as any) : null;
+                    const to_place = is_place_target(to_path_target) ? (to_path_target as any) : null;
+                    const parse_place_path = (p: string) => {
+                        const t = resolve_inventory_target_id(String(p))?.target ?? null;
+                        return is_place_target(t) ? (t as any) : null;
+                    };
+                    const is_place_path = (p: any) => !!parse_place_path(String(p ?? ''));
 
                     // Load place once if needed.
                     const actual_place_id = actor.location?.place_id;
@@ -16012,6 +17927,9 @@ function start_http_server(log_path: string): void {
                                     }
                                     return [{ x: Math.floor(pp.x), y: Math.floor(pp.y), z: Math.floor(pp.z) }];
                                 }
+                                if (pp.kind === 'place_grow') {
+                                    return [{ x: Math.floor(pp.x), y: Math.floor(pp.y), z: Math.floor(pp.z) }];
+                                }
                                 return [];
                             } catch {
                                 return [];
@@ -16120,8 +18038,7 @@ function start_http_server(log_path: string): void {
                                 return;
                             }
 
-                            res.writeHead(200, { "Content-Type": "application/json" });
-                            res.end(JSON.stringify({ ok: true }));
+                            await send_transfer_success();
                             return;
                         } catch (err) {
                             debug_error('transfer', '[INLINE] /api/transfer pile move error', err);
@@ -16142,6 +18059,14 @@ function start_http_server(log_path: string): void {
                                 if (container_obj?.id === child_id) return container_obj;
                                 if (container_obj && Array.isArray(container_obj.contents)) {
                                     const found = container_obj.contents.find((it: any) => it?.id === child_id);
+                                    if (found) return found;
+                                }
+                                return null;
+                            }
+                            if (pp?.kind === 'place_grow') {
+                                const grow_target = resolve_tile_grow_surface(place_any, pp.place_id, pp.x, pp.y, pp.z, pp.grow_index);
+                                if (grow_target && Array.isArray(grow_target.surface.contents)) {
+                                    const found = grow_target.surface.contents.find((it: any) => it?.id === child_id);
                                     if (found) return found;
                                 }
                                 return null;
@@ -16220,6 +18145,18 @@ function start_http_server(log_path: string): void {
                     }
 
                     if (!String(item_instance_id ?? '').startsWith('pile:')) {
+                        debug_transfer_item_occurrences(String(item_instance_id), 'before_remove_scan');
+                        const repaired = repair_transfer_item_occurrences(String(item_instance_id));
+                        if (repaired.repaired) {
+                            debug_warn('transfer', '[INLINE] repaired duplicate item occurrences before transfer', {
+                                item_instance_id: String(item_instance_id),
+                                removed_paths: repaired.removed_paths,
+                                remaining: repaired.remaining,
+                                from_container,
+                                to_container,
+                            });
+                            debug_transfer_item_occurrences(String(item_instance_id), 'after_repair_before_remove_scan');
+                        }
                         if (!ensure_transfer_item_occurrences(String(item_instance_id), 1, 'before_remove')) {
                             return;
                         }
@@ -16407,6 +18344,15 @@ function start_http_server(log_path: string): void {
                                     const tile_path = `place.tile.${place_any.id}.${x}_${y}_${wz}`;
                                     if (String(tile?.id ?? '') === item_id) out.push(tile_path);
                                     if (Array.isArray(tile.contents)) collect_inline_item_occurrences(tile.contents, item_id, `${tile_path}.contents`, out);
+                                    if (Array.isArray((tile as any).grow_surfaces)) {
+                                        const grow_surfaces = (tile as any).grow_surfaces as any[];
+                                        for (let grow_index = 0; grow_index < grow_surfaces.length; grow_index += 1) {
+                                            const surface = grow_surfaces[grow_index];
+                                            if (!surface || !Array.isArray(surface.contents)) continue;
+                                            const grow_path = `place.grow.${place_any.id}.${x}_${y}_${wz}.${grow_index}`;
+                                            collect_inline_item_occurrences(surface.contents, item_id, `${grow_path}.contents`, out);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -16434,6 +18380,126 @@ function start_http_server(log_path: string): void {
                         return [...collect_actor_item_occurrences(item_id), ...collect_place_item_occurrences(item_id)];
                     }
 
+                    function prune_inline_item_occurrences(items: any[], item_id: string, path_prefix: string, keep: (path: string) => boolean, removed_paths: string[]): void {
+                        if (!Array.isArray(items)) return;
+                        for (let i = items.length - 1; i >= 0; i -= 1) {
+                            const it = items[i];
+                            if (!it || typeof it !== 'object') continue;
+                            const item_path = `${path_prefix}.${i}`;
+                            if (Array.isArray(it.contents)) {
+                                prune_inline_item_occurrences(it.contents, item_id, `${item_path}.contents`, keep, removed_paths);
+                            }
+                            if (String(it?.id ?? '') === item_id && !keep(item_path)) {
+                                items.splice(i, 1);
+                                removed_paths.push(item_path);
+                            }
+                        }
+                    }
+
+                    function build_source_keep_path_predicate(): ((path: string) => boolean) | null {
+                        const from_container_id = String(from_container ?? '');
+                        if (from_container_id.startsWith('body_slots.')) {
+                            const prefix = `actor.${from_container_id}`;
+                            return (path: string) => path === prefix || path.startsWith(`${prefix}.contents.`);
+                        }
+                        if (from_container_id.startsWith('actor.item.')) {
+                            const parsed = parse_actor_item_container_id(from_container_id);
+                            if (!parsed) return null;
+                            const found = find_actor_item_by_id(actor, parsed.item_id);
+                            if (!found) return null;
+                            const prefix = `actor.body_slots.${found.path}.contents`;
+                            return (path: string) => path.startsWith(`${prefix}.`);
+                        }
+                        if (from_place?.kind === 'place_grow') {
+                            const prefix = `place.grow.${from_place.place_id}.${from_place.x}_${from_place.y}_${from_place.z}.${from_place.grow_index}.contents`;
+                            return (path: string) => path.startsWith(`${prefix}.`);
+                        }
+                        if (from_place?.kind === 'place_tile') {
+                            const prefix = `place.tile.${from_place.place_id}.${from_place.x}_${from_place.y}_${from_place.z}.contents`;
+                            return (path: string) => path.startsWith(`${prefix}.`);
+                        }
+                        if (from_place?.kind === 'place_item') {
+                            return null;
+                        }
+                        if (from_place?.kind === 'place_ground') {
+                            const prefix = `place.ground.${from_place.place_id}.${from_place.x}_${from_place.y}_${from_place.z}`;
+                            return (path: string) => path.startsWith(`${prefix}.`) || path.startsWith(`place.ground.main.${from_place.place_id}.`);
+                        }
+                        return null;
+                    }
+
+                    function repair_transfer_item_occurrences(item_id: string): { repaired: boolean; removed_paths: string[]; remaining: string[] } {
+                        const keep = build_source_keep_path_predicate();
+                        if (!keep) return { repaired: false, removed_paths: [], remaining: collect_transfer_item_occurrences(item_id) };
+                        const removed_paths: string[] = [];
+
+                        const body_slots = actor?.body_slots;
+                        if (body_slots && typeof body_slots === 'object') {
+                            for (const [slot_name, slot_any] of Object.entries(body_slots as Record<string, any>)) {
+                                const slot = slot_any as any;
+                                const armor_path = `actor.body_slots.${slot_name}.armor`;
+                                if (slot?.armor && Array.isArray(slot.armor.contents)) prune_inline_item_occurrences(slot.armor.contents, item_id, `${armor_path}.contents`, keep, removed_paths);
+                                if (slot?.armor && String(slot.armor?.id ?? '') === item_id && !keep(armor_path)) { slot.armor = null; removed_paths.push(armor_path); }
+                                const tool_path = `actor.body_slots.${slot_name}.tool`;
+                                if (slot?.tool && Array.isArray(slot.tool.contents)) prune_inline_item_occurrences(slot.tool.contents, item_id, `${tool_path}.contents`, keep, removed_paths);
+                                if (slot?.tool && String(slot.tool?.id ?? '') === item_id && !keep(tool_path)) { slot.tool = null; removed_paths.push(tool_path); }
+                                if (Array.isArray(slot?.garb)) {
+                                    for (let i = slot.garb.length - 1; i >= 0; i -= 1) {
+                                        const garb = slot.garb[i];
+                                        if (!garb || typeof garb !== 'object') continue;
+                                        const garb_path = `actor.body_slots.${slot_name}.garb.${i}`;
+                                        if (Array.isArray(garb.contents)) prune_inline_item_occurrences(garb.contents, item_id, `${garb_path}.contents`, keep, removed_paths);
+                                        if (String(garb?.id ?? '') === item_id && !keep(garb_path)) { slot.garb.splice(i, 1); removed_paths.push(garb_path); }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (place_any && typeof place_any === 'object') {
+                            for (const layer_key of get_place_tile_layer_keys(place_any)) {
+                                const layer = place_any?.[layer_key];
+                                const cells = layer?.cells;
+                                if (!Array.isArray(cells)) continue;
+                                const wz = get_layer_world_z(place_any, layer_key);
+                                for (let y = 0; y < cells.length; y += 1) {
+                                    const row = cells[y];
+                                    if (!Array.isArray(row)) continue;
+                                    for (let x = 0; x < row.length; x += 1) {
+                                        const tile = row[x];
+                                        if (!tile || typeof tile !== 'object') continue;
+                                        const tile_path = `place.tile.${place_any.id}.${x}_${y}_${wz}`;
+                                        if (Array.isArray(tile.contents)) prune_inline_item_occurrences(tile.contents, item_id, `${tile_path}.contents`, keep, removed_paths);
+                                        if (Array.isArray((tile as any).grow_surfaces)) {
+                                            const grow_surfaces = (tile as any).grow_surfaces as any[];
+                                            for (let grow_index = 0; grow_index < grow_surfaces.length; grow_index += 1) {
+                                                const surface = grow_surfaces[grow_index];
+                                                if (!surface || !Array.isArray(surface.contents)) continue;
+                                                const grow_path = `place.grow.${place_any.id}.${x}_${y}_${wz}.${grow_index}`;
+                                                prune_inline_item_occurrences(surface.contents, item_id, `${grow_path}.contents`, keep, removed_paths);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            const structures = Array.isArray(place_any?.structures) ? place_any.structures : [];
+                            for (let i = 0; i < structures.length; i += 1) {
+                                const structure = structures[i];
+                                if (!structure || typeof structure !== 'object' || !Array.isArray(structure.contents)) continue;
+                                const structure_path = `place.structure.${place_any.id}.${i}`;
+                                prune_inline_item_occurrences(structure.contents, item_id, `${structure_path}.contents`, keep, removed_paths);
+                            }
+                            if (Array.isArray(place_any?.ground?.main)) prune_inline_item_occurrences(place_any.ground.main, item_id, `place.ground.main.${place_any.id}`, keep, removed_paths);
+                            const scattered = place_any?.ground?.scattered;
+                            if (scattered && typeof scattered === 'object') {
+                                for (const [key, list] of Object.entries(scattered as Record<string, any[]>)) {
+                                    prune_inline_item_occurrences(list, item_id, `place.ground.${place_any.id}.${key}`, keep, removed_paths);
+                                }
+                            }
+                        }
+
+                        return { repaired: removed_paths.length > 0, removed_paths, remaining: collect_transfer_item_occurrences(item_id) };
+                    }
+
                     function reject_transfer_integrity(error: string, detail: any): void {
                         debug_error('transfer', `[INLINE] integrity failure ${error}`, detail);
                         res.writeHead(409, { "Content-Type": "application/json" });
@@ -16455,6 +18521,18 @@ function start_http_server(log_path: string): void {
                             return false;
                         }
                         return true;
+                    }
+
+                    function debug_transfer_item_occurrences(item_id: string, stage: string): void {
+                        const occurrences = collect_transfer_item_occurrences(item_id);
+                        debug_log('TAG_DEBUG', '[INLINE_TRANSFER_TRACE] item occurrences', {
+                            stage,
+                            item_instance_id: item_id,
+                            occurrence_count: occurrences.length,
+                            occurrences,
+                            from_container,
+                            to_container,
+                        });
                     }
 
                     function remove_from_body_slot(path: string, child_id: string): any {
@@ -16534,10 +18612,9 @@ function start_http_server(log_path: string): void {
                                         const tx = Math.floor(Number(target_grid_x));
                                         const ty = Math.floor(Number(target_grid_y));
 
-                                        if (!container_obj.container_capacity || typeof container_obj.container_capacity.max_slots !== 'number' || container_obj.container_capacity.max_slots < 1) {
-                                            container_obj.container_capacity = { max_slots: Math.max(12, container_obj.contents.length) };
-                                        }
-                                        const max_slots = Math.max(1, Math.floor(Number(container_obj.container_capacity.max_slots)));
+                                        const max_slots = tgt.kind === 'tile'
+                                            ? ensure_tile_container_capacity(container_obj)
+                                            : ensure_resolved_container_capacity(container_obj, String(tgt.structure?.def_id ?? ''));
                                         const { cols, rows } = calculate_grid_dimensions(max_slots);
                                         const slot_index = (ty * cols) + tx;
                                         const in_bounds = tx >= 0 && ty >= 0 && tx < cols && ty < rows && slot_index >= 0 && slot_index < max_slots;
@@ -16573,8 +18650,7 @@ function start_http_server(log_path: string): void {
                                             return;
                                         }
 
-                                        res.writeHead(200, { "Content-Type": "application/json" });
-                                        res.end(JSON.stringify({ ok: true }));
+                                        await send_transfer_success();
                                         return;
                                     }
                                 } catch (err) {
@@ -16646,8 +18722,7 @@ function start_http_server(log_path: string): void {
                                             return;
                                         }
 
-                                        res.writeHead(200, { "Content-Type": "application/json" });
-                                        res.end(JSON.stringify({ ok: true }));
+                                        await send_transfer_success();
                                         return;
                                     }
                                 } catch (err) {
@@ -16717,8 +18792,7 @@ function start_http_server(log_path: string): void {
                                 res.end(JSON.stringify({ ok: false, error: save_result.error }));
                                 return;
                             }
-                            res.writeHead(200, { "Content-Type": "application/json" });
-                            res.end(JSON.stringify({ ok: true }));
+                            await send_transfer_success();
                             return;
                         }
 
@@ -16737,8 +18811,7 @@ function start_http_server(log_path: string): void {
                                 res.end(JSON.stringify({ ok: false, error: save_result.error }));
                                 return;
                             }
-                            res.writeHead(200, { "Content-Type": "application/json" });
-                            res.end(JSON.stringify({ ok: true }));
+                            await send_transfer_success();
                             return;
                         }
                     }
@@ -16818,6 +18891,23 @@ function start_http_server(log_path: string): void {
                                     container_obj.contents.splice(Math.min(idx, container_obj.contents.length), 0, removed);
                                 };
                             }
+                        } else if (from_place.kind === 'place_grow') {
+                            const grow_target = resolve_tile_grow_surface(place_any, from_place.place_id, from_place.x, from_place.y, from_place.z, from_place.grow_index);
+                            if (!grow_target) {
+                                res.writeHead(404, { "Content-Type": "application/json" });
+                                res.end(JSON.stringify({ ok: false, error: 'grow_surface_not_found' }));
+                                return;
+                            }
+                            const contents = grow_target.surface.contents as any[];
+                            const idx = contents.findIndex((it: any) => String(it?.id ?? '') === String(item_instance_id));
+                            if (idx >= 0) {
+                                const removed_list = contents.splice(idx, 1);
+                                removed = removed_list[0] ?? null;
+                                rollback_source = () => {
+                                    if (!Array.isArray(grow_target.surface.contents)) grow_target.surface.contents = [];
+                                    grow_target.surface.contents.splice(Math.min(idx, grow_target.surface.contents.length), 0, removed);
+                                };
+                            }
                         } else if (from_place.kind === 'place_item') {
                             const all_ground = get_all_ground_items(place_any);
                             const found = all_ground.find(({ item }: { item: InlineItem }) => String(item?.id ?? '') === String(from_place.item_id));
@@ -16859,6 +18949,7 @@ function start_http_server(log_path: string): void {
                     }
 
                     if (removed && !String(item_instance_id ?? '').startsWith('pile:')) {
+                        debug_transfer_item_occurrences(String(item_instance_id), 'after_remove_scan');
                         if (!ensure_transfer_item_occurrences(String(item_instance_id), 0, 'after_remove')) {
                             if (rollback_source) rollback_source();
                             rollback_actor();
@@ -16893,7 +18984,7 @@ function start_http_server(log_path: string): void {
                             placed_items.push({ id: String(it?.id ?? ''), placed: placed.placed });
                         }
 
-                        const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, to_place.place_id, place_any);
+                        const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, to_place.place_id, place_any, { merge_active_runtime: false });
                         if (!save_place_result.ok) {
                             if (rollback_source) rollback_source();
                             rollback_actor();
@@ -16901,8 +18992,7 @@ function start_http_server(log_path: string): void {
                             res.end(JSON.stringify({ ok: false, error: save_place_result.error }));
                             return;
                         }
-                        res.writeHead(200, { "Content-Type": "application/json" });
-                        res.end(JSON.stringify({ ok: true, placed: placed_items }));
+                        await send_transfer_success({ placed: placed_items });
                         return;
                     }
 
@@ -16921,7 +19011,13 @@ function start_http_server(log_path: string): void {
 
                     if (to_place && place_any) {
                         // Place destinations
-                        if (to_place.kind === 'place_ground') {
+                        if (to_place.kind === 'place_grow') {
+                            if (rollback_source) rollback_source();
+                            rollback_actor();
+                            res.writeHead(400, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: false, error: 'grow_surface_rejects_player_insert' }));
+                            return;
+                        } else if (to_place.kind === 'place_ground') {
                             delete (removed as any).grid_x;
                             delete (removed as any).grid_y;
                             const placing_ground_to_ground = !!(from_place && from_place.kind === 'place_ground');
@@ -17148,6 +19244,7 @@ function start_http_server(log_path: string): void {
                     }
 
                     if (removed && !String(item_instance_id ?? '').startsWith('pile:')) {
+                        debug_transfer_item_occurrences(String(item_instance_id), 'after_insert_scan');
                         if (!ensure_transfer_item_occurrences(String(item_instance_id), 1, 'after_insert')) {
                             if (rollback_source) rollback_source();
                             rollback_actor();
@@ -17171,7 +19268,8 @@ function start_http_server(log_path: string): void {
                     // - If both actor+place change: save place first; then actor.
                     //   If actor save fails, roll back place to the pre-transfer snapshot.
                     if (need_place_save && actor_dirty) {
-                        const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, String(pid), place_any);
+                        if (removed) debug_transfer_item_occurrences(String(removed?.id ?? item_instance_id), 'before_place_save');
+                        const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, String(pid), place_any, { merge_active_runtime: false });
                         if (!save_place_result.ok) {
                             rollback_actor();
                             res.writeHead(500, { "Content-Type": "application/json" });
@@ -17184,7 +19282,7 @@ function start_http_server(log_path: string): void {
                             // Best-effort rollback: restore place snapshot.
                             if (place_before) {
                                 try {
-                                    save_place_with_ground_and_sync_active(data_slot_number, String(pid), place_before);
+                                    save_place_with_ground_and_sync_active(data_slot_number, String(pid), place_before, { merge_active_runtime: false });
                                 } catch {
                                     // ignore
                                 }
@@ -17193,15 +19291,18 @@ function start_http_server(log_path: string): void {
                             res.end(JSON.stringify({ ok: false, error: save_actor_result.error }));
                             return;
                         }
+                        if (removed) debug_transfer_item_occurrences(String(removed?.id ?? item_instance_id), 'after_actor_and_place_save');
                     } else {
                         if (need_place_save) {
-                            const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, String(pid), place_any);
+                            if (removed) debug_transfer_item_occurrences(String(removed?.id ?? item_instance_id), 'before_place_save');
+                            const save_place_result = save_place_with_ground_and_sync_active(data_slot_number, String(pid), place_any, { merge_active_runtime: false });
                             if (!save_place_result.ok) {
                                 rollback_actor();
                                 res.writeHead(500, { "Content-Type": "application/json" });
                                 res.end(JSON.stringify({ ok: false, error: save_place_result.error }));
                                 return;
                             }
+                            if (removed) debug_transfer_item_occurrences(String(removed?.id ?? item_instance_id), 'after_place_save');
                         }
                         if (actor_dirty) {
                             const save_actor_result = save_actor_with_items(data_slot_number, actor_id, actor_result.actor);
@@ -17210,11 +19311,11 @@ function start_http_server(log_path: string): void {
                                 res.end(JSON.stringify({ ok: false, error: save_actor_result.error }));
                                 return;
                             }
+                            if (removed) debug_transfer_item_occurrences(String(removed?.id ?? item_instance_id), 'after_actor_save');
                         }
                     }
 
-                    res.writeHead(200, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ ok: true }));
+                    await send_transfer_success();
                 } catch (err) {
                     debug_error("transfer", "/api/transfer inline error", err);
                     res.writeHead(500, { "Content-Type": "application/json" });
@@ -17316,59 +19417,9 @@ function start_http_server(log_path: string): void {
                              debug_warn('3DIFICATION_TEST', `FAIL /api/place/items missing elevated ground item (place=${place_id} z=${want_z})`);
                          }
 
-                         // Verify voxelized piles: same (x,y) can hold items at multiple z.
-                         const by_xy = new Map<string, Set<number>>();
-                         for (const rec of (items as any[])) {
-                             const item = (rec as any)?.item;
-                             const position = (rec as any)?.position;
-                             if (!position) continue;
-                             const x = Number(position.x);
-                             const y = Number(position.y);
-                             if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-                             const iz = Math.floor(Number((item as any)?.elevation ?? base_z));
-                             const k = `${x}_${y}`;
-                             const s = by_xy.get(k) ?? new Set<number>();
-                             s.add(iz);
-                             by_xy.set(k, s);
-                         }
-                          const multi = Array.from(by_xy.values()).some((s) => s.size >= 2);
-                          if (multi) {
-                              debug_log('3DIFICATION_TEST', `PASS /api/place/items supports multi-z piles (place=${place_id})`);
-                          } else {
-                              debug_warn('3DIFICATION_TEST', `FAIL /api/place/items missing multi-z pile scenario (place=${place_id})`);
-                          }
-
-                          // Verify stacked piles: two distinct z at the same (x,y) each with 2+ items.
-                          const by_xy_z_count = new Map<string, Map<number, number>>();
-                          for (const rec of (items as any[])) {
-                              const item = (rec as any)?.item;
-                              const position = (rec as any)?.position;
-                              if (!position) continue;
-                              const x = Number(position.x);
-                              const y = Number(position.y);
-                              if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-                              const iz = Math.floor(Number((item as any)?.elevation ?? base_z));
-                              const xy = `${x}_${y}`;
-                              const mz = by_xy_z_count.get(xy) ?? new Map<number, number>();
-                              mz.set(iz, (mz.get(iz) ?? 0) + 1);
-                              by_xy_z_count.set(xy, mz);
-                          }
-                          const stacked_piles = Array.from(by_xy_z_count.values()).some((mz) => {
-                              let pile_layers = 0;
-                              for (const c of mz.values()) {
-                                  if (c >= 2) pile_layers++;
-                                  if (pile_layers >= 2) return true;
-                              }
-                              return false;
-                          });
-                          if (stacked_piles) {
-                              debug_log('3DIFICATION_TEST', `PASS /api/place/items supports stacked piles (place=${place_id})`);
-                          } else {
-                              debug_warn('3DIFICATION_TEST', `FAIL /api/place/items missing stacked piles (place=${place_id})`);
-                          }
-                      }
-                  } catch {
-                      // ignore
+                       }
+                   } catch {
+                       // ignore
                   }
             } catch (err) {
                 debug_error("API", "/api/place/items error", err);
@@ -17459,8 +19510,8 @@ function start_http_server(log_path: string): void {
                         contents: normalized.map(({ item, grid_x, grid_y }: any) => {
                             const p = resolve_inline_item_payload_for_api(item);
                             return {
-                                instance: { id: p.id, def_id: p.def_id, qty: p.qty, tags: p.tags },
-                                definition: { id: p.def_id, name: p.name, weight: p.unit_weight, tags: p.tags, display_char: p.display_char, display_color: p.display_color },
+                                instance: { id: p.id, def_id: p.def_id, qty: p.qty, tags: p.tags, resolved_tag_states: p.resolved_tag_states, value_mag: p.value_mag },
+                                definition: { id: p.def_id, name: p.name, weight: p.unit_weight, tags: p.tags, resolved_tag_states: p.resolved_tag_states, value_mag: p.value_mag, display_char: p.display_char, display_color: p.display_color },
                                 grid_x,
                                 grid_y,
                             };
@@ -17559,8 +19610,8 @@ function start_http_server(log_path: string): void {
                         contents: contents.map(({ item, grid_x, grid_y }: any) => {
                             const p = resolve_inline_item_payload_for_api(item);
                             return {
-                                instance: { id: p.id, def_id: p.def_id, qty: p.qty, tags: p.tags },
-                                definition: { id: p.def_id, name: p.name, weight: p.unit_weight, tags: p.tags, display_char: p.display_char, display_color: p.display_color },
+                                instance: { id: p.id, def_id: p.def_id, qty: p.qty, tags: p.tags, resolved_tag_states: p.resolved_tag_states, value_mag: p.value_mag },
+                                definition: { id: p.def_id, name: p.name, weight: p.unit_weight, tags: p.tags, resolved_tag_states: p.resolved_tag_states, value_mag: p.value_mag, display_char: p.display_char, display_color: p.display_color },
                                 grid_x,
                                 grid_y,
                             };
@@ -17617,13 +19668,10 @@ function start_http_server(log_path: string): void {
 
                 const container_obj: any = tgt.kind === 'tile' ? tgt.tile : tgt.structure;
                 if (!Array.isArray(container_obj.contents)) container_obj.contents = [];
-                if (!container_obj.container_capacity || typeof container_obj.container_capacity.max_slots !== 'number' || container_obj.container_capacity.max_slots < 1) {
-                    container_obj.container_capacity = { max_slots: Math.max(12, container_obj.contents.length) };
-                    // persist patch
-                    tgt.save();
-                }
-
-                const max_slots = Math.floor(container_obj.container_capacity.max_slots);
+                const max_slots = tgt.kind === 'tile'
+                    ? ensure_tile_container_capacity(container_obj)
+                    : ensure_resolved_container_capacity(container_obj, String(tgt.structure?.def_id ?? ''));
+                tgt.save();
                 const contents = normalize_inline_container_grid(container_obj.contents, max_slots, `place_tile_container:${place_id}:${tx},${ty}`);
 
                 // Repair coords in-place and persist (like container-items).
@@ -17701,8 +19749,8 @@ function start_http_server(log_path: string): void {
                         contents: contents.map(({ item, grid_x, grid_y }: any) => {
                             const p = resolve_inline_item_payload_for_api(item);
                             return {
-                                instance: { id: p.id, def_id: p.def_id, qty: p.qty, tags: p.tags },
-                                definition: { id: p.def_id, name: p.name, weight: p.unit_weight, tags: p.tags, display_char: p.display_char, display_color: p.display_color },
+                                instance: { id: p.id, def_id: p.def_id, qty: p.qty, tags: p.tags, resolved_tag_states: p.resolved_tag_states, value_mag: p.value_mag },
+                                definition: { id: p.def_id, name: p.name, weight: p.unit_weight, tags: p.tags, resolved_tag_states: p.resolved_tag_states, value_mag: p.value_mag, display_char: p.display_char, display_color: p.display_color },
                                 grid_x,
                                 grid_y,
                             };
@@ -17798,8 +19846,8 @@ function start_http_server(log_path: string): void {
                         contents: contents.map(({ item, grid_x, grid_y }: any) => {
                             const p = resolve_inline_item_payload_for_api(item);
                             return {
-                                instance: { id: p.id, def_id: p.def_id, qty: p.qty, tags: p.tags },
-                                definition: { id: p.def_id, name: p.name, weight: p.unit_weight, tags: p.tags, display_char: p.display_char, display_color: p.display_color },
+                                instance: { id: p.id, def_id: p.def_id, qty: p.qty, tags: p.tags, resolved_tag_states: p.resolved_tag_states, value_mag: p.value_mag },
+                                definition: { id: p.def_id, name: p.name, weight: p.unit_weight, tags: p.tags, resolved_tag_states: p.resolved_tag_states, value_mag: p.value_mag, display_char: p.display_char, display_color: p.display_color },
                                 grid_x,
                                 grid_y,
                             };
@@ -17808,6 +19856,301 @@ function start_http_server(log_path: string): void {
                 }));
             } catch (err) {
                 debug_error("API", "/api/actor/container_item error", err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "internal_error" }));
+            }
+            return;
+        }
+
+        // GET /api/inventory/tile_view?place_id=xxx&x=0&y=0&z=0 - Owner-view payload for tile container
+        if (url.pathname === "/api/inventory/tile_view") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+            const place_id = url.searchParams.get("place_id");
+            const x_raw = url.searchParams.get("x");
+            const y_raw = url.searchParams.get("y");
+            const z_raw = url.searchParams.get("z");
+            const x = x_raw !== null ? Number(x_raw) : NaN;
+            const y = y_raw !== null ? Number(y_raw) : NaN;
+            const z = z_raw !== null ? Number(z_raw) : NaN;
+            if (!place_id || !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                return;
+            }
+            try {
+                const place_res = load_place(data_slot_number, place_id);
+                if (!place_res.ok) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "place_not_found" }));
+                    return;
+                }
+                const place = place_res.place as any;
+                const tx = Math.floor(x), ty = Math.floor(y), tz = Math.floor(z);
+                const tile = get_place_tile_at_world_z(place, tx, ty, tz) as any;
+                const resolved_tile = tile ? resolve_place_tile(String(tile.kind ?? ''), tile) : null;
+                const grow_configs = resolve_grow_tag_configs(resolved_tile?.resolved_tag_states ?? []);
+                const tgt = resolve_tile_container_target(place, place_id, tx, ty, tz);
+                if (!tile && !tgt) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "tile_not_found" }));
+                    return;
+                }
+                let container_view_data: { contributor_name: string; container_id: string; slot_count: number; contents: InlineItem[] } | null = null;
+                if (tgt) {
+                    const container_obj: any = tgt.kind === 'tile' ? tgt.tile : tgt.structure;
+                    if (!Array.isArray(container_obj.contents)) container_obj.contents = [];
+                    if (!container_obj.container_capacity || typeof container_obj.container_capacity.max_slots !== 'number' || container_obj.container_capacity.max_slots < 1) {
+                        container_obj.container_capacity = { max_slots: Math.max(12, container_obj.contents.length) };
+                        tgt.save();
+                    }
+                    const max_slots = Math.floor(container_obj.container_capacity.max_slots);
+                    const contents = normalize_inline_container_grid(container_obj.contents, max_slots, `place_tile_container:${place_id}:${tx},${ty}`);
+                    const coords_by_id = new Map<string, { x: number; y: number }>();
+                    for (const e of contents) coords_by_id.set(String(e.item?.id ?? ''), { x: e.grid_x, y: e.grid_y });
+                    let repaired = 0;
+                    for (const it of container_obj.contents) {
+                        const c = coords_by_id.get(String(it?.id ?? ''));
+                        if (!c) continue;
+                        if ((it as any).grid_x !== c.x || (it as any).grid_y !== c.y) { (it as any).grid_x = c.x; (it as any).grid_y = c.y; repaired++; }
+                    }
+                    if (repaired > 0) tgt.save();
+                    container_view_data = {
+                        contributor_name: resolved_tile?.def?.name ? String(resolved_tile.def.name) : (tgt.kind === 'structure' ? 'CONTAINER' : 'CONTAINER'),
+                        container_id: `place.tile.${place_id}.${tx}_${ty}_${tz}`,
+                        slot_count: max_slots,
+                        contents: contents.map((entry: any) => entry.item),
+                    };
+                }
+                const requested_id = `place.tile.${place_id}.${tx}_${ty}_${tz}`;
+                let canonical_id = requested_id;
+                let redirect: any = null;
+                if (tgt?.kind === 'structure') {
+                    const structure_any: any = tgt.structure;
+                    const anchor = get_structure_container_anchor_xy(place, structure_any, tz);
+                    if (anchor) {
+                        canonical_id = `place.tile.${place_id}.${anchor.x}_${anchor.y}_${anchor.z}`;
+                    }
+                    const alias_ids = get_structure_container_alias_ids(place_id, place, structure_any, tz);
+                    redirect = {
+                        from: requested_id,
+                        canonical_id,
+                        kind: 'structure',
+                        structure_id: String((structure_any as any)?.id ?? ''),
+                        alias_ids,
+                    };
+                }
+                const resolved_name = (() => {
+                    try {
+                        if (tile) {
+                            const k = String(tile?.kind ?? '');
+                            const r = k ? resolve_place_tile(k, tile as any) : null;
+                            return (r?.def as any)?.name ? String((r!.def as any).name) : null;
+                        }
+                        if (tgt?.kind === 'structure') {
+                            const structure_any: any = tgt.structure;
+                            const d = String(structure_any?.def_id ?? '');
+                            const r = d ? resolve_place_tile(d, { kind: d, tag_add: structure_any?.tag_add, tag_remove: structure_any?.tag_remove } as any) : null;
+                            return (r?.def as any)?.name ? String((r!.def as any).name) : null;
+                        }
+                    } catch {}
+                    return null;
+                })();
+                const grows = grow_configs.map((config, grow_index: number) => {
+                    const surface = ensure_tile_grow_surface(tile, grow_index, Math.max(1, config.max_grow_slots ?? GROW_DEFAULT_MAX_SLOTS));
+                    const max_slots = Math.max(1, Math.floor(Number(surface.max_slots ?? config.max_grow_slots ?? GROW_DEFAULT_MAX_SLOTS) || GROW_DEFAULT_MAX_SLOTS));
+                    return {
+                        contributor_name: config.contributor_name,
+                        container_id: `place.grow.${place_id}.${tx}_${ty}_${tz}.${grow_index}`,
+                        slot_count: max_slots,
+                        contents: Array.isArray(surface.contents) ? surface.contents : [],
+                    };
+                });
+                if (container_view_data) container_view_data.container_id = canonical_id;
+                if (!container_view_data && grows.length <= 0) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "tile_has_no_inventory_surfaces" }));
+                    return;
+                }
+                const view = build_tile_owner_inventory_view({
+                    owner: { kind: 'tile', place_id, x: tx, y: ty, z: tz },
+                    owner_name: resolved_name ?? `Tile (${tx},${ty})`,
+                    container: container_view_data,
+                    grows,
+                });
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, view, redirect }));
+            } catch (err) {
+                debug_error("API", "/api/inventory/tile_view error", err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "internal_error" }));
+            }
+            return;
+        }
+
+        // GET /api/inventory/place_item_view?place_id=xxx&item_id=yyy - Owner-view payload for ground container item
+        if (url.pathname === "/api/inventory/place_item_view") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+            const place_id = url.searchParams.get("place_id");
+            const item_id = url.searchParams.get("item_id");
+            if (!place_id || !item_id) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                return;
+            }
+            try {
+                const place_result = load_place_with_ground(data_slot_number, place_id);
+                if (!place_result.ok) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: place_result.error }));
+                    return;
+                }
+                const all_items = get_all_ground_items(place_result.place);
+                const found = all_items.find(({ item }: { item: InlineItem }) => item.id === item_id);
+                if (!found) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "item_not_found" }));
+                    return;
+                }
+                const container_item = found.item as any;
+                const container_payload = resolve_inline_item_payload_for_api(container_item);
+                if (!build_physics_tag_flags(container_payload.tags).container) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
+                    return;
+                }
+                const contents_raw = Array.isArray(container_item.contents) ? container_item.contents : [];
+                const cap_res = resolve_inline_container_capacity(container_item, contents_raw.length, `place_container_item:${place_id}:${item_id}`);
+                const max_slots = cap_res.max_slots;
+                const contents = normalize_inline_container_grid(contents_raw, max_slots, `place_container_item:${place_id}:${item_id}`);
+                const coords_by_id = new Map<string, { x: number; y: number }>();
+                for (const e of contents) coords_by_id.set(String(e.item?.id ?? ''), { x: e.grid_x, y: e.grid_y });
+                let repaired = 0;
+                for (const it of contents_raw) {
+                    const c = coords_by_id.get(String(it?.id ?? ''));
+                    if (!c) continue;
+                    if (it.grid_x !== c.x || it.grid_y !== c.y) { it.grid_x = c.x; it.grid_y = c.y; repaired++; }
+                }
+                if (cap_res.patched || repaired > 0) {
+                    const save_place_res = save_place_with_ground_and_sync_active(data_slot_number, place_id, place_result.place);
+                    if (!save_place_res.ok) debug_error('API', `[CAPACITY_SANITY] failed to save place after patch ${place_id}`, save_place_res.error);
+                }
+                const view = build_container_owner_inventory_view({
+                    owner: { kind: 'item', owner_kind: 'place', owner_id: place_id, item_id },
+                    owner_name: String(container_payload.name ?? item_id),
+                    contributor_id: `place.item.${place_id}.${item_id}`,
+                    contributor_kind: 'owner_native',
+                    contributor_name: String(container_payload.name ?? item_id),
+                    contributor_depth: 0,
+                    contributor_sort_key: `place_item:${String(container_payload.name ?? item_id)}`,
+                    surface_id: `surface:place.item.${place_id}.${item_id}:container`,
+                    container_id: `place.item.${place_id}.${item_id}`,
+                    surface_label: 'CONTAINER',
+                    normalized_contents: contents as any,
+                    slot_count: max_slots,
+                });
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, view }));
+            } catch (err) {
+                debug_error("API", "/api/inventory/place_item_view error", err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "internal_error" }));
+            }
+            return;
+        }
+
+        // GET /api/inventory/actor_item_view?actor_id=xxx&item_id=yyy - Owner-view payload for actor-owned container item
+        if (url.pathname === "/api/inventory/actor_item_view") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const actor_id = url.searchParams.get("actor_id");
+            const item_id = url.searchParams.get("item_id");
+            if (!actor_id || !item_id) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                return;
+            }
+
+            try {
+                const actor_result = load_actor_with_items(data_slot_number, actor_id);
+                if (!actor_result.ok) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: actor_result.error }));
+                    return;
+                }
+
+                const found = find_actor_item_by_id(actor_result.actor, item_id);
+                if (!found) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "item_not_found" }));
+                    return;
+                }
+
+                const container_item = found.item as any;
+                const container_payload = resolve_inline_item_payload_for_api(container_item);
+                const is_container = build_physics_tag_flags(container_payload.tags).container;
+                if (!is_container) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
+                    return;
+                }
+
+                const contents_raw = Array.isArray(container_item.contents) ? container_item.contents : [];
+                const cap_res = resolve_inline_container_capacity(container_item, contents_raw.length, `actor_container_item:${actor_id}:${item_id}`);
+                const max_slots = cap_res.max_slots;
+                const contents = normalize_inline_container_grid(contents_raw, max_slots, `actor_container_item:${actor_id}:${item_id}`);
+
+                const coords_by_id = new Map<string, { x: number; y: number }>();
+                for (const e of contents) {
+                    coords_by_id.set(String(e.item?.id ?? ''), { x: e.grid_x, y: e.grid_y });
+                }
+                let repaired = 0;
+                for (const it of contents_raw) {
+                    const id = String(it?.id ?? '');
+                    const c = coords_by_id.get(id);
+                    if (!c) continue;
+                    if (it.grid_x !== c.x || it.grid_y !== c.y) {
+                        it.grid_x = c.x;
+                        it.grid_y = c.y;
+                        repaired++;
+                    }
+                }
+                if (cap_res.patched || repaired > 0) {
+                    const save_res = save_actor_with_items(data_slot_number, actor_id, actor_result.actor);
+                    if (!save_res.ok) {
+                        debug_error('API', `[CAPACITY_SANITY] failed to save actor after patch ${actor_id}`, save_res.error);
+                    }
+                }
+
+                const view = build_container_owner_inventory_view({
+                    owner: { kind: 'item', owner_kind: 'actor', owner_id: actor_id, item_id },
+                    owner_name: String(container_payload.name ?? item_id),
+                    contributor_id: `actor.item.${actor_id}.${item_id}`,
+                    contributor_kind: 'owner_native',
+                    contributor_name: String(container_payload.name ?? item_id),
+                    contributor_depth: 0,
+                    contributor_sort_key: `item:${String(container_payload.name ?? item_id)}`,
+                    surface_id: `surface:actor.item.${actor_id}.${item_id}:container`,
+                    container_id: `actor.item.${actor_id}.${item_id}`,
+                    surface_label: 'CONTAINER',
+                    normalized_contents: contents as any,
+                    slot_count: max_slots,
+                });
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, view }));
+            } catch (err) {
+                debug_error("API", "/api/inventory/actor_item_view error", err);
                 res.writeHead(500, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ ok: false, error: "internal_error" }));
             }
@@ -17968,83 +20311,146 @@ function start_http_server(log_path: string): void {
             return;
         }
 
-        // GET /api/place/ground_container - Open container on ground (inline system)
-        if (url.pathname === "/api/place/ground_container") {
+        // GET /api/inventory/pile_view?place_id=xxx&position_key=x_y_z - Owner-view payload for pile container
+        if (url.pathname === "/api/inventory/pile_view") {
             if (req.method !== "GET") {
                 res.writeHead(405, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
                 return;
             }
-
             const place_id = url.searchParams.get("place_id");
-            const position_key = url.searchParams.get("position_key"); // e.g., "4_5_0"
-            const item_index = url.searchParams.get("index");
-
-            if (!place_id || !position_key || item_index === null) {
+            const position_key = url.searchParams.get("position_key");
+            if (!place_id || !position_key) {
                 res.writeHead(400, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
                 return;
             }
-
             try {
-                debug_log("API", `/api/place/ground_container: Opening container at ${position_key}[${item_index}] in ${place_id}`);
-
-                // Load place with ground items
                 const place_result = load_place_with_ground(data_slot_number, place_id);
                 if (!place_result.ok) {
                     res.writeHead(400, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: place_result.error }));
                     return;
                 }
-
-                const place_any = place_result.place as any;
+                const place_any: any = place_result.place as any;
                 const norm = normalize_voxel_position_key(place_any, String(position_key));
                 if (!norm) {
                     res.writeHead(400, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: "invalid_position_key" }));
                     return;
                 }
+                const list: any[] = Array.isArray(place_any.ground?.scattered?.[norm.key]) ? place_any.ground.scattered[norm.key] : [];
+                if (list.length < 2) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "not_a_pile" }));
+                    return;
+                }
+                const max_slots = Math.max(10, list.length);
+                const normalized = normalize_inline_container_grid(list, max_slots, `ground_pile:${place_id}:${norm.key}`);
+                const coords_by_id = new Map<string, { x: number; y: number }>();
+                for (const e of normalized) coords_by_id.set(String(e.item?.id ?? ''), { x: e.grid_x, y: e.grid_y });
+                let repaired = 0;
+                for (const it of list) {
+                    const c = coords_by_id.get(String(it?.id ?? ''));
+                    if (!c) continue;
+                    if (it.grid_x !== c.x || it.grid_y !== c.y) { it.grid_x = c.x; it.grid_y = c.y; repaired++; }
+                }
+                if (repaired > 0) {
+                    const save_res = save_place_with_ground_and_sync_active(data_slot_number, place_id, place_result.place);
+                    if (!save_res.ok) debug_error('API', `[GRID_SANITY] failed to save pile repair ${place_id}:${norm.key}`, save_res.error);
+                }
+                const view = build_container_owner_inventory_view({
+                    owner: { kind: 'tile', place_id, x: norm.x, y: norm.y, z: norm.z },
+                    owner_name: `Pile (${norm.key})`,
+                    contributor_id: `place.pile.${place_id}.${norm.key}`,
+                    contributor_kind: 'owner_native',
+                    contributor_name: `Pile (${norm.key})`,
+                    contributor_depth: 0,
+                    contributor_sort_key: `pile:${norm.key}`,
+                    surface_id: `surface:place.pile.${place_id}.${norm.key}:container`,
+                    container_id: `place.pile.${place_id}.${norm.key}`,
+                    surface_label: 'PILE',
+                    normalized_contents: normalized as any,
+                    slot_count: max_slots,
+                });
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, view }));
+            } catch (err) {
+                debug_error("API", "/api/inventory/pile_view error", err);
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "internal_error" }));
+            }
+            return;
+        }
 
-                const ground = place_any.ground as any;
-                if (!ground?.scattered?.[norm.key]) {
-                    res.writeHead(404, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ ok: false, error: "ground_items_not_found" }));
+        // GET /api/inventory/body_slot_view?actor_id=xxx&path=slot.type(.index) - Owner-view payload for body-slot container
+        if (url.pathname === "/api/inventory/body_slot_view") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            const actor_id = url.searchParams.get("actor_id");
+            const container_path = url.searchParams.get("path");
+            if (!actor_id || !container_path) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "missing_parameters" }));
+                return;
+            }
+
+            try {
+                const actor_result = load_actor_with_items(data_slot_number, actor_id);
+                if (!actor_result.ok) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: actor_result.error }));
                     return;
                 }
 
-                const items_at_position = ground.scattered[norm.key];
-                const index = parseInt(item_index, 10);
-
-                if (isNaN(index) || index < 0 || index >= items_at_position.length) {
-                    res.writeHead(404, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ ok: false, error: "item_not_found" }));
+                const path_parts = container_path.split('.');
+                if (path_parts.length < 2) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "invalid_path_format" }));
                     return;
                 }
-
-                const container_item = items_at_position[index];
+                const slot_name = path_parts[0]!;
+                const slot_type = path_parts[1]!;
+                const slot_index = path_parts.length > 2 ? parseInt(path_parts[2]!, 10) : null;
+                const body_slots = actor_result.actor.body_slots as Record<string, any>;
+                const slot = body_slots?.[slot_name];
+                if (!slot) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "slot_not_found" }));
+                    return;
+                }
+                let container_item: any = null;
+                if (slot_type === 'armor' && slot.armor) container_item = slot.armor;
+                else if (slot_type === 'tool' && slot.tool) container_item = slot.tool;
+                else if (slot_type === 'garb' && slot.garb && slot_index !== null) container_item = slot.garb[slot_index];
+                if (!container_item) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error: "container_not_found" }));
+                    return;
+                }
 
                 const container_payload = resolve_inline_item_payload_for_api(container_item);
-                const is_container = build_physics_tag_flags(container_payload.tags).container || Array.isArray((container_item as any)?.contents);
+                const is_container = build_physics_tag_flags(container_payload.tags).container;
                 if (!is_container) {
                     res.writeHead(400, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: "not_a_container" }));
                     return;
                 }
 
-                const contents_raw = Array.isArray((container_item as any)?.contents) ? (container_item as any).contents : [];
-                const cap_res = resolve_inline_container_capacity(container_item, contents_raw.length, `ground_container:${place_id}:${norm.key}[${index}]`);
+                const contents_raw = Array.isArray(container_item.contents) ? container_item.contents : [];
+                const cap_res = resolve_inline_container_capacity(container_item, contents_raw.length, `body_slot:${actor_id}:${container_path}`);
                 const max_slots = cap_res.max_slots;
-                const contents = normalize_inline_container_grid(contents_raw, max_slots, `ground_container:${place_id}:${norm.key}[${index}]`);
+                const contents = normalize_inline_container_grid(contents_raw, max_slots, `body_slot:${actor_id}:${container_path}`);
 
-                // Repair coords in-place and persist (same as other container endpoints).
                 const coords_by_id = new Map<string, { x: number; y: number }>();
-                for (const e of contents) {
-                    coords_by_id.set(String(e.item?.id ?? ''), { x: e.grid_x, y: e.grid_y });
-                }
+                for (const e of contents) coords_by_id.set(String(e.item?.id ?? ''), { x: e.grid_x, y: e.grid_y });
                 let repaired = 0;
                 for (const it of contents_raw) {
-                    const id = String(it?.id ?? '');
-                    const c = coords_by_id.get(id);
+                    const c = coords_by_id.get(String(it?.id ?? ''));
                     if (!c) continue;
                     if (it.grid_x !== c.x || it.grid_y !== c.y) {
                         it.grid_x = c.x;
@@ -18053,42 +20459,28 @@ function start_http_server(log_path: string): void {
                     }
                 }
                 if (cap_res.patched || repaired > 0) {
-                    const save_place_res = save_place_with_ground_and_sync_active(data_slot_number, place_id, place_result.place);
-                    if (!save_place_res.ok) {
-                        debug_error('API', `[CAPACITY_SANITY] failed to save place after patch ${place_id}`, save_place_res.error);
-                    }
-                    if (repaired > 0) {
-                        debug_log('API', `[GRID_SANITY] ground_container:${place_id}:${norm.key}[${index}] repaired=${repaired}`);
-                    }
+                    const save_res = save_actor_with_items(data_slot_number, actor_id, actor_result.actor);
+                    if (!save_res.ok) debug_error('API', `[CAPACITY_SANITY] failed to save actor after patch ${actor_id}`, save_res.error);
                 }
-                
-                debug_log("API", `/api/place/ground_container: Found container with ${contents.length} items`);
 
+                const view = build_container_owner_inventory_view({
+                    owner: { kind: 'actor', id: actor_id },
+                    owner_name: String(actor_result.actor?.name ?? actor_id),
+                    contributor_id: `body_slots.${container_path}`,
+                    contributor_kind: 'body_slot',
+                    contributor_name: String(container_payload.name ?? container_path),
+                    contributor_depth: 0,
+                    contributor_sort_key: `body_container:${container_path}`,
+                    surface_id: `surface:body_slots.${container_path}:container`,
+                    container_id: `body_slots.${container_path}`,
+                    surface_label: 'CONTAINER',
+                    normalized_contents: contents as any,
+                    slot_count: max_slots,
+                });
                 res.writeHead(200, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({
-                    ok: true,
-                    container: {
-                        id: container_payload.id,
-                        name: container_payload.name,
-                        def_id: container_payload.def_id,
-                        position_key: norm.key,
-                        index: index,
-                        capacity: {
-                            max_slots,
-                        },
-                        contents: contents.map(({ item, grid_x, grid_y }: any) => {
-                            const p = resolve_inline_item_payload_for_api(item);
-                            return {
-                                instance: { id: p.id, def_id: p.def_id, qty: p.qty, tags: p.tags },
-                                definition: { id: p.def_id, name: p.name, weight: p.unit_weight, tags: p.tags, display_char: p.display_char, display_color: p.display_color },
-                                grid_x,
-                                grid_y,
-                            };
-                        })
-                    }
-                }));
+                res.end(JSON.stringify({ ok: true, view }));
             } catch (err) {
-                debug_error("API", `/api/place/ground_container error`, err);
+                debug_error("API", "/api/inventory/body_slot_view error", err);
                 res.writeHead(500, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ ok: false, error: "internal_error" }));
             }
@@ -18384,6 +20776,8 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
                 }
 
                 // NEW COMMUNICATION SYSTEM: All text input goes through COMMUNICATE action
+                const sender_id = (msg.sender ?? "").trim();
+                const actor_ref = sender_id.startsWith("actor.") ? sender_id : `actor.${sender_id}`;
                 const volume_override = (msg.meta as any)?.intent_subtype;
                 if (typeof volume_override === "string") {
                     const v = volume_override.toUpperCase();
@@ -18393,13 +20787,30 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
                 }
                 
                 console.log(`[Breath] Processing user input: "${content.slice(0, 50)}"`);
+                const meta_target_ref = typeof (msg.meta as any)?.target_ref === "string" && (msg.meta as any).target_ref.trim().length > 0
+                    ? (msg.meta as any).target_ref.trim()
+                    : null;
+                const actor_target_before_submit = getActorTarget(actor_ref)?.target_ref ?? null;
+                debug_log("[Breath] Preparing COMMUNICATE from user input", {
+                    actor_ref,
+                    text_preview: content.slice(0, 80),
+                    inbound_meta_target_ref: meta_target_ref,
+                    actor_target_before_submit,
+                });
                 
                 // Use new communication input system
-                handleCommunicationSubmit(content, (intent) => {
+                handleCommunicationSubmit(content, actor_ref, (intent) => {
                     console.log(`[Breath] Created COMMUNICATE intent:`, {
                         target: intent.targetRef || "(broadcast)",
                         volume: intent.volume,
                         message: intent.message.slice(0, 30)
+                    });
+                    debug_log("[Breath] COMMUNICATE intent created", {
+                        actor_ref: intent.actorRef,
+                        intent_target_ref: intent.targetRef ?? null,
+                        inbound_meta_target_ref: meta_target_ref,
+                        actor_target_before_submit,
+                        volume: intent.volume,
                     });
                     
                     // Process through ActionPipeline
@@ -18423,9 +20834,6 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
                                 .filter((r): r is string => typeof r === "string")
                                 .filter((r) => r.startsWith("npc."));
 
-                              // If this COMMUNICATE had no explicit target, allow a single observed NPC to respond.
-                              // This keeps early-game conversations flowing without enabling multi-NPC pile-on.
-                              const eligible_default = get_response_eligible_by_action(result.intentId);
                               const direct_target = (
                                 intent.targetRef && observed_by_list.includes(intent.targetRef)
                               ) ? [intent.targetRef] : [];
@@ -18433,19 +20841,18 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
                               // Response eligibility rules:
                               // - If user explicitly targets an NPC, only that NPC may respond (prevents pile-on).
                               // - If no explicit target:
-                              //   - If witness marked eligible responders, use that.
-                              //   - Else if exactly one NPC observed, allow that single NPC to respond.
+                              //   - If exactly one NPC observed, allow that single NPC to respond.
                               //   - Else if conversation_phase is exit and there are observed NPCs, allow exactly one observed NPC to respond
                               //     (prevents dead-air on goodbyes without enabling multi-NPC pile-on).
                               const response_eligible_by = intent.targetRef
                                 ? direct_target
                                 : (
-                                  (eligible_default.length === 0 && observed_npcs.length === 1)
+                                  (observed_npcs.length === 1)
                                     ? observed_npcs
                                     : (
-                                      (eligible_default.length === 0 && conversation_phase === "exit" && observed_npcs.length > 0)
+                                      (conversation_phase === "exit" && observed_npcs.length > 0)
                                         ? [observed_npcs[0] as string]
-                                        : eligible_default
+                                        : []
                                     )
                                 );
 
@@ -18465,10 +20872,12 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
                                       processed_by_action_pipeline: true,
                                       observed_by: observed_by_list,
                                       response_eligible_by,
-                                      conversation_phase,
-                                      renderer_context: {
-                                        actor_ref: intent.actorRef,
-                                        target_ref: intent.targetRef,
+                                       conversation_phase,
+                                        world_breath_index: get_timed_event_world_breath_index(data_slot_number),
+                                        timed_event_id: get_timed_event_state(data_slot_number)?.timed_event_id ?? null,
+                                       renderer_context: {
+                                         actor_ref: intent.actorRef,
+                                         target_ref: intent.targetRef,
                                         intent_subtype: intent.volume,
                                         observed_by: observed_by_list,
                                         response_eligible_by,
@@ -18670,7 +21079,11 @@ setInterval(() => {
 }, 2000);
 
 
-run_cli(log_path);
+if (should_run_host_cli()) {
+    run_cli(log_path);
+} else {
+    debug_log("Host CLI disabled for this boot", { role: get_boot_role() });
+}
 
 // ============================================================================
 // CLICK HANDLERS (Called from frontend)
@@ -18680,13 +21093,16 @@ run_cli(log_path);
  * Handle left click on entity (select target)
  * Called by frontend when user left-clicks an NPC, actor, or item
  */
-export function handleEntityClick(entity_ref: string, entity_type: "npc" | "actor" | "item"): void {
-    const actor_ref = "actor.henry_actor"; // TODO: Get from session
+export function handleEntityClick(actor_ref: string, entity_ref: string, entity_type: "npc" | "actor" | "item"): void {
+    const normalized_actor_ref = String(actor_ref ?? "").trim();
+    if (!normalized_actor_ref) {
+        throw new Error("missing_actor_ref");
+    }
     
     debug_log("[CLICK]", `Left click on ${entity_type}: ${entity_ref}`);
     
     // Set as target for communication
-    setActorTarget(actor_ref, entity_ref, entity_type);
+    setActorTarget(normalized_actor_ref, entity_ref, entity_type);
     
     // TODO: Send command to frontend to update UI
     // "Talking to: Grenda"

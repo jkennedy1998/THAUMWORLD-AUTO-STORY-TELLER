@@ -6,8 +6,9 @@ import { send_highlight_command, send_target_command } from "../npc_ai/movement_
 import { load_actor } from "../actor_storage/store.js";
 import { load_npc } from "../npc_storage/store.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
+import { get_configured_data_slot } from "../shared/boot_env.js";
 
-const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+const data_slot_number = get_configured_data_slot();
 
 function resolve_target_display_name(target_ref: string, target_type: "npc" | "actor" | "item" | "terrain", fallback?: string): string | undefined {
   const clean_fallback = typeof fallback === "string" ? fallback.trim() : "";

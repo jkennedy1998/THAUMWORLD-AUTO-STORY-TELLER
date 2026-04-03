@@ -13,10 +13,11 @@
 import type { Goal } from "./movement_state.js";
 import { debug_log } from "../shared/debug.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
+import { get_configured_data_slot } from "../shared/boot_env.js";
 import { clear_conversation_presence, get_conversation_presence, get_current_conversation_breath, set_conversation_presence } from "../shared/conversation_presence_store.js";
 
 const CONVERSATION_DURATION_BREATHS = 30;
-const data_slot = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+const data_slot = get_configured_data_slot();
 
 /** Active conversation state for an NPC */
 export interface ActiveConversation {

@@ -109,12 +109,15 @@ export type PlaceStructureInstance = {
   // Optional tag deltas applied on top of the tile definition's tags.
   tag_add?: TagInstance[];
   tag_remove?: Array<{ key: string; mag: number }>;
+  tag_lifecycle?: Record<string, { last_processed_breath?: number }>;
 
   // Derived/runtime-only (populated by server API):
   display_char?: string;
   display_color?: string;
   container_glyphs?: { closed: string; open: string };
   tags?: TagInstance[];
+  resolved_tag_states?: unknown[];
+  value_mag?: unknown;
   render_shader?: RenderShaderBindings;
   // Resolved physical body model (voxel footprint). When absent, treated as 1 voxel at origin.
   body_model?: { anchor_part?: string; physical: BodyModelVoxel[] };
@@ -131,13 +134,24 @@ export type PlaceTile = {
   // Effective tags are resolved server-side; `tags` is treated as derived/runtime-only.
   tag_add?: TagInstance[];
   tag_remove?: Array<{ key: string; mag: number }>;
+  tag_lifecycle?: Record<string, { last_processed_breath?: number }>;
   tags?: TagInstance[];
+  resolved_tag_states?: unknown[];
+  value_mag?: unknown;
   render_shader?: RenderShaderBindings;
 
   // Inline container-like storage for tile contents (e.g., harvestables, planters).
   // Items may carry grid_x/grid_y fields (same as container-items) for organization.
   // Only used if tile has CONTAINER tag.
   contents?: InlineItem[];
+
+  // Dedicated grow-produced harvest storage, separate from normal container contents.
+  // Indexed by grow tag stream order on the tile.
+  grow_surfaces?: Array<{
+    contents?: InlineItem[];
+    max_slots?: number;
+    last_breath_processed?: number;
+  }>;
   
   // Container capacity - overrides tile definition if specified
   // Used for tiles with CONTAINER tag

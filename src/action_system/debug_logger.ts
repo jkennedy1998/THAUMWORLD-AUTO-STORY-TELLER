@@ -2,7 +2,8 @@
 // Provides detailed logging for testing the action pipeline
 
 import type { ActionIntent, ActionResult, ActionEffect } from "../action_system/intent.js";
-import type { TaggedItem, ActionCapability } from "../tag_system/index.js";
+import type { TaggedItem } from "../tag_system/registry.js";
+import type { ActionCapability } from "../tag_system/capabilities.js";
 import type { RollResult, PotencyResult } from "../roll_system/index.js";
 
 /**

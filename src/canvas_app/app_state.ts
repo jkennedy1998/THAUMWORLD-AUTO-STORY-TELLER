@@ -4,17 +4,26 @@ import { make_text_window_module, type TextWindowMessage } from '../mono_ui/modu
 import { make_input_module } from '../mono_ui/modules/input_module.js';
 import { make_roller_module } from '../mono_ui/modules/roller_module.js';
 import { make_place_module } from '../mono_ui/modules/place_module.js';
-import { make_container_module, type SlotItem } from '../mono_ui/modules/container_module.js';
-import { make_character_module, type CharacterDropTarget } from '../mono_ui/modules/character_module.js';
-import { make_character_editor_module } from '../mono_ui/modules/character_editor_module.js';
+import type { SlotItem } from '../mono_ui/modules/container_module.js';
+import { make_character_module, get_character_module_tag_row_at, type CharacterDropTarget } from '../mono_ui/modules/character_module.js';
+import { make_owner_inventory_module } from '../mono_ui/modules/owner_inventory_module.js';
+import { make_entity_editor_module } from '../mono_ui/modules/entity_editor_module.js';
+import { make_tag_picker_module, type TagPickerDefinition, type TagPickerDraft, type TagPickerField } from '../mono_ui/modules/tag_picker_module.js';
+import { make_actor_claim_module, type ActorClaimEntry } from '../mono_ui/modules/actor_claim_module.js';
+import { make_character_creation_module, type CharacterCreationField } from '../mono_ui/modules/character_creation_module.js';
+import { make_debug_commander_module, type DebugCommanderAction } from '../mono_ui/modules/debug_commander_module.js';
+import { make_world_entry_module } from '../mono_ui/modules/world_entry_module.js';
+import { make_world_join_module, type JoinableWorldEntry } from '../mono_ui/modules/world_join_module.js';
 import { make_option_picker_module, type OptionPickerEntry } from '../mono_ui/modules/option_picker_module.js';
+import { discover_joinable_worlds, fetch_local_host_status } from './world_discovery.js';
 import { make_initiative_module } from '../mono_ui/modules/initiative_module.js';
 import { make_toolbox_module } from '../mono_ui/modules/toolbox_module.js';
+import { make_tool_properties_module, type ToolPropertyRow } from '../mono_ui/modules/tool_properties_module.js';
 import { makeLayerPaletteModule } from '../ascii_painter/layer_palette_module.js';
 import type { SlotType } from '../equipment/body_slot_resolver.js';
 import type { Canvas, Module, PointerEvent, Rgb, Rect } from '../mono_ui/types.js';
 import { create_module_registry, type ModuleRegistry } from '../mono_ui/module_registry.js';
-import { handleEntityClick, set_current_actor_ref } from '../interface_program/frontend_api.js';
+import { handleEntityClick, set_current_actor_ref, set_session_token } from '../interface_program/frontend_api.js';
 import type { Place, TilePosition } from '../types/place.js';
 import { debug_warn, debug_log } from '../shared/debug.js';
 import { resolve_char } from '../render_shaders/resolver.js';
@@ -28,10 +37,18 @@ import { make_screen_overlay_bar_module } from '../mono_ui/modules/screen_overla
 import { infer_action_verb_hint } from '../shared/intent_hint.js';
 // NOTE: Do NOT import Node.js modules (load_actor, find_kind, etc.) here.
 // This code runs in browser context and must use HTTP APIs instead.
-import type { Container } from '../types/container.js';
 import { calculate_grid_dimensions, get_container_grid } from '../container_storage/grid_calculator.js';
 import { type ItemInstance } from '../item_instances/store.js';
 import { type ItemDefinition } from '../item_storage/store.js';
+import type { OwnerInventoryView, StorageSlot, StorageSurface } from '../inventory_surfaces/types.js';
+import { get_container_id_from_target_id } from '../inventory_surfaces/target_ids.js';
+import { tag_key } from '../tag_system/tag_key.js';
+import type { TagInstance } from '../tag_system/registry.js';
+import { resolve_grow_tag_configs } from '../mag/grow.js';
+import { resolve_spoils_tag_config_from_states } from '../tag_system/index.js';
+import { clamp_mag, normalize_signed_mag, project_container_max_slots, resolve_container_capacity_mag_from_states } from '../mag/index.js';
+import { get_damage_dice_from_mag } from '../mag/damage.js';
+import { is_tag_editor_visible } from '../tag_system/definitions.js';
 import type { EquipmentSlots } from '../types/body_slots.js';
 import { initWebSocketClient } from '../mono_ui/websocket_client.js';
 import { DEBUG_VISION, set_debug_bundle_enabled, spawn_sense_broadcast_particles } from '../mono_ui/vision_debugger.js';
@@ -44,7 +61,7 @@ import { get_defined_place_world_zs as get_authored_place_world_zs, get_place_ti
 import { get_flood_fill_points, get_line_points, get_rect_fill_points, get_rect_stroke_points, type PainterPoint } from '../shared/painter_tools.js';
 import { play_sfx } from '../mono_ui/sfx/sfx_player.js';
 import { format_interval_avg, format_interval_min, get_movement_debug_snapshot } from '../shared/movement_debug_state.js';
-import { has_tag_name } from '../shared/physics_tags.js';
+import { has_resolved_tag } from '../tag_system/canonical_readers.js';
 import { get_character_id_from_ref } from '../shared/character_storage.js';
 import { compute_adjacent_place_bounds, get_place_region_bounds, region_bounds_overlap, select_place_resize_face } from '../shared/place_adjacency.js';
 import {
@@ -96,6 +113,8 @@ type PlacePainterTool =
     | 'place_resize'
     | 'region_tool';
 
+type PlacePainterEraseTarget = 'tiles' | 'characters' | 'items';
+
 function is_place_painter_shape_tool(tool: PlacePainterTool): tool is 'line' | 'rect_stroke' | 'rect_fill' {
     return tool === 'line' || tool === 'rect_stroke' || tool === 'rect_fill';
 }
@@ -136,24 +155,238 @@ type WindowFeed = {
  * Used for determining which equipped items appear in the container sidebar
  */
 function is_container_item(definition: ItemDefinition): boolean {
-    if (!definition.tags) return false;
-    
     const container_tags = ['CONTAINER', 'BAG', 'SACK', 'POUCH', 'BACKPACK', 'WALLET', 'CHEST', 'BOX'];
-    
-    for (const tag of definition.tags) {
-        if (container_tags.includes(tag.name.toUpperCase())) {
-            return true;
-        }
-    }
-    
-    return false;
+    const tags = Array.isArray(definition.tags) ? definition.tags : [];
+    return container_tags.some((tag) => tags.some((entry: any) => String(entry?.name ?? '').trim().toUpperCase() === tag));
 }
 
 function has_tag(tags: any[] | undefined | null, want: string): boolean {
-    return has_tag_name(tags, want);
+    return Array.isArray(tags) && tags.some((entry: any) => String(entry?.name ?? '').trim().toUpperCase() === String(want ?? '').trim().toUpperCase());
 }
 
 export function create_app_state(): AppState {
+    const reconnect_token_storage_key = 'thaumworld_reconnect_token';
+    const controlled_actor_storage_key = 'thaumworld_controlled_actor_ref';
+    let multiplayer_session_bootstrap_promise: Promise<void> | null = null;
+
+    function get_or_create_reconnect_token(): string {
+        const existing = String((APP_CONFIG as any).reconnect_token ?? '').trim();
+        if (existing) return existing;
+        let next = '';
+        try {
+            next = String(window.localStorage.getItem(reconnect_token_storage_key) ?? '').trim();
+        } catch {
+            next = '';
+        }
+        if (!next) {
+            next = `reconnect_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+            try {
+                window.localStorage.setItem(reconnect_token_storage_key, next);
+            } catch {
+                // ignore persistence failure; in-memory fallback still works for this run
+            }
+        }
+        (APP_CONFIG as any).reconnect_token = next;
+        return next;
+    }
+
+    async function ensure_multiplayer_session_bootstrap(force: boolean = false): Promise<void> {
+        debug_log('[WORLD_BOOT]', `ensure_multiplayer_session_bootstrap force=${force} session_token=${String((APP_CONFIG as any).session_token ?? '').trim() ? 'present' : 'missing'}`);
+        if (!force) {
+            const existing_session_token = String((APP_CONFIG as any).session_token ?? '').trim();
+            if (existing_session_token) return;
+            if (multiplayer_session_bootstrap_promise) return multiplayer_session_bootstrap_promise;
+        }
+        const reconnect_token = get_or_create_reconnect_token();
+        multiplayer_session_bootstrap_promise = fetch('http://localhost:8787/api/connect', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                slot: APP_CONFIG.selected_data_slot,
+                reconnect_token,
+            }),
+        }).then(async (res) => {
+            const data = await res.json().catch(() => null) as any;
+            if (!res.ok || !data?.ok) {
+                debug_warn('[WORLD_BOOT]', 'multiplayer session bootstrap failed', { status: res.status, data });
+                throw new Error(String(data?.error ?? `connect_failed:${res.status}`));
+            }
+            const next_session_token = String(data?.session_token ?? '').trim();
+            const next_reconnect_token = String(data?.reconnect_token ?? reconnect_token).trim() || reconnect_token;
+            if (!next_session_token) {
+                throw new Error('connect_invalid_response');
+            }
+            (APP_CONFIG as any).session_token = next_session_token;
+            (APP_CONFIG as any).connection_id = String(data?.connection_id ?? '').trim();
+            (APP_CONFIG as any).reconnect_token = next_reconnect_token;
+            set_session_token(next_session_token);
+            debug_log('[WORLD_BOOT]', `multiplayer session ready connection=${String(data?.connection_id ?? 'unknown')}`);
+            try {
+                window.localStorage.setItem(reconnect_token_storage_key, next_reconnect_token);
+            } catch {
+                // ignore persistence failure
+            }
+            const wsClient = initWebSocketClient(undefined, { sessionToken: next_session_token, slot: APP_CONFIG.selected_data_slot });
+            void wsClient;
+        }).finally(() => {
+            multiplayer_session_bootstrap_promise = null;
+        });
+        return multiplayer_session_bootstrap_promise;
+    }
+
+    async function refresh_joinable_worlds(): Promise<void> {
+        ui_state.world_join.is_loading = true;
+        try {
+            const entries = await discover_joinable_worlds(APP_CONFIG.selected_data_slot);
+            ui_state.world_join.entries = entries;
+            ui_state.world_join.selected_world_id = entries[0]?.id ?? null;
+            ui_state.world_join.status_lines = entries.length > 0
+                ? [
+                    'local worlds detected',
+                    String(entries[0]?.description ?? 'join enabled'),
+                  ]
+                : ['no local world detected', 'launch a world first or start a local host'];
+        } finally {
+            ui_state.world_join.is_loading = false;
+        }
+    }
+
+    function open_world_entry_module(): void {
+        ui_state.world_entry.is_visible = true;
+        ui_state.world_join.is_visible = false;
+        ui_state.actor_claim.is_visible = false;
+        ui_state.character_creation.is_visible = false;
+        apply_runtime_module_visibility();
+        void refresh_world_entry_status();
+    }
+
+    async function refresh_world_entry_status(): Promise<void> {
+        const status = await fetch_local_host_status(APP_CONFIG.selected_data_slot);
+        ui_state.world_entry.status_lines = status
+            ? [
+                `local host detected: ${String(status.world_label ?? `slot ${APP_CONFIG.selected_data_slot}`)}`,
+                `join mode: ${String(status.join_mode ?? 'join enabled')}`,
+                `services: ${(Array.isArray(status.services) ? status.services.length : 0).toString()}`,
+              ]
+            : [
+                'no local host detected',
+                'launch world will start or reuse a local host',
+              ];
+    }
+
+    async function begin_world_session(): Promise<void> {
+        ui_state.world_entry.status_lines = ['connecting to local host...', 'bootstrapping multiplayer session'];
+        ui_state.world_join.status_lines = ['connecting to selected world...', 'bootstrapping multiplayer session'];
+        debug_log('[WORLD_BOOT]', 'begin_world_session start');
+        try {
+            await ensure_multiplayer_session_bootstrap(true);
+            debug_log('[WORLD_BOOT]', 'begin_world_session bootstrap ok');
+            ui_state.world_entry.is_visible = false;
+            ui_state.world_join.is_visible = false;
+            apply_runtime_module_visibility();
+            await refresh_controlled_actor_binding(true);
+            debug_log('[WORLD_BOOT]', 'begin_world_session refresh_controlled_actor_binding complete');
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            debug_warn('[WORLD_BOOT]', 'begin_world_session failed', { message });
+            ui_state.world_entry.is_visible = true;
+            ui_state.world_join.is_visible = false;
+            ui_state.world_entry.status_lines = [
+                'failed to connect to local host',
+                message,
+                'restart with a host boot or launch again',
+            ];
+            apply_runtime_module_visibility();
+            throw err;
+        }
+    }
+
+    async function open_world_join_module(): Promise<void> {
+        ui_state.world_entry.is_visible = false;
+        ui_state.world_join.is_visible = true;
+        ui_state.world_join.status_lines = ['searching for local worlds...'];
+        apply_runtime_module_visibility();
+        await refresh_joinable_worlds();
+    }
+
+    async function join_selected_world(): Promise<void> {
+        if (!ui_state.world_join.selected_world_id) {
+            ui_state.world_join.status_lines = ['select a world to join'];
+            return;
+        }
+        try {
+            await begin_world_session();
+        } catch {
+            ui_state.world_join.is_visible = true;
+            ui_state.world_entry.is_visible = false;
+            apply_runtime_module_visibility();
+        }
+    }
+
+    function get_session_token(): string {
+        return String((APP_CONFIG as any).session_token ?? '').trim();
+    }
+
+    function persist_controlled_actor_ref(actor_ref: string): void {
+        const ref = String(actor_ref ?? '').trim();
+        try {
+            if (ref) window.localStorage.setItem(controlled_actor_storage_key, ref);
+            else window.localStorage.removeItem(controlled_actor_storage_key);
+        } catch {
+            // ignore persistence failure
+        }
+    }
+
+    function clear_controlled_actor_runtime_state(): void {
+        (APP_CONFIG as any).input_actor_id = '';
+        persist_controlled_actor_ref('');
+        set_current_actor_ref('');
+        ui_state.actor_claim.current_actor_ref = null;
+        ui_state.actor_claim.selected_actor_ref = null;
+        ui_state.actor_claim.game_ready = false;
+        ui_state.controls.selected_target = null;
+        ui_state.controls.targets = [];
+        ui_state.controls.targets_ready = false;
+        ui_state.container.owner_view = null;
+        ui_state.container.open_containers.clear();
+        ui_state.character.display_name = '';
+        ui_state.character.equipped_items.clear();
+        ui_state.character.body_slots = {} as EquipmentSlots;
+        apply_runtime_module_visibility();
+    }
+
+    let unload_release_sent = false;
+    function release_actor_claim_on_exit(): void {
+        if (unload_release_sent) return;
+        const session_token = String((APP_CONFIG as any).session_token ?? '').trim();
+        if (!session_token || !get_controlled_actor_id()) {
+            clear_controlled_actor_runtime_state();
+            return;
+        }
+        unload_release_sent = true;
+        try {
+            const payload = JSON.stringify({
+                slot: APP_CONFIG.selected_data_slot,
+                session_token,
+            });
+            const url = 'http://localhost:8787/api/actors/release';
+            if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
+                const blob = new Blob([payload], { type: 'application/json' });
+                navigator.sendBeacon(url, blob);
+            } else {
+                void fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: payload,
+                    keepalive: true,
+                }).catch(() => undefined);
+            }
+        } catch {
+            // ignore exit-time release failures
+        }
+        clear_controlled_actor_runtime_state();
+    }
+
     const WHITE: Rgb = get_color_by_name('off_white').rgb;
     const DEEP_RED: Rgb = get_color_by_name('deep_red').rgb;
 
@@ -267,6 +500,20 @@ export function create_app_state(): AppState {
         selected_tool: 'paint' as PlacePainterTool,
         left_click_tool: 'paint' as PlacePainterTool,
         right_click_tool: 'erase' as PlacePainterTool,
+        entity_inspector_mode: 'replace' as 'replace' | 'duplicate',
+        left_brush_size: 1,
+        right_brush_size: 1,
+        left_erase_targets: {
+            tiles: true,
+            characters: false,
+            items: false,
+        } as Record<PlacePainterEraseTarget, boolean>,
+        right_erase_targets: {
+            tiles: true,
+            characters: false,
+            items: false,
+        } as Record<PlacePainterEraseTarget, boolean>,
+        active_property_side: 'left' as 'left' | 'right',
         selected_palette_kind: 'tile' as 'tile' | 'item',
             selected_tile_palette_section: 'blocks' as 'blocks' | 'connectors' | 'all',
             selected_palette_entry_id: null as string | null,
@@ -348,8 +595,8 @@ export function create_app_state(): AppState {
         },
         container: {
             is_visible: false,  // Toggle with 'i' key
-            current_container: null as Container | null,
             slot_items: [] as SlotItem[],
+            owner_view: null as OwnerInventoryView | null,
             is_open: true,
             // Phase 7: Track open container modules for visual state
             open_containers: new Set<string>(), // Set of container_ids that are currently open
@@ -363,12 +610,18 @@ export function create_app_state(): AppState {
             // Container window slots (1..5): stable positions by slot index
             container_slot_by_container_id: new Map<string, number>(),
             container_slots: [null, null, null, null, null] as Array<string | null>,
-            // Track container data for all open containers (shared state for refreshing)
-            container_data_map: new Map<string, { container: Container; contents: any[] }>(),
+            // Track owner-view payloads for all open inventory windows.
+            owner_view_by_container_id: new Map<string, OwnerInventoryView>(),
         },
         character: {
             is_visible: true,  // Always visible for now
             display_name: '',
+            render_meta: {
+                kind_id: null as string | null,
+                body_model_id: null as string | null,
+                entity_render: null as any,
+                tags: [] as any[],
+            },
             body_slots: {} as EquipmentSlots,
             equipped_items: new Map() as Map<string, { instance: ItemInstance; definition: ItemDefinition }>,
             weight: { current: 0, max: 100 },
@@ -380,7 +633,6 @@ export function create_app_state(): AppState {
             highlighted_items: [] as Array<{ container_id: string; slot_index: number }>,  // Items highlighted when hovering slot
         },
         character_editor: {
-            is_visible: false,
             character_ref: null as string | null,
             role: null as 'actor' | 'npc' | null,
             original: null as Record<string, unknown> | null,
@@ -395,14 +647,104 @@ export function create_app_state(): AppState {
             dirty: false,
             saving: false,
         },
+        tile_editor: {
+            tile_ref: null as string | null,
+            place_id: null as string | null,
+            x: 0,
+            y: 0,
+            z: 0,
+            original: null as Record<string, unknown> | null,
+            status_lines: ['Place painter only'],
+            saving: false,
+        },
+        item_editor: {
+            item_ref: null as string | null,
+            owner_kind: null as null | 'actor' | 'npc' | 'place',
+            owner_id: null as string | null,
+            original: null as Record<string, unknown> | null,
+            status_lines: ['Place painter only'],
+            saving: false,
+        },
+        entity_inspector: {
+            is_visible: false,
+            entity_ref: null as string | null,
+            entity_kind: null as null | 'character' | 'tile' | 'item',
+        },
+        tag_picker: {
+            is_visible: false,
+            entity_ref: null as string | null,
+            selected_tag_key: null as string | null,
+            selected_field: 'name' as TagPickerField,
+            original_name: '' as string,
+            draft: null as TagPickerDraft | null,
+            definition: null as TagPickerDefinition | null,
+            meta_text: '' as string,
+            status_lines: ['Place painter only'],
+            applying: false,
+        },
         option_picker: {
             is_visible: false,
             title: 'PICKER',
-            target_kind: null as null | 'character_editor',
+            target_kind: null as null | 'character_editor' | 'tag_picker' | 'character_creation',
             target_field: null as string | null,
             options: [] as OptionPickerEntry[],
             selected_value: null as string | null,
             status_lines: [] as string[],
+        },
+        character_creation: {
+            is_visible: false,
+            is_loading: false,
+            is_submitting: false,
+            selected_field: 'name' as string,
+            draft: {
+                kind: '',
+                title: '',
+                name: '',
+                sex: 'female',
+            },
+            preview: {
+                size_mag: 0,
+                carry_capacity: 0,
+                base_stats: { con: 0, str: 0, dex: 0, wis: 0, int: 0, cha: 0 },
+                effective_stats: { con: 0, str: 0, dex: 0, wis: 0, int: 0, cha: 0 },
+                kind_stat_changes: { con: 0, str: 0, dex: 0, wis: 0, int: 0, cha: 0 } as Record<string, number>,
+            },
+            bootstrap: {
+                kinds: [] as OptionPickerEntry[],
+                sex_options: [] as OptionPickerEntry[],
+            },
+            status_lines: ['choose a kind', 'type a name and title'],
+            created_actor_ref: null as string | null,
+        },
+        world_entry: {
+            is_visible: true,
+            status_lines: ['choose how to connect', 'launch starts or reuses a local world host'],
+        },
+        world_join: {
+            is_visible: false,
+            is_loading: false,
+            selected_world_id: null as string | null,
+            entries: [] as JoinableWorldEntry[],
+            status_lines: ['searching for local worlds...'],
+        },
+        actor_claim: {
+            is_visible: false,
+            is_blocking: false,
+            is_loading: false,
+            is_submitting: false,
+            game_ready: false,
+            title: 'CLAIM ACTOR',
+            selected_actor_ref: null as string | null,
+            current_actor_ref: null as string | null,
+            actors: [] as ActorClaimEntry[],
+            status_lines: [] as string[],
+            error: null as string | null,
+            open_reason: null as null | 'startup_required' | 'saved_actor_claimed' | 'manual_claim' | 'post_release' | 'pre_input_required' | 'claim_failed',
+            guest_label: 'Guest session' as string,
+        },
+        debug_commander: {
+            selected_action_id: null as string | null,
+            status_lines: ['debug commands', 'click or press enter to run'],
         },
         // Module management (Phase 7.5)
         modules: {
@@ -411,6 +753,7 @@ export function create_app_state(): AppState {
             visibility: new Map<string, boolean>(),
             open_npc_modules: new Set<string>(),
         },
+        entity_tags_by_ref: new Map<string, TagInstance[]>(),
     };
 
     // Keep the current place "active" on the server so breath continues to tick
@@ -740,11 +1083,72 @@ export function create_app_state(): AppState {
             : ui_state.place_painter.left_click_tool;
     }
 
+    function get_place_painter_tool_for_side(side: 'left' | 'right'): PlacePainterTool {
+        return side === 'right'
+            ? ui_state.place_painter.right_click_tool
+            : ui_state.place_painter.left_click_tool;
+    }
+
+    function get_place_painter_brush_size_for_side(side: 'left' | 'right'): number {
+        return side === 'right'
+            ? ui_state.place_painter.right_brush_size
+            : ui_state.place_painter.left_brush_size;
+    }
+
+    function set_place_painter_brush_size_for_side(side: 'left' | 'right', size: number): void {
+        const next = Math.max(1, Math.min(5, Math.floor(size)));
+        if (side === 'right') ui_state.place_painter.right_brush_size = next;
+        else ui_state.place_painter.left_brush_size = next;
+        ui_state.place_painter.active_property_side = side;
+        save_place_painter_prefs_debounced();
+    }
+
+    function get_place_painter_side_for_button(button?: number): 'left' | 'right' {
+        return button === 2 ? 'right' : 'left';
+    }
+
+    function get_place_painter_erase_targets_for_side(side: 'left' | 'right'): Record<PlacePainterEraseTarget, boolean> {
+        return side === 'right'
+            ? ui_state.place_painter.right_erase_targets
+            : ui_state.place_painter.left_erase_targets;
+    }
+
+    function is_place_painter_erase_target_enabled(target: PlacePainterEraseTarget, side: 'left' | 'right'): boolean {
+        return get_place_painter_erase_targets_for_side(side)[target] === true;
+    }
+
+    function toggle_place_painter_erase_target(target: PlacePainterEraseTarget, side: 'left' | 'right'): void {
+        const targets = get_place_painter_erase_targets_for_side(side);
+        targets[target] = !targets[target];
+        ui_state.place_painter.active_property_side = side;
+        save_place_painter_prefs_debounced();
+    }
+
+    function get_place_painter_erase_targets_summary_for_side(side: 'left' | 'right'): string {
+        const enabled: string[] = [];
+        if (is_place_painter_erase_target_enabled('tiles', side)) enabled.push('T');
+        if (is_place_painter_erase_target_enabled('characters', side)) enabled.push('C');
+        if (is_place_painter_erase_target_enabled('items', side)) enabled.push('I');
+        return enabled.length > 0 ? enabled.join('') : 'none';
+    }
+
+    function get_place_painter_erase_targets_summary(): string {
+        return `L:${get_place_painter_erase_targets_summary_for_side('left')} R:${get_place_painter_erase_targets_summary_for_side('right')}`;
+    }
+
+    function get_place_painter_brush_points(x: number, y: number, size: number): PainterPoint[] {
+        const span = Math.max(1, Math.min(5, Math.floor(size)));
+        const start_x = x - Math.floor(span / 2);
+        const start_y = y - Math.floor(span / 2);
+        return get_rect_fill_points(start_x, start_y, start_x + span - 1, start_y + span - 1);
+    }
+
     function set_place_painter_selected_tile_by_id(id: string): boolean {
         const entry = ui_state.place_painter.tile_palette_entries.find((it) => it.id === id);
         if (!entry) return false;
         ui_state.place_painter.selected_palette_kind = 'tile';
         ui_state.place_painter.selected_palette_entry_id = entry.id;
+        save_place_painter_prefs_debounced();
         return true;
     }
 
@@ -753,7 +1157,25 @@ export function create_app_state(): AppState {
         if (!entry) return false;
         ui_state.place_painter.selected_palette_kind = 'item';
         ui_state.place_painter.selected_item_palette_entry_id = entry.id;
+        save_place_painter_prefs_debounced();
         return true;
+    }
+
+    function toggle_place_painter_palette_kind(): void {
+        ui_state.place_painter.selected_palette_kind = ui_state.place_painter.selected_palette_kind === 'tile' ? 'item' : 'tile';
+        save_place_painter_prefs_debounced();
+    }
+
+    function cycle_place_painter_tile_palette_section(): void {
+        const order: Array<'blocks' | 'connectors' | 'all'> = ['blocks', 'connectors', 'all'];
+        const idx = order.indexOf(ui_state.place_painter.selected_tile_palette_section);
+        const next = order[(idx + 1) % order.length] ?? 'blocks';
+        ui_state.place_painter.selected_tile_palette_section = next;
+        const active_entries = get_active_place_painter_tile_entries();
+        if (!active_entries.some((entry) => entry.id === ui_state.place_painter.selected_palette_entry_id)) {
+            ui_state.place_painter.selected_palette_entry_id = active_entries[0]?.id ?? ui_state.place_painter.tile_palette_entries[0]?.id ?? null;
+        }
+        save_place_painter_prefs_debounced();
     }
 
     function get_place_tile_kind_at(place: Place | null, x: number, y: number, z: number): string | null {
@@ -1321,6 +1743,65 @@ export function create_app_state(): AppState {
         debug_log(`[PLACE_PAINTER] local entity move mirrored ${JSON.stringify({ place_id, entity_ref, entity_type, target_x, target_y, target_z })}`);
     }
 
+    function apply_local_place_entity_erase(place_id: string, entity_ref: string, entity_type: 'npc' | 'actor' | 'item' | 'pile' | 'structure', source_x: number, source_y: number, source_z: number): void {
+        const apply_to_place = (place: any): void => {
+            if (!place || String(place.id ?? '') !== place_id) return;
+            if (entity_type === 'actor') {
+                if (Array.isArray(place?.contents?.actors_present)) {
+                    place.contents.actors_present = place.contents.actors_present.filter((a: any) => String(a?.actor_ref ?? '') !== entity_ref);
+                }
+                return;
+            }
+            if (entity_type === 'npc') {
+                if (Array.isArray(place?.contents?.npcs_present)) {
+                    place.contents.npcs_present = place.contents.npcs_present.filter((n: any) => String(n?.npc_ref ?? '') !== entity_ref);
+                }
+                return;
+            }
+            if (entity_type === 'structure') {
+                const sid = String(entity_ref).replace(/^structure\./, '');
+                if (Array.isArray(place?.structures)) {
+                    place.structures = place.structures.filter((s: any) => String(s?.id ?? '') !== sid);
+                }
+                return;
+            }
+            if (entity_type === 'item') {
+                const item_id = String(entity_ref).replace(/^item\./, '');
+                if (Array.isArray(place?.contents?.items_on_ground)) {
+                    place.contents.items_on_ground = place.contents.items_on_ground.filter((it: any) => String(it?.item_ref ?? '') !== item_id);
+                }
+                return;
+            }
+            if (entity_type === 'pile' && Array.isArray(place?.contents?.items_on_ground)) {
+                place.contents.items_on_ground = place.contents.items_on_ground.filter((it: any) => {
+                    const pos = it?.tile_position;
+                    const z = typeof it?.elevation === 'number' ? Math.floor(it.elevation) : null;
+                    return !(pos?.x === source_x && pos?.y === source_y && z === source_z);
+                });
+            }
+        };
+        apply_to_place(ui_state.place.current_place as any);
+        const scene_place = get_scene_place(place_id) as any;
+        if (scene_place && scene_place !== ui_state.place.current_place) apply_to_place(scene_place);
+
+        if (entity_type === 'item') {
+            const item_id = String(entity_ref).replace(/^item\./, '');
+            if (item_id) {
+                remove_ground_item_from_local_maps(item_id);
+                ui_state.place.ground_items_by_id.delete(item_id);
+            }
+        } else if (entity_type === 'pile') {
+            const voxel_key = `${source_x}_${source_y}_${Math.floor(source_z)}`;
+            const item_ids = [...(ui_state.place.ground_items_by_voxel.get(voxel_key) ?? [])];
+            for (const item_id of item_ids) {
+                remove_ground_item_from_local_maps(item_id);
+                ui_state.place.ground_items_by_id.delete(item_id);
+            }
+            ui_state.place.ground_items_by_voxel.delete(voxel_key);
+        }
+        debug_log(`[PLACE_PAINTER] local entity erase mirrored ${JSON.stringify({ place_id, entity_ref, entity_type, source_x, source_y, source_z })}`);
+    }
+
     function get_place_painter_move_source_preview(
         place_id: string,
         entity_ref: string,
@@ -1881,6 +2362,15 @@ export function create_app_state(): AppState {
         return String(APP_CONFIG.input_actor_id ?? '').trim();
     }
 
+    function get_controlled_actor_snapshot(place: Place | null | undefined): any | null {
+        if (!place) return null;
+        const actor_ref = get_input_actor_ref();
+        if (!actor_ref) return null;
+        return Array.isArray(place.contents?.actors_present)
+            ? place.contents.actors_present.find((actor: any) => String(actor?.actor_ref ?? '') === actor_ref) ?? null
+            : null;
+    }
+
     function get_follow_camera_entity_ref(): string {
         if (ui_state.timed_event_debug.active && ui_state.timed_event_debug.phase === 'world_sim_interstitial') {
             return '';
@@ -2014,11 +2504,9 @@ export function create_app_state(): AppState {
             const ok = await place_painter_pause_controller.activate();
             if (!ok) return false;
             ui_state.place_painter.active = true;
-            ui_state.place_painter.left_click_tool = 'paint';
-            ui_state.place_painter.right_click_tool = 'erase';
             ui_state.place_painter.selected_tool = ui_state.place_painter.left_click_tool;
-            if (tile_palette_ok) ui_state.place_painter.selected_palette_kind = 'tile';
-            else if (item_palette_ok) ui_state.place_painter.selected_palette_kind = 'item';
+        if (tile_palette_ok) ui_state.place_painter.selected_palette_kind = 'tile';
+        else if (item_palette_ok) ui_state.place_painter.selected_palette_kind = 'item';
             if (tile_palette_ok) {
                 const active_entries = get_active_place_painter_tile_entries();
                 if (!active_entries.some((entry) => entry.id === ui_state.place_painter.selected_palette_entry_id)) {
@@ -2028,6 +2516,7 @@ export function create_app_state(): AppState {
             const actor_tile = get_current_place()?.contents?.actors_present?.find((a: any) => a.actor_ref === get_input_actor_ref())?.tile_position;
             if (actor_tile) set_place_camera_target_position(actor_tile, 'free');
             set_place_painter_modules_visible(true);
+            save_place_painter_prefs_debounced();
             return true;
         }
         const ok = await place_painter_pause_controller.deactivate();
@@ -2100,6 +2589,11 @@ export function create_app_state(): AppState {
 
         const tool = session.button === 2 ? ui_state.place_painter.right_click_tool : ui_state.place_painter.left_click_tool;
         if (tool === 'erase') {
+            const side = get_place_painter_side_for_button(session.button);
+            if (!is_place_painter_erase_target_enabled('tiles', side)) {
+                flash_status(['Shape erase is tile-only', 'Enable tile erase to use line/rect erase'], 1400);
+                return;
+            }
             const ok = await mutate_place_tiles_batch(session.place_id, points.map((point) => ({ x: point.x, y: point.y, z: session.world_z, erase: true })));
             flash_status([ok ? `Erased ${points.length} tiles` : 'Shape erase failed'], 1200);
             return;
@@ -2120,6 +2614,102 @@ export function create_app_state(): AppState {
         return get_rect_fill_points(session.start_x, session.start_y, session.current_x, session.current_y);
     }
 
+    function get_place_painter_character_targets_at(place_id: string, x: number, y: number, z: number): Array<{ entity_ref: string; entity_type: 'actor' | 'npc' }> {
+        const place = (get_scene_place(place_id) ?? ui_state.place.current_place) as any;
+        if (!place || String(place.id ?? '') !== place_id) return [];
+        const out: Array<{ entity_ref: string; entity_type: 'actor' | 'npc' }> = [];
+        const actors = Array.isArray(place?.contents?.actors_present) ? place.contents.actors_present : [];
+        const npcs = Array.isArray(place?.contents?.npcs_present) ? place.contents.npcs_present : [];
+        for (const actor of actors) {
+            const pos = actor?.tile_position;
+            const az = typeof actor?.elevation === 'number' ? Math.floor(actor.elevation) : null;
+            if (pos?.x === x && pos?.y === y && az === z) out.push({ entity_ref: String(actor?.actor_ref ?? ''), entity_type: 'actor' });
+        }
+        for (const npc of npcs) {
+            const pos = npc?.tile_position;
+            const nz = typeof npc?.elevation === 'number' ? Math.floor(npc.elevation) : null;
+            if (pos?.x === x && pos?.y === y && nz === z) out.push({ entity_ref: String(npc?.npc_ref ?? ''), entity_type: 'npc' });
+        }
+        return out.filter((entry) => entry.entity_ref.length > 0);
+    }
+
+    function get_place_painter_item_target_at(x: number, y: number, z: number): { entity_ref: string; entity_type: 'item' | 'pile'; count: number } | null {
+        const voxel_key = `${x}_${y}_${Math.floor(z)}`;
+        const item_ids = [...(ui_state.place.ground_items_by_voxel.get(voxel_key) ?? [])].filter((id) => typeof id === 'string' && id.length > 0);
+        if (item_ids.length < 1) return null;
+        if (item_ids.length === 1) {
+            return { entity_ref: `item.${item_ids[0]}`, entity_type: 'item', count: 1 };
+        }
+        return { entity_ref: `pile:${x}_${y}_${Math.floor(z)}`, entity_type: 'pile', count: item_ids.length };
+    }
+
+    async function erase_place_painter_targets_at(place_id: string, x: number, y: number, z: number, button?: number): Promise<{ ok: boolean; messages: string[] }> {
+        const messages: string[] = [];
+        let attempted = false;
+        let ok = true;
+        const side = get_place_painter_side_for_button(button);
+        const brush_size = get_place_painter_brush_size_for_side(side);
+        ui_state.place_painter.active_property_side = side;
+
+        if (is_place_painter_erase_target_enabled('characters', side)) {
+            const chars = get_place_painter_character_targets_at(place_id, x, y, z);
+            if (chars.length > 0) {
+                attempted = true;
+                messages.push('Character erase is stubbed');
+                ok = false;
+            }
+        }
+
+        if (is_place_painter_erase_target_enabled('items', side)) {
+            const item_target = get_place_painter_item_target_at(x, y, z);
+            if (item_target) {
+                attempted = true;
+                const result = await erase_place_painter_entity({
+                    place_id,
+                    entity_ref: item_target.entity_ref,
+                    entity_type: item_target.entity_type,
+                    source_x: x,
+                    source_y: y,
+                    source_z: z,
+                });
+                if (result.ok) messages.push(item_target.entity_type === 'pile' ? `Erased ${item_target.count} items` : 'Erased item');
+                else {
+                    messages.push(`Item erase failed: ${result.error ?? 'unknown_error'}`);
+                    ok = false;
+                }
+            }
+        }
+
+        if (is_place_painter_erase_target_enabled('tiles', side)) {
+            attempted = true;
+            const erased = await erase_place_painter_tiles_brush_at(place_id, x, y, z, brush_size);
+            if (erased.ok) messages.push(erased.count > 1 ? `Erased ${erased.count} tiles` : 'Erased tile');
+            else {
+                messages.push('Tile erase failed');
+                ok = false;
+            }
+        }
+
+        if (!attempted) {
+            return { ok: false, messages: ['Erase has no targets enabled'] };
+        }
+        if (messages.length < 1) {
+            return { ok: false, messages: ['Nothing to erase here'] };
+        }
+        return { ok, messages };
+    }
+
+    async function erase_place_painter_tiles_brush_at(place_id: string, x: number, y: number, z: number, brush_size: number): Promise<{ ok: boolean; count: number }> {
+        const points = get_place_painter_brush_points(x, y, brush_size);
+        if (points.length < 1) return { ok: false, count: 0 };
+        if (points.length === 1) {
+            const ok = await erase_place_tile_at(place_id, x, y, z);
+            return { ok, count: ok ? 1 : 0 };
+        }
+        const ok = await mutate_place_tiles_batch(place_id, points.map((point) => ({ x: point.x, y: point.y, z, erase: true })));
+        return { ok, count: ok ? points.length : 0 };
+    }
+
     async function handle_place_painter_primary_action(target: {
         place_id: string;
         tile_position: { x: number; y: number };
@@ -2138,6 +2728,8 @@ export function create_app_state(): AppState {
         };
 
         const tool = get_place_painter_tool_for_button(target.button);
+        const side = get_place_painter_side_for_button(target.button);
+        ui_state.place_painter.active_property_side = side;
         ui_state.place_painter.selected_tool = tool;
         const target_label = target.entity_ref
             ? `${get_entity_display_name(target.entity_ref)} @ ${target.tile_position.x},${target.tile_position.y},${target.world_z}`
@@ -2201,19 +2793,22 @@ export function create_app_state(): AppState {
                 flash_status(['Same-region place_connector is obsolete; use place create instead'], 1800);
                 return;
             }
-            const ok = await paint_place_tile_at(
-                target.place_id,
-                target.tile_position.x,
-                target.tile_position.y,
-                target.world_z,
-                selected.id,
-            );
+            const brush_points = get_place_painter_brush_points(target.tile_position.x, target.tile_position.y, get_place_painter_brush_size_for_side(side));
+            const ok = brush_points.length === 1
+                ? await paint_place_tile_at(
+                    target.place_id,
+                    target.tile_position.x,
+                    target.tile_position.y,
+                    target.world_z,
+                    selected.id,
+                )
+                : await mutate_place_tiles_batch(target.place_id, brush_points.map((point) => ({ x: point.x, y: point.y, z: target.world_z, kind: selected.id })));
             if (!ok) {
                 flash_status([`Paint failed: ${selected.id}`], 1200);
                 return;
             }
             flash_status([
-                `Painted ${selected.id}`,
+                brush_points.length > 1 ? `Painted ${selected.id} x${brush_points.length}` : `Painted ${selected.id}`,
                 `tile: ${target_label}`,
             ], 1200);
             return;
@@ -2278,20 +2873,18 @@ export function create_app_state(): AppState {
                 flash_status(['Erase only works on the selected place'], 1200);
                 return;
             }
-            const ok = await erase_place_tile_at(
+            const result = await erase_place_painter_targets_at(
                 target.place_id,
                 target.tile_position.x,
                 target.tile_position.y,
                 target.world_z,
+                target.button,
             );
-            if (!ok) {
-                flash_status([`Erase failed`, `tile: ${target_label}`], 1200);
+            if (!result.ok) {
+                flash_status([...result.messages, `tile: ${target_label}`], 1400);
                 return;
             }
-            flash_status([
-                'Erased tile',
-                `tile: ${target_label}`,
-            ], 1200);
+            flash_status([...result.messages, `tile: ${target_label}`], 1200);
             return;
         }
 
@@ -2364,11 +2957,15 @@ export function create_app_state(): AppState {
         }
 
         if (tool === 'character') {
-            if (!target.entity_ref || (target.entity_type !== 'npc' && target.entity_type !== 'actor')) {
-                flash_status(['Character tool: click an actor or npc'], 1200);
+            if (target.entity_ref && (target.entity_type === 'npc' || target.entity_type === 'actor')) {
+                await open_character_editor_module(target.entity_ref);
                 return;
             }
-            await open_character_editor_module(target.entity_ref);
+            if (target.entity_ref && target.entity_type === 'item') {
+                select_item_for_entity_inspector({ item_ref: target.entity_ref, owner_kind: 'place', owner_id: target.place_id });
+                return;
+            }
+            await open_tile_editor_module(target.place_id, target.tile_position.x, target.tile_position.y, target.world_z);
             return;
         }
 
@@ -2434,8 +3031,8 @@ export function create_app_state(): AppState {
     }
 
     function place_painter_module_ids(include_auxiliary: boolean = false): string[] {
-        const ids = ['place_painter_toolbar', 'place_painter_tools', 'place_painter_palette', 'place_painter_layers', 'place_painter_status'];
-        if (include_auxiliary) ids.push('character_editor_module', 'option_picker_module');
+        const ids = ['place_painter_toolbar', 'place_painter_tools', 'place_painter_palette', 'place_painter_layers', 'place_painter_tool_properties'];
+        if (include_auxiliary) ids.push('entity_inspector_module', 'tag_picker_module', 'option_picker_module');
         return ids;
     }
 
@@ -2444,8 +3041,47 @@ export function create_app_state(): AppState {
             set_module_visible(id, visible);
         }
         if (!visible) {
-            close_character_editor_module();
+            close_entity_inspector();
+            close_tag_picker_module();
             close_option_picker();
+        }
+    }
+
+    async function erase_place_painter_entity(args: {
+        place_id: string;
+        entity_ref: string;
+        entity_type: 'npc' | 'actor' | 'item' | 'pile';
+        source_x: number;
+        source_y: number;
+        source_z: number;
+    }): Promise<{ ok: boolean; error?: string; deleted_count?: number }> {
+        const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+        try {
+            debug_log(`[PLACE_PAINTER] erase entity request ${JSON.stringify(args)}`);
+            const res = await fetch(`${base_url}/api/place_painter/erase`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    slot: APP_CONFIG.selected_data_slot,
+                    place_id: args.place_id,
+                    entity_ref: args.entity_ref,
+                    entity_type: args.entity_type,
+                    source: { x: args.source_x, y: args.source_y, z: args.source_z },
+                }),
+            });
+            const data = await res.json().catch(() => null as any);
+            if (!res.ok || !data?.ok) {
+                debug_warn(`[PLACE_PAINTER] erase entity failed ${JSON.stringify({ args, status: res.status, data })}`);
+                return { ok: false, error: String(data?.error ?? 'erase_failed') };
+            }
+            if (args.entity_type === 'item' || args.entity_type === 'pile') {
+                apply_local_place_entity_erase(args.place_id, args.entity_ref, args.entity_type, args.source_x, args.source_y, args.source_z);
+            }
+            await update_current_place(args.place_id, { source: 'place_painter_erase_entity', preserve_place_painter: true });
+            debug_log(`[PLACE_PAINTER] erase entity success ${JSON.stringify({ ...args, deleted_count: Number(data?.deleted ?? 0) })}`);
+            return { ok: true, deleted_count: Number(data?.deleted ?? 0) || 0 };
+        } catch {
+            return { ok: false, error: 'network_error' };
         }
     }
 
@@ -2496,7 +3132,7 @@ export function create_app_state(): AppState {
             { tool: 'rect_stroke', label: 'Rect', icon: '□' },
             { tool: 'rect_fill', label: 'Fill', icon: '■' },
             { tool: 'bucket', label: 'Bucket', icon: '▧' },
-            { tool: 'character', label: 'Char', icon: '@' },
+            { tool: 'character', label: 'Entity', icon: '@' },
             { tool: 'move', label: 'Move', icon: '◎' },
             { tool: 'place_create', label: 'Create', icon: '+' },
             { tool: 'place_delete', label: 'Delete', icon: '-' },
@@ -2510,34 +3146,7 @@ export function create_app_state(): AppState {
             { id: 'tools', label: () => `TOOLS:${module_registry.is_visible('place_painter_tools') ? 'ON' : 'OFF'}`, width: 14, onPress: () => set_module_visible('place_painter_tools', !module_registry.is_visible('place_painter_tools')) },
             { id: 'picker', label: () => `PICKER:${module_registry.is_visible('place_painter_palette') ? 'ON' : 'OFF'}`, width: 16, onPress: () => set_module_visible('place_painter_palette', !module_registry.is_visible('place_painter_palette')) },
             { id: 'layers', label: () => `LAYERS:${module_registry.is_visible('place_painter_layers') ? 'ON' : 'OFF'}`, width: 16, onPress: () => set_module_visible('place_painter_layers', !module_registry.is_visible('place_painter_layers')) },
-            { id: 'status', label: () => `STATUS:${module_registry.is_visible('place_painter_status') ? 'ON' : 'OFF'}`, width: 16, onPress: () => set_module_visible('place_painter_status', !module_registry.is_visible('place_painter_status')) },
-            { id: 'kind', label: () => `KIND:${ui_state.place_painter.selected_palette_kind.toUpperCase()}`, width: 14, onPress: async () => {
-                const next = ui_state.place_painter.selected_palette_kind === 'tile' ? 'item' : 'tile';
-                const ok = next === 'tile'
-                    ? await ensure_place_painter_tile_palette_loaded()
-                    : await ensure_place_painter_item_palette_loaded();
-                if (!ok) {
-                    flash_status([`${next} palette load failed`], 1200);
-                    return;
-                }
-                ui_state.place_painter.selected_palette_kind = next;
-                flash_status([`Palette: ${next}`], 1200);
-            } },
-            { id: 'section', label: () => `SEC:${ui_state.place_painter.selected_tile_palette_section.toUpperCase()}`, width: 16, onPress: () => {
-                if (ui_state.place_painter.selected_palette_kind !== 'tile') {
-                    flash_status(['Section filter only applies to tile palette'], 1200);
-                    return;
-                }
-                const order: Array<'blocks' | 'connectors' | 'all'> = ['blocks', 'connectors', 'all'];
-                const idx = order.indexOf(ui_state.place_painter.selected_tile_palette_section);
-                const next = order[(idx + 1) % order.length] ?? 'blocks';
-                ui_state.place_painter.selected_tile_palette_section = next;
-                const active_entries = get_active_place_painter_tile_entries();
-                if (!active_entries.some((entry) => entry.id === ui_state.place_painter.selected_palette_entry_id)) {
-                    ui_state.place_painter.selected_palette_entry_id = active_entries[0]?.id ?? ui_state.place_painter.tile_palette_entries[0]?.id ?? null;
-                }
-                flash_status([`Tile section: ${next}`], 1200);
-            } },
+            { id: 'props', label: () => `PROPS:${module_registry.is_visible('place_painter_tool_properties') ? 'ON' : 'OFF'}`, width: 15, onPress: () => set_module_visible('place_painter_tool_properties', !module_registry.is_visible('place_painter_tool_properties')) },
         ];
         return make_screen_overlay_bar_module({
             id: 'place_painter_toolbar',
@@ -2545,13 +3154,13 @@ export function create_app_state(): AppState {
             get_screen_size: () => ({ width: APP_CONFIG.grid_width, height: APP_CONFIG.grid_height }),
             get_is_visible: () => ui_state.place_painter.active && module_registry.is_visible('place_painter_toolbar'),
             default_expanded: true,
-            get_status_text: () => `KIND:${ui_state.place_painter.selected_palette_kind.toUpperCase()} SEC:${ui_state.place_painter.selected_tile_palette_section.toUpperCase()} L:${ui_state.place_painter.left_click_tool} R:${ui_state.place_painter.right_click_tool}`,
+            get_status_text: () => `KIND:${ui_state.place_painter.selected_palette_kind.toUpperCase()} SEC:${ui_state.place_painter.selected_tile_palette_section.toUpperCase()} ER:${get_place_painter_erase_targets_summary()} L:${ui_state.place_painter.left_click_tool} R:${ui_state.place_painter.right_click_tool}`,
             buttons: () => buttons.map((btn) => ({
                 id: btn.id,
                 label: btn.label,
                 width: btn.width,
                 onPress: () => { void btn.onPress(); },
-                is_active: () => btn.id === 'kind' || btn.id === 'section',
+                is_active: () => btn.id === 'props',
             })),
         });
     }
@@ -2573,26 +3182,32 @@ export function create_app_state(): AppState {
             on_tool_select: (tool) => {
                 ui_state.place_painter.selected_tool = tool as any;
                 ui_state.place_painter.left_click_tool = tool as any;
+                ui_state.place_painter.active_property_side = 'left';
                 if (String(tool) !== 'move') {
                     ui_state.place_painter.move_pending_source = null;
                     ui_state.place_painter.move_drag_session = null;
                 }
                 ui_state.place_painter.shape_session = null;
+                save_place_painter_prefs_debounced();
                 flash_status([`Left tool: ${String(tool)}`], 900);
             },
             on_left_click_tool_change: (tool) => {
                 ui_state.place_painter.left_click_tool = tool as any;
                 ui_state.place_painter.selected_tool = tool as any;
+                ui_state.place_painter.active_property_side = 'left';
                 if (String(tool) !== 'move') {
                     ui_state.place_painter.move_pending_source = null;
                     ui_state.place_painter.move_drag_session = null;
                 }
                 ui_state.place_painter.shape_session = null;
+                save_place_painter_prefs_debounced();
                 flash_status([`Left tool: ${String(tool)}`], 900);
             },
             on_right_click_tool_change: (tool) => {
                 ui_state.place_painter.right_click_tool = tool as any;
+                ui_state.place_painter.active_property_side = 'right';
                 ui_state.place_painter.shape_session = null;
+                save_place_painter_prefs_debounced();
                 flash_status([`Right tool: ${String(tool)}`], 900);
             },
             on_move: (new_rect) => persist_module_rect('place_painter_tools', new_rect),
@@ -2601,38 +3216,187 @@ export function create_app_state(): AppState {
         });
     }
 
-    function make_place_painter_status_module(rect: Rect): Module {
-        return make_place_painter_window_module({
-            id: 'place_painter_status',
+    function make_place_painter_tool_properties_module(rect: Rect): Module {
+        return make_tool_properties_module({
+            id: 'place_painter_tool_properties',
             rect,
-            title: 'PAINTER STATUS',
-            draw_content(c, rect) {
-                const selectedTile = get_selected_place_painter_tile_entry();
-                const selectedItem = get_selected_place_painter_item_entry();
-                const selected = ui_state.place_painter.selected_palette_kind === 'item' ? selectedItem : selectedTile;
-                const lines = [
-                    `L:${ui_state.place_painter.left_click_tool} R:${ui_state.place_painter.right_click_tool}`,
-                    `kind: ${ui_state.place_painter.selected_palette_kind}`,
-                    `selected: ${selected?.id ?? 'none'}`,
-                    selected ? `${selected.display_char} ${selected.name}` : 'no selection',
-                    ui_state.place_painter.move_pending_source
-                        ? `move: ${ui_state.place_painter.move_pending_source.entity_ref} -> ?`
-                        : (ui_state.place_painter.move_drag_session
-                            ? `move: ${ui_state.place_painter.move_drag_session.entity_ref} -> ${ui_state.place_painter.move_drag_session.target_x},${ui_state.place_painter.move_drag_session.target_y},${ui_state.place_painter.move_drag_session.target_z}`
-                            : 'move: (none)'),
-                    ui_state.place_painter.last_primary_target
-                        ? `last: ${ui_state.place_painter.last_primary_target.x},${ui_state.place_painter.last_primary_target.y},${ui_state.place_painter.last_primary_target.z}`
-                        : 'last: none',
-                ];
-                for (let i = 0; i < lines.length; i += 1) {
-                    const y = rect.y1 - 2 - i;
-                    if (y <= rect.y0) break;
-                    const line = lines[i]!;
-                    for (let j = 0; j < line.length && rect.x0 + 1 + j < rect.x1; j += 1) {
-                        c.set(rect.x0 + 1 + j, y, { char: line[j]!, rgb: get_color_by_name('off_white').rgb, weight_index: 4, render_index: 6, style: 'regular' });
-                    }
+            title: 'PROPS',
+            get_current_tool: () => get_place_painter_tool_for_side(ui_state.place_painter.active_property_side),
+            get_brush_size: () => 1,
+            on_brush_size_change: () => {},
+            get_space_replace: () => false,
+            on_space_replace_change: () => {},
+            get_text_spacing: () => 0,
+            on_text_spacing_change: () => {},
+            get_text_charlead: () => 0,
+            on_text_charlead_change: () => {},
+            get_text_enterlead: () => 0,
+            on_text_enterlead_change: () => {},
+            get_text_enterspace: () => 0,
+            on_text_enterspace_change: () => {},
+            get_selection_mode: () => 'replace',
+            on_selection_mode_change: () => {},
+            get_paste_space_replace: () => false,
+            on_paste_space_replace_change: () => {},
+            get_paste_scale: () => 1,
+            on_paste_scale_change: () => {},
+            get_paste_ignore_space: () => false,
+            on_paste_ignore_space_change: () => {},
+            get_paste_ignore_black: () => false,
+            on_paste_ignore_black_change: () => {},
+            get_paste_ignore_white: () => false,
+            on_paste_ignore_white_change: () => {},
+            get_paste_ignore_color: () => false,
+            on_paste_ignore_color_change: () => {},
+            get_paste_ignore_color_rgb: () => ({ r: 255, g: 255, b: 255 }),
+            on_paste_ignore_color_select: () => {},
+            get_gradiator_state: () => ({ slots: ['  ', '  ', '  '], activeSlot: 0, isEditing: false, editSlot: null, editCursorX: 0 }),
+            on_gradiator_slot_select: () => {},
+            on_gradiator_char_select: () => {},
+            on_gradiator_add_char: () => {},
+            on_gradiator_remove_char: () => {},
+            on_gradiator_char_set: () => {},
+            property_rows: (): ToolPropertyRow[] => {
+                const left_tool = get_place_painter_tool_for_side('left');
+                const right_tool = get_place_painter_tool_for_side('right');
+                const rows: ToolPropertyRow[] = [];
+                const has_tool = (tool: PlacePainterTool): boolean => left_tool === tool || right_tool === tool;
+                if (has_tool('paint') || has_tool('erase')) {
+                    rows.push({
+                        type: 'dual_slider',
+                        id: 'brush_size',
+                        label: 'Brush Size',
+                        min: 1,
+                        max: 5,
+                        left_value: get_place_painter_brush_size_for_side('left'),
+                        right_value: get_place_painter_brush_size_for_side('right'),
+                        format_value: (value) => `${value}x${value}`,
+                        on_change: (value, side) => {
+                            set_place_painter_brush_size_for_side(side, value);
+                            flash_status([`${side === 'left' ? 'Left' : 'Right'} brush: ${value}x${value}`], 900);
+                        },
+                    });
                 }
+                if (left_tool === 'erase' || right_tool === 'erase') {
+                    rows.push({
+                        type: 'dual_toggle',
+                        id: 'erase_tiles',
+                        label: 'Tiles',
+                        left_value: is_place_painter_erase_target_enabled('tiles', 'left'),
+                        right_value: is_place_painter_erase_target_enabled('tiles', 'right'),
+                        left_enabled: left_tool === 'erase',
+                        right_enabled: right_tool === 'erase',
+                        on_toggle: (side) => {
+                            ui_state.place_painter.active_property_side = side;
+                            toggle_place_painter_erase_target('tiles', side);
+                            flash_status([`${side === 'left' ? 'Left' : 'Right'} erase tiles: ${is_place_painter_erase_target_enabled('tiles', side) ? 'on' : 'off'}`, `Targets: ${get_place_painter_erase_targets_summary()}`], 1000);
+                        },
+                    });
+                    rows.push({
+                        type: 'dual_toggle',
+                        id: 'erase_characters',
+                        label: 'Characters',
+                        note: '(stub)',
+                        left_value: is_place_painter_erase_target_enabled('characters', 'left'),
+                        right_value: is_place_painter_erase_target_enabled('characters', 'right'),
+                        left_enabled: left_tool === 'erase',
+                        right_enabled: right_tool === 'erase',
+                        on_toggle: (side) => {
+                            ui_state.place_painter.active_property_side = side;
+                            toggle_place_painter_erase_target('characters', side);
+                            flash_status([`${side === 'left' ? 'Left' : 'Right'} erase characters: ${is_place_painter_erase_target_enabled('characters', side) ? 'on' : 'off'}`, 'Character erase remains stubbed'], 1100);
+                        },
+                    });
+                    rows.push({
+                        type: 'dual_toggle',
+                        id: 'erase_items',
+                        label: 'Items',
+                        left_value: is_place_painter_erase_target_enabled('items', 'left'),
+                        right_value: is_place_painter_erase_target_enabled('items', 'right'),
+                        left_enabled: left_tool === 'erase',
+                        right_enabled: right_tool === 'erase',
+                        on_toggle: (side) => {
+                            ui_state.place_painter.active_property_side = side;
+                            toggle_place_painter_erase_target('items', side);
+                            flash_status([`${side === 'left' ? 'Left' : 'Right'} erase items: ${is_place_painter_erase_target_enabled('items', side) ? 'on' : 'off'}`, `Targets: ${get_place_painter_erase_targets_summary()}`], 1000);
+                        },
+                    });
+                }
+                if (has_tool('bucket')) {
+                    rows.push({
+                        type: 'info',
+                        id: 'bucket_info',
+                        text: 'Bucket fills matching tiles on current z',
+                    });
+                }
+                if (has_tool('line') || has_tool('rect_stroke') || has_tool('rect_fill')) {
+                    rows.push({
+                        type: 'info',
+                        id: 'shape_info',
+                        text: 'Shape tools apply selected tile on current z',
+                    });
+                }
+                if (has_tool('move')) {
+                    const pending = ui_state.place_painter.move_pending_source;
+                    rows.push({
+                        type: 'info',
+                        id: 'move_info',
+                        text: pending
+                            ? `Move src ${pending.x},${pending.y},${pending.z}`
+                            : 'Move: click entity, then destination',
+                    });
+                }
+                if (has_tool('character')) {
+                    rows.push({
+                        type: 'single_cycle',
+                        id: 'entity_inspector_mode',
+                        label: 'Entity Win',
+                        value: get_entity_inspector_mode_label(),
+                        options: ['replace'],
+                        enabled: false,
+                        on_cycle: () => {
+                            flash_status([`Entity windows: ${get_entity_inspector_mode_label()}`], 1000);
+                        },
+                    });
+                    rows.push({
+                        type: 'info',
+                        id: 'character_info',
+                        text: 'Entity tool reuses the main inspector window',
+                    });
+                }
+                if (has_tool('place_create')) {
+                    rows.push({
+                        type: 'info',
+                        id: 'place_create_info',
+                        text: 'Create: click border of selected place',
+                    });
+                }
+                if (has_tool('place_delete')) {
+                    rows.push({
+                        type: 'info',
+                        id: 'place_delete_info',
+                        text: 'Delete: click adjacent place to remove',
+                    });
+                }
+                if (has_tool('place_resize')) {
+                    rows.push({
+                        type: 'info',
+                        id: 'place_resize_info',
+                        text: 'Resize: click a face of selected place',
+                    });
+                }
+                if (has_tool('region_tool')) {
+                    rows.push({
+                        type: 'info',
+                        id: 'region_tool_info',
+                        text: 'Region tool not implemented yet',
+                    });
+                }
+                return rows;
             },
+            on_move: (new_rect) => persist_module_rect('place_painter_tool_properties', new_rect),
+            on_resize: (new_rect) => persist_module_rect('place_painter_tool_properties', new_rect),
+            on_close: () => set_module_visible('place_painter_tool_properties', false),
         });
     }
 
@@ -2718,6 +3482,20 @@ export function create_app_state(): AppState {
                 ? 'ITEMS'
                 : `TILES:${ui_state.place_painter.selected_tile_palette_section.toUpperCase()}`,
             draw_content(c, rect) {
+                const activeLabel = ui_state.place_painter.selected_palette_kind === 'item' ? '[ITEMS]' : '[TILES]';
+                const inactiveLabel = ui_state.place_painter.selected_palette_kind === 'item' ? ' tiles ' : ' items ';
+                for (let i = 0; i < activeLabel.length && rect.x0 + 2 + i < rect.x1; i += 1) {
+                    c.set(rect.x0 + 2 + i, rect.y1 - 2, { char: activeLabel[i]!, rgb: get_color_by_name('vivid_yellow').rgb, weight_index: 5, render_index: 6, style: 'regular' });
+                }
+                for (let i = 0; i < inactiveLabel.length && rect.x0 + 11 + i < rect.x1; i += 1) {
+                    c.set(rect.x0 + 11 + i, rect.y1 - 2, { char: inactiveLabel[i]!, rgb: get_color_by_name('medium_gray').rgb, weight_index: 4, render_index: 6, style: 'regular' });
+                }
+                if (ui_state.place_painter.selected_palette_kind === 'tile') {
+                    const sectionLabel = `[${ui_state.place_painter.selected_tile_palette_section.toUpperCase()}]`;
+                    for (let i = 0; i < sectionLabel.length && rect.x0 + 20 + i < rect.x1; i += 1) {
+                        c.set(rect.x0 + 20 + i, rect.y1 - 2, { char: sectionLabel[i]!, rgb: get_color_by_name('vivid_blue').rgb, weight_index: 5, render_index: 6, style: 'regular' });
+                    }
+                }
                 const entries = ui_state.place_painter.selected_palette_kind === 'item'
                     ? ui_state.place_painter.item_palette_entries
                     : get_active_place_painter_tile_entries();
@@ -2725,7 +3503,7 @@ export function create_app_state(): AppState {
                     ? ui_state.place_painter.selected_item_palette_entry_id
                     : ui_state.place_painter.selected_palette_entry_id;
                 const cols = Math.max(2, Math.floor((rect.x1 - rect.x0 - 2) / 2));
-                const rows = Math.max(1, rect.y1 - rect.y0 - 2);
+                const rows = Math.max(1, rect.y1 - rect.y0 - 3);
                 const selectedIndex = Math.max(0, entries.findIndex((entry) => entry.id === selectedId));
                 const pageSize = cols * rows;
                 const page = Math.floor(selectedIndex / pageSize);
@@ -2736,7 +3514,7 @@ export function create_app_state(): AppState {
                     const row = Math.floor(idx / cols);
                     const col = idx % cols;
                     const x = rect.x0 + 2 + (col * 2);
-                    const y = rect.y1 - 2 - row;
+                    const y = rect.y1 - 3 - row;
                     if (y <= rect.y0 || x >= rect.x1) continue;
                     const isSelected = entry.id === selectedId;
                     c.set(x, y, { char: entry.display_char, rgb: isSelected ? get_color_by_name('off_white').rgb : get_color_by_name('off_white').rgb, weight_index: isSelected ? 6 : 4, render_index: 6, style: 'regular' });
@@ -2747,9 +3525,29 @@ export function create_app_state(): AppState {
             },
             on_pointer_down_content(e, rect) {
                 if (e.button !== 0 || !ui_state.place_painter.active) return;
+                if (e.y === rect.y1 - 2 && e.x >= rect.x0 + 2 && e.x <= rect.x0 + 18) {
+                    const next = ui_state.place_painter.selected_palette_kind === 'tile' ? 'item' : 'tile';
+                    const load = next === 'tile'
+                        ? ensure_place_painter_tile_palette_loaded
+                        : ensure_place_painter_item_palette_loaded;
+                    void load().then((ok) => {
+                        if (!ok) {
+                            flash_status([`${next} palette load failed`], 1200);
+                            return;
+                        }
+                        toggle_place_painter_palette_kind();
+                        flash_status([`Palette: ${ui_state.place_painter.selected_palette_kind}`], 1200);
+                    });
+                    return;
+                }
+                if (ui_state.place_painter.selected_palette_kind === 'tile' && e.y === rect.y1 - 2 && e.x >= rect.x0 + 20 && e.x <= rect.x0 + 33) {
+                    cycle_place_painter_tile_palette_section();
+                    flash_status([`Tile section: ${ui_state.place_painter.selected_tile_palette_section}`], 1200);
+                    return;
+                }
                 const cols = Math.max(2, Math.floor((rect.x1 - rect.x0 - 2) / 2));
-                const rows = Math.max(1, rect.y1 - rect.y0 - 2);
-                const row = rect.y1 - 2 - e.y;
+                const rows = Math.max(1, rect.y1 - rect.y0 - 3);
+                const row = rect.y1 - 3 - e.y;
                 const col = Math.floor((e.x - (rect.x0 + 2)) / 2);
                 if (row < 0 || col < 0 || col >= cols || row >= rows) return;
                 if (row < 0) return;
@@ -2767,10 +3565,12 @@ export function create_app_state(): AppState {
                 if (!entry) return;
                 if (ui_state.place_painter.selected_palette_kind === 'item') {
                     ui_state.place_painter.selected_item_palette_entry_id = entry.id;
+                    save_place_painter_prefs_debounced();
                     flash_status([`Item: ${entry.id}`, `${entry.display_char} ${entry.name}`], 1200);
                     return;
                 }
                 ui_state.place_painter.selected_palette_entry_id = entry.id;
+                save_place_painter_prefs_debounced();
                 flash_status([`Tile: ${entry.id}`, `${entry.display_char} ${entry.name}`], 1200);
             },
         });
@@ -2778,6 +3578,7 @@ export function create_app_state(): AppState {
 
     const MODULE_LAYOUT_STORAGE_KEY = 'thaumworld:module_layout:v1';
     const PLACE_FOCUS_Z_STORAGE_KEY = 'thaumworld:place_focus_z:v1';
+    const PLACE_PAINTER_PREFS_STORAGE_KEY = 'thaumworld:place_painter_prefs:v1';
     const PLACE_VISIBLE_PLANE_RADIUS = 0;
 
     function is_rect(v: any): v is Rect {
@@ -2857,21 +3658,124 @@ export function create_app_state(): AppState {
         }, 200);
     }
 
+    function load_place_painter_prefs(): void {
+        try {
+            const raw = window.localStorage?.getItem(PLACE_PAINTER_PREFS_STORAGE_KEY);
+            if (!raw) return;
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === 'object') {
+                if (typeof parsed.left_click_tool === 'string') ui_state.place_painter.left_click_tool = parsed.left_click_tool as PlacePainterTool;
+                if (typeof parsed.right_click_tool === 'string') ui_state.place_painter.right_click_tool = parsed.right_click_tool as PlacePainterTool;
+                if (typeof parsed.selected_tool === 'string') ui_state.place_painter.selected_tool = parsed.selected_tool as PlacePainterTool;
+                if (parsed.entity_inspector_mode === 'replace' || parsed.entity_inspector_mode === 'duplicate') ui_state.place_painter.entity_inspector_mode = parsed.entity_inspector_mode;
+                if (typeof parsed.active_property_side === 'string' && (parsed.active_property_side === 'left' || parsed.active_property_side === 'right')) {
+                    ui_state.place_painter.active_property_side = parsed.active_property_side;
+                }
+                if (typeof parsed.left_brush_size === 'number') ui_state.place_painter.left_brush_size = Math.max(1, Math.min(5, Math.floor(parsed.left_brush_size)));
+                if (typeof parsed.right_brush_size === 'number') ui_state.place_painter.right_brush_size = Math.max(1, Math.min(5, Math.floor(parsed.right_brush_size)));
+                if (parsed.left_erase_targets && typeof parsed.left_erase_targets === 'object') {
+                    ui_state.place_painter.left_erase_targets.tiles = Boolean(parsed.left_erase_targets.tiles);
+                    ui_state.place_painter.left_erase_targets.characters = Boolean(parsed.left_erase_targets.characters);
+                    ui_state.place_painter.left_erase_targets.items = Boolean(parsed.left_erase_targets.items);
+                }
+                if (parsed.right_erase_targets && typeof parsed.right_erase_targets === 'object') {
+                    ui_state.place_painter.right_erase_targets.tiles = Boolean(parsed.right_erase_targets.tiles);
+                    ui_state.place_painter.right_erase_targets.characters = Boolean(parsed.right_erase_targets.characters);
+                    ui_state.place_painter.right_erase_targets.items = Boolean(parsed.right_erase_targets.items);
+                }
+                if (parsed.selected_palette_kind === 'tile' || parsed.selected_palette_kind === 'item') ui_state.place_painter.selected_palette_kind = parsed.selected_palette_kind;
+                if (parsed.selected_tile_palette_section === 'blocks' || parsed.selected_tile_palette_section === 'connectors' || parsed.selected_tile_palette_section === 'all') {
+                    ui_state.place_painter.selected_tile_palette_section = parsed.selected_tile_palette_section;
+                }
+                if (typeof parsed.selected_palette_entry_id === 'string' || parsed.selected_palette_entry_id === null) ui_state.place_painter.selected_palette_entry_id = parsed.selected_palette_entry_id;
+                if (typeof parsed.selected_item_palette_entry_id === 'string' || parsed.selected_item_palette_entry_id === null) ui_state.place_painter.selected_item_palette_entry_id = parsed.selected_item_palette_entry_id;
+            }
+        } catch {
+            // ignore
+        }
+    }
+
+    function save_place_painter_prefs(): void {
+        try {
+            window.localStorage?.setItem(PLACE_PAINTER_PREFS_STORAGE_KEY, JSON.stringify({
+                left_click_tool: ui_state.place_painter.left_click_tool,
+                right_click_tool: ui_state.place_painter.right_click_tool,
+                selected_tool: ui_state.place_painter.selected_tool,
+                entity_inspector_mode: ui_state.place_painter.entity_inspector_mode,
+                active_property_side: ui_state.place_painter.active_property_side,
+                left_brush_size: ui_state.place_painter.left_brush_size,
+                right_brush_size: ui_state.place_painter.right_brush_size,
+                left_erase_targets: ui_state.place_painter.left_erase_targets,
+                right_erase_targets: ui_state.place_painter.right_erase_targets,
+                selected_palette_kind: ui_state.place_painter.selected_palette_kind,
+                selected_tile_palette_section: ui_state.place_painter.selected_tile_palette_section,
+                selected_palette_entry_id: ui_state.place_painter.selected_palette_entry_id,
+                selected_item_palette_entry_id: ui_state.place_painter.selected_item_palette_entry_id,
+            }));
+        } catch {
+            // ignore
+        }
+    }
+
+    let place_painter_prefs_timer: number | null = null;
+    function save_place_painter_prefs_debounced(): void {
+        if (place_painter_prefs_timer) clearTimeout(place_painter_prefs_timer);
+        place_painter_prefs_timer = window.setTimeout(() => {
+            place_painter_prefs_timer = null;
+            save_place_painter_prefs();
+        }, 100);
+    }
+
     function get_persisted_rect(module_id: string, fallback: Rect): Rect {
         return ui_state.modules.positions.get(module_id) ?? fallback;
     }
 
+    function persist_entity_inspector_rect(rect: Rect): void {
+        persist_module_rect('entity_inspector_module', rect);
+    }
+
     function set_module_visible(module_id: string, visible: boolean): void {
         ui_state.modules.visibility.set(module_id, visible);
-        ui_state.modules.registry?.set_visibility(module_id, visible);
+        apply_runtime_module_visibility(module_id);
         if (module_id === 'character_module') ui_state.character.is_visible = visible;
         if (module_id === 'inventory_container') ui_state.container.is_visible = visible;
         persist_module_layout_debounced();
     }
 
+    const SHELL_MODULE_IDS = new Set(['bg', 'status', 'world_entry_module', 'world_join_module', 'actor_claim_module', 'character_creation_module']);
+
+    function has_active_actor_claim(): boolean {
+        return get_controlled_actor_id().length > 0;
+    }
+
+    function should_module_be_runtime_visible(module_id: string): boolean {
+        if (module_id === 'actor_claim_module') return ui_state.actor_claim.is_visible;
+        if (module_id === 'character_creation_module') return ui_state.character_creation.is_visible;
+        if (module_id === 'world_entry_module') return ui_state.world_entry.is_visible;
+        if (module_id === 'world_join_module') return ui_state.world_join.is_visible;
+        if (SHELL_MODULE_IDS.has(module_id)) return true;
+        const desired = ui_state.modules.visibility.has(module_id) ? Boolean(ui_state.modules.visibility.get(module_id)) : true;
+        if (!has_active_actor_claim()) return false;
+        if (!ui_state.actor_claim.game_ready) return false;
+        return desired;
+    }
+
+    function apply_runtime_module_visibility(module_id?: string): void {
+        const registry = ui_state.modules.registry;
+        if (!registry?.set_visibility) return;
+        if (module_id) {
+            registry.set_visibility(module_id, should_module_be_runtime_visible(module_id));
+            return;
+        }
+        for (const module of registry.get_all()) {
+            registry.set_visibility(module.id, should_module_be_runtime_visible(module.id));
+        }
+    }
+
     // Load persisted module state early so it affects initial rects/visibility.
     load_persisted_module_layout();
     load_place_focus_z();
+    load_place_painter_prefs();
 
     // Shared drag state for cross-module drag-and-drop
     const drag_state = {
@@ -2879,6 +3783,7 @@ export function create_app_state(): AppState {
         source_module: null as string | null,
         item_instance_id: null as string | null,
         source_container_id: null as string | null,
+        source_target_id: null as string | null,
         source_slot_index: null as number | null,
         item_definition: null as ItemDefinition | null,
         current_x: 0,
@@ -2888,12 +3793,13 @@ export function create_app_state(): AppState {
         return_start_x: 0,
         return_start_y: 0,
 
-        start_drag(source: string, item_id: string, container_id: string, def: ItemDefinition, slot_index?: number) {
+        start_drag(source: string, item_id: string, container_id: string, def: ItemDefinition, slot_index?: number, target_id?: string) {
             this.is_dragging = true;
             this.is_rejected = false;
             this.source_module = source;
             this.item_instance_id = item_id;
             this.source_container_id = container_id;
+            this.source_target_id = target_id ?? null;
             this.source_slot_index = slot_index ?? null;
             this.item_definition = def;
             debug_log(`[DragState] Started drag: ${def.name} from ${source}${slot_index !== undefined ? ` slot ${slot_index}` : ''}`);
@@ -3027,6 +3933,7 @@ export function create_app_state(): AppState {
             this.source_module = null;
             this.item_instance_id = null;
             this.source_container_id = null;
+            this.source_target_id = null;
             this.source_slot_index = null;
             this.item_definition = null;
             // Clear highlighted slots
@@ -3203,6 +4110,22 @@ export function create_app_state(): AppState {
         return [];
     }
 
+    async function apply_item_legality_highlight(
+        item_instance_id: string,
+        source_container_id: string | null,
+        definition: ItemDefinition,
+        source_label: string,
+    ): Promise<void> {
+        const compatible = await get_compatible_slots_for_instance(item_instance_id, source_container_id, definition);
+        ui_state.character.highlighted_slots = compatible;
+        ui_state.character.hovered_item = { name: definition.name, source: source_label };
+    }
+
+    function clear_item_legality_highlight(): void {
+        ui_state.character.highlighted_slots = [];
+        ui_state.character.hovered_item = null;
+    }
+
     // Helper function to find items in open containers compatible with a body slot
     // Returns array of { container_id, slot_index } for items that can equip to slot_name
     function get_compatible_items_for_slot(slot_name: string): Array<{ container_id: string; slot_index: number }> {
@@ -3213,49 +4136,48 @@ export function create_app_state(): AppState {
         
         // Search through all open containers
         for (const container_id of ui_state.container.open_containers) {
-            const container_data = ui_state.container.container_data_map.get(container_id);
-            if (!container_data) {
-                debug_log(`[get_compatible_items_for_slot] No data for container: ${container_id}`);
+            const owner_view = ui_state.container.owner_view_by_container_id.get(container_id);
+            if (!owner_view) {
+                debug_log(`[get_compatible_items_for_slot] No owner view for container: ${container_id}`);
                 continue;
             }
-            
-            debug_log(`[get_compatible_items_for_slot] Checking container: ${container_id} with ${container_data.contents.length} items`);
-            
-            const contents = container_data.contents;
-            for (let i = 0; i < contents.length; i++) {
-                const entry = contents[i];
-                if (!entry?.definition) {
-                    debug_log(`[get_compatible_items_for_slot] Item ${i} in ${container_id} missing definition`);
-                    continue;
-                }
-                
-                const item_name = entry.definition.name || entry.instance?.def_id || 'unknown';
-                // defs+deltas migration: treat instance.tags as non-authoritative; prefer definition/effective tags.
-                const tags: any[] = entry.definition?.tags ?? [];
 
-                function meta_matches(m: any, target: string): boolean {
-                    const mm = String(m ?? '').trim();
-                    if (!mm) return false;
-                    if (mm === 'hand') return target === 'hand_left' || target === 'hand_right';
-                    if (mm === 'leg') return target === 'leg_left' || target === 'leg_right';
-                    return mm === target;
-                }
+            let item_count = 0;
+            for (const group of owner_view.groups) {
+                for (const surface of group.surfaces) {
+                    for (const slot of surface.slots) {
+                        const item = slot.item;
+                        if (!item) continue;
+                        item_count += 1;
+                        const item_name = item.name || item.def_id || 'unknown';
+                        const tags: any[] = item.tags ?? [];
+                        const item_ref = { tags, resolved_tag_states: (item as any).resolved_tag_states ?? [] };
 
-                const armor_tag = tags.find((t: any) => t?.name === 'ARMOR');
-                const garb_tag = tags.find((t: any) => t?.name === 'GARB');
-                const armor_ok = armor_tag && Array.isArray(armor_tag.meta) && armor_tag.meta.some((m: any) => meta_matches(m, slot_name));
-                const garb_ok = garb_tag && Array.isArray(garb_tag.meta) && garb_tag.meta.some((m: any) => meta_matches(m, slot_name));
+                        function meta_matches(m: any, target: string): boolean {
+                            const mm = String(m ?? '').trim();
+                            if (!mm) return false;
+                            if (mm === 'hand') return target === 'hand_left' || target === 'hand_right';
+                            if (mm === 'leg') return target === 'leg_left' || target === 'leg_right';
+                            return mm === target;
+                        }
 
-                // Hand tool slots: any item can be held.
-                const tool_ok = slot_name === 'hand_left' || slot_name === 'hand_right';
+                        const armor_tag = has_resolved_tag(item_ref as any, 'ARMOR') ? tags.find((t: any) => t?.name === 'ARMOR') : null;
+                        const garb_tag = has_resolved_tag(item_ref as any, 'GARB') ? tags.find((t: any) => t?.name === 'GARB') : null;
+                        const armor_ok = armor_tag && Array.isArray(armor_tag.meta) && armor_tag.meta.some((m: any) => meta_matches(m, slot_name));
+                        const garb_ok = garb_tag && Array.isArray(garb_tag.meta) && garb_tag.meta.some((m: any) => meta_matches(m, slot_name));
 
-                if (tool_ok || armor_ok || garb_ok) {
-                    compatible_items.push({ container_id, slot_index: i });
-                    debug_log(`[get_compatible_items_for_slot] ✓ ${item_name} (slot ${i}) compatible with ${slot_name}`);
-                } else {
-                    debug_log(`[get_compatible_items_for_slot] ✗ ${item_name} (slot ${i}) NOT compatible`);
+                        const tool_ok = slot_name === 'hand_left' || slot_name === 'hand_right';
+
+                        if (tool_ok || armor_ok || garb_ok) {
+                            compatible_items.push({ container_id, slot_index: slot.slot_index });
+                            debug_log(`[get_compatible_items_for_slot] ✓ ${item_name} (${surface.id}:${slot.slot_index}) compatible with ${slot_name}`);
+                        } else {
+                            debug_log(`[get_compatible_items_for_slot] ✗ ${item_name} (${surface.id}:${slot.slot_index}) NOT compatible`);
+                        }
+                    }
                 }
             }
+            debug_log(`[get_compatible_items_for_slot] Checking container: ${container_id} with ${item_count} items`);
         }
         
         debug_log(`[get_compatible_items_for_slot] Found ${compatible_items.length} compatible items for ${slot_name}`);
@@ -3299,14 +4221,16 @@ export function create_app_state(): AppState {
                 if (value && typeof (value as any).id === 'string') {
                     const item = value as any;
                     equipped.set(item.id, {
-                        instance: { id: item.id, def_id: item.def_id, qty: item.qty || 1, tags: item.tags || [] } as ItemInstance,
+                        instance: { id: item.id, def_id: item.def_id, qty: item.qty || 1, tags: item.tags || [], resolved_tag_states: item.resolved_tag_states || [], value_mag: item.value_mag || null } as any,
                         definition: {
                             id: item.def_id,
                             name: item.name,
                             weight: item.weight || 0,
                             tags: item.tags || [],
+                            resolved_tag_states: item.resolved_tag_states || [],
+                            value_mag: item.value_mag || null,
                             display_char: (typeof item.display_char === 'string' && item.display_char.length > 0) ? String(item.display_char).charAt(0) : '·',
-                        } as ItemDefinition,
+                        } as unknown as ItemDefinition,
                     });
                     debug_log(`[LOAD_EQUIPPED] ${slot_name}.${slot_type}: ${item.name} (${item.id})`);
                 }
@@ -3316,14 +4240,16 @@ export function create_app_state(): AppState {
                     const item = s.garb[i];
                     if (item && typeof item.id === 'string') {
                         equipped.set(item.id, {
-                            instance: { id: item.id, def_id: item.def_id, qty: item.qty || 1, tags: item.tags || [] } as ItemInstance,
+                            instance: { id: item.id, def_id: item.def_id, qty: item.qty || 1, tags: item.tags || [], resolved_tag_states: item.resolved_tag_states || [], value_mag: item.value_mag || null } as any,
                             definition: {
                                 id: item.def_id,
                                 name: item.name,
                                 weight: item.weight || 0,
                                 tags: item.tags || [],
+                                resolved_tag_states: item.resolved_tag_states || [],
+                                value_mag: item.value_mag || null,
                                 display_char: (typeof (item as any).display_char === 'string' && String((item as any).display_char).length > 0) ? String((item as any).display_char).charAt(0) : '·',
-                            } as ItemDefinition,
+                            } as unknown as ItemDefinition,
                         });
                         debug_log(`[LOAD_EQUIPPED] ${slot_name}.garb.${i}: ${item.name} (${item.id})`);
                     }
@@ -3339,19 +4265,23 @@ export function create_app_state(): AppState {
         body_slots: EquipmentSlots;
         equipped_items: Map<string, { instance: ItemInstance; definition: ItemDefinition }>;
         weight_data: { current: number; max: number };
+        owner_view?: OwnerInventoryView | null;
     }> {
         const slot = APP_CONFIG.selected_data_slot;
-        const response = await fetch(`http://localhost:8787/api/character?ref=${encodeURIComponent(character_ref)}&slot=${slot}`);
+        const url = character_ref.startsWith('actor.')
+            ? `http://localhost:8787/api/actor/private_state?actor_ref=${encodeURIComponent(character_ref)}&slot=${slot}&session_token=${encodeURIComponent(get_session_token())}`
+            : `http://localhost:8787/api/character?ref=${encodeURIComponent(character_ref)}&slot=${slot}`;
+        const response = await fetch(url);
         if (!response.ok) {
             throw new Error(`character_fetch_failed:${response.status}`);
         }
 
         const payload = await response.json();
-        if (!payload?.ok || !payload?.character) {
+        if (!payload?.ok || (!payload?.character && !payload?.actor)) {
             throw new Error(String(payload?.error ?? 'character_payload_invalid'));
         }
 
-        const character = payload.character as any;
+        const character = payload.actor ? payload.actor as any : payload.character as any;
         const body_slots = (character?.body_slots && typeof character.body_slots === 'object')
             ? character.body_slots as EquipmentSlots
             : {};
@@ -3365,6 +4295,7 @@ export function create_app_state(): AppState {
                 current: get_character_weight_from_body_slots(body_slots),
                 max: strength * 2.5,
             },
+            owner_view: payload?.view ?? null,
         };
     }
 
@@ -3405,6 +4336,179 @@ export function create_app_state(): AppState {
         return id ? `id: ${id}` : character_ref;
     }
 
+    function build_tile_entity_ref(place_id: string, x: number, y: number, z: number): string {
+        return `tile.${String(place_id)}.${Math.floor(x)}.${Math.floor(y)}.${Math.floor(z)}`;
+    }
+
+    function parse_tile_entity_ref(entity_ref: string | null): { place_id: string; x: number; y: number; z: number } | null {
+        const ref = String(entity_ref ?? '').trim();
+        if (!ref.startsWith('tile.')) return null;
+        const parts = ref.split('.');
+        if (parts.length < 5) return null;
+        const z = Math.floor(Number(parts[parts.length - 1] ?? NaN));
+        const y = Math.floor(Number(parts[parts.length - 2] ?? NaN));
+        const x = Math.floor(Number(parts[parts.length - 3] ?? NaN));
+        const place_id = parts.slice(1, parts.length - 3).join('.');
+        if (!place_id || !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
+        return { place_id, x, y, z };
+    }
+
+    function get_entity_editor_subject_label(entity_ref: string | null): string {
+        if (!entity_ref) return 'no target';
+        const tile_ref = parse_tile_entity_ref(entity_ref);
+        if (tile_ref) return `tile ${tile_ref.x},${tile_ref.y},${tile_ref.z}`;
+        if (entity_ref.startsWith('item.')) {
+            const original = ui_state.item_editor.original as any;
+            if (ui_state.item_editor.item_ref === entity_ref && original) {
+                const name = String(original?.name ?? entity_ref).trim();
+                const qty = Math.max(1, Math.floor(Number(original?.qty ?? 1) || 1));
+                return qty > 1 ? `${name} x${qty}` : name;
+            }
+            return entity_ref;
+        }
+        return get_character_editor_subject_label(entity_ref);
+    }
+
+    function get_entity_inspector_mode_label(): string {
+        return 'replace';
+    }
+
+    function open_entity_inspector(kind: 'character' | 'tile' | 'item', entity_ref: string): void {
+        ui_state.entity_inspector.is_visible = true;
+        ui_state.entity_inspector.entity_kind = kind;
+        ui_state.entity_inspector.entity_ref = entity_ref;
+        set_module_visible('entity_inspector_module', true);
+    }
+
+    function close_entity_inspector(): void {
+        ui_state.entity_inspector.is_visible = false;
+        ui_state.entity_inspector.entity_kind = null;
+        ui_state.entity_inspector.entity_ref = null;
+        set_module_visible('entity_inspector_module', false);
+    }
+
+    function get_tile_editor_grow_summary(payload: Record<string, unknown> | null): { count: number; period?: number; slots?: number; yield_qty?: number; item_defs?: string[] } {
+        const states = Array.isArray((payload as any)?.resolved_tag_states) ? (payload as any).resolved_tag_states : [];
+        const grows = resolve_grow_tag_configs(states as any);
+        const first = grows[0] ?? null;
+        return {
+            count: grows.length,
+            period: first?.period_breaths,
+            slots: first?.max_grow_slots,
+            yield_qty: first?.yield_qty,
+            item_defs: Array.isArray(first?.item_def_ids) ? first.item_def_ids : undefined,
+        };
+    }
+
+    function get_container_capacity_summary(payload: Record<string, unknown> | null): { has_container: boolean; capacity_mag?: number; max_slots?: number } {
+        const states = Array.isArray((payload as any)?.resolved_tag_states) ? (payload as any).resolved_tag_states : [];
+        const capacity_mag = resolve_container_capacity_mag_from_states(states as any);
+        if (capacity_mag === null) return { has_container: false };
+        return {
+            has_container: true,
+            capacity_mag,
+            max_slots: project_container_max_slots(capacity_mag),
+        };
+    }
+
+    function get_item_editor_spoil_summary(payload: Record<string, unknown> | null): { has_spoils: boolean; period?: number; elapsed?: number; remaining?: number; result_item_def_id?: string | null } {
+        const states = Array.isArray((payload as any)?.resolved_tag_states) ? (payload as any).resolved_tag_states : [];
+        const config = resolve_spoils_tag_config_from_states(states as any);
+        if (!config) return { has_spoils: false };
+        const last = Number((payload as any)?.last_breath_processed);
+        const current = Number((payload as any)?.current_breath_index);
+        const elapsed = Number.isFinite(last) && Number.isFinite(current)
+            ? Math.max(0, Math.floor(current) - Math.floor(last))
+            : undefined;
+        const remaining = elapsed === undefined ? undefined : Math.max(0, config.period_breaths - elapsed);
+        return {
+            has_spoils: true,
+            period: config.period_breaths,
+            elapsed,
+            remaining,
+            result_item_def_id: config.result_item_def_id,
+        };
+    }
+
+    function get_item_editor_tool_summary(payload: Record<string, unknown> | null): { has_tool: boolean; tool_name?: string; potency_mag?: number; potency_dice?: string } {
+        const states = Array.isArray((payload as any)?.resolved_tag_states) ? (payload as any).resolved_tag_states : [];
+        const tool_state = states.find((state: any) => String(state?.name ?? '').trim().toUpperCase() === 'TOOL') ?? null;
+        if (!tool_state) return { has_tool: false };
+        const subtype = states.find((state: any) => {
+            if (!state || String(state?.name ?? '').trim().toUpperCase() === 'TOOL') return false;
+            const meta = Array.isArray(state?.definition?.meta) ? state.definition.meta.map((entry: unknown) => String(entry ?? '').trim().toLowerCase()) : [];
+            const potency_mag = Number((state?.dim_mag ?? {})?.potency_roll_mag);
+            return meta.includes('tool') || Number.isFinite(potency_mag);
+        }) ?? null;
+        if (!subtype) return { has_tool: true };
+        const potency_mag = Number((subtype?.dim_mag ?? {})?.potency_roll_mag);
+        const normalized_mag = Number.isFinite(potency_mag) ? Math.floor(potency_mag) : Math.floor(Number(subtype?.stored_mag ?? 0) || 0);
+        return {
+            has_tool: true,
+            tool_name: String(subtype?.name ?? '').trim() || 'TOOL',
+            potency_mag: normalized_mag,
+            potency_dice: get_damage_dice_from_mag(normalized_mag),
+        };
+    }
+
+    function format_legality_detail(detail: unknown): string {
+        if (!detail || typeof detail !== 'object') return '';
+        const any_detail = detail as Record<string, unknown>;
+        const stack_reason = String(any_detail.stack_reason ?? '').trim();
+        if (stack_reason.startsWith('tag_stack_pairing_failed')) {
+            const tag_name = String(any_detail.tag_name ?? stack_reason.split(':')[1] ?? '').trim();
+            if (tag_name === 'FROST!') return 'stack needs matching FROST! tags on both items';
+            if (tag_name === 'GARB') return 'stack needs matching GARB tags on both items';
+            if (tag_name === 'SPOILS') return 'stack needs matching SPOILS tags on both items';
+            if (tag_name === 'FIRE!') return 'stack needs matching FIRE! tags on both items';
+            return tag_name ? `stack needs matching ${tag_name} tags on both items` : 'stack tags do not pair cleanly';
+        }
+        if (stack_reason.startsWith('tag_stack_illegal')) {
+            const tag_name = String(any_detail.tag_name ?? stack_reason.split(':')[1] ?? '').trim();
+            const mismatch = String(any_detail.mismatch ?? '').trim();
+            if (tag_name === 'FROST!') {
+                if (mismatch === 'dimensions') return 'stack blocked: FROST! non-intensity values must match';
+                if (mismatch === 'info') return 'stack blocked: FROST! info must match';
+                return 'stack blocked by tag rule: FROST!';
+            }
+            if (tag_name === 'GARB') {
+                if (mismatch === 'dimensions') return 'stack blocked: GARB dimensions must match exactly';
+                if (mismatch === 'info') return 'stack blocked: GARB info must match exactly';
+                return 'stack blocked: GARB must match exactly';
+            }
+            if (tag_name === 'SPOILS') {
+                if (mismatch === 'dimensions') return 'stack blocked: SPOILS time values must match';
+                if (mismatch === 'info') return 'stack blocked: SPOILS result data must match';
+                return 'stack blocked: SPOILS must match exactly';
+            }
+            if (tag_name === 'FIRE!') {
+                if (mismatch === 'dimensions') return 'stack blocked: FIRE! non-intensity values must match';
+                if (mismatch === 'info') return 'stack blocked: FIRE! info must match';
+                return 'stack blocked by tag rule: FIRE!';
+            }
+            return tag_name ? `stack blocked by tag rule: ${tag_name}` : 'stack blocked by tag rule';
+        }
+        if (stack_reason === 'max_stack_exceeded') {
+            return `stack would exceed max size ${String(any_detail.max_stack ?? '?')}`;
+        }
+        if (stack_reason) return `stack blocked: ${stack_reason}`;
+        return JSON.stringify(detail);
+    }
+
+    function maybe_focus_container_tag(entity_ref: string): void {
+        if (ui_state.tag_picker.entity_ref === entity_ref) return;
+        const container_tag = get_character_tags(entity_ref).find((tag) => String(tag?.name ?? '').trim().toUpperCase() === 'CONTAINER') ?? null;
+        if (!container_tag) return;
+        load_tag_picker_from_entity(entity_ref, container_tag);
+    }
+
+    function maybe_focus_grow_tag_for_tile(tile_ref: string): void {
+        if (ui_state.tag_picker.entity_ref === tile_ref) return;
+        const grow_tag = get_character_tags(tile_ref).find((tag) => String(tag?.name ?? '').trim().toUpperCase() === 'GROW') ?? null;
+        if (!grow_tag) return;
+        load_tag_picker_from_entity(tile_ref, grow_tag);
+    }
+
     function get_transcript_speaker_name(sender: string): string {
         const ref = String(sender ?? '').trim();
         if (!ref) return 'Unknown';
@@ -3414,13 +4518,12 @@ export function create_app_state(): AppState {
         return ref;
     }
 
-    function sync_character_display_name_in_loaded_state(character_ref: string, next_name_raw: unknown): void {
-        const next_name = typeof next_name_raw === 'string' ? next_name_raw.trim() : '';
-        if (!next_name) return;
+    function sync_character_runtime_in_loaded_state(character_ref: string, character: Record<string, unknown>): void {
+        const next_name = String(character?.name ?? '').trim();
         const next_initial = next_name.charAt(0).toUpperCase();
 
         for (const target of ui_state.controls.targets) {
-            if (target.ref === character_ref) target.label = next_name;
+            if (target.ref === character_ref && next_name) target.label = next_name;
         }
 
         const patch_place = (place: any): void => {
@@ -3428,16 +4531,26 @@ export function create_app_state(): AppState {
             if (character_ref.startsWith('npc.') && Array.isArray(place.contents.npcs_present)) {
                 for (const npc of place.contents.npcs_present) {
                     if (String(npc?.npc_ref ?? '') === character_ref) {
-                        npc.name = next_name;
-                        (npc as any).display_char = next_initial;
+                        if (next_name) npc.name = next_name;
+                        if (next_initial) (npc as any).display_char = next_initial;
+                        (npc as any).sex = String(character?.sex ?? '');
+                        (npc as any).title = String(character?.title ?? '');
+                        (npc as any).kind = String((character as any)?.kind ?? (character as any)?.kind_id ?? '');
+                        if (typeof (character as any)?.body_model_id === 'string') (npc as any).body_model_id = String((character as any).body_model_id);
+                        if ((character as any)?.entity_render) (npc as any).entity_render = (character as any).entity_render;
                     }
                 }
             }
             if (character_ref.startsWith('actor.') && Array.isArray(place.contents.actors_present)) {
                 for (const actor of place.contents.actors_present) {
                     if (String(actor?.actor_ref ?? '') === character_ref) {
-                        actor.name = next_name;
-                        (actor as any).display_char = next_initial;
+                        if (next_name) actor.name = next_name;
+                        if (next_initial) (actor as any).display_char = next_initial;
+                        (actor as any).sex = String(character?.sex ?? '');
+                        (actor as any).title = String(character?.title ?? '');
+                        (actor as any).kind = String((character as any)?.kind ?? (character as any)?.kind_id ?? '');
+                        if (typeof (character as any)?.body_model_id === 'string') (actor as any).body_model_id = String((character as any).body_model_id);
+                        if ((character as any)?.entity_render) (actor as any).entity_render = (character as any).entity_render;
                     }
                 }
             }
@@ -3445,9 +4558,13 @@ export function create_app_state(): AppState {
 
         patch_place(ui_state.place.current_place as any);
         for (const place of ui_state.place.scene_places) patch_place(place as any);
+        set_command_handler_place(ui_state.place.current_place);
 
         if (character_ref === get_input_actor_ref()) {
-            ui_state.character.display_name = next_name;
+            if (next_name) ui_state.character.display_name = next_name;
+            ui_state.character.render_meta.kind_id = String((character as any)?.kind ?? (character as any)?.kind_id ?? '') || null;
+            if (typeof (character as any)?.body_model_id === 'string') ui_state.character.render_meta.body_model_id = String((character as any).body_model_id);
+            if ((character as any)?.entity_render) ui_state.character.render_meta.entity_render = (character as any).entity_render;
         }
     }
 
@@ -3465,6 +4582,7 @@ export function create_app_state(): AppState {
         ui_state.character_editor.dirty = false;
         ui_state.character_editor.status_lines = [
             get_character_editor_subject_label(character_ref),
+            typeof (character as any)?.stat_source === 'object' ? `stat source: ${String((character as any)?.stat_source?.kind_id ?? (character as any)?.kind ?? '-')}` : 'stat source: baked',
             'type to edit selected field',
             'ctrl+s save / esc unfocus',
         ];
@@ -3478,8 +4596,7 @@ export function create_app_state(): AppState {
         try {
             const data = await load_character_module_data(character_ref);
             populate_character_editor_state(character_ref, data.character as Record<string, unknown>);
-            ui_state.character_editor.is_visible = true;
-            set_module_visible('character_editor_module', true);
+            open_entity_inspector('character', character_ref);
             flash_status([`Editing ${get_character_editor_subject_label(character_ref)}`], 1200);
         } catch (err) {
             debug_warn('[CharacterEditor] open failed', err);
@@ -3529,11 +4646,12 @@ export function create_app_state(): AppState {
             if (!res.ok || !data?.ok || !data?.character) {
                 throw new Error(String(data?.error ?? `HTTP ${res.status}`));
             }
-            sync_character_display_name_in_loaded_state(character_ref, (data.character as any)?.name);
+            sync_character_runtime_in_loaded_state(character_ref, data.character as Record<string, unknown>);
             populate_character_editor_state(character_ref, data.character as Record<string, unknown>);
             ui_state.character_editor.status_lines = [
                 get_character_editor_subject_label(character_ref),
                 `saved: ${String((data.character as any)?.name ?? '(unnamed)')}`,
+                Object.prototype.hasOwnProperty.call(patch, 'kind') ? 'stats rederived from stat source' : 'stat source preserved',
                 `file: ${String(data?.path ?? 'unknown')}`,
             ];
             ui_state.controls.targets_ready = false;
@@ -3565,14 +4683,573 @@ export function create_app_state(): AppState {
     }
 
     function close_character_editor_module(): void {
-        ui_state.character_editor.is_visible = false;
         close_option_picker();
-        set_module_visible('character_editor_module', false);
+        if (ui_state.entity_inspector.entity_kind === 'character') close_entity_inspector();
+    }
+
+    function populate_tile_editor_state(tile_ref: string, payload: Record<string, unknown>): void {
+        const parsed = parse_tile_entity_ref(tile_ref);
+        if (!parsed) return;
+        const grow = get_tile_editor_grow_summary(payload);
+        const container = get_container_capacity_summary(payload);
+        ui_state.tile_editor.tile_ref = tile_ref;
+        ui_state.tile_editor.place_id = parsed.place_id;
+        ui_state.tile_editor.x = parsed.x;
+        ui_state.tile_editor.y = parsed.y;
+        ui_state.tile_editor.z = parsed.z;
+        ui_state.tile_editor.original = JSON.parse(JSON.stringify(payload ?? {}));
+        ui_state.tile_editor.status_lines = [
+            get_entity_editor_subject_label(tile_ref),
+            grow.count > 0
+                ? `grow: ${grow.count} stream${grow.count === 1 ? '' : 's'} | select GROW to edit`
+                : 'tags edit live through tag picker',
+            grow.count > 0 && grow.period !== undefined
+                ? `period:${grow.period} slots:${grow.slots ?? 0} yield:${grow.yield_qty ?? 0}`
+                : container.has_container
+                    ? `container cap:${container.capacity_mag ?? 1} slots:${container.max_slots ?? 1}`
+                : 'reload to refresh resolved state',
+            'reload to refresh resolved state',
+        ].filter((line, index, all) => line && all.indexOf(line) === index);
+        set_character_tags(tile_ref, (payload as any)?.tags);
+    }
+
+    async function load_tile_editor_data(place_id: string, x: number, y: number, z: number): Promise<Record<string, unknown>> {
+        const res = await fetch(`http://localhost:8787/api/tile/editor?place_id=${encodeURIComponent(place_id)}&x=${Math.floor(x)}&y=${Math.floor(y)}&z=${Math.floor(z)}&slot=${APP_CONFIG.selected_data_slot}`);
+        const data = await res.json().catch(() => null as any);
+        if (!res.ok || !data?.ok || !data?.tile) {
+            throw new Error(String(data?.error ?? `HTTP ${res.status}`));
+        }
+        return data.tile as Record<string, unknown>;
+    }
+
+    async function open_tile_editor_module(place_id: string, x: number, y: number, z: number): Promise<void> {
+        if (!ui_state.place_painter.active) {
+            flash_status(['Tile editor is place-painter only'], 1200);
+            return;
+        }
+        const tile_ref = build_tile_entity_ref(place_id, x, y, z);
+        try {
+            const data = await load_tile_editor_data(place_id, x, y, z);
+            populate_tile_editor_state(tile_ref, data);
+            open_entity_inspector('tile', tile_ref);
+            maybe_focus_grow_tag_for_tile(tile_ref);
+            maybe_focus_container_tag(tile_ref);
+            flash_status([`Editing ${get_entity_editor_subject_label(tile_ref)}`], 1200);
+        } catch (err) {
+            debug_warn('[TileEditor] open failed', err);
+            flash_status(['Tile load failed', `${x},${y},${z}`], 1500);
+        }
+    }
+
+    async function reload_tile_editor_module(): Promise<void> {
+        const tile_ref = ui_state.tile_editor.tile_ref;
+        const parsed = parse_tile_entity_ref(tile_ref);
+        if (!parsed) return;
+        try {
+            const data = await load_tile_editor_data(parsed.place_id, parsed.x, parsed.y, parsed.z);
+            populate_tile_editor_state(tile_ref!, data);
+            ui_state.tile_editor.status_lines = [get_entity_editor_subject_label(tile_ref), 'reloaded'];
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            ui_state.tile_editor.status_lines = [get_entity_editor_subject_label(tile_ref), `reload failed: ${message}`];
+        }
+    }
+
+    async function save_tile_editor_module(): Promise<void> {
+        const tile_ref = ui_state.tile_editor.tile_ref;
+        ui_state.tile_editor.status_lines = [get_entity_editor_subject_label(tile_ref), 'tile tag edits save live'];
+    }
+
+    function close_tile_editor_module(): void {
+        ui_state.tile_editor.tile_ref = null;
+        ui_state.tile_editor.place_id = null;
+        ui_state.tile_editor.original = null;
+        if (ui_state.entity_inspector.entity_kind === 'tile') close_entity_inspector();
+    }
+
+    function clamp_tag_mag(value: unknown, fallback: number = 0): number {
+        return Math.max(0, Math.min(99, Math.floor(Number(value ?? fallback) || 0)));
+    }
+
+    function clamp_dimension_mag(value: unknown, definition?: TagPickerDefinition['dimensions'][number] | null, fallback?: number): number {
+        return clamp_mag(value, definition?.min_mag ?? null, definition?.max_mag ?? null, fallback ?? definition?.default_mag ?? 0);
+    }
+
+    function normalize_dim_mag_for_ui(value: unknown): Record<string, number> | undefined {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+        const out: Record<string, number> = {};
+        for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+            const next_key = String(key ?? '').trim();
+            if (!next_key) continue;
+            out[next_key] = normalize_signed_mag(raw, 0);
+        }
+        return Object.keys(out).length > 0 ? out : undefined;
+    }
+
+    function clone_tag_info_for_ui(value: unknown): unknown[] | undefined {
+        return Array.isArray(value) ? JSON.parse(JSON.stringify(value)) : undefined;
+    }
+
+    function normalize_tag_instance_for_ui(tag: any): TagPickerDraft {
+        const next_mag = clamp_tag_mag(tag?.mag ?? 1, 1);
+        return {
+            key: typeof tag?.key === 'string' ? String(tag.key) : undefined,
+            name: String(tag?.name ?? '').trim().toUpperCase(),
+            mag: next_mag,
+            dim_mag: normalize_dim_mag_for_ui(tag?.dim_mag),
+            meta: Array.isArray(tag?.meta) ? tag.meta.map((entry: unknown) => String(entry ?? '').trim().toUpperCase()).filter(Boolean) : [],
+            info: clone_tag_info_for_ui(tag?.info),
+            source: typeof tag?.source === 'string' ? String(tag.source) : undefined,
+            expiry: Number.isFinite(Number(tag?.expiry)) ? Math.floor(Number(tag.expiry)) : undefined,
+            scope: Array.isArray(tag?.scope)
+                ? tag.scope.map((entry: unknown) => String(entry ?? '').trim().toUpperCase()).filter((entry: string) => entry === 'CHARACTER' || entry === 'ITEM' || entry === 'TILE' || entry === 'TAG') as Array<'CHARACTER' | 'ITEM' | 'TILE' | 'TAG'>
+                : undefined,
+        };
+    }
+
+    function merge_tag_with_definition(tag: TagPickerDraft, definition: TagPickerDefinition | null): TagPickerDraft {
+        const quantity_mag = definition?.quantity_dimension_id ? (tag.dim_mag?.[definition.quantity_dimension_id] ?? tag.mag ?? 1) : 1;
+        const next: TagPickerDraft = {
+            ...tag,
+            mag: clamp_tag_mag(quantity_mag, 1),
+            meta: [...tag.meta],
+            dim_mag: tag.dim_mag ? { ...tag.dim_mag } : undefined,
+            info: clone_tag_info_for_ui(tag.info),
+            scope: Array.isArray(tag.scope) ? [...tag.scope] : undefined,
+        };
+        if (!definition) return next;
+        const next_dim_mag: Record<string, number> = { ...(next.dim_mag ?? {}) };
+        for (const dimension of definition.dimensions) {
+            const existing = next_dim_mag[dimension.id];
+            next_dim_mag[dimension.id] = clamp_dimension_mag(existing ?? dimension.default_mag, dimension, dimension.default_mag);
+        }
+        next.dim_mag = Object.keys(next_dim_mag).length > 0 ? next_dim_mag : undefined;
+        return next;
+    }
+
+    async function fetch_tag_definition_for_ui(name: string): Promise<TagPickerDefinition | null> {
+        const tag_name = String(name ?? '').trim().toUpperCase();
+        if (!tag_name) return null;
+        const res = await fetch(`http://localhost:8787/api/tag/definition?name=${encodeURIComponent(tag_name)}`);
+        const data = await res.json().catch(() => null as any);
+        if (!res.ok || !data?.ok || !data?.definition) throw new Error(String(data?.error ?? `HTTP ${res.status}`));
+        const definition = data.definition as any;
+        return {
+            name: String(definition?.name ?? tag_name),
+            base_tag_value_mag: Number.isFinite(Number(definition?.base_tag_value_mag)) ? Math.floor(Number(definition.base_tag_value_mag)) : 0,
+            quantity_dimension_id: typeof definition?.quantity_dimension_id === 'string' ? String(definition.quantity_dimension_id) : null,
+            dimensions: Array.isArray(definition?.dimensions)
+                ? definition.dimensions.map((dimension: any) => ({
+                    id: String(dimension?.id ?? '').trim(),
+                    label: String(dimension?.label ?? dimension?.id ?? '').trim(),
+                    default_mag: normalize_signed_mag(dimension?.default_mag, 0),
+                    min_mag: Number.isFinite(Number(dimension?.min_mag)) ? Math.floor(Number(dimension.min_mag)) : null,
+                    max_mag: Number.isFinite(Number(dimension?.max_mag)) ? Math.floor(Number(dimension.max_mag)) : null,
+                    description: typeof dimension?.description === 'string' ? String(dimension.description) : null,
+                    value_up_per_mag: Number.isFinite(Number(dimension?.value_up_per_mag)) ? Number(dimension.value_up_per_mag) : undefined,
+                    value_down_per_mag: Number.isFinite(Number(dimension?.value_down_per_mag)) ? Number(dimension.value_down_per_mag) : undefined,
+                })).filter((dimension: TagPickerDefinition['dimensions'][number]) => dimension.id.length > 0)
+                : [],
+        };
+    }
+
+    async function sync_tag_picker_definition(name: string, opts?: { preserve_status?: boolean }): Promise<void> {
+        const tag_name = String(name ?? '').trim().toUpperCase();
+        if (!tag_name) {
+            ui_state.tag_picker.definition = null;
+            return;
+        }
+        try {
+            const definition = await fetch_tag_definition_for_ui(tag_name);
+            ui_state.tag_picker.definition = definition;
+            if (ui_state.tag_picker.draft) {
+                ui_state.tag_picker.draft = merge_tag_with_definition(ui_state.tag_picker.draft, definition);
+            }
+            if (!opts?.preserve_status) update_tag_picker_status(get_entity_editor_subject_label(ui_state.tag_picker.entity_ref), `tag: ${tag_name}`);
+        } catch (err) {
+            ui_state.tag_picker.definition = null;
+            const message = err instanceof Error ? err.message : String(err);
+            update_tag_picker_status(get_entity_editor_subject_label(ui_state.tag_picker.entity_ref), `definition load failed: ${message}`);
+        }
+    }
+
+    function get_character_tags(entity_ref: string | null): TagInstance[] {
+        if (!entity_ref) return [];
+        return ui_state.entity_tags_by_ref.get(entity_ref) ?? [];
+    }
+
+    function set_character_tags(entity_ref: string, tags: unknown): void {
+        const next = Array.isArray(tags)
+            ? tags
+                .map((tag) => normalize_tag_instance_for_ui(tag))
+                .filter((tag) => is_tag_editor_visible(String(tag?.name ?? '')))
+            : [];
+        ui_state.entity_tags_by_ref.set(entity_ref, next);
+        if (entity_ref === get_input_actor_ref()) {
+            ui_state.character.render_meta.tags = next;
+        }
+    }
+
+    function update_tag_picker_status(...lines: string[]): void {
+        ui_state.tag_picker.status_lines = lines.filter((line) => String(line ?? '').trim().length > 0);
+    }
+
+    function find_best_matching_tag(tags: TagInstance[], tag: TagPickerDraft, previous_key?: string | null): TagInstance | null {
+        const next_key = tag_key(tag as any);
+        return tags.find((entry) => tag_key(entry as any) === next_key)
+            ?? tags.find((entry) => previous_key && tag_key(entry as any) === previous_key)
+            ?? tags.find((entry) => String(entry?.name ?? '').trim().toUpperCase() === String(tag.name ?? '').trim().toUpperCase())
+            ?? null;
+    }
+
+    function load_tag_picker_from_entity(entity_ref: string, tag: TagInstance): void {
+        const normalized = normalize_tag_instance_for_ui(tag);
+        ui_state.tag_picker.is_visible = true;
+        ui_state.tag_picker.entity_ref = entity_ref;
+        ui_state.tag_picker.selected_tag_key = tag_key(normalized as any);
+        ui_state.tag_picker.selected_field = 'name';
+        ui_state.tag_picker.original_name = normalized.name;
+        ui_state.tag_picker.draft = {
+            ...normalized,
+            meta: [...normalized.meta],
+            dim_mag: normalized.dim_mag ? { ...normalized.dim_mag } : undefined,
+            info: clone_tag_info_for_ui(normalized.info),
+            scope: Array.isArray(normalized.scope) ? [...normalized.scope] : undefined,
+        };
+        ui_state.tag_picker.meta_text = normalized.meta.join(',');
+        update_tag_picker_status(get_entity_editor_subject_label(entity_ref), `tag: ${normalized.name}`);
+        set_module_visible('tag_picker_module', true);
+        void sync_tag_picker_definition(normalized.name, { preserve_status: true });
+    }
+
+    function close_tag_picker_module(): void {
+        ui_state.tag_picker.is_visible = false;
+        ui_state.tag_picker.entity_ref = null;
+        ui_state.tag_picker.selected_tag_key = null;
+        ui_state.tag_picker.original_name = '';
+        ui_state.tag_picker.draft = null;
+        ui_state.tag_picker.definition = null;
+        ui_state.tag_picker.meta_text = '';
+        if (ui_state.option_picker.target_kind === 'tag_picker') close_option_picker();
+        set_module_visible('tag_picker_module', false);
+    }
+
+    async function apply_tag_picker_draft(): Promise<void> {
+        const entity_ref = ui_state.tag_picker.entity_ref;
+        const draft = ui_state.tag_picker.draft;
+        if (!entity_ref || !draft) return;
+        if (ui_state.tag_picker.definition?.quantity_dimension_id) {
+            const dim_id = ui_state.tag_picker.definition.quantity_dimension_id;
+            draft.mag = clamp_tag_mag(draft.dim_mag?.[dim_id] ?? draft.mag, draft.mag);
+        } else {
+            draft.mag = 1;
+        }
+        ui_state.tag_picker.applying = true;
+        const previous_key = ui_state.tag_picker.selected_tag_key;
+        try {
+            const is_tile = entity_ref.startsWith('tile.');
+            const is_item = entity_ref.startsWith('item.');
+            const tile_ref = parse_tile_entity_ref(entity_ref);
+            const endpoint = is_tile
+                ? 'http://localhost:8787/api/tile/tag/update'
+                : is_item
+                    ? 'http://localhost:8787/api/item/tag/update'
+                    : 'http://localhost:8787/api/character/tag/update';
+            const body = is_tile && tile_ref
+                ? {
+                    slot: APP_CONFIG.selected_data_slot,
+                    place_id: tile_ref.place_id,
+                    x: tile_ref.x,
+                    y: tile_ref.y,
+                    z: tile_ref.z,
+                    mode: 'upsert',
+                    previous_key,
+                    previous_tag_name: ui_state.tag_picker.original_name,
+                    tag: draft,
+                }
+                : is_item
+                    ? {
+                        slot: APP_CONFIG.selected_data_slot,
+                        item_ref: entity_ref,
+                        owner_kind: ui_state.item_editor.owner_kind,
+                        owner_id: ui_state.item_editor.owner_id,
+                        mode: 'upsert',
+                        previous_key,
+                        previous_tag_name: ui_state.tag_picker.original_name,
+                        tag: draft,
+                    }
+                : {
+                    slot: APP_CONFIG.selected_data_slot,
+                    ref: entity_ref,
+                    mode: 'upsert',
+                    previous_key,
+                    previous_tag_name: ui_state.tag_picker.original_name,
+                    tag: draft,
+                };
+            const res = await fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const data = await res.json().catch(() => null as any);
+            const payload = is_tile ? data?.tile : is_item ? data?.item : data?.character;
+            if (!res.ok || !data?.ok || !payload) {
+                throw new Error(String(data?.error ?? `HTTP ${res.status}`));
+            }
+            set_character_tags(entity_ref, (payload as any)?.tags);
+            const next_tags = get_character_tags(entity_ref);
+            const refreshed = find_best_matching_tag(next_tags, draft, previous_key) ?? normalize_tag_instance_for_ui(draft);
+            load_tag_picker_from_entity(entity_ref, refreshed);
+            if (is_tile && tile_ref) {
+                populate_tile_editor_state(entity_ref, payload as Record<string, unknown>);
+                const selected_place_id = ui_state.place.scene_selected_place_id ?? ui_state.place.current_place_id;
+                if (selected_place_id === tile_ref.place_id) void update_current_place(tile_ref.place_id, { source: 'tile_tag_update', preserve_place_painter: true });
+                else void refresh_single_scene_place(tile_ref.place_id);
+            } else if (is_item && ui_state.item_editor.owner_kind && ui_state.item_editor.owner_id) {
+                populate_item_editor_state({ item_ref: entity_ref, owner_kind: ui_state.item_editor.owner_kind, owner_id: ui_state.item_editor.owner_id }, payload as Record<string, unknown>);
+                if (ui_state.item_editor.owner_kind === 'place') {
+                    const selected_place_id = ui_state.place.scene_selected_place_id ?? ui_state.place.current_place_id;
+                    if (selected_place_id === ui_state.item_editor.owner_id) void update_current_place(ui_state.item_editor.owner_id, { source: 'item_tag_update', preserve_place_painter: true });
+                    else void refresh_single_scene_place(ui_state.item_editor.owner_id);
+                } else {
+                    void refresh_actor_owner_inventory_view();
+                }
+            } else if (entity_ref === get_input_actor_ref()) {
+                void refresh_character_data(true);
+            }
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            update_tag_picker_status(get_entity_editor_subject_label(entity_ref), `tag save failed: ${message}`);
+        } finally {
+            ui_state.tag_picker.applying = false;
+        }
+    }
+
+    async function remove_tag_picker_selected(): Promise<void> {
+        const entity_ref = ui_state.tag_picker.entity_ref;
+        const draft = ui_state.tag_picker.draft;
+        const tag_name = draft?.name || ui_state.tag_picker.original_name;
+        const previous_key = ui_state.tag_picker.selected_tag_key;
+        if (!entity_ref || (!tag_name && !previous_key)) return;
+        ui_state.tag_picker.applying = true;
+        try {
+            const is_tile = entity_ref.startsWith('tile.');
+            const is_item = entity_ref.startsWith('item.');
+            const tile_ref = parse_tile_entity_ref(entity_ref);
+            const endpoint = is_tile
+                ? 'http://localhost:8787/api/tile/tag/update'
+                : is_item
+                    ? 'http://localhost:8787/api/item/tag/update'
+                    : 'http://localhost:8787/api/character/tag/update';
+            const body = is_tile && tile_ref
+                ? {
+                    slot: APP_CONFIG.selected_data_slot,
+                    place_id: tile_ref.place_id,
+                    x: tile_ref.x,
+                    y: tile_ref.y,
+                    z: tile_ref.z,
+                    mode: 'remove',
+                    previous_key,
+                    tag_name,
+                }
+                : is_item
+                    ? {
+                        slot: APP_CONFIG.selected_data_slot,
+                        item_ref: entity_ref,
+                        owner_kind: ui_state.item_editor.owner_kind,
+                        owner_id: ui_state.item_editor.owner_id,
+                        mode: 'remove',
+                        previous_key,
+                        tag_name,
+                    }
+                : {
+                    slot: APP_CONFIG.selected_data_slot,
+                    ref: entity_ref,
+                    mode: 'remove',
+                    previous_key,
+                    tag_name,
+                };
+            const res = await fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const data = await res.json().catch(() => null as any);
+            const payload = is_tile ? data?.tile : is_item ? data?.item : data?.character;
+            if (!res.ok || !data?.ok || !payload) {
+                throw new Error(String(data?.error ?? `HTTP ${res.status}`));
+            }
+            set_character_tags(entity_ref, (payload as any)?.tags);
+            update_tag_picker_status(get_entity_editor_subject_label(entity_ref), `removed ${tag_name}`);
+            close_tag_picker_module();
+            if (is_tile && tile_ref) {
+                populate_tile_editor_state(entity_ref, payload as Record<string, unknown>);
+                const selected_place_id = ui_state.place.scene_selected_place_id ?? ui_state.place.current_place_id;
+                if (selected_place_id === tile_ref.place_id) void update_current_place(tile_ref.place_id, { source: 'tile_tag_remove', preserve_place_painter: true });
+                else void refresh_single_scene_place(tile_ref.place_id);
+            } else if (is_item && ui_state.item_editor.owner_kind && ui_state.item_editor.owner_id) {
+                populate_item_editor_state({ item_ref: entity_ref, owner_kind: ui_state.item_editor.owner_kind, owner_id: ui_state.item_editor.owner_id }, payload as Record<string, unknown>);
+                if (ui_state.item_editor.owner_kind === 'place') {
+                    const selected_place_id = ui_state.place.scene_selected_place_id ?? ui_state.place.current_place_id;
+                    if (selected_place_id === ui_state.item_editor.owner_id) void update_current_place(ui_state.item_editor.owner_id, { source: 'item_tag_remove', preserve_place_painter: true });
+                    else void refresh_single_scene_place(ui_state.item_editor.owner_id);
+                } else {
+                    void refresh_actor_owner_inventory_view();
+                }
+            } else if (entity_ref === get_input_actor_ref()) {
+                void refresh_character_data(true);
+            }
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            update_tag_picker_status(get_entity_editor_subject_label(entity_ref), `tag remove failed: ${message}`);
+        } finally {
+            ui_state.tag_picker.applying = false;
+        }
+    }
+
+    async function seed_default_entity_tag(entity_ref: string): Promise<void> {
+        ui_state.tag_picker.entity_ref = entity_ref;
+        ui_state.tag_picker.selected_tag_key = null;
+        ui_state.tag_picker.original_name = '';
+        ui_state.tag_picker.draft = { name: 'CONTAINER', mag: 1, meta: [], dim_mag: undefined, info: undefined, scope: undefined, source: undefined, expiry: undefined };
+        await sync_tag_picker_definition('CONTAINER', { preserve_status: true });
+        await apply_tag_picker_draft();
+    }
+
+    function get_character_ref_for_module_id(module_id: string): string | null {
+        if (module_id === 'character_module') return get_input_actor_ref();
+        if (module_id.startsWith('npc_character_')) return `npc.${module_id.slice('npc_character_'.length)}`;
+        return null;
+    }
+
+    function get_tag_scope_for_entity_ref(entity_ref: string | null): 'CHARACTER' | 'TILE' | 'ITEM' | null {
+        const ref = String(entity_ref ?? '').trim();
+        if (!ref) return null;
+        if (ref.startsWith('actor.') || ref.startsWith('npc.')) return 'CHARACTER';
+        if (ref.startsWith('tile.')) return 'TILE';
+        if (ref.startsWith('item.')) return 'ITEM';
+        return null;
+    }
+
+    type ItemInspectorSelection = {
+        item_ref: string;
+        owner_kind: 'actor' | 'npc' | 'place';
+        owner_id: string;
+    };
+
+    function build_item_selection_from_surface(surface: StorageSurface, slot: StorageSlot): ItemInspectorSelection | null {
+        const item_ref = slot.item?.id ? `item.${slot.item.id}` : null;
+        if (!item_ref) return null;
+        if (surface.owner.kind === 'actor') return { item_ref, owner_kind: 'actor', owner_id: surface.owner.id };
+        if (surface.owner.kind === 'npc') return { item_ref, owner_kind: 'npc', owner_id: surface.owner.id };
+        if (surface.owner.kind === 'tile') return { item_ref, owner_kind: 'place', owner_id: surface.owner.place_id };
+        if (surface.owner.kind === 'structure') return { item_ref, owner_kind: 'place', owner_id: surface.owner.place_id };
+        if (surface.owner.kind === 'item') return { item_ref, owner_kind: surface.owner.owner_kind === 'place' ? 'place' : surface.owner.owner_kind, owner_id: surface.owner.owner_id };
+        return null;
+    }
+
+    function populate_item_editor_state(selection: ItemInspectorSelection, payload: Record<string, unknown>): void {
+        ui_state.item_editor.item_ref = selection.item_ref;
+        ui_state.item_editor.owner_kind = selection.owner_kind;
+        ui_state.item_editor.owner_id = selection.owner_id;
+        ui_state.item_editor.original = JSON.parse(JSON.stringify(payload ?? {}));
+        const container = get_container_capacity_summary(payload);
+        const spoils = get_item_editor_spoil_summary(payload);
+        const tool = get_item_editor_tool_summary(payload);
+        ui_state.item_editor.status_lines = [
+            get_entity_editor_subject_label(selection.item_ref),
+            tool.has_tool
+                ? `tool: ${String(tool.tool_name ?? 'TOOL').toLowerCase()} potency:${tool.potency_dice ?? '-'}`
+                : spoils.has_spoils
+                ? `spoils in ${spoils.period ?? 0} breaths${spoils.result_item_def_id ? ` -> ${spoils.result_item_def_id}` : ' -> delete'}`
+                : container.has_container
+                ? `container cap:${container.capacity_mag ?? 1} slots:${container.max_slots ?? 1}`
+                : 'single-click items to inspect',
+            spoils.has_spoils
+                ? `elapsed:${spoils.elapsed ?? 0} remaining:${spoils.remaining ?? spoils.period ?? 0}`
+                : tool.has_tool
+                ? `potency mag:${tool.potency_mag ?? 0} dice:${tool.potency_dice ?? '-'}`
+                : 'tags edit live through tag picker',
+            'tags edit live through tag picker',
+        ];
+        set_character_tags(selection.item_ref, (payload as any)?.tags);
+    }
+
+    async function load_item_editor_data(selection: ItemInspectorSelection): Promise<Record<string, unknown>> {
+        const res = await fetch('http://localhost:8787/api/item/editor', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ slot: APP_CONFIG.selected_data_slot, ...selection }),
+        });
+        const data = await res.json().catch(() => null as any);
+        if (!res.ok || !data?.ok || !data?.item) throw new Error(String(data?.error ?? `HTTP ${res.status}`));
+        return data.item as Record<string, unknown>;
+    }
+
+    async function open_item_editor_module(selection: ItemInspectorSelection): Promise<void> {
+        try {
+            const data = await load_item_editor_data(selection);
+            populate_item_editor_state(selection, data);
+            open_entity_inspector('item', selection.item_ref);
+            maybe_focus_container_tag(selection.item_ref);
+            flash_status([`Inspecting ${String((data as any)?.name ?? selection.item_ref)}`], 1200);
+        } catch (err) {
+            debug_warn('[ItemEditor] open failed', err);
+            flash_status([`Item load failed`, selection.item_ref], 1500);
+        }
+    }
+
+    function select_item_for_entity_inspector(selection: ItemInspectorSelection): void {
+        void open_item_editor_module(selection);
+    }
+
+    async function reload_item_editor_module(): Promise<void> {
+        const item_ref = ui_state.item_editor.item_ref;
+        const owner_kind = ui_state.item_editor.owner_kind;
+        const owner_id = ui_state.item_editor.owner_id;
+        if (!item_ref || !owner_kind || !owner_id) return;
+        try {
+            const data = await load_item_editor_data({ item_ref, owner_kind, owner_id });
+            populate_item_editor_state({ item_ref, owner_kind, owner_id }, data);
+            ui_state.item_editor.status_lines = [get_entity_editor_subject_label(item_ref), 'reloaded'];
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            ui_state.item_editor.status_lines = [get_entity_editor_subject_label(item_ref), `reload failed: ${message}`];
+        }
+    }
+
+    async function save_item_editor_module(): Promise<void> {
+        const item_ref = ui_state.item_editor.item_ref;
+        ui_state.item_editor.status_lines = [get_entity_editor_subject_label(item_ref), 'item tag edits save live'];
+    }
+
+    async function apply_tag_picker_drop(x: number, y: number): Promise<void> {
+        const draft = ui_state.tag_picker.draft;
+        if (!draft || !ui_state.modules.registry) return;
+        const modules = ui_state.modules.registry.get_all();
+        for (let i = modules.length - 1; i >= 0; i -= 1) {
+            const module = modules[i]!;
+            const entity_ref = get_character_ref_for_module_id(module.id);
+            if (!entity_ref) continue;
+            const hit = get_character_module_tag_row_at(module.rect, x, y, get_character_tags(entity_ref).length);
+            if (!hit) continue;
+            if (hit.kind === 'add') {
+                ui_state.tag_picker.entity_ref = entity_ref;
+                ui_state.tag_picker.original_name = draft.name;
+                await apply_tag_picker_draft();
+                return;
+            }
+            const existing = get_character_tags(entity_ref)[hit.index] ?? null;
+            ui_state.tag_picker.entity_ref = entity_ref;
+            ui_state.tag_picker.original_name = String(existing?.name ?? draft.name).trim().toUpperCase();
+            await apply_tag_picker_draft();
+            return;
+        }
     }
 
     async function open_option_picker(args: {
         title: string;
-        target_kind: 'character_editor';
+        target_kind: 'character_editor' | 'tag_picker' | 'character_creation';
         target_field: string;
         selected_value?: string | null;
         options?: OptionPickerEntry[];
@@ -3608,6 +5285,705 @@ export function create_app_state(): AppState {
         }
     }
 
+    function apply_character_creation_preview(preview: any): void {
+        ui_state.character_creation.preview = {
+            size_mag: Number(preview?.size_mag ?? 0) || 0,
+            carry_capacity: Number(preview?.carry_capacity ?? 0) || 0,
+            base_stats: {
+                con: Number(preview?.base_stats?.con ?? 0) || 0,
+                str: Number(preview?.base_stats?.str ?? 0) || 0,
+                dex: Number(preview?.base_stats?.dex ?? 0) || 0,
+                wis: Number(preview?.base_stats?.wis ?? 0) || 0,
+                int: Number(preview?.base_stats?.int ?? 0) || 0,
+                cha: Number(preview?.base_stats?.cha ?? 0) || 0,
+            },
+            effective_stats: {
+                con: Number(preview?.effective_stats?.con ?? 0) || 0,
+                str: Number(preview?.effective_stats?.str ?? 0) || 0,
+                dex: Number(preview?.effective_stats?.dex ?? 0) || 0,
+                wis: Number(preview?.effective_stats?.wis ?? 0) || 0,
+                int: Number(preview?.effective_stats?.int ?? 0) || 0,
+                cha: Number(preview?.effective_stats?.cha ?? 0) || 0,
+            },
+            kind_stat_changes: { ...((preview?.kind_stat_changes as Record<string, number> | undefined) ?? {}) },
+        };
+    }
+
+    async function refresh_character_creation_bootstrap(kind_id?: string): Promise<void> {
+        ui_state.character_creation.is_loading = true;
+        try {
+            const query = kind_id ? `?kind_id=${encodeURIComponent(kind_id)}` : '';
+            const res = await fetch(`http://localhost:8787/api/character/create/bootstrap${query}`);
+            const data = await res.json().catch(() => null) as any;
+            if (!res.ok || !data?.ok) {
+                throw new Error(String(data?.error ?? `character_create_bootstrap_failed:${res.status}`));
+            }
+            ui_state.character_creation.bootstrap.kinds = Array.isArray(data.kinds)
+                ? data.kinds.map((kind: any) => ({ value: String(kind.value ?? ''), label: String(kind.label ?? kind.value ?? ''), description: typeof kind.description === 'string' ? kind.description : undefined }))
+                : [];
+            ui_state.character_creation.bootstrap.sex_options = Array.isArray(data.sex_options)
+                ? data.sex_options.map((entry: any) => ({ value: String(entry.value ?? ''), label: String(entry.label ?? entry.value ?? '') }))
+                : [];
+            const selected_kind = String(data.selected_value ?? ui_state.character_creation.bootstrap.kinds[0]?.value ?? '').trim();
+            if (selected_kind) ui_state.character_creation.draft.kind = selected_kind;
+            if (!ui_state.character_creation.draft.sex) {
+                ui_state.character_creation.draft.sex = String(ui_state.character_creation.bootstrap.sex_options[0]?.value ?? 'female');
+            }
+            apply_character_creation_preview(data.preview);
+        } finally {
+            ui_state.character_creation.is_loading = false;
+        }
+    }
+
+    async function open_character_creation_module(): Promise<void> {
+        ui_state.actor_claim.is_visible = false;
+        ui_state.character_creation.is_visible = true;
+        ui_state.character_creation.selected_field = 'name';
+        ui_state.character_creation.status_lines = ['choose a kind', 'type a name and title'];
+        apply_runtime_module_visibility();
+        await refresh_character_creation_bootstrap(ui_state.character_creation.draft.kind || undefined);
+    }
+
+    function close_character_creation_module(): void {
+        ui_state.character_creation.is_visible = false;
+        ui_state.actor_claim.is_visible = true;
+        apply_runtime_module_visibility();
+    }
+
+    async function reset_character_creation_draft(): Promise<void> {
+        ui_state.character_creation.draft = { kind: '', title: '', name: '', sex: 'female' };
+        ui_state.character_creation.created_actor_ref = null;
+        await refresh_character_creation_bootstrap();
+        ui_state.character_creation.status_lines = ['draft reset', 'choose a kind'];
+    }
+
+    function update_character_creation_field(key: string, value: string): void {
+        if (key === 'size' || key === 'carry' || key.startsWith('stat_')) return;
+        (ui_state.character_creation.draft as any)[key] = value;
+    }
+
+    async function open_character_creation_field_picker(field_key: string): Promise<void> {
+        ui_state.character_creation.selected_field = field_key;
+        if (field_key === 'kind') {
+            await open_option_picker({
+                title: 'PICK KIND',
+                target_kind: 'character_creation',
+                target_field: 'kind',
+                selected_value: ui_state.character_creation.draft.kind,
+                options: ui_state.character_creation.bootstrap.kinds,
+            });
+            return;
+        }
+        if (field_key === 'sex') {
+            await open_option_picker({
+                title: 'PICK SEX',
+                target_kind: 'character_creation',
+                target_field: 'sex',
+                selected_value: ui_state.character_creation.draft.sex,
+                options: ui_state.character_creation.bootstrap.sex_options,
+            });
+        }
+    }
+
+    function get_character_creation_fields(): CharacterCreationField[] {
+        const preview = ui_state.character_creation.preview;
+        return [
+            { key: 'kind', label: 'kind', value: ui_state.character_creation.draft.kind || '(pick kind)' },
+            { key: 'title', label: 'title', value: ui_state.character_creation.draft.title || '' },
+            { key: 'name', label: 'name', value: ui_state.character_creation.draft.name || '' },
+            { key: 'sex', label: 'sex', value: ui_state.character_creation.draft.sex || '(pick sex)' },
+            { key: 'size', label: 'size', value: String(preview.size_mag), editable: false },
+            { key: 'carry', label: 'carry', value: String(preview.carry_capacity), editable: false },
+            { key: 'base_con', label: 'base con', value: String(preview.base_stats.con), editable: false },
+            { key: 'base_str', label: 'base str', value: String(preview.base_stats.str), editable: false },
+            { key: 'base_dex', label: 'base dex', value: String(preview.base_stats.dex), editable: false },
+            { key: 'base_wis', label: 'base wis', value: String(preview.base_stats.wis), editable: false },
+            { key: 'base_int', label: 'base int', value: String(preview.base_stats.int), editable: false },
+            { key: 'base_cha', label: 'base cha', value: String(preview.base_stats.cha), editable: false },
+            { key: 'stat_con', label: 'eff con', value: String(preview.effective_stats.con), editable: false },
+            { key: 'stat_str', label: 'eff str', value: String(preview.effective_stats.str), editable: false },
+            { key: 'stat_dex', label: 'eff dex', value: String(preview.effective_stats.dex), editable: false },
+            { key: 'stat_wis', label: 'eff wis', value: String(preview.effective_stats.wis), editable: false },
+            { key: 'stat_int', label: 'eff int', value: String(preview.effective_stats.int), editable: false },
+            { key: 'stat_cha', label: 'eff cha', value: String(preview.effective_stats.cha), editable: false },
+        ];
+    }
+
+    async function submit_character_creation(): Promise<void> {
+        await ensure_multiplayer_session_bootstrap();
+        const draft = ui_state.character_creation.draft;
+        if (!draft.kind) {
+            ui_state.character_creation.status_lines = ['pick a kind first'];
+            return;
+        }
+        if (!draft.name.trim()) {
+            ui_state.character_creation.status_lines = ['type a character name'];
+            return;
+        }
+        ui_state.character_creation.is_submitting = true;
+        try {
+            const res = await fetch('http://localhost:8787/api/character/create', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    slot: APP_CONFIG.selected_data_slot,
+                    session_token: get_session_token(),
+                    kind_id: draft.kind,
+                    title: draft.title,
+                    name: draft.name,
+                    sex: draft.sex,
+                }),
+            });
+            const data = await res.json().catch(() => null) as any;
+            if (!res.ok || !data?.ok || typeof data?.actor_ref !== 'string') {
+                throw new Error(String(data?.error ?? `character_create_failed:${res.status}`));
+            }
+            ui_state.character_creation.created_actor_ref = String(data.actor_ref).trim();
+            ui_state.character_creation.status_lines = [`created ${String(data.actor_name ?? draft.name).trim() || draft.name}`, 'returning to claim module'];
+            close_character_creation_module();
+            ui_state.actor_claim.is_visible = true;
+            ui_state.actor_claim.selected_actor_ref = ui_state.character_creation.created_actor_ref;
+            await refresh_actor_claim_state(['actor created', 'select claim to enter the world']);
+        } finally {
+            ui_state.character_creation.is_submitting = false;
+        }
+    }
+
+    async function refresh_actor_claim_state(status_lines?: string[]): Promise<void> {
+        await ensure_multiplayer_session_bootstrap();
+        const session_token = get_session_token();
+        const url = `http://localhost:8787/api/actors/claimable?slot=${encodeURIComponent(String(APP_CONFIG.selected_data_slot))}&session_token=${encodeURIComponent(session_token)}`;
+        ui_state.actor_claim.is_loading = true;
+        ui_state.actor_claim.error = null;
+        try {
+            const res = await fetch(url);
+            const data = await res.json().catch(() => null) as {
+                ok?: boolean;
+                error?: string;
+                current_actor_ref?: string | null;
+                actors?: Array<{
+                    actor_ref: string;
+                    actor_id: string;
+                    actor_name: string;
+                    claimed_by_self: boolean;
+                    claimed_by_other: boolean;
+                }>;
+            } | null;
+            if (!res.ok || !data?.ok || !Array.isArray(data?.actors)) {
+                throw new Error(String(data?.error ?? `claimable_fetch_failed:${res.status}`));
+            }
+            ui_state.actor_claim.actors = data.actors.map((actor) => ({
+                actor_ref: String(actor.actor_ref ?? '').trim(),
+                actor_id: String(actor.actor_id ?? '').trim(),
+                actor_name: String(actor.actor_name ?? actor.actor_id ?? actor.actor_ref ?? '').trim(),
+                claimed_by_self: Boolean(actor.claimed_by_self),
+                claimed_by_other: Boolean(actor.claimed_by_other),
+                claimed_by_client_session_id: null,
+                can_claim: !actor.claimed_by_other,
+            }));
+            ui_state.actor_claim.current_actor_ref = typeof data.current_actor_ref === 'string' ? data.current_actor_ref : null;
+            if (!ui_state.actor_claim.selected_actor_ref || !ui_state.actor_claim.actors.some((actor) => actor.actor_ref === ui_state.actor_claim.selected_actor_ref)) {
+                const preferred = ui_state.actor_claim.current_actor_ref
+                    ?? ui_state.actor_claim.actors.find((actor) => actor.can_claim)?.actor_ref
+                    ?? ui_state.actor_claim.actors[0]?.actor_ref
+                    ?? null;
+                ui_state.actor_claim.selected_actor_ref = preferred;
+            }
+            ui_state.actor_claim.status_lines = status_lines ?? [
+                ui_state.actor_claim.current_actor_ref ? 'release before switching actors' : 'select an actor to enter the world',
+                'guest mode: one claim at a time',
+            ];
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            ui_state.actor_claim.error = message;
+            ui_state.actor_claim.status_lines = status_lines ?? ['claim list failed', message];
+            throw err;
+        } finally {
+            ui_state.actor_claim.is_loading = false;
+            apply_runtime_module_visibility('actor_claim_module');
+        }
+    }
+
+    async function claim_actor(actor_ref: string): Promise<void> {
+        await ensure_multiplayer_session_bootstrap();
+        ui_state.actor_claim.is_submitting = true;
+        ui_state.actor_claim.error = null;
+        try {
+            const res = await fetch('http://localhost:8787/api/actors/claim', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    slot: APP_CONFIG.selected_data_slot,
+                    session_token: get_session_token(),
+                    actor_ref,
+                }),
+            });
+            const data = await res.json().catch(() => null) as any;
+            if (!res.ok || !data?.ok || typeof data?.controlled_actor_ref !== 'string') {
+                throw new Error(String(data?.error ?? `actor_claim_failed:${res.status}`));
+            }
+            const controlled_actor_ref = String(data.controlled_actor_ref).trim();
+            const actor_id = get_character_id_from_ref(controlled_actor_ref);
+            if (!actor_id) throw new Error('actor_claim_missing_actor_id');
+            (APP_CONFIG as any).input_actor_id = actor_id;
+            persist_controlled_actor_ref(controlled_actor_ref);
+            set_current_actor_ref(controlled_actor_ref);
+            ui_state.actor_claim.current_actor_ref = controlled_actor_ref;
+            ui_state.actor_claim.selected_actor_ref = controlled_actor_ref;
+            ui_state.character.display_name = typeof data?.controlled_actor_name === 'string' && data.controlled_actor_name.trim().length > 0
+                ? data.controlled_actor_name.trim()
+                : ui_state.character.display_name;
+            ui_state.actor_claim.status_lines = [`claimed ${ui_state.character.display_name || actor_id}`, 'loading world state...'];
+            ui_state.actor_claim.is_visible = false;
+            ui_state.actor_claim.is_blocking = false;
+            ui_state.actor_claim.game_ready = false;
+            await load_claimed_actor_runtime(actor_id, controlled_actor_ref, 'actor_claim_sync');
+            flash_status([`Claimed ${ui_state.character.display_name || actor_id}`], 1400);
+            apply_runtime_module_visibility();
+            void poll_window_feeds();
+        } finally {
+            ui_state.actor_claim.is_submitting = false;
+            apply_runtime_module_visibility('actor_claim_module');
+        }
+    }
+
+    async function release_claimed_actor(): Promise<void> {
+        await ensure_multiplayer_session_bootstrap();
+        ui_state.actor_claim.is_submitting = true;
+        try {
+            const res = await fetch('http://localhost:8787/api/actors/release', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    slot: APP_CONFIG.selected_data_slot,
+                    session_token: get_session_token(),
+                }),
+            });
+            const data = await res.json().catch(() => null) as any;
+            if (!res.ok || !data?.ok) {
+                throw new Error(String(data?.error ?? `actor_release_failed:${res.status}`));
+            }
+            clear_controlled_actor_runtime_state();
+            await update_current_place(null, { source: 'actor_release' });
+        } finally {
+            ui_state.actor_claim.is_submitting = false;
+        }
+    }
+
+    async function open_actor_claim_module(open_reason: typeof ui_state.actor_claim.open_reason, status_lines?: string[]): Promise<void> {
+        ui_state.actor_claim.is_visible = true;
+        ui_state.actor_claim.is_blocking = !has_active_actor_claim();
+        ui_state.actor_claim.open_reason = open_reason;
+        ui_state.actor_claim.status_lines = status_lines ?? ui_state.actor_claim.status_lines;
+        apply_runtime_module_visibility();
+        await refresh_actor_claim_state(status_lines);
+    }
+
+    function close_actor_claim_module(): void {
+        if (ui_state.actor_claim.is_blocking) return;
+        ui_state.actor_claim.is_visible = false;
+        ui_state.actor_claim.open_reason = null;
+        apply_runtime_module_visibility();
+    }
+
+    function select_actor_claim_entry(actor_ref: string): void {
+        ui_state.actor_claim.selected_actor_ref = actor_ref;
+    }
+
+    async function claim_selected_actor(): Promise<void> {
+        const actor_ref = String(ui_state.actor_claim.selected_actor_ref ?? '').trim();
+        if (!actor_ref) {
+            ui_state.actor_claim.status_lines = ['select an actor to claim'];
+            return;
+        }
+        if (ui_state.actor_claim.current_actor_ref && ui_state.actor_claim.current_actor_ref !== actor_ref) {
+            ui_state.actor_claim.status_lines = ['release your current actor first', 'one actor claimed at a time'];
+            return;
+        }
+        try {
+            await claim_actor(actor_ref);
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            ui_state.actor_claim.error = message;
+            ui_state.actor_claim.is_visible = true;
+            ui_state.actor_claim.is_blocking = !has_active_actor_claim();
+            ui_state.actor_claim.status_lines = ['claim failed', message];
+            apply_runtime_module_visibility();
+        }
+    }
+
+    async function release_actor_claim_and_reopen(): Promise<void> {
+        try {
+            await release_claimed_actor();
+            ui_state.actor_claim.is_visible = true;
+            ui_state.actor_claim.is_blocking = true;
+            await refresh_actor_claim_state(['actor released', 'select another actor']);
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            ui_state.actor_claim.error = message;
+            ui_state.actor_claim.is_visible = true;
+            ui_state.actor_claim.is_blocking = !has_active_actor_claim();
+            ui_state.actor_claim.status_lines = ['release failed', message];
+            apply_runtime_module_visibility();
+            throw err;
+        }
+    }
+
+    async function logout_to_actor_claim(): Promise<void> {
+        await release_actor_claim_and_reopen();
+        set_module_visible('debug_commander_module', false);
+        flash_status(['Logged out', 'select an actor to continue'], 1400);
+    }
+
+    function set_debug_commander_selected_action(action_id: string): void {
+        ui_state.debug_commander.selected_action_id = action_id;
+    }
+
+    function build_debug_commander_actions(): DebugCommanderAction[] {
+        return [
+            {
+                id: 'debug_add_fire',
+                label: 'FIRE',
+                description: 'add FIRE! tag to controlled actor',
+                rgb: get_color_by_name('vivid_red').rgb,
+                on_trigger: async () => {
+                    const response = await fetch('http://localhost:8787/api/tag/add', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            entity_ref: get_input_actor_ref() || 'actor.player',
+                            tag_name: 'FIRE!',
+                            mag: 5,
+                            dim_mag: { fire_intensity_mag: 5, disperse_time_mag: 0 }
+                        })
+                    });
+                    flash_status([response.ok ? 'FIRE! tag added to actor' : 'Failed to add FIRE! tag'], 1500);
+                },
+            },
+            {
+                id: 'debug_show_inventory',
+                label: 'INV',
+                description: 'dump actor inventory to status',
+                rgb: get_color_by_name('pale_green').rgb,
+                on_trigger: async () => {
+                    const actor_id = get_controlled_actor_id();
+                    const items_res = await fetch(`http://localhost:8787/api/actor/items?actor_id=${actor_id}`);
+                    const items_data = await items_res.json();
+                    if (!items_data.ok) {
+                        flash_status(['Failed to load inventory'], 1500);
+                        return;
+                    }
+                    if (items_data.items && items_data.items.length > 0) {
+                        const items = items_data.items.map((entry: any) => `${entry.item.qty}x ${entry.item.name} (${entry.item.weight}kg) @ ${entry.slot_name}.${entry.slot_type}`);
+                        flash_status(['Inventory:', ...items.slice(0, 6)], 3000);
+                    } else {
+                        flash_status(['Inventory: (empty)'], 1500);
+                    }
+                },
+            },
+            {
+                id: 'ui_toggle_character',
+                label: module_registry.is_visible('character_module') ? 'CHAR HIDE' : 'CHAR SHOW',
+                description: 'toggle character module',
+                rgb: get_color_by_name('pale_yellow').rgb,
+                on_trigger: () => {
+                    const next = !module_registry.is_visible('character_module');
+                    set_module_visible('character_module', next);
+                    flash_status([next ? 'Character shown' : 'Character hidden'], 900);
+                },
+            },
+            {
+                id: 'ui_toggle_debug',
+                label: module_registry.is_visible('debug') ? 'DEBUG HIDE' : 'DEBUG SHOW',
+                description: 'toggle debug reader window',
+                rgb: get_color_by_name('pale_yellow').rgb,
+                on_trigger: () => {
+                    const next = !module_registry.is_visible('debug');
+                    set_module_visible('debug', next);
+                    flash_status([next ? 'Debug shown' : 'Debug hidden'], 900);
+                },
+            },
+            {
+                id: 'debug_open_nearest_npc',
+                label: 'NPCINV',
+                description: 'open nearest npc inventory module',
+                rgb: get_color_by_name('vivid_cyan').rgb,
+                on_trigger: async () => {
+                    const place = get_current_place();
+                    if (!place) {
+                        flash_status(['No place loaded'], 1500);
+                        return;
+                    }
+                    const actor_ref = get_input_actor_ref();
+                    const actor = place.contents.actors_present.find((a: any) => a.actor_ref === actor_ref);
+                    if (!actor) {
+                        flash_status(['Actor not found in place'], 1500);
+                        return;
+                    }
+                    const npcs = place.contents.npcs_present;
+                    if (!npcs || npcs.length === 0) {
+                        flash_status(['No NPCs in this place'], 1500);
+                        return;
+                    }
+                    let nearest_npc: any = null;
+                    let min_distance = Infinity;
+                    for (const npc of npcs) {
+                        const dx = npc.tile_position.x - actor.tile_position.x;
+                        const dy = npc.tile_position.y - actor.tile_position.y;
+                        const distance = Math.sqrt(dx * dx + dy * dy);
+                        if (distance < min_distance) {
+                            min_distance = distance;
+                            nearest_npc = npc;
+                        }
+                    }
+                    if (!nearest_npc) {
+                        flash_status(['Could not find nearest NPC'], 1500);
+                        return;
+                    }
+                    const npc_name = get_entity_display_name(nearest_npc.npc_ref);
+                    flash_status([`Opening ${npc_name}'s inventory (${min_distance.toFixed(0)} tiles)`], 1500);
+                    await open_npc_character_module(nearest_npc.npc_ref, npc_name);
+                },
+            },
+            {
+                id: 'debug_dump_body_slots',
+                label: 'SLOTS',
+                description: 'dump body slot state to console',
+                rgb: get_color_by_name('vivid_yellow').rgb,
+                on_trigger: async () => {
+                    const actor_id = get_controlled_actor_id();
+                    const actor_res = await fetch(`http://localhost:8787/api/actor?id=${actor_id}`);
+                    if (!actor_res.ok) {
+                        flash_status(['Failed to fetch actor'], 1500);
+                        return;
+                    }
+                    const actor_data = await actor_res.json();
+                    if (!actor_data.ok) {
+                        flash_status(['Actor data error'], 1500);
+                        return;
+                    }
+                    const body_slots = actor_data.body_slots || {};
+                    debug_log('[DEBUG COMMANDER] Raw body_slots from API:');
+                    for (const [slot_name, slot_data] of Object.entries(body_slots)) {
+                        const slot = slot_data as any;
+                        debug_log(`[DEBUG COMMANDER] ${slot_name}: tool=${slot.tool || 'null'} armor=${slot.armor || 'null'} garb=[${slot.garb?.join(', ') || 'empty'}]`);
+                    }
+                    ui_state.character.equipped_items.forEach((item, slot) => {
+                        debug_log(`[DEBUG COMMANDER] equipped ${slot}: ${item.definition.name} (${item.instance.id})`);
+                    });
+                    flash_status(['Body slots dumped to console'], 2000);
+                },
+            },
+            {
+                id: 'debug_place_painter',
+                label: ui_state.place_painter.active ? 'PAINT OFF' : 'PAINT ON',
+                description: 'toggle place painter mode',
+                rgb: ui_state.place_painter.active ? get_color_by_name('vivid_green').rgb : WHITE,
+                on_trigger: async () => {
+                    const place = get_current_place();
+                    if (!place?.id) {
+                        flash_status(['No place loaded'], 1200);
+                        return;
+                    }
+                    const ok = await toggle_place_painter();
+                    if (!ok) {
+                        flash_status(['Place painter toggle failed'], 1500);
+                        return;
+                    }
+                    flash_status([
+                        ui_state.place_painter.active ? 'Place painter ON' : 'Place painter off',
+                        `pause:${ui_state.place.pause_state.paused ? 'paused' : 'running'}`,
+                    ], 1500);
+                },
+            },
+            {
+                id: 'debug_pause_place',
+                label: debug_pause_controller.is_active() ? 'PAUSE OFF' : 'PAUSE ON',
+                description: 'pause or resume current place',
+                rgb: debug_pause_controller.is_active() ? get_color_by_name('vivid_red').rgb : WHITE,
+                on_trigger: async () => {
+                    const place = get_current_place();
+                    if (!place?.id) {
+                        flash_status(['No place loaded'], 1200);
+                        return;
+                    }
+                    const result = await toggle_current_place_pause_debug();
+                    if (!result.ok) {
+                        if (result.mode === 'blocked' && result.sources.length > 0) {
+                            flash_status(['Pause held by other source', `sources: ${result.sources.join(',')}`], 1800);
+                            return;
+                        }
+                        flash_status(['Pause toggle failed'], 1500);
+                        return;
+                    }
+                    flash_status([
+                        result.mode === 'paused' ? 'Place paused' : 'Place resumed',
+                        ui_state.place.pause_state.pause_sources.length > 0 ? `sources: ${ui_state.place.pause_state.pause_sources.join(',')}` : 'sources: none',
+                    ], 1500);
+                },
+            },
+            {
+                id: 'debug_start_timed_event',
+                label: 'TEVT',
+                description: 'start timed event in current place',
+                rgb: get_color_by_name('pale_orange').rgb,
+                on_trigger: async () => {
+                    const place = get_current_place();
+                    if (!place?.id) {
+                        flash_status(['No place loaded'], 1200);
+                        return;
+                    }
+                    const result = await start_debug_timed_event(place.id, 'combat');
+                    if (!result.ok) {
+                        flash_status([`Timed event failed: ${result.error ?? 'unknown'}`], 1800);
+                        return;
+                    }
+                    flash_status(['Timed event queued', `participants: ${result.participants?.length ?? 0}`], 1500);
+                    void refresh_timed_event_debug_state();
+                },
+            },
+            {
+                id: 'debug_next_timed_turn',
+                label: 'NEXT',
+                description: 'advance to next timed-event turn',
+                rgb: get_color_by_name('pale_orange').rgb,
+                on_trigger: async () => {
+                    const result = await debug_advance_timed_event_turn();
+                    if (!result.ok) {
+                        flash_status([`Next turn failed: ${result.error ?? 'unknown'}`], 1800);
+                        return;
+                    }
+                    flash_status([`Turn ${result.new_turn ?? '?'}`, `active: ${result.active_actor ?? '(none)'}`], 1500);
+                    void refresh_timed_event_debug_state();
+                },
+            },
+            {
+                id: 'debug_body',
+                label: 'BOD',
+                description: 'toggle debug body model',
+                rgb: get_color_by_name('vivid_yellow').rgb,
+                on_trigger: async () => {
+                    const place = get_current_place();
+                    if (!place) return;
+                    const actor_id = get_controlled_actor_id();
+                    const actor_ref = `actor.${actor_id}`;
+                    const actor = place.contents.actors_present.find((a: any) => a.actor_ref === actor_ref) as any;
+                    if (!actor) return;
+                    const cur = String(actor.body_model_id ?? '');
+                    const next = cur === 'test.self_exclusion_y2' ? 'character.biped_2z' : 'test.self_exclusion_y2';
+                    const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+                    await fetch(`${base_url}/api/actor/debug/body_model`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ slot: APP_CONFIG.selected_data_slot, actor_id, body_model_id: next }),
+                    });
+                    flash_status([`Body model: ${next}`], 1500);
+                    await update_current_place(place.id, { source: 'debug_body_model_toggle' });
+                },
+            },
+            {
+                id: 'debug_move_refresh',
+                label: 'MOVE',
+                description: 'force movement refresh helper',
+                rgb: get_color_by_name('pale_orange').rgb,
+                on_trigger: async () => {
+                    const result = await debug_move_refresh();
+                    if (!result.ok) {
+                        flash_status([`MOVE failed: ${result.error ?? 'unknown'}`], 1800);
+                        return;
+                    }
+                    flash_status(['MOVE refresh used', `${result.actor_ref ?? '(active actor)'}`], 1500);
+                    void refresh_timed_event_debug_state();
+                },
+            },
+            {
+                id: 'debug_end_timed_event',
+                label: 'END',
+                description: 'force-end current timed event',
+                rgb: get_color_by_name('pale_orange').rgb,
+                on_trigger: async () => {
+                    const result = await debug_end_timed_event();
+                    if (!result.ok) {
+                        flash_status([`END failed: ${result.error ?? 'unknown'}`], 1800);
+                        return;
+                    }
+                    flash_status(['Timed event ended'], 1500);
+                    void refresh_timed_event_debug_state();
+                },
+            },
+            {
+                id: 'debug_toggle_overlays',
+                label: DEBUG_VISION.enabled ? 'OVR OFF' : 'OVR ON',
+                description: 'toggle debug overlays bundle',
+                rgb: get_color_by_name('pale_yellow').rgb,
+                on_trigger: () => {
+                    const next = !DEBUG_VISION.enabled;
+                    set_ui_debug_enabled(next);
+                    set_debug_bundle_enabled(next);
+                    flash_status([next ? 'Debug overlays ON' : 'Debug overlays off'], 900);
+                },
+            },
+            {
+                id: 'logout_actor',
+                label: 'LOGOUT',
+                description: 'release actor and return to claim screen',
+                rgb: get_color_by_name('pumpkin').rgb,
+                on_trigger: async () => {
+                    await logout_to_actor_claim();
+                },
+            },
+        ];
+    }
+
+    function trigger_debug_commander_action(action_id: string): void {
+        const action = build_debug_commander_actions().find((entry) => entry.id === action_id);
+        if (!action || action.disabled) return;
+        ui_state.debug_commander.status_lines = ['running...', action.label];
+        void Promise.resolve(action.on_trigger())
+            .then(() => {
+                ui_state.debug_commander.status_lines = [action.label, action.description ?? 'command complete'];
+            })
+            .catch((err) => {
+                const message = err instanceof Error ? err.message : String(err);
+                ui_state.debug_commander.status_lines = ['command failed', message];
+                flash_status([`Debug command failed`, message], 1800);
+            });
+    }
+
+    async function load_claimed_actor_runtime(actor_id: string, actor_ref: string, source: string): Promise<void> {
+        ui_state.actor_claim.game_ready = false;
+        apply_runtime_module_visibility();
+        await refresh_character_data(true);
+        let resolved_place_id: string | null = null;
+        try {
+            const url = `${APP_CONFIG.action_targets_endpoint}?slot=${APP_CONFIG.selected_data_slot}&actor_id=${encodeURIComponent(actor_id)}`;
+            const res = await fetch(url);
+            const data = await res.json().catch(() => null) as {
+                ok?: boolean;
+                region?: string | null;
+                place_id?: string | null;
+                targets?: Array<{ ref: string; label: string; type: string }>;
+            } | null;
+            if (res.ok && data?.ok) {
+                ui_state.controls.targets = Array.isArray(data.targets) ? data.targets : [];
+                ui_state.controls.region_label = typeof data.region === 'string' ? data.region : null;
+                ui_state.controls.targets_ready = true;
+                resolved_place_id = typeof data.place_id === 'string' && data.place_id.trim().length > 0 ? data.place_id.trim() : null;
+            }
+        } catch (err) {
+            debug_warn('[ActorClaim]', 'Failed to load claimed actor runtime targets', err);
+        }
+        if (!resolved_place_id) {
+            resolved_place_id = await resolve_private_actor_place_id(actor_ref);
+        }
+        await update_current_place(resolved_place_id ?? ui_state.place.actor_current_place_id ?? ui_state.place.current_place_id, { source });
+        const place = get_current_place();
+        if (place?.id) ui_state.place.actor_current_place_id = place.id;
+        set_current_actor_ref(actor_ref);
+        ui_state.actor_claim.game_ready = !!get_current_place();
+        apply_runtime_module_visibility();
+    }
+
     function close_option_picker(): void {
         ui_state.option_picker.is_visible = false;
         ui_state.option_picker.target_kind = null;
@@ -3640,6 +6016,19 @@ export function create_app_state(): AppState {
         }
     }
 
+    async function open_tag_picker_name_picker(): Promise<void> {
+        const entity_ref = ui_state.tag_picker.entity_ref;
+        if (!entity_ref) return;
+        const scope = get_tag_scope_for_entity_ref(entity_ref);
+        await open_option_picker({
+            title: 'PICK TAG',
+            target_kind: 'tag_picker',
+            target_field: 'name',
+            selected_value: ui_state.tag_picker.draft?.name ?? null,
+            fetch_url: `http://localhost:8787/api/tag/options?scope=${encodeURIComponent(scope ?? 'CHARACTER')}&ref=${encodeURIComponent(entity_ref)}&slot=${APP_CONFIG.selected_data_slot}`,
+        });
+    }
+
     function apply_option_picker_selection(value: string): void {
         if (ui_state.option_picker.target_kind === 'character_editor' && ui_state.option_picker.target_field) {
             const key = ui_state.option_picker.target_field;
@@ -3650,6 +6039,28 @@ export function create_app_state(): AppState {
                     get_character_editor_subject_label(ui_state.character_editor.character_ref),
                     `picked ${key}: ${value}`,
                 ];
+            }
+        }
+        if (ui_state.option_picker.target_kind === 'tag_picker' && ui_state.option_picker.target_field === 'name' && ui_state.tag_picker.draft) {
+            ui_state.tag_picker.draft.name = String(value ?? '').trim().toUpperCase();
+            ui_state.tag_picker.original_name = ui_state.tag_picker.original_name || ui_state.tag_picker.draft.name;
+            ui_state.tag_picker.status_lines = [
+                get_entity_editor_subject_label(ui_state.tag_picker.entity_ref),
+                `picked tag: ${ui_state.tag_picker.draft.name}`,
+            ];
+            void (async () => {
+                await sync_tag_picker_definition(ui_state.tag_picker.draft?.name ?? '', { preserve_status: true });
+                await apply_tag_picker_draft();
+            })();
+        }
+        if (ui_state.option_picker.target_kind === 'character_creation' && ui_state.option_picker.target_field) {
+            const key = ui_state.option_picker.target_field;
+            update_character_creation_field(key, value);
+            if (key === 'kind') {
+                void refresh_character_creation_bootstrap(value);
+            }
+            if (key === 'sex') {
+                ui_state.character_creation.status_lines = [`sex: ${value}`, 'create to add actor to claim list'];
             }
         }
         ui_state.option_picker.selected_value = value;
@@ -3670,6 +6081,15 @@ export function create_app_state(): AppState {
             const actor_data = await load_character_module_data(`actor.${actor_id}`);
             const actor = actor_data.character;
             ui_state.character.display_name = String(actor?.name ?? actor_id);
+            ui_state.character.render_meta.kind_id = typeof (actor as any)?.kind === 'string'
+                ? String((actor as any).kind)
+                : (typeof (actor as any)?.kind_id === 'string' ? String((actor as any).kind_id) : null);
+            ui_state.character.render_meta.body_model_id = typeof (actor as any)?.body_model_id === 'string'
+                ? String((actor as any).body_model_id)
+                : null;
+            ui_state.character.render_meta.entity_render = (actor as any)?.entity_render ?? null;
+            ui_state.character.render_meta.tags = Array.isArray((actor as any)?.tags) ? (actor as any).tags : [];
+            set_character_tags(`actor.${actor_id}`, (actor as any)?.tags);
 
             // View centering is derived from the loaded place (not actor elevation).
 
@@ -3714,6 +6134,10 @@ export function create_app_state(): AppState {
             debug_log(`[Character] Total equipped items loaded: ${ui_state.character.equipped_items.size}`);
             debug_log(`[LOAD_EQUIPPED] === END LOADING INLINE ITEMS ===`);
             last_character_refresh_ms = Date.now();
+            if (ui_state.container.is_visible) {
+                ui_state.container.owner_view = actor_data.owner_view ?? ui_state.container.owner_view;
+                if (!actor_data.owner_view) void refresh_actor_owner_inventory_view();
+            }
             
         } catch (err) {
             console.error('[Character] Error refreshing character data:', err);
@@ -3722,115 +6146,105 @@ export function create_app_state(): AppState {
         }
     }
 
-    // Phase 1: Get main inventory container (equipped sack)
-    // MIGRATED: Now uses new inline system with body_slots paths
-    async function get_main_inventory_container(): Promise<{ container_id: string; container_data: any } | null> {
-        const actor_id = get_controlled_actor_id();
-        const slot = APP_CONFIG.selected_data_slot;
-        
-        debug_log(`[MainInventory] === LOOKING FOR MAIN INVENTORY (INLINE SYSTEM) ===`);
-        debug_log(`[MainInventory] Actor: ${actor_id}, Slot: ${slot}`);
-        
-        if (!actor_id) {
-            flash_status(['No actor selected'], 1500);
-            debug_log('[MainInventory] ERROR: No actor_id in APP_CONFIG');
-            return null;
-        }
-        
+    async function load_actor_owner_inventory_view(actor_id: string): Promise<OwnerInventoryView | null> {
+        if (!actor_id) return null;
         try {
-            const actor_data = await load_character_module_data(`actor.${actor_id}`);
-            const actor = actor_data.character;
-            const body_slots = actor_data.body_slots || {};
-            debug_log(`[MainInventory] Actor loaded. Body slots: ${Object.keys(body_slots).join(', ')}`);
-            
-            // Priority order: leg_left, leg_right, torso, head
-            // NEW INLINE SYSTEM: Look for CONTAINER tag in body_slots directly
-            const slot_priority = ['leg_left', 'leg_right', 'torso', 'head'];
-            
-            for (const slot_name of slot_priority) {
-                const body_slot = body_slots[slot_name];
-                debug_log(`[MainInventory] Checking ${slot_name}`);
-                
-                if (!body_slot) {
-                    debug_log(`[MainInventory]   ${slot_name} is empty`);
-                    continue;
-                }
-                
-                // Check armor slot for CONTAINER tag
-                const armor_item = (body_slot.armor && typeof body_slot.armor === 'object') ? body_slot.armor as any : null;
-                if (armor_item) {
-                    const is_container = has_tag(armor_item.tags, 'CONTAINER');
-                    debug_log(`[MainInventory]   ${slot_name}.armor: ${armor_item.name}, is_container=${is_container}`);
-                    if (is_container) {
-                        const container_id = `body_slots.${slot_name}.armor`;
-                        debug_log(`[MainInventory] SUCCESS: Found container at ${container_id}`);
-                        return {
-                            container_id,
-                            container_data: {
-                                id: container_id,
-                                kind: 'inline_body_slot',
-                                name: armor_item.name,
-                                path: `${slot_name}.armor`,
-                                contents: armor_item.contents || []
-                            }
-                        };
-                    }
-                }
-                
-                // Check tool slot for CONTAINER tag
-                const tool_item = (body_slot.tool && typeof body_slot.tool === 'object') ? body_slot.tool as any : null;
-                if (tool_item) {
-                    const is_container = has_tag(tool_item.tags, 'CONTAINER');
-                    debug_log(`[MainInventory]   ${slot_name}.tool: ${tool_item.name}, is_container=${is_container}`);
-                    if (is_container) {
-                        const container_id = `body_slots.${slot_name}.tool`;
-                        debug_log(`[MainInventory] SUCCESS: Found container at ${container_id}`);
-                        return {
-                            container_id,
-                            container_data: {
-                                id: container_id,
-                                kind: 'inline_body_slot',
-                                name: tool_item.name,
-                                path: `${slot_name}.tool`,
-                                contents: tool_item.contents || []
-                            }
-                        };
-                    }
-                }
-                
-                // Check garb slots for CONTAINER tag
-                if (body_slot.garb && Array.isArray(body_slot.garb)) {
-                    for (let i = 0; i < body_slot.garb.length; i++) {
-                        const garb_item = body_slot.garb[i];
-                        if (!garb_item || typeof garb_item !== 'object') continue;
-                        const is_container = has_tag((garb_item as any).tags, 'CONTAINER');
-                        debug_log(`[MainInventory]   ${slot_name}.garb.${i}: ${garb_item.name}, is_container=${is_container}`);
-                        if (is_container) {
-                            const container_id = `body_slots.${slot_name}.garb.${i}`;
-                            debug_log(`[MainInventory] SUCCESS: Found container at ${container_id}`);
-                            return {
-                                container_id,
-                                container_data: {
-                                    id: container_id,
-                                    kind: 'inline_body_slot',
-                                    name: garb_item.name,
-                                    path: `${slot_name}.garb.${i}`,
-                                    contents: garb_item.contents || []
-                                }
-                            };
-                        }
-                    }
-                }
+            const resp = await fetch(`http://localhost:8787/api/actor/private_state?actor_ref=${encodeURIComponent(`actor.${actor_id}`)}&slot=${APP_CONFIG.selected_data_slot}&session_token=${encodeURIComponent(get_session_token())}`);
+            const data = await resp.json();
+            if (!resp.ok || !data?.ok || !data?.view) {
+                debug_log(`[InventoryOwnerView] Failed to load actor inventory view for ${actor_id}: ${JSON.stringify(data)}`);
+                return null;
             }
-            
-            debug_log('[MainInventory] WARNING: No equipped container found in any body slot');
-            flash_status(['No equipped container found'], 1500);
-            return null;
+            return data.view as OwnerInventoryView;
         } catch (err) {
-            console.error('[MainInventory] Error getting main inventory:', err);
-            debug_log(`[MainInventory] EXCEPTION: ${err instanceof Error ? err.message : String(err)}`);
+            console.error('[InventoryOwnerView] Error loading actor inventory view:', err);
             return null;
         }
+    }
+
+    async function resolve_private_actor_place_id(actor_ref: string): Promise<string | null> {
+        const normalized_actor_ref = String(actor_ref ?? '').trim();
+        if (!normalized_actor_ref.startsWith('actor.')) return null;
+        try {
+            const resp = await fetch(`http://localhost:8787/api/actor/private_state?actor_ref=${encodeURIComponent(normalized_actor_ref)}&slot=${APP_CONFIG.selected_data_slot}&session_token=${encodeURIComponent(get_session_token())}`);
+            const data = await resp.json().catch(() => null) as any;
+            if (!resp.ok || !data?.ok || !data?.actor) return null;
+            const place_id = String(data.actor?.location?.place_id ?? '').trim();
+            return place_id || null;
+        } catch {
+            return null;
+        }
+    }
+
+    async function load_actor_item_owner_inventory_view(actor_id: string, item_id: string): Promise<OwnerInventoryView | null> {
+        if (!actor_id || !item_id) return null;
+        const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+        try {
+            const resp = await fetch(`${base_url}/api/inventory/actor_item_view?actor_id=${encodeURIComponent(actor_id)}&item_id=${encodeURIComponent(item_id)}`);
+            const data = await resp.json();
+            if (!resp.ok || !data?.ok || !data?.view) {
+                debug_log(`[InventoryOwnerView] Failed to load actor item inventory view for ${actor_id}.${item_id}: ${JSON.stringify(data)}`);
+                return null;
+            }
+            return data.view as OwnerInventoryView;
+        } catch (err) {
+            console.error('[InventoryOwnerView] Error loading actor item inventory view:', err);
+            return null;
+        }
+    }
+
+    async function load_body_slot_owner_inventory_view(actor_id: string, path: string): Promise<OwnerInventoryView | null> {
+        if (!actor_id || !path) return null;
+        const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+        try {
+            const resp = await fetch(`${base_url}/api/inventory/body_slot_view?actor_id=${encodeURIComponent(actor_id)}&path=${encodeURIComponent(path)}`);
+            const data = await resp.json();
+            if (!resp.ok || !data?.ok || !data?.view) return null;
+            return data.view as OwnerInventoryView;
+        } catch {
+            return null;
+        }
+    }
+
+    async function load_tile_owner_inventory_view(place_id: string, x: number, y: number, z: number): Promise<{ view: OwnerInventoryView; redirect?: any } | null> {
+        const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+        try {
+            const resp = await fetch(`${base_url}/api/inventory/tile_view?place_id=${encodeURIComponent(place_id)}&x=${x}&y=${y}&z=${z}`);
+            const data = await resp.json();
+            if (!resp.ok || !data?.ok || !data?.view) return null;
+            return { view: data.view as OwnerInventoryView, redirect: data.redirect ?? undefined };
+        } catch {
+            return null;
+        }
+    }
+
+    async function load_place_item_owner_inventory_view(place_id: string, item_id: string): Promise<OwnerInventoryView | null> {
+        const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+        try {
+            const resp = await fetch(`${base_url}/api/inventory/place_item_view?place_id=${encodeURIComponent(place_id)}&item_id=${encodeURIComponent(item_id)}`);
+            const data = await resp.json();
+            if (!resp.ok || !data?.ok || !data?.view) return null;
+            return data.view as OwnerInventoryView;
+        } catch {
+            return null;
+        }
+    }
+
+    async function load_pile_owner_inventory_view(place_id: string, position_key: string): Promise<OwnerInventoryView | null> {
+        const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
+        try {
+            const resp = await fetch(`${base_url}/api/inventory/pile_view?place_id=${encodeURIComponent(place_id)}&position_key=${encodeURIComponent(position_key)}`);
+            const data = await resp.json();
+            if (!resp.ok || !data?.ok || !data?.view) return null;
+            return data.view as OwnerInventoryView;
+        } catch {
+            return null;
+        }
+    }
+
+    async function refresh_actor_owner_inventory_view(): Promise<void> {
+        const actor_id = get_controlled_actor_id();
+        ui_state.container.owner_view = actor_id ? await load_actor_owner_inventory_view(actor_id) : null;
     }
 
     /**
@@ -3905,188 +6319,189 @@ export function create_app_state(): AppState {
         return null;
     }
 
-    // Refresh ALL open containers by iterating through the canonical container_data_map keys.
-    async function refresh_container_data(): Promise<void> {
-        const open_containers = Array.from(ui_state.container.container_data_map.keys());
-        if (open_containers.length === 0) return;
-        
-        debug_log(`[ContainerRefresh] Refreshing ${open_containers.length} open container(s)`);
-        
-        for (const container_id of open_containers) {
-            try {
-                const slot = APP_CONFIG.selected_data_slot;
-                let container: Container | null = null;
-                let contents: any[] = [];
-
-                // Virtual pile container (rebuild from cached ground items)
-                if (container_id.startsWith('place.pile.')) {
-                    const parts = container_id.split('.');
-                    const place_id = parts[2];
-                    const position_key = parts[3];
-                    const item_ids = position_key ? (ui_state.place.ground_items_by_voxel.get(position_key) ?? []) : [];
-                    if (item_ids.length <= 1) {
-                        close_container_module(container_id);
-                        continue;
-                    }
-
-                    if (!place_id || !position_key) {
-                        close_container_module(container_id);
-                        continue;
-                    }
-
-                    // Use canonical server payload so piles behave like all other containers.
-                    const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                    const api_res = await fetch(`${base_url}/api/place/pile_container?place_id=${encodeURIComponent(place_id)}&position_key=${encodeURIComponent(position_key)}`);
-                    if (!api_res.ok) {
-                        close_container_module(container_id);
-                        continue;
-                    }
-                    const api_data = await api_res.json();
-                    if (!api_data.ok || !api_data.container) {
-                        close_container_module(container_id);
-                        continue;
-                    }
-                    contents = api_data.container.contents || [];
-                    container = {
-                        id: container_id,
-                        kind: 'inline_pile' as any,
-                        name: api_data.container.name,
-                        def_id: api_data.container.def_id,
-                        capacity: api_data.container.capacity,
-                        contents,
-                    } as any;
+    async function get_inventory_panel_drop_target_container_id(): Promise<string | null> {
+        const owner_view = ui_state.container.owner_view;
+        if (owner_view) {
+            for (const group of owner_view.groups) {
+                for (const surface of group.surfaces) {
+                    if (!surface.accepts_player_insert) continue;
+                    if (surface.surface_kind !== 'container') continue;
+                    const container_id = get_container_id_from_target_id(surface.surface_target_id);
+                    if (container_id) return container_id;
                 }
-
-                // Inline body_slots container
-                else if (container_id.startsWith('body_slots.')) {
-                    const actor_id = get_controlled_actor_id();
-                    const path = container_id.split('.').slice(1).join('.');
-                    const api_res = await fetch(`http://localhost:8787/api/body_slot/container?actor_id=${encodeURIComponent(actor_id)}&path=${encodeURIComponent(path)}`);
-                    if (!api_res.ok) {
-                        close_container_module(container_id);
-                        continue;
-                    }
-                    const api_data = await api_res.json();
-                    if (!api_data.ok || !api_data.container) {
-                        close_container_module(container_id);
-                        continue;
-                    }
-                    contents = api_data.container.contents || [];
-                    container = {
-                        id: container_id,
-                        kind: 'inline_body_slot' as any,
-                        name: api_data.container.name,
-                        def_id: api_data.container.def_id,
-                        path: api_data.container.path,
-                        capacity: api_data.container.capacity,
-                        contents,
-                    } as any;
-                }
-
-                // Inline container-item on ground
-                else if (container_id.startsWith('place.item.')) {
-                    const parts = container_id.split('.');
-                    const place_id = parts[2];
-                    const item_id = parts[3];
-                    if (!place_id || !item_id) {
-                        close_container_module(container_id);
-                        continue;
-                    }
-                    const api_res = await fetch(`http://localhost:8787/api/place/container_item?place_id=${encodeURIComponent(place_id)}&item_id=${encodeURIComponent(item_id)}`);
-                    if (!api_res.ok) {
-                        close_container_module(container_id);
-                        continue;
-                    }
-                    const api_data = await api_res.json();
-                    if (!api_data.ok || !api_data.container) {
-                        close_container_module(container_id);
-                        continue;
-                    }
-                    contents = api_data.container.contents || [];
-                    container = {
-                        id: container_id,
-                        kind: 'inline_ground_container_item' as any,
-                        name: api_data.container.name,
-                        def_id: api_data.container.def_id,
-                        capacity: api_data.container.capacity,
-                        contents,
-                    } as any;
-                }
-
-                // Inline tile container
-                else if (container_id.startsWith('place.tile.')) {
-                    const parsed = parse_place_tile_container_id(container_id);
-                    if (!parsed) {
-                        close_container_module(container_id);
-                        continue;
-                    }
-                    const api_res = await fetch(`http://localhost:8787/api/place/tile_container?place_id=${encodeURIComponent(parsed.place_id)}&x=${encodeURIComponent(String(parsed.x))}&y=${encodeURIComponent(String(parsed.y))}&z=${encodeURIComponent(String(parsed.z))}`);
-                    if (!api_res.ok) {
-                        close_container_module(container_id);
-                        continue;
-                    }
-                    const api_data = await api_res.json();
-                    if (!api_data.ok || !api_data.container) {
-                        close_container_module(container_id);
-                        continue;
-                    }
-                    contents = api_data.container.contents || [];
-                    container = {
-                        id: container_id,
-                        kind: 'inline_tile_container' as any,
-                        name: api_data.container.name,
-                        def_id: api_data.container.def_id,
-                        capacity: api_data.container.capacity,
-                        contents,
-                    } as any;
-                }
-
-                // Inline actor-owned container-item by id
-                else if (container_id.startsWith('actor.item.')) {
-                    const parts = container_id.split('.');
-                    const actor_id = parts[2];
-                    const item_id = parts[3];
-                    if (!actor_id || !item_id) {
-                        close_container_module(container_id);
-                        continue;
-                    }
-                    const api_res = await fetch(`http://localhost:8787/api/actor/container_item?actor_id=${encodeURIComponent(actor_id)}&item_id=${encodeURIComponent(item_id)}`);
-                    if (!api_res.ok) {
-                        close_container_module(container_id);
-                        continue;
-                    }
-                    const api_data = await api_res.json();
-                    if (!api_data.ok || !api_data.container) {
-                        close_container_module(container_id);
-                        continue;
-                    }
-                    contents = api_data.container.contents || [];
-                    container = {
-                        id: container_id,
-                        kind: 'inline_actor_container_item' as any,
-                        name: api_data.container.name,
-                        def_id: api_data.container.def_id,
-                        capacity: api_data.container.capacity,
-                        contents,
-                    } as any;
-                }
-
-                else {
-                    // No legacy container ids supported.
-                    close_container_module(container_id);
-                    continue;
-                }
-                
-                if (container) {
-                    // Update the shared state map
-                    ui_state.container.container_data_map.set(container_id, { container, contents });
-                    debug_log(`[ContainerRefresh] Updated ${container_id} with ${contents.length} items`);
-                } else {
-                    debug_log(`[ContainerRefresh] Warning: Could not refresh ${container_id}`);
-                }
-            } catch (err) {
-                debug_log(`[ContainerRefresh] Error refreshing ${container_id}:`, err);
             }
+        }
+        return await get_default_pickup_target_container_id();
+    }
+
+    function get_open_owner_inventory_container_id_for_item(surface: StorageSurface, slot: StorageSlot): string | null {
+        const item_id = String(slot.item?.id ?? '');
+        if (!item_id) return null;
+        const owner = surface.owner as any;
+        if (owner?.kind === 'actor' && owner?.id) {
+            return `actor.item.${String(owner.id)}.${item_id}`;
+        }
+        if (owner?.kind === 'item' && owner?.owner_kind === 'actor' && owner?.owner_id) {
+            return `actor.item.${String(owner.owner_id)}.${item_id}`;
+        }
+        if (owner?.kind === 'item' && owner?.owner_kind === 'place' && owner?.owner_id) {
+            return `place.item.${String(owner.owner_id)}.${item_id}`;
+        }
+        if (owner?.kind === 'tile') {
+            return null;
+        }
+        return null;
+    }
+
+    function get_refresh_owner_keys_for_container_id(container_id: string | null | undefined): Set<string> {
+        const raw = String(container_id ?? '').trim();
+        const out = new Set<string>();
+        if (!raw) return out;
+        if (raw.startsWith('body_slots.') || raw.startsWith('actor.item.')) {
+            out.add(`actor:${get_controlled_actor_id()}`);
+            return out;
+        }
+        if (raw.startsWith('place.tile.')) {
+            const parsed = parse_place_tile_container_id(raw);
+            if (parsed) out.add(`tile:${parsed.place_id}:${parsed.x}:${parsed.y}:${parsed.z}`);
+            return out;
+        }
+        if (raw.startsWith('place.grow.')) {
+            const parts = raw.split('.');
+            if (parts.length >= 5) {
+                const place_id = parts[2];
+                const [xs, ys, zs] = String(parts[3] ?? '').split('_');
+                const x = Number(xs), y = Number(ys), z = Number(zs);
+                if (place_id && Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) {
+                    out.add(`tile:${place_id}:${Math.floor(x)}:${Math.floor(y)}:${Math.floor(z)}`);
+                }
+            }
+            return out;
+        }
+        if (raw.startsWith('place.item.')) {
+            const parts = raw.split('.');
+            if (parts.length >= 4) out.add(`place_item:${parts[2]}:${parts[3]}`);
+            return out;
+        }
+        if (raw.startsWith('place.pile.')) {
+            const parts = raw.split('.');
+            if (parts.length >= 4) out.add(`pile:${parts[2]}:${parts[3]}`);
+            return out;
+        }
+        return out;
+    }
+
+    async function reload_open_owner_view_for_container_id(container_id: string): Promise<void> {
+        const canonical = ui_state.container.canonical_by_alias.get(container_id) ?? container_id;
+        if (canonical === 'inventory_container') return;
+        let next_view: OwnerInventoryView | null = null;
+        if (canonical.startsWith('actor.item.')) {
+            const parts = canonical.split('.');
+            next_view = await load_actor_item_owner_inventory_view(String(parts[2] ?? ''), String(parts[3] ?? ''));
+        } else if (canonical.startsWith('body_slots.')) {
+            const actor_id = get_controlled_actor_id();
+            if (actor_id) next_view = await load_body_slot_owner_inventory_view(actor_id, canonical.slice('body_slots.'.length));
+        } else if (canonical.startsWith('place.tile.')) {
+            const parsed = parse_place_tile_container_id(canonical);
+            if (parsed) next_view = (await load_tile_owner_inventory_view(parsed.place_id, parsed.x, parsed.y, parsed.z))?.view ?? null;
+        } else if (canonical.startsWith('place.item.')) {
+            const parts = canonical.split('.');
+            next_view = await load_place_item_owner_inventory_view(String(parts[2] ?? ''), String(parts[3] ?? ''));
+        } else if (canonical.startsWith('place.pile.')) {
+            const parts = canonical.split('.');
+            next_view = await load_pile_owner_inventory_view(String(parts[2] ?? ''), String(parts[3] ?? ''));
+        }
+        if (!next_view) return;
+        const aliases = ui_state.container.aliases_by_canonical.get(canonical) ?? [canonical];
+        for (const alias of aliases) {
+            ui_state.container.owner_view_by_container_id.set(alias, next_view);
+        }
+    }
+
+    async function refresh_after_transfer(from_container_id: string, to_container_id: string): Promise<void> {
+        const source = String(from_container_id ?? '');
+        const target = String(to_container_id ?? '');
+        const place_involved = source.startsWith('place.') || target.startsWith('place.');
+        const actor_involved = source.startsWith('actor.') || source.startsWith('body_slots.') || target.startsWith('actor.') || target.startsWith('body_slots.');
+        const source_keys = get_refresh_owner_keys_for_container_id(source);
+        const target_keys = get_refresh_owner_keys_for_container_id(target);
+        const affected_keys = new Set<string>([...source_keys, ...target_keys]);
+
+        if (place_involved) {
+            const place = get_current_place();
+            if (place) {
+                const place_to_place = source.startsWith('place.') && target.startsWith('place.');
+                if (place_to_place) await refresh_place_visual_state(place.id);
+                else await update_current_place(place.id);
+            }
+        }
+
+        if (actor_involved) {
+            await refresh_character_data();
+            await refresh_actor_owner_inventory_view();
+        }
+
+        const reloads: Promise<void>[] = [];
+        for (const open_id of ui_state.container.open_containers) {
+            const open_keys = get_refresh_owner_keys_for_container_id(open_id);
+            const intersects = [...open_keys].some((key) => affected_keys.has(key));
+            if (intersects) reloads.push(reload_open_owner_view_for_container_id(open_id));
+        }
+        await Promise.all(reloads);
+    }
+
+    function get_best_known_actor_presence_seed(actor_ref: string): {
+        name?: string;
+        kind_id?: string;
+        body_model_id?: string;
+        entity_render?: any;
+        tags?: any[];
+        facing?: string | null;
+    } {
+        const normalized_ref = String(actor_ref ?? '').trim();
+        const sources: any[] = [];
+        if (ui_state.place.current_place) sources.push(ui_state.place.current_place);
+        for (const place of ui_state.place.scene_places) {
+            if (place && place !== ui_state.place.current_place) sources.push(place);
+        }
+        for (const place of sources) {
+            const actors = Array.isArray((place as any)?.contents?.actors_present) ? (place as any).contents.actors_present : [];
+            const match = actors.find((entry: any) => String(entry?.actor_ref ?? '') === normalized_ref) ?? null;
+            if (!match) continue;
+            return {
+                name: typeof match?.name === 'string' && match.name.trim().length > 0 ? String(match.name) : undefined,
+                kind_id: typeof match?.kind_id === 'string' ? String(match.kind_id) : undefined,
+                body_model_id: typeof match?.body_model_id === 'string' ? String(match.body_model_id) : undefined,
+                entity_render: match?.entity_render,
+                tags: Array.isArray(match?.tags) ? match.tags : undefined,
+                facing: typeof match?.facing === 'string' ? String(match.facing) : undefined,
+            };
+        }
+
+        if (normalized_ref === get_input_actor_ref()) {
+            return {
+                name: ui_state.character.display_name || undefined,
+                kind_id: ui_state.character.render_meta.kind_id ?? undefined,
+                body_model_id: ui_state.character.render_meta.body_model_id ?? undefined,
+                entity_render: ui_state.character.render_meta.entity_render ?? undefined,
+                tags: ui_state.character.render_meta.tags,
+                facing: get_facing(normalized_ref),
+            };
+        }
+
+        return {
+            facing: get_facing(normalized_ref),
+        };
+    }
+
+    // Refresh legacy container state. This should normally be empty after owner-view cutover.
+    async function refresh_container_data(): Promise<void> {
+        const legacy_open = Array.from(ui_state.container.owner_view_by_container_id.keys()).filter((container_id) => !ui_state.container.open_containers.has(container_id));
+        if (legacy_open.length === 0) return;
+
+        debug_log(`[ContainerRefresh] Retiring ${legacy_open.length} legacy container window(s)`);
+        for (const container_id of legacy_open) {
+            close_owner_inventory_view(String(container_id));
         }
     }
 
@@ -4170,6 +6585,7 @@ export function create_app_state(): AppState {
         if (ui_state.place.scene_selected_place_id === place.id || ui_state.place.current_place_id === place.id) {
             ui_state.place.current_place = place;
             ui_state.place.current_place_id = place.id;
+            set_command_handler_place(place);
         }
     }
 
@@ -4195,6 +6611,14 @@ export function create_app_state(): AppState {
         if (ui_state.place.current_place && ui_state.place.current_place.id !== target_place_id) {
             ui_state.place.current_place = clean_place(ui_state.place.current_place);
         }
+    }
+
+    function is_place_visible_in_scene(place_id: string | null | undefined): boolean {
+        const normalized = String(place_id ?? '').trim();
+        if (!normalized) return false;
+        if (ui_state.place.current_place?.id === normalized) return true;
+        return ui_state.place.scene_visible_place_ids.includes(normalized)
+            || ui_state.place.scene_places.some((place) => place.id === normalized);
     }
 
     async function refresh_single_scene_place(place_id: string): Promise<Place | null> {
@@ -4278,7 +6702,7 @@ export function create_app_state(): AppState {
                     if (!position_key) continue;
                     const ids = ui_state.place.ground_items_by_voxel.get(position_key) ?? [];
                     if (ids.length <= 1) {
-                        close_container_module(cid);
+                        close_owner_inventory_view(cid);
                     }
                 }
             }
@@ -4946,7 +7370,7 @@ export function create_app_state(): AppState {
                                     if (!position_key) continue;
                                     const ids = ui_state.place.ground_items_by_voxel.get(position_key) ?? [];
                                     if (ids.length <= 1) {
-                                        close_container_module(cid);
+                                        close_owner_inventory_view(cid);
                                     }
                                 }
                             }
@@ -5010,11 +7434,30 @@ export function create_app_state(): AppState {
     }
 
     async function refresh_controlled_actor_binding(force: boolean = false): Promise<void> {
+        if (ui_state.world_entry.is_visible || ui_state.world_join.is_visible) return;
         const current_actor_id = get_controlled_actor_id();
         if (!force && current_actor_id) return;
-        const res = await fetch(`http://localhost:8787/api/session/control?slot=${APP_CONFIG.selected_data_slot}`);
-        if (!res.ok) throw new Error(`session_control_fetch_failed:${res.status}`);
-        const data = await res.json();
+        await ensure_multiplayer_session_bootstrap();
+        const session_token = get_session_token();
+        const query = [`slot=${encodeURIComponent(String(APP_CONFIG.selected_data_slot))}`, `session_token=${encodeURIComponent(session_token)}`];
+        const res = await fetch(`http://localhost:8787/api/session/control?${query.join('&')}`);
+        const data = await res.json().catch(() => null) as any;
+        if (!res.ok) {
+            const error = String(data?.error ?? `session_control_fetch_failed:${res.status}`);
+            if (error === 'controlled_actor_release_required') {
+                clear_controlled_actor_runtime_state();
+                await refresh_controlled_actor_binding(force);
+                return;
+            }
+            if (error === 'controlled_actor_binding_required' || error === 'controlled_actor_already_claimed') {
+                clear_controlled_actor_runtime_state();
+                await open_actor_claim_module(error === 'controlled_actor_already_claimed' ? 'saved_actor_claimed' : 'startup_required', error === 'controlled_actor_already_claimed'
+                    ? ['saved actor is already claimed', 'pick another actor to continue']
+                    : ['select an actor to begin', 'one actor claimed at a time']);
+                return;
+            }
+            throw new Error(error);
+        }
         if (!data?.ok || typeof data?.controlled_actor_ref !== 'string') {
             throw new Error(String(data?.error ?? 'session_control_invalid'));
         }
@@ -5023,12 +7466,21 @@ export function create_app_state(): AppState {
         if (!actor_id) throw new Error('session_control_missing_actor_id');
         const changed = actor_id !== current_actor_id;
         (APP_CONFIG as any).input_actor_id = actor_id;
+        persist_controlled_actor_ref(actor_ref);
         set_current_actor_ref(actor_ref);
+        ui_state.actor_claim.current_actor_ref = actor_ref;
+        ui_state.actor_claim.selected_actor_ref = actor_ref;
+        ui_state.actor_claim.is_visible = false;
+        ui_state.actor_claim.is_blocking = false;
+        ui_state.actor_claim.game_ready = false;
+        apply_runtime_module_visibility();
         if (changed) {
             ui_state.character.display_name = typeof data?.controlled_actor_name === 'string' && data.controlled_actor_name.trim().length > 0
                 ? data.controlled_actor_name.trim()
                 : ui_state.character.display_name;
-            void refresh_character_data(true);
+            void load_claimed_actor_runtime(actor_id, actor_ref, 'session_control_binding');
+        } else if (!ui_state.place.current_place_id) {
+            void load_claimed_actor_runtime(actor_id, actor_ref, 'session_control_resume');
         }
     }
 
@@ -5078,6 +7530,7 @@ export function create_app_state(): AppState {
         tasks.push((async () => {
             try {
                 await refresh_controlled_actor_binding();
+                if (!get_controlled_actor_id()) return;
                 if (movement_active && (now - last_targets_poll_ms) < 2400) {
                     maybe_refresh_debug_window_messages();
                     return;
@@ -5210,6 +7663,33 @@ export function create_app_state(): AppState {
             if (trimmed.toLowerCase() === '/target') {
                 ui_state.controls.selected_target = null;
                 flash_status([`target cleared`], 1200);
+                return;
+            }
+            if (trimmed.toLowerCase() === '/claim') {
+                if (get_controlled_actor_id()) {
+                    await open_actor_claim_module('manual_claim', ['release current actor to switch', 'one actor claimed at a time']);
+                    return;
+                }
+                await open_actor_claim_module('manual_claim', ['select an actor to claim', 'use /unclaim before switching']);
+                return;
+            }
+            if (trimmed.toLowerCase() === '/unclaim') {
+                await release_actor_claim_and_reopen();
+                flash_status(['Actor released', 'select another actor to continue'], 1400);
+                return;
+            }
+            if (trimmed.toLowerCase() === '/debugcommander') {
+                const next = !module_registry.is_visible('debug_commander_module');
+                set_module_visible('debug_commander_module', next);
+                flash_status([next ? 'Debug commander shown' : 'Debug commander hidden'], 900);
+                return;
+            }
+            if (trimmed.toLowerCase() === '/logout') {
+                await logout_to_actor_claim();
+                return;
+            }
+            if (!get_controlled_actor_id()) {
+                await open_actor_claim_module('pre_input_required', ['select an actor before sending input', 'one actor claimed at a time']);
                 return;
             }
 
@@ -5382,6 +7862,7 @@ export function create_app_state(): AppState {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
+                    session_token: get_session_token(),
                     text: outgoing,
                     sender: get_controlled_actor_id(),
                     // Send inferred verb when available (not just explicit override).
@@ -5655,26 +8136,6 @@ export function create_app_state(): AppState {
     const ROLL_X1 = R_X1;
     const BTN_Y0 = Y_INPUT0;
     const BTN_Y1 = Y_TRANSCRIPT1;
-    
-    // Debug buttons - positioned at TOP RIGHT of screen, horizontally
-    // Y coordinates: 0 is bottom, 50 is top (grid_height - 1)
-    // Place buttons at very top right, away from status bar
-    const DEBUG_Y_TOP = 48;      // Near top (just below screen edge)
-    const DEBUG_Y_BOTTOM = 49;   // Single row height
-    const DEBUG_X0 = 98;         // Start from right side (after status text area)
-    const DEBUG_X1 = 108;        // Button width
-    const DEBUG_BTN_STEP_X = 12;
-    const DEBUG_BTN_STEP_Y = 2;
-
-    const debug_button_rect = (col: number, row: number) => ({
-        x0: DEBUG_X0 + (col * DEBUG_BTN_STEP_X),
-        y0: DEBUG_Y_TOP + (row * DEBUG_BTN_STEP_Y),
-        x1: DEBUG_X1 + (col * DEBUG_BTN_STEP_X),
-        y1: (DEBUG_Y_TOP + (row * DEBUG_BTN_STEP_Y)) + 1,
-    });
-
-    // Second debug row for movement unification tests.
-    const DEBUG_Y_TEST = DEBUG_Y_TOP - DEBUG_BTN_STEP_Y;
 
     // Do not seed the log window with placeholder text.
 
@@ -6160,6 +8621,7 @@ export function create_app_state(): AppState {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
+                            session_token: get_session_token(),
                             text: 'inspect',
                             sender: get_controlled_actor_id(),
                             intent_verb: 'INSPECT',
@@ -6188,7 +8650,7 @@ export function create_app_state(): AppState {
                 const place = get_current_place();
                 if (!place) return;
                 const cid = build_place_tile_container_id(place.id, tile_x, tile_y, world_z);
-                void open_container_module(cid);
+                void open_owner_inventory_view(cid);
             },
             on_place_transition: async (target_place_id: string, direction: string): Promise<boolean> => {
                 // Handle place transition when user clicks on a connector
@@ -6228,6 +8690,7 @@ export function create_app_state(): AppState {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
+                                session_token: get_session_token(),
                                 entity_ref: get_input_actor_ref(),
                                 target_place_id: target_place_id
                             })
@@ -6285,9 +8748,12 @@ export function create_app_state(): AppState {
             get_actor_position: () => {
                 const place = get_current_place();
                 if (!place) return null;
-                const player = place.contents.actors_present[0];
+                const player = get_controlled_actor_snapshot(place);
                 return player ? { x: player.tile_position.x, y: player.tile_position.y } : null;
             },
+            get_controlled_actor_ref: () => get_input_actor_ref() || null,
+            get_session_token: () => get_session_token() || null,
+            request_scene_place_refresh: (place_id: string) => { void refresh_single_scene_place(place_id); },
             on_double_click_npc: (npc_ref: string) => {
                 debug_log(`[PlaceModule] Double-click on NPC: ${npc_ref}`);
                 // Look up NPC to get name
@@ -6313,7 +8779,7 @@ export function create_app_state(): AppState {
                 // Multiple items => open pile UI
                  if (item_ids.length >= 2) {
                      const pile_id = `place.pile.${place.id}.${voxel_key}`;
-                     void open_container_module(pile_id);
+                     void open_owner_inventory_view(pile_id);
                      return;
                  }
 
@@ -6343,7 +8809,7 @@ export function create_app_state(): AppState {
 
                      if (is_container_item(def)) {
                          const cid = `place.item.${place.id}.${item_id}`;
-                         void open_container_module(cid);
+                         void open_owner_inventory_view(cid);
                          return;
                      }
 
@@ -6440,8 +8906,7 @@ export function create_app_state(): AppState {
 
                 drag_state.start_drag('ground', item_id, `place.ground.${place.id}.${meta_voxel_key}`, def);
                 void (async () => {
-                    const compatible = await get_compatible_slots_for_instance(item_id, `place.ground.${place.id}.${meta_voxel_key}`, def);
-                    ui_state.character.highlighted_slots = compatible;
+                    await apply_item_legality_highlight(item_id, `place.ground.${place.id}.${meta_voxel_key}`, def, `place.ground.${place.id}.${meta_voxel_key}`);
                 })();
             },
 
@@ -6477,8 +8942,7 @@ export function create_app_state(): AppState {
                 void (async () => {
                     const place = get_current_place();
                     const source = place ? `place.ground.${place.id}` : 'place.ground';
-                    const compatible = await get_compatible_slots_for_instance(item_id, source, def);
-                    ui_state.character.highlighted_slots = compatible;
+                    await apply_item_legality_highlight(item_id, source, def, source);
                 })();
             },
 
@@ -6582,12 +9046,12 @@ export function create_app_state(): AppState {
                             log_ground_item_cache_position('pre-refresh optimistic check', moved_item_id, tile_x, tile_y, target_z);
                             flash_status(['Dragged'], 900);
                             drag_state.end_drag();
-                            await update_current_place(place_id, { source: 'drag_ground_to_place' });
+                            await refresh_place_visual_state(place_id);
                             log_ground_item_cache_position('post-refresh authoritative check', moved_item_id, tile_x, tile_y, target_z);
                             void refresh_container_data();
                             return true;
                         }
-                        flash_status([`Cannot drag: ${mv.error}`, mv.detail ? JSON.stringify(mv.detail) : ''], 2500);
+                        flash_status([`Cannot drag: ${mv.error}`, format_legality_detail(mv.detail)], 2500);
                         drag_state.reject_drag();
                         return false;
                     } catch {
@@ -6634,12 +9098,12 @@ export function create_app_state(): AppState {
                             log_ground_item_cache_position('pre-refresh optimistic check', moved_item_id, tile_x, tile_y, target_z);
                             flash_status(['Dragged'], 900);
                             drag_state.end_drag();
-                            await update_current_place(place_id, { source: 'drag_ground_within_place' });
+                            await refresh_place_visual_state(place_id);
                             log_ground_item_cache_position('post-refresh authoritative check', moved_item_id, tile_x, tile_y, target_z);
                             void refresh_container_data();
                             return true;
                         }
-                        flash_status([`Cannot drag: ${mv.error}`, mv.detail ? JSON.stringify(mv.detail) : ''], 2500);
+                        flash_status([`Cannot drag: ${mv.error}`, format_legality_detail(mv.detail)], 2500);
                         drag_state.reject_drag();
                         return false;
                     } catch {
@@ -6772,7 +9236,7 @@ export function create_app_state(): AppState {
                 }
 
                 // Get actor position for distance check
-                const actor = place.contents.actors_present[0];
+                const actor = get_controlled_actor_snapshot(place);
                 if (!actor) {
                     debug_log(`[PlaceModule] on_drop: No actor present - rejecting`);
                     return false;
@@ -6814,7 +9278,7 @@ export function create_app_state(): AppState {
                             debug_log(`[PlaceModule] on_drop: API returned detail: ${JSON.stringify(drop_res.detail)}`);
                         }
                         drag_state.reject_drag();
-                        flash_status([`Cannot drop: ${drop_res.error}`, drop_res.detail ? JSON.stringify(drop_res.detail) : ''], 2500);
+                        flash_status([`Cannot drop: ${drop_res.error}`, format_legality_detail(drop_res.detail)], 2500);
                         return false;
                     }
                 } catch (err) {
@@ -6844,7 +9308,7 @@ export function create_app_state(): AppState {
                 debug_log(`[PlaceModule] on_throw: Place is ${place.id}`);
 
                 // Get actor
-                const actor = place.contents.actors_present[0];
+                const actor = get_controlled_actor_snapshot(place);
                 if (!actor) {
                     debug_log(`[PlaceModule] on_throw: No actor present - rejecting`);
                     return false;
@@ -7162,479 +9626,27 @@ export function create_app_state(): AppState {
             OnPress() { ui_state.controls.move_mode = 'SPRINT'; flash_status(['move: SPRINT'], 800); },
         }),
 
-        // Debug button: Add FIRE! tag to actor
-        make_button_module({
-            id: 'debug_add_fire',
-            rect: debug_button_rect(0, 0),
-            label: 'FIRE',
-            rgb: get_color_by_name('vivid_red').rgb,
-            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            async OnPress() {
-                console.log('[DEBUG BUTTON] FIRE button pressed');
-                try {
-                    console.log('[DEBUG BUTTON] Calling /api/tag/add...');
-                    const response = await fetch('http://localhost:8787/api/tag/add', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            entity_ref: get_input_actor_ref() || 'actor.player',
-                            tag_name: 'FIRE!',
-                            mag: 5,
-                            meta: ['DISPERSING']
-                        })
-                    });
-                    console.log('[DEBUG BUTTON] Response status:', response.status);
-                    if (response.ok) {
-                        console.log('[DEBUG BUTTON] FIRE! tag added successfully');
-                        flash_status(['FIRE! tag added to actor'], 1500);
-                    } else {
-                        console.log('[DEBUG BUTTON] Failed to add FIRE! tag');
-                        flash_status(['Failed to add FIRE! tag'], 1500);
-                    }
-                } catch (err) {
-                    console.error('[DEBUG BUTTON] Error:', err);
-                    flash_status(['Error: Could not connect to API'], 1500);
-                }
+        make_debug_commander_module({
+            id: 'debug_commander_module',
+            rect: get_persisted_rect('debug_commander_module', { x0: 138, y0: 18, x1: 198, y1: 43 }),
+            get_is_visible: () => Boolean(ui_state.modules.visibility.get('debug_commander_module')),
+            get_actions: () => build_debug_commander_actions(),
+            get_selected_action_id: () => {
+                const actions = build_debug_commander_actions();
+                if (actions.length < 1) return null;
+                const selected = ui_state.debug_commander.selected_action_id;
+                return actions.some((action) => action.id === selected) ? selected : actions[0]!.id;
             },
+            get_status_lines: () => ui_state.debug_commander.status_lines,
+            on_select_action: (action_id) => set_debug_commander_selected_action(action_id),
+            on_trigger_action: (action_id) => trigger_debug_commander_action(action_id),
+            on_close: () => {
+                set_module_visible('debug_commander_module', false);
+                flash_status(['Debug commander hidden'], 900);
+            },
+            on_move: (new_rect) => persist_module_rect('debug_commander_module', new_rect),
+            on_resize: (new_rect) => persist_module_rect('debug_commander_module', new_rect),
         }),
-
-        // Debug button: Show Inventory (using new inline item API)
-        make_button_module({
-            id: 'debug_show_inventory',
-            rect: debug_button_rect(1, 0),
-            label: 'INV',
-            rgb: get_color_by_name('pale_green').rgb,
-            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            async OnPress() {
-                console.log('[DEBUG BUTTON] INV button pressed');
-                try {
-                    const actor_id = get_controlled_actor_id();
-                    console.log('[DEBUG BUTTON] Fetching inline items for actor:', actor_id);
-                    
-                    // Get inline items from new API
-                    const items_res = await fetch(`http://localhost:8787/api/actor/items?actor_id=${actor_id}`);
-                    console.log('[DEBUG BUTTON] Items response status:', items_res.status);
-                    const items_data = await items_res.json();
-                    console.log('[DEBUG BUTTON] Items data:', items_data);
-                    
-                    if (!items_data.ok) {
-                        console.log('[DEBUG BUTTON] Failed to load items:', items_data.error);
-                        flash_status(['Failed to load inventory'], 1500);
-                        return;
-                    }
-                    
-                    if (items_data.items && items_data.items.length > 0) {
-                        const items = items_data.items.map((entry: any) => {
-                            const item = entry.item;
-                            return `${item.qty}x ${item.name} (${item.weight}kg) @ ${entry.slot_name}.${entry.slot_type}`;
-                        }
-                        );
-                        console.log('[DEBUG BUTTON] Inventory items:', items);
-                        flash_status(['Inventory:', ...items.slice(0, 6)], 3000);
-                    } else {
-                        console.log('[DEBUG BUTTON] Inventory empty');
-                        flash_status(['Inventory: (empty)'], 1500);
-                    }
-                } catch (err) {
-                    console.error('[DEBUG BUTTON] Error:', err);
-                    flash_status(['Error: Could not load inventory'], 1500);
-                }
-            },
-        }),
-
-        // Quick UI toggles (temporary; will move to a real bottom bar later)
-        make_button_module({
-            id: 'ui_toggle_character',
-            rect: debug_button_rect(2, 0),
-            label: 'CHAR',
-            rgb: get_color_by_name('pale_yellow').rgb,
-            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            OnPress() {
-                const cur = module_registry.is_visible('character_module');
-                const next = !cur;
-                set_module_visible('character_module', next);
-                flash_status([next ? 'Character shown' : 'Character hidden'], 900);
-            },
-        }),
-        make_button_module({
-            id: 'ui_toggle_debug',
-            rect: debug_button_rect(3, 0),
-            label: 'DEBUG',
-            rgb: get_color_by_name('pale_yellow').rgb,
-            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            OnPress() {
-                const cur = module_registry.is_visible('debug');
-                const next = !cur;
-                set_module_visible('debug', next);
-                flash_status([next ? 'Debug shown' : 'Debug hidden'], 900);
-            },
-        }),
-
-        // Debug overlays toggle (vision/hearing/broadcast + facing). Replaces hotkeys.
-        make_button_module({
-            id: 'debug_toggle_overlays',
-            rect: { x0: DEBUG_X0 + 60, y0: DEBUG_Y_TEST, x1: DEBUG_X1 + 60, y1: DEBUG_Y_TEST + 1 },
-            label: 'OVR',
-            rgb: get_color_by_name('pale_yellow').rgb,
-            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            OnPress() {
-                const next = !DEBUG_VISION.enabled;
-                set_ui_debug_enabled(next);
-                set_debug_bundle_enabled(next);
-                flash_status([next ? 'Debug overlays ON' : 'Debug overlays off'], 900);
-            },
-        }),
-
-        make_button_module({
-            id: 'debug_move_refresh',
-            rect: { x0: DEBUG_X0 + 36, y0: DEBUG_Y_TEST, x1: DEBUG_X1 + 36, y1: DEBUG_Y_TEST + 1 },
-            label: 'MOVE',
-            rgb: get_color_by_name('pale_orange').rgb,
-            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            async OnPress() {
-                const result = await debug_move_refresh();
-                if (!result.ok) {
-                    flash_status([`MOVE failed: ${result.error ?? 'unknown'}`], 1800);
-                    return;
-                }
-                flash_status([
-                    `MOVE refresh used`,
-                    `${result.actor_ref ?? '(active actor)'}`,
-                ], 1500);
-                void refresh_timed_event_debug_state();
-            },
-        }),
-
-        make_button_module({
-            id: 'debug_end_timed_event',
-            rect: { x0: DEBUG_X0 + 48, y0: DEBUG_Y_TEST, x1: DEBUG_X1 + 48, y1: DEBUG_Y_TEST + 1 },
-            label: 'END',
-            rgb: get_color_by_name('pale_orange').rgb,
-            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            async OnPress() {
-                const result = await debug_end_timed_event();
-                if (!result.ok) {
-                    flash_status([`END failed: ${result.error ?? 'unknown'}`], 1800);
-                    return;
-                }
-                flash_status(['Timed event ended'], 1500);
-                void refresh_timed_event_debug_state();
-            },
-        }),
-
-        // Debug button: Pause/resume current place
-        make_button_module({
-            id: 'debug_pause_place',
-            rect: debug_button_rect(7, 0),
-            label: 'PAUSE',
-            rgb: WHITE,
-            get_rgb: () => {
-                if (debug_pause_controller.is_active()) return get_color_by_name('vivid_red').rgb;
-                if (ui_state.place.pause_state.paused) return get_color_by_name('pale_orange').rgb;
-                return get_color_by_name('dark_gray').rgb;
-            },
-            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            async OnPress() {
-                const place = get_current_place();
-                if (!place?.id) {
-                    flash_status(['No place loaded'], 1200);
-                    return;
-                }
-                const result = await toggle_current_place_pause_debug();
-                if (!result.ok) {
-                    if (result.mode === 'blocked' && result.sources.length > 0) {
-                        flash_status([
-                            'Pause held by other source',
-                            `sources: ${result.sources.join(',')}`,
-                        ], 1800);
-                        return;
-                    }
-                    flash_status(['Pause toggle failed'], 1500);
-                    return;
-                }
-                const pause_state = ui_state.place.pause_state;
-                flash_status([
-                    result.mode === 'paused' ? 'Place paused' : 'Place resumed',
-                    pause_state.pause_sources.length > 0
-                        ? `sources: ${pause_state.pause_sources.join(',')}`
-                        : 'sources: none',
-                ], 1500);
-            },
-        }),
-
-        // Drag-and-drop equipping is now implemented:
-        // - Drag item from inventory container to character body slot
-        // - This replaces the EQUIP/UNEQUIP debug buttons
-
-        // Phase 2: Double-click replaces these debug buttons:
-        // - CNTRS (list containers) -> Press 'I' to open inventory
-        // - GRND (ground items) -> Double-click ground to open scattered container
-        // - NPCINV (NPC inventory) -> Double-click NPC to open character module
-
-        // Debug button: Open nearest NPC (for quick access during development)
-        make_button_module({
-            id: 'debug_open_nearest_npc',
-            rect: debug_button_rect(4, 0),
-            label: 'NPCINV',
-            rgb: get_color_by_name('vivid_cyan').rgb,
-            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            async OnPress() {
-                console.log('[DEBUG BUTTON] NPCINV button pressed - Opening nearest NPC inventory');
-                debug_log('[DEBUG BUTTON] NPCINV button pressed');
-                
-                const place = get_current_place();
-                if (!place) {
-                    debug_log('[DEBUG BUTTON] No place loaded');
-                    flash_status(['No place loaded'], 1500);
-                    return;
-                }
-                
-                debug_log(`[DEBUG BUTTON] Current place: ${place.id}`);
-                debug_log(`[DEBUG BUTTON] Actors present: ${place.contents.actors_present?.length || 0}`);
-                debug_log(`[DEBUG BUTTON] NPCs present: ${place.contents.npcs_present?.length || 0}`);
-                
-                // Get actor position
-                const actor_ref = get_input_actor_ref();
-                const actor = place.contents.actors_present.find((a: any) => a.actor_ref === actor_ref);
-                if (!actor) {
-                    debug_log(`[DEBUG BUTTON] Actor ${actor_ref} not found in place`);
-                    flash_status(['Actor not found in place'], 1500);
-                    return;
-                }
-                
-                const actor_pos = actor.tile_position;
-                debug_log(`[DEBUG BUTTON] Actor ${actor_ref} at position (${actor_pos.x},${actor_pos.y})`);
-                
-                // Get all NPCs in place
-                const npcs = place.contents.npcs_present;
-                if (!npcs || npcs.length === 0) {
-                    debug_log('[DEBUG BUTTON] No NPCs in place');
-                    flash_status(['No NPCs in this place'], 1500);
-                    return;
-                }
-                
-                // Find nearest NPC
-                let nearest_npc = null;
-                let min_distance = Infinity;
-                
-                for (const npc of npcs) {
-                    const dx = npc.tile_position.x - actor_pos.x;
-                    const dy = npc.tile_position.y - actor_pos.y;
-                    const distance = Math.sqrt(dx * dx + dy * dy);
-                    debug_log(`[DEBUG BUTTON] NPC ${npc.npc_ref} at (${npc.tile_position.x},${npc.tile_position.y}), distance: ${distance.toFixed(1)}`);
-                    
-                    if (distance < min_distance) {
-                        min_distance = distance;
-                        nearest_npc = npc;
-                    }
-                }
-                
-                if (!nearest_npc) {
-                    debug_log('[DEBUG BUTTON] Could not determine nearest NPC');
-                    flash_status(['Could not find nearest NPC'], 1500);
-                    return;
-                }
-                
-                // Extract NPC name from npc_ref (e.g., "npc.grenda" -> "Grenda")
-                const npc_name = get_entity_display_name(nearest_npc.npc_ref);
-                
-                debug_log(`[DEBUG BUTTON] Selected nearest NPC: ${npc_name} (${nearest_npc.npc_ref}) at distance ${min_distance.toFixed(1)}`);
-                flash_status([`Opening ${npc_name}'s inventory (${min_distance.toFixed(0)} tiles)`], 1500);
-                
-                // Open NPC inventory
-                try {
-                    await open_npc_character_module(nearest_npc.npc_ref, npc_name);
-                } catch (err) {
-                    debug_log(`[DEBUG BUTTON] Error opening NPC module:`, err);
-                    flash_status([`Error opening ${npc_name}'s inventory`], 1500);
-                }
-            },
-        }),
-
-        // Debug button: Dump body_slots state
-        make_button_module({
-            id: 'debug_dump_body_slots',
-            rect: debug_button_rect(5, 0),
-            label: 'SLOTS',
-            rgb: get_color_by_name('vivid_yellow').rgb,
-            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            async OnPress() {
-                console.log('[DEBUG BUTTON] SLOTS button pressed');
-                debug_log('[DEBUG BUTTON] === DUMPING BODY SLOTS STATE ===');
-                
-                try {
-                    const actor_id = get_controlled_actor_id();
-                    debug_log(`[DEBUG BUTTON] Actor ID: ${actor_id}`);
-                    
-                    // Fetch actor data directly
-                    const actor_res = await fetch(`http://localhost:8787/api/actor?id=${actor_id}`);
-                    if (!actor_res.ok) {
-                        debug_log('[DEBUG BUTTON] ERROR: Failed to fetch actor');
-                        flash_status(['Failed to fetch actor'], 1500);
-                        return;
-                    }
-                    
-                    const actor_data = await actor_res.json();
-                    if (!actor_data.ok) {
-                        debug_log('[DEBUG BUTTON] ERROR: Actor data not ok');
-                        flash_status(['Actor data error'], 1500);
-                        return;
-                    }
-                    
-                    const body_slots = actor_data.body_slots || {};
-                    debug_log('[DEBUG BUTTON] Raw body_slots from API:');
-                    
-                    // Log each slot
-                    for (const [slot_name, slot_data] of Object.entries(body_slots)) {
-                        const slot = slot_data as any;
-                        debug_log(`[DEBUG BUTTON] ${slot_name}:`);
-                        debug_log(`[DEBUG BUTTON]   tool: ${slot.tool || 'null'}`);
-                        debug_log(`[DEBUG BUTTON]   armor: ${slot.armor || 'null'}`);
-                        debug_log(`[DEBUG BUTTON]   garb: [${slot.garb?.join(', ') || 'empty'}]`);
-                    }
-                    
-                    // Also log what's in ui_state
-                    debug_log('[DEBUG BUTTON] ui_state.character.equipped_items:');
-                    ui_state.character.equipped_items.forEach((item, slot) => {
-                        debug_log(`[DEBUG BUTTON]   ${slot}: ${item.definition.name} (${item.instance.id})`);
-                    });
-                    
-                    flash_status(['Body slots dumped to console'], 2000);
-                } catch (err) {
-                    console.error('[DEBUG BUTTON] Error:', err);
-                    flash_status(['Error dumping body slots'], 1500);
-                }
-            },
-        }),
-
-        // Debug button: Place painter toggle
-        make_button_module({
-            id: 'debug_drop_item',
-            rect: debug_button_rect(6, 0),
-            label: 'PAINT',
-            rgb: WHITE,
-            get_rgb: () => {
-                if (ui_state.place_painter.active) return get_color_by_name('vivid_green').rgb;
-                if (place_painter_pause_controller.is_active()) return get_color_by_name('pale_orange').rgb;
-                return get_color_by_name('dark_gray').rgb;
-            },
-            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            async OnPress() {
-                const place = get_current_place();
-                if (!place?.id) {
-                    flash_status(['No place loaded'], 1200);
-                    return;
-                }
-                const ok = await toggle_place_painter();
-                if (!ok) {
-                    flash_status(['Place painter toggle failed'], 1500);
-                    return;
-                }
-                flash_status([
-                    ui_state.place_painter.active ? 'Place painter ON' : 'Place painter off',
-                    `pause:${ui_state.place.pause_state.paused ? 'paused' : 'running'}`,
-                ], 1500);
-            },
-        }),
-
-        // ================================
-        // MOVE_UNIFY_TEST helpers (Phase 5)
-        // ================================
-        // Note: legacy debug movement buttons that used /api/actor/move were removed.
-        // Movement is now server-authoritative via /api/movement/* only.
-
-        // Debug button: start timed event in current place.
-        make_button_module({
-            id: 'debug_start_timed_event',
-            rect: { x0: DEBUG_X0, y0: DEBUG_Y_TEST, x1: DEBUG_X1, y1: DEBUG_Y_TEST + 1 },
-            label: 'TEVT',
-            rgb: get_color_by_name('pale_orange').rgb,
-            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            async OnPress() {
-                const place = get_current_place();
-                if (!place?.id) {
-                    flash_status(['No place loaded'], 1200);
-                    return;
-                }
-                const result = await start_debug_timed_event(place.id, 'combat');
-                if (!result.ok) {
-                    flash_status([`Timed event failed: ${result.error ?? 'unknown'}`], 1800);
-                    return;
-                }
-                flash_status([
-                    'Timed event queued',
-                    `participants: ${result.participants?.length ?? 0}`,
-                ], 1500);
-                void refresh_timed_event_debug_state();
-            },
-        }),
-
-        // Debug button: advance to next timed-event turn.
-        make_button_module({
-            id: 'debug_next_timed_turn',
-            rect: { x0: DEBUG_X0 + 12, y0: DEBUG_Y_TEST, x1: DEBUG_X1 + 12, y1: DEBUG_Y_TEST + 1 },
-            label: 'NEXT',
-            rgb: get_color_by_name('pale_orange').rgb,
-            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            async OnPress() {
-                const result = await debug_advance_timed_event_turn();
-                if (!result.ok) {
-                    flash_status([`Next turn failed: ${result.error ?? 'unknown'}`], 1800);
-                    return;
-                }
-                flash_status([
-                    `Turn ${result.new_turn ?? '?'}`,
-                    `active: ${result.active_actor ?? '(none)'}`,
-                ], 1500);
-                void refresh_timed_event_debug_state();
-            },
-        }),
-
-        // Note: levitate/teleport debug movement was removed with /api/actor/move.
-
-        // Toggle test body model for self-exclusion test.
-        make_button_module({
-            id: 'debug_body',
-            rect: { x0: DEBUG_X0 + 24, y0: DEBUG_Y_TEST, x1: DEBUG_X1 + 24, y1: DEBUG_Y_TEST + 1 },
-            label: 'BOD',
-            rgb: get_color_by_name('vivid_yellow').rgb,
-            bg: { char: '*', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            async OnPress() {
-                const place = get_current_place();
-                if (!place) return;
-                const actor_id = get_controlled_actor_id();
-                const actor_ref = `actor.${actor_id}`;
-                const actor = place.contents.actors_present.find((a: any) => a.actor_ref === actor_ref) as any;
-                if (!actor) return;
-
-                const cur = String(actor.body_model_id ?? '');
-                const next = cur === 'test.self_exclusion_y2' ? 'character.biped_2z' : 'test.self_exclusion_y2';
-                const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                await fetch(`${base_url}/api/actor/debug/body_model`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ slot: APP_CONFIG.selected_data_slot, actor_id, body_model_id: next }),
-                });
-                flash_status([`Body model: ${next}`], 1500);
-                await update_current_place(place.id, { source: 'debug_body_model_toggle' });
-            },
-        }),
-
-        // Note: support-from-occupant test is now handled by LIFT onto existing structures.
 
         make_roller_module({
             id: 'roller',
@@ -7663,10 +9675,19 @@ export function create_app_state(): AppState {
             get_actor_id: () => get_controlled_actor_id(),
             get_body_slots: () => ui_state.character.body_slots,
             get_equipped_items: () => ui_state.character.equipped_items,
+            get_tags: () => get_character_tags(get_input_actor_ref()),
+            get_selected_tag_key: () => ui_state.tag_picker.entity_ref === get_input_actor_ref() ? ui_state.tag_picker.selected_tag_key : null,
             get_weight_data: () => ui_state.character.weight,
             get_is_visible: () => ui_state.character.is_visible,
+            on_select_tag: (tag: TagInstance) => load_tag_picker_from_entity(get_input_actor_ref(), tag),
+            on_add_tag: () => { void seed_default_entity_tag(get_input_actor_ref()); },
             on_slot_click: (slot_name: string, slot_type: SlotType, garb_index: number | null) => {
                 console.log(`[Character] Clicked body slot: ${slot_name}.${slot_type}${garb_index !== null ? `.${garb_index}` : ''}`);
+            },
+            on_select_item: (_slot_name: string, _slot_type: SlotType, _garb_index: number | null, item) => {
+                const actor_id = get_controlled_actor_id();
+                if (!actor_id) return;
+                select_item_for_entity_inspector({ item_ref: `item.${item.id}`, owner_kind: 'actor', owner_id: actor_id });
             },
             on_slot_hover: (slot_name: string | null, slot_type: SlotType | null, garb_index: number | null, equipped_item: { instance: ItemInstance; definition: ItemDefinition } | null) => {
                 if (equipped_item) {
@@ -7701,9 +9722,8 @@ export function create_app_state(): AppState {
                 // Store in shared drag state
                 drag_state.start_drag('character', item.id, container_id, definition);
                 // Highlight compatible slots (call API for tag-based compatibility)
-                const compatible = await get_compatible_slots_for_instance(item.id, container_id, definition);
-                ui_state.character.highlighted_slots = compatible;
-                console.log(`[Character] Drag started from ${slot_name}.${slot_type}${garb_index !== null ? `.${garb_index}` : ''} - highlighting slots:`, compatible);
+                await apply_item_legality_highlight(item.id, container_id, definition, container_id);
+                console.log(`[Character] Drag started from ${slot_name}.${slot_type}${garb_index !== null ? `.${garb_index}` : ''} - legality highlight applied`);
             },
             on_invalid_drop: (message: string) => {
                 flash_status([message], 1800);
@@ -8004,45 +10024,10 @@ export function create_app_state(): AppState {
                 // Check if drop is on container module (inventory)
                 // Container module rect: { x0: 160, y0: 18, x1: 198, y1: 35 }
                 if (x >= 160 && x <= 198 && y >= 18 && y <= 35) {
-                    // Get target container (the sack)
-                    const container = ui_state.container.current_container;
-                    if (!container) {
+                    const target_container_id = await get_inventory_panel_drop_target_container_id();
+                    if (!target_container_id) {
                         drag_state.end_drag();
                         return false;
-                    }
-
-                    // Calculate target grid position if container is open
-                    let target_grid_x: number | undefined;
-                    let target_grid_y: number | undefined;
-                    
-                    if (ui_state.container.is_visible) {
-                        // Container is open - calculate which slot was dropped on
-                        const { cols, rows } = get_container_grid(container);
-                        const slot_spacing_x = 2;
-                        const slot_spacing_y = 1;
-                        
-                        // Standard container window position when open
-                        // These should match the container module's rendering
-                        const container_x0 = 160;
-                        const container_y0 = 18;
-                        const start_x = container_x0 + 2;
-                        const start_y = container_y0 + 35; // Approximate, row 0 at bottom
-                        
-                        // Calculate column
-                        const col = Math.floor((x - start_x) / slot_spacing_x);
-                        
-                        // Calculate row (inverted Y)
-                        const row_offset = start_y - y;
-                        const row = Math.floor(row_offset / slot_spacing_y);
-                        
-                        // Validate bounds
-                        if (col >= 0 && col < cols && row >= 0 && row < rows) {
-                            target_grid_x = col;
-                            target_grid_y = row;
-                            debug_log(`[Character] Drop calculated: grid(${target_grid_x}, ${target_grid_y}) from screen(${x}, ${y})`);
-                        } else {
-                            debug_log(`[Character] Drop out of bounds: col=${col}, row=${row}, bounds=${cols}x${rows}`);
-                        }
                     }
 
                     try {
@@ -8050,9 +10035,7 @@ export function create_app_state(): AppState {
                             actor_id: get_controlled_actor_id(),
                             item_instance_id: String(drag_state.item_instance_id ?? ''),
                             from_container: String(drag_state.source_container_id ?? ''),
-                            to_container: container.id,
-                            target_grid_x,
-                            target_grid_y,
+                            to_container: target_container_id,
                         });
 
                         if (transfer_data.ok) {
@@ -8199,59 +10182,269 @@ export function create_app_state(): AppState {
             on_container_click: (container_id: string) => {
                 debug_log(`[Character] Container clicked: ${container_id}`);
                 // Phase 7: Open container in new ContainerModule
-                void open_container_module(container_id, 'your container');
+                void open_owner_inventory_view(container_id, 'your container');
             },
             // Phase 7: Right-click container opening
             on_open_container: async (container_id: string, slot_name: string) => {
                 debug_log(`[Character] Opening container via right-click: ${container_id}`);
-                await open_container_module(container_id, slot_name);
+                await open_owner_inventory_view(container_id, slot_name);
             },
             get_open_containers: () => ui_state.container.open_containers,
         }),
 
-        make_character_editor_module({
-            id: 'character_editor_module',
-            rect: get_persisted_rect('character_editor_module', { x0: 126, y0: 4, x1: 158, y1: 20 }),
-            get_is_visible: () => ui_state.place_painter.active && ui_state.character_editor.is_visible,
-            get_title: () => 'CHAR EDIT',
-            get_subtitle: () => get_character_editor_subject_label(ui_state.character_editor.character_ref),
-            get_fields: () => [
-                { key: 'name', label: 'name', value: ui_state.character_editor.draft.name },
-                { key: 'title', label: 'title', value: ui_state.character_editor.draft.title },
-                { key: 'kind', label: 'kind', value: ui_state.character_editor.draft.kind },
-                { key: 'sex', label: 'sex', value: ui_state.character_editor.draft.sex },
-                { key: 'age', label: 'age', value: ui_state.character_editor.draft.age },
-            ],
+        make_entity_editor_module({
+            id: 'entity_inspector_module',
+            rect: get_persisted_rect('entity_inspector_module', { x0: 126, y0: 4, x1: 158, y1: 20 }),
+            get_is_visible: () => ui_state.place_painter.active && ui_state.entity_inspector.is_visible,
+            get_title: () => ui_state.entity_inspector.entity_kind === 'tile' ? 'TILE' : ui_state.entity_inspector.entity_kind === 'item' ? 'ITEM' : 'ENTITY',
+            get_subtitle: () => get_entity_editor_subject_label(ui_state.entity_inspector.entity_ref),
+            get_fields: () => {
+                if (ui_state.entity_inspector.entity_kind === 'character') {
+                    return [
+                        { key: 'name', label: 'name', value: ui_state.character_editor.draft.name },
+                        { key: 'title', label: 'title', value: ui_state.character_editor.draft.title },
+                        { key: 'kind', label: 'kind', value: ui_state.character_editor.draft.kind },
+                        { key: 'sex', label: 'sex', value: ui_state.character_editor.draft.sex },
+                        { key: 'age', label: 'age', value: ui_state.character_editor.draft.age },
+                    ];
+                }
+                if (ui_state.entity_inspector.entity_kind === 'item') {
+                    const original = ui_state.item_editor.original as any;
+                    const container = get_container_capacity_summary(original as any);
+                    const qty = Number(original?.qty ?? 1);
+                    const singleValue = Number(original?.single_value_mag ?? original?.value_mag?.total_value_mag ?? 0);
+                    const stackValue = Number(original?.stack_value_mag ?? (singleValue * qty));
+                    const singleWeight = Number(original?.single_weight ?? 0);
+                    const stackWeight = Number(original?.stack_weight ?? (singleWeight * qty));
+                    const fields = [
+                        { key: 'name', label: 'name', value: String(original?.name ?? ''), editable: false },
+                        { key: 'size', label: 'size', value: String(original?.size_mag ?? 0), editable: false },
+                        { key: 'qty', label: 'qty', value: String(qty), editable: false },
+                        { key: 'value', label: 'value', value: `${singleValue}/${stackValue}`, editable: false },
+                        { key: 'weight', label: 'weight', value: `${singleWeight}/${stackWeight}`, editable: false },
+                    ];
+                    if (container.has_container) {
+                        fields.push(
+                            { key: 'cont_mag', label: 'cont mag', value: String(container.capacity_mag ?? 1), editable: false },
+                            { key: 'cont_slots', label: 'slots', value: String(container.max_slots ?? 1), editable: false },
+                        );
+                    }
+                    return fields;
+                }
+                const original = ui_state.tile_editor.original as any;
+                const tags = get_character_tags(ui_state.tile_editor.tile_ref);
+                const value_mag = Number(original?.value_mag?.total_value_mag ?? original?.total_value_mag ?? 0);
+                const grow = get_tile_editor_grow_summary(original as any);
+                const container = get_container_capacity_summary(original as any);
+                const fields: Array<{ key: string; label: string; value: string; editable: boolean }> = [
+                    { key: 'kind', label: 'kind', value: String(original?.kind ?? ''), editable: false },
+                    { key: 'place', label: 'place', value: String(ui_state.tile_editor.place_id ?? ''), editable: false },
+                    { key: 'pos', label: 'pos', value: `${ui_state.tile_editor.x},${ui_state.tile_editor.y},${ui_state.tile_editor.z}`, editable: false },
+                    { key: 'tags', label: 'tag ct', value: String(tags.length), editable: false },
+                    { key: 'value', label: 'value', value: String(value_mag), editable: false },
+                ];
+                if (container.has_container) {
+                    fields.push(
+                        { key: 'cont_mag', label: 'cont mag', value: String(container.capacity_mag ?? 1), editable: false },
+                        { key: 'cont_slots', label: 'slots', value: String(container.max_slots ?? 1), editable: false },
+                    );
+                }
+                if (grow.count > 0) {
+                    fields.push(
+                        { key: 'grow_ct', label: 'grow ct', value: String(grow.count), editable: false },
+                        { key: 'grow_period', label: 'grow t', value: String(grow.period ?? '-'), editable: false },
+                        { key: 'grow_slots', label: 'grow s', value: String(grow.slots ?? '-'), editable: false },
+                        { key: 'grow_yield', label: 'grow y', value: String(grow.yield_qty ?? '-'), editable: false },
+                    );
+                }
+                return fields;
+            },
+            get_tags: () => get_character_tags(ui_state.entity_inspector.entity_kind === 'character' ? ui_state.character_editor.character_ref : ui_state.entity_inspector.entity_kind === 'item' ? ui_state.item_editor.item_ref : ui_state.tile_editor.tile_ref),
+            get_selected_tag_key: () => ui_state.tag_picker.entity_ref === ui_state.entity_inspector.entity_ref ? ui_state.tag_picker.selected_tag_key : null,
             get_status_lines: () => {
-                const lines = [...ui_state.character_editor.status_lines];
-                if (ui_state.character_editor.dirty) lines.push('unsaved changes');
-                if (ui_state.character_editor.saving) lines.push('saving in progress');
+                const lines: string[] = ui_state.entity_inspector.entity_kind === 'character'
+                    ? [...ui_state.character_editor.status_lines]
+                    : ui_state.entity_inspector.entity_kind === 'item'
+                        ? [...ui_state.item_editor.status_lines]
+                    : [...ui_state.tile_editor.status_lines];
+                if (ui_state.entity_inspector.entity_kind === 'character' && ui_state.character_editor.dirty) lines.push('unsaved changes');
+                if (ui_state.entity_inspector.entity_kind === 'character' && ui_state.character_editor.saving) lines.push('saving in progress');
+                if (ui_state.entity_inspector.entity_kind === 'item' && ui_state.item_editor.saving) lines.push('saving in progress');
+                if (ui_state.entity_inspector.entity_kind === 'tile' && ui_state.tile_editor.saving) lines.push('saving in progress');
                 return lines;
             },
             on_update_field: (key, value) => {
+                if (ui_state.entity_inspector.entity_kind !== 'character') return;
                 if (!(key in ui_state.character_editor.draft)) return;
                 (ui_state.character_editor.draft as any)[key] = value;
                 ui_state.character_editor.dirty = true;
-                ui_state.character_editor.status_lines = [
-                    get_character_editor_subject_label(ui_state.character_editor.character_ref),
-                    `editing ${key}`,
-                ];
+                ui_state.character_editor.status_lines = [get_character_editor_subject_label(ui_state.character_editor.character_ref), `editing ${key}`];
             },
             on_select_field: (key: string) => {
-                if (key === 'kind' || key === 'sex') {
-                    void open_character_editor_field_picker(key);
+                if (ui_state.entity_inspector.entity_kind !== 'character') return;
+                if (key === 'kind' || key === 'sex') void open_character_editor_field_picker(key);
+            },
+            on_select_tag: (tag) => {
+                const ref = ui_state.entity_inspector.entity_kind === 'character' ? ui_state.character_editor.character_ref : ui_state.entity_inspector.entity_kind === 'item' ? ui_state.item_editor.item_ref : ui_state.tile_editor.tile_ref;
+                if (ref) load_tag_picker_from_entity(ref, tag);
+            },
+            on_add_tag: () => {
+                const ref = ui_state.entity_inspector.entity_kind === 'character' ? ui_state.character_editor.character_ref : ui_state.entity_inspector.entity_kind === 'item' ? ui_state.item_editor.item_ref : ui_state.tile_editor.tile_ref;
+                if (ref) void seed_default_entity_tag(ref);
+            },
+            on_save: async () => {
+                if (ui_state.entity_inspector.entity_kind === 'character') await save_character_editor_module();
+                else if (ui_state.entity_inspector.entity_kind === 'item') await save_item_editor_module();
+                else await save_tile_editor_module();
+            },
+            on_reload: async () => {
+                if (ui_state.entity_inspector.entity_kind === 'character') await reload_character_editor_module();
+                else if (ui_state.entity_inspector.entity_kind === 'item') await reload_item_editor_module();
+                else await reload_tile_editor_module();
+            },
+            on_close: () => close_entity_inspector(),
+            on_move: (new_rect) => persist_entity_inspector_rect(new_rect),
+        }),
+
+        make_tag_picker_module({
+            id: 'tag_picker_module',
+            rect: get_persisted_rect('tag_picker_module', { x0: 96, y0: 4, x1: 125, y1: 17 }),
+            get_is_visible: () => ui_state.place_painter.active && ui_state.tag_picker.is_visible,
+            get_title: () => 'TAG PICK',
+            get_subtitle: () => get_entity_editor_subject_label(ui_state.tag_picker.entity_ref),
+            get_tag: () => ui_state.tag_picker.draft,
+            get_definition: () => ui_state.tag_picker.definition,
+            get_selected_field: () => ui_state.tag_picker.selected_field,
+            get_status_lines: () => {
+                const lines: string[] = [...ui_state.tag_picker.status_lines];
+                if (ui_state.tag_picker.applying) lines.push('applying...');
+                lines.push('enter commits text / arrows adjust values');
+                return lines;
+            },
+            on_select_field: (field) => {
+                ui_state.tag_picker.selected_field = field;
+            },
+            on_open_name_picker: () => { void open_tag_picker_name_picker(); },
+            on_adjust_mag: (delta) => {
+                if (!ui_state.tag_picker.draft) return;
+                ui_state.tag_picker.selected_field = 'mag';
+                ui_state.tag_picker.draft.mag = clamp_tag_mag(ui_state.tag_picker.draft.mag + delta, ui_state.tag_picker.draft.mag);
+                update_tag_picker_status(get_entity_editor_subject_label(ui_state.tag_picker.entity_ref), `mag: ${ui_state.tag_picker.draft.mag}`);
+                void apply_tag_picker_draft();
+            },
+            on_adjust_dimension: (dimension_id, delta) => {
+                if (!ui_state.tag_picker.draft) return;
+                const definition = ui_state.tag_picker.definition?.dimensions.find((entry) => entry.id === dimension_id) ?? null;
+                const current = ui_state.tag_picker.draft.dim_mag?.[dimension_id] ?? definition?.default_mag ?? 0;
+                const next = clamp_dimension_mag(current + delta, definition, current);
+                ui_state.tag_picker.selected_field = `dim:${dimension_id}`;
+                if (!ui_state.tag_picker.draft.dim_mag) ui_state.tag_picker.draft.dim_mag = {};
+                ui_state.tag_picker.draft.dim_mag[dimension_id] = next;
+                if (ui_state.tag_picker.definition?.quantity_dimension_id === dimension_id) {
+                    ui_state.tag_picker.draft.mag = clamp_tag_mag(next, ui_state.tag_picker.draft.mag);
+                }
+                update_tag_picker_status(get_entity_editor_subject_label(ui_state.tag_picker.entity_ref), `${dimension_id}: ${next}`);
+                void apply_tag_picker_draft();
+            },
+            on_update_meta_text: (value) => {
+                ui_state.tag_picker.selected_field = 'meta';
+                ui_state.tag_picker.meta_text = value;
+                if (ui_state.tag_picker.draft) {
+                    ui_state.tag_picker.draft.meta = value.split(',').map((entry) => entry.trim().toUpperCase()).filter(Boolean);
                 }
             },
-            on_save: async () => await save_character_editor_module(),
-            on_reload: async () => await reload_character_editor_module(),
-            on_close: () => close_character_editor_module(),
-            on_move: (new_rect) => persist_module_rect('character_editor_module', new_rect),
+            on_commit_meta: () => {
+                if (!ui_state.tag_picker.draft) return;
+                ui_state.tag_picker.draft.meta = ui_state.tag_picker.meta_text.split(',').map((entry) => entry.trim().toUpperCase()).filter(Boolean);
+                update_tag_picker_status(get_entity_editor_subject_label(ui_state.tag_picker.entity_ref), `meta: ${ui_state.tag_picker.meta_text || '-'}`);
+                void apply_tag_picker_draft();
+            },
+            on_remove_tag: () => { void remove_tag_picker_selected(); },
+            on_drag_apply: (x, y) => { void apply_tag_picker_drop(x, y); },
+            on_close: () => close_tag_picker_module(),
+            on_move: (new_rect) => persist_module_rect('tag_picker_module', new_rect),
+        }),
+
+        make_world_entry_module({
+            id: 'world_entry_module',
+            rect: get_persisted_rect('world_entry_module', { x0: 76, y0: 10, x1: 126, y1: 24 }),
+            get_is_visible: () => ui_state.world_entry.is_visible,
+            get_status_lines: () => ui_state.world_entry.status_lines,
+            on_launch_world: () => { void begin_world_session(); },
+            on_join_world: () => { void open_world_join_module(); },
+            on_move: (new_rect) => persist_module_rect('world_entry_module', new_rect),
+        }),
+
+        make_world_join_module({
+            id: 'world_join_module',
+            rect: get_persisted_rect('world_join_module', { x0: 72, y0: 8, x1: 132, y1: 28 }),
+            get_is_visible: () => ui_state.world_join.is_visible,
+            get_entries: () => ui_state.world_join.entries,
+            get_selected_world_id: () => ui_state.world_join.selected_world_id,
+            get_status_lines: () => ui_state.world_join.status_lines,
+            on_select_world: (world_id) => { ui_state.world_join.selected_world_id = world_id; },
+            on_join_selected: () => { void join_selected_world(); },
+            on_back: () => open_world_entry_module(),
+            on_refresh: () => { void refresh_joinable_worlds(); },
+            on_move: (new_rect) => persist_module_rect('world_join_module', new_rect),
+        }),
+
+        make_actor_claim_module({
+            id: 'actor_claim_module',
+            rect: get_persisted_rect('actor_claim_module', { x0: 68, y0: 8, x1: 132, y1: 28 }),
+            get_is_visible: () => ui_state.actor_claim.is_visible,
+            get_is_blocking: () => ui_state.actor_claim.is_blocking,
+            get_title: () => ui_state.actor_claim.title,
+            get_guest_label: () => ui_state.actor_claim.guest_label,
+            get_entries: () => ui_state.actor_claim.actors,
+            get_selected_actor_ref: () => ui_state.actor_claim.selected_actor_ref,
+            get_current_actor_ref: () => ui_state.actor_claim.current_actor_ref,
+            get_status_lines: () => {
+                const lines = [...ui_state.actor_claim.status_lines];
+                if (ui_state.actor_claim.error) lines.unshift(`error: ${ui_state.actor_claim.error}`);
+                if (ui_state.actor_claim.is_loading) lines.unshift('loading actors...');
+                if (ui_state.actor_claim.is_submitting) lines.unshift('updating claim...');
+                return lines;
+            },
+            get_is_loading: () => ui_state.actor_claim.is_loading,
+            get_is_submitting: () => ui_state.actor_claim.is_submitting,
+            on_select: (actor_ref) => select_actor_claim_entry(actor_ref),
+            on_claim_selected: () => { void claim_selected_actor(); },
+            on_create_actor: () => { void open_character_creation_module(); },
+            on_release_current: () => { void release_actor_claim_and_reopen(); },
+            on_refresh: () => { void refresh_actor_claim_state(); },
+            on_close: () => close_actor_claim_module(),
+            on_move: (new_rect) => persist_module_rect('actor_claim_module', new_rect),
+        }),
+
+        make_character_creation_module({
+            id: 'character_creation_module',
+            rect: get_persisted_rect('character_creation_module', { x0: 74, y0: 6, x1: 132, y1: 28 }),
+            get_is_visible: () => ui_state.character_creation.is_visible,
+            get_title: () => 'CREATE ACTOR',
+            get_subtitle: () => 'public actor - returns to claim list',
+            get_fields: () => get_character_creation_fields(),
+            get_status_lines: () => {
+                const lines = [...ui_state.character_creation.status_lines];
+                if (ui_state.character_creation.is_loading) lines.unshift('loading creation options...');
+                if (ui_state.character_creation.is_submitting) lines.unshift('creating actor...');
+                return lines;
+            },
+            on_update_field: (key, value) => update_character_creation_field(key, value),
+            on_select_field: (key) => {
+                ui_state.character_creation.selected_field = key;
+                if (key === 'kind' || key === 'sex') void open_character_creation_field_picker(key);
+            },
+            on_create: async () => { await submit_character_creation(); },
+            on_reset: async () => { await reset_character_creation_draft(); },
+            on_close: () => close_character_creation_module(),
+            on_move: (new_rect) => persist_module_rect('character_creation_module', new_rect),
         }),
 
         make_option_picker_module({
             id: 'option_picker_module',
             rect: get_persisted_rect('option_picker_module', { x0: 94, y0: 4, x1: 124, y1: 20 }),
-            get_is_visible: () => ui_state.place_painter.active && ui_state.option_picker.is_visible,
+            get_is_visible: () => ui_state.option_picker.is_visible && (ui_state.place_painter.active || ui_state.character_creation.is_visible),
             get_title: () => ui_state.option_picker.title,
             get_options: () => ui_state.option_picker.options,
             get_selected_value: () => ui_state.option_picker.selected_value,
@@ -8261,70 +10454,31 @@ export function create_app_state(): AppState {
             on_move: (new_rect) => persist_module_rect('option_picker_module', new_rect),
         }),
 
-        // Inventory Container Module - BOTTOM
-        // Shows sack contents
-        make_container_module({
+        // Inventory Owner Module - BOTTOM
+        // Shows actor body surfaces plus first-layer attached storage surfaces.
+        make_owner_inventory_module({
             id: 'inventory_container',
-            rect: { x0: 160, y0: 18, x1: 198, y1: 35 },
-            get_container: () => ui_state.container.current_container,
-            get_slot_items: () => {
-                const container = ui_state.container.current_container;
-                const contents = ui_state.container.slot_items || [];
-                const max_slots = container?.capacity?.max_slots || contents.length || 10;
-                
-                // Map items to SlotItem format with proper slot_index
-                const slots = [];
-                for (let i = 0; i < max_slots; i++) {
-                    slots.push({ slot_index: i, instance: null, definition: null });
-                }
-                
-                contents.forEach((item: any, idx: number) => {
-                    let slot_index = idx;
-                    
-                    // If item has grid coordinates, use them
-                    if (item.grid_x !== undefined && item.grid_y !== undefined && container) {
-                        const { cols } = get_container_grid(container);
-                        slot_index = item.grid_y * cols + item.grid_x;
-                    }
-                    
-                    if (slot_index >= 0 && slot_index < max_slots) {
-                        slots[slot_index] = {
-                            slot_index,
-                            instance: item.instance,
-                            definition: item.definition
-                        };
-                    }
-                });
-                
-                return slots;
-            },
-
+            rect: get_persisted_rect('inventory_container', { x0: 160, y0: 18, x1: 198, y1: 35 }),
+            get_view: () => ui_state.container.owner_view,
             get_is_visible: () => ui_state.container.is_visible,
-            set_is_visible: async (visible: boolean) => { 
-                debug_log(`[Inventory] set_is_visible called with: ${visible}`);
+            set_is_visible: async (visible: boolean) => {
+                debug_log(`[InventoryOwner] set_is_visible called with: ${visible}`);
                 set_module_visible('inventory_container', visible);
+                ui_state.container.is_visible = visible;
                 if (visible) {
-                    // Phase 1: Load main inventory (equipped sack) when opening
-                    debug_log('[Inventory] Opening inventory - fetching main inventory container...');
-                    const main_inventory = await get_main_inventory_container();
-                    debug_log(`[Inventory] get_main_inventory_container returned: ${main_inventory ? 'SUCCESS' : 'NULL'}`);
-                    
-                    if (main_inventory) {
-                        ui_state.container.current_container = main_inventory.container_data;
-                        ui_state.container.slot_items = main_inventory.container_data.contents || [];
-                        debug_log(`[Inventory] Loaded main inventory: ${main_inventory.container_id} with ${main_inventory.container_data.contents?.length || 0} items`);
+                    const actor_id = get_controlled_actor_id();
+                    const view = actor_id ? await load_actor_owner_inventory_view(actor_id) : null;
+                    ui_state.container.owner_view = view;
+                    if (view) {
+                        flash_status(['Inventory opened (press i to close)'], 1000);
                     } else {
-                        debug_log('[Inventory] No main inventory found - will show empty');
+                        flash_status(['No inventory view available'], 1500);
                     }
-                    
-                    // Refresh container data when opening
-                    void refresh_container_data();
-                    flash_status(['Inventory opened (press i to close)'], 1000);
-                    
-                    // Auto-refresh every 2 seconds while inventory is open
                     const refresh_interval = window.setInterval(() => {
                         if (ui_state.container.is_visible) {
-                            void refresh_container_data();
+                            const current_actor_id = get_controlled_actor_id();
+                            if (!current_actor_id) return;
+                            void refresh_actor_owner_inventory_view();
                         } else {
                             window.clearInterval(refresh_interval);
                         }
@@ -8333,418 +10487,103 @@ export function create_app_state(): AppState {
                     flash_status(['Inventory closed'], 800);
                 }
             },
-            on_slot_click: (slot_index: number) => {
-                console.log(`[Inventory] Clicked slot ${slot_index}`);
+            on_open_nested_container: (item_id: string, item_name: string) => {
+                const actor_id = get_controlled_actor_id();
+                if (!actor_id) return;
+                void open_owner_inventory_view(`actor.item.${actor_id}.${item_id}`, item_name);
             },
-            on_drag_start: (slot_index: number, item: ItemInstance, definition: ItemDefinition, container_id: string) => {
-                console.log(`[Inventory] Drag started on slot ${slot_index}: ${definition.name}`);
-                
-                // Validate drag using centralized drag_state.can_drag()
-                const validation = drag_state.can_drag(item.id, definition);
+            on_select_item: (surface, slot) => {
+                const selection = build_item_selection_from_surface(surface, slot);
+                if (!selection) return;
+                select_item_for_entity_inspector(selection);
+            },
+            on_slot_hover: async (_surface, slot) => {
+                if (slot?.item) {
+                    const source_container_id = get_container_id_from_target_id(slot.slot_target_id);
+                    if (!source_container_id) {
+                        clear_item_legality_highlight();
+                        return;
+                    }
+                    const definition = {
+                        id: slot.item.def_id,
+                        name: slot.item.name,
+                        display_char: slot.item.display_char,
+                        tags: slot.item.tags,
+                    } as ItemDefinition;
+                    await apply_item_legality_highlight(slot.item.id, source_container_id, definition, source_container_id);
+                } else {
+                    clear_item_legality_highlight();
+                }
+            },
+            on_drag_start: (surface, slot, definition) => {
+                if (!slot.item) return;
+                const validation = drag_state.can_drag(slot.item.id, definition);
                 if (!validation.can) {
                     flash_status([validation.reason!], 1500);
-                    console.log(`[Inventory] Drag rejected: ${validation.reason}`);
                     return;
                 }
-                
-                // Store in shared drag state
-                drag_state.start_drag('container', item.id, container_id, definition, slot_index);
+                const source_container_id = get_container_id_from_target_id(slot.slot_target_id) ?? get_container_id_from_target_id(surface.surface_target_id);
+                if (!source_container_id) {
+                    flash_status(['Missing source target for inventory slot'], 1500);
+                    return;
+                }
+                // Reuse the legacy 'container' drag lane for now so existing cross-module
+                // transfer and world-drop behavior keeps working during the surface migration.
+                drag_state.start_drag('container', slot.item.id, source_container_id, definition, slot.slot_index, slot.slot_target_id);
+                void apply_item_legality_highlight(slot.item.id, source_container_id, definition, source_container_id);
             },
-            get_open_containers: () => ui_state.container.open_containers,
-            get_open_container_id_for_item: (item_instance_id: string): string | null => {
+            on_drop: async (surface, slot): Promise<boolean> => {
+                if (!drag_state.is_dragging) return false;
+                if (!surface.accepts_player_insert) return false;
                 const actor_id = get_controlled_actor_id();
-                if (!actor_id) return null;
-                return `actor.item.${actor_id}.${item_instance_id}`;
-            },
-            on_open_container_item: (item: ItemInstance, definition: ItemDefinition, parent_container_id: string) => {
-                // Route container-item drags to opening.
-                const place = get_current_place();
-                if (place && parent_container_id.startsWith('place.pile.')) {
-                    void open_container_module(`place.item.${place.id}.${item.id}`, definition.name);
-                } else {
-                    void open_container_module(`actor.item.${get_controlled_actor_id()}.${item.id}`, definition.name);
+                if (!actor_id) return false;
+
+                const target_container_id = get_container_id_from_target_id(slot.slot_target_id) ?? get_container_id_from_target_id(surface.surface_target_id);
+                if (!target_container_id) return false;
+
+                if (drag_state.source_container_id === target_container_id && surface.surface_kind !== 'container') {
+                    return false;
                 }
-            },
-            on_slot_hover: async (slot_index: number, item: ItemInstance, definition: ItemDefinition | null) => {
-                if (definition) {
-                    // Find compatible slots and highlight them (call API for tag-based compatibility)
-                    const source_container_id = ui_state.container.current_container?.id ?? null;
-                    const compatible = await get_compatible_slots_for_instance(item.id, source_container_id, definition);
-                    ui_state.character.highlighted_slots = compatible;
-                    ui_state.character.hovered_item = { name: definition.name, source: 'inventory' };
-                    console.log(`[Inventory] Hovering ${definition.name} - compatible slots:`, compatible);
-                } else {
-                    // Clear highlights and hover
-                    ui_state.character.highlighted_slots = [];
-                    ui_state.character.hovered_item = null;
+
+                const transfer_res = await api_transfer_inline({
+                    actor_id,
+                    item_instance_id: String(drag_state.item_instance_id ?? ''),
+                    from_container: String(drag_state.source_container_id ?? ''),
+                    to_container: target_container_id,
+                    from_target_id: drag_state.source_target_id ?? undefined,
+                    to_target_id: slot.slot_target_id,
+                    target_grid_x: surface.surface_kind === 'container' ? slot.grid_x : undefined,
+                    target_grid_y: surface.surface_kind === 'container' ? slot.grid_y : undefined,
+                });
+
+                if (!transfer_res.ok) {
+                    const detail_text = format_legality_detail(transfer_res.detail);
+                    const detail = detail_text ? ` (${detail_text})` : '';
+                    flash_status([`Failed to move: ${transfer_res.error}${detail}`], 1800);
+                    return false;
                 }
+
+                const source = String(drag_state.source_container_id ?? '');
+                await refresh_after_transfer(source, target_container_id);
+
+                flash_status([`${drag_state.item_definition?.name ?? 'Item'} moved`], 1200);
+                drag_state.end_drag();
+                void refresh_container_data();
+                return true;
             },
-            // Bidirectional highlighting: return items highlighted when hovering body slots
-            get_highlighted_items: () => ui_state.character.highlighted_items,
             on_drag_rejected: () => drag_state.reject_drag(),
-            on_drop: async (slot_index: number): Promise<boolean> => {
-                console.log(`[Inventory] on_drop callback called for slot: ${slot_index}`);
-                console.log(`[Inventory] Drag state: is_dragging=${drag_state.is_dragging}, source_module=${drag_state.source_module}`);
-                console.log(`[Inventory] Dragged item: ${drag_state.item_definition?.name} (${drag_state.item_instance_id})`);
-                console.log(`[Inventory] Source container: ${drag_state.source_container_id}`);
-
-                // Check if there's an active drag
-                if (!drag_state.is_dragging) {
-                    console.log(`[Inventory] No active drag - rejecting`);
-                    return false;
-                }
-
-                // Get target container (the sack)
-                const container = ui_state.container.current_container;
-                if (!container) {
-                    console.log(`[Inventory] No container loaded - rejecting`);
-                    drag_state.end_drag();
-                    return false;
-                }
-
-                let target_container_id = container.id;
-                let target_name = 'inventory';
-
-                // Shortcut: dropping onto a container-item inside this container deposits into it.
-                const container_data = ui_state.container.container_data_map.get(container.id);
-                const contents = container_data?.contents || [];
-                // Map drop slot_index to actual item using grid coords when available.
-                const { cols } = get_container_grid(container);
-                let target_item: any = null;
-                for (let idx = 0; idx < contents.length; idx++) {
-                    const entry = contents[idx];
-                    if (!entry?.instance) continue;
-                    let si = idx;
-                    if (entry.grid_x !== undefined && entry.grid_y !== undefined) {
-                        si = (entry.grid_y * cols) + entry.grid_x;
-                    }
-                    if (si === slot_index) {
-                        target_item = entry;
-                        break;
-                    }
-                }
-
-                const target_is_container = has_tag(target_item?.definition?.tags, 'CONTAINER');
-                if (target_item?.instance?.id && target_is_container) {
-                    if (drag_state.item_instance_id === target_item.instance.id) {
-                        flash_status(['Cannot deposit a container into itself'], 1500);
-                        drag_state.reject_drag();
-                        return false;
-                    }
-                    target_container_id = `actor.item.${get_controlled_actor_id()}.${target_item.instance.id}`;
-                    target_name = target_item.definition?.name || 'container';
-                }
-
-                const src = String(drag_state.source_container_id ?? '');
-
-                // Pile drags are sweep-only (place->place).
-                if (drag_state.source_module === 'ground' && src.startsWith('place.pile.')) {
-                    flash_status(['Open the pile and drag a specific item out'], 2000);
-                    drag_state.reject_drag();
-                    return false;
-                }
-
-                // Ground container-item -> actor container: withdraw nested item.
-                if (src.startsWith('place.item.')) {
-                    try {
-                        const wd = await api_transfer_inline({
-                            actor_id: get_controlled_actor_id(),
-                            item_instance_id: String(drag_state.item_instance_id ?? ''),
-                            from_container: src,
-                            to_container: target_container_id,
-                        });
-                        if (wd.ok) {
-                            flash_status([`${drag_state.item_definition?.name} moved to ${target_name}`], 1500);
-                            drag_state.end_drag();
-                            const place = get_current_place();
-                            if (place) await update_current_place(place.id);
-                            void refresh_container_data();
-                            void refresh_character_data();
-                            return true;
-                        }
-                        const detail = wd.detail ? ` (${JSON.stringify(wd.detail)})` : '';
-                        flash_status([`Failed to pick up: ${wd.error}${detail}`], 1500);
-                        drag_state.reject_drag();
-                        return false;
-                    } catch {
-                        flash_status(['Error picking up item'], 1500);
-                        drag_state.reject_drag();
-                        return false;
-                    }
-                }
-
-                if (src.startsWith('place.pile.') && String(drag_state.item_instance_id ?? '').startsWith('pile:')) {
-                    flash_status(['Open the pile and drag a specific item out'], 2000);
-                    drag_state.reject_drag();
-                    return false;
-                }
-
-                // If source is a place item (ground single OR pile contents), use pickup_to.
-                if (src.startsWith('place.ground.') || src.startsWith('place.pile.')) {
-                    try {
-                        if (src.startsWith('place.pile.') && String(drag_state.item_instance_id ?? '').startsWith('pile:')) {
-                            flash_status(['Open the pile and drag a specific item out'], 2000);
-                            drag_state.reject_drag();
-                            return false;
-                        }
-
-                        const tx = await api_transfer_inline({
-                            actor_id: get_controlled_actor_id(),
-                            item_instance_id: String(drag_state.item_instance_id ?? ''),
-                            from_container: src,
-                            to_container: target_container_id,
-                        });
-
-                        if (tx.ok) {
-                            const place = get_current_place();
-                            flash_status([`${drag_state.item_definition?.name} moved to ${target_name}`], 1500);
-                            drag_state.end_drag();
-                            if (place) await update_current_place(place.id);
-                            void refresh_container_data();
-                            void refresh_character_data();
-                            return true;
-                        }
-                        flash_status([`Failed to move: ${tx.error || 'unknown error'}`], 1500);
-                        drag_state.reject_drag();
-                        return false;
-                    } catch (err) {
-                        console.error('[Inventory] transfer error:', err);
-                        flash_status(['Error moving item'], 1500);
-                        drag_state.reject_drag();
-                        return false;
-                    }
-                }
-
-                console.log(`[Inventory] Transferring ${drag_state.item_definition?.name} to ${target_container_id}`);
-
-                try {
-                    const transfer_data = await api_transfer_inline({
-                        actor_id: get_controlled_actor_id(),
-                        item_instance_id: String(drag_state.item_instance_id ?? ''),
-                        from_container: String(drag_state.source_container_id ?? ''),
-                        to_container: target_container_id,
-                    });
-
-                    if (transfer_data.ok) {
-                        console.log(`[Inventory] Transfer successful: ${drag_state.item_definition?.name} -> ${target_container_id}`);
-                        flash_status([`${drag_state.item_definition?.name} moved to ${target_name}`], 1500);
-
-                        // Refresh data
-                        void refresh_container_data();
-                        void refresh_character_data();
-
-                        drag_state.end_drag();
-                        return true;
-                    } else {
-                        console.log(`[Inventory] Transfer failed:`, transfer_data.error);
-                        flash_status([`Failed to move: ${transfer_data.error || 'unknown error'}`], 1500);
-                        drag_state.reject_drag();
-                        return false;
-                    }
-                } catch (err) {
-                    console.error(`[Inventory] Error during transfer:`, err);
-                    flash_status([`Error moving item`], 1500);
-                    drag_state.reject_drag();
-                    return false;
-                }
-            },
-            on_cross_module_drop: async (x: number, y: number): Promise<boolean> => {
-                console.log(`[Inventory] Cross-module drop callback called at (${x}, ${y})`);
-                console.log(`[Inventory] Drag state: is_dragging=${drag_state.is_dragging}, source_module=${drag_state.source_module}`);
-                console.log(`[Inventory] Dragged item: ${drag_state.item_definition?.name}, container=${drag_state.source_container_id}`);
-
-                // Check if we have an active drag
-                if (!drag_state.is_dragging) {
-                    console.log(`[Inventory] No active drag - rejecting drop`);
-                    return false;
-                }
-
-                // Character module rect: { x0: 160, y0: 2, x1: 198, y1: 17 }
-                console.log(`[Inventory] Checking if drop is on character module: x=${x} (160-198), y=${y} (2-17)`);
-                if (x >= 160 && x <= 198 && y >= 2 && y <= 17) {
-                    console.log(`[Inventory] Drop is on character module`);
-                    // Drop is on character module - determine which slot
-                    // Calculate slot from y position
-                    // CharacterModule draws slots at: start_y = rect.y1 - 4 = 13
-                    // Row 0 (head): y = 13, Row 1 (hands): y = 11, Row 2 (torso): y = 9, Row 3 (legs): y = 7
-                    // Formula: row_from_top = floor((start_y - y) / 2) where start_y = 13
-                    const start_y = 13; // rect.y1 - 4, must match CharacterModule
-                    const row_from_top = Math.floor((start_y - y) / 2);
-                    console.log(`[Inventory] Calculated row_from_top: ${row_from_top} (y=${y}, start_y=${start_y})`);
-
-                    let target_slot_name: string | null = null;
-                    if (row_from_top === 0) {
-                        target_slot_name = 'head';
-                    } else if (row_from_top === 1) {
-                        // Hands - check x position
-                        if (x < 179) {
-                            target_slot_name = 'hand_left';
-                        } else {
-                            target_slot_name = 'hand_right';
-                        }
-                    } else if (row_from_top === 2) {
-                        target_slot_name = 'torso';
-                    } else if (row_from_top === 3) {
-                        // Legs - check x position
-                        if (x < 179) {
-                            target_slot_name = 'leg_left';
-                        } else {
-                            target_slot_name = 'leg_right';
-                        }
-                    }
-
-                    console.log(`[Inventory] Target slot determined: ${target_slot_name}`);
-
-                    if (!target_slot_name) {
-                        console.log(`[Inventory] Could not determine target slot - rejecting`);
-                        return false;
-                    }
-
-                    console.log(`[Inventory] Target slot: ${target_slot_name}`);
-
-                    // Determine slot type based on item tags
-                    const item_def = drag_state.item_definition;
-                    if (!item_def) {
-                        console.log(`[Inventory] No item definition - rejecting`);
-                        drag_state.end_drag();
-                        return false;
-                    }
-                    const has_tool = has_tag(item_def.tags, 'TOOL');
-                    const has_armor = has_tag(item_def.tags, 'ARMOR');
-                    const has_garb = has_tag(item_def.tags, 'GARB');
-                    
-                    // Check if this slot is compatible with the item (call API for tag-based compatibility)
-                    const compatible_slots = await get_compatible_slots_for_instance(drag_state.item_instance_id!, drag_state.source_container_id, item_def);
-                    
-                    // Find the best matching slot type for this target slot
-                    let target_slot_type: string | null = null;
-                    let target_garb_index: number | null = null;
-                    
-                    // Check if target slot is in compatible slots
-                    const compatible_for_slot = compatible_slots.filter((slot: { slot_name: string; slot_type: string; garb_index?: number }) => 
-                        slot.slot_name === target_slot_name
-                    );
-                    
-                    if (compatible_for_slot.length === 0) {
-                        console.log(`[Inventory] ${target_slot_name} is not compatible with ${item_def.name}`);
-                        flash_status([`${item_def.name} cannot be equipped to ${target_slot_name}`], 1500);
-                        drag_state.end_drag();
-                        return false;
-                    }
-                    
-                    // Determine which slot type to use based on item tags
-                    if (has_armor && compatible_for_slot.some((s: any) => s.slot_type === 'armor')) {
-                        target_slot_type = 'armor';
-                    } else if (has_garb && compatible_for_slot.some((s: any) => s.slot_type === 'garb')) {
-                        target_slot_type = 'garb';
-                        // Find first available garb slot
-                        const existing_garb_indices = compatible_for_slot
-                            .filter((s: any) => s.slot_type === 'garb' && s.garb_index !== undefined)
-                            .map((s: any) => s.garb_index);
-                        target_garb_index = existing_garb_indices.length > 0 ? Math.min(...existing_garb_indices) : 0;
-                    } else if (has_tool && compatible_for_slot.some((s: any) => s.slot_type === 'tool')) {
-                        target_slot_type = 'tool';
-                    } else if (compatible_for_slot.length > 0) {
-                        // Default to first compatible type
-                        const first_slot = compatible_for_slot[0];
-                        target_slot_type = first_slot?.slot_type ?? 'tool';
-                        if (target_slot_type === 'garb' && first_slot) {
-                            target_garb_index = first_slot.garb_index ?? 0;
-                        }
-                    } else {
-                        console.log(`[Inventory] No compatible slot type found for ${target_slot_name}`);
-                        flash_status([`Cannot determine slot type for ${target_slot_name}`], 1500);
-                        drag_state.end_drag();
-                        return false;
-                    }
-                    
-                    console.log(`[Inventory] Determined slot type: ${target_slot_type}${target_garb_index !== null ? '.' + target_garb_index : ''}`);
-
-                    // Determine target container based on slot
-                    const actor_id = get_controlled_actor_id();
-                    
-                    // Build inline target path (Phase 5)
-                    let target_container_id = `body_slots.${target_slot_name}.${target_slot_type}`;
-                    if (target_slot_type === 'garb' && target_garb_index !== null) {
-                        target_container_id += `.${target_garb_index}`;
-                    }
-                    
-                    console.log(`[Inventory] Built target container ID: ${target_container_id}`);
-
-                    console.log(`[Inventory] Transferring ${drag_state.item_definition?.name} to ${target_container_id}`);
-
-                    try {
-                        const transfer_data = await api_transfer_inline({
-                            actor_id: get_controlled_actor_id(),
-                            item_instance_id: String(drag_state.item_instance_id ?? ''),
-                            from_container: String(drag_state.source_container_id ?? ''),
-                            to_container: target_container_id,
-                        });
-
-                        if (transfer_data.ok) {
-                            console.log(`[Inventory] Equip successful: ${drag_state.item_definition?.name} -> ${target_slot_name}`);
-                            flash_status([`${drag_state.item_definition?.name} equipped to ${target_slot_name}`], 1500);
-
-                            // Refresh data
-                            void refresh_container_data();
-                            void refresh_character_data();
-
-                            drag_state.end_drag();
-                            return true;
-                        } else {
-                            console.log(`[Inventory] Equip failed:`, transfer_data.error);
-                            flash_status([`Failed to equip: ${transfer_data.error || 'unknown error'}`], 1500);
-                            drag_state.reject_drag();
-                            return false;
-                        }
-                    } catch (err) {
-                        console.error(`[Inventory] Error during equip:`, err);
-                        flash_status([`Error equipping item`], 1500);
-                        drag_state.reject_drag();
-                        return false;
-                    }
-                }
-
-                drag_state.reject_drag();
-                return false;
-            },
-            border_rgb: get_color_by_name('light_gray').rgb,
-            bg_rgb: get_color_by_name('off_black').rgb,
-            text_rgb: get_color_by_name('off_white').rgb,
-            // Phase 8: Enable gizmos (close X, move #)
-            gizmos: {
-                enabled: ['close', 'move', 'resize', 'seamless'],
-                can_close: true,
-                can_move: true,
-                can_save_position: false,
-                on_close: () => {
-                    debug_log('[ContainerModule] Close gizmo clicked - hiding container');
-                    set_module_visible('inventory_container', false);
-                    flash_status(['Inventory closed (X clicked)'], 800);
-                },
-                on_move_start: () => {
-                    debug_log('[ContainerModule] Move mode started');
-                },
-                on_move: (new_rect) => {
-                    // Update position tracking
-                    ui_state.modules.positions.set('inventory_container', new_rect);
-                    debug_log(`[ContainerModule] Moving to (${new_rect.x0},${new_rect.y0})`);
-                },
-                on_move_end: (final_rect) => {
-                    ui_state.modules.positions.set('inventory_container', final_rect);
-                    flash_status([`Container moved to (${final_rect.x0},${final_rect.y0})`], 1000);
-                },
-            },
+            get_highlighted_items: () => ui_state.character.highlighted_items,
+            get_open_container_ids: () => ui_state.container.open_containers,
+            get_open_container_id_for_item: (surface, slot) => get_open_owner_inventory_container_id_for_item(surface, slot),
         }),
 
         make_place_painter_toolbar_module(get_persisted_rect('place_painter_toolbar', { x0: 0, y0: 0, x1: 120, y1: 2 })),
         make_place_painter_tools_module(get_persisted_rect('place_painter_tools', { x0: 0, y0: 8, x1: 24, y1: 22 })),
         make_place_painter_palette_module(get_persisted_rect('place_painter_palette', { x0: 25, y0: 8, x1: 45, y1: 26 })),
         make_place_painter_layers_module(get_persisted_rect('place_painter_layers', { x0: 0, y0: 23, x1: 28, y1: 40 })),
-        make_place_painter_status_module(get_persisted_rect('place_painter_status', { x0: 46, y0: 8, x1: 76, y1: 18 })),
+        make_place_painter_tool_properties_module(get_persisted_rect('place_painter_tool_properties', { x0: 46, y0: 19, x1: 78, y1: 29 })),
         
-        // Phase 1.5: Global 'I' key handler - opens main inventory via open_container_module
-        // This ensures the inventory works the same as clicking a sack
+        // Global 'I' key handler - toggles the unified owner inventory module
         {
             id: 'global_key_handler',
             rect: { x0: 0, y0: 0, x1: 0, y1: 0 }, // Invisible module
@@ -8756,22 +10595,21 @@ export function create_app_state(): AppState {
                     e.preventDefault();
                     e.stopPropagation();
                     
-                    // Find and open main inventory
                     void (async () => {
-                        // Prefer user-selected default container if set; otherwise fallback.
-                        const preferred = ui_state.character.default_container_id;
-                        const target_id = preferred || (await get_main_inventory_container())?.container_id || null;
-
-                        if (!target_id) {
-                            flash_status(['No inventory equipped'], 1500);
-                            return;
-                        }
-
-                        if (ui_state.container.open_containers.has(target_id)) {
-                            close_container_module(target_id);
+                        const inventory_visible = ui_state.container.is_visible;
+                        if (inventory_visible) {
+                            set_module_visible('inventory_container', false);
+                            ui_state.container.is_visible = false;
                             flash_status(['Inventory closed'], 800);
                         } else {
-                            await open_container_module(target_id, 'inventory');
+                            const inventory_module = module_registry.get('inventory_container');
+                            if (inventory_module) {
+                                set_module_visible('inventory_container', true);
+                                ui_state.container.is_visible = true;
+                                const actor_id = get_controlled_actor_id();
+                                ui_state.container.owner_view = actor_id ? await load_actor_owner_inventory_view(actor_id) : null;
+                                flash_status(['Inventory opened (press i to close)'], 1000);
+                            }
                         }
                     })();
                     
@@ -8786,6 +10624,7 @@ export function create_app_state(): AppState {
     for (const module of modules) {
         module_registry.register(module);
     }
+    ui_state.modules.registry = module_registry;
 
     // Apply persisted visibility for registered modules.
     for (const [id, visible] of ui_state.modules.visibility.entries()) {
@@ -8802,6 +10641,10 @@ export function create_app_state(): AppState {
     if (!ui_state.modules.visibility.has('debug')) {
         ui_state.modules.visibility.set('debug', module_registry.is_visible('debug'));
     }
+    if (!ui_state.modules.visibility.has('debug_commander_module')) {
+        ui_state.modules.visibility.set('debug_commander_module', true);
+        module_registry.set_visibility('debug_commander_module', true);
+    }
     if (!ui_state.modules.visibility.has('initiative')) {
         ui_state.modules.visibility.set('initiative', module_registry.is_visible('initiative'));
     }
@@ -8809,6 +10652,7 @@ export function create_app_state(): AppState {
         ui_state.modules.visibility.set(id, false);
         module_registry.set_visibility(id, false);
     }
+    apply_runtime_module_visibility();
     persist_module_layout_debounced();
     
     // Seed default positions if not persisted yet (used by NPC module positioning).
@@ -8845,11 +10689,20 @@ export function create_app_state(): AppState {
     ui_state.place.npc_movement_active = false;
 
     const wsClient = initWebSocketClient();
+    open_world_entry_module();
     wsClient.on('ENTITY_PLACE_TRANSITION', (payload: any) => {
         try {
             const entity_ref = String(payload?.entity_ref ?? '');
+            const from_place_id = String(payload?.from_place_id ?? '').trim();
             const target_place_id = String(payload?.to_place_id ?? '').trim();
-            if (entity_ref !== get_input_actor_ref() || !target_place_id) return;
+            if (!target_place_id) return;
+            if (entity_ref !== get_input_actor_ref()) {
+                const should_refresh_target = is_place_visible_in_scene(target_place_id);
+                const should_refresh_source = is_place_visible_in_scene(from_place_id);
+                if (should_refresh_source && from_place_id) void refresh_single_scene_place(from_place_id);
+                if (should_refresh_target) void refresh_single_scene_place(target_place_id);
+                return;
+            }
             remove_actor_from_non_target_scene_places(entity_ref, target_place_id);
             const prev_actor_place_id = ui_state.place.actor_current_place_id;
             const prev_selected_place_id = ui_state.place.scene_selected_place_id;
@@ -8866,14 +10719,32 @@ export function create_app_state(): AppState {
                 const actor_x = Math.floor(Number(payload?.x));
                 const actor_y = Math.floor(Number(payload?.y));
                 const actor_z = (typeof payload?.z === 'number' && Number.isFinite(payload.z)) ? Math.floor(payload.z) : null;
+                const actor_seed = get_best_known_actor_presence_seed(actor_ref);
                 if (Number.isFinite(actor_x) && Number.isFinite(actor_y)) {
                     const actors = Array.isArray(cached_target_place.contents?.actors_present) ? cached_target_place.contents.actors_present : [];
                     const actor_entry: any = actors.find((a: any) => a.actor_ref === actor_ref) ?? null;
                     if (actor_entry) {
                         actor_entry.tile_position = { x: actor_x, y: actor_y };
                         if (actor_z !== null) actor_entry.elevation = actor_z;
+                        if (typeof actor_seed.name === 'string' && actor_seed.name.length > 0 && (typeof actor_entry.name !== 'string' || actor_entry.name.trim().length <= 0)) actor_entry.name = actor_seed.name;
+                        if (typeof actor_seed.kind_id === 'string' && actor_seed.kind_id.length > 0 && typeof actor_entry.kind_id !== 'string') actor_entry.kind_id = actor_seed.kind_id;
+                        if (typeof actor_seed.body_model_id === 'string' && actor_seed.body_model_id.length > 0 && typeof actor_entry.body_model_id !== 'string') actor_entry.body_model_id = actor_seed.body_model_id;
+                        if (actor_seed.entity_render && !actor_entry.entity_render) actor_entry.entity_render = actor_seed.entity_render;
+                        if (Array.isArray(actor_seed.tags) && actor_seed.tags.length > 0 && !Array.isArray(actor_entry.tags)) actor_entry.tags = actor_seed.tags;
+                        if (typeof actor_seed.facing === 'string' && actor_seed.facing.length > 0 && typeof actor_entry.facing !== 'string') actor_entry.facing = actor_seed.facing;
                     } else {
-                        actors.push({ actor_ref, tile_position: { x: actor_x, y: actor_y }, elevation: actor_z ?? undefined, status: 'present' });
+                        actors.push({
+                            actor_ref,
+                            name: actor_seed.name ?? ui_state.character.display_name ?? 'Unknown Actor',
+                            tile_position: { x: actor_x, y: actor_y },
+                            elevation: actor_z ?? undefined,
+                            facing: actor_seed.facing ?? undefined,
+                            kind_id: actor_seed.kind_id ?? undefined,
+                            body_model_id: actor_seed.body_model_id ?? undefined,
+                            entity_render: actor_seed.entity_render ?? undefined,
+                            tags: Array.isArray(actor_seed.tags) ? actor_seed.tags : [],
+                            status: 'present'
+                        });
                         if (!cached_target_place.contents) cached_target_place.contents = { npcs_present: [], actors_present: [], items_on_ground: [], features: [] } as any;
                         cached_target_place.contents.actors_present = actors;
                     }
@@ -8901,6 +10772,35 @@ export function create_app_state(): AppState {
     });
     wsClient.on('ITEM_MUTATIONS_APPLIED', (payload: any) => {
         void handle_item_mutations_event(payload);
+    });
+    wsClient.on('PLACE_PRESENCE_CHANGED', (payload: any) => {
+        const place_id = String(payload?.place_id ?? '').trim();
+        if (!place_id || !is_place_visible_in_scene(place_id)) return;
+        void refresh_single_scene_place(place_id);
+    });
+    wsClient.on('ACTOR_PRIVATE_STATE_CHANGED', (payload: any) => {
+        const actor_ref = String(payload?.actor_ref ?? '').trim();
+        if (actor_ref && actor_ref !== get_input_actor_ref()) return;
+        void refresh_character_data(true);
+    });
+    wsClient.on('SESSION_INVALIDATED', (_payload: any) => {
+        void (async () => {
+            try {
+                await ensure_multiplayer_session_bootstrap(true);
+                await refresh_controlled_actor_binding(true);
+            } catch (err) {
+                debug_warn('[MultiplayerSession] session invalidation recovery failed', err);
+                clear_controlled_actor_runtime_state();
+                await open_actor_claim_module('startup_required', ['session expired', 'select an actor to continue']);
+            }
+        })();
+    });
+    wsClient.on('CLAIM_INVALIDATED', (_payload: any) => {
+        void (async () => {
+            clear_controlled_actor_runtime_state();
+            await update_current_place(null, { source: 'claim_invalidated' });
+            await open_actor_claim_module('startup_required', ['connection lost long enough to release actor', 'select an actor to continue']);
+        })();
     });
 
     // Initial load of character data
@@ -8940,7 +10840,7 @@ export function create_app_state(): AppState {
       * Supports inline container paths (`body_slots.*`, `actor.item.*`, `place.item.*`)
       * and special UI containers like piles.
       */
-    async function open_container_module(container_id: string, source_name?: string): Promise<void> {
+    async function open_owner_inventory_view(container_id: string, source_name?: string): Promise<void> {
         debug_log(`[ContainerOpener] === OPENING CONTAINER: ${container_id} ===`);
         debug_log(`[ContainerOpener] Source name: ${source_name || '(none)'}`);
 
@@ -8980,6 +10880,9 @@ export function create_app_state(): AppState {
         try {
             let container: any;
             let container_data: any;
+            let owner_view_data: OwnerInventoryView | null = null;
+            let use_owner_inventory_module = false;
+            let reload_owner_view: (() => Promise<OwnerInventoryView | null>) | null = null;
 
             // Pile UI (virtual container representing a ground tile with 2+ items)
             if (container_id.startsWith('place.pile.')) {
@@ -8996,29 +10899,10 @@ export function create_app_state(): AppState {
                     // Auto-revert: no pile.
                     return;
                 }
-
-                // Use canonical server payload so piles behave like all other containers.
-                const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                const api_res = await fetch(`${base_url}/api/place/pile_container?place_id=${encodeURIComponent(place_id)}&position_key=${encodeURIComponent(position_key)}`);
-                if (!api_res.ok) {
-                    flash_status([`Failed to load pile: ${api_res.status}`], 1500);
-                    return;
-                }
-                const api_data = await api_res.json();
-                if (!api_data.ok || !api_data.container) {
-                    // Auto-revert: no pile / not found.
-                    return;
-                }
-                const contents = api_data.container.contents || [];
-                container = {
-                    id: container_id,
-                    kind: 'inline_pile',
-                    name: api_data.container.name,
-                    def_id: api_data.container.def_id,
-                    capacity: api_data.container.capacity,
-                    contents,
-                };
-                container_data = { container, contents };
+                owner_view_data = await load_pile_owner_inventory_view(place_id, position_key);
+                reload_owner_view = () => load_pile_owner_inventory_view(place_id, position_key);
+                if (!owner_view_data) return;
+                use_owner_inventory_module = true;
             }
 
             // Open a container-item on the ground by item id
@@ -9031,28 +10915,13 @@ export function create_app_state(): AppState {
                     return;
                 }
 
-                const api_res = await fetch(`http://localhost:8787/api/place/container_item?place_id=${encodeURIComponent(place_id)}&item_id=${encodeURIComponent(item_id)}`);
-                if (!api_res.ok) {
+                owner_view_data = await load_place_item_owner_inventory_view(place_id, item_id);
+                reload_owner_view = () => load_place_item_owner_inventory_view(place_id, item_id);
+                if (!owner_view_data) {
                     flash_status(['Container not found'], 1500);
                     return;
                 }
-
-                const api_data = await api_res.json();
-                if (!api_data.ok || !api_data.container) {
-                    flash_status([`Container not found: ${api_data.error || 'unknown'}`], 1500);
-                    return;
-                }
-
-                const contents = api_data.container.contents || [];
-                container = {
-                    id: container_id,
-                    kind: 'inline_ground_container_item',
-                    name: api_data.container.name,
-                    def_id: api_data.container.def_id,
-                    capacity: api_data.container.capacity,
-                    contents,
-                };
-                container_data = { container, contents };
+                use_owner_inventory_module = true;
             }
 
             // Open a tile container (inline tile contents)
@@ -9064,28 +10933,21 @@ export function create_app_state(): AppState {
                     return;
                 }
 
-                const api_res = await fetch(`http://localhost:8787/api/place/tile_container?place_id=${encodeURIComponent(parsed.place_id)}&x=${encodeURIComponent(String(parsed.x))}&y=${encodeURIComponent(String(parsed.y))}&z=${encodeURIComponent(String(parsed.z))}`);
-                if (!api_res.ok) {
+                const tile_owner_res = await load_tile_owner_inventory_view(parsed.place_id, parsed.x, parsed.y, parsed.z);
+                if (!tile_owner_res?.view) {
                     flash_status(['Tile container not found'], 1500);
                     return;
                 }
+                owner_view_data = tile_owner_res.view;
+                reload_owner_view = async () => (await load_tile_owner_inventory_view(parsed.place_id, parsed.x, parsed.y, parsed.z))?.view ?? null;
+                use_owner_inventory_module = true;
 
-                const api_data = await api_res.json();
-                if (!api_data.ok || !api_data.container) {
-                    flash_status([`Tile container not found: ${api_data.error || 'unknown'}`], 1500);
-                    return;
-                }
-
-                // Canonicalize: structure multi-tiles return a canonical anchor tile id.
-                const canonical_id = (typeof api_data.container.id === 'string' && api_data.container.id.length > 0)
-                    ? String(api_data.container.id)
+                const canonical_id = typeof tile_owner_res.redirect?.canonical_id === 'string' && tile_owner_res.redirect.canonical_id.length > 0
+                    ? String(tile_owner_res.redirect.canonical_id)
                     : container_id;
-                const redirect = api_data.container.redirect ?? null;
-                const alias_ids: string[] = Array.isArray(redirect?.alias_ids)
-                    ? redirect.alias_ids.map((s: any) => String(s)).filter((s: string) => s.length > 0)
+                const alias_ids: string[] = Array.isArray(tile_owner_res.redirect?.alias_ids)
+                    ? tile_owner_res.redirect.alias_ids.map((s: any) => String(s)).filter((s: string) => s.length > 0)
                     : [];
-
-                // If canonical already open, just mark aliases open and stop.
                 if (canonical_id !== container_id && ui_state.container.open_containers.has(canonical_id)) {
                     const all_aliases = Array.from(new Set([container_id, canonical_id, ...alias_ids]));
                     ui_state.container.aliases_by_canonical.set(canonical_id, all_aliases);
@@ -9094,29 +10956,14 @@ export function create_app_state(): AppState {
                     flash_status([`Container already open`], 800);
                     return;
                 }
-
-                // Switch to canonical id for module identity.
-                {
-                    const all_aliases = Array.from(new Set([container_id, canonical_id, ...alias_ids]));
-                    if (redirect && all_aliases.length > 0) {
-                        ui_state.container.aliases_by_canonical.set(canonical_id, all_aliases);
-                        for (const a of all_aliases) ui_state.container.canonical_by_alias.set(a, canonical_id);
-                    }
-                    if (canonical_id !== container_id) {
-                        container_id = canonical_id;
-                    }
+                const all_aliases = Array.from(new Set([container_id, canonical_id, ...alias_ids]));
+                if (tile_owner_res.redirect && all_aliases.length > 0) {
+                    ui_state.container.aliases_by_canonical.set(canonical_id, all_aliases);
+                    for (const a of all_aliases) ui_state.container.canonical_by_alias.set(a, canonical_id);
                 }
-
-                const contents = api_data.container.contents || [];
-                container = {
-                    id: container_id,
-                    kind: 'inline_tile_container',
-                    name: api_data.container.name,
-                    def_id: api_data.container.def_id,
-                    capacity: api_data.container.capacity,
-                    contents,
-                };
-                container_data = { container, contents };
+                if (canonical_id !== container_id) {
+                    container_id = canonical_id;
+                }
             }
 
             // Open an arbitrary actor-owned container-item (nested/equipped) by item id
@@ -9129,28 +10976,13 @@ export function create_app_state(): AppState {
                     return;
                 }
 
-                const api_res = await fetch(`http://localhost:8787/api/actor/container_item?actor_id=${encodeURIComponent(actor_id)}&item_id=${encodeURIComponent(item_id)}`);
-                if (!api_res.ok) {
+                owner_view_data = await load_actor_item_owner_inventory_view(actor_id, item_id);
+                reload_owner_view = () => load_actor_item_owner_inventory_view(actor_id, item_id);
+                if (!owner_view_data) {
                     flash_status(['Container not found'], 1500);
                     return;
                 }
-
-                const api_data = await api_res.json();
-                if (!api_data.ok || !api_data.container) {
-                    flash_status([`Container not found: ${api_data.error || 'unknown'}`], 1500);
-                    return;
-                }
-
-                const contents = api_data.container.contents || [];
-                container = {
-                    id: container_id,
-                    kind: 'inline_actor_container_item',
-                    name: api_data.container.name,
-                    def_id: api_data.container.def_id,
-                    capacity: api_data.container.capacity,
-                    contents,
-                };
-                container_data = { container, contents };
+                use_owner_inventory_module = true;
             }
             
             // NEW INLINE SYSTEM: Handle body_slots paths
@@ -9174,101 +11006,47 @@ export function create_app_state(): AppState {
                 
                 // Reconstruct the path without the 'body_slots.' prefix
                 const container_path = path_parts.slice(1).join('.');
-                debug_log(`[ContainerOpener] Calling API: /api/body_slot/container?actor_id=${actor_id}&path=${container_path}`);
-                
-                // Call the new inline API
-                const api_res = await fetch(`http://localhost:8787/api/body_slot/container?actor_id=${actor_id}&path=${encodeURIComponent(container_path)}`);
-                debug_log(`[ContainerOpener] API response status: ${api_res.status}`);
-                
-                if (!api_res.ok) {
-                    const error_text = await api_res.text();
-                    debug_log(`[ContainerOpener] ERROR: API returned ${api_res.status}: ${error_text}`);
-                    flash_status([`Failed to load container: ${api_res.status}`], 1500);
+                owner_view_data = await load_body_slot_owner_inventory_view(actor_id, container_path);
+                reload_owner_view = () => load_body_slot_owner_inventory_view(actor_id, container_path);
+                if (!owner_view_data) {
+                    flash_status([`Container not found`], 1500);
                     return;
                 }
+                use_owner_inventory_module = true;
                 
-                const api_data = await api_res.json();
-                debug_log(`[ContainerOpener] API response: ok=${api_data.ok}, has container=${!!api_data.container}`);
-                
-                if (!api_data.ok || !api_data.container) {
-                    debug_log(`[ContainerOpener] ERROR: API returned not ok or no container: ${api_data.error || 'unknown'}`);
-                    flash_status([`Container not found: ${api_data.error || 'unknown'}`], 1500);
-                    return;
-                }
-                
-                // Format the response for the container module
-                const contents = api_data.container.contents || [];
-                debug_log(`[ContainerOpener] Container has ${contents.length} items`);
-                
-                container = {
-                    id: container_id,
-                    kind: 'inline_body_slot',
-                    name: api_data.container.name,
-                    def_id: api_data.container.def_id,
-                    path: api_data.container.path,
-                    capacity: api_data.container.capacity,
-                    contents: contents
-                };
-                container_data = { container, contents };
-                
-                debug_log(`[ContainerOpener] Successfully loaded inline body_slots container: ${container.name} (${contents.length} items)`);
+                debug_log(`[ContainerOpener] Successfully loaded body-slot owner view: ${container_path}`);
             }
             // NEW INLINE SYSTEM: Handle ground containers
             else if (container_id.startsWith('place.ground.')) {
-                debug_log(`[ContainerOpener] NEW INLINE SYSTEM: Opening ground container: ${container_id}`);
-                
-                // Parse: place.ground.{place_id}.{position_key}.{index}
+                debug_log(`[ContainerOpener] Redirecting legacy ground container: ${container_id}`);
+
+                // Legacy form: place.ground.{place_id}.{position_key}.{index}
+                // Final inventory model uses place.item for single container-items and
+                // place.pile for voxel piles, so resolve the concrete item id and reopen there.
                 const path_parts = container_id.split('.');
                 if (path_parts.length < 5) {
                     debug_log(`[ContainerOpener] ERROR: Invalid place.ground path format: ${container_id}`);
                     flash_status([`Invalid container path`], 1500);
                     return;
                 }
-                
+
                 const place_id = path_parts[2]!;
-                const position_key = path_parts[3]!; // e.g., "4_5"
-                const item_index = path_parts[4]!;
-                
-                debug_log(`[ContainerOpener] Parsed: place_id=${place_id}, position_key=${position_key}, index=${item_index}`);
-                debug_log(`[ContainerOpener] Calling API: /api/place/ground_container?place_id=${place_id}&position_key=${position_key}&index=${item_index}`);
-                
-                // Call the new inline API
-                const api_res = await fetch(`http://localhost:8787/api/place/ground_container?place_id=${encodeURIComponent(place_id)}&position_key=${encodeURIComponent(position_key)}&index=${encodeURIComponent(item_index)}`);
-                debug_log(`[ContainerOpener] API response status: ${api_res.status}`);
-                
-                if (!api_res.ok) {
-                    const error_text = await api_res.text();
-                    debug_log(`[ContainerOpener] ERROR: API returned ${api_res.status}: ${error_text}`);
-                    flash_status([`Failed to load container: ${api_res.status}`], 1500);
+                const position_key = path_parts[3]!;
+                const item_index = parseInt(path_parts[4]!, 10);
+                if (!Number.isFinite(item_index) || item_index < 0) {
+                    flash_status([`Invalid ground container index`], 1500);
                     return;
                 }
-                
-                const api_data = await api_res.json();
-                debug_log(`[ContainerOpener] API response: ok=${api_data.ok}, has container=${!!api_data.container}`);
-                
-                if (!api_data.ok || !api_data.container) {
-                    debug_log(`[ContainerOpener] ERROR: API returned not ok or no container: ${api_data.error || 'unknown'}`);
-                    flash_status([`Container not found: ${api_data.error || 'unknown'}`], 1500);
+
+                const item_ids = ui_state.place.ground_items_by_voxel.get(position_key) ?? [];
+                const item_id = item_ids[item_index] ?? null;
+                if (!item_id) {
+                    flash_status([`Ground container not found`], 1500);
                     return;
                 }
-                
-                // Format the response for the container module
-                const contents = api_data.container.contents || [];
-                debug_log(`[ContainerOpener] Container has ${contents.length} items`);
-                
-                container = {
-                    id: container_id,
-                    kind: 'inline_ground',
-                    name: api_data.container.name,
-                    def_id: api_data.container.def_id,
-                    position_key: api_data.container.position_key,
-                    index: api_data.container.index,
-                    capacity: api_data.container.capacity,
-                    contents: contents
-                };
-                container_data = { container, contents };
-                
-                debug_log(`[ContainerOpener] Successfully loaded inline ground container: ${container.name} (${contents.length} items)`);
+
+                void open_owner_inventory_view(`place.item.${place_id}.${item_id}`, source_name);
+                return;
             }
             // OLD SYSTEM: Handle regular container IDs (container.xxx format) - DEPRECATED but kept for transition
             else {
@@ -9308,649 +11086,105 @@ export function create_app_state(): AppState {
                 y1: Math.floor((grid_h + module_h) / 2) + offset_y,
             };
             
-            // Create container module with callbacks that read from shared state
-            const container_module = make_container_module({
+            if (!use_owner_inventory_module || !owner_view_data) {
+                flash_status([`Unsupported container id`], 1500);
+                return;
+            }
+
+            const container_module = make_owner_inventory_module({
                 id: instance_id,
                 rect: container_rect,
-                get_container: () => {
-                    // Read from shared state so updates are visible to all modules
-                    const data = ui_state.container.container_data_map.get(container_id);
-                    return data?.container || null;
-                },
-                get_slot_items: () => {
-                    // Read from shared state so updates are visible to all modules
-                    const data = ui_state.container.container_data_map.get(container_id);
-                    const contents = data?.contents || [];
-                    const container = data?.container;
-                    const max_slots = container?.capacity?.max_slots || contents.length;
-                    
-                    debug_log(`[DEBUG-GRID] === get_slot_items called for ${container_id} ===`);
-                    debug_log(`[DEBUG-GRID] Container data found: ${!!data}`);
-                    debug_log(`[DEBUG-GRID] Contents count: ${contents.length}`);
-                    debug_log(`[DEBUG-GRID] Max slots: ${max_slots}`);
-                    
-                    // Count items with and without grid coordinates
-                    const with_coords = contents.filter((item: any) => item.grid_x !== undefined && item.grid_y !== undefined).length;
-                    const without_coords = contents.length - with_coords;
-                    debug_log(`[DEBUG-GRID] Items WITH grid coords: ${with_coords}, WITHOUT: ${without_coords}`);
-                    
-                    // Map items to their grid positions for sparse inventory support
-                    // Items with grid_x/grid_y are placed at their grid position
-                    // Items without grid coordinates use packed behavior (array index)
-                    const slots = [];
-                    for (let i = 0; i < max_slots; i++) {
-                        slots.push({ slot_index: i, instance: null, definition: null });
-                    }
-                    
-                    // Place items at their grid positions or packed positions
-                    contents.forEach((item: any, idx: number) => {
-                        let slot_index = idx;
-                        
-                        // If item has grid coordinates, calculate slot_index from them
-                        if (item.grid_x !== undefined && item.grid_y !== undefined && container) {
-                            const { cols } = get_container_grid(container);
-                            slot_index = item.grid_y * cols + item.grid_x;
-                            debug_log(`[DEBUG-GRID] ✅ Grid mapping: ${item.instance?.def_id} -> grid(${item.grid_x},${item.grid_y}) -> slot ${slot_index}`);
-                        } else {
-                            debug_log(`[DEBUG-GRID] ⚠️ Packed mapping: ${item.instance?.def_id} -> slot ${slot_index} (NO GRID COORDS - grid_x: ${item.grid_x}, grid_y: ${item.grid_y})`);
-                        }
-                        
-                        if (slot_index >= 0 && slot_index < max_slots) {
-                            slots[slot_index] = {
-                                slot_index,
-                                instance: item.instance,
-                                definition: item.definition
-                            };
-                        } else {
-                            debug_log(`[DEBUG-GRID] ❌ ERROR: Slot index ${slot_index} out of bounds (0-${max_slots-1}) for ${item.instance?.def_id}`);
-                        }
-                    });
-                    
-                    const filled_slots = slots.filter((s: any) => s.instance !== null).length;
-                    debug_log(`[DEBUG-GRID] === get_slot_items complete: ${filled_slots} filled slots ===`);
-                    
-                    return slots;
-                },
+                get_view: () => owner_view_data,
                 get_is_visible: () => true,
                 set_is_visible: (visible: boolean) => {
-                    if (!visible) {
-                        // Close this container module
-                        close_container_module(container_id);
-                    }
+                    if (!visible) close_owner_inventory_view(container_id);
                 },
-                on_slot_click: (slot_index: number) => {
-                    debug_log(`[Container ${instance_id}] Clicked slot ${slot_index}`);
-                },
-                // Tile containers behave like container-items; allow moving items in/out.
-                allow_drag: true,
-                on_drag_start: (slot_index: number, item: ItemInstance, definition: ItemDefinition, cont_id: string) => {
-                    // Validate drag using centralized drag_state.can_drag()
-                    const validation = drag_state.can_drag(item.id, definition);
-                    if (!validation.can) {
-                        flash_status([validation.reason!], 1500);
-                        debug_log(`[Container ${instance_id}] Drag rejected: ${validation.reason}`);
-                        return;
-                    }
-                    
-                    drag_state.start_drag('container', item.id, cont_id, definition, slot_index);
-                },
-                on_open_container_item: (item: ItemInstance, definition: ItemDefinition, parent_container_id: string) => {
-                    const place = get_current_place();
-                    if (place && parent_container_id.startsWith('place.pile.')) {
-                        void open_container_module(`place.item.${place.id}.${item.id}`, definition.name);
-                    } else if (place && parent_container_id.startsWith('place.tile.')) {
-                        // Nested container-items inside a tile container are not yet addressable.
+                on_open_nested_container: (item_id: string, item_name: string) => {
+                    if (container_id.startsWith('place.pile.')) {
+                        const place = get_current_place();
+                        if (place) void open_owner_inventory_view(`place.item.${place.id}.${item_id}`, item_name);
+                    } else if (container_id.startsWith('place.tile.')) {
                         flash_status(['Nested tile containers not supported yet'], 1500);
-                    } else if (place && parent_container_id.startsWith('place.item.')) {
-                        // Nested container-items inside a ground container-item are not yet addressable.
+                    } else if (container_id.startsWith('place.item.')) {
                         flash_status(['Nested ground containers not supported yet'], 1500);
                     } else {
-                        void open_container_module(`actor.item.${get_controlled_actor_id()}.${item.id}`, definition.name);
+                        void open_owner_inventory_view(`actor.item.${get_controlled_actor_id()}.${item_id}`, item_name);
                     }
                 },
-                on_slot_hover: async (slot_index: number, item: ItemInstance, definition: ItemDefinition | null) => {
-                    if (definition) {
-                        // Highlight compatible body slots when hovering items (call API for tag-based compatibility)
-                        const compatible = await get_compatible_slots_for_instance(item.id, container_id, definition);
-                        ui_state.character.highlighted_slots = compatible;
-                        ui_state.character.hovered_item = { name: definition.name, source: container_id };
+                on_select_item: (surface, slot) => {
+                    const selection = build_item_selection_from_surface(surface, slot);
+                    if (!selection) return;
+                    select_item_for_entity_inspector(selection);
+                },
+                on_slot_hover: async (_surface, slot) => {
+                    if (slot?.item) {
+                        const source_container_id = get_container_id_from_target_id(slot.slot_target_id);
+                        if (!source_container_id) {
+                            clear_item_legality_highlight();
+                            return;
+                        }
+                        const definition = {
+                            id: slot.item.def_id,
+                            name: slot.item.name,
+                            display_char: slot.item.display_char,
+                            tags: slot.item.tags,
+                        } as ItemDefinition;
+                        await apply_item_legality_highlight(slot.item.id, source_container_id, definition, source_container_id);
                     } else {
-                        ui_state.character.highlighted_slots = [];
-                        ui_state.character.hovered_item = null;
+                        clear_item_legality_highlight();
                     }
                 },
-                // Bidirectional highlighting: return items highlighted when hovering body slots
-                get_highlighted_items: () => ui_state.character.highlighted_items,
+                on_drag_start: (surface, slot, definition) => {
+                    if (!slot.item) return;
+                    const validation = drag_state.can_drag(slot.item.id, definition);
+                    if (!validation.can) {
+                        flash_status([validation.reason!], 1500);
+                        return;
+                    }
+                    const source_container_id = get_container_id_from_target_id(slot.slot_target_id) ?? get_container_id_from_target_id(surface.surface_target_id);
+                    if (!source_container_id) return;
+                    drag_state.start_drag('container', slot.item.id, source_container_id, definition, slot.slot_index, slot.slot_target_id);
+                    void apply_item_legality_highlight(slot.item.id, source_container_id, definition, source_container_id);
+                },
+                on_drop: async (surface, slot): Promise<boolean> => {
+                    if (!drag_state.is_dragging) return false;
+                    if (!surface.accepts_player_insert) return false;
+                    const target_container_id = get_container_id_from_target_id(slot.slot_target_id) ?? get_container_id_from_target_id(surface.surface_target_id);
+                    if (!target_container_id) return false;
+
+                    const transfer_res = await api_transfer_inline({
+                        actor_id: get_controlled_actor_id(),
+                        item_instance_id: String(drag_state.item_instance_id ?? ''),
+                        from_container: String(drag_state.source_container_id ?? ''),
+                        to_container: target_container_id,
+                        from_target_id: drag_state.source_target_id ?? undefined,
+                        to_target_id: slot.slot_target_id,
+                        target_grid_x: slot.grid_x,
+                        target_grid_y: slot.grid_y,
+                    });
+
+                if (!transfer_res.ok) {
+                    flash_status([`Transfer failed: ${transfer_res.error}`], 1500);
+                    return false;
+                }
+
+                owner_view_data = reload_owner_view ? await reload_owner_view() : owner_view_data;
+                if (owner_view_data) {
+                    const aliases = ui_state.container.aliases_by_canonical.get(container_id) ?? [container_id];
+                    for (const a of aliases) ui_state.container.owner_view_by_container_id.set(a, owner_view_data);
+                }
+                const source_container_id = String(drag_state.source_container_id ?? '');
+                await refresh_after_transfer(source_container_id, target_container_id);
+                owner_view_data = ui_state.container.owner_view_by_container_id.get(container_id) ?? owner_view_data;
+                void refresh_container_data();
+                flash_status([`${drag_state.item_definition?.name ?? 'Item'} moved`], 1200);
+                drag_state.end_drag();
+                return true;
+                },
                 on_drag_rejected: () => drag_state.reject_drag(),
-                on_drop: async (slot_index: number, grid_x?: number, grid_y?: number): Promise<boolean> => {
-                    // Handle dropping items into this container
-                    debug_log(`[DEBUG-GRID] on_drop called: slot_index=${slot_index}, grid_x=${grid_x}, grid_y=${grid_y}`);
-                    debug_log(`[DEBUG-GRID] drag_state: is_dragging=${drag_state.is_dragging}, source_container_id=${drag_state.source_container_id}`);
-                    
-                    if (!drag_state.is_dragging) {
-                        debug_log(`[DEBUG-GRID] Early return: not dragging`);
-                        return false;
-                    }
-
-                    const src = String(drag_state.source_container_id ?? '');
-
-                    // Tile containers behave like ground container-items.
-                    if (container_id.startsWith('place.tile.')) {
-                        const place = get_current_place();
-                        if (!place) {
-                            drag_state.reject_drag();
-                            return false;
-                        }
-
-                        const parsed = parse_place_tile_container_id(container_id);
-                        if (!parsed || place.id !== parsed.place_id) {
-                            drag_state.reject_drag();
-                            return false;
-                        }
-
-                        return await perform_drag_drop_into_tile_container({
-                            place,
-                            tile_x: parsed.x,
-                            tile_y: parsed.y,
-                            world_z: parsed.z,
-                            grid_x,
-                            grid_y,
-                        });
-                    }
-
-                    // Target is a ground pile UI: treat drops into it as dropping to ground at that tile.
-                    if (container_id.startsWith('place.pile.')) {
-                        const parts = container_id.split('.');
-                        const place_id = parts[2];
-                        const position_key = parts[3];
-                        if (!place_id || !position_key) {
-                            drag_state.reject_drag();
-                            return false;
-                        }
-                        const [xs, ys, zs] = (position_key || '').split('_');
-                        const x = parseInt(xs || '0', 10);
-                        const y = parseInt(ys || '0', 10);
-                        const pile_z = parseInt(zs || '', 10);
-                        const to_elevation = Number.isFinite(pile_z) ? Math.floor(pile_z) : get_focus_world_z_for_current_place();
-
-                        // Reorder within the same pile (acts like container reordering).
-                        if (src === container_id && !String(drag_state.item_instance_id ?? '').startsWith('pile:')) {
-                            try {
-                                // Prefer explicit grid coords from the module; fallback to slot_index mapping.
-                                let gx = grid_x;
-                                let gy = grid_y;
-                                if (gx === undefined || gy === undefined) {
-                                    const data = ui_state.container.container_data_map.get(container_id);
-                                    const cont = data?.container;
-                                    if (cont) {
-                                        const { cols } = get_container_grid(cont as any);
-                                        gx = slot_index % cols;
-                                        gy = Math.floor(slot_index / cols);
-                                    }
-                                }
-
-                                const mv = await api_transfer_inline({
-                                    actor_id: get_controlled_actor_id(),
-                                    item_instance_id: String(drag_state.item_instance_id ?? ''),
-                                    from_container: container_id,
-                                    to_container: container_id,
-                                    target_grid_x: typeof gx === 'number' ? gx : undefined,
-                                    target_grid_y: typeof gy === 'number' ? gy : undefined,
-                                });
-
-                                if (mv.ok) {
-                                    flash_status(['Moved'], 800);
-                                    drag_state.end_drag();
-                                    await update_current_place(place_id, { source: 'container_move_within_place' });
-                                    void refresh_container_data();
-                                    return true;
-                                }
-                                flash_status([`Move failed: ${mv.error}`], 1500);
-                                drag_state.reject_drag();
-                                return false;
-                            } catch {
-                                flash_status(['Move failed'], 1500);
-                                drag_state.reject_drag();
-                                return false;
-                            }
-                        }
-
-                        // Move a place-sourced single item into this pile tile.
-                        if ((src.startsWith('place.pile.') || src.startsWith('place.ground.')) && !String(drag_state.item_instance_id ?? '').startsWith('pile:')) {
-                            const src_parts = src.split('.');
-                            const src_place_id = src_parts[2];
-                            const src_position_key = src_parts[3];
-                            if (!src_place_id || !src_position_key || src_place_id !== place_id) {
-                                drag_state.reject_drag();
-                                return false;
-                            }
-                            const [fxs, fys, fzs] = (src_position_key || '').split('_');
-                            const from_x = parseInt(fxs || '0', 10);
-                            const from_y = parseInt(fys || '0', 10);
-                            const from_z = parseInt(fzs || '', 10);
-                            try {
-                                const mv = await api_transfer_inline({
-                                    actor_id: get_controlled_actor_id(),
-                                    item_instance_id: String(drag_state.item_instance_id ?? ''),
-                                    from_container: src,
-                                    to_container: container_id,
-                                });
-                                if (mv.ok) {
-                                    flash_status(['Moved'], 900);
-                                    drag_state.end_drag();
-                                    await update_current_place(place_id, { source: 'pile_move_within_place' });
-                                    void refresh_container_data();
-                                    return true;
-                                }
-                                flash_status([`Move failed: ${mv.error}`], 1500);
-                                drag_state.reject_drag();
-                                return false;
-                            } catch {
-                                flash_status(['Move failed'], 1500);
-                                drag_state.reject_drag();
-                                return false;
-                            }
-                        }
-
-                        // If dropping onto a container-item within the pile, deposit into it.
-                        try {
-                            const data = ui_state.container.container_data_map.get(container_id);
-                            const cont = data?.container;
-                            const contents = data?.contents || [];
-                            if (cont) {
-                                const { cols } = get_container_grid(cont as any);
-                                let target_entry: any = null;
-                                for (let idx = 0; idx < contents.length; idx++) {
-                                    const entry = contents[idx];
-                                    if (!entry?.instance) continue;
-                                    let si = idx;
-                                    if (entry.grid_x !== undefined && entry.grid_y !== undefined) {
-                                        si = (entry.grid_y * cols) + entry.grid_x;
-                                    }
-                                    if (si === slot_index) {
-                                        target_entry = entry;
-                                        break;
-                                    }
-                                }
-
-                                const target_item_id = target_entry?.instance?.id;
-                                const meta = target_item_id ? ui_state.place.ground_items_by_id.get(String(target_item_id)) : null;
-                                const is_container = has_tag(meta?.tags, 'CONTAINER');
-                                if (target_item_id && is_container) {
-                                    if (drag_state.item_instance_id === target_item_id) {
-                                    flash_status(['Cannot deposit a container into itself'], 1500);
-                                    drag_state.reject_drag();
-                                    return false;
-                                }
-
-                                    if (src.startsWith('place.pile.') && String(drag_state.item_instance_id ?? '').startsWith('pile:')) {
-                                        flash_status(['Open the pile and drag a specific item out'], 2000);
-                                        drag_state.reject_drag();
-                                        return false;
-                                    }
-
-                                    const dest = `place.item.${place_id}.${String(target_item_id)}`;
-                                    const tx = await api_transfer_inline({
-                                        actor_id: get_controlled_actor_id(),
-                                        item_instance_id: String(drag_state.item_instance_id ?? ''),
-                                        from_container: src,
-                                        to_container: dest,
-                                    });
-
-                                    if (tx.ok) {
-                                        flash_status([`Moved into ${meta?.name ?? 'container'}`], 1500);
-                                        drag_state.end_drag();
-                                        await update_current_place(place_id);
-                                        void refresh_container_data();
-                                        void refresh_character_data();
-                                        return true;
-                                    }
-
-                                    flash_status([`Deposit failed: ${tx.error || 'unknown error'}`], 1500);
-                                    drag_state.reject_drag();
-                                    return false;
-                                }
-                            }
-                        } catch {
-                            // fall through to drop
-                        }
-
-                        // If source is ground too, only allow cancel back onto same pile tile.
-                        if (drag_state.source_module === 'ground' || src.startsWith('place.ground.') || src.startsWith('place.pile.')) {
-                            if (src.includes(position_key || '')) {
-                                drag_state.end_drag();
-                                return true;
-                            }
-                            drag_state.reject_drag();
-                            return false;
-                        }
-
-                        // Ground container-item -> ground tile (pile tile): spill to ground.
-                        if (src.startsWith('place.item.')) {
-                            try {
-                                const to_container = `place.ground.${place_id}.${x}_${y}_${to_elevation}`;
-                                const sp = await api_transfer_inline({
-                                    actor_id: get_controlled_actor_id(),
-                                    item_instance_id: String(drag_state.item_instance_id ?? ''),
-                                    from_container: src,
-                                    to_container,
-                                });
-                                if (sp.ok) {
-                                    flash_status(['Dropped to pile'], 1200);
-                                    drag_state.end_drag();
-                                    await update_current_place(place_id);
-                                    void refresh_container_data();
-                                    void refresh_character_data();
-                                    return true;
-                                }
-                                flash_status([`Drop failed: ${sp.error}`], 1500);
-                                drag_state.reject_drag();
-                                return false;
-                            } catch {
-                                flash_status(['Drop failed'], 1500);
-                                drag_state.reject_drag();
-                                return false;
-                            }
-                        }
-
-                        // Tile container -> ground tile (pile tile): spill to ground.
-                        if (src.startsWith('place.tile.')) {
-                            try {
-                                const to_container = `place.ground.${place_id}.${x}_${y}_${to_elevation}`;
-                                const sp = await api_transfer_inline({
-                                    actor_id: get_controlled_actor_id(),
-                                    item_instance_id: String(drag_state.item_instance_id ?? ''),
-                                    from_container: src,
-                                    to_container,
-                                });
-                                if (sp.ok) {
-                                    flash_status(['Dropped to pile'], 1200);
-                                    drag_state.end_drag();
-                                    await update_current_place(place_id);
-                                    void refresh_container_data();
-                                    void refresh_character_data();
-                                    return true;
-                                }
-                                flash_status([`Drop failed: ${sp.error}`], 1500);
-                                drag_state.reject_drag();
-                                return false;
-                            } catch {
-                                flash_status(['Drop failed'], 1500);
-                                drag_state.reject_drag();
-                                return false;
-                            }
-                        }
-
-                        try {
-                            const to_container = `place.ground.${place_id}.${x}_${y}_${to_elevation}`;
-                            const drop_data = await api_transfer_inline({
-                                actor_id: get_controlled_actor_id(),
-                                item_instance_id: String(drag_state.item_instance_id ?? ''),
-                                from_container: src,
-                                to_container,
-                            });
-                            if (drop_data.ok) {
-                                flash_status(['Dropped to pile'], 1200);
-                                drag_state.end_drag();
-                                await update_current_place(place_id);
-                                void refresh_container_data();
-                                void refresh_character_data();
-                                return true;
-                            }
-                            flash_status([`Drop failed: ${drop_data.error || 'unknown error'}`], 1500);
-                            drag_state.reject_drag();
-                            return false;
-                        } catch (err) {
-                            flash_status(['Drop failed'], 1500);
-                            drag_state.reject_drag();
-                            return false;
-                        }
-                    }
-
-                    // Target is a ground container-item UI: deposits into that container-item.
-                    if (container_id.startsWith('place.item.')) {
-                        const parts = container_id.split('.');
-                        const place_id = parts[2];
-                        const container_item_id = parts[3];
-                        if (!place_id || !container_item_id) {
-                            drag_state.reject_drag();
-                            return false;
-                        }
-
-                        if (drag_state.item_instance_id === container_item_id) {
-                            flash_status(['Cannot deposit a container into itself'], 1500);
-                            drag_state.reject_drag();
-                            return false;
-                        }
-
-                        try {
-                            const src = String(drag_state.source_container_id ?? '');
-
-                            if (src.startsWith('place.pile.') && String(drag_state.item_instance_id ?? '').startsWith('pile:')) {
-                                flash_status(['Open the pile and drag a specific item out'], 2000);
-                                drag_state.reject_drag();
-                                return false;
-                            }
-
-                            const tx = await api_transfer_inline({
-                                actor_id: get_controlled_actor_id(),
-                                item_instance_id: String(drag_state.item_instance_id ?? ''),
-                                from_container: src,
-                                to_container: container_id,
-                                target_grid_x: typeof grid_x === 'number' ? grid_x : undefined,
-                                target_grid_y: typeof grid_y === 'number' ? grid_y : undefined,
-                            });
-
-                            if (tx.ok) {
-                                flash_status(['Deposited'], 1200);
-                                drag_state.end_drag();
-                                await update_current_place(place_id);
-                                void refresh_container_data();
-                                void refresh_character_data();
-                                return true;
-                            }
-
-                            flash_status([`Deposit failed: ${tx.error || 'unknown error'}`], 1500);
-                            drag_state.reject_drag();
-                            return false;
-                        } catch {
-                            flash_status(['Deposit failed'], 1500);
-                            drag_state.reject_drag();
-                            return false;
-                        }
-                    }
-
-                    // Source is ground single item / ground container-item: pickup/withdraw into body_slots/actor.item target.
-                    const src0 = String(drag_state.source_container_id ?? '');
-                    if (drag_state.source_module === 'ground' && src0.startsWith('place.pile.')) {
-                        flash_status(['Open the pile and drag a specific item out'], 2000);
-                        drag_state.reject_drag();
-                        return false;
-                    }
-
-                    if (drag_state.source_module === 'ground' || src0.startsWith('place.ground.') || src0.startsWith('place.item.')) {
-                        if (!container_id.startsWith('body_slots.') && !container_id.startsWith('actor.item.')) {
-                            flash_status(['Cannot place ground items into that container yet'], 1500);
-                            drag_state.reject_drag();
-                            return false;
-                        }
-
-                        try {
-                            const src = src0;
-
-                            const tx = await api_transfer_inline({
-                                actor_id: get_controlled_actor_id(),
-                                item_instance_id: String(drag_state.item_instance_id ?? ''),
-                                from_container: src,
-                                to_container: container_id,
-                                target_grid_x: typeof grid_x === 'number' ? grid_x : undefined,
-                                target_grid_y: typeof grid_y === 'number' ? grid_y : undefined,
-                            });
-
-                            if (tx.ok) {
-                                const place = get_current_place();
-                                flash_status(['Picked up'], 1200);
-                                drag_state.end_drag();
-                                if (place) await update_current_place(place.id, { source: 'pickup_refresh' });
-                                void refresh_container_data();
-                                void refresh_character_data();
-                                return true;
-                            }
-
-                            flash_status([`Pickup failed: ${tx.error || 'unknown error'}`], 1500);
-                            drag_state.reject_drag();
-                            return false;
-                        } catch {
-                            flash_status(['Pickup failed'], 1500);
-                            drag_state.reject_drag();
-                            return false;
-                        }
-                    }
-                    
-                    try {
-                        // Read from shared state for consistency
-                        const data = ui_state.container.container_data_map.get(container_id);
-                        const contents = data?.contents || [];
-                        debug_log(`[DEBUG-GRID] Container data loaded: ${contents.length} items`);
-                        
-                        // Determine target container
-                        let target_container_id = container_id;
-                        let target_name = container_id.split('.').pop() || 'container';
-
-                        // Shortcut: dropping onto a container-item inside this container deposits into it.
-                        const cont = data?.container;
-                        if (cont && Array.isArray(contents) && (container_id.startsWith('body_slots.') || container_id.startsWith('actor.item.'))) {
-                            const { cols } = get_container_grid(cont as any);
-                            let target_entry: any = null;
-                            for (let idx = 0; idx < contents.length; idx++) {
-                                const entry = contents[idx];
-                                if (!entry?.instance) continue;
-                                let si = idx;
-                                if (entry.grid_x !== undefined && entry.grid_y !== undefined) {
-                                    si = (entry.grid_y * cols) + entry.grid_x;
-                                }
-                                if (si === slot_index) {
-                                    target_entry = entry;
-                                    break;
-                                }
-                            }
-
-                            const target_is_container = has_tag(target_entry?.definition?.tags, 'CONTAINER');
-                            if (target_entry?.instance?.id && target_is_container) {
-                                if (drag_state.item_instance_id === target_entry.instance.id) {
-                                    flash_status(['Cannot deposit a container into itself'], 1500);
-                                    drag_state.reject_drag();
-                                    return false;
-                                }
-                                target_container_id = `actor.item.${get_controlled_actor_id()}.${target_entry.instance.id}`;
-                                target_name = target_entry.definition?.name || 'container';
-                            }
-                        }
-
-                        const src = String(drag_state.source_container_id ?? '');
-                        const target_slot_occupied = Array.isArray(contents) && contents.some((entry: any, idx: number) => {
-                            if (!entry?.instance) return false;
-                            let si = idx;
-                            if (entry.grid_x !== undefined && entry.grid_y !== undefined && cont) {
-                                const { cols } = get_container_grid(cont as any);
-                                si = (entry.grid_y * cols) + entry.grid_x;
-                            }
-                            return si === slot_index;
-                        });
-                        
-                        // Build transfer request body
-                        const transfer_body: any = {
-                            actor_id: get_controlled_actor_id(),
-                            item_instance_id: drag_state.item_instance_id,
-                            from_container: drag_state.source_container_id,
-                            to_container: target_container_id,
-                            from_slot_index: drag_state.source_slot_index,
-                            to_slot_index: slot_index,
-                        };
-                        
-                        // Add grid coordinates when dropping into the container itself.
-                        // When depositing into a nested container-item, do not forward parent grid coords.
-                        debug_log(`[DEBUG-GRID] Checking grid condition: source=${drag_state.source_container_id}, target=${target_container_id}, grid_x=${grid_x}, grid_y=${grid_y}`);
-                        if (target_container_id === container_id && grid_x !== undefined && grid_y !== undefined) {
-                            const same_container_move = src === container_id;
-                            if (!same_container_move && target_slot_occupied) {
-                                debug_log(`[DEBUG-GRID] Grid coordinates SKIPPED because target slot ${slot_index} is occupied; using auto-place fallback`);
-                            } else {
-                                transfer_body.target_grid_x = grid_x;
-                                transfer_body.target_grid_y = grid_y;
-                                debug_log(`[DEBUG-GRID] Grid coordinates INCLUDED: (${grid_x}, ${grid_y})`);
-                            }
-                        } else {
-                            debug_log(`[DEBUG-GRID] Grid coordinates SKIPPED`);
-                        }
-                        
-                        debug_log(`[DEBUG-GRID] Request body:`, JSON.stringify(transfer_body, null, 2));
-                        
-                        const transfer_data = await api_transfer_inline({
-                            actor_id: String(transfer_body.actor_id ?? get_controlled_actor_id()),
-                            item_instance_id: String(transfer_body.item_instance_id ?? ''),
-                            from_container: String(transfer_body.from_container ?? ''),
-                            to_container: String(transfer_body.to_container ?? ''),
-                            target_grid_x: transfer_body.target_grid_x,
-                            target_grid_y: transfer_body.target_grid_y,
-                        });
-                        
-                        if (transfer_data.ok) {
-                            flash_status([`${drag_state.item_definition?.name} moved to ${target_name}`], 1500);
-                            drag_state.end_drag();
-                            // Refresh both container and character data
-                            void refresh_container_data();
-                            void refresh_character_data();
-
-                            // If either side is place-owned, refresh the place snapshot.
-                            try {
-                                const fromc = String(drag_state.source_container_id ?? '');
-                                const toc = String(target_container_id ?? '');
-                                if (fromc.startsWith('place.') || toc.startsWith('place.')) {
-                                    const place = get_current_place();
-                                    if (place) void update_current_place(place.id);
-                                }
-                            } catch {
-                                // ignore
-                            }
-                            return true;
-                        } else {
-                            debug_log(`[DEBUG-GRID] Transfer failed response: ${JSON.stringify(transfer_data)}`);
-                            flash_status([`Transfer failed: ${transfer_data.error}`], 1500);
-                            drag_state.reject_drag();
-                            return false;
-                        }
-                    } catch (err) {
-                        flash_status([`Error transferring item`], 1500);
-                        drag_state.reject_drag();
-                        return false;
-                    }
-                },
-                gizmos: {
-                    enabled: ['close', 'move', 'resize', 'seamless'],
-                    can_close: true,
-                    can_move: true,
-                    can_save_position: false,
-                    on_close: () => {
-                        close_container_module(container_id);
-                    },
-                    on_move: (new_rect) => {
-                        ui_state.modules.positions.set(instance_id, new_rect);
-                        persist_module_layout_debounced();
-                    },
-                    on_move_end: (final_rect) => {
-                        ui_state.modules.positions.set(instance_id, final_rect);
-                        persist_module_layout_debounced();
-                    },
-                    on_resize: (new_rect) => {
-                        ui_state.modules.positions.set(instance_id, new_rect);
-                        persist_module_layout_debounced();
-                    },
-                    on_resize_end: (final_rect) => {
-                        ui_state.modules.positions.set(instance_id, final_rect);
-                        persist_module_layout_debounced();
-                    },
-                },
+                get_highlighted_items: () => ui_state.character.highlighted_items,
+                get_open_container_ids: () => ui_state.container.open_containers,
+                get_open_container_id_for_item: (surface, slot) => get_open_owner_inventory_container_id_for_item(surface, slot),
             });
             
             // Register module
@@ -9960,28 +11194,10 @@ export function create_app_state(): AppState {
             for (const a of aliases) {
                 ui_state.container.open_containers.add(a);
                 ui_state.container.container_module_map.set(a, instance_id);
+                ui_state.container.owner_view_by_container_id.set(a, owner_view_data);
             }
             
-            // Store container data in shared state for refreshing
-            // FIX: Use container_data.contents (from API) which has migrated grid coordinates
-            // instead of container.contents which might be stale
-            const contents_to_store = container_data.contents || container.contents || [];
-            debug_log(`[ContainerOpener] Storing container data for ${container_id}`);
-            debug_log(`[ContainerOpener] - container_data.contents length: ${container_data.contents?.length || 0}`);
-            debug_log(`[ContainerOpener] - container.contents length: ${container.contents?.length || 0}`);
-            debug_log(`[ContainerOpener] - Using: ${container_data.contents ? 'container_data.contents (API)' : 'container.contents (fallback)'}`);
-            
-            // Log first few items to verify grid coordinates
-            contents_to_store.slice(0, 3).forEach((item: any, idx: number) => {
-                debug_log(`[ContainerOpener] - Item ${idx}: ${item.instance?.def_id}, grid_x: ${item.grid_x}, grid_y: ${item.grid_y}`);
-            });
-            
-            ui_state.container.container_data_map.set(container_id, { 
-                container, 
-                contents: contents_to_store
-            });
-            
-            const display_name = source_name || (container?.name ?? null) || container_id.split('.').pop() || 'container';
+            const display_name = source_name || (owner_view_data?.owner_name ?? null) || container_id.split('.').pop() || 'container';
             flash_status([`Opened ${display_name}`], 1000);
             debug_log(`[ContainerOpener] Opened ${container_id} as ${instance_id}`);
             
@@ -9998,7 +11214,7 @@ export function create_app_state(): AppState {
     /**
      * Phase 7: Close a container module
      */
-    function close_container_module(container_id: string): void {
+    function close_owner_inventory_view(container_id: string): void {
         debug_log(`[ContainerOpener] Closing container: ${container_id}`);
 
         // Canonicalize so closing an alias closes the canonical module.
@@ -10025,9 +11241,10 @@ export function create_app_state(): AppState {
             ui_state.container.open_containers.delete(a);
             ui_state.container.container_module_map.delete(a);
             ui_state.container.canonical_by_alias.delete(a);
+            ui_state.container.owner_view_by_container_id.delete(a);
         }
         ui_state.container.aliases_by_canonical.delete(container_id);
-        ui_state.container.container_data_map.delete(container_id);
+        ui_state.container.owner_view_by_container_id.delete(container_id);
         if (typeof slot === 'number' && slot >= 1 && slot <= ui_state.container.container_slots.length) {
             ui_state.container.container_slots[slot - 1] = null;
         }
@@ -10097,6 +11314,7 @@ export function create_app_state(): AppState {
             body_slots = npc_data.body_slots;
             equipped_items = npc_data.equipped_items;
             weight_data = npc_data.weight_data;
+            set_character_tags(npc_ref, (npc_data.character as any)?.tags);
             const live_name = String((npc_data.character as any)?.name ?? '').trim();
             if (live_name) {
                 if (module_registry.has(module_id)) {
@@ -10122,8 +11340,12 @@ export function create_app_state(): AppState {
             get_actor_id: () => npc_id,
             get_body_slots: () => body_slots,
             get_equipped_items: () => equipped_items,
+            get_tags: () => get_character_tags(npc_ref),
+            get_selected_tag_key: () => ui_state.tag_picker.entity_ref === npc_ref ? ui_state.tag_picker.selected_tag_key : null,
             get_weight_data: () => weight_data,
             get_is_visible: () => true,
+            on_select_tag: (tag: TagInstance) => load_tag_picker_from_entity(npc_ref, tag),
+            on_add_tag: () => { void seed_default_entity_tag(npc_ref); },
             on_slot_click: (slot_name: string, slot_type: SlotType, garb_index: number | null) => {
                 debug_log(`[NPC Module] Clicked body slot: ${slot_name}.${slot_type}${garb_index !== null ? `.${garb_index}` : ''}`);
             },
@@ -10182,8 +11404,8 @@ export function create_app_state(): AppState {
                     x >= container_module.rect.x0 && x <= container_module.rect.x1 &&
                     y >= container_module.rect.y0 && y <= container_module.rect.y1) {
                     
-                    const container = ui_state.container.current_container;
-                    if (!container) {
+                    const target_container_id = await get_inventory_panel_drop_target_container_id();
+                    if (!target_container_id) {
                         drag_state.end_drag();
                         return false;
                     }
@@ -10193,7 +11415,7 @@ export function create_app_state(): AppState {
                             actor_id: get_controlled_actor_id(),
                             item_instance_id: String(drag_state.item_instance_id ?? ''),
                             from_container: String(drag_state.source_container_id ?? ''),
-                            to_container: container.id,
+                            to_container: target_container_id,
                         });
                         
                         if (transfer_data.ok) {
@@ -10321,12 +11543,12 @@ export function create_app_state(): AppState {
             on_container_click: (container_id: string) => {
                 debug_log(`[NPC Module] Container clicked: ${container_id}`);
                 // Phase 7: Open container in new ContainerModule
-                void open_container_module(container_id, `${get_entity_display_name(npc_ref, display_name)}'s container`);
+                void open_owner_inventory_view(container_id, `${get_entity_display_name(npc_ref, display_name)}'s container`);
             },
             // Phase 7: Right-click container opening
             on_open_container: async (container_id: string, slot_name: string) => {
                 debug_log(`[NPC Module] Opening container via right-click: ${container_id}`);
-                await open_container_module(container_id, `${get_entity_display_name(npc_ref, display_name)}'s ${slot_name}`);
+                await open_owner_inventory_view(container_id, `${get_entity_display_name(npc_ref, display_name)}'s ${slot_name}`);
             },
             get_open_containers: () => ui_state.container.open_containers,
         });
@@ -10386,6 +11608,10 @@ export function create_app_state(): AppState {
     (window as any).open_npc_module = open_npc_character_module;
     (window as any).close_npc_module = close_npc_module;
     (window as any).test_dynamic_modules = test_dynamic_modules;
+
+    window.addEventListener('beforeunload', () => {
+        release_actor_claim_on_exit();
+    });
 
     return {
         modules: module_registry.get_all(),

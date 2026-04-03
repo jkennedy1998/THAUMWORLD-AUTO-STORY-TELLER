@@ -8,12 +8,8 @@
   "tags": [
     { "name": "STRUCTURE", "mag": 1, "meta": [], "scope": ["TILE"] },
     { "name": "OCCUPIES", "mag": 1, "meta": [], "scope": ["TILE"] },
-    { "name": "CONTAINER", "mag": 1, "meta": [], "scope": ["TILE"] }
+    { "name": "CONTAINER", "mag": 1, "meta": [], "dim_mag": { "container_capacity_mag": 4 }, "scope": ["TILE"] }
   ],
-  "container_capacity": {
-    "max_slots": 30,
-    "max_weight": 75000
-  },
   "container_glyphs": {
     "closed": "⍞",
     "open": "⌸"

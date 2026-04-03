@@ -8,6 +8,7 @@
 import path from "path";
 import { spawn } from "child_process";
 import { fileURLToPath, pathToFileURL } from "url";
+import { acquireHostLaunchLock, detectLocalHost, detectVite, readHostLaunchLock, recoverHostLaunchLock, releaseHostLaunchLock, waitForLocalHost, writeHostSessionFile } from "./launcher_common.mjs";
 
 // Get __dirname in ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -17,9 +18,12 @@ const __dirname = path.dirname(__filename);
 const args = process.argv.slice(2);
 const slot_arg = args.find(arg => arg.startsWith("--slot="));
 const data_slot = slot_arg ? parseInt(slot_arg.split("=")[1]) : 1;
+const mode_arg = args.find(arg => arg.startsWith("--mode="));
+const launch_mode = (mode_arg ? String(mode_arg.split("=")[1] ?? "smart") : "smart").trim().toLowerCase();
 
 console.log("🎮 Starting THAUMWORLD with log capture...");
 console.log(`💾 Data slot: ${data_slot}`);
+console.log(`🧭 Launch mode: ${launch_mode}`);
 console.log("");
 
 // Import the compiled log capture module
@@ -58,7 +62,8 @@ console.log("");
 const spawned_processes = [];
 
 // Launch all processes
-const processes = [
+const host_processes = [
+  { name: "event_bridge", cmd: "node", args: ["dist/event_bridge/main.js"], delay: 0 },
   { name: "data_broker", cmd: "node", args: ["dist/data_broker/main.js"], delay: 0 },
   // { name: "interpreter", cmd: "node", args: ["dist/interpreter_ai/main.js"], delay: 500 },  // ARCHIVED - communication system now in interface_program
   { name: "renderer", cmd: "node", args: ["dist/renderer_ai/main.js"], delay: 500 },
@@ -67,7 +72,11 @@ const processes = [
   { name: "roller", cmd: "node", args: ["dist/roller/main.js"], delay: 500 },
   { name: "state_applier", cmd: "node", args: ["dist/state_applier/main.js"], delay: 500 },
   { name: "turn_manager", cmd: "node", args: ["dist/turn_manager/main.js"], delay: 500 },
-  { name: "interface", cmd: "node", args: ["dist/interface_program/main.js"], delay: 2000 },
+  { name: "interface", cmd: "node", args: ["dist/interface_program/main.js"], delay: 2000 }
+];
+
+const client_processes = [
+  { name: "vite", cmd: "npx", args: ["vite"], delay: 0 },
   { name: "electron", cmd: "npx", args: ["electron", "."], delay: 3000 }
 ];
 
@@ -75,7 +84,7 @@ async function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function launch_all() {
+async function launch_process_list(processes, role) {
   for (const proc of processes) {
     await sleep(proc.delay);
     console.log(`🚀 Starting ${proc.name}...`);
@@ -90,7 +99,8 @@ async function launch_all() {
           env: {
             ...process.env,
             DATA_SLOT: data_slot.toString(),
-            NODE_ENV: "development"
+            NODE_ENV: "development",
+            THAUM_BOOT_ROLE: role
           },
           cwd: path.join(__dirname, "..")
         }
@@ -102,8 +112,52 @@ async function launch_all() {
     }
   }
 
+}
+
+async function launch_all() {
+  const baseDir = path.join(__dirname, '..');
+  let hostExists = await detectLocalHost(data_slot);
+  const viteExists = await detectVite();
+  const existingLock = readHostLaunchLock(baseDir, data_slot);
+  if (existingLock) {
+    console.log(`🔒 Host launch lock detected pid=${existingLock.pid || 'unknown'} created_at=${existingLock.created_at || 'unknown'}`);
+  }
+
+  if (launch_mode === 'host') {
+    writeHostSessionFile(baseDir, data_slot, session.sessionId ?? `session_${Date.now()}`, new Date());
+    await launch_process_list(host_processes, 'host');
+  } else if (launch_mode === 'client') {
+    const clientList = viteExists ? client_processes.filter(proc => proc.name !== 'vite') : client_processes;
+    await launch_process_list(clientList, 'client');
+  } else if (!hostExists) {
+    if (existingLock) {
+      const recovered = await recoverHostLaunchLock(baseDir, data_slot, { timeoutMs: 5000, probeFirst: true });
+      console.log(`🔧 Host lock recovery: ${recovered.reason}${recovered.cleared ? ' (cleared stale lock)' : ''}`);
+      hostExists = await detectLocalHost(data_slot);
+    }
+    const lock = acquireHostLaunchLock(baseDir, data_slot);
+    if (lock.ok) {
+      writeHostSessionFile(baseDir, data_slot, session.sessionId ?? `session_${Date.now()}`, new Date());
+      console.log(`🔐 Host lock acquired ${lock.lockPath}`);
+      await launch_process_list(host_processes, 'host');
+      setTimeout(() => releaseHostLaunchLock(lock.lockPath), 20000);
+      hostExists = await waitForLocalHost(data_slot, 25000);
+      console.log(`🩺 Host wait result after start: ${hostExists ? 'ready' : 'not_reachable'}`);
+    } else {
+      console.log('Another launcher is starting the local host; attaching client once ready...');
+      hostExists = await waitForLocalHost(data_slot, 25000);
+      console.log(`🩺 Host wait result while attaching: ${hostExists ? 'ready' : 'not_reachable'}`);
+    }
+    const clientList = viteExists ? client_processes.filter(proc => proc.name !== 'vite') : client_processes;
+    await launch_process_list(clientList, 'client');
+  } else {
+    console.log('🩺 Local host health probe succeeded before launch');
+    const clientList = viteExists ? client_processes.filter(proc => proc.name !== 'vite') : client_processes;
+    await launch_process_list(clientList, 'client');
+  }
+
   console.log("");
-  console.log("✅ All processes started!");
+  console.log("✅ Launch complete!");
   console.log("🌐 Game window should appear shortly...");
   console.log("");
   console.log("Press Ctrl+C to stop all services");

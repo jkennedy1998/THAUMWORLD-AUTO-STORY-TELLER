@@ -250,93 +250,93 @@ We should prefer prompt frameworks that shape content rather than feeding raw us
 ## Phases (Chronological)
 
 ### Phase 0 - Preserve Working Intent, Audit Legacy Paths
-- [ ] Trace every current `COMMUNICATE` entry, response path, witness path, and timed-event deferral hook
-- [ ] Mark which parts become canonical, transitional, or deleted
-- [ ] Identify every legacy timer-driven conversation side effect that must be removed
+- [~] Trace every current `COMMUNICATE` entry, response path, witness path, and timed-event deferral hook
+- [~] Mark which parts become canonical, transitional, or deleted
+- [~] Identify every legacy timer-driven conversation side effect that must be removed
 - [ ] Preserve current good behavior examples before refactor (direct greeting, direct question, goodbye, bystander hearing, timed-event deferral)
-- [ ] Audit current hard-rooted timed communication bridge in `src/turn_manager/main.ts`
-- [ ] Audit current pending communication store shape in `src/world_storage/store.ts`
-- [ ] Audit any remaining interface-side turn-window assumptions that speech must not depend on
+- [~] Audit current hard-rooted timed communication bridge in `src/turn_manager/main.ts`
+- [~] Audit current pending communication store shape in `src/world_storage/store.ts`
+- [~] Audit any remaining interface-side turn-window assumptions that speech must not depend on
 
 ### Phase 1 - Define Canonical CommunicationEvent Contract
-- [ ] Define canonical `CommunicationEvent` shape
-- [ ] Define how direct targets and broadcast listeners are represented
-- [ ] Include breath-owned creation metadata
-- [ ] Define how communication events link to conversation sessions and timed events
-- [ ] Define immutable-vs-derived fields (`speaker_ref`/`text` vs `heard_by_refs`/eligibility)
-- [ ] Define canonical event completion semantics
+- [~] Define canonical `CommunicationEvent` shape
+- [~] Define how direct targets and broadcast listeners are represented
+- [~] Include breath-owned creation metadata
+- [~] Define how communication events link to conversation sessions and timed events
+- [~] Define immutable-vs-derived fields (`speaker_ref`/`text` vs `heard_by_refs`/eligibility)
+- [~] Define canonical event completion semantics
 - [ ] Define the session-extension resolver inputs used when a new speech event arrives
 
 ### Phase 2 - Define ConversationSession Contract
-- [ ] Define `ConversationSession` state: participants, transcript, summary, queue, mode, location context
-- [ ] Define participant states: engaged, queued, speaking, thinking, observing, left
-- [ ] Define leave/close semantics (goodbye, disengage, distance, timed-event exit, death)
-- [ ] Define when a new speech event extends an existing session vs creates a new one
-- [ ] Define `active` vs `cooling` vs `closed`
-- [ ] Define `transcript_recent` retention window and rollover into `transcript_summary`
-- [ ] Define session-owned shared summary vs per-NPC remembered memory factoids
-- [ ] Define observer -> participant promotion rules
-- [ ] Define `last_addressed_breath`, `last_spoke_breath`, and `last_active_breath` semantics for session members
-- [ ] Define breath-based decay thresholds for recent address/activity weighting
+- [~] Define `ConversationSession` state: participants, transcript, summary, queue, mode, location context
+- [~] Define participant states: engaged, queued, speaking, thinking, observing, left
+- [~] Define leave/close semantics (goodbye, disengage, distance, timed-event exit, death)
+- [~] Define when a new speech event extends an existing session vs creates a new one
+- [~] Define `active` vs `cooling` vs `closed`
+- [~] Define `transcript_recent` retention window and rollover into `transcript_summary`
+- [~] Define session-owned shared summary vs per-NPC remembered memory factoids
+- [~] Define observer -> participant promotion rules
+- [~] Define `last_addressed_breath`, `last_spoke_breath`, and `last_active_breath` semantics for session members
+ - [~] Define breath-based decay thresholds for recent address/activity weighting
 
 ### Phase 3 - Listener Evaluation Architecture
-- [ ] Define the listener evaluation result contract: ignore / observe / join / queue / leave
-- [ ] Weight response desire by direct target, relevance, relationship, role, current task, and current goal
-- [ ] Keep role/behavior hooks centralized and reusable
+- [~] Define the listener evaluation result contract: ignore / observe / join / queue / leave
+- [~] Weight response desire by direct target, relevance, relationship, role, current task, and current goal
+- [~] Keep role/behavior hooks centralized and reusable
 - [ ] Ensure `guard`, `idle_wander`, `shopkeep`, `follow`, and future behaviors can evaluate differently
-- [ ] Define a typed `ListenerDecision` result with reason, social role, and queue-admission metadata
-- [ ] Include breath-based address recency and participant recency in listener weighting
+- [~] Define a typed `ListenerDecision` result with reason, social role, and queue-admission metadata
+- [~] Include breath-based address recency and participant recency in listener weighting
 
 ### Phase 4 - Stable Speaking Queue
-- [ ] Implement stable queue ordering once speakers are queued
-- [ ] Queue entries store intent-to-speak, not generated text
-- [ ] Define queue priorities for initial admission only (direct target, urgency, relevance, engagement)
-- [ ] Do not reorder once queued unless a future explicit interruption rule is added
-- [ ] Define queue-entry expiry/removal rules
-- [ ] Define what happens when a queued speaker declines at front-of-queue time
-- [ ] Define the exact deterministic queue admission weighting formula and stable tie-breaks
+- [~] Implement stable queue ordering once speakers are queued
+- [~] Queue entries store intent-to-speak, not generated text
+- [~] Define queue priorities for initial admission only (direct target, urgency, relevance, engagement)
+- [~] Do not reorder once queued unless a future explicit interruption rule is added
+- [~] Define queue-entry expiry/removal rules
+- [~] Define what happens when a queued speaker declines at front-of-queue time
+- [~] Define the exact deterministic queue admission weighting formula and stable tie-breaks
 
 ### Phase 5 - Turn-Arrival Re-evaluation
-- [ ] When a speaker reaches the front, rebuild current conversation context
-- [ ] Re-evaluate whether they still want to speak
-- [ ] Allow outcomes: speak / stay silent / leave / no longer relevant
-- [ ] Ensure re-evaluation is required in both free-roam sequential speaking and timed-event speaking
-- [ ] Define the exact `SpeechTurnContext` bundle provided at re-evaluation time
+- [~] When a speaker reaches the front, rebuild current conversation context
+- [~] Re-evaluate whether they still want to speak
+- [~] Allow outcomes: speak / stay silent / leave / no longer relevant
+- [~] Ensure re-evaluation is required in both free-roam sequential speaking and timed-event speaking
+- [~] Define the exact `SpeechTurnContext` bundle provided at re-evaluation time
 - [ ] Define whether a declined speaker may requeue later in the same session
 
 ### Phase 6 - Prompt Framework Refactor
-- [ ] Treat the LLM as the phrasing layer, not the reply-ownership layer
-- [ ] Refactor prompt assembly to use structured communication context similar to inspect context building
-- [ ] Define speech prompt frameworks for direct replies, questions, farewells, objections, clarifications, and overheard relevant joins
-- [ ] Keep scripted/template fast-paths only as optional output strategies behind the same decision contract
-- [ ] Define the `GeneratedSpeechAction` contract emitted after successful generation
-- [ ] Define explicit `thinking`/generation failure behavior
+- [~] Treat the LLM as the phrasing layer, not the reply-ownership layer
+- [~] Refactor prompt assembly to use structured communication context similar to inspect context building
+- [~] Define speech prompt frameworks for direct replies, questions, farewells, objections, clarifications, and overheard relevant joins
+- [~] Keep scripted/template fast-paths only as optional output strategies behind the same decision contract
+- [~] Define the `GeneratedSpeechAction` contract emitted after successful generation
+- [~] Define explicit `thinking`/generation failure behavior
 
 ### Phase 7 - Timed-Event Integration
-- [ ] Speech inside timed events must become a real turn-owned action
-- [ ] If it is not the NPC's turn, preserve queued speak intent rather than generating immediate text
-- [ ] On the NPC's turn, re-evaluate current conversation state before speaking
-- [ ] Ensure speech action cost/input ownership aligns with the broader timed-event action model
-- [ ] Replace the current `pending_communication_opportunities -> turn_manager replayed applied_COMMUNICATE` bridge with conversation-session-owned queued speech intent
-- [ ] Keep the current initiative / world-interstitial system as-is while swapping communication ownership underneath it
+- [~] Speech inside timed events must become a real turn-owned action
+- [~] If it is not the NPC's turn, preserve queued speak intent rather than generating immediate text
+- [~] On the NPC's turn, re-evaluate current conversation state before speaking
+- [~] Ensure speech action cost/input ownership aligns with the broader timed-event action model
+- [~] Replace the current `pending_communication_opportunities -> turn_manager replayed applied_COMMUNICATE` bridge with conversation-session-owned queued speech intent
+- [~] Keep the current initiative / world-interstitial system as-is while swapping communication ownership underneath it
 
 ### Phase 8 - Free-Roam Conversation Timing
-- [ ] Replace remaining `Date.now()`-owned conversation timing with breath-aware timing where possible
-- [ ] Allow low-contention conversations to proceed in free mode without forcing a timed event
-- [ ] Keep free-roam conversation responsive while still sequential when multiple speakers queue up
+- [~] Replace remaining `Date.now()`-owned conversation timing with breath-aware timing where possible
+- [~] Allow low-contention conversations to proceed in free mode without forcing a timed event
+- [~] Keep free-roam conversation responsive while still sequential when multiple speakers queue up
 
 ### Phase 9 - Legacy Removal
-- [ ] Remove global response dedupe patterns that are no longer valid (`responded_npcs`-style logic)
-- [ ] Remove direct outbox-poll side-effect reply emission
-- [ ] Remove duplicate communication ownership split across witness, NPC AI, and timed-event queues
-- [ ] Collapse old wandering/timer conversation hooks that bypass the new queue/session model
-- [ ] Remove turn-manager hard-rooted communication replay once queued speech actions become canonical
-- [ ] Remove or shrink `pending_communication_opportunities` if conversation/session-owned queue state supersedes it
+- [x] Remove global response dedupe patterns that are no longer valid (`responded_npcs`-style logic)
+- [x] Remove direct outbox-poll side-effect reply emission
+- [x] Remove duplicate communication ownership split across witness, NPC AI, and timed-event queues
+- [x] Collapse old wandering/timer conversation hooks that bypass the new queue/session model
+- [x] Remove turn-manager hard-rooted communication replay once queued speech actions become canonical
+- [x] Remove or shrink `pending_communication_opportunities` if conversation/session-owned queue state supersedes it
 
 ### Phase 10 - Observability + Debugging
-- [ ] Add logs for communication event creation, listener evaluation, queue admission, queue order, re-evaluation result, generation start/end, and delivery
-- [ ] Add debug view for active conversation sessions and queued speakers
-- [ ] Add explicit logs for "wanted to speak but declined at turn arrival" cases
+- [~] Add logs for communication event creation, listener evaluation, queue admission, queue order, re-evaluation result, generation start/end, and delivery
+- [~] Add debug view for active conversation sessions and queued speakers
+- [~] Add explicit logs for "wanted to speak but declined at turn arrival" cases
 
 ### Phase 11 - Verification Checklist
 - [ ] Directly addressed NPC reliably answers when appropriate
@@ -357,7 +357,26 @@ We should prefer prompt frameworks that shape content rather than feeding raw us
 
 - Communication intent creation is already structured enough to stay.
 - Witness logic already understands hearing, direct address, engagement, and farewells.
-- The main problem is response ownership and lifecycle: too much of it lives in `src/npc_ai/main.ts` polling behavior, legacy dedupe state, and the transitional turn-manager communication bridge.
+- The biggest remaining mismatch is no longer ownership split inside the runtime; it is verification confidence and a few compatibility surfaces still existing for restore/debug rather than a clean final deletion pass.
+
+### Current Reality Check
+
+- Timed speech no longer replays a fake `applied_COMMUNICATE` action; turn manager now emits a dedicated queued-speech service handoff and NPC AI rebuilds context from session queue state.
+- `PendingCommunicationOpportunity` has been reduced to a thin transport shim carrying ids/order/turn metadata instead of copied speech content.
+- Forced timed speech now stays turn-owned while generation is in flight, which matches the intended "thinking takes time" model.
+- Compatibility conversation expiry is now breath-aware and uses canonical free-roam place breath when place context is known; the old wall-clock timeout path is no longer the primary model there.
+- Witness now projects visual/engagement state from session alignment during updates, and NPC AI triggers that projection immediately after communication admission.
+- Witness start/join/eavesdrop behavior has been made lighter: nearby chatter and bystander curiosity no longer create durable conversation state locally; direct-address paths now mostly prewarm movement/visual state and wait for session admission to create durable compatibility metadata.
+- `conversation_state` is now closer to restore metadata plus presence sync than a canonical owner, but it still exists and still carries fallback target/participant data for compatibility.
+- The old unused `witness_integration` path has been removed, and wandering now keys off shared conversation presence rather than local compatibility state.
+- So: the project is still aligned with the plan, and Phase 9 is effectively complete in architecture even though some compatibility helpers still exist for restore/debug support.
+
+### Why The Implementation Shifted A Bit
+
+- The plan direction stayed stable: move ownership into session/queue state, thin the pending bridge, and demote witness/timer systems.
+- The implementation order shifted slightly because the safest path was to introduce projection/compatibility layers first instead of deleting witness/timer behavior outright.
+- In practice this meant adding interim pieces like session-to-witness projection, pending restore metadata, and free-roam breath sharing so behavior stayed working while ownership moved.
+- That is a sequencing shift, not an architectural reversal: the code moved toward the plan, but through a more gradual migration path than the original checklist wording implied.
 
 ### Immediate Architecture Decisions Already Chosen
 

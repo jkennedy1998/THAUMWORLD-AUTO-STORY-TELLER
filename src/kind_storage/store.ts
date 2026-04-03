@@ -3,6 +3,7 @@ import { parse } from "jsonc-parser";
 import { get_kind_definitions_path } from "../engine/paths.js";
 import type { BodySlotRepresentation } from "../shared/body_slot_representation.js";
 import type { EntityRenderProfile } from "../render_shaders/definitions.js";
+import type { TagInstance } from "../tag_system/registry.js";
 
 export type KindDefinition = {
     id: string;
@@ -26,6 +27,7 @@ export type KindDefinition = {
     stat_changes?: Record<string, number>;
     diet?: string;
     temperature_range?: { low: number; high: number };
+    tags?: TagInstance[];
     appearance?: string;
     lore?: string;
     gift_of_kind?: Record<string, unknown>[];

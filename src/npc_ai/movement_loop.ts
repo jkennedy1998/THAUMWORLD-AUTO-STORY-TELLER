@@ -8,6 +8,7 @@
 import type { Place, TilePosition } from "../types/place.js";
 import { debug_log } from "../shared/debug.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
+import { get_configured_data_slot } from "../shared/boot_env.js";
 import {
   init_movement_engine,
   start_entity_movement,
@@ -22,7 +23,7 @@ import { is_in_conversation_presence } from "../shared/conversation_presence_sto
 import { send_wander_command, send_stop_command } from "./movement_command_sender.js";
 import { should_behavior_auto_wander } from "./behavior.js";
 
-const data_slot = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+const data_slot = get_configured_data_slot();
 
 function is_conversation_blocking_wander(npc_ref: string): boolean {
   return is_in_conversation_presence(data_slot, npc_ref);

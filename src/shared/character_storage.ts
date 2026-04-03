@@ -21,6 +21,8 @@ export type PlaceCharacterPresenceBase = CharacterRuntimeContinuity & {
   body_slot_representation?: Record<string, any>;
   weight?: number;
   tags?: Array<{ name: string; mag: number; meta: string[] }>;
+  resolved_tag_states?: unknown[];
+  value_mag?: unknown;
   entity_render?: unknown;
 };
 

@@ -13,9 +13,12 @@
   "tags": [
     {
       "name": "ARMOR",
-      "mag": 1,
+      "mag": 4,
+      "dim_mag": {
+        "armor_value_mag": 4
+      },
       "meta": ["leg_left"],
-      "info": [4]
+      "info": []
     }
   ]
 }

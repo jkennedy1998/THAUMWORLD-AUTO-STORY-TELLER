@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { ActionPipeline, DEFAULT_PIPELINE_CONFIG, type PipelineDependencies } from "../action_system/pipeline.js";
 import { createIntent, type ActionIntent, type Location } from "../action_system/intent.js";
 import { debugLogger, logActionIntent, logToolValidation, logRoll, logActionResult, logSeparator, logPipelineStage, printTestScenario, printTestSummary, createTestActor, createTestTool, createTestNPC } from "../action_system/debug_logger.js";
-import { initializeDefaultRules } from "../tag_system/index.js";
+import { initializeDefaultRules } from "../tag_system/registry.js";
 import { initializeDefaultEffectors } from "../effectors/index.js";
 import { choose_follow_tile } from "../interface_program/conversation_follow.js";
 

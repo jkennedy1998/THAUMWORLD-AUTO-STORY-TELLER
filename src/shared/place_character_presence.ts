@@ -19,6 +19,7 @@ function normalize_tags(tags: any): Array<{ name: string; mag: number; meta: str
     .filter((tag) => tag.name.length > 0);
 }
 
+
 export function normalize_place_npc_presence(raw: any): PlaceNPC {
   return {
     npc_ref: String(raw?.npc_ref ?? "npc.unknown"),
@@ -36,6 +37,8 @@ export function normalize_place_npc_presence(raw: any): PlaceNPC {
     ...(raw?.movement_schedule && typeof raw.movement_schedule === "object" ? { movement_schedule: raw.movement_schedule } : {}),
     ...(typeof raw?.weight === "number" && Number.isFinite(raw.weight) ? { weight: Number(raw.weight) } : {}),
     ...(normalize_tags(raw?.tags)?.length ? { tags: normalize_tags(raw?.tags) } : {}),
+    ...(Array.isArray(raw?.resolved_tag_states) ? { resolved_tag_states: raw.resolved_tag_states } : {}),
+    ...(raw?.value_mag && typeof raw.value_mag === "object" ? { value_mag: raw.value_mag } : {}),
     ...(raw?.entity_render && typeof raw.entity_render === "object" ? { entity_render: raw.entity_render } : {}),
     status: raw?.status === "moving" || raw?.status === "busy" || raw?.status === "sleeping" ? raw.status : "present",
     activity: typeof raw?.activity === "string" && raw.activity.length > 0 ? raw.activity : "standing here",
@@ -59,9 +62,35 @@ export function normalize_place_actor_presence(raw: any): PlaceActor {
     ...(raw?.movement_schedule && typeof raw.movement_schedule === "object" ? { movement_schedule: raw.movement_schedule } : {}),
     ...(typeof raw?.weight === "number" && Number.isFinite(raw.weight) ? { weight: Number(raw.weight) } : {}),
     ...(normalize_tags(raw?.tags)?.length ? { tags: normalize_tags(raw?.tags) } : {}),
+    ...(Array.isArray(raw?.resolved_tag_states) ? { resolved_tag_states: raw.resolved_tag_states } : {}),
+    ...(raw?.value_mag && typeof raw.value_mag === "object" ? { value_mag: raw.value_mag } : {}),
     ...(raw?.entity_render && typeof raw.entity_render === "object" ? { entity_render: raw.entity_render } : {}),
     status: raw?.status === "moving" || raw?.status === "busy" ? raw.status : "present",
   };
+}
+
+export function project_public_place_npc_presence(raw: any): PlaceNPC {
+  const normalized = normalize_place_npc_presence(raw) as any;
+  delete normalized.breath_index;
+  delete normalized.breath_last_processed;
+  delete normalized.breath_last_processed_ms;
+  delete normalized.movement_schedule;
+  delete normalized.weight;
+  delete normalized.resolved_tag_states;
+  delete normalized.value_mag;
+  return normalized;
+}
+
+export function project_public_place_actor_presence(raw: any): PlaceActor {
+  const normalized = normalize_place_actor_presence(raw) as any;
+  delete normalized.breath_index;
+  delete normalized.breath_last_processed;
+  delete normalized.breath_last_processed_ms;
+  delete normalized.movement_schedule;
+  delete normalized.weight;
+  delete normalized.resolved_tag_states;
+  delete normalized.value_mag;
+  return normalized;
 }
 
 export function normalize_place_character_presence_records(place_any: any): boolean {

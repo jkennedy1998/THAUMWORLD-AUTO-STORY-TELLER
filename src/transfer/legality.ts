@@ -1,9 +1,12 @@
 import { calculate_grid_dimensions } from "../container_storage/grid_calculator.js";
 import { find_actor_item_by_id } from "../item_storage/inline_store.js";
 import { load_master_item } from "../item_storage/store.js";
-import { load_master_tile } from "../tile_storage/store.js";
+import { resolve_inline_item } from "../item_storage/resolve.js";
+import { evaluate_item_stack_policy } from "../item_storage/stacking.js";
+import { resolve_place_tile } from "../tile_storage/resolve.js";
+import { project_container_max_slots, resolve_container_capacity_mag_from_states } from "../mag/container.js";
 import type { TagInstance } from "../tag_system/registry.js";
-import { apply_tag_deltas } from "../tag_system/tag_deltas.js";
+import { debug_log } from "../shared/debug.js";
 
 type SlotType = 'armor' | 'tool' | 'garb';
 
@@ -77,41 +80,17 @@ export function get_tag(item: any, tag_name: string): any | null {
 }
 
 function resolve_effective_tags(item: any): TagInstance[] {
-  // Prefer database-derived tags for inline items.
   const def_id = typeof item?.def_id === 'string' ? String(item.def_id) : '';
   if (def_id) {
-    const def_res = load_master_item(def_id);
-    const tile_res = !def_res.ok ? load_master_tile(def_id) : null;
-    const base = def_res.ok
-      ? (def_res.item.tags ?? [])
-      : (tile_res && tile_res.ok ? (tile_res.tile.tags ?? []) : []);
-    const add = Array.isArray(item?.tag_add) ? (item.tag_add as TagInstance[]) : [];
-    const remove = Array.isArray(item?.tag_remove)
-      ? item.tag_remove
-          .map((op: any) => ({ key: String(op?.key ?? ''), mag: Number(op?.mag ?? 0) }))
-          .filter((op: any) => op.key && Number.isFinite(op.mag) && op.mag > 0)
-          .map((op: any) => ({ key: op.key, mag: Math.floor(op.mag) }))
-      : [];
-    return apply_tag_deltas({ base, add, remove });
+    return resolve_inline_item(def_id, item)?.effective_tags ?? [];
   }
 
-  // Place tiles / structures used as inline containers.
   const kind = typeof item?.kind === 'string' ? String(item.kind) : '';
   if (kind) {
-    const def_res = load_master_tile(kind);
-    const base = def_res.ok ? (def_res.tile.tags ?? []) : [];
-    const add = Array.isArray(item?.tag_add) ? (item.tag_add as TagInstance[]) : [];
-    const remove = Array.isArray(item?.tag_remove)
-      ? item.tag_remove
-          .map((op: any) => ({ key: String(op?.key ?? ''), mag: Number(op?.mag ?? 0) }))
-          .filter((op: any) => op.key && Number.isFinite(op.mag) && op.mag > 0)
-          .map((op: any) => ({ key: op.key, mag: Math.floor(op.mag) }))
-      : [];
-    return apply_tag_deltas({ base, add, remove });
+    return resolve_place_tile(kind, item)?.effective_tags ?? [];
   }
 
-  // Fallback: legacy stored tags.
-  return Array.isArray(item?.tags) ? (item.tags as TagInstance[]) : [];
+  return Array.isArray(item?.tags) ? item.tags : [];
 }
 
 export function is_item_compatible_with_body_slot(item: any, target: BodySlotTarget): boolean {
@@ -138,6 +117,12 @@ export function is_item_compatible_with_body_slot(item: any, target: BodySlotTar
 }
 
 export function get_container_capacity_max_slots(container_item: any): number {
+  const def_id = typeof container_item?.def_id === 'string' ? String(container_item.def_id) : '';
+  if (def_id) {
+    const resolved = resolve_inline_item(def_id, container_item);
+    const dim_mag = resolve_container_capacity_mag_from_states(resolved?.resolved_tag_states ?? []);
+    if (dim_mag !== null) return project_container_max_slots(dim_mag);
+  }
   const cap = container_item?.container_capacity?.max_slots;
   if (typeof cap === 'number' && Number.isFinite(cap) && cap > 0) return Math.floor(cap);
   const fallback = Array.isArray(container_item?.contents) ? container_item.contents.length : 0;
@@ -174,7 +159,28 @@ export function validate_deposit_into_container_item(dest_container_item: any, m
 
   if (grid) {
     const occupied = dest_container_item.contents.find((it: any) => it?.grid_x === grid.x && it?.grid_y === grid.y);
-    if (occupied) return { ok: false, error: 'target_slot_occupied' };
+    if (occupied) {
+      const moving_def = load_master_item(String(moving_item?.def_id ?? ''));
+      const occupied_def = load_master_item(String(occupied?.def_id ?? ''));
+      if (moving_def.ok && occupied_def.ok) {
+        const stack_check = evaluate_item_stack_policy(occupied, occupied_def.item, moving_item, moving_def.item);
+        if (stack_check.ok) return { ok: true };
+        debug_log('LEGALITY', `[STACK] blocked stack into occupied slot reason=${String(stack_check.reason ?? 'unknown')}`);
+        return {
+          ok: false,
+          error: 'stack_blocked',
+          detail: {
+            target_grid: grid,
+            occupied_item_id: String(occupied?.id ?? ''),
+            occupied_def_id: String(occupied?.def_id ?? ''),
+            moving_def_id: String(moving_item?.def_id ?? ''),
+            stack_reason: stack_check.reason ?? 'unknown',
+            ...(stack_check.detail ?? {}),
+          },
+        };
+      }
+      return { ok: false, error: 'target_slot_occupied' };
+    }
   }
 
   return { ok: true };

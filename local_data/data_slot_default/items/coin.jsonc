@@ -10,11 +10,5 @@
   "conductivity_mag": 3,
   "max_stack_size": 99,
   "display_char": "$",
-  "tags": [
-    {
-      "name": "CURRENCY",
-      "mag": 1,
-      "meta": []
-    }
-  ]
+  "tags": []
 }

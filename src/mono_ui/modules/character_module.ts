@@ -23,6 +23,25 @@ import {
   SLOT_TYPE_COLORS,
   SLOT_HIGHLIGHT_COLORS,
 } from "../../equipment/body_slot_resolver.js";
+import { has_resolved_tag } from "../../tag_system/canonical_readers.js";
+import { tag_key } from "../../tag_system/tag_key.js";
+import type { TagInstance } from "../../tag_system/registry.js";
+
+export const CHARACTER_MODULE_TAG_ROWS = 4;
+export const CHARACTER_MODULE_TAG_AREA_HEIGHT = CHARACTER_MODULE_TAG_ROWS + 1;
+
+export function get_character_module_tag_row_at(rect: Rect, x: number, y: number, tag_count: number): { kind: "tag"; index: number } | { kind: "add" } | null {
+  const x0 = rect.x0 + 6;
+  const x1 = rect.x1 - 1;
+  const row_start_y = rect.y0 + 2;
+  if (x < x0 || x > x1) return null;
+  if (y < row_start_y || y >= row_start_y + CHARACTER_MODULE_TAG_ROWS) return null;
+  const index = y - row_start_y;
+  const visible_tag_rows = Math.max(0, Math.min(tag_count, CHARACTER_MODULE_TAG_ROWS - 1));
+  if (index < visible_tag_rows) return { kind: "tag", index };
+  if (index === visible_tag_rows) return { kind: "add" };
+  return null;
+}
 
 // Character module configuration
 export type CharacterModuleConfig = {
@@ -34,6 +53,8 @@ export type CharacterModuleConfig = {
   get_actor_id: () => string; // Full actor ID (e.g., "henry_actor")
   get_body_slots: () => EquipmentSlots;
   get_equipped_items: () => Map<string, { instance: ItemInstance; definition: ItemDefinition }>;
+  get_tags?: () => TagInstance[];
+  get_selected_tag_key?: () => string | null;
   
   // Weight data
   get_weight_data: () => {
@@ -44,6 +65,9 @@ export type CharacterModuleConfig = {
   // Interaction
   get_is_visible: () => boolean;
   on_slot_click?: (slot_name: string, slot_type: SlotType, garb_index: number | null) => void;
+  on_select_item?: (slot_name: string, slot_type: SlotType, garb_index: number | null, item: ItemInstance, definition: ItemDefinition) => void;
+  on_select_tag?: (tag: TagInstance) => void;
+  on_add_tag?: () => void;
   on_drop?: (slot_name: string, slot_type: SlotType, garb_index: number | null, target?: CharacterDropTarget) => Promise<boolean>;
   on_drag_start?: (
     slot_name: string,
@@ -146,7 +170,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
     return {
       left: rect.x0 + SIDEBAR_WIDTH,
       right: rect.x1,
-      top: rect.y0 + 2,     // Below header
+      top: rect.y0 + 2 + CHARACTER_MODULE_TAG_AREA_HEIGHT,
       bottom: rect.y1 - 3,  // Above weight bar
     };
   }
@@ -307,7 +331,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       
       // Check if item is in tool slot but doesn't have TOOL tag
       const is_tool_slot = slot.slot_type === 'tool';
-      const has_tool_tag = equipped_item.definition.tags?.some(tag => tag.name === 'TOOL');
+      const has_tool_tag = has_resolved_tag((equipped_item.instance as any), 'TOOL') || Array.isArray((equipped_item.definition as any)?.tags) && (equipped_item.definition as any).tags.some((tag: any) => String(tag?.name ?? '').trim().toUpperCase() === 'TOOL');
       const is_non_tool_in_tool_slot = is_tool_slot && !has_tool_tag;
 
       rq.push({
@@ -368,6 +392,8 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       const actor_name = opts.get_actor_name();
       const body_slots = opts.get_body_slots();
       const equipped = opts.get_equipped_items();
+      const tags = opts.get_tags?.() ?? [];
+      const selected_tag_key = opts.get_selected_tag_key?.() ?? null;
       const weight = opts.get_weight_data();
       const now_ms = Date.now();
       const rq: RenderRequest[] = [];
@@ -435,7 +461,41 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
           }
         }
       }
-      
+
+      const tag_area_x = rect.x0 + SIDEBAR_WIDTH + 1;
+      const tag_area_width = Math.max(1, rect.x1 - tag_area_x);
+      const visible_tags = tags.slice(0, Math.max(0, CHARACTER_MODULE_TAG_ROWS - 1));
+      for (let i = 0; i < CHARACTER_MODULE_TAG_ROWS; i += 1) {
+        const row_y = rect.y0 + 2 + i;
+        const tag = visible_tags[i] ?? null;
+        const is_add = i === visible_tags.length;
+        let text = "";
+        let rgb = get_color_by_name("medium_gray").rgb;
+        let weight_index = 3;
+        if (tag) {
+          const key = tag_key(tag as any);
+          const selected = key === selected_tag_key;
+          text = `${selected ? ">" : " "}${String(tag.name ?? "")} ${Math.max(0, Math.floor(Number((tag as any).mag ?? 0) || 0))}`;
+          rgb = selected ? get_color_by_name("vivid_yellow").rgb : get_color_by_name("off_white").rgb;
+          weight_index = selected ? 6 : 4;
+        } else if (is_add) {
+          text = "+ add tag";
+          rgb = get_color_by_name("vivid_green").rgb;
+          weight_index = 5;
+        } else {
+          text = ".";
+        }
+        const clipped = text.slice(0, tag_area_width - 1);
+        for (let j = 0; j < clipped.length; j += 1) {
+          c.set(tag_area_x + j, row_y, {
+            char: clipped[j]!,
+            rgb,
+            style: "regular",
+            weight_index,
+          });
+        }
+      }
+
       // Draw weight bar
       const weight_y = rect.y0 + 1;
       const weight_pct = weight.max > 0 ? weight.current / weight.max : 0;
@@ -679,6 +739,17 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       
       // Get clicked slot
       const slot = get_resolved_slot_at_position(e.x, e.y);
+      const tag_hit = get_character_module_tag_row_at(rect, e.x, e.y, opts.get_tags?.().length ?? 0);
+      if (tag_hit) {
+        const tags = opts.get_tags?.() ?? [];
+        if (tag_hit.kind === "add") {
+          opts.on_add_tag?.();
+          return;
+        }
+        const tag = tags[tag_hit.index] ?? null;
+        if (tag) opts.on_select_tag?.(tag);
+        return;
+      }
       if (!slot) return;
       
       // Right-click opens container if item has container_data
@@ -686,9 +757,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
         if (slot.item_id) {
           const found_item = get_equipped_item_by_id(slot.item_id);
           if (found_item) {
-            const tags: any[] = (Array.isArray((found_item.instance as any)?.tags) ? (found_item.instance as any).tags : [])
-              .concat(Array.isArray((found_item.definition as any)?.tags) ? (found_item.definition as any).tags : []);
-            const is_container = tags.some((t: any) => String(t?.name ?? '').toUpperCase() === 'CONTAINER');
+            const is_container = has_resolved_tag((found_item.instance as any), 'CONTAINER') || Array.isArray((found_item.definition as any)?.tags) && (found_item.definition as any).tags.some((tag: any) => String(tag?.name ?? '').trim().toUpperCase() === 'CONTAINER');
             if (is_container) {
               const container_id = get_slot_container_id(opts.get_actor_id(), slot);
               debug_log(`[CharacterModule] Right-clicked container: ${container_id}`);
@@ -702,6 +771,12 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       
       // Left-click
       debug_log(`[CharacterModule] Clicked: ${slot.body_slot}.${slot.slot_type}${slot.garb_index !== null ? `.${slot.garb_index}` : ''}`);
+      if (slot.item_id) {
+        const found_item = get_equipped_item_by_id(slot.item_id);
+        if (found_item) {
+          opts.on_select_item?.(slot.body_slot, slot.slot_type, slot.garb_index, found_item.instance, found_item.definition);
+        }
+      }
       opts.on_slot_click?.(slot.body_slot, slot.slot_type, slot.garb_index);
     },
     on_pointer_leave_content(): void {

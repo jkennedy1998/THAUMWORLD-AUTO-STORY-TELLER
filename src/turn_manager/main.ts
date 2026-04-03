@@ -16,11 +16,16 @@ import {
     advance_turn,
     can_actor_afford_action_cost,
     consume_actor_action_cost,
+    cancel_pending_communication_opportunity,
     consume_pending_communication_opportunity,
     finalize_timed_event_turn_if_exhausted,
+    get_pending_communication_opportunities,
     has_pending_communication_opportunity,
     mark_actor_done,
     mark_actor_left_region,
+    queue_pending_communication_opportunity,
+    release_pending_communication_opportunity,
+    sync_pending_communication_opportunities_with_queue,
     is_actor_in_region,
     get_timed_event_phase
 } from "../world_storage/store.js";
@@ -33,8 +38,10 @@ import { build_working_memory, cleanup_expired_memories } from "../context_manag
 import type { TimedEventType } from "../shared/constants.js";
 import { getDefaultCost } from "../action_system/registry.js";
 import { face_target } from "../npc_ai/facing_system.js";
+import { build_queue_transport_context, build_speech_turn_context, get_all_conversation_sessions, get_next_session_queue_entry, get_session_queue_entry, get_session_queue_entry_by_id, get_session_queue_entry_ids, get_session_queue_snapshot, mark_queue_entry_status_by_id } from "../conversation_manager/session_state.js";
+import { get_configured_data_slot } from "../shared/boot_env.js";
 
-const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+const data_slot_number = get_configured_data_slot();
 const POLL_MS = SERVICE_CONFIG.POLL_MS.TURN_MANAGER;
 
 // Track which events we've already processed to avoid duplicates
@@ -196,6 +203,65 @@ async function maybe_finalize_exhausted_turn(slot: number, actor_ref: string, co
     return true;
 }
 
+function ensure_pending_communication_from_session_queue(slot: number, actor_ref: string, store: WorldStore): void {
+    if (!store.timed_event_active || !store.timed_event_id) return;
+    const sessions = get_all_conversation_sessions(slot).filter((session) => session.timed_event_id === store.timed_event_id);
+    for (const session of sessions) {
+        const next_entry = get_next_session_queue_entry(slot, session.conversation_id);
+        if (!next_entry || next_entry.participant_ref !== actor_ref) continue;
+
+        const existing = get_pending_communication_opportunities(slot, session.conversation_id)
+            .find((opp) => opp.queue_entry_id === next_entry.queue_entry_id && opp.npc_ref === actor_ref && (opp.status === "pending" || opp.status === "in_flight"));
+        if (existing) {
+            debug_log("TurnManager: session queue already has pending communication transport", {
+                actor: actor_ref,
+                conversation_id: session.conversation_id,
+                queue_entry_id: next_entry.queue_entry_id,
+                opportunity_id: existing.opportunity_id,
+            });
+            return;
+        }
+
+        const transport_context = build_queue_transport_context(slot, {
+            conversation_id: session.conversation_id,
+            participant_ref: actor_ref,
+            queue_entry_id: next_entry.queue_entry_id,
+        });
+        const latest_message = transport_context.latest_external_turn;
+        if (!latest_message) {
+            debug_log("TurnManager: cannot create pending communication from session queue without transcript", {
+                actor: actor_ref,
+                conversation_id: session.conversation_id,
+                queue_entry_id: next_entry.queue_entry_id,
+            });
+            return;
+        }
+
+        const queued = queue_pending_communication_opportunity(slot, {
+            event_id: store.timed_event_id,
+            queue_entry_id: transport_context.queue_entry?.queue_entry_id ?? next_entry.queue_entry_id,
+            queue_stable_order: transport_context.queue_entry?.stable_order ?? next_entry.stable_order,
+            source_message_id: transport_context.queue_entry?.joined_from_event_id ?? next_entry.joined_from_event_id,
+            npc_ref: actor_ref,
+            trigger_context: store.timed_event_trigger?.kind,
+            created_turn: store.current_turn,
+            created_round: store.current_round,
+            conversation_id: session.conversation_id,
+        });
+        debug_log("TurnManager: created pending communication from session queue", {
+            actor: actor_ref,
+            conversation_id: session.conversation_id,
+            queue_entry_id: next_entry.queue_entry_id,
+            queue_stable_order: next_entry.stable_order,
+            queued_ok: queued.ok,
+            opportunity_id: queued.ok ? queued.opportunity_id : null,
+            source_message_id: next_entry.joined_from_event_id,
+            source_speaker_ref: latest_message.speaker_ref,
+        });
+        return;
+    }
+}
+
 // Roll 1d20
 function roll_d20(): number {
     return Math.floor(Math.random() * 20) + 1;
@@ -316,9 +382,171 @@ async function process_npc_turn(slot: number, actor_ref: string, store: WorldSto
     const npc = npc_result.npc;
     const npc_name = (npc.name as string) ?? npc_id;
 
+    ensure_pending_communication_from_session_queue(slot, actor_ref, store);
+
+    const in_flight_comm = get_pending_communication_opportunities(slot)
+        .find((opp) => opp.npc_ref === actor_ref && opp.status === "in_flight");
+    if (in_flight_comm) {
+        debug_log("TurnManager: waiting for in-flight NPC communication to finish", {
+            actor: actor_ref,
+            opportunity_id: in_flight_comm.opportunity_id,
+            conversation_id: in_flight_comm.conversation_id ?? null,
+            queue_entry_id: in_flight_comm.queue_entry_id ?? null,
+            queue_stable_order: in_flight_comm.queue_stable_order ?? null,
+        });
+        return;
+    }
+
     const pending_comm = consume_pending_communication_opportunity(slot, actor_ref);
-    const communication_focus_ref = pending_comm?.target_ref || pending_comm?.speaker_ref || null;
     if (pending_comm) {
+        if (pending_comm.conversation_id) {
+            const queue_sync = sync_pending_communication_opportunities_with_queue(slot, {
+                conversation_id: pending_comm.conversation_id,
+                valid_queue_entry_ids: get_session_queue_entry_ids(slot, pending_comm.conversation_id),
+            });
+            debug_log("TurnManager: synced pending communication opportunities before npc speech turn", {
+                actor: actor_ref,
+                conversation_id: pending_comm.conversation_id,
+                queue_sync,
+            });
+        }
+        const session_queue_entry = pending_comm.conversation_id
+            ? (pending_comm.queue_entry_id
+                ? get_session_queue_entry_by_id(slot, pending_comm.conversation_id, pending_comm.queue_entry_id)
+                : get_session_queue_entry(slot, pending_comm.conversation_id, actor_ref))
+            : null;
+        const next_queue_entry = pending_comm.conversation_id
+            ? get_next_session_queue_entry(slot, pending_comm.conversation_id)
+            : null;
+        const session_queue_snapshot = pending_comm.conversation_id
+            ? get_session_queue_snapshot(slot, pending_comm.conversation_id).map((entry) => ({
+                participant_ref: entry.participant_ref,
+                stable_order: entry.stable_order,
+                status: entry.status,
+            }))
+            : [];
+        const pending_opportunity_snapshot = pending_comm.conversation_id
+            ? get_pending_communication_opportunities(slot, pending_comm.conversation_id).map((opp) => ({
+                opportunity_id: opp.opportunity_id,
+                npc_ref: opp.npc_ref,
+                queue_entry_id: opp.queue_entry_id ?? null,
+                queue_stable_order: opp.queue_stable_order ?? null,
+                status: opp.status,
+            }))
+            : [];
+        const speech_turn_context = pending_comm.conversation_id
+            ? build_speech_turn_context(slot, { conversation_id: pending_comm.conversation_id, participant_ref: actor_ref })
+            : null;
+        const queue_transport_context = pending_comm.conversation_id
+            ? build_queue_transport_context(slot, {
+                conversation_id: pending_comm.conversation_id,
+                participant_ref: actor_ref,
+                queue_entry_id: pending_comm.queue_entry_id,
+            })
+            : null;
+        const transport_queue_entry = queue_transport_context?.queue_entry ?? null;
+        const latest_external_turn = queue_transport_context?.latest_external_turn ?? null;
+        const source_text = String(latest_external_turn?.text ?? "").trim();
+        const source_speaker_ref = typeof latest_external_turn?.speaker_ref === "string" && latest_external_turn.speaker_ref.length > 0
+            ? latest_external_turn.speaker_ref
+            : null;
+        const target_ref = transport_queue_entry?.target_refs[0] ?? null;
+        const queue_social_role = transport_queue_entry?.social_role ?? null;
+        const queue_reason_to_speak = transport_queue_entry?.reason_to_speak ?? null;
+        debug_log("TurnManager: NPC turn using pending communication opportunity", {
+            actor: actor_ref,
+            opportunity_id: pending_comm.opportunity_id,
+            queue_entry_id: pending_comm.queue_entry_id ?? null,
+            queue_stable_order: pending_comm.queue_stable_order ?? null,
+            conversation_id: pending_comm.conversation_id ?? null,
+            session_queue_entry: session_queue_entry ? {
+                participant_ref: session_queue_entry.participant_ref,
+                stable_order: session_queue_entry.stable_order,
+                social_role: session_queue_entry.social_role,
+                status: session_queue_entry.status,
+            } : null,
+            next_queue_entry: next_queue_entry ? {
+                participant_ref: next_queue_entry.participant_ref,
+                stable_order: next_queue_entry.stable_order,
+                status: next_queue_entry.status,
+            } : null,
+            speech_turn_context: speech_turn_context ? {
+                participant_ref: speech_turn_context.participant_ref,
+                current_mode: speech_turn_context.current_mode,
+                participant_count: speech_turn_context.participants.length,
+                transcript_recent_count: speech_turn_context.transcript_recent.length,
+                transcript_summary_present: speech_turn_context.transcript_summary.length > 0,
+                memory_factoid_count: speech_turn_context.memory_factoids_for_participant.length,
+            } : null,
+            queue_transport_context: queue_transport_context ? {
+                queue_entry_id: queue_transport_context.queue_entry?.queue_entry_id ?? null,
+                queue_social_role: queue_transport_context.queue_entry?.social_role ?? null,
+                latest_external_turn_speaker_ref: queue_transport_context.latest_external_turn?.speaker_ref ?? null,
+                latest_external_turn_present: !!queue_transport_context.latest_external_turn,
+            } : null,
+            session_queue_snapshot,
+            pending_opportunity_snapshot,
+        });
+        if (pending_comm.queue_entry_id && !session_queue_entry) {
+            const cancelled = cancel_pending_communication_opportunity(slot, pending_comm.opportunity_id, "missing_session_queue_entry");
+            append_log_message(log_path, "system", `${npc_name} no longer has a valid place in the conversation queue.`);
+            debug_log("TurnManager: cancelled pending communication because session queue entry is missing", {
+                actor: actor_ref,
+                opportunity_id: pending_comm.opportunity_id,
+                queue_entry_id: pending_comm.queue_entry_id,
+                cancelled,
+                conversation_id: pending_comm.conversation_id ?? null,
+            });
+            mark_actor_done(slot, actor_ref);
+            return;
+        }
+        if (!transport_queue_entry || !latest_external_turn || !source_speaker_ref || source_text.length === 0) {
+            const cancelled = cancel_pending_communication_opportunity(slot, pending_comm.opportunity_id, "missing_queue_transport_context");
+            if (pending_comm.conversation_id && pending_comm.queue_entry_id) {
+                mark_queue_entry_status_by_id(slot, pending_comm.conversation_id, pending_comm.queue_entry_id, "cancelled");
+            }
+            append_log_message(log_path, "system", `${npc_name} cannot reconstruct the queued conversation context to respond.`);
+            debug_log("TurnManager: cancelled pending communication because queue transport context is incomplete", {
+                actor: actor_ref,
+                opportunity_id: pending_comm.opportunity_id,
+                conversation_id: pending_comm.conversation_id ?? null,
+                queue_entry_id: pending_comm.queue_entry_id ?? null,
+                has_queue_entry: !!transport_queue_entry,
+                has_latest_external_turn: !!latest_external_turn,
+                has_source_speaker_ref: !!source_speaker_ref,
+                source_text_length: source_text.length,
+                cancelled,
+            });
+            mark_actor_done(slot, actor_ref);
+            return;
+        }
+        if (next_queue_entry && next_queue_entry.participant_ref !== actor_ref) {
+            debug_log("TurnManager: pending communication actor is not front of queue", {
+                actor: actor_ref,
+                conversation_id: pending_comm.conversation_id ?? null,
+                expected_front: next_queue_entry.participant_ref,
+                actual_queue_entry: session_queue_entry?.participant_ref ?? null,
+            });
+            const released = release_pending_communication_opportunity(slot, pending_comm.opportunity_id);
+            append_log_message(log_path, "system", `${npc_name} waits to speak; another queued speaker is ahead.`);
+            debug_log("TurnManager: released pending communication because npc is not queue front", {
+                actor: actor_ref,
+                opportunity_id: pending_comm.opportunity_id,
+                released,
+                expected_front: next_queue_entry.participant_ref,
+            });
+            mark_actor_done(slot, actor_ref);
+            return;
+        }
+        if (pending_comm.conversation_id && pending_comm.queue_entry_id) {
+            mark_queue_entry_status_by_id(slot, pending_comm.conversation_id, pending_comm.queue_entry_id, "thinking");
+            debug_log("TurnManager: marked queue entry thinking for pending communication", {
+                actor: actor_ref,
+                conversation_id: pending_comm.conversation_id,
+                queue_entry_id: pending_comm.queue_entry_id,
+            });
+        }
+        const communication_focus_ref = target_ref || source_speaker_ref;
         const move_goal = choose_npc_wander_goal(slot, actor_ref, communication_focus_ref);
         if (move_goal) {
             const moved = await request_entity_move_to(slot, actor_ref, move_goal);
@@ -352,6 +580,15 @@ async function process_npc_turn(slot: number, actor_ref: string, store: WorldSto
                 action_cost: communicate_cost,
                 opportunity_id: pending_comm.opportunity_id,
             });
+            const released = release_pending_communication_opportunity(slot, pending_comm.opportunity_id);
+            if (pending_comm.conversation_id && pending_comm.queue_entry_id) {
+                mark_queue_entry_status_by_id(slot, pending_comm.conversation_id, pending_comm.queue_entry_id, "queued");
+            }
+            debug_log("TurnManager: released pending communication because actor has no action cost left", {
+                actor: actor_ref,
+                opportunity_id: pending_comm.opportunity_id,
+                released,
+            });
             mark_actor_done(slot, actor_ref);
             return;
         }
@@ -364,6 +601,15 @@ async function process_npc_turn(slot: number, actor_ref: string, store: WorldSto
                 action_cost: communicate_cost,
                 opportunity_id: pending_comm.opportunity_id,
             });
+            const released = release_pending_communication_opportunity(slot, pending_comm.opportunity_id);
+            if (pending_comm.conversation_id && pending_comm.queue_entry_id) {
+                mark_queue_entry_status_by_id(slot, pending_comm.conversation_id, pending_comm.queue_entry_id, "queued");
+            }
+            debug_log("TurnManager: released pending communication after failing to spend action cost", {
+                actor: actor_ref,
+                opportunity_id: pending_comm.opportunity_id,
+                released,
+            });
             mark_actor_done(slot, actor_ref);
             return;
         }
@@ -372,22 +618,20 @@ async function process_npc_turn(slot: number, actor_ref: string, store: WorldSto
         ensure_outbox_exists(outbox_path);
 
         const communicate_msg = create_message({
-            sender: pending_comm.speaker_ref,
-            content: pending_comm.original_text,
-            stage: "applied_COMMUNICATE",
+            sender: "turn_manager",
+            content: `Service queued communication turn for ${pending_comm.npc_ref}`,
+            stage: "service_queued_communication",
             status: "sent",
             correlation_id: pending_comm.correlation_id,
             conversation_id: pending_comm.conversation_id,
             meta: {
-                intent_verb: "COMMUNICATE",
-                original_text: pending_comm.original_text,
-                target_ref: pending_comm.target_ref,
-                observed_by: [pending_comm.npc_ref],
-                response_eligible_by: [pending_comm.npc_ref],
+                service_kind: "queued_speech_turn",
                 force_npc_ref: pending_comm.npc_ref,
                 intent_subtype: pending_comm.volume ?? "NORMAL",
                 timed_event_pending_opportunity_id: pending_comm.opportunity_id,
                 timed_event_trigger_context: pending_comm.trigger_context,
+                timed_event_queue_entry_id: pending_comm.queue_entry_id,
+                timed_event_queue_stable_order: pending_comm.queue_stable_order,
             },
         });
         append_outbox_message(outbox_path, communicate_msg);
@@ -412,11 +656,16 @@ async function process_npc_turn(slot: number, actor_ref: string, store: WorldSto
             actor: actor_ref,
             opportunity_id: pending_comm.opportunity_id,
             source_message_id: pending_comm.source_message_id,
+            queue_entry_id: pending_comm.queue_entry_id ?? null,
+            queue_stable_order: pending_comm.queue_stable_order ?? null,
             action_cost: communicate_cost,
         });
-        if (await maybe_finalize_exhausted_turn(slot, actor_ref, { reason: "pending_communication" })) {
-            return;
-        }
+        debug_log("TurnManager: NPC turn remains active while communication is being generated", {
+            actor: actor_ref,
+            opportunity_id: pending_comm.opportunity_id,
+            conversation_id: pending_comm.conversation_id ?? null,
+            queue_entry_id: pending_comm.queue_entry_id ?? null,
+        });
         return;
     }
      

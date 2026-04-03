@@ -11,9 +11,8 @@ export {
   handleImpactSingle,
   handleProjectileSingle,
   handleInspect,
-  
+
   // Utilities
-  getDamageDice,
   calculateScatterLocation,
   getBestSenseForDistance,
   calculateInspectRange,
@@ -29,3 +28,5 @@ export {
   type ActionEffect,
   type ProjectileResult
 } from "./core.js";
+
+export { get_damage_dice_from_mag as getDamageDice } from "../mag/damage.js";

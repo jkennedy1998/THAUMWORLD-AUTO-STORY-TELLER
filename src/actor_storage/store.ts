@@ -12,6 +12,9 @@ import { sanitize_actor_for_save } from "../shared/defs_deltas_sanitize.js";
 import { resolve_character_body_model_id } from "../shared/body_model.js";
 import { DEFAULT_CHARACTER_BODY_SLOT_REPRESENTATION } from "../shared/body_slot_representation.js";
 import { make_opaque_entity_id } from "../shared/entity_ids.js";
+import { hydrate_character_tags } from "../shared/character_tags.js";
+import { load_place } from "../place_storage/store.js";
+import { can_place_volume } from "../place_storage/movement_legality.js";
 
 export type ActorLookupResult =
     | { ok: true; actor: Record<string, unknown>; path: string }
@@ -32,6 +35,8 @@ export type ActorSearchQuery = {
 export type CreateActorFromKindInput = {
     actor_id?: string;
     name: string;
+    title?: string;
+    sex?: string;
     kind_id: string;
     gift_kind_choices: string[];
     gift_greater_choice: string | null;
@@ -40,6 +45,86 @@ export type CreateActorFromKindInput = {
     background?: string;
     age?: number;
 };
+
+function clone_numeric_stats(stats: Record<string, unknown> | undefined): Record<string, number> {
+    return {
+        con: Number(stats?.con ?? 0) || 0,
+        str: Number(stats?.str ?? 0) || 0,
+        dex: Number(stats?.dex ?? 0) || 0,
+        wis: Number(stats?.wis ?? 0) || 0,
+        int: Number(stats?.int ?? 0) || 0,
+        cha: Number(stats?.cha ?? 0) || 0,
+    };
+}
+
+function build_spawn_search_offsets(max_radius: number): Array<{ dx: number; dy: number }> {
+    const offsets: Array<{ dx: number; dy: number }> = [{ dx: 0, dy: 0 }];
+    for (let radius = 1; radius <= max_radius; radius += 1) {
+        for (let dy = -radius; dy <= radius; dy += 1) {
+            for (let dx = -radius; dx <= radius; dx += 1) {
+                if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) continue;
+                offsets.push({ dx, dy });
+            }
+        }
+    }
+    return offsets;
+}
+
+function assign_spawn_near_loaded_actor(slot: number, actor_id: string, actor: Record<string, unknown>): boolean {
+    const search_hits = find_actors(slot, {});
+    for (const hit of search_hits) {
+        const anchor_id = String(hit.id ?? '').trim();
+        if (!anchor_id || anchor_id === actor_id || RESERVED_ACTOR_IDS.has(anchor_id)) continue;
+        const anchor_result = load_actor(slot, anchor_id);
+        if (!anchor_result.ok) continue;
+        const anchor_actor = anchor_result.actor as any;
+        const place_id = String(anchor_actor?.location?.place_id ?? '').trim();
+        if (!place_id) continue;
+        const place_result = load_place(slot, place_id);
+        if (!place_result.ok) continue;
+        const place = place_result.place as any;
+        const anchor_presence = Array.isArray(place?.contents?.actors_present)
+            ? place.contents.actors_present.find((entry: any) => String(entry?.actor_ref ?? '') === `actor.${anchor_id}`) ?? null
+            : null;
+        const anchor_tile = anchor_presence?.tile_position ?? anchor_actor?.location?.tile ?? null;
+        const anchor_x = Math.floor(Number(anchor_tile?.x ?? 0));
+        const anchor_y = Math.floor(Number(anchor_tile?.y ?? 0));
+        if (!Number.isFinite(anchor_x) || !Number.isFinite(anchor_y)) continue;
+        const anchor_z = Number.isFinite(Number(anchor_presence?.elevation))
+            ? Math.floor(Number(anchor_presence.elevation))
+            : Number.isFinite(Number(anchor_tile?.z))
+                ? Math.floor(Number(anchor_tile.z))
+                : Math.floor(Number(place?.coordinates?.elevation ?? 0)) || 0;
+        for (const offset of build_spawn_search_offsets(6)) {
+            const target = { x: anchor_x + offset.dx, y: anchor_y + offset.dy, z: anchor_z };
+            const legality = can_place_volume(place, { kind: 'actor', id: actor_id }, target, 'WALK');
+            if (!legality.ok) continue;
+            (actor as any).location = {
+                ...((actor as any).location ?? {}),
+                place_id,
+                tile: { x: target.x, y: target.y, z: target.z },
+                world_tile: anchor_actor?.location?.world_tile ? { ...anchor_actor.location.world_tile } : ((actor as any).location?.world_tile ?? undefined),
+                region_tile: anchor_actor?.location?.region_tile ? { ...anchor_actor.location.region_tile } : ((actor as any).location?.region_tile ?? undefined),
+            };
+            return true;
+        }
+    }
+    return false;
+}
+
+export function ensure_actor_has_spawn_location(slot: number, actor_id: string): ActorLookupResult {
+    const existing = load_actor(slot, actor_id);
+    if (!existing.ok) return existing;
+    const actor = existing.actor as Record<string, unknown>;
+    const place_id = String((actor as any)?.location?.place_id ?? '').trim();
+    if (place_id) return existing;
+    const spawned = assign_spawn_near_loaded_actor(slot, actor_id, actor);
+    if (!spawned) {
+        return { ok: false, error: 'spawn_location_unavailable', todo: `Unable to assign spawn location for actor ${actor_id}` };
+    }
+    const actor_path = save_actor(slot, actor_id, actor);
+    return { ok: true, actor, path: actor_path };
+}
 
 const RESERVED_ACTOR_IDS = new Set([
     "default_actor",
@@ -150,6 +235,8 @@ export function load_actor(slot: number, actor_id: string): ActorLookupResult {
             (actor as any).weight = derive_default_actor_weight(actor);
             dirty = true;
         }
+        const tag_hydration = hydrate_character_tags(actor);
+        if (tag_hydration.changed) dirty = true;
     } catch {
         // ignore
     }
@@ -191,6 +278,7 @@ export function save_actor(slot: number, actor_id: string, actor: Record<string,
     ensure_actor_dir(slot);
     const actor_path = get_actor_path(slot, actor_id);
     (actor as any).body_slots = normalize_body_slots((actor as any).body_slots);
+    hydrate_character_tags(actor as any);
 
     // defs+deltas migration: strip derived/legacy inline item fields before persisting.
     sanitize_actor_for_save(actor as any);
@@ -247,6 +335,8 @@ export function create_actor_from_kind(slot: number, input: CreateActorFromKindI
 
     const actor_id = input.actor_id ?? make_actor_id(input.name);
     const actor = { ...template.actor, id: actor_id, name: input.name } as Record<string, unknown>;
+    if (typeof input.title === "string") actor.title = input.title;
+    if (typeof input.sex === "string") actor.sex = input.sex;
 
     // Breath timekeeping + scheduling (server authoritative).
     // Used for movement cadence and for aging inventory items without per-item trackers.
@@ -277,6 +367,7 @@ export function create_actor_from_kind(slot: number, input: CreateActorFromKindI
         ? (kind as any).body_slot_representation
         : DEFAULT_CHARACTER_BODY_SLOT_REPRESENTATION;
     if (typeof kind.size_mag === "number") actor.size_mag = kind.size_mag;
+    if (typeof kind.weight === "number") actor.weight = kind.weight;
     if (typeof kind.sleep_type === "string") actor.sleep_type = kind.sleep_type;
     if (typeof kind.sleep_required_per_day === "number") actor.sleep_required_per_day = kind.sleep_required_per_day;
     if (kind.senses) actor.senses = { ...kind.senses };
@@ -292,8 +383,14 @@ export function create_actor_from_kind(slot: number, input: CreateActorFromKindI
     if (kind.temperature_range) actor.temperature_range = { ...kind.temperature_range };
 
     const stats = input.stats ? { ...input.stats } : ((actor.stats as Record<string, unknown>) ?? {});
+    const base_stats = clone_numeric_stats(stats as Record<string, unknown>);
     apply_stat_changes(stats, kind.stat_changes as Record<string, number> | undefined);
     actor.stats = stats;
+    (actor as any).stat_source = {
+        base_stats,
+        kind_id: kind.id,
+        kind_stat_changes: { ...((kind.stat_changes as Record<string, number> | undefined) ?? {}) },
+    };
 
     if (input.age !== undefined) actor.age = input.age;
     apply_background(actor, input.background);
@@ -323,6 +420,8 @@ export function create_actor_from_kind(slot: number, input: CreateActorFromKindI
 
     // TODO: incorporate personality and flavor choices during character creation.
 
+    assign_spawn_near_loaded_actor(slot, actor_id, actor);
+
     apply_level1_derived(actor, { set_current_to_max: true });
 
     const actor_path = save_actor(slot, actor_id, actor);
@@ -340,7 +439,8 @@ export function find_actors(slot: number, query: ActorSearchQuery): ActorSearchH
         const id = String(actor.id ?? file.replace(/\.jsonc$/i, ""));
         const name = String(actor.name ?? "");
         const kind = String(actor.kind ?? "");
-        const tags = Array.isArray(actor.tags) ? actor.tags : [];
+        const hydrated = hydrate_character_tags(actor as any);
+        const tags = hydrated.effective_tags;
 
         if (query.name && !name.toLowerCase().includes(query.name.toLowerCase())) continue;
         if (query.kind && kind.toLowerCase() !== query.kind.toLowerCase()) continue;

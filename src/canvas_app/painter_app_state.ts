@@ -290,7 +290,7 @@ export function create_painter_app_state(): PainterAppState {
   let left_click_tool: ToolType = saved_tool_props.left_click_tool as ToolType || 'pencil';
   let right_click_tool: ToolType = saved_tool_props.right_click_tool as ToolType || 'eraser';
   
-  let active_property_side: 'left' | 'right' = 'left';
+  let active_property_side: 'left' | 'right' = saved_tool_props.active_property_side === 'right' ? 'right' : 'left';
 
   const left_brush: Brush = {
     char: saved_tool_props.left_brush_char ?? '█',
@@ -335,6 +335,7 @@ export function create_painter_app_state(): PainterAppState {
         left_brush_weight_index: brush.weight_index,
         left_brush_size,
         brush_size: left_brush_size,
+        active_property_side: side,
       });
       return;
     }
@@ -343,6 +344,7 @@ export function create_painter_app_state(): PainterAppState {
       right_brush_rgb: { ...brush.rgb },
       right_brush_weight_index: brush.weight_index,
       right_brush_size,
+      active_property_side: side,
     });
   }
   
@@ -1044,13 +1046,13 @@ export function create_painter_app_state(): PainterAppState {
       on_left_click_tool_change: (tool) => {
         active_property_side = 'left';
         left_click_tool = tool;
-        saveToolProperties({ left_click_tool: tool });
+        saveToolProperties({ left_click_tool: tool, active_property_side: 'left' });
         console.log('Left-click tool:', tool);
       },
       on_right_click_tool_change: (tool) => {
         active_property_side = 'right';
         right_click_tool = tool;
-        saveToolProperties({ right_click_tool: tool });
+        saveToolProperties({ right_click_tool: tool, active_property_side: 'right' });
         console.log('Right-click tool:', tool);
       },
       on_move: (new_rect) => {

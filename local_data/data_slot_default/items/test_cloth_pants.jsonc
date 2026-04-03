@@ -14,8 +14,7 @@
     {
       "name": "GARB",
       "mag": 1,
-      "meta": ["leg_left"],
-      "info": [1]
+      "meta": ["leg_left"]
     }
   ]
 }

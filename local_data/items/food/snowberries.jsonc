@@ -5,25 +5,19 @@
   "weight": 10,
   "weight_mag": 1,
   "mag": 1,
-  "size_mag": 1,
+  "size_mag": -1,
   "hardness_mag": 1,
   "conductivity_mag": 1,
-  "stackable": true,
-  "max_stack_size": 20,
   "display_char": "*",
   "tags": [
     {
-      "name": "FOOD",
-      "mag": 1,
-      "meta": [],
-      "scope": ["ITEM"]
-    },
-    {
       "name": "SPOILS",
       "mag": 1,
+      "dim_mag": {
+        "spoil_time_mag": 0
+      },
       "meta": [],
       "info": {
-        "period_breaths": 300,
         "result_item_def_id": "mush"
       },
       "scope": ["ITEM"]

@@ -29,7 +29,6 @@ import { load_npc, save_npc } from "../npc_storage/store.js";
 import { advance_time } from "../time_system/tracker.js";
 import { move_entity_in_index } from "../place_storage/entity_index.js";
 import { end_conversations_involving_entity } from "../npc_ai/witness_handler.js";
-import { MetaTagProcessor } from "../tag_system/meta_processor.js";
 import { debug_log } from "../shared/debug.js";
 
 function find_valid_entry_tile(place: Place, entity_ref: string, preferred: TilePosition): TilePosition {
@@ -381,9 +380,6 @@ export async function travel_between_places(
     end_conversations_involving_entity(entity_ref, `left place ${from_place_id} -> ${target_place_id}`);
   }
   
-  // Process dispersing tags when moving between places
-  await MetaTagProcessor.processDispersingTags(slot);
-  
   return {
     ok: true,
     from_place_id,
@@ -408,9 +404,6 @@ export async function travel_between_regions(
   
   // Advance game time
   advance_time(slot, travel_minutes);
-  
-  // Process dispersing tags after regional travel
-  await MetaTagProcessor.processDispersingTags(slot);
   
   return {
     ok: true,

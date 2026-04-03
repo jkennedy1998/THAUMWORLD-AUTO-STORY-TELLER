@@ -16,6 +16,7 @@ import {
   parseLatestLog,
   updateLatestPointer,
 } from "../src/launcher/log_utils.js";
+import { acquireHostLaunchLock, detectLocalHost, detectVite, readHostLaunchLock, recoverHostLaunchLock, releaseHostLaunchLock, waitForLocalHost, writeHostSessionFile as writeHostSessionManifest } from "./launcher_common.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -23,10 +24,13 @@ const __dirname = path.dirname(__filename);
 const args = process.argv.slice(2);
 const slot_arg = args.find((arg) => arg.startsWith("--slot="));
 const data_slot = slot_arg ? parseInt(slot_arg.split("=")[1] ?? "1", 10) : 1;
+const mode_arg = args.find((arg) => arg.startsWith("--mode="));
+const launch_mode = (mode_arg ? String(mode_arg.split("=")[1] ?? "smart") : "smart").trim().toLowerCase();
 
 console.log("Starting THAUMWORLD DEV mode with log capture...");
 console.log("Code changes will be reflected immediately (no rebuild needed)");
 console.log(`Data slot: ${data_slot}`);
+console.log(`Launch mode: ${launch_mode}`);
 console.log("");
 
 const session = initLogSession(data_slot, "game");
@@ -48,20 +52,9 @@ function verifyLatestPointer(): void {
 
 verifyLatestPointer();
 
-const sessionFilePath = path.join(process.cwd(), ".session_id");
-fs.writeFileSync(
-  sessionFilePath,
-  JSON.stringify(
-    {
-      session_id: sessionId,
-      boot_time: bootTime.toISOString(),
-      boot_timestamp: bootTime.getTime(),
-      version: 1,
-    },
-    null,
-    2
-  )
-);
+function writeHostSessionMetadata(): void {
+  writeHostSessionManifest(path.join(__dirname, ".."), data_slot, sessionId, bootTime);
+}
 
 console.log(`Logging to: ${logDir}`);
 console.log(`Main log: ${mainLog}`);
@@ -113,6 +106,7 @@ function shouldPrintToConsole(_processName: string, level: string, line: string)
 
 function spawnWithLogging(name: string, command: string, args: string[], options: Record<string, unknown> = {}): ChildProcess {
   const isWindows = process.platform === "win32";
+  const extraEnv = (options.env && typeof options.env === 'object') ? options.env as Record<string, string> : {};
   const child = spawn(command, args, {
     ...options,
     stdio: ["pipe", "pipe", "pipe"],
@@ -122,6 +116,7 @@ function spawnWithLogging(name: string, command: string, args: string[], options
       ...process.env,
       DATA_SLOT: data_slot.toString(),
       NODE_ENV: "development",
+      ...extraEnv,
     },
   });
   childProcesses.push(child);
@@ -160,8 +155,7 @@ function spawnWithLogging(name: string, command: string, args: string[], options
   return child;
 }
 
-function startDev(): void {
-  console.log("Starting all processes...");
+function startHostProcesses(): void {
   const processes = [
     { name: "event_bridge", cmd: "tsx", args: ["src/event_bridge/main.ts"] },
     { name: "interface", cmd: "tsx", args: ["src/interface_program/main.ts"] },
@@ -172,15 +166,74 @@ function startDev(): void {
     { name: "state_applier", cmd: "tsx", args: ["src/state_applier/main.ts"] },
     { name: "npc_ai", cmd: "tsx", args: ["src/npc_ai/main.ts"] },
     { name: "turn_manager", cmd: "tsx", args: ["src/turn_manager/main.ts"] },
-    { name: "vite", cmd: "npx", args: ["vite"] },
   ];
   for (const proc of processes) {
-    spawnWithLogging(proc.name, proc.cmd, proc.args);
+    spawnWithLogging(proc.name, proc.cmd, proc.args, { env: { THAUM_BOOT_ROLE: 'host' } });
   }
+}
+
+function startViteIfNeeded(start: boolean): void {
+  if (start) spawnWithLogging("vite", "npx", ["vite"], { env: { THAUM_BOOT_ROLE: 'client' } });
+}
+
+function startElectronDelayed(delayMs: number): void {
   setTimeout(() => {
-    spawnWithLogging("electron", "npx", ["electron", "."]);
-  }, 8000);
-  console.log("All processes started");
+    spawnWithLogging("electron", "npx", ["electron", "."], { env: { THAUM_BOOT_ROLE: 'client' } });
+  }, delayMs);
+}
+
+async function startDev(): Promise<void> {
+  console.log("Starting processes...");
+  let hostExists = await detectLocalHost(data_slot);
+  const viteExists = await detectVite();
+  const baseDir = path.join(__dirname, '..');
+  const existingLock = readHostLaunchLock(baseDir, data_slot);
+  if (existingLock) {
+    console.log(`Host launch lock detected: pid=${existingLock.pid || 'unknown'} created_at=${existingLock.created_at || 'unknown'}`);
+  }
+
+  if (launch_mode === 'host') {
+    writeHostSessionMetadata();
+    startHostProcesses();
+    console.log('Host services started');
+    return;
+  }
+
+  if (launch_mode === 'client') {
+    startViteIfNeeded(!viteExists);
+    startElectronDelayed(viteExists ? 1000 : 4000);
+    console.log('Client started');
+    return;
+  }
+
+  if (!hostExists) {
+    if (existingLock) {
+      const recovered = await recoverHostLaunchLock(baseDir, data_slot, { timeoutMs: 5000, probeFirst: true });
+      console.log(`Host lock recovery: ${recovered.reason}${recovered.cleared ? ' (cleared stale lock)' : ''}`);
+      hostExists = await detectLocalHost(data_slot);
+    }
+    const lock = acquireHostLaunchLock(baseDir, data_slot);
+    if (lock.ok) {
+      writeHostSessionMetadata();
+      console.log(`Host lock acquired at ${lock.lockPath}`);
+      startHostProcesses();
+      setTimeout(() => releaseHostLaunchLock(lock.lockPath), 20000);
+      hostExists = await waitForLocalHost(data_slot, 25000);
+      console.log(`Host wait result after start: ${hostExists ? 'ready' : 'not_reachable'}`);
+    } else {
+      console.log('Another launcher is starting the local host; waiting to attach...');
+      hostExists = await waitForLocalHost(data_slot, 25000);
+      console.log(`Host wait result while attaching: ${hostExists ? 'ready' : 'not_reachable'}`);
+    }
+    startViteIfNeeded(!viteExists);
+    startElectronDelayed(viteExists ? 6000 : 9000);
+    console.log(lock.ok ? 'No local host detected; started local host + client' : 'Waiting for local host, then attaching client');
+  } else {
+    console.log('Local host health probe succeeded before launch');
+    startViteIfNeeded(!viteExists);
+    startElectronDelayed(viteExists ? 1000 : 4000);
+    console.log('Local host detected; attached client only');
+  }
   console.log("Press Ctrl+C to stop");
 }
 
@@ -211,7 +264,7 @@ process.on("unhandledRejection", (reason) => {
 });
 
 try {
-  startDev();
+  void startDev();
 } catch (err) {
   console.error("Failed to start dev process:", err);
   process.exit(1);

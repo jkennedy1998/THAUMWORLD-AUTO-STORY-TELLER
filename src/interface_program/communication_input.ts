@@ -7,9 +7,9 @@ import { load_actor } from "../actor_storage/store.js";
 import { getActorTarget, hasValidTarget } from "./target_state.js";
 import { debug_log } from "../shared/debug.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
-import { get_or_bind_controlled_actor_ref } from "../shared/session_control.js";
+import { get_configured_data_slot } from "../shared/boot_env.js";
 
-const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+const data_slot_number = get_configured_data_slot();
 
 export type VolumeLevel = "WHISPER" | "NORMAL" | "SHOUT";
 
@@ -68,9 +68,13 @@ export function setMessage(message: string): void {
  * Create COMMUNICATE intent from current state
  * This is called when user hits Enter or clicks Send
  */
-export function createCommunicationIntent(): CommunicationIntent | null {
-  const actor_ref = get_or_bind_controlled_actor_ref(data_slot_number);
-  const actor_id = actor_ref.startsWith("actor.") ? actor_ref.slice(6) : actor_ref;
+export function createCommunicationIntent(actor_ref: string): CommunicationIntent | null {
+  const normalized_actor_ref = String(actor_ref ?? "").trim();
+  if (!normalized_actor_ref.startsWith("actor.")) {
+    debug_log("[INPUT]", "Missing explicit actor ref for communication intent", { actor_ref });
+    return null;
+  }
+  const actor_id = normalized_actor_ref.slice("actor.".length);
   
   // Load actor
   const actor_result = load_actor(data_slot_number, actor_id);
@@ -88,8 +92,8 @@ export function createCommunicationIntent(): CommunicationIntent | null {
   }
   
   // Get target from target state
-  const target_state = getActorTarget(actor_ref);
-  const target_ref = hasValidTarget(actor_ref) 
+  const target_state = getActorTarget(normalized_actor_ref);
+  const target_ref = hasValidTarget(normalized_actor_ref) 
     ? target_state?.target_ref 
     : undefined;
   
@@ -99,7 +103,7 @@ export function createCommunicationIntent(): CommunicationIntent | null {
   }
   
   debug_log("[INPUT]", `Creating COMMUNICATE intent`, {
-    actor: actor_ref,
+    actor: normalized_actor_ref,
     target: target_ref || "(none - broadcast)",
     target_state_target: target_state?.target_ref || null,
     target_state_valid: !!target_state?.is_valid,
@@ -108,7 +112,7 @@ export function createCommunicationIntent(): CommunicationIntent | null {
   });
   
   // Create the intent using action system
-  const intent = createIntent(actor_ref, "COMMUNICATE", "player_input", {
+  const intent = createIntent(normalized_actor_ref, "COMMUNICATE", "player_input", {
     actorLocation: {
       world_x: actor_location.world_tile?.x ?? 0,
       world_y: actor_location.world_tile?.y ?? 0,
@@ -146,17 +150,18 @@ export function createCommunicationIntent(): CommunicationIntent | null {
  */
 export function handleCommunicationSubmit(
   text: string,
+  actor_ref: string,
   processIntentFn: (intent: any) => void
 ): void {
   setMessage(text);
-  const actor_ref = get_or_bind_controlled_actor_ref(data_slot_number);
+  const normalized_actor_ref = String(actor_ref ?? "").trim();
   debug_log("[INPUT]", "Submitting communication text for intent creation", {
-    actor: actor_ref,
+    actor: normalized_actor_ref,
     text_preview: text.slice(0, 80),
-    target_state_target: getActorTarget(actor_ref)?.target_ref || null,
-    has_valid_target: hasValidTarget(actor_ref),
+    target_state_target: getActorTarget(normalized_actor_ref)?.target_ref || null,
+    has_valid_target: hasValidTarget(normalized_actor_ref),
   });
-  const intent = createCommunicationIntent();
+  const intent = createCommunicationIntent(normalized_actor_ref);
   
   if (intent) {
     processIntentFn(intent);

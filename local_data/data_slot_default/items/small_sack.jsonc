@@ -1,7 +1,7 @@
 {
   "id": "small_sack",
   "name": "Small Sack",
-  "description": "A simple cloth sack for carrying items. Can hold about 10 items or 5kg of weight. Worn on the leg.",
+  "description": "A simple cloth sack for carrying items. Can hold about 8 items or 5kg of weight. Worn on the leg.",
   "weight": 100,
   "weight_mag": 1,
   "mag": 1,
@@ -11,7 +11,7 @@
   "max_stack_size": 1,
   "display_char": "s",
   "container": {
-    "capacity_slots": 10,
+    "capacity_slots": 8,
     "capacity_weight": 5000
   },
   "tags": [
@@ -24,7 +24,10 @@
     {
       "name": "CONTAINER",
       "mag": 1,
-      "meta": []
+      "meta": [],
+      "dim_mag": {
+        "container_capacity_mag": 2
+      }
     }
   ]
 }

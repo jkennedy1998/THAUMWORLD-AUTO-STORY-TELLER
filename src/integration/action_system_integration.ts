@@ -4,7 +4,7 @@
 import { ActionPipeline, type PipelineDependencies } from "../action_system/pipeline.js";
 import { createIntent, type ActionIntent, type Location } from "../action_system/intent.js";
 import { debugLogger, logSeparator } from "../action_system/debug_logger.js";
-import { initializeDefaultRules } from "../tag_system/index.js";
+import { initializeDefaultRules } from "../tag_system/registry.js";
 import { initializeDefaultEffectors } from "../effectors/index.js";
 
 // Initialize systems

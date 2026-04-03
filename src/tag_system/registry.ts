@@ -10,6 +10,10 @@ export interface TagInstance {
   name: string;
   /** Magnitude / stack count (default: 1) - renamed from stacks */
   mag: number;
+  /** @deprecated Legacy compatibility field; canonical runtime uses mag + dim_mag */
+  rank_mag?: number;
+  /** Optional named MAG dimensions for canonical multidimensional tags */
+  dim_mag?: Record<string, number>;
   /** Meta tags applied to this tag instance (e.g., ["dispersing"]) */
   meta: string[];
   /** Tracked information / variables (optional) */
@@ -19,7 +23,7 @@ export interface TagInstance {
   /** Expiry timestamp in milliseconds (optional) */
   expiry?: number;
   /** Valid scopes for this tag instance (optional) */
-  scope?: ("CHARACTER" | "ITEM" | "TILE")[];
+  scope?: ("CHARACTER" | "ITEM" | "TILE" | "TAG")[];
 }
 
 /**
@@ -43,6 +47,16 @@ export interface TagAction {
   damage_formula: string;
   /** Proficiencies that apply to this action */
   proficiencies: string[];
+  /** Optional action execution metadata */
+  runtime?: {
+    action_cost?: "FREE" | "PARTIAL" | "FULL" | "EXTENDED";
+    requires_result_roll?: boolean;
+    requires_potency_roll?: boolean;
+    potency_on_hit_only?: boolean;
+    result_against?: "evasion" | "distance" | "none";
+    auto_hit_target_types?: Array<"item" | "tile" | "place_tile">;
+    potency_source?: "tool" | "tool_plus_ammo" | "none";
+  };
 }
 
 /**
@@ -173,17 +187,6 @@ export class TagRegistry {
 export const tagRegistry = new TagRegistry();
 
 /**
- * Calculate weight MAG from item weight
- */
-export function calculateWeightMAG(weight: number): number {
-  if (weight <= 5) return 1;      // Light: rock, dagger, arrow
-  if (weight <= 15) return 2;     // Medium: sword, mace, helmet
-  if (weight <= 30) return 3;     // Heavy: greatsword, armor
-  if (weight <= 50) return 4;     // Very Heavy: anvil, chest
-  return 5;                        // Extreme: furniture, boulders
-}
-
-/**
  * Calculate item MAG from tag magnitude
  */
 export function calculateItemMAG(item: TaggedItem): number {
@@ -194,6 +197,45 @@ export function calculateItemMAG(item: TaggedItem): number {
  * Default tag rules for core items
  */
 export const DEFAULT_TAG_RULES: TagRule[] = [
+  {
+    name: "DAGGER",
+    description: "A light melee weapon for stabbing and throwing",
+    meta_tags: ["tool", "weapon", "melee", "thrown"],
+    actions: [
+      {
+        action_type: "USE.IMPACT_SINGLE",
+        requirements: null,
+        range_category: "MELEE",
+        base_range: 1,
+        damage_formula: "dagger_potency_mag",
+        proficiencies: ["Brawn", "Accuracy"],
+        runtime: {
+          action_cost: "PARTIAL",
+          requires_result_roll: true,
+          requires_potency_roll: true,
+          potency_on_hit_only: true,
+          result_against: "evasion",
+          potency_source: "tool",
+        },
+      },
+      {
+        action_type: "USE.PROJECTILE_SINGLE",
+        requirements: null,
+        range_category: "THROWN",
+        base_range: 5,
+        damage_formula: "dagger_potency_mag",
+        proficiencies: ["Accuracy", "Brawn"],
+        runtime: {
+          action_cost: "PARTIAL",
+          requires_result_roll: true,
+          requires_potency_roll: true,
+          potency_on_hit_only: true,
+          result_against: "distance",
+          potency_source: "tool_plus_ammo",
+        },
+      },
+    ],
+  },
   {
     name: "bow",
     description: "A ranged weapon that fires projectiles",

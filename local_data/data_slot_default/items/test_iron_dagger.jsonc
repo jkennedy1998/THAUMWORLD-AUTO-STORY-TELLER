@@ -14,8 +14,15 @@
     {
       "name": "TOOL",
       "mag": 1,
-      "meta": ["weapon"],
-      "info": [1]
+      "meta": ["weapon"]
+    },
+    {
+      "name": "DAGGER",
+      "mag": 2,
+      "dim_mag": {
+        "potency_roll_mag": 2
+      },
+      "meta": []
     }
   ]
 }

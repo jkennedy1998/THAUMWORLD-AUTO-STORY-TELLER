@@ -5,6 +5,7 @@ import { compute_sense_clarity, compute_sense_range_mag } from "./senses.js";
 import { load_actor } from "../actor_storage/store.js";
 import { load_npc } from "../npc_storage/store.js";
 import { is_timed_event_active, get_timed_event_state, get_active_actor_ref, ensure_world_exists, save_world_store, type WorldStore } from "../world_storage/store.js";
+import { has_awareness_target } from "../tag_system/canonical_readers.js";
 
 function format_command_line(command: CommandNode): string {
     const args = Object.entries(command.args)
@@ -57,17 +58,17 @@ function parse_subject_ref(subject: string): { type: "actor" | "npc"; id: string
     return null;
 }
 
-function load_subject_tags(slot: number, subject: string): Array<Record<string, unknown>> | null {
+function load_subject_entity(slot: number, subject: string): Record<string, unknown> | null {
     const parsed = parse_subject_ref(subject);
     if (!parsed || !parsed.id) return null;
     if (parsed.type === "actor") {
         const loaded = load_actor(slot, parsed.id);
         if (!loaded.ok) return null;
-        return Array.isArray(loaded.actor.tags) ? (loaded.actor.tags as Array<Record<string, unknown>>) : null;
+        return loaded.actor as Record<string, unknown>;
     }
     const loaded = load_npc(slot, parsed.id);
     if (!loaded.ok) return null;
-    return Array.isArray(loaded.npc.tags) ? (loaded.npc.tags as Array<Record<string, unknown>>) : null;
+    return loaded.npc as Record<string, unknown>;
 }
 
 function load_subject_location(slot: number, subject: string): Record<string, unknown> | null {
@@ -137,21 +138,11 @@ function get_owner_ref_from_target(target_ref: string): string | null {
     return null;
 }
 
-function has_awareness_tag(tags: Array<Record<string, unknown>> | null, target_ref: string): boolean {
-    if (!tags || tags.length === 0) return false;
-    for (const tag of tags) {
-        if (String(tag.name ?? "").toUpperCase() !== "AWARENESS") continue;
-        const info = Array.isArray(tag.info) ? (tag.info as unknown[]) : [];
-        if (info.some((entry) => String(entry) === target_ref)) return true;
-    }
-    return false;
-}
-
 function has_target_awareness(slot: number, subject: string, target_ref: string): boolean {
     if (!target_ref) return true;
     if (target_ref === subject) return true;
 
-    const tags = load_subject_tags(slot, subject);
+    const entity = load_subject_entity(slot, subject);
     const location = load_subject_location(slot, subject);
     const owner_ref = get_owner_ref_from_target(target_ref);
 
@@ -189,8 +180,8 @@ function has_target_awareness(slot: number, subject: string, target_ref: string)
         if (is_world_tile_ref(target_ref) && target_ref === refs.world) return true;
     }
 
-    if (has_awareness_tag(tags, target_ref)) return true;
-    if (owner_ref && has_awareness_tag(tags, owner_ref)) return true;
+    if (has_awareness_target(entity, target_ref)) return true;
+    if (owner_ref && has_awareness_target(entity, owner_ref)) return true;
     return false;
 }
 

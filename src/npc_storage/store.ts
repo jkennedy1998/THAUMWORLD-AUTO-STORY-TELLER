@@ -12,6 +12,7 @@ import { DEFAULT_CHARACTER_BODY_SLOT_REPRESENTATION } from "../shared/body_slot_
 import { sanitize_npc_for_save } from "../shared/defs_deltas_sanitize.js";
 import { make_opaque_entity_id } from "../shared/entity_ids.js";
 import { initialize_equipment_slots, normalize_body_slots } from "../types/body_slots.js";
+import { hydrate_character_tags } from "../shared/character_tags.js";
 
 export type NpcLookupResult =
     | { ok: true; npc: Record<string, unknown>; path: string }
@@ -125,6 +126,8 @@ export function load_npc(slot: number, npc_id: string): NpcLookupResult {
             (npc as any).weight = derive_default_npc_weight(npc);
             dirty = true;
         }
+        const tag_hydration = hydrate_character_tags(npc);
+        if (tag_hydration.changed) dirty = true;
     } catch {
         // ignore
     }
@@ -166,6 +169,7 @@ export function save_npc(slot: number, npc_id: string, npc: Record<string, unkno
     ensure_npc_dir(slot);
     const npc_path = get_npc_path(slot, npc_id);
     (npc as any).body_slots = normalize_body_slots((npc as any).body_slots);
+    hydrate_character_tags(npc as any);
     sanitize_npc_for_save(npc as any);
     fs.writeFileSync(npc_path, JSON.stringify(npc, null, 2), "utf-8");
     return npc_path;
@@ -249,6 +253,17 @@ function pick_perks(kind: Record<string, unknown>): Record<string, unknown>[] {
     return [...picked_gifts, ...picked_greater, ...flaws];
 }
 
+function clone_numeric_stats(stats: Record<string, unknown> | undefined): Record<string, number> {
+    return {
+        con: Number(stats?.con ?? 0) || 0,
+        str: Number(stats?.str ?? 0) || 0,
+        dex: Number(stats?.dex ?? 0) || 0,
+        wis: Number(stats?.wis ?? 0) || 0,
+        int: Number(stats?.int ?? 0) || 0,
+        cha: Number(stats?.cha ?? 0) || 0,
+    };
+}
+
 export function create_npc_from_kind(slot: number, input: CreateNpcFromKindInput): NpcLookupResult {
     const template = load_default_npc();
     if (!template.ok) return template;
@@ -310,12 +325,18 @@ export function create_npc_from_kind(slot: number, input: CreateNpcFromKindInput
     if (kind.temperature_range) npc.temperature_range = { ...kind.temperature_range };
 
     const stats = random_stat_assignment();
+    const base_stats = clone_numeric_stats(stats as Record<string, unknown>);
     if (kind.stat_changes) {
         for (const [key, delta] of Object.entries(kind.stat_changes as Record<string, number>)) {
             stats[key] = Number(stats[key] ?? 50) + delta;
         }
     }
     npc.stats = stats;
+    (npc as any).stat_source = {
+        base_stats,
+        kind_id: kind.id,
+        kind_stat_changes: { ...((kind.stat_changes as Record<string, number> | undefined) ?? {}) },
+    };
 
     const { age, adulthood } = pick_age(kind as Record<string, unknown>, input.age);
     npc.age = age;
@@ -351,7 +372,8 @@ export function find_npcs(slot: number, query: NpcSearchQuery): NpcSearchHit[] {
         const id = String(npc.id ?? file.replace(/\.jsonc$/i, ""));
         const name = String(npc.name ?? "");
         const kind = String(npc.kind ?? "");
-        const tags = Array.isArray(npc.tags) ? npc.tags : [];
+        const hydrated = hydrate_character_tags(npc as any);
+        const tags = hydrated.effective_tags;
 
         if (query.name && !name.toLowerCase().includes(query.name.toLowerCase())) continue;
         if (query.kind && kind.toLowerCase() !== query.kind.toLowerCase()) continue;

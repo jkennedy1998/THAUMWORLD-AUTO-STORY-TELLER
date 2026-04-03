@@ -2,7 +2,11 @@
 // Phase 3 & 5: Core Actions with Effector Integration
 
 import type { Location } from "../action_system/intent.js";
-import type { TaggedItem, ActionCapability } from "../tag_system/index.js";
+import type { TaggedItem } from "../tag_system/registry.js";
+import type { ActionCapability } from "../tag_system/capabilities.js";
+import { get_resolved_tag_stored_mag } from "../tag_system/canonical_readers.js";
+import { get_damage_dice_from_mag } from "../mag/damage.js";
+import { performPotencyRoll } from "../roll_system/index.js";
 import {
   effectorRegistry,
   applyEffectors,
@@ -55,6 +59,50 @@ export interface ProjectileResult {
   inTarget: boolean;
   scatterDistance?: number;
   damage?: number;
+}
+
+function get_runtime_tag_power(entity: TaggedItem | undefined, tag_name: string): number {
+  if (!entity) return 0;
+  const resolved_mag = get_resolved_tag_stored_mag(entity as any, tag_name);
+  if (resolved_mag > 0) return resolved_mag;
+  const raw_match = Array.isArray(entity.tags)
+    ? entity.tags.find((tag) => String(tag?.name ?? '').trim().toUpperCase() === String(tag_name ?? '').trim().toUpperCase())
+    : null;
+  return raw_match ? Math.max(0, Math.floor(Number(raw_match.mag ?? 0) || 0)) : 0;
+}
+
+function get_target_kind(targetRef: string | undefined): "character" | "item" | "tile" | "unknown" {
+  const ref = String(targetRef ?? "").trim();
+  if (ref.startsWith("actor.") || ref.startsWith("npc.")) return "character";
+  if (ref.startsWith("item.")) return "item";
+  if (ref.startsWith("tile.") || ref.startsWith("place_tile.") || ref.startsWith("region_tile.") || ref.startsWith("world_tile.")) return "tile";
+  return "unknown";
+}
+
+function get_tool_base_mag(tool: TaggedItem | undefined, capability: ActionCapability | undefined): number {
+  return capability?.source_tag ? Math.max(1, get_runtime_tag_power(tool, capability.source_tag)) : 1;
+}
+
+function get_projectile_ammo_mag(ammo: TaggedItem | undefined): number {
+  if (!ammo) return 0;
+  const tag_bonus = Math.max(0, get_runtime_tag_power(ammo, "PROJECTILE"));
+  return tag_bonus > 0 ? tag_bonus : 1;
+}
+
+async function handleTransferItem(_context: ActionContext): Promise<ActionResult> {
+  return {
+    success: true,
+    effects: [],
+    messages: ["Transfer item action resolved through legality pipeline"],
+  };
+}
+
+async function handleEquipItem(_context: ActionContext): Promise<ActionResult> {
+  return {
+    success: true,
+    effects: [],
+    messages: ["Equip item action resolved through legality pipeline"],
+  };
 }
 
 /**
@@ -161,26 +209,21 @@ export async function handleImpactSingle(
       messages: ["No target specified"]
     };
   }
-  
-  // Get damage from tool capability
-  const toolMAG = tool?.tags?.find(t => 
-    capability?.source_tag && t.name === capability.source_tag
-  )?.mag || 1;
-  
+  const hit = parameters.hit !== false;
+  const targetKind = get_target_kind(targetRef);
+  const toolMAG = get_tool_base_mag(tool, capability);
   const baseDamageMAG = parameters.damageMAG || toolMAG;
   
   // Apply effectors to damage (Phase 5)
-  let finalDamageMAG = baseDamageMAG;
   let damageEffectors: Effector[] = [];
   
   if (tool) {
     damageEffectors = effectorRegistry.getItemEffectors(tool);
-    const modified = calculateModifiedRoll(baseDamageMAG, damageEffectors);
-    finalDamageMAG = modified.finalValue;
   }
   
-  // Calculate damage dice based on MAG
-  const damageDice = getDamageDice(finalDamageMAG);
+  const potency = hit ? performPotencyRoll(baseDamageMAG, damageEffectors) : null;
+  const damageDice = potency?.dice ?? get_damage_dice_from_mag(baseDamageMAG);
+  const totalDamage = potency?.total ?? 0;
   
   return {
     success: true,
@@ -190,14 +233,20 @@ export async function handleImpactSingle(
       parameters: {
         attacker: actorRef,
         weapon: tool?.ref,
+        hit,
+        target_kind: targetKind,
         damage_dice: damageDice,
-        damage_mag: finalDamageMAG,
+        damage_mag: totalDamage,
         base_damage_mag: baseDamageMAG,
+        potency_roll_total: totalDamage,
+        potency_roll_nat: potency?.roll ?? 0,
         effectors: damageEffectors.map(e => ({ type: e.type, value: e.value, source: e.source })),
         range: "MELEE"
       }
     }],
-    messages: [`${actorRef} attacks ${targetRef} with ${tool?.name || "unarmed"} (MAG ${finalDamageMAG}${baseDamageMAG !== finalDamageMAG ? `, base ${baseDamageMAG}` : ""})`]
+    messages: hit
+      ? [`${actorRef} attacks ${targetRef} with ${tool?.name || "unarmed"} (${damageDice}${targetKind !== 'character' ? ', damage stub only' : ''})`]
+      : [`${actorRef} attacks ${targetRef} with ${tool?.name || "unarmed"} and misses.`]
   };
 }
 
@@ -245,8 +294,6 @@ export async function handleProjectileSingle(
   const modifiedRange = calculateModifiedRange(baseRange, rangeEffectors);
   const finalRange = modifiedRange.finalValue;
   
-  // Calculate hit/miss (simplified - actual roll done in rules_lawyer)
-  // Apply effectors to attack roll
   const baseRoll = parameters.roll || 10;
   let attackEffectors: Effector[] = [];
   if (tool) {
@@ -256,9 +303,8 @@ export async function handleProjectileSingle(
   const roll = modifiedAttack.finalValue;
   const cr = parameters.cr || 10;
   
-  // Calculate scatter on miss
+  const hit = parameters.hit !== false;
   let scatterDistance = 0;
-  const hit = roll >= cr; // Simplified hit calculation
   if (!hit) {
     const missBy = cr - roll;
     scatterDistance = Math.ceil(missBy / 3);
@@ -267,25 +313,16 @@ export async function handleProjectileSingle(
   // Determine if projectile sticks
   const sticks = hit && parameters.sticks !== false;
   
-  // Calculate damage
-  const toolMAG = tool?.tags?.find(t => 
-    capability?.source_tag && t.name === capability.source_tag
-  )?.mag || 1;
-  
-  const ammoMAG = ammo?.tags?.find(t => t.name === "projectile")?.mag || 
-                 (isThrown ? 0 : 1);
-  
+  const toolMAG = get_tool_base_mag(tool, capability);
+  const ammoMAG = get_projectile_ammo_mag(ammo);
   const baseTotalMAG = toolMAG + ammoMAG;
   
-  // Apply effectors to damage
   let damageEffectors: Effector[] = [];
   if (tool) {
     damageEffectors = effectorRegistry.getItemEffectors(tool);
   }
-  const modifiedDamage = calculateModifiedRoll(baseTotalMAG, damageEffectors);
-  const totalMAG = modifiedDamage.finalValue;
-  
-  const damageDice = getDamageDice(totalMAG);
+  const potency = hit ? performPotencyRoll(baseTotalMAG, damageEffectors) : null;
+  const damageDice = potency?.dice ?? get_damage_dice_from_mag(baseTotalMAG);
   
   // Determine landing location
   const landingLocation = hit && sticks 
@@ -299,7 +336,7 @@ export async function handleProjectileSingle(
     landingLocation,
     inTarget: hit && sticks,
     scatterDistance: hit ? 0 : scatterDistance,
-    damage: hit ? totalMAG : 0
+    damage: hit ? (potency?.total ?? baseTotalMAG) : 0
   };
   
   // Build effector info for response
@@ -321,8 +358,11 @@ export async function handleProjectileSingle(
         modified_roll: roll,
         cr,
         damage_dice: damageDice,
-        damage_mag: totalMAG,
+        damage_mag: hit ? (potency?.total ?? baseTotalMAG) : 0,
         base_damage_mag: baseTotalMAG,
+        potency_roll_total: hit ? (potency?.total ?? baseTotalMAG) : 0,
+        potency_roll_nat: potency?.roll ?? 0,
+        target_kind: get_target_kind(targetRef),
         range_category: rangeCategory,
         range: finalRange,
         base_range: baseRange,
@@ -336,7 +376,7 @@ export async function handleProjectileSingle(
       }
     }],
     messages: hit 
-      ? [`${actorRef} hits ${targetRef} with ${projectile.name}! (Range: ${finalRange}, Damage MAG: ${totalMAG})`]
+      ? [`${actorRef} hits ${targetRef} with ${projectile.name}! (Range: ${finalRange}, Potency: ${damageDice})`]
       : [`${actorRef} misses ${targetRef}! Projectile scatters ${scatterDistance} tiles.`],
     projectiles: [projectileResult]
   };
@@ -365,20 +405,6 @@ function calculateScatterLocation(
 }
 
 /**
- * Get damage dice based on MAG
- */
-function getDamageDice(mag: number): string {
-  if (mag <= 0) return "1";
-  if (mag === 1) return "1d2";
-  if (mag === 2) return "1d4";
-  if (mag === 3) return "1d6";
-  if (mag === 4) return "1d8";
-  if (mag === 5) return "2d4";
-  if (mag === 6) return "1d10";
-  return `${Math.floor(mag / 2)}d6`;
-}
-
-/**
  * Main action handler router
  */
 export async function handleAction(
@@ -400,6 +426,10 @@ export async function handleAction(
         return handleImpactSingle(context);
       } else if (subtype === "PROJECTILE_SINGLE") {
         return handleProjectileSingle(context, context.parameters.ammo);
+      } else if (subtype === "TRANSFER_ITEM") {
+        return handleTransferItem(context);
+      } else if (subtype === "EQUIP_ITEM") {
+        return handleEquipItem(context);
       }
       return {
         success: false,
@@ -470,7 +500,6 @@ export function applyEffectorsToAction(
 
 // Export individual handlers for testing
 export {
-  getDamageDice,
   calculateScatterLocation,
   handleInspect,
   getBestSenseForDistance,

@@ -19,8 +19,9 @@ import { load_place, create_basic_place } from "../place_storage/store.js";
 import { isCurrentSession, getSessionMeta } from "../shared/session.js";
 import { debug_log as broker_debug, debug_warn } from "../shared/debug.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
+import { get_configured_data_slot } from "../shared/boot_env.js";
 
-const data_slot_number = SERVICE_CONFIG.DEFAULT_DATA_SLOT || 1;
+const data_slot_number = get_configured_data_slot();
 const POLL_MS = SERVICE_CONFIG.POLL_MS.DATA_BROKER;
 const ITERATION_LIMIT = SERVICE_CONFIG.MAX_BROKER_ITERATIONS;
 

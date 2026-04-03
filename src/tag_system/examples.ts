@@ -3,11 +3,15 @@
 
 import {
   tagRegistry,
-  TagResolver,
   initializeDefaultRules,
-  calculateWeightMAG,
   type TaggedItem
-} from "./index.js";
+} from "./registry.js";
+import { calculate_weight_mag } from "../mag/weight.js";
+import {
+  check_ammo_compatibility,
+  get_enabled_actions,
+  validate_throw,
+} from "./capabilities.js";
 
 import {
   validateToolRequirement,
@@ -24,7 +28,6 @@ import {
 
 // Initialize the system
 initializeDefaultRules();
-const resolver = new TagResolver(tagRegistry);
 
 // Example 1: Create items
 const longbow: TaggedItem = {
@@ -64,7 +67,7 @@ const rock: TaggedItem = {
 
 // Example 2: Check what actions a tool enables
 console.log("=== Longbow Actions ===");
-const bowActions = resolver.getEnabledActions(longbow);
+const bowActions = get_enabled_actions(longbow);
 for (const action of bowActions) {
   console.log(`- ${action.action_type}: ${action.range.effective} tiles`);
   console.log(`  Proficiencies: ${action.proficiencies.join(", ")}`);
@@ -77,10 +80,10 @@ for (const action of bowActions) {
 
 // Example 3: Check ammo compatibility
 console.log("\n=== Ammo Compatibility ===");
-const arrowCompatible = resolver.checkAmmoCompatibility(longbow, arrow, "USE.PROJECTILE_SINGLE");
+const arrowCompatible = check_ammo_compatibility(longbow, arrow, "USE.PROJECTILE_SINGLE");
 console.log(`Bow + Arrow: ${arrowCompatible.compatible ? "✅ Compatible" : "❌ " + arrowCompatible.reason}`);
 
-const rockCompatible = resolver.checkAmmoCompatibility(longbow, rock, "USE.PROJECTILE_SINGLE");
+const rockCompatible = check_ammo_compatibility(longbow, rock, "USE.PROJECTILE_SINGLE");
 console.log(`Bow + Rock: ${rockCompatible.compatible ? "✅ Compatible" : "❌ " + rockCompatible.reason}`);
 
 // Example 4: Calculate ranges
@@ -95,7 +98,7 @@ console.log(`Sword thrown (STR ${heroSTR}): ${swordThrownRange} tiles`);
 
 // Example 5: Validate throwing
 console.log("\n=== Throw Validation ===");
-const swordThrow = resolver.validateThrow(heroSTR, sword);
+const swordThrow = validate_throw(heroSTR, sword);
 console.log(`Can throw sword: ${swordThrow.can_throw ? "✅ Yes" : "❌ " + swordThrow.reason}`);
 console.log(`Max range: ${swordThrow.max_range} tiles`);
 
@@ -105,7 +108,7 @@ const anvil: TaggedItem = {
   weight: 45,  // MAG 4
   tags: []
 };
-const anvilThrow = resolver.validateThrow(heroSTR, anvil);
+const anvilThrow = validate_throw(heroSTR, anvil);
 console.log(`Can throw anvil: ${anvilThrow.can_throw ? "✅ Yes" : "❌ " + anvilThrow.reason}`);
 
 // Example 6: Actor with equipped items
@@ -134,7 +137,7 @@ if (toolValidation.valid && toolValidation.tool) {
 
 // Example 7: Get all enabled actions
 console.log("\n=== All Enabled Actions ===");
-const enabledActions = resolver.getEnabledActions(longbow);
+const enabledActions = get_enabled_actions(longbow);
 for (const action of enabledActions) {
   console.log(`- ${action.action_type}`);
   console.log(`  Range: ${action.range.category} (${action.range.effective} tiles)`);
@@ -166,9 +169,9 @@ console.log(`Distance from (5,5) to (10,10): ${distance.toFixed(2)} tiles`);
 
 // Example 9: Weight MAG calculation
 console.log("\n=== Weight MAG ===");
-console.log(`Arrow (weight 1): MAG ${calculateWeightMAG(1)}`);
-console.log(`Rock (weight 3): MAG ${calculateWeightMAG(3)}`);
-console.log(`Sword (weight 10): MAG ${calculateWeightMAG(10)}`);
-console.log(`Anvil (weight 45): MAG ${calculateWeightMAG(45)}`);
+console.log(`Arrow (weight 1): MAG ${calculate_weight_mag(1)}`);
+console.log(`Rock (weight 3): MAG ${calculate_weight_mag(3)}`);
+console.log(`Sword (weight 10): MAG ${calculate_weight_mag(10)}`);
+console.log(`Anvil (weight 45): MAG ${calculate_weight_mag(45)}`);
 
 console.log("\n=== Examples Complete ===");

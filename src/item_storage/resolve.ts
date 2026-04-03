@@ -1,6 +1,8 @@
 import type { InlineItem } from "../types/inline_item.js";
 import type { TagInstance } from "../tag_system/registry.js";
 import { apply_tag_deltas, type TagRemoveOp } from "../tag_system/tag_deltas.js";
+import { resolve_tag_states_from_instances, type ResolvedTagState } from "../tag_system/resolved.js";
+import { build_entity_value_mag_breakdown, type EntityValueMagBreakdown } from "../tag_system/value.js";
 import { tag_key } from "../tag_system/tag_key.js";
 import { load_master_item, type ItemDefinition } from "./store.js";
 import { debug_warn } from "../shared/debug.js";
@@ -10,6 +12,8 @@ const warned_legacy_item_ids = new Set<string>();
 export type ResolvedItem = {
   def: ItemDefinition;
   effective_tags: TagInstance[];
+  resolved_tag_states: ResolvedTagState[];
+  value_mag: EntityValueMagBreakdown;
   name: string;
   unit_weight: number;
   display_char: string;
@@ -52,6 +56,8 @@ export function resolve_inline_item(def_id: string, item: InlineItem): ResolvedI
   const add = Array.isArray(item.tag_add) ? (item.tag_add as TagInstance[]) : [];
   const remove = normalize_remove_ops(item.tag_remove);
   const effective_tags = apply_tag_deltas({ base: def.tags ?? [], add, remove });
+  const resolved_tag_states = resolve_tag_states_from_instances(effective_tags);
+  const value_mag = build_entity_value_mag_breakdown(def, resolved_tag_states);
 
   const display_color_override = typeof item.display_color === "string" ? item.display_color : null;
   const def_color = typeof (def as any).display_color === "string" ? String((def as any).display_color) : null;
@@ -59,6 +65,8 @@ export function resolve_inline_item(def_id: string, item: InlineItem): ResolvedI
   return {
     def,
     effective_tags,
+    resolved_tag_states,
+    value_mag,
     name: String(def.name ?? def.id ?? def_id),
     unit_weight: Number(def.weight ?? 0),
     display_char: pick_display_char(def),

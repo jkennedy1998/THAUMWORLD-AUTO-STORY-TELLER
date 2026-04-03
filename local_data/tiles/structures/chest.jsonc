@@ -22,6 +22,9 @@
       "name": "CONTAINER",
       "mag": 1,
       "meta": [],
+      "dim_mag": {
+        "container_capacity_mag": 3
+      },
       "scope": ["TILE"]
     },
     {
@@ -31,10 +34,6 @@
       "scope": ["TILE"]
     }
   ],
-  "container_capacity": {
-    "max_slots": 20,
-    "max_weight": 50000
-  },
   "container_glyphs": {
     "closed": "⍞",
     "open": "⌸"

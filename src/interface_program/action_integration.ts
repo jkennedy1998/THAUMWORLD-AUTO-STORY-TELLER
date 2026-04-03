@@ -4,6 +4,7 @@
 import { ActionPipeline, type ActionIntent, type ActionResult } from "../action_system/index.js";
 import { load_actor } from "../actor_storage/store.js";
 import { find_npcs, load_npc } from "../npc_storage/store.js";
+import { has_awareness_entry } from "../shared/awareness.js";
 import { get_npc_location } from "../npc_storage/location.js";
 import { getAvailableTargets } from "../action_system/target_resolution.js";
 import { debug_log, debug_warn } from "../shared/debug.js";
@@ -20,6 +21,8 @@ function createPipelineDependencies(dataSlot: number) {
     if (!intent || intent.verb !== "USE") return "action";
 
     const subtype = String(intent.parameters?.subtype ?? "").toUpperCase();
+    if (subtype === "TRANSFER_ITEM") return "movement";
+    if (subtype === "EQUIP_ITEM") return "action";
     if (subtype === "IMPACT_SINGLE" || subtype === "PROJECTILE_SINGLE") return "action";
 
     const original = String(intent.originalInput ?? "").toLowerCase();
@@ -61,12 +64,19 @@ function createPipelineDependencies(dataSlot: number) {
       return null;
     },
     
-    // Check if actor is aware of target
-    checkActorAwareness: async (actorRef: string, targetRef: string) => {
-      // Not implemented: awareness gating.
-      // Current behavior assumes awareness is handled elsewhere (or always true).
-      return true; // Default to aware for now
-    },
+      // Check if actor is aware of target
+      checkActorAwareness: async (actorRef: string, targetRef: string) => {
+        if (!targetRef || targetRef === actorRef) return true;
+        if (actorRef.startsWith("actor.")) {
+          const result = load_actor(dataSlot, actorRef.replace("actor.", ""));
+          return result.ok ? has_awareness_entry(result.actor as any, targetRef) : false;
+        }
+        if (actorRef.startsWith("npc.")) {
+          const result = load_npc(dataSlot, actorRef.replace("npc.", ""));
+          return result.ok ? has_awareness_entry(result.npc as any, targetRef) : false;
+        }
+        return false;
+      },
     
     // Check if actor can afford action cost
     checkActionCost: async (actorRef: string, cost: any, intent?: ActionIntent) => {
@@ -100,16 +110,48 @@ function createPipelineDependencies(dataSlot: number) {
         const result = load_actor(dataSlot, actorRef.replace("actor.", ""));
         if (result.ok && result.actor) {
           const actor = result.actor as any;
-          return {
-            ref: actorRef,
-            body_slots: actor.body_slots as Record<string, any> | undefined,
-            hand_slots: actor.hand_slots as Record<string, string> | undefined,
-            inventory: actor.inventory as Record<string, unknown> | undefined
-          };
+            return {
+              ref: actorRef,
+              body_slots: actor.body_slots as Record<string, any> | undefined,
+              hand_slots: actor.hand_slots as Record<string, string> | undefined,
+              inventory: actor.inventory as Record<string, unknown> | undefined,
+              proficiencies: actor.proficiencies as Record<string, number> | undefined,
+              stats: actor.stats as Record<string, number> | undefined,
+            };
+          }
         }
-      }
-      return null;
-    },
+        if (actorRef.startsWith("npc.")) {
+          const result = load_npc(dataSlot, actorRef.replace("npc.", ""));
+          if (result.ok && result.npc) {
+            const npc = result.npc as any;
+            return {
+              ref: actorRef,
+              body_slots: npc.body_slots as Record<string, any> | undefined,
+              hand_slots: npc.hand_slots as Record<string, string> | undefined,
+              inventory: npc.inventory as Record<string, unknown> | undefined,
+              proficiencies: npc.proficiencies as Record<string, number> | undefined,
+              stats: npc.stats as Record<string, number> | undefined,
+            };
+          }
+        }
+        return null;
+      },
+      getTargetData: async (targetRef: string) => {
+        if (targetRef.startsWith("actor.")) {
+          const result = load_actor(dataSlot, targetRef.replace("actor.", ""));
+          const actor = result.ok ? result.actor as any : null;
+          return actor ? { kind: "character" as const, evasion: Number(actor?.derived?.evasion ?? actor?.evasion ?? 10) } : null;
+        }
+        if (targetRef.startsWith("npc.")) {
+          const result = load_npc(dataSlot, targetRef.replace("npc.", ""));
+          const npc = result.ok ? result.npc as any : null;
+          return npc ? { kind: "character" as const, evasion: Number(npc?.derived?.evasion ?? npc?.evasion ?? 10) } : null;
+        }
+        if (targetRef.startsWith("item.")) return { kind: "item" as const, evasion: null };
+        if (targetRef.startsWith("place_tile.")) return { kind: "place_tile" as const, evasion: null };
+        if (targetRef.startsWith("tile.") || targetRef.startsWith("region_tile.") || targetRef.startsWith("world_tile.")) return { kind: "tile" as const, evasion: null };
+        return null;
+      },
     
     // Execute effect
     executeEffect: async (effect: any) => {
