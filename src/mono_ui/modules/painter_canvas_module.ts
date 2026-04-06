@@ -123,10 +123,15 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   const CANVAS_MAX_WIDTH = 200;
   const CANVAS_MAX_HEIGHT = 100;
 
-  const CANVAS_WIDTH = 80;
-  const CANVAS_HEIGHT = 40;
-
   let scale = 1;
+
+  function getViewportWidth(): number {
+    return Math.max(1, rect.x1 - rect.x0 + 1);
+  }
+
+  function getViewportHeight(): number {
+    return Math.max(1, rect.y1 - rect.y0 + 1);
+  }
   
   // Global pan offset from CSS transform (when panning blank space)
   let global_pan_offset = { x: 0, y: 0 };
@@ -543,10 +548,12 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       c.fill_rect(rect, { char: ' ', rgb: bg_color, style: 'regular' });
 
       const totalPan = getTotalPan();
+      const viewport_width = getViewportWidth();
+      const viewport_height = getViewportHeight();
       const start_x = clamp(Math.floor(totalPan.x), 0, opts.grid.width - 1);
-      const end_x = clamp(Math.floor(totalPan.x + CANVAS_WIDTH), 0, opts.grid.width);
+      const end_x = clamp(Math.floor(totalPan.x + viewport_width), 0, opts.grid.width);
       const start_y = clamp(Math.floor(totalPan.y), 0, opts.grid.height - 1);
-      const end_y = clamp(Math.floor(totalPan.y + CANVAS_HEIGHT), 0, opts.grid.height);
+      const end_y = clamp(Math.floor(totalPan.y + viewport_height), 0, opts.grid.height);
 
       const selected_z = opts.get_selected_z();
       const space = getSpace();
@@ -930,7 +937,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       if (current_mouse_pos) {
         const mouse_local_x = current_mouse_pos.x - rect.x0;
         const mouse_local_y = current_mouse_pos.y - rect.y0;
-        if (mouse_local_x >= 0 && mouse_local_x < CANVAS_WIDTH && mouse_local_y >= 0 && mouse_local_y < CANVAS_HEIGHT) {
+        if (mouse_local_x >= 0 && mouse_local_x < viewport_width && mouse_local_y >= 0 && mouse_local_y < viewport_height) {
           c.set(rect.x0 + mouse_local_x, rect.y0 + mouse_local_y, {
             char: 'M',
             rgb: get_color_by_name('vivid_magenta').rgb,
@@ -948,7 +955,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const click_local_y = last_click.y - rect.y0;
         
         // Mark click position with X
-        if (click_local_x >= 0 && click_local_x < CANVAS_WIDTH && click_local_y >= 0 && click_local_y < CANVAS_HEIGHT) {
+        if (click_local_x >= 0 && click_local_x < viewport_width && click_local_y >= 0 && click_local_y < viewport_height) {
           c.set(rect.x0 + click_local_x, rect.y0 + click_local_y, {
             char: 'X',
             rgb: get_color_by_name('vivid_green').rgb,
@@ -961,7 +968,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         // Mark calculated grid position with +
         const grid_local_x = last_click.grid_x - Math.floor(debug_totalPan.x);
         const grid_local_y = last_click.grid_y - Math.floor(debug_totalPan.y);
-        if (grid_local_x >= 0 && grid_local_x < CANVAS_WIDTH && grid_local_y >= 0 && grid_local_y < CANVAS_HEIGHT) {
+        if (grid_local_x >= 0 && grid_local_x < viewport_width && grid_local_y >= 0 && grid_local_y < viewport_height) {
           c.set(rect.x0 + grid_local_x, rect.y0 + grid_local_y, {
             char: '+',
             rgb: get_color_by_name('vivid_red').rgb,

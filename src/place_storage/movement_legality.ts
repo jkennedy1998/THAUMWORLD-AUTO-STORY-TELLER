@@ -26,9 +26,23 @@ export type BlockerCapabilityProfile = {
   effective_tags: any[];
   occupies: boolean;
   pushable: boolean;
-  can_step_up: boolean;
   can_climb_surface: boolean;
 };
+
+export type WalkStepUpCheck =
+  | {
+      ok: true;
+      blocker_profile: BlockerCapabilityProfile;
+      up: MoveCheck;
+      up_forward: MoveCheck;
+    }
+  | {
+      ok: false;
+      reason: "not_blocked" | "missing_blocker_profile" | "not_occupies" | "pushable" | "up_blocked" | "up_forward_blocked";
+      blocker_profile?: BlockerCapabilityProfile | null;
+      up?: MoveCheck;
+      up_forward?: MoveCheck;
+    };
 
 export type LegalityContext = {
   exclude_owner?: OwnerRef;
@@ -228,9 +242,54 @@ function build_blocker_profile(owner_kind: "tile" | "occupant", owner_id: string
     effective_tags: Array.isArray(tags) ? tags : [],
     occupies: flags.occupies,
     pushable: flags.pushable,
-    can_step_up: has_tag_name(tags, 'STEP_UP') && !flags.pushable,
     can_climb_surface: has_tag_name(tags, 'CLIMB_SURFACE') && !flags.pushable,
   };
+}
+
+export function can_walk_step_up_from_blocked_forward(
+  place: Place,
+  owner: OwnerRef,
+  current_origin: Voxel,
+  desired: { dx: number; dy: number },
+  forward_check: MoveCheck,
+  ctx: LegalityContext = {},
+): WalkStepUpCheck {
+  if (forward_check.ok || forward_check.reason !== "blocked") {
+    return { ok: false, reason: "not_blocked" };
+  }
+
+  const blocker_profile = (forward_check as any)?.detail?.blocker_profile as BlockerCapabilityProfile | null | undefined;
+  if (!blocker_profile) {
+    return { ok: false, reason: "missing_blocker_profile", blocker_profile: null };
+  }
+  if (!blocker_profile.occupies) {
+    return { ok: false, reason: "not_occupies", blocker_profile };
+  }
+  if (blocker_profile.pushable) {
+    return { ok: false, reason: "pushable", blocker_profile };
+  }
+
+  const cur_x = Math.floor(Number(current_origin?.x ?? 0));
+  const cur_y = Math.floor(Number(current_origin?.y ?? 0));
+  const cur_z = Math.floor(Number(current_origin?.z ?? 0));
+  const dx = Math.floor(Number(desired?.dx ?? 0));
+  const dy = Math.floor(Number(desired?.dy ?? 0));
+  const next_ctx = { ...ctx, exclude_owner: ctx.exclude_owner ?? owner };
+
+  const up = can_place_volume(place, owner, { x: cur_x, y: cur_y, z: cur_z + 1 }, "WALK", {
+    ...next_ctx,
+    allow_unsupported: true,
+  });
+  if (!up.ok) {
+    return { ok: false, reason: "up_blocked", blocker_profile, up };
+  }
+
+  const up_forward = can_place_volume(place, owner, { x: cur_x + dx, y: cur_y + dy, z: cur_z + 1 }, "WALK", next_ctx);
+  if (!up_forward.ok) {
+    return { ok: false, reason: "up_forward_blocked", blocker_profile, up, up_forward };
+  }
+
+  return { ok: true, blocker_profile, up, up_forward };
 }
 
 function find_blocking_occupant_at(place: Place, x: number, y: number, z: number, ctx: LegalityContext | undefined): OccupantInfo | null {

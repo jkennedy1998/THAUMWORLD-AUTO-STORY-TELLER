@@ -17,6 +17,7 @@ import { debug_log } from "../shared/debug.js";
 /** Sense broadcast for a single sense */
 export interface SenseBroadcast {
   sense: SenseType;           // One of: light, pressure, aroma, thaumic
+  broadcast_mag?: number;     // Canonical broadcast MAG for distance/detail scaling
   intensity: number;          // 1-10 scale (loudness/visibility)
   range_tiles: number;        // How far this sense travels
   directional: boolean;       // True only for light (requires facing)
@@ -49,6 +50,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
     broadcasts: [
       {
         sense: "light",
+        broadcast_mag: 0,
         intensity: 3,
         // Default to NORMAL if subtype is omitted.
         range_tiles: 3,
@@ -57,6 +59,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
       },
       {
         sense: "pressure",
+        broadcast_mag: 0,
         intensity: 5,
         // Default to NORMAL if subtype is omitted.
         range_tiles: 5,
@@ -73,6 +76,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
     broadcasts: [
       {
         sense: "pressure",
+        broadcast_mag: -1,
         intensity: 2,
         // Distance MAG +1: MAG1 (adjacent) -> MAG2 (3 tiles)
         range_tiles: 3,
@@ -89,6 +93,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
     broadcasts: [
       {
         sense: "light",
+        broadcast_mag: 0,
         intensity: 3,
         range_tiles: 3,
         directional: true,
@@ -96,6 +101,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
       },
       {
         sense: "pressure",
+        broadcast_mag: 0,
         intensity: 5,
         // Distance MAG +1: MAG2 (3 tiles) -> MAG3 (5 tiles)
         range_tiles: 5,
@@ -112,6 +118,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
     broadcasts: [
       {
         sense: "light",
+        broadcast_mag: 1,
         intensity: 5,
         range_tiles: 10,
         directional: true,
@@ -119,6 +126,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
       },
       {
         sense: "pressure",
+        broadcast_mag: 2,
         intensity: 8,
         // Distance MAG +1: MAG4 (10 tiles) -> MAG5 (30 tiles)
         range_tiles: 30,
@@ -136,6 +144,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
     broadcasts: [
       {
         sense: "light",
+        broadcast_mag: 0,
         intensity: 5,
         range_tiles: 12,
         directional: true,
@@ -143,6 +152,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
       },
       {
         sense: "pressure",
+        broadcast_mag: 0,
         intensity: 3,
         range_tiles: 5,
         directional: false,
@@ -158,6 +168,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
     broadcasts: [
       {
         sense: "light",
+        broadcast_mag: 1,
         intensity: 7,
         range_tiles: 15,
         directional: true,
@@ -165,6 +176,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
       },
       {
         sense: "pressure",
+        broadcast_mag: 1,
         intensity: 6,
         range_tiles: 8,
         directional: false,
@@ -180,6 +192,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
     broadcasts: [
       {
         sense: "light",
+        broadcast_mag: -1,
         intensity: 4,
         range_tiles: 10,
         directional: true,
@@ -187,6 +200,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
       },
       {
         sense: "pressure",
+        broadcast_mag: -1,
         intensity: 1,
         range_tiles: 3,
         directional: false,
@@ -203,6 +217,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
     broadcasts: [
       {
         sense: "light",
+        broadcast_mag: 1,
         intensity: 7,
         range_tiles: 8,
         directional: true,
@@ -210,6 +225,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
       },
       {
         sense: "pressure",
+        broadcast_mag: 1,
         intensity: 7,
         range_tiles: 6,
         directional: false,
@@ -225,6 +241,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
     broadcasts: [
       {
         sense: "light",
+        broadcast_mag: 1,
         intensity: 6,
         range_tiles: 10,
         directional: true,
@@ -232,6 +249,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
       },
       {
         sense: "pressure",
+        broadcast_mag: 1,
         intensity: 6,
         range_tiles: 8,
         directional: false,
@@ -247,6 +265,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
     broadcasts: [
       {
         sense: "light",
+        broadcast_mag: 2,
         intensity: 9,
         range_tiles: 15,
         directional: true,
@@ -254,6 +273,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
       },
       {
         sense: "pressure",
+        broadcast_mag: 2,
         intensity: 9,
         range_tiles: 15,
         directional: false,
@@ -276,6 +296,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
     broadcasts: [
       {
         sense: "light",
+        broadcast_mag: -1,
         intensity: 4,
         range_tiles: 5,
         directional: true,
@@ -283,6 +304,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
       },
       {
         sense: "pressure",
+        broadcast_mag: -1,
         intensity: 2,
         range_tiles: 2,
         directional: false,
@@ -299,6 +321,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
     broadcasts: [
       {
         sense: "light",
+        broadcast_mag: -1,
         intensity: 4,
         range_tiles: 4,
         directional: true,
@@ -306,6 +329,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
       },
       {
         sense: "pressure",
+        broadcast_mag: 0,
         intensity: 4,
         range_tiles: 4,
         directional: false,
@@ -321,6 +345,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
     broadcasts: [
       {
         sense: "light",
+        broadcast_mag: -1,
         intensity: 3,
         range_tiles: 3,
         directional: true,
@@ -328,6 +353,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
       },
       {
         sense: "pressure",
+        broadcast_mag: -1,
         intensity: 2,
         range_tiles: 2,
         directional: false,
@@ -344,6 +370,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
     broadcasts: [
       {
         sense: "light",
+        broadcast_mag: 2,
         intensity: 8,
         range_tiles: 20,
         directional: true,
@@ -351,6 +378,7 @@ export const ACTION_SENSE_PROFILES: Record<string, ActionSenseProfile> = {
       },
       {
         sense: "pressure",
+        broadcast_mag: 1,
         intensity: 5,
         range_tiles: 10,
         directional: false,
@@ -419,6 +447,25 @@ export function get_primary_sense(
   return broadcasts.reduce((max, current) => 
     current.intensity > max.intensity ? current : max
   );
+}
+
+export function get_broadcast_mag(broadcast: SenseBroadcast): number {
+  if (Number.isFinite(Number(broadcast.broadcast_mag))) {
+    return Math.floor(Number(broadcast.broadcast_mag));
+  }
+  if (broadcast.sense === "pressure") {
+    if (broadcast.range_tiles >= 30) return 2;
+    if (broadcast.range_tiles >= 8) return 1;
+    if (broadcast.range_tiles >= 5) return 0;
+    return -1;
+  }
+  if (broadcast.sense === "light") {
+    if (broadcast.range_tiles >= 15) return 2;
+    if (broadcast.range_tiles >= 8) return 1;
+    if (broadcast.range_tiles >= 3) return 0;
+    return -1;
+  }
+  return 0;
 }
 
 /**
@@ -493,7 +540,7 @@ export function log_sense_broadcast(
   if (!profile) return;
   
   const sense_names = profile.broadcasts.map(b => 
-    `${b.sense}(int:${b.intensity},rng:${b.range_tiles})`
+    `${b.sense}(mag:${get_broadcast_mag(b)},int:${b.intensity},rng:${b.range_tiles})`
   ).join(", ");
   
   debug_log("SenseBroadcast", `${entity_ref} ${verb}${subtype ? "." + subtype : ""} at (${location.x},${location.y}): ${sense_names}`);

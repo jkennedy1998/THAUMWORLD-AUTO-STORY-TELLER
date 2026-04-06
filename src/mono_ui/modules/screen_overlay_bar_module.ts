@@ -12,12 +12,22 @@ type OverlayButton = {
   is_active?: () => boolean;
 };
 
+type OverlayTab = {
+  id: string;
+  label: string | (() => string);
+  width?: number;
+  items?: OverlayButton[] | (() => OverlayButton[]);
+  is_visible?: () => boolean;
+};
+
 type OverlayBarOptions = {
   id: string;
   title?: string;
   get_screen_size: () => { width: number; height: number };
+  get_insets?: () => { left?: number; right?: number; top?: number; bottom?: number };
   anchor?: 'bottom' | 'top';
   buttons: () => OverlayButton[];
+  tabs?: () => OverlayTab[];
   get_status_text?: () => string;
   get_is_visible?: () => boolean;
   get_is_expanded?: () => boolean;
@@ -32,7 +42,7 @@ type OverlayBarOptions = {
 };
 
 const ANIMATION_MS = 140;
-const HANDLE_WIDTH = 11;
+const HANDLE_WIDTH = 1;
 
 function clamp01(v: number): number {
   return Math.max(0, Math.min(1, v));
@@ -48,6 +58,7 @@ function resolve_label(label: OverlayButton['label']): string {
 
 export function make_screen_overlay_bar_module(opts: OverlayBarOptions): Module {
   let expanded = opts.default_expanded ?? true;
+  let active_tab_id: string | null | undefined = undefined;
   let anim_from = expanded ? 1 : 0;
   let anim_to = expanded ? 1 : 0;
   let anim_started_at = Date.now();
@@ -56,10 +67,15 @@ export function make_screen_overlay_bar_module(opts: OverlayBarOptions): Module 
 
   const collapsed_height = Math.max(3, opts.collapsed_height ?? 3);
   const expanded_height = Math.max(collapsed_height, opts.expanded_height ?? 5);
-  const inset_left = Math.max(0, opts.inset_left ?? 2);
-  const inset_right = Math.max(0, opts.inset_right ?? 2);
-  const inset_top = Math.max(0, opts.inset_top ?? 1);
-  const inset_bottom = Math.max(0, opts.inset_bottom ?? 1);
+  function get_insets(): { left: number; right: number; top: number; bottom: number } {
+    const dynamic = opts.get_insets?.() ?? {};
+    return {
+      left: Math.max(0, dynamic.left ?? opts.inset_left ?? 2),
+      right: Math.max(0, dynamic.right ?? opts.inset_right ?? 2),
+      top: Math.max(0, dynamic.top ?? opts.inset_top ?? 1),
+      bottom: Math.max(0, dynamic.bottom ?? opts.inset_bottom ?? 1),
+    };
+  }
 
   function get_target_expanded(): boolean {
     return opts.get_is_expanded ? opts.get_is_expanded() : expanded;
@@ -94,42 +110,49 @@ export function make_screen_overlay_bar_module(opts: OverlayBarOptions): Module 
 
   function get_rect(): Rect {
     const { width, height } = opts.get_screen_size();
+    const insets = get_insets();
     const progress = get_progress();
     const current_height = collapsed_height + Math.round((expanded_height - collapsed_height) * progress);
     if ((opts.anchor ?? 'bottom') === 'top') {
       return {
-        x0: inset_left - runtime_pan_x,
-        y0: (height - current_height - inset_top) + runtime_pan_y,
-        x1: (width - 1 - inset_right) - runtime_pan_x,
-        y1: (height - 1 - inset_top) + runtime_pan_y,
+        x0: insets.left - runtime_pan_x,
+        y0: (height - current_height - insets.top) + runtime_pan_y,
+        x1: (width - 1 - insets.right) - runtime_pan_x,
+        y1: (height - 1 - insets.top) + runtime_pan_y,
       };
     }
     return {
-      x0: inset_left - runtime_pan_x,
-      y0: inset_bottom + runtime_pan_y,
-      x1: (width - 1 - inset_right) - runtime_pan_x,
-      y1: (inset_bottom + current_height - 1) + runtime_pan_y,
+      x0: insets.left - runtime_pan_x,
+      y0: insets.bottom + runtime_pan_y,
+      x1: (width - 1 - insets.right) - runtime_pan_x,
+      y1: (insets.bottom + current_height - 1) + runtime_pan_y,
     };
   }
 
-  function get_pan_bounds(): { min_x: number; max_x: number; min_y: number; max_y: number } {
-    const { height } = opts.get_screen_size();
-    const progress = get_progress();
-    const current_height = collapsed_height + Math.round((expanded_height - collapsed_height) * progress);
-    if ((opts.anchor ?? 'bottom') === 'top') {
-      return {
-        min_x: -inset_right,
-        max_x: inset_left,
-        min_y: -(height - current_height - inset_top),
-        max_y: inset_top,
-      };
+  function get_tabs(): OverlayTab[] {
+    const tabs = opts.tabs?.() ?? [];
+    return tabs.filter((tab) => tab.is_visible ? tab.is_visible() : true);
+  }
+
+  function get_active_tab(): OverlayTab | null {
+    const tabs = get_tabs();
+    if (tabs.length < 1) {
+      active_tab_id = null;
+      return null;
     }
-    return {
-      min_x: -inset_right,
-      max_x: inset_left,
-      min_y: -inset_bottom,
-      max_y: height - current_height - inset_bottom,
-    };
+    if (active_tab_id === undefined) {
+      active_tab_id = tabs[0]?.id ?? null;
+    }
+    if (active_tab_id === null) return null;
+    if (!tabs.some((tab) => tab.id === active_tab_id)) {
+      active_tab_id = tabs[0]?.id ?? null;
+    }
+    return tabs.find((tab) => tab.id === active_tab_id) ?? null;
+  }
+
+  function get_tab_items(tab: OverlayTab | null): OverlayButton[] {
+    if (!tab?.items) return [];
+    return typeof tab.items === 'function' ? tab.items() : tab.items;
   }
 
   function get_handle_bounds(rect: Rect): { x0: number; x1: number; y: number } {
@@ -158,8 +181,12 @@ export function make_screen_overlay_bar_module(opts: OverlayBarOptions): Module 
       : rect.y0 + 2;
   }
 
+  function get_tab_row_y(rect: Rect): number | null {
+    return get_status_row_y(rect);
+  }
+
   function get_button_layout(rect: Rect): Array<{ button: OverlayButton; x0: number; x1: number }> {
-    const buttons = opts.buttons();
+    const buttons = get_tab_items(get_active_tab());
     const layout: Array<{ button: OverlayButton; x0: number; x1: number }> = [];
     let x = rect.x0 + 2;
     for (const button of buttons) {
@@ -167,6 +194,19 @@ export function make_screen_overlay_bar_module(opts: OverlayBarOptions): Module 
       const width = button.width ?? Math.max(4, label.length);
       if (x + width > rect.x1 - 1) break;
       layout.push({ button, x0: x, x1: x + width - 1 });
+      x += width + 2;
+    }
+    return layout;
+  }
+
+  function get_tab_layout(rect: Rect): Array<{ tab: OverlayTab; x0: number; x1: number }> {
+    const layout: Array<{ tab: OverlayTab; x0: number; x1: number }> = [];
+    let x = rect.x0 + 2;
+    for (const tab of get_tabs()) {
+      const label = resolve_label(tab.label);
+      const width = tab.width ?? Math.max(5, label.length);
+      if (x + width > rect.x1 - 1) break;
+      layout.push({ tab, x0: x, x1: x + width - 1 });
       x += width + 2;
     }
     return layout;
@@ -181,14 +221,14 @@ export function make_screen_overlay_bar_module(opts: OverlayBarOptions): Module 
     }
   }
 
+  function toggle_tab(tab_id: string): void {
+    active_tab_id = active_tab_id === tab_id ? null : tab_id;
+  }
+
   return {
     id: opts.id,
     get rect() { return get_rect(); },
     Focusable: true,
-    isScreenLocked: true,
-    getScreenLockedPanBounds(): { min_x: number; max_x: number; min_y: number; max_y: number } {
-      return get_pan_bounds();
-    },
     setRuntimePanOffset(x_tiles: number, y_tiles: number): void {
       runtime_pan_x = x_tiles;
       runtime_pan_y = y_tiles;
@@ -211,28 +251,28 @@ export function make_screen_overlay_bar_module(opts: OverlayBarOptions): Module 
         weight_index: PANEL_BORDER_PRESETS.default_double.weight_index,
       });
 
-      const handle_label = `${get_target_expanded() ? 'v' : '^'} ${opts.title ?? 'SHORTCUTS'}`;
-      for (let i = 0; i < handle_label.length && handle.x0 + i <= handle.x1; i++) {
-        c.set(handle.x0 + i, handle.y, {
-          char: handle_label[i]!,
-          rgb: accent_rgb,
-          style: 'regular',
-          weight_index: 5,
-          render_index: 7,
-        });
-      }
+      c.set(handle.x0, handle.y, {
+        char: get_target_expanded() ? 'v' : '^',
+        rgb: accent_rgb,
+        style: 'regular',
+        weight_index: 6,
+        render_index: 7,
+      });
 
-      const status_y = get_status_row_y(rect);
-      const status_text = opts.get_status_text?.();
-      if (status_y !== null && status_text) {
-        for (let i = 0; i < status_text.length && rect.x0 + 2 + i < rect.x1; i++) {
-          c.set(rect.x0 + 2 + i, status_y, {
-            char: status_text[i]!,
-            rgb: text_rgb,
-            style: 'regular',
-            weight_index: 4,
-            render_index: 6,
-          });
+      const tab_y = get_tab_row_y(rect);
+      if (tab_y !== null) {
+        for (const entry of get_tab_layout(rect)) {
+          const label = resolve_label(entry.tab.label);
+          const color = entry.tab.id === active_tab_id ? accent_rgb : text_rgb;
+          for (let i = 0; i < label.length && entry.x0 + i <= entry.x1; i++) {
+            c.set(entry.x0 + i, tab_y, {
+              char: label[i]!,
+              rgb: color,
+              style: 'regular',
+              weight_index: entry.tab.id === active_tab_id ? 6 : 4,
+              render_index: 6,
+            });
+          }
         }
       }
 
@@ -251,6 +291,21 @@ export function make_screen_overlay_bar_module(opts: OverlayBarOptions): Module 
             });
           }
         }
+
+        if (get_button_layout(rect).length < 1) {
+          const status_text = opts.get_status_text?.();
+          if (status_text) {
+            for (let i = 0; i < status_text.length && rect.x0 + 2 + i < rect.x1; i++) {
+              c.set(rect.x0 + 2 + i, button_y, {
+                char: status_text[i]!,
+                rgb: text_rgb,
+                style: 'regular',
+                weight_index: 4,
+                render_index: 6,
+              });
+            }
+          }
+        }
       }
     },
 
@@ -262,6 +317,15 @@ export function make_screen_overlay_bar_module(opts: OverlayBarOptions): Module 
       if (e.y === handle.y && e.x >= handle.x0 && e.x <= handle.x1) {
         set_expanded(!get_target_expanded());
         return;
+      }
+      const tab_y = get_tab_row_y(rect);
+      if (tab_y !== null && e.y === tab_y) {
+        for (const entry of get_tab_layout(rect)) {
+          if (e.x >= entry.x0 && e.x <= entry.x1) {
+            toggle_tab(entry.tab.id);
+            return;
+          }
+        }
       }
       const button_y = get_button_row_y(rect);
       if (button_y === null || e.y !== button_y) return;
@@ -285,10 +349,6 @@ export function make_screen_overlay_bar_module(opts: OverlayBarOptions): Module 
         press_button(button);
         return;
       }
-    },
-
-    OnDragMove(): void {
-      // Intentionally present to prevent global panning from stealing overlay interactions.
     },
   };
 }

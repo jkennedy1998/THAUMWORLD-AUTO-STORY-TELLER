@@ -588,9 +588,9 @@ export function apply_rules_stub(commands: CommandNode[], slot: number): RuleRes
                         const clarity = compute_awareness_clarity(slot, command.subject, senses, context);
                         if (clarity === "none") continue;
                         if (clarity === "obscured") {
-                            effect_lines.push(`SYSTEM.SET_AWARENESS(observer=${command.subject}, target=${t.value}, clarity=obscured)`);
+                            effect_lines.push(`SYSTEM.SET_AWARENESS(observer=${t.value}, target=${command.subject}, clarity=obscured, identity_known=false)`);
                         } else {
-                            effect_lines.push(`SYSTEM.SET_AWARENESS(observer=${command.subject}, target=${t.value})`);
+                            effect_lines.push(`SYSTEM.SET_AWARENESS(observer=${t.value}, target=${command.subject}, clarity=clear, identity_known=true)`);
                         }
                     }
                 }

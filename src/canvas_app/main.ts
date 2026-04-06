@@ -9,6 +9,7 @@ const IS_PAINTER_MODE = (window as any).electronAPI?.appMode === 'ascii_painter'
 
 const el = document.getElementById('mono_canvas') as HTMLCanvasElement | null;
 if (!el) throw new Error('mono_canvas element not found');
+const canvasEl = el;
 
 let modules: readonly Module[];
 let module_registry: any;
@@ -17,6 +18,7 @@ let on_pointer_move_global: ((x: number, y: number, e: any) => void) | undefined
 let on_after_compose: ((canvas: any) => void) | undefined;
 
 let painter_state: ReturnType<typeof create_painter_app_state> | null = null;
+let game_state: ReturnType<typeof create_app_state> | null = null;
 
 if (IS_PAINTER_MODE) {
     // PAINTER MODE
@@ -44,7 +46,7 @@ if (IS_PAINTER_MODE) {
 } else {
     // GAME MODE
     console.log('🎮 Initializing Game...');
-    const game_state = create_app_state();
+    game_state = create_app_state();
     modules = game_state.modules;
     module_registry = game_state.module_registry;
     on_drag_end_outside = game_state.on_drag_end_outside;
@@ -53,6 +55,31 @@ if (IS_PAINTER_MODE) {
 }
 
 const config = IS_PAINTER_MODE ? PAINTER_CONFIG : APP_CONFIG;
+const layout_state = IS_PAINTER_MODE ? painter_state : game_state;
+
+function compute_responsive_grid(scale: number): { width: number; height: number } | null {
+    const viewport = canvasEl.parentElement;
+    if (!viewport) return null;
+
+    const metricsCanvas = document.createElement('canvas');
+    const metricsCtx = metricsCanvas.getContext('2d');
+    if (!metricsCtx) return null;
+
+    const s = Number.isFinite(scale) ? Math.max(0.25, Math.min(6.0, scale)) : 1.0;
+    const fontSizePx = config.base_font_size_px * s;
+    const lineHeightPx = fontSizePx * config.base_line_height_mult;
+    const letterSpacingPx = fontSizePx * config.base_letter_spacing_mult;
+    metricsCtx.font = `400 ${fontSizePx}px ${config.font_family}`;
+    const glyphW = metricsCtx.measureText('M').width;
+    const tileW = glyphW + letterSpacingPx;
+    const tileH = lineHeightPx;
+    if (!Number.isFinite(tileW) || !Number.isFinite(tileH) || tileW <= 0 || tileH <= 0) return null;
+
+    return {
+        width: Math.max(1, Math.floor(viewport.clientWidth / tileW)),
+        height: Math.max(1, Math.floor(viewport.clientHeight / tileH)),
+    };
+}
 
 function get_visible_modules(): readonly Module[] {
     if (!module_registry?.get_all) return modules;
@@ -68,7 +95,7 @@ function get_visible_modules(): readonly Module[] {
 }
 
 const runtime = new CanvasRuntime({
-    canvas: el,
+    canvas: canvasEl,
     grid_width: config.grid_width,
     grid_height: config.grid_height,
     font_family: config.font_family,
@@ -81,6 +108,13 @@ const runtime = new CanvasRuntime({
     on_pointer_move_global,
     on_after_compose,
 });
+
+function apply_responsive_layout(scale: number): void {
+    const next = compute_responsive_grid(scale);
+    if (!next) return;
+    runtime.set_grid_size(next.width, next.height);
+    layout_state?.update_layout(next.width, next.height);
+}
 
 // Subscribe to module registry changes
 if (module_registry) {
@@ -153,7 +187,7 @@ if (IS_PAINTER_MODE && painter_state) {
         }
 
         if (!gotPanEvent || bootWarmup) {
-            const r = el.getBoundingClientRect();
+            const r = canvasEl.getBoundingClientRect();
             if (Number.isFinite(r.left) && Number.isFinite(r.top)) {
                 globalPan.x = r.left;
                 globalPan.y = r.top;
@@ -299,6 +333,7 @@ async function boot() {
     }
 
     runtime.set_scale(saved_scale);
+    apply_responsive_layout(saved_scale);
     update_texture_filter_for_scale(saved_scale);
     update_background_for_scale(saved_scale);
 
@@ -306,6 +341,7 @@ async function boot() {
         window.addEventListener('thaumworld_ui_scale', (ev: any) => {
             const next = Number(ev?.detail?.scale);
             if (!Number.isFinite(next)) return;
+            apply_responsive_layout(next);
             update_texture_filter_for_scale(next);
             update_background_for_scale(next);
         });
@@ -326,6 +362,14 @@ async function boot() {
         } catch {
             // ignore
         }
+    }
+
+    try {
+        window.addEventListener('resize', () => {
+            apply_responsive_layout(runtime.get_scale());
+        });
+    } catch {
+        // ignore
     }
 
     runtime.start();

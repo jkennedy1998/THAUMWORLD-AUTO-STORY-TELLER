@@ -5,14 +5,11 @@ import type { ActionVerb } from "../shared/constants.js";
 import type { TargetType, ActionDefinition } from "./registry.js";
 import { ACTION_REGISTRY, isValidTargetType } from "./registry.js";
 import type { ActionIntent, Location } from "./intent.js";
-import { get_entities_in_place } from "../place_storage/entity_index.js";
-import { load_npc } from "../npc_storage/store.js";
-import { load_actor } from "../actor_storage/store.js";
-import { get_npc_location } from "../npc_storage/location.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
 import { get_configured_data_slot } from "../shared/boot_env.js";
 import { DEBUG_LEVEL } from "../shared/debug.js";
 import { debug_event } from "../shared/debug_event.js";
+import { get_perceivable_entities_in_place } from "../shared/perceivable_entities.js";
 
 function parsePlaceTileRef(targetRef: string): { place_id: string; x: number; y: number } | null {
   const parts = targetRef.split('.');
@@ -138,9 +135,12 @@ export function calculateDistance(loc1: Location, loc2: Location): number {
       loc1.region_y === loc2.region_y) {
     if (loc1.x !== undefined && loc1.y !== undefined && 
         loc2.x !== undefined && loc2.y !== undefined) {
+      const z1 = Number.isFinite(Number(loc1.z)) ? Number(loc1.z) : 0;
+      const z2 = Number.isFinite(Number(loc2.z)) ? Number(loc2.z) : 0;
       return Math.sqrt(
         Math.pow(loc1.x - loc2.x, 2) + 
-        Math.pow(loc1.y - loc2.y, 2)
+        Math.pow(loc1.y - loc2.y, 2) +
+        Math.pow(z1 - z2, 2)
       );
     }
   }
@@ -454,7 +454,6 @@ export async function getAvailableTargets(
   location: Location,
   radius: number = 50
 ): Promise<AvailableTarget[]> {
-  const data_slot = get_configured_data_slot();
   const targets: AvailableTarget[] = [];
   
   // Need place_id to look up entities
@@ -462,91 +461,32 @@ export async function getAvailableTargets(
   if (!place_id) {
     return targets;
   }
-  
-  // Get all entities in this place from the index
-  const entities = get_entities_in_place(data_slot, place_id);
-  
-  // Process NPCs
-  for (const npc_ref of entities.npcs) {
-    const npc_id = npc_ref.replace("npc.", "");
-    
-    const npc_result = load_npc(data_slot, npc_id);
-    
-    if (!npc_result.ok || !npc_result.npc) {
-      continue;
-    }
-    
-    const npc_location = get_npc_location(npc_result.npc);
-    if (!npc_location) {
-      continue;
-    }
-    
-    // Calculate distance (in tile space within the place)
-    const npc_tile_pos = npc_location.tile;
-    const actor_tile_pos = { x: location.x ?? 0, y: location.y ?? 0 };
-    const distance = Math.sqrt(
-      Math.pow(npc_tile_pos.x - actor_tile_pos.x, 2) +
-      Math.pow(npc_tile_pos.y - actor_tile_pos.y, 2)
-    );
-    
-    if (distance <= radius) {
-      targets.push({
-        ref: npc_ref,
-        type: "character",
-        name: (npc_result.npc.name as string) || npc_id,
-        location: {
-          world_x: npc_location.world_tile.x,
-          world_y: npc_location.world_tile.y,
-          region_x: npc_location.region_tile.x,
-          region_y: npc_location.region_tile.y,
-          x: npc_tile_pos.x,
-          y: npc_tile_pos.y,
-          place_id: place_id
-        },
-        distance
-      });
-    }
-  }
-  
-  // Process Actors
-  for (const actor_ref of entities.actors) {
-    const actor_id = actor_ref.replace("actor.", "");
-    const actor_result = load_actor(data_slot, actor_id);
-    
-    if (!actor_result.ok || !actor_result.actor) {
-      continue;
-    }
-    
-    const actor_loc = (actor_result.actor as any).location;
-    if (!actor_loc?.tile) {
-      continue;
-    }
-    
-    // Calculate distance
-    const actor_tile_pos = { x: location.x ?? 0, y: location.y ?? 0 };
-    const other_tile_pos = actor_loc.tile;
-    const distance = Math.sqrt(
-      Math.pow(other_tile_pos.x - actor_tile_pos.x, 2) +
-      Math.pow(other_tile_pos.y - actor_tile_pos.y, 2)
-    );
-    
-    if (distance <= radius) {
-      targets.push({
-        ref: actor_ref,
-        type: "character",
-        name: (actor_result.actor.name as string) || actor_id,
-        location: {
-          world_x: actor_loc.world_tile?.x ?? 0,
-          world_y: actor_loc.world_tile?.y ?? 0,
-          region_x: actor_loc.region_tile?.x ?? 0,
-          region_y: actor_loc.region_tile?.y ?? 0,
-          x: other_tile_pos.x,
-          y: other_tile_pos.y,
-          place_id: place_id
-        },
-        distance
-      });
-    }
+  const data_slot = get_configured_data_slot();
+  const candidates = get_perceivable_entities_in_place({
+    slot: data_slot,
+    place_id,
+    origin: { x: location.x ?? 0, y: location.y ?? 0, z: (location as any).z },
+    radius,
+    include_kinds: ["character"],
+  });
+
+  for (const candidate of candidates) {
+    targets.push({
+      ref: candidate.ref,
+      type: "character",
+      name: candidate.name || candidate.ref.replace(/^(actor|npc)\./, ""),
+      location: {
+        world_x: location.world_x,
+        world_y: location.world_y,
+        region_x: location.region_x,
+        region_y: location.region_y,
+        x: candidate.position.x,
+        y: candidate.position.y,
+        z: candidate.position.z,
+        place_id: candidate.position.place_id,
+      },
+      distance: candidate.distance,
+    });
   }
   
   if (DEBUG_LEVEL >= 4) {
@@ -562,12 +502,13 @@ export async function getAvailableTargets(
   return targets;
 }
 
-// Check if actor is aware of target
 export async function checkAwareness(
   actorRef: string,
-  targetRef: string
+  targetRef: string,
+  actorData?: Record<string, unknown> | null
 ): Promise<boolean> {
-  // This would check the awareness system
-  // For now, return true
-  return true;
+  if (!targetRef || targetRef === actorRef) return true;
+  if (!actorData) return true;
+  return has_awareness_entry(actorData, targetRef);
 }
+import { has_awareness_entry } from "../shared/awareness.js";

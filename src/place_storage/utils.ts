@@ -17,6 +17,7 @@ import type {
 import { load_place, save_place } from "./store.js";
 import { get_place_region_bounds, get_places_face_adjacency, is_region_voxel_inside_place, region_voxel_to_local_voxel } from "../shared/place_adjacency.js";
 import { normalize_place_actor_presence, normalize_place_npc_presence } from "../shared/place_character_presence.js";
+import { get_perceivable_entities_from_place } from "../shared/perceivable_entities.js";
 
 /**
  * Calculate distance between two tile positions (in tiles)
@@ -78,13 +79,15 @@ export function get_nearby_entities_in_place(
   npcs: PlaceNPC[];
   actors: PlaceActor[];
 } {
-  const npcs = place.contents.npcs_present.filter(npc =>
-    get_tile_distance(center, npc.tile_position) <= radius_tiles
-  );
-  
-  const actors = place.contents.actors_present.filter(actor =>
-    get_tile_distance(center, actor.tile_position) <= radius_tiles
-  );
+  const candidates = get_perceivable_entities_from_place({
+    place,
+    origin: center,
+    radius: radius_tiles,
+    include_kinds: ["character"],
+  });
+  const refs = new Set(candidates.map((candidate) => candidate.ref));
+  const npcs = place.contents.npcs_present.filter((npc) => refs.has(String(npc.npc_ref ?? "")));
+  const actors = place.contents.actors_present.filter((actor) => refs.has(String(actor.actor_ref ?? "")));
   
   return { npcs, actors };
 }

@@ -93,7 +93,24 @@ function adjust_inventory(effect_id: string, target_path: string, item_ref: stri
     diffs.push({ effect_id, target: data.id ?? target_path, field: `inventory.${item_id}`, delta: mag, reason: "SYSTEM.ADJUST_INVENTORY" });
 }
 
-function apply_awareness(effect_id: string, observer_path: string, observer_ref: string, target_ref: string, clarity: string | null, diffs: AppliedDiff[]): void {
+function get_boolean(value: ValueNode | undefined): boolean | null {
+    if (!value) return null;
+    if (value.type === "identifier") {
+        if (value.value === "true") return true;
+        if (value.value === "false") return false;
+    }
+    return null;
+}
+
+function apply_awareness(
+    effect_id: string,
+    observer_path: string,
+    observer_ref: string,
+    target_ref: string,
+    clarity: string | null,
+    identity_known: boolean | null,
+    diffs: AppliedDiff[]
+): void {
     // Filter out self-awareness (observer becoming aware of themselves)
     if (observer_ref === target_ref) {
         return;
@@ -107,7 +124,9 @@ function apply_awareness(effect_id: string, observer_path: string, observer_ref:
         return;
     }
 
-    set_awareness_entry(data, target_ref, clarity);
+    set_awareness_entry(data, target_ref, clarity, {
+        identity_known: identity_known ?? undefined,
+    });
     write_jsonc(observer_path, data);
     diffs.push({ effect_id, target: data.id ?? observer_path, field: "awareness", delta: 1, reason: "SYSTEM.SET_AWARENESS" });
 }
@@ -228,7 +247,8 @@ export function apply_effects(commands: CommandNode[], target_paths: Record<stri
                 continue;
             }
             const clarity = get_identifier(cmd.args.clarity) ?? null;
-            apply_awareness(effect_id, observer_path, observer_ref, target_ref, clarity, diffs);
+            const identity_known = get_boolean(cmd.args.identity_known);
+            apply_awareness(effect_id, observer_path, observer_ref, target_ref, clarity, identity_known, diffs);
         } else if (cmd.verb === "SET_OCCUPANCY") {
             // Parse tiles list from command args
             const tiles_arg = cmd.args.tiles;

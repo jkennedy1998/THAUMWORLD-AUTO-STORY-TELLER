@@ -12,8 +12,6 @@
 import type { TilePosition } from "../types/place.js";
 import { DEBUG_LEVEL, debug_log } from "../shared/debug.js";
 import type { Place } from "../types/place.js";
-import type { PerceptionEvent, PerceptionDetails } from "../action_system/perception.js";
-import { get_senses_for_action } from "../action_system/sense_broadcast.js";
 
 /**
  * Called by the shared movement engine when an entity moves.
@@ -36,6 +34,7 @@ export function process_witness_movement(
     mover_ref,
     x: mover_position.x,
     y: mover_position.y,
+    z: mover_position.z,
     step_number,
     total_steps,
   });
@@ -96,76 +95,34 @@ export async function emit_move_perception_batch(options: {
 
   const now = Date.now();
   const last = last_emit_by_mover.get(mover_ref) ?? 0;
-  if (now - last < MIN_EMIT_INTERVAL_MS) return;
+  if (now - last < MIN_EMIT_INTERVAL_MS) {
+    console.info("[MovementPerception] emit_move_perception_batch.skipped_throttle", {
+      mover_ref,
+      place_id: place.id,
+      step_number,
+      total_steps,
+      speed_tpm,
+      since_last_ms: now - last,
+      min_interval_ms: MIN_EMIT_INTERVAL_MS,
+    });
+    return;
+  }
   last_emit_by_mover.set(mover_ref, now);
 
   // Only emit when Electron API is available (renderer context).
   const api = (globalThis as any)?.electronAPI ?? (globalThis as any)?.window?.electronAPI;
-  if (!api) return;
-
-  const move_subtype = infer_move_subtype(speed_tpm);
-  const broadcasts = get_senses_for_action("MOVE", move_subtype);
-  const senses = broadcasts.map(b => b.sense);
-
-  // Observers: all NPCs in the place except the mover if mover is an NPC.
-  const observers = place.contents.npcs_present.filter(n => n.npc_ref !== mover_ref);
-
-  const action_id = `move_${now}_${Math.random().toString(36).substring(2, 9)}`;
-  const created_at = new Date(now).toISOString();
-
-  const details_base: PerceptionDetails = {
-    movement: move_subtype,
-    step_number,
-    total_steps,
-    actor_pos: { x: mover_position.x, y: mover_position.y },
-  } as any;
-
-  const events: PerceptionEvent[] = [];
-  for (const obs of observers) {
-    const op = obs.tile_position;
-    const dx = mover_position.x - op.x;
-    const dy = mover_position.y - op.y;
-    const distance = Math.sqrt(dx * dx + dy * dy);
-
-    const details: PerceptionDetails = {
-      ...details_base,
-      observer_pos: { x: op.x, y: op.y },
-    } as any;
-
-    events.push({
-      id: `perc_${now}_${Math.random().toString(36).substring(2, 9)}`,
-      timestamp: now,
-      observerRef: obs.npc_ref,
-      type: "action_completed",
-      actionId: action_id,
-      actorRef: mover_ref,
-      actorType: mover_ref.startsWith("npc.") ? "npc" : "player",
-      actorVisibility: "clear",
-      actorIdentity: mover_ref,
-      verb: "MOVE",
-      subtype: move_subtype,
-      verbClarity: "clear",
-      targetRef: undefined,
-      targetVisibility: undefined,
-      location: {
-        world_x: 0,
-        world_y: 0,
-        region_x: 0,
-        region_y: 0,
-        x: mover_position.x,
-        y: mover_position.y,
-        place_id: place.id,
-      },
-      distance,
-      senses,
-      details,
-      threatLevel: 0,
-      interestLevel: 20,
-      urgency: 10,
+  if (!api) {
+    console.info("[MovementPerception] emit_move_perception_batch.skipped_no_api", {
+      mover_ref,
+      place_id: place.id,
+      step_number,
+      total_steps,
     });
+    return;
   }
 
-  if (events.length === 0) return;
+  const move_subtype = infer_move_subtype(speed_tpm);
+  const created_at = new Date(now).toISOString();
 
   try {
     const dataSlotDir = await api.getDataSlotDir(1);
@@ -183,31 +140,53 @@ export async function emit_move_perception_batch(options: {
     }
 
     const batch_msg = {
-      id: `perc_batch_${now}_${Math.random().toString(36).substring(2, 9)}`,
-      type: "perception_event_batch",
-      events,
+      id: `move_perc_batch_${now}_${Math.random().toString(36).substring(2, 9)}`,
+      type: "movement_perception_batch",
+      mover_ref,
+      mover_position,
       place_id: place.id,
-      timestamp: created_at,
+      step_number,
+      total_steps,
+      speed_tpm,
+      subtype: move_subtype,
+      timestamp_ms: now,
+      created_at: created_at,
       sender: "renderer",
       recipient: "interface_program",
     };
+
+    console.info("[MovementPerception] emit_move_perception_batch.write_start", {
+      message_id: batch_msg.id,
+      mover_ref,
+      place_id: place.id,
+      subtype: move_subtype,
+      step_number,
+      total_steps,
+      speed_tpm,
+      inbox_path: inboxPath,
+    });
 
     inbox.messages.unshift({
       id: batch_msg.id,
       sender: "renderer",
       content: JSON.stringify(batch_msg),
       created_at: created_at,
-      type: "perception_event_batch",
+      type: "movement_perception_batch",
       status: "sent",
     });
 
     await api.writeFile(inboxPath, JSON.stringify(inbox, null, 2));
+    console.info("[MovementPerception] emit_move_perception_batch.write_ok", {
+      message_id: batch_msg.id,
+      mover_ref,
+      place_id: place.id,
+      subtype: move_subtype,
+    });
   } catch (err) {
-    if (DEBUG_LEVEL >= 4) {
-      debug_log("MovementPerception", "emit_move_perception_batch.failed", {
-        mover_ref,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
+    console.error("[MovementPerception] emit_move_perception_batch.failed", {
+      mover_ref,
+      place_id: place.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }

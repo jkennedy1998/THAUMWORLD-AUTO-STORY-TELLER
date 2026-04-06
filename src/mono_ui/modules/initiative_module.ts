@@ -1,4 +1,4 @@
-import type { Canvas, Module, Rect, WheelEvent } from '../types.js';
+import type { Canvas, Module, PointerEvent, Rect, WheelEvent } from '../types.js';
 import { get_color_by_name } from '../colors.js';
 import { PANEL_BORDER_PRESETS, draw_panel_horizontal_divider } from '../module_borders.js';
 import type { ModuleGizmosConfig } from '../module_gizmos.js';
@@ -17,6 +17,7 @@ export type InitiativeModuleState = {
   current_turn: number | null;
   current_round: number | null;
   active_actor_ref: string | null;
+  controlled_actor_ref: string | null;
   turn_window_breaths: number | null;
   turn_breaths_remaining: number | null;
   timed_event_world_breath_index: number | null;
@@ -30,6 +31,7 @@ export type InitiativeModuleOptions = {
   on_move?: (new_rect: Rect) => void;
   on_resize?: (new_rect: Rect) => void;
   on_close?: () => void;
+  on_end_turn?: () => void;
 };
 
 type Row =
@@ -109,6 +111,7 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
   let scroll_offset = 0;
   let last_transition_key = '';
   let transition_until_ms = 0;
+  let end_turn_hitbox: Rect | null = null;
 
   const bg_color = get_color_by_name('off_black').rgb;
   const border_color = get_color_by_name('light_gray').rgb;
@@ -224,6 +227,33 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
         });
       }
 
+      const can_end_turn = !!(
+        state.active
+        && state.phase !== 'world_sim_interstitial'
+        && state.active_actor_ref
+        && state.controlled_actor_ref
+        && state.active_actor_ref === state.controlled_actor_ref
+      );
+      const action_label = state.active ? (can_end_turn ? '[END TURN]' : '[WAIT TURN]') : '';
+      const action_rgb = can_end_turn ? flash_color : muted_color;
+      const action_x = rect.x0 + 1;
+      end_turn_hitbox = action_label
+        ? {
+            x0: action_x,
+            y0: summary_y,
+            x1: Math.min(rect.x1 - 1, action_x + action_label.length - 1),
+            y1: summary_y,
+          }
+        : null;
+      for (let i = 0; i < action_label.length && action_x + i < rect.x1; i += 1) {
+        c.set(action_x + i, summary_y, {
+          char: action_label[i]!,
+          rgb: action_rgb,
+          style: 'regular',
+          weight_index: can_end_turn ? 6 : 4,
+        });
+      }
+
       draw_panel_horizontal_divider(c, {
         y: divider_y,
         rect,
@@ -335,6 +365,20 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
       if (rows.length <= 0) return;
       scroll_offset += e.delta_y > 0 ? 1 : -1;
       clamp_scroll(rows);
+    },
+    on_pointer_down_content(e: PointerEvent): void {
+      if (e.button !== 0 || !end_turn_hitbox) return;
+      const state = opts.get_state();
+      const can_end_turn = !!(
+        state.active
+        && state.phase !== 'world_sim_interstitial'
+        && state.active_actor_ref
+        && state.controlled_actor_ref
+        && state.active_actor_ref === state.controlled_actor_ref
+      );
+      if (!can_end_turn) return;
+      if (e.x < end_turn_hitbox.x0 || e.x > end_turn_hitbox.x1 || e.y < end_turn_hitbox.y0 || e.y > end_turn_hitbox.y1) return;
+      opts.on_end_turn?.();
     },
   });
 }

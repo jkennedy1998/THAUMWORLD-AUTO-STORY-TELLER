@@ -10,12 +10,10 @@ import { ACTION_VERBS, SERVICE_CONFIG } from "../shared/constants.js";
 import { parse_machine_text } from "../system_syntax/index.js";
 import { resolve_references } from "../reference_resolver/resolver.js";
 import { apply_effects } from "./apply.js";
-import { find_npcs, load_npc, save_npc } from "../npc_storage/store.js";
-import { load_actor, save_actor } from "../actor_storage/store.js";
+import { load_npc } from "../npc_storage/store.js";
+import { load_actor } from "../actor_storage/store.js";
 import { add_event_to_memory, get_working_memory, build_working_memory } from "../context_manager/index.js";
 import { get_timed_event_state } from "../world_storage/store.js";
-import { has_awareness_target } from "../tag_system/canonical_readers.js";
-import { set_awareness_entry } from "../shared/awareness.js";
 import { get_configured_data_slot } from "../shared/boot_env.js";
 import { parse } from "jsonc-parser";
 import * as fs from "node:fs";
@@ -74,103 +72,6 @@ function extractTool(event: string): string | null {
 
 // Note: Atomic update functions are now provided by outbox_store.ts
 // StateApplier uses the centralized update_outbox_message from outbox_store.ts
-
-// Apply AWARENESS tags to NPCs when player communicates
-// Per THAUMWORLD rules: NPCs gain awareness when player makes sensible actions (communicating)
-function apply_awareness_tags(events: string[] | undefined): number {
-    if (!events || events.length === 0) return 0;
-    
-    let appliedCount = 0;
-    
-    for (const event of events) {
-        if (!event.includes("COMMUNICATE")) continue;
-        
-        // Extract actor ID from event (e.g., "actor.henry_actor.COMMUNICATE")
-        const actorMatch = event.match(/actor\.(\w+)\.COMMUNICATE/);
-        if (!actorMatch || !actorMatch[1]) continue;
-        
-        const actorId = actorMatch[1];
-        
-        // Load actor to get their location
-        const actorResult = load_actor(data_slot_number, actorId);
-        if (!actorResult.ok) continue;
-        
-        const actor = actorResult.actor;
-        const actorLocation = actor.location as { 
-            region_tile?: { x: number; y: number }; 
-            tile?: { x: number; y: number };
-        };
-        
-        if (!actorLocation?.region_tile) continue;
-        
-        // Find all NPCs in the same region
-        const nearbyNpcs = find_npcs(data_slot_number, {}).filter(npcHit => {
-            if (npcHit.id === "default_npc") return false;
-            
-            const npcResult = load_npc(data_slot_number, npcHit.id);
-            if (!npcResult.ok) return false;
-            
-            const npc = npcResult.npc as { 
-                location?: { region_tile?: { x: number; y: number } } 
-            };
-            const npcRegion = npc.location?.region_tile;
-            
-            if (!npcRegion) return false;
-            
-            // Check if in same region
-            return (
-                npcRegion.x === actorLocation.region_tile!.x &&
-                npcRegion.y === actorLocation.region_tile!.y
-            );
-        });
-        
-        // Apply AWARENESS tag to each nearby NPC
-        for (const npcHit of nearbyNpcs) {
-            const npcResult = load_npc(data_slot_number, npcHit.id);
-            if (!npcResult.ok) continue;
-            
-            const npc = npcResult.npc as Record<string, unknown>;
-            
-            // Check if already has awareness of this actor (case-insensitive)
-            const actorRef = `actor.${actorId}`;
-            const hasAwareness = has_awareness_target(npc, actorRef);
-            
-            if (!hasAwareness) {
-                // Add AWARENESS tag
-                set_awareness_entry(npc, actorRef, null);
-                
-                // Save updated NPC
-                save_npc(data_slot_number, npcHit.id, npc);
-                appliedCount++;
-                
-                if (DEBUG_LEVEL >= 3) {
-                    debug_pipeline("StateApplier", `Applied AWARENESS tag to ${npcHit.id}`, {
-                        npc: npcHit.id,
-                        target: actorRef
-                    });
-                }
-            }
-        }
-        
-        // Also apply bidirectional awareness: player gains awareness of NPCs
-        // This is done by adding tags to the actor as well
-        let actorAwarenessChanged = false;
-        for (const npcHit of nearbyNpcs) {
-            const npcRef = `npc.${npcHit.id}`;
-            const hasNpcAwareness = has_awareness_target(actor as Record<string, unknown>, npcRef);
-            
-            if (!hasNpcAwareness) {
-                set_awareness_entry(actor as Record<string, unknown>, npcRef, null);
-                actorAwarenessChanged = true;
-            }
-        }
-        if (actorAwarenessChanged) {
-            save_actor(data_slot_number, actorId, actor as Record<string, unknown>);
-        }
-    }
-    
-    return appliedCount;
-}
 
 async function process_message(outbox_path: string, log_path: string, msg: MessageEnvelope): Promise<void> {
     // Step 1: Transition to processing
@@ -263,18 +164,10 @@ async function process_message(outbox_path: string, log_path: string, msg: Messa
         debug_pipeline("StateApplier", `  [2/4] No effects to apply`, { id: msg.id });
     }
 
-    // Step 3: Apply awareness tags for COMMUNICATE events
     const events = (msg.meta as any)?.events as string[] | undefined;
     const hasCommunicateEvents = events?.some(e => e.includes("COMMUNICATE")) ?? false;
-    
-    if (hasCommunicateEvents) {
-        const awarenessApplied = apply_awareness_tags(events);
-        if (awarenessApplied > 0) {
-            debug_pipeline("StateApplier", `  [2.5/4] Applied ${awarenessApplied} awareness tags`, { id: msg.id });
-        }
-    }
-    
-    // Step 3.5: Record events to working memory for ALL actions
+
+    // Step 3: Record events to working memory for ALL actions
     // FIX: Check for active timed event and use event_id as lookup key to align with turn_manager
     const timed_event = get_timed_event_state(data_slot_number);
     const is_timed_event_active = timed_event?.timed_event_active && timed_event?.event_id;

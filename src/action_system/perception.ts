@@ -25,6 +25,19 @@ export type PerceptionClarity =
   | "obscured"   // Something happened but unclear what
   | "sensed";    // Only sensed via non-visual means
 
+export type RuntimeDetectionClarity = "clear" | "obscured" | "none";
+
+export interface PerceptionDetection {
+  sense: SenseType;
+  clarity: RuntimeDetectionClarity;
+  identityKnown: boolean;
+  locationKnown: boolean;
+  observerSenseMag: number;
+  broadcastMag: number;
+  detailedRangeTiles: number;
+  obscuredRangeTiles: number;
+}
+
 // Perception event
 export interface PerceptionEvent {
   id: string;
@@ -40,6 +53,8 @@ export interface PerceptionEvent {
   actorType: "player" | "npc";
   actorVisibility: PerceptionClarity;
   actorIdentity?: string;  // Known name or "unknown figure"
+  identityKnown?: boolean;
+  locationKnown?: boolean;
   
   // Action details
   verb: ActionVerb;
@@ -56,7 +71,12 @@ export interface PerceptionEvent {
   location: Location;
   distance: number;
   senses: SenseType[];
-  
+  detectable?: boolean;
+  bestSense?: SenseType;
+  detections?: PerceptionDetection[];
+  observerPositionWorld?: Location;
+  actorPositionWorld?: Location;
+
   // Details
   details: PerceptionDetails;
   
@@ -244,6 +264,8 @@ export async function checkPerception(
   if (!perceptibility.visual && perceptibility.auditory) {
     clarity = "sensed";
   }
+
+  const identityKnown = clarity === "clear" && perceptibility.visual;
   
   return {
     canPerceive: true,
@@ -251,7 +273,7 @@ export async function checkPerception(
     senses,
     distance,
     details: {},
-    obscured: false
+    obscured: !identityKnown
   };
 }
 
@@ -362,7 +384,8 @@ function createPerceptionEvent(
     actorRef: intent.actorRef,
     actorType: intent.actorType,
     actorVisibility: perception.clarity,
-    actorIdentity: intent.actorRef,  // Would resolve to name
+    actorIdentity: perception.clarity === "obscured" || perception.clarity === "sensed" ? undefined : intent.actorRef,
+    identityKnown: !(perception.clarity === "obscured" || perception.clarity === "sensed"),
     verb: intent.verb,
     subtype: typeof intent.parameters?.subtype === "string" ? intent.parameters.subtype : undefined,
     verbClarity: perception.clarity,
@@ -393,6 +416,7 @@ export async function broadcastPerception(
   result?: ActionResult,
   options: {
     getCharactersInRange?: (location: Location, radius: number) => Promise<Array<{ ref: string; location: Location }>>;
+    onPerceived?: (event: PerceptionEvent) => Promise<void>;
   } = {}
 ): Promise<PerceptionEvent[]> {
   const actionDef = ACTION_REGISTRY[intent.verb];
@@ -437,6 +461,7 @@ export async function broadcastPerception(
       x: intent.actorLocation.x,
       y: intent.actorLocation.y,
       place_id: intent.actorLocation.place_id,
+      z: intent.actorLocation.z,
     });
   }
   
@@ -477,6 +502,24 @@ export async function broadcastPerception(
       
       // Store in memory
       perceptionMemory.addPerception(observer.ref, event);
+      if (options.onPerceived) {
+        console.info("[Perception] onPerceived.invoke", {
+          timing,
+          verb: intent.verb,
+          observer_ref: observer.ref,
+          actor_ref: intent.actorRef,
+          visibility: event.actorVisibility,
+          identityKnown: event.identityKnown,
+          locationKnown: event.locationKnown,
+        });
+        await options.onPerceived(event);
+        console.info("[Perception] onPerceived.complete", {
+          timing,
+          verb: intent.verb,
+          observer_ref: observer.ref,
+          actor_ref: intent.actorRef,
+        });
+      }
       
       events.push(event);
     }

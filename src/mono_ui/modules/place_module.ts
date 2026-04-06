@@ -3,7 +3,6 @@ import { rect_width, rect_height } from "../types.js";
 import { draw_module_border, PANEL_BORDER_PRESETS } from "../module_borders.js";
 import { get_color_by_name } from "../colors.js";
 import type { Place, PlaceNPC, PlaceActor, PlaceConnector, TilePosition, PlaceTile } from "../../types/place.js";
-import { get_entity_path, start_entity_movement, start_entity_vertical_steps, is_entity_moving, stop_entity_movement, set_entity_realtime_movement, update_realtime_intent, get_movement_state, register_place, unregister_place } from "../../shared/movement_engine.js";
 import { type TagChangeEvent } from "../../shared/event_emitter.js";
 import { initWebSocketClient, type WebSocketClient } from "../websocket_client.js";
 import type { TagInstance } from "../../tag_system/registry.js";
@@ -32,6 +31,20 @@ import { touch_world_layers_owner } from "../world_layers_owner.js";
 import { compute_dom_viewport_for_rect } from "../runtime/dom_viewport.js";
 import { create_place_camera_controller } from "../runtime/place_camera_controller.js";
 import { get_move_intent, is_jump_down, subscribe_move_intent_changes, type MoveIntent, type MoveIntentChangeMeta } from "../runtime/input_actions.js";
+import type { GizmoState, ModuleGizmosConfig } from "../module_gizmos.js";
+import {
+  clear_gizmo_hover_state,
+  create_gizmo_state,
+  draw_module_gizmos,
+  get_resize_edge,
+  handle_global_pointer_down_for_gizmos,
+  handle_gizmo_click,
+  handle_move_drag,
+  handle_resize_drag,
+  is_in_gizmo_area,
+  should_draw_module_chrome,
+  update_gizmo_hover_state,
+} from "../module_gizmos.js";
 import { get_character_camera_focus_tile } from "../../shared/character_camera_focus.js";
 import type { ItemInstance } from "../../item_instances/store.js";
 import type { ItemDefinition } from "../../item_storage/store.js";
@@ -71,6 +84,28 @@ function footstep_cooldown_ms(speed_tpm: number): number {
   const tpm = Number.isFinite(speed_tpm) && speed_tpm > 0 ? speed_tpm : 300;
   const ms_per_tile = (60 * 1000) / tpm;
   return Math.max(55, Math.min(260, Math.round(ms_per_tile * 0.75)));
+}
+
+function opposite_connector_direction(direction: string): string {
+  switch (String(direction)) {
+    case 'x+': return 'x-';
+    case 'x-': return 'x+';
+    case 'y+': return 'y-';
+    case 'y-': return 'y+';
+    case 'z+': return 'z-';
+    case 'z-': return 'z+';
+    default: return String(direction);
+  }
+}
+
+function connector_direction_to_step(direction: string): { dx: number; dy: number } | null {
+  switch (String(direction)) {
+    case 'x+': return { dx: 1, dy: 0 };
+    case 'x-': return { dx: -1, dy: 0 };
+    case 'y+': return { dx: 0, dy: 1 };
+    case 'y-': return { dx: 0, dy: -1 };
+    default: return null;
+  }
 }
 // Debug logging helper - re-enabled with balanced output
 const place_debug_sample_counts = new Map<string, number>();
@@ -206,6 +241,10 @@ export type PlaceModuleConfig = {
   get_scene_selected_place_id?: () => string | null;
   get_actor_current_place_id?: () => string | null;
   get_scene_connector_hops_visible?: () => number;
+  on_move?: (new_rect: Rect) => void;
+  on_resize?: (new_rect: Rect) => void;
+  on_move_end?: (final_rect: Rect) => void;
+  on_resize_end?: (final_rect: Rect) => void;
 
   // Target selection callback - called when user right-clicks an entity
   // Returns true if target was valid and selected, false otherwise
@@ -226,10 +265,6 @@ export type PlaceModuleConfig = {
     tile_position: TilePosition;
   }) => void;
 
-  // Place transition callback - called when user clicks on a door/connection
-  // Returns true if transition was successful, false otherwise
-  on_place_transition?: (target_place_id: string, direction: string) => Promise<boolean> | boolean;
-
   // Styling
   border_rgb?: Rgb;
   bg_rgb?: Rgb;
@@ -243,6 +278,7 @@ export type PlaceModuleConfig = {
 
   // Runtime metrics needed for DOM world layer viewport mapping.
   grid_height: number;
+  get_grid_height?: () => number;
   font_family: string;
   base_font_size_px: number;
 
@@ -463,15 +499,18 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   // View state
   const camera = create_place_camera_controller({ initial_scale: config.initial_scale ?? 1, padding_tiles: PADDING_TILES });
   const view: ViewState = camera.view;
+  const gizmo_config: ModuleGizmosConfig = {
+    enabled: ['move', 'resize', 'seamless'],
+    can_close: false,
+    can_move: true,
+    can_save_position: false,
+  };
+  const gizmo_state: GizmoState = create_gizmo_state();
 
   let hovered: HoveredTile = null;
   let targeted: TargetedEntity = null; // Track selected target for communication (follows entity)
   let last_pointer_x = 0;
   let last_pointer_y = 0;
-
-  // Movement engine place registration should track the latest place snapshot.
-  // `/api/place` returns a new object frequently; the movement engine must not hold a stale reference.
-  let last_registered_place_obj: Place | null = null;
 
   // Tile cycling state for multiple entities
   type EntityCycleState = {
@@ -638,13 +677,10 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     particles.push(particle as Particle);
   });
   
-  // Track current place for unified movement engine
-  let current_place_id: string | null = null;
-  
   // Track previous entity positions to detect movement and spawn footsteps
   const previous_positions = new Map<string, TilePosition & { z?: number }>();
-  // Track previous movement state to detect when movement starts
-  const previous_moving_state = new Map<string, boolean>();
+  // Track recent motion locally from authoritative position updates.
+  const recent_movement_seen_at = new Map<string, number>();
   // Throttle movement sound/broadcasts per entity
   const movement_sound_step = new Map<string, number>();
 
@@ -1728,24 +1764,6 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
   // Held input stepping now lives in MovementEngine as a realtime controller.
 
-  // Spawn particles along a path (pale yellow)
-  function spawn_path_particles(path: TilePosition[]) {
-    const now = Date.now();
-    const path_rgb = get_color_by_name("pale_yellow").rgb;
-    
-    for (const pos of path) {
-      particles.push({
-        x: pos.x,
-        y: pos.y,
-        world_z: 0,
-        char: "·",
-        rgb: path_rgb,
-        created_at: now,
-        lifespan_ms: PARTICLE_LIFESPAN_MS
-      });
-    }
-  }
-  
   // Spawn movement particle at position (vivid cyan)
   function spawn_movement_particle(pos: TilePosition) {
     const now = Date.now();
@@ -1863,25 +1881,18 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   function check_entity_movement(place: Place) {
     const center_world_z = get_world_z_center_for_place(place);
     const visible_planes_z = get_defined_scene_world_zs(place);
+    const now_ms = Date.now();
+    const MOVEMENT_RECENT_WINDOW_MS = 280;
 
     // Check actors
     for (const actor of place.contents.actors_present) {
       const prev = previous_positions.get(actor.actor_ref);
-      const was_moving = previous_moving_state.get(actor.actor_ref) || false;
-      const path_info = get_entity_path(actor.actor_ref);
-      const is_moving = !!path_info;
-      
-      // Check if just started moving (transition from not moving to moving)
-      if (!was_moving && is_moving && path_info) {
-        // Started moving, spawn path particles
-        spawn_path_particles(path_info.path);
-      }
-      
-      // Check if moved to new tile
       const az = get_entity_world_z(actor as any, center_world_z);
-      if (prev && (prev.x !== actor.tile_position.x || prev.y !== actor.tile_position.y || (prev.z ?? 0) !== az)) {
+      const moved_this_frame = !!prev && (prev.x !== actor.tile_position.x || prev.y !== actor.tile_position.y || (prev.z ?? 0) !== az);
+      if (moved_this_frame) {
         // Actor moved, spawn movement particle
         spawn_movement_particle(actor.tile_position);
+        recent_movement_seen_at.set(actor.actor_ref, now_ms);
 
         // Server-authoritative movement: do not persist actor position from renderer.
 
@@ -1906,34 +1917,27 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           });
         }
       }
+      const last_move_seen_ms = recent_movement_seen_at.get(actor.actor_ref) ?? 0;
+      const is_moving = moved_this_frame || ((now_ms - last_move_seen_ms) <= MOVEMENT_RECENT_WINDOW_MS);
       
       // Update stored state
       previous_positions.set(actor.actor_ref, { ...actor.tile_position, z: az });
-      previous_moving_state.set(actor.actor_ref, is_moving);
 
       if (!is_moving) {
         movement_sound_step.delete(actor.actor_ref);
+        recent_movement_seen_at.delete(actor.actor_ref);
       }
     }
     
     // Check NPCs
     for (const npc of place.contents.npcs_present) {
       const prev = previous_positions.get(npc.npc_ref);
-      const was_moving = previous_moving_state.get(npc.npc_ref) || false;
-      const path_info = get_entity_path(npc.npc_ref);
-      const is_moving = !!path_info;
-      
-      // Check if just started moving (transition from not moving to moving)
-      if (!was_moving && is_moving && path_info) {
-        // Started moving, spawn path particles
-        spawn_path_particles(path_info.path);
-      }
-      
-      // Check if moved to new tile
       const nz = get_entity_world_z(npc as any, center_world_z);
-      if (prev && (prev.x !== npc.tile_position.x || prev.y !== npc.tile_position.y || (prev.z ?? 0) !== nz)) {
+      const moved_this_frame = !!prev && (prev.x !== npc.tile_position.x || prev.y !== npc.tile_position.y || (prev.z ?? 0) !== nz);
+      if (moved_this_frame) {
         // NPC moved, spawn movement particle
         spawn_movement_particle(npc.tile_position);
+        recent_movement_seen_at.set(npc.npc_ref, now_ms);
 
         // Movement sound for NPCs (assume WALK for now)
         const n = (movement_sound_step.get(npc.npc_ref) ?? 0) + 1;
@@ -1956,13 +1960,15 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           });
         }
       }
+      const last_move_seen_ms = recent_movement_seen_at.get(npc.npc_ref) ?? 0;
+      const is_moving = moved_this_frame || ((now_ms - last_move_seen_ms) <= MOVEMENT_RECENT_WINDOW_MS);
       
       // Update stored state
       previous_positions.set(npc.npc_ref, { ...npc.tile_position, z: nz });
-      previous_moving_state.set(npc.npc_ref, is_moving);
 
       if (!is_moving) {
         movement_sound_step.delete(npc.npc_ref);
+        recent_movement_seen_at.delete(npc.npc_ref);
       }
     }
   }
@@ -3134,7 +3140,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         pan_y_px: dom_pan_px.y,
         tile_w_px: dom_pan_px.tileW,
         tile_h_px: dom_pan_px.tileH,
-        grid_height: config.grid_height,
+        grid_height: config.get_grid_height ? config.get_grid_height() : config.grid_height,
         rect: inner,
         base_font_size_px: config.base_font_size_px,
         ui_scale: dom_pan_px.scale,
@@ -3450,16 +3456,24 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const updates: any[] = Array.isArray(msg?.updates) ? msg.updates : [];
       if (updates.length === 0) return;
 
-      const baseZ = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
-      const getLayerKey = (z: number): string => {
+      const scenePlaces = Array.isArray(config.get_scene_places?.()) ? (config.get_scene_places?.() ?? []) : [];
+      const allKnownPlaces = new Map<string, Place>();
+      allKnownPlaces.set(String(place.id), place);
+      for (const scenePlace of scenePlaces) {
+        if (!scenePlace?.id) continue;
+        allKnownPlaces.set(String(scenePlace.id), scenePlace);
+      }
+
+      const getLayerKey = (placeRef: Place, z: number): string => {
+        const baseZ = Math.floor(Number((placeRef as any)?.coordinates?.elevation ?? 0)) || 0;
         const offset = Math.floor(z - baseZ);
         return tile_offset_to_layer_key(offset);
       };
-      const ensureLayer = (layerKey: string): any => {
-        const placeAny: any = place as any;
+      const ensureLayer = (placeRef: Place, layerKey: string): any => {
+        const placeAny: any = placeRef as any;
         if (!placeAny[layerKey]) {
-          const width = Math.max(1, Math.floor(Number(place.tile_grid?.width ?? 1)));
-          const height = Math.max(1, Math.floor(Number(place.tile_grid?.height ?? 1)));
+          const width = Math.max(1, Math.floor(Number(placeRef.tile_grid?.width ?? 1)));
+          const height = Math.max(1, Math.floor(Number(placeRef.tile_grid?.height ?? 1)));
           placeAny[layerKey] = {
             width,
             height,
@@ -3469,28 +3483,86 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         return placeAny[layerKey];
       };
 
+      const readTile = (placeRef: Place, pos: { x: number; y: number; z: number }): any | null => {
+        const layer = ensureLayer(placeRef, getLayerKey(placeRef, Math.floor(Number(pos.z) || 0)));
+        const x = Math.floor(Number(pos.x));
+        const y = Math.floor(Number(pos.y));
+        if (!Array.isArray(layer?.cells?.[y])) return null;
+        return layer.cells[y][x] ?? null;
+      };
+
+      const clearTile = (placeRef: Place, pos: { x: number; y: number; z: number }): any | null => {
+        const layer = ensureLayer(placeRef, getLayerKey(placeRef, Math.floor(Number(pos.z) || 0)));
+        const x = Math.floor(Number(pos.x));
+        const y = Math.floor(Number(pos.y));
+        if (!Array.isArray(layer?.cells?.[y])) return null;
+        const tile = layer.cells[y][x] ?? null;
+        if (!tile) return null;
+        layer.cells[y][x] = null;
+        return tile;
+      };
+
+      const writeTile = (placeRef: Place, pos: { x: number; y: number; z: number }, tile: any): boolean => {
+        const layer = ensureLayer(placeRef, getLayerKey(placeRef, Math.floor(Number(pos.z) || 0)));
+        const x = Math.floor(Number(pos.x));
+        const y = Math.floor(Number(pos.y));
+        if (!Array.isArray(layer?.cells?.[y])) return false;
+        layer.cells[y][x] = tile;
+        return true;
+      };
+
       let applied = 0;
+      let crossPlaceApplied = 0;
+      let crossPlaceDeferred = 0;
       for (const u of updates) {
         const pid = String(u?.place_id ?? '');
-        if (pid !== String(place.id)) continue;
+        const fromPlaceId = String(u?.from_place_id ?? pid ?? '');
+        const toPlaceId = String(u?.to_place_id ?? pid ?? '');
         const from = u?.from;
         const to = u?.to;
         if (!from || !to) continue;
-        const fromLayer = ensureLayer(getLayerKey(Math.floor(Number(from.z) || 0)));
-        const toLayer = ensureLayer(getLayerKey(Math.floor(Number(to.z) || 0)));
-        const fx = Math.floor(Number(from.x));
-        const fy = Math.floor(Number(from.y));
-        const tx = Math.floor(Number(to.x));
-        const ty = Math.floor(Number(to.y));
-        if (!Array.isArray(fromLayer?.cells?.[fy]) || !Array.isArray(toLayer?.cells?.[ty])) continue;
-        const tile = fromLayer.cells[fy][fx];
-        if (!tile) continue;
-        fromLayer.cells[fy][fx] = null;
-        toLayer.cells[ty][tx] = tile;
-        applied += 1;
+        const samePlaceMove = fromPlaceId === toPlaceId;
+
+        if (samePlaceMove) {
+          const localPlace = allKnownPlaces.get(pid);
+          if (!localPlace || pid !== String(place.id)) continue;
+          const tile = clearTile(localPlace, from);
+          if (!tile) continue;
+          if (!writeTile(localPlace, to, tile)) {
+            writeTile(localPlace, from, tile);
+            continue;
+          }
+          applied += 1;
+          continue;
+        }
+
+        const sourcePlace = allKnownPlaces.get(fromPlaceId);
+        const targetPlace = allKnownPlaces.get(toPlaceId);
+        const tile = sourcePlace ? clearTile(sourcePlace, from) : null;
+        if (tile && targetPlace && writeTile(targetPlace, to, tile)) {
+          applied += 1;
+          crossPlaceApplied += 1;
+          continue;
+        }
+        if (tile && sourcePlace) {
+          void writeTile(sourcePlace, from, tile);
+        }
+        if (sourcePlace && String(place.id) === fromPlaceId) {
+          const removed = clearTile(sourcePlace, from);
+          if (removed) {
+            applied += 1;
+            crossPlaceDeferred += 1;
+          }
+        } else if (targetPlace && String(place.id) === toPlaceId) {
+          const targetExisting = readTile(targetPlace, to);
+          if (targetExisting) {
+            applied += 1;
+            crossPlaceDeferred += 1;
+          }
+        }
       }
       if (applied > 0) {
-        console.log('[MOVE_UNIFY_TEST] renderer applied tile move batch ' + JSON.stringify({ place_id: place.id, applied }));
+        console.log('[MOVE_UNIFY_TEST] renderer applied tile move batch ' + JSON.stringify({ place_id: place.id, applied, cross_place_applied: crossPlaceApplied, cross_place_deferred: crossPlaceDeferred }));
       }
     } catch {
       // ignore
@@ -3554,14 +3626,20 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         top: view.offset_y + visible_h < place.tile_grid.height ? '^' : undefined,
       } : undefined;
 
-      // Draw border
-      draw_module_border(canvas, {
-        rect,
-        style: PANEL_BORDER_PRESETS.default_double.style,
-        border_rgb,
-        weight_index: PANEL_BORDER_PRESETS.default_double.weight_index,
-        markers,
-      });
+      if (should_draw_module_chrome(gizmo_config, gizmo_state)) {
+        draw_module_border(canvas, {
+          rect,
+          style: PANEL_BORDER_PRESETS.default_double.style,
+          border_rgb,
+          weight_index: PANEL_BORDER_PRESETS.default_double.weight_index,
+          markers,
+          header: {
+            text: 'PLACE',
+            reserve_left_cols: 2 + ((gizmo_config.enabled?.length ?? 0) * 2),
+          },
+        });
+        draw_module_gizmos(canvas, rect, gizmo_config, gizmo_state);
+      }
 
       if (!place) {
         // Ensure DOM world layers are not left mounted on an empty session.
@@ -3610,21 +3688,6 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const camera_target = (config.get_camera_target_position?.() ?? get_primary_actor_focus_position(place) ?? config.get_actor_position?.() ?? null);
       if (camera_target && camera_target_mode !== 'free') {
         center_on_scene_tile(camera_target.x, camera_target.y, place);
-      }
-
-      // Register place with unified movement engine if changed
-      if (place.id !== current_place_id) {
-        if (current_place_id) {
-          unregister_place(current_place_id);
-        }
-        current_place_id = place.id;
-        last_registered_place_obj = null;
-      }
-
-      // Always ensure the engine has the latest snapshot for this place id.
-      if (place !== last_registered_place_obj) {
-        register_place(place.id, place);
-        last_registered_place_obj = place;
       }
 
       // Poll input actions and update movement intent every frame.
@@ -3716,7 +3779,12 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       draw_place(canvas, place);
     },
 
+    OnGlobalPointerDown(e: PointerEvent): void {
+      handle_global_pointer_down_for_gizmos(e, rect, gizmo_config, gizmo_state);
+    },
+
     OnPointerMove(e: PointerEvent): void {
+      update_gizmo_hover_state(e.x, e.y, rect, gizmo_config, gizmo_state);
       const place = config.get_place();
       if (!place) return;
       const painter_tool = config.get_place_painter_tool?.() ?? 'paint';
@@ -3891,6 +3959,13 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     },
 
     OnDragStart(e: DragEvent): void {
+      if (gizmo_state.is_move_mode || gizmo_state.is_resize_mode) {
+        gizmo_state.move_start_x = e.start_x;
+        gizmo_state.move_start_y = e.start_y;
+        if (!gizmo_state.original_rect) gizmo_state.original_rect = { ...rect };
+        return;
+      }
+
       const place = config.get_place();
       if (!place) return;
 
@@ -3929,6 +4004,28 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     },
 
     OnDragMove(e): void {
+      if (gizmo_state.is_move_mode && gizmo_state.original_rect) {
+        const next_rect = handle_move_drag(e.x, e.y, gizmo_state, gizmo_state.original_rect, config.on_move);
+        if (next_rect) rect = next_rect;
+        return;
+      }
+
+      if (gizmo_state.is_resize_mode && gizmo_state.is_dragging_resize && gizmo_state.original_rect) {
+        const next_rect = handle_resize_drag(
+          e.x,
+          e.y,
+          gizmo_state,
+          gizmo_state.original_rect,
+          12,
+          8,
+          Number.MAX_SAFE_INTEGER,
+          Number.MAX_SAFE_INTEGER,
+          config.on_resize,
+        );
+        if (next_rect) rect = next_rect;
+        return;
+      }
+
       const place = config.get_place();
       if (!place) return;
       if (config.is_place_painter_active?.() && painter_pan_drag_active) {
@@ -3944,6 +4041,18 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     },
 
     OnDragEnd(e: DragEvent): void {
+      if (gizmo_state.is_resize_mode && gizmo_state.is_dragging_resize) {
+        config.on_resize_end?.(rect);
+        gizmo_state.is_dragging_resize = false;
+        gizmo_state.original_rect = null;
+        return;
+      }
+      if (gizmo_state.is_move_mode) {
+        config.on_move_end?.(rect);
+        gizmo_state.original_rect = null;
+        return;
+      }
+
       debug_log_place(`[OnDragEnd] ========== DRAG END ==========`);
       debug_log_place(`[OnDragEnd] Called at screen position (${e.x}, ${e.y})`);
       debug_log_place(`[OnDragEnd] config.is_dragging exists: ${!!config.is_dragging}`);
@@ -4056,6 +4165,36 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     },
 
     OnPointerDown(e: PointerEvent): void {
+      update_gizmo_hover_state(e.x, e.y, rect, gizmo_config, gizmo_state);
+      if (is_in_gizmo_area(e.x, e.y, rect, gizmo_config)) {
+        const gizmo = handle_gizmo_click(e.x, e.y, rect, gizmo_config, gizmo_state);
+        if (gizmo === 'move' || gizmo === 'resize') {
+          gizmo_state.move_start_x = e.x;
+          gizmo_state.move_start_y = e.y;
+          gizmo_state.original_rect = { ...rect };
+        }
+        return;
+      }
+
+      if (gizmo_state.is_resize_mode) {
+        const edge = get_resize_edge(e.x, e.y, rect);
+        if (edge) {
+          gizmo_state.resize_edge = edge;
+          gizmo_state.is_dragging_resize = true;
+          gizmo_state.move_start_x = e.x;
+          gizmo_state.move_start_y = e.y;
+          gizmo_state.original_rect = { ...rect };
+          return;
+        }
+      }
+
+      if (gizmo_state.is_move_mode) {
+        gizmo_state.move_start_x = e.x;
+        gizmo_state.move_start_y = e.y;
+        if (!gizmo_state.original_rect) gizmo_state.original_rect = { ...rect };
+        return;
+      }
+
       const place = config.get_place();
       if (!place) return;
       const painter_active = !!config.is_place_painter_active?.();
@@ -4306,34 +4445,118 @@ export function make_place_module(config: PlaceModuleConfig): Module {
             distance: dist_to_connector,
           });
 
-          const started = start_entity_movement(
-            player.actor_ref,
-            "actor",
-            place,
-            {
-              type: "move_to",
-              target_position: { x: connector_hit.approach_x, y: connector_hit.approach_y },
-              priority: 10,
-              reason: "Travel to connector",
-            },
-            300,
-            undefined,
-            undefined,
-            (_pos) => {
-              play_sfx('footstep_blip', { emitter_ref: player.actor_ref, channel: 'sfx', cooldown_ms: footstep_cooldown_ms(300) });
-            }
-          );
-
-          if (!started) {
-            debug_log_place("CONNECTOR: Path to connector blocked");
-          }
+          const mode = get_move_mode();
+          void fetch('http://localhost:8787/api/movement/move_to', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              session_token: config.get_session_token?.() ?? undefined,
+              entity_ref: player.actor_ref,
+              place_id: place.id,
+              x: connector_hit.approach_x,
+              y: connector_hit.approach_y,
+              z: local_focus_world_z,
+              mode,
+            }),
+          })
+            .then(async (r) => {
+              const j = await r.json().catch(() => null);
+              if (!r.ok) {
+                debug_log_place('CONNECTOR: approach move rejected (server)', { status: r.status, body: j });
+                return;
+              }
+              if (j?.queued === false || j?.rejected === true) {
+                debug_log_place('CONNECTOR: approach move not queued (server)', j);
+                return;
+              }
+              debug_log_place('CONNECTOR: approach move accepted (server)', j);
+            })
+            .catch(() => {
+              // ignore
+            });
           return;
         }
 
-        if (config.on_place_transition) {
-          const result = config.on_place_transition(connector_hit.target_place_id, connector_hit.label);
-          if (result) return;
+        const actor_is_on_connector_border =
+          player.tile_position.x === connector_hit.border_x &&
+          player.tile_position.y === connector_hit.border_y;
+
+        if (actor_is_on_connector_border) {
+          const outward_direction = connector_hit.connector.place_a_id === place.id
+            ? String(connector_hit.connector.direction_from_a ?? 'connector')
+            : opposite_connector_direction(String(connector_hit.connector.direction_from_a ?? 'connector'));
+          const outward_step = connector_direction_to_step(outward_direction);
+          if (!outward_step) {
+            debug_log_place('CONNECTOR: border transition rejected due to unsupported connector direction', {
+              actor_ref: player.actor_ref,
+              target_place_id: connector_hit.target_place_id,
+              direction: outward_direction,
+              border_pos: { x: connector_hit.border_x, y: connector_hit.border_y },
+            });
+            return;
+          }
+          debug_log_place('CONNECTOR: actor on border tile, sending authoritative seam intent', {
+            actor_ref: player.actor_ref,
+            target_place_id: connector_hit.target_place_id,
+            direction: outward_direction,
+            step: outward_step,
+            border_pos: { x: connector_hit.border_x, y: connector_hit.border_y },
+          });
+          void fetch('http://localhost:8787/api/movement/intent', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              session_token: config.get_session_token?.() ?? undefined,
+              entity_ref: player.actor_ref,
+              place_id: place.id,
+              dx: outward_step.dx,
+              dy: outward_step.dy,
+              mode: get_move_mode(),
+            }),
+          })
+            .then(async (r) => {
+              const j = await r.json().catch(() => null);
+              if (!r.ok) {
+                debug_log_place('CONNECTOR: seam intent rejected (server)', { status: r.status, body: j });
+                return;
+              }
+              debug_log_place('CONNECTOR: seam intent accepted (server)', j);
+            })
+            .catch(() => {
+              // ignore
+            });
+          return;
         }
+
+        const mode = get_move_mode();
+        void fetch('http://localhost:8787/api/movement/move_to', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_token: config.get_session_token?.() ?? undefined,
+            entity_ref: player.actor_ref,
+            place_id: place.id,
+            x: connector_hit.border_x,
+            y: connector_hit.border_y,
+            z: local_focus_world_z,
+            mode,
+          }),
+        })
+          .then(async (r) => {
+            const j = await r.json().catch(() => null);
+            if (!r.ok) {
+              debug_log_place('CONNECTOR: border move rejected (server)', { status: r.status, body: j });
+              return;
+            }
+            if (j?.queued === false || j?.rejected === true) {
+              debug_log_place('CONNECTOR: border move not queued (server)', j);
+              return;
+            }
+            debug_log_place('CONNECTOR: border move accepted (server)', j);
+          })
+          .catch(() => {
+            // ignore
+          });
         return;
       }
 
@@ -4455,6 +4678,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     },
 
     OnPointerLeave(): void {
+      clear_gizmo_hover_state(gizmo_state);
       hovered = null;
     },
 

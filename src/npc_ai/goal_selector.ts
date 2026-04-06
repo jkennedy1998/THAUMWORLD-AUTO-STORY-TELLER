@@ -1,7 +1,8 @@
 /**
  * NPC Goal Selector
  * 
- * Determines what goals NPCs should pursue during free movement.
+ * Determines which ambient routine an NPC is following and what concrete goal
+ * that routine should produce during free movement.
  * Uses heuristics, personality, schedule, and environment - NOT LLM calls.
  * 
  * Goal selection is lightweight and runs every 10-30 seconds per NPC.
@@ -9,12 +10,13 @@
  */
 
 import type { Place, TilePosition, PlaceFeature } from "../types/place.js";
-import type { Goal, GoalType } from "./movement_state.js";
+import type { Goal, GoalType, RoutineKind } from "./movement_state.js";
 import { load_npc } from "../npc_storage/store.js";
 import { get_npc_location } from "../npc_storage/location.js";
 import { load_schedule, get_current_activity } from "../npc_storage/schedule_manager.js";
 import type { GameTime } from "../time_system/tracker.js";
 import { debug_log } from "../shared/debug.js";
+import { resolve_npc_behavior } from "./behavior.js";
 
 /** Context for goal selection */
 export type GoalContext = {
@@ -33,6 +35,13 @@ export type PersonalityProfile = {
   curious: number;                // 0-10, higher = explores more
   role: string;                   // "guard", "shopkeeper", "villager", etc.
   schedule_driven: boolean;       // Follows schedule strictly?
+};
+
+export type RoutineSelection = {
+  routine: RoutineKind;
+  reason: string;
+  archetype_requested: string;
+  archetype_resolved: string;
 };
 
 /** Priority levels for goals */
@@ -63,8 +72,10 @@ export function select_goal(
   const npc = npc_result.npc;
   const personality = extract_personality(npc);
   const current_pos = get_current_position(npc);
+  const routine = select_routine(npc_ref, npc, context, personality);
   
   debug_log("NPC_Goals", `${npc_ref} personality:`, personality);
+  debug_log("NPC_Goals", `${npc_ref} routine:`, routine);
   
   // 1. Check schedule (highest priority for schedule-driven NPCs)
   const schedule_goal = check_schedule_goal(npc_ref, npc, context, personality);
@@ -87,16 +98,85 @@ export function select_goal(
     return social_goal;
   }
   
-  // 4. Default behavior based on personality
+  // 4. Follow schedule even if it did not outrank other contextual goals.
   if (schedule_goal) {
-    // Follow schedule even if low priority
     return schedule_goal;
   }
   
-  // 5. Generate default goal based on personality
-  const default_goal = generate_default_goal(npc_ref, context, current_pos, personality);
-  debug_log("NPC_Goals", `${npc_ref} default_goal:`, default_goal);
-  return default_goal;
+  // 5. Build goal from the selected routine.
+  const routine_goal = build_goal_for_routine(routine, npc_ref, context, current_pos, personality);
+  debug_log("NPC_Goals", `${npc_ref} routine_goal:`, routine_goal);
+  return routine_goal;
+}
+
+export function select_routine(
+  npc_ref: string,
+  npc: Record<string, unknown>,
+  context: GoalContext,
+  personality: PersonalityProfile,
+): RoutineSelection {
+  const behavior = resolve_npc_behavior(npc_ref, npc);
+  const current_place_id = get_npc_location(npc)?.place_id;
+  const schedule = load_schedule(context.slot, npc_ref.replace("npc.", ""));
+  const activity_result = schedule ? get_current_activity(schedule, context.game_time) : null;
+
+  if (behavior.requested === "shopkeep") {
+    return {
+      routine: "attend_place",
+      reason: activity_result?.current_entry && activity_result.current_entry.place_id === current_place_id
+        ? `scheduled_attend:${activity_result.current_entry.description}`
+        : "archetype_shopkeep_stubbed_to_idle_wander_goals",
+      archetype_requested: behavior.requested,
+      archetype_resolved: behavior.resolved,
+    };
+  }
+
+  if (behavior.requested === "follow") {
+    return {
+      routine: "follow_target",
+      reason: "archetype_follow_stubbed_to_idle_wander_goals",
+      archetype_requested: behavior.requested,
+      archetype_resolved: behavior.resolved,
+    };
+  }
+
+  if (personality.role === "guard") {
+    return {
+      routine: "guard_place",
+      reason: "role_guard_stubbed_to_idle_wander_goals",
+      archetype_requested: behavior.requested,
+      archetype_resolved: behavior.resolved,
+    };
+  }
+
+  return {
+    routine: "idle_wander",
+    reason: "default_idle_wander",
+    archetype_requested: behavior.requested,
+    archetype_resolved: behavior.resolved,
+  };
+}
+
+function build_goal_for_routine(
+  routine: RoutineSelection,
+  npc_ref: string,
+  context: GoalContext,
+  current_pos: TilePosition,
+  personality: PersonalityProfile,
+): Goal {
+  switch (routine.routine) {
+    case "attend_place":
+      return generate_counter_goal(context, routine);
+    case "guard_place":
+      return generate_patrol_goal(context, current_pos, routine);
+    case "sleep_at_home":
+      return generate_rest_goal(context, current_pos, routine);
+    case "follow_target":
+    case "socialize":
+    case "idle_wander":
+    default:
+      return generate_idle_wander_default_goal(npc_ref, context, current_pos, personality, routine);
+  }
 }
 
 /**
@@ -337,51 +417,44 @@ export function generate_conversation_goal(
 }
 
 /**
- * Generate default goal based on personality
+ * Generate the default idle-wander goal shape used by routines that do not yet
+ * have their own concrete implementation.
  */
-function generate_default_goal(
+function generate_idle_wander_default_goal(
   npc_ref: string,
   context: GoalContext,
   current_pos: TilePosition,
-  personality: PersonalityProfile
+  personality: PersonalityProfile,
+  routine?: RoutineSelection,
 ): Goal {
   const roll = Math.random();
-  
-  // Role-based defaults
-  if (personality.role === "guard") {
-    return generate_patrol_goal(context, current_pos);
-  }
-  
-  if (personality.role === "shopkeeper") {
-    return generate_counter_goal(context);
-  }
-  
+
   // Personality-based
   if (personality.energetic >= 7 && roll < 0.6) {
-    return generate_wander_goal(context, current_pos);
+    return generate_wander_goal(context, current_pos, routine);
   }
   
   if (personality.curious >= 7 && roll < 0.4) {
-    return generate_explore_goal(context, current_pos);
+    return generate_explore_goal(context, current_pos, routine);
   }
   
   if (personality.social >= 7 && roll < 0.3) {
     // Will try social goal next tick if people nearby
-    return generate_wait_goal(context, current_pos, "Looking for someone to talk to");
+    return generate_wait_goal(context, current_pos, routine?.reason ?? "Looking for someone to talk to");
   }
   
   // Default: wander or rest
   if (roll < 0.7) {
-    return generate_wander_goal(context, current_pos);
+    return generate_wander_goal(context, current_pos, routine);
   }
   
-  return generate_rest_goal(context, current_pos);
+  return generate_rest_goal(context, current_pos, routine);
 }
 
 /**
  * Generate patrol goal (for guards)
  */
-function generate_patrol_goal(context: GoalContext, current_pos: TilePosition): Goal {
+function generate_patrol_goal(context: GoalContext, current_pos: TilePosition, routine?: RoutineSelection): Goal {
   // Pick a random edge or corner of the place
   const width = context.place.tile_grid.width;
   const height = context.place.tile_grid.height;
@@ -401,14 +474,14 @@ function generate_patrol_goal(context: GoalContext, current_pos: TilePosition): 
     priority: PRIORITY.MEDIUM,
     created_at: Date.now(),
     expires_at: Date.now() + 10 * 60 * 1000, // 10 minutes
-    reason: "Patrolling the area",
+    reason: routine?.reason ?? "Patrolling the area",
   };
 }
 
 /**
  * Generate counter/station goal (for shopkeepers)
  */
-function generate_counter_goal(context: GoalContext): Goal {
+function generate_counter_goal(context: GoalContext, routine?: RoutineSelection): Goal {
   // Find a central feature or use default entry
   const features = context.place.contents.features;
   const counter = features.find(f => 
@@ -425,8 +498,8 @@ function generate_counter_goal(context: GoalContext): Goal {
       priority: PRIORITY.MEDIUM,
       created_at: Date.now(),
       expires_at: Date.now() + 15 * 60 * 1000, // 15 minutes
-      reason: "Working at the counter",
-    };
+        reason: routine?.reason ?? "Working at the counter",
+      };
   }
   
   // Default to entry point
@@ -436,14 +509,14 @@ function generate_counter_goal(context: GoalContext): Goal {
     priority: PRIORITY.MEDIUM,
     created_at: Date.now(),
     expires_at: Date.now() + 10 * 60 * 1000,
-    reason: "Standing at post",
+    reason: routine?.reason ?? "Standing at post",
   };
 }
 
 /**
  * Generate wander goal
  */
-function generate_wander_goal(context: GoalContext, current_pos: TilePosition): Goal {
+function generate_wander_goal(context: GoalContext, current_pos: TilePosition, routine?: RoutineSelection): Goal {
   const width = context.place.tile_grid.width;
   const height = context.place.tile_grid.height;
   
@@ -459,14 +532,14 @@ function generate_wander_goal(context: GoalContext, current_pos: TilePosition): 
     priority: PRIORITY.LOW,
     created_at: Date.now(),
     expires_at: Date.now() + 3 * 60 * 1000, // 3 minutes
-    reason: "Wandering around",
+    reason: routine?.reason ?? "Wandering around",
   };
 }
 
 /**
  * Generate exploration goal (go to new area)
  */
-function generate_explore_goal(context: GoalContext, current_pos: TilePosition): Goal {
+function generate_explore_goal(context: GoalContext, current_pos: TilePosition, routine?: RoutineSelection): Goal {
   // Go to opposite side of place
   const width = context.place.tile_grid.width;
   const height = context.place.tile_grid.height;
@@ -482,7 +555,7 @@ function generate_explore_goal(context: GoalContext, current_pos: TilePosition):
     priority: PRIORITY.LOW,
     created_at: Date.now(),
     expires_at: Date.now() + 5 * 60 * 1000,
-    reason: "Exploring the area",
+    reason: routine?.reason ?? "Exploring the area",
   };
 }
 
@@ -507,7 +580,7 @@ function generate_wait_goal(
 /**
  * Generate rest goal (find place to sit/stand)
  */
-function generate_rest_goal(context: GoalContext, current_pos: TilePosition): Goal {
+function generate_rest_goal(context: GoalContext, current_pos: TilePosition, routine?: RoutineSelection): Goal {
   // Look for seating
   const seats = context.place.contents.features.filter(f =>
     f.name.toLowerCase().includes("chair") ||
@@ -525,13 +598,13 @@ function generate_rest_goal(context: GoalContext, current_pos: TilePosition): Go
         priority: PRIORITY.LOW,
         created_at: Date.now(),
         expires_at: Date.now() + 5 * 60 * 1000,
-        reason: "Taking a seat",
-      };
+          reason: routine?.reason ?? "Taking a seat",
+        };
     }
   }
   
   // Just idle where standing
-  return generate_wait_goal(context, current_pos, "Resting");
+  return generate_wait_goal(context, current_pos, routine?.reason ?? "Resting");
 }
 
 /**

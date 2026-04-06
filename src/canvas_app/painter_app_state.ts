@@ -96,6 +96,7 @@ const CANVAS_HEIGHT = 40;
 export type PainterAppState = {
   modules: readonly Module[];
   module_registry: ModuleRegistry;
+  update_layout: (grid_width: number, grid_height: number) => void;
 
   // Global pointer move hook for screen-space parallax.
   on_pointer_move_global?: (x: number, y: number, e: any) => void;
@@ -653,15 +654,17 @@ export function create_painter_app_state(): PainterAppState {
   
   // Calculate layout - positions are in grid coordinates
   // Total grid is 200x50, we center the canvas with padding
-  const GRID_WIDTH = 200;
-  const GRID_HEIGHT = 50;
-  const CANVAS_DISPLAY_WIDTH = 80;  // Visible canvas width
-  const CANVAS_DISPLAY_HEIGHT = 38; // Visible canvas height
-  const PADDING_X = 10;             // Padding on each side
-  
-  // Center the canvas horizontally
-  const canvas_start_x = Math.floor((GRID_WIDTH - CANVAS_DISPLAY_WIDTH - PADDING_X * 2) / 2);
-  const canvas_start_y = 4;
+  let GRID_WIDTH: number = PAINTER_CONFIG.grid_width;
+  let GRID_HEIGHT: number = PAINTER_CONFIG.grid_height;
+
+  function get_default_canvas_rect(): Rect {
+    return {
+      x0: 20,
+      y0: 4,
+      x1: 99,
+      y1: 43,
+    };
+  }
   
   const file_menu_rect: Rect = {
     x0: 0,
@@ -677,12 +680,7 @@ export function create_painter_app_state(): PainterAppState {
     y1: GRID_HEIGHT - 1
   };
 
-  let canvas_rect: Rect = {
-    x0: canvas_start_x + PADDING_X,
-    y0: canvas_start_y,
-    x1: canvas_start_x + PADDING_X + CANVAS_DISPLAY_WIDTH - 1,
-    y1: canvas_start_y + CANVAS_DISPLAY_HEIGHT - 1
-  };
+  let canvas_rect: Rect = get_default_canvas_rect();
   
   // Create toolbar module
   const toolbar_module = make_painter_toolbar_module({
@@ -792,12 +790,7 @@ export function create_painter_app_state(): PainterAppState {
     },
     on_close: () => {
       // Reset canvas to default position
-      canvas_rect = {
-        x0: canvas_start_x + PADDING_X,
-        y0: canvas_start_y,
-        x1: canvas_start_x + PADDING_X + CANVAS_DISPLAY_WIDTH - 1,
-        y1: canvas_start_y + CANVAS_DISPLAY_HEIGHT - 1
-      };
+      canvas_rect = get_default_canvas_rect();
       console.log('Canvas reset to default position');
     },
     on_viewport_change: (viewport) => {
@@ -1666,10 +1659,20 @@ export function create_painter_app_state(): PainterAppState {
   registry.set_visibility('tool_properties', tool_properties_open);
   registry.set_visibility('layer_palette', layer_palette_open);
   registry.set_visibility('camera_control', camera_control_open);
+
+  function update_layout(grid_width: number, grid_height: number): void {
+    GRID_WIDTH = Math.max(1, Math.floor(Number(grid_width) || GRID_WIDTH));
+    GRID_HEIGHT = Math.max(1, Math.floor(Number(grid_height) || GRID_HEIGHT));
+    (PAINTER_CONFIG as any).grid_width = GRID_WIDTH;
+    (PAINTER_CONFIG as any).grid_height = GRID_HEIGHT;
+
+    file_menu_rect.x1 = GRID_WIDTH - 1;
+  }
   
   return {
     modules: registry.get_all(),
     module_registry: registry,
+    update_layout,
 
      // Screen-space parallax: centered on the canvas module, but responsive anywhere.
      on_pointer_move_global: (x: number, y: number) => {

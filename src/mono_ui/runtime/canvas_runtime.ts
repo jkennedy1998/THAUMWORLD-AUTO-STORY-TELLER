@@ -155,6 +155,18 @@ export class CanvasRuntime {
         return this.scale;
     }
 
+    set_grid_size(grid_width: number, grid_height: number): void {
+        const next_width = Math.max(1, Math.floor(Number(grid_width) || 1));
+        const next_height = Math.max(1, Math.floor(Number(grid_height) || 1));
+        const size_changed = next_width !== this.grid_width || next_height !== this.grid_height;
+        this.grid_width = next_width;
+        this.grid_height = next_height;
+        if (size_changed) {
+            this.engine_canvas = create_canvas(this.grid_width, this.grid_height);
+        }
+        this.resize_to_grid();
+    }
+
     private clamp_scale(scale: number): number {
         if (!Number.isFinite(scale)) return 1.0;
         // Conservative clamp; this is UI-only and can be tuned later.
@@ -355,6 +367,11 @@ export class CanvasRuntime {
         const tile_h = line_height_px;
 
         return { font_size_px, line_height_px, letter_spacing_px, tile_w, tile_h };
+    }
+
+    get_tile_metrics(): { tile_w: number; tile_h: number; font_size_px: number } {
+        const { tile_w, tile_h, font_size_px } = this.get_metrics();
+        return { tile_w, tile_h, font_size_px };
     }
 
     private resize_to_grid(): void {

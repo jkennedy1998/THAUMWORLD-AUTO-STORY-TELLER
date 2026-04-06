@@ -27,13 +27,12 @@ import { handleEntityClick, set_current_actor_ref, set_session_token } from '../
 import type { Place, TilePosition } from '../types/place.js';
 import { debug_warn, debug_log } from '../shared/debug.js';
 import { resolve_char } from '../render_shaders/resolver.js';
-import { debug_peek_next_step, is_entity_moving } from '../shared/movement_engine.js';
 import { can_place_volume } from '../place_storage/movement_legality.js';
 import { set_command_handler_place } from '../mono_ui/modules/movement_command_handler.js';
 import { get_color_by_name } from '../mono_ui/colors.js';
 import type { ModuleGizmosConfig } from '../mono_ui/module_gizmos.js';
 import { make_floating_panel_module } from '../mono_ui/modules/floating_panel_module.js';
-import { make_screen_overlay_bar_module } from '../mono_ui/modules/screen_overlay_bar_module.js';
+import { make_program_nav_bar_module, type ProgramNavAction } from '../mono_ui/modules/program_nav_bar_module.js';
 import { infer_action_verb_hint } from '../shared/intent_hint.js';
 // NOTE: Do NOT import Node.js modules (load_actor, find_kind, etc.) here.
 // This code runs in browser context and must use HTTP APIs instead.
@@ -129,6 +128,7 @@ type ItemMutationRefreshIntent = {
 
 export type AppState = {
     modules: readonly Module[];
+    update_layout: (grid_width: number, grid_height: number) => void;
     start_window_feed_polling: (interval_ms: number) => void;
     module_registry: ModuleRegistry;
     on_drag_end_outside: (x: number, y: number) => void;
@@ -238,12 +238,15 @@ export function create_app_state(): AppState {
         ui_state.world_join.is_loading = true;
         try {
             const entries = await discover_joinable_worlds(APP_CONFIG.selected_data_slot);
+            const previous_selected_world_id = ui_state.world_join.selected_world_id;
             ui_state.world_join.entries = entries;
-            ui_state.world_join.selected_world_id = entries[0]?.id ?? null;
+            ui_state.world_join.selected_world_id = previous_selected_world_id && entries.some((entry) => entry.id === previous_selected_world_id)
+                ? previous_selected_world_id
+                : entries[0]?.id ?? null;
             ui_state.world_join.status_lines = entries.length > 0
                 ? [
                     'local worlds detected',
-                    String(entries[0]?.description ?? 'join enabled'),
+                    String((entries.find((entry) => entry.id === ui_state.world_join.selected_world_id) ?? entries[0])?.description ?? 'join enabled'),
                   ]
                 : ['no local world detected', 'launch a world first or start a local host'];
         } finally {
@@ -2225,11 +2228,23 @@ export function create_app_state(): AppState {
         }
     }
 
-    async function debug_advance_timed_event_turn(): Promise<{ ok: boolean; error?: string; active_actor?: string; new_turn?: number }> {
+    async function advance_timed_event_turn_for_controlled_actor(): Promise<{ ok: boolean; error?: string; active_actor?: string; new_turn?: number }> {
         try {
-            const res = await fetch(`http://localhost:8787/api/timed_event/debug/next_turn?slot=${APP_CONFIG.selected_data_slot}`, {
+            const actor_ref = get_input_actor_ref();
+            const session_token = get_session_token();
+            if (!actor_ref) {
+                return { ok: false, error: 'controlled_actor_binding_required' };
+            }
+            if (!session_token) {
+                return { ok: false, error: 'invalid_session_token' };
+            }
+            const res = await fetch(`http://localhost:8787/api/timed_event/next_turn?slot=${APP_CONFIG.selected_data_slot}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    session_token,
+                    actor_ref,
+                }),
             });
             const data = await res.json().catch(() => null as any);
             if (!res.ok || !data?.ok) {
@@ -3031,7 +3046,7 @@ export function create_app_state(): AppState {
     }
 
     function place_painter_module_ids(include_auxiliary: boolean = false): string[] {
-        const ids = ['place_painter_toolbar', 'place_painter_tools', 'place_painter_palette', 'place_painter_layers', 'place_painter_tool_properties'];
+        const ids = ['place_painter_tools', 'place_painter_palette', 'place_painter_layers', 'place_painter_tool_properties'];
         if (include_auxiliary) ids.push('entity_inspector_module', 'tag_picker_module', 'option_picker_module');
         return ids;
     }
@@ -3142,26 +3157,44 @@ export function create_app_state(): AppState {
     }
 
     function make_place_painter_toolbar_module(rect: Rect): Module {
-        const buttons = [
-            { id: 'tools', label: () => `TOOLS:${module_registry.is_visible('place_painter_tools') ? 'ON' : 'OFF'}`, width: 14, onPress: () => set_module_visible('place_painter_tools', !module_registry.is_visible('place_painter_tools')) },
-            { id: 'picker', label: () => `PICKER:${module_registry.is_visible('place_painter_palette') ? 'ON' : 'OFF'}`, width: 16, onPress: () => set_module_visible('place_painter_palette', !module_registry.is_visible('place_painter_palette')) },
-            { id: 'layers', label: () => `LAYERS:${module_registry.is_visible('place_painter_layers') ? 'ON' : 'OFF'}`, width: 16, onPress: () => set_module_visible('place_painter_layers', !module_registry.is_visible('place_painter_layers')) },
-            { id: 'props', label: () => `PROPS:${module_registry.is_visible('place_painter_tool_properties') ? 'ON' : 'OFF'}`, width: 15, onPress: () => set_module_visible('place_painter_tool_properties', !module_registry.is_visible('place_painter_tool_properties')) },
+        const toggle = (id: string): void => set_module_visible(id, !module_registry.is_visible(id));
+        const debug_items: ProgramNavAction[] = [
+            { id: 'debug_text', label: () => `DEBUG:${module_registry.is_visible('debug') ? 'ON' : 'OFF'}`, width: 13, onPress: () => toggle('debug'), is_active: () => module_registry.is_visible('debug') },
+            { id: 'debug_cmd', label: () => `COMMANDER:${module_registry.is_visible('debug_commander_module') ? 'ON' : 'OFF'}`, width: 17, onPress: () => toggle('debug_commander_module'), is_active: () => module_registry.is_visible('debug_commander_module') },
         ];
-        return make_screen_overlay_bar_module({
+        const module_items: ProgramNavAction[] = [
+            { id: 'status', label: () => `STATUS:${module_registry.is_visible('status') ? 'ON' : 'OFF'}`, width: 14, onPress: () => toggle('status'), is_active: () => module_registry.is_visible('status') },
+            { id: 'transcript', label: () => `TRANSCRIPT:${module_registry.is_visible('transcript') ? 'ON' : 'OFF'}`, width: 18, onPress: () => toggle('transcript'), is_active: () => module_registry.is_visible('transcript') },
+            { id: 'input', label: () => `INPUT:${module_registry.is_visible('input') ? 'ON' : 'OFF'}`, width: 13, onPress: () => toggle('input'), is_active: () => module_registry.is_visible('input') },
+            { id: 'roller', label: () => `ROLLER:${module_registry.is_visible('roller') ? 'ON' : 'OFF'}`, width: 14, onPress: () => toggle('roller'), is_active: () => module_registry.is_visible('roller') },
+            { id: 'character', label: () => `CHAR:${module_registry.is_visible('character_module') ? 'ON' : 'OFF'}`, width: 12, onPress: () => toggle('character_module'), is_active: () => module_registry.is_visible('character_module') },
+        ];
+        const system_items: ProgramNavAction[] = [
+            { id: 'logout', label: 'LOGOUT', width: 8, onPress: () => { void logout_to_actor_claim(); } },
+        ];
+        const paint_items: ProgramNavAction[] = [
+            { id: 'tools', label: () => `TOOLS:${module_registry.is_visible('place_painter_tools') ? 'ON' : 'OFF'}`, width: 14, onPress: () => toggle('place_painter_tools'), is_active: () => module_registry.is_visible('place_painter_tools') },
+            { id: 'picker', label: () => `PICKER:${module_registry.is_visible('place_painter_palette') ? 'ON' : 'OFF'}`, width: 16, onPress: () => toggle('place_painter_palette'), is_active: () => module_registry.is_visible('place_painter_palette') },
+            { id: 'layers', label: () => `LAYERS:${module_registry.is_visible('place_painter_layers') ? 'ON' : 'OFF'}`, width: 16, onPress: () => toggle('place_painter_layers'), is_active: () => module_registry.is_visible('place_painter_layers') },
+            { id: 'props', label: () => `PROPS:${module_registry.is_visible('place_painter_tool_properties') ? 'ON' : 'OFF'}`, width: 15, onPress: () => toggle('place_painter_tool_properties'), is_active: () => module_registry.is_visible('place_painter_tool_properties') },
+        ];
+        return make_program_nav_bar_module({
             id: 'place_painter_toolbar',
-            title: 'PLACE PAINTER',
             get_screen_size: () => ({ width: APP_CONFIG.grid_width, height: APP_CONFIG.grid_height }),
-            get_is_visible: () => ui_state.place_painter.active && module_registry.is_visible('place_painter_toolbar'),
+            get_is_visible: () => module_registry.is_visible('place_painter_toolbar'),
             default_expanded: true,
-            get_status_text: () => `KIND:${ui_state.place_painter.selected_palette_kind.toUpperCase()} SEC:${ui_state.place_painter.selected_tile_palette_section.toUpperCase()} ER:${get_place_painter_erase_targets_summary()} L:${ui_state.place_painter.left_click_tool} R:${ui_state.place_painter.right_click_tool}`,
-            buttons: () => buttons.map((btn) => ({
-                id: btn.id,
-                label: btn.label,
-                width: btn.width,
-                onPress: () => { void btn.onPress(); },
-                is_active: () => btn.id === 'props',
-            })),
+            expanded_height: 5,
+            tabs: () => {
+                const tabs = [
+                    { id: 'debug', label: 'DEBUG', width: 7, items: debug_items },
+                    { id: 'modules', label: 'MODULES', width: 9, items: module_items },
+                    { id: 'system', label: 'SYSTEM', width: 8, items: system_items },
+                ];
+                if (ui_state.place_painter.active) {
+                    tabs.splice(2, 0, { id: 'paint', label: 'PAINT', width: 7, items: paint_items });
+                }
+                return tabs;
+            },
         });
     }
 
@@ -3753,6 +3786,7 @@ export function create_app_state(): AppState {
         if (module_id === 'character_creation_module') return ui_state.character_creation.is_visible;
         if (module_id === 'world_entry_module') return ui_state.world_entry.is_visible;
         if (module_id === 'world_join_module') return ui_state.world_join.is_visible;
+        if (module_id === 'place_painter_toolbar') return has_active_actor_claim() && ui_state.actor_claim.game_ready;
         if (SHELL_MODULE_IDS.has(module_id)) return true;
         const desired = ui_state.modules.visibility.has(module_id) ? Boolean(ui_state.modules.visibility.get(module_id)) : true;
         if (!has_active_actor_claim()) return false;
@@ -5704,6 +5738,46 @@ export function create_app_state(): AppState {
                 },
             },
             {
+                id: 'cost_free',
+                label: ui_state.controls.override_cost === 'FREE' ? 'COST FREE*' : 'COST FREE',
+                description: 'override action cost to FREE',
+                rgb: get_color_by_name('pale_orange').rgb,
+                on_trigger: () => {
+                    ui_state.controls.override_cost = 'FREE';
+                    flash_status(['action cost: FREE'], 800);
+                },
+            },
+            {
+                id: 'cost_part',
+                label: ui_state.controls.override_cost === 'PARTIAL' ? 'COST PART*' : 'COST PART',
+                description: 'override action cost to PARTIAL',
+                rgb: get_color_by_name('pale_orange').rgb,
+                on_trigger: () => {
+                    ui_state.controls.override_cost = 'PARTIAL';
+                    flash_status(['action cost: PARTIAL'], 800);
+                },
+            },
+            {
+                id: 'cost_full',
+                label: ui_state.controls.override_cost === 'FULL' ? 'COST FULL*' : 'COST FULL',
+                description: 'override action cost to FULL',
+                rgb: get_color_by_name('pale_orange').rgb,
+                on_trigger: () => {
+                    ui_state.controls.override_cost = 'FULL';
+                    flash_status(['action cost: FULL'], 800);
+                },
+            },
+            {
+                id: 'cost_ext',
+                label: ui_state.controls.override_cost === 'EXTENDED' ? 'COST EXT*' : 'COST EXT',
+                description: 'override action cost to EXTENDED',
+                rgb: get_color_by_name('pale_orange').rgb,
+                on_trigger: () => {
+                    ui_state.controls.override_cost = 'EXTENDED';
+                    flash_status(['action cost: EXTENDED'], 800);
+                },
+            },
+            {
                 id: 'debug_open_nearest_npc',
                 label: 'NPCINV',
                 description: 'open nearest npc inventory module',
@@ -5839,21 +5913,6 @@ export function create_app_state(): AppState {
                         return;
                     }
                     flash_status(['Timed event queued', `participants: ${result.participants?.length ?? 0}`], 1500);
-                    void refresh_timed_event_debug_state();
-                },
-            },
-            {
-                id: 'debug_next_timed_turn',
-                label: 'NEXT',
-                description: 'advance to next timed-event turn',
-                rgb: get_color_by_name('pale_orange').rgb,
-                on_trigger: async () => {
-                    const result = await debug_advance_timed_event_turn();
-                    if (!result.ok) {
-                        flash_status([`Next turn failed: ${result.error ?? 'unknown'}`], 1800);
-                        return;
-                    }
-                    flash_status([`Turn ${result.new_turn ?? '?'}`, `active: ${result.active_actor ?? '(none)'}`], 1500);
                     void refresh_timed_event_debug_state();
                 },
             },
@@ -7442,6 +7501,15 @@ export function create_app_state(): AppState {
         const query = [`slot=${encodeURIComponent(String(APP_CONFIG.selected_data_slot))}`, `session_token=${encodeURIComponent(session_token)}`];
         const res = await fetch(`http://localhost:8787/api/session/control?${query.join('&')}`);
         const data = await res.json().catch(() => null) as any;
+        if (res.ok && String(data?.binding_state ?? '') === 'unbound') {
+            clear_controlled_actor_runtime_state();
+            if (ui_state.actor_claim.is_visible) {
+                apply_runtime_module_visibility('actor_claim_module');
+                return;
+            }
+            await open_actor_claim_module('startup_required', ['select an actor to begin', 'one actor claimed at a time']);
+            return;
+        }
         if (!res.ok) {
             const error = String(data?.error ?? `session_control_fetch_failed:${res.status}`);
             if (error === 'controlled_actor_release_required') {
@@ -7682,6 +7750,24 @@ export function create_app_state(): AppState {
                 const next = !module_registry.is_visible('debug_commander_module');
                 set_module_visible('debug_commander_module', next);
                 flash_status([next ? 'Debug commander shown' : 'Debug commander hidden'], 900);
+                return;
+            }
+            if (trimmed.toLowerCase() === '/status') {
+                const next = !module_registry.is_visible('status');
+                set_module_visible('status', next);
+                flash_status([next ? 'Status shown' : 'Status hidden'], 900);
+                return;
+            }
+            if (trimmed.toLowerCase() === '/transcript') {
+                const next = !module_registry.is_visible('transcript');
+                set_module_visible('transcript', next);
+                flash_status([next ? 'Transcript shown' : 'Transcript hidden'], 900);
+                return;
+            }
+            if (trimmed.toLowerCase() === '/input') {
+                const next = !module_registry.is_visible('input');
+                set_module_visible('input', next);
+                flash_status([next ? 'Input shown' : 'Input hidden'], 900);
                 return;
             }
             if (trimmed.toLowerCase() === '/logout') {
@@ -8139,8 +8225,6 @@ export function create_app_state(): AppState {
 
     // Do not seed the log window with placeholder text.
 
-    let input_submit: (() => void) | null = null;
-
     // Create module registry for dynamic module management (Phase 7.5)
     const module_registry = create_module_registry();
     ui_state.modules.registry = module_registry;
@@ -8300,7 +8384,7 @@ export function create_app_state(): AppState {
         const recently_changed_ms = Math.max(0, now_ms - Math.max(0, renderer_debug.last_actor_pos_changed_ms || 0));
         const actor_is_repositioning = recently_changed_ms <= 220;
         const always_track_follow_target = ui_state.timed_event_debug.active;
-        if (!always_track_follow_target && !is_entity_moving(actor_ref) && !actor_is_repositioning) return;
+        if (!always_track_follow_target && !actor_is_repositioning) return;
         const target = resolve_follow_actor_camera_focus_region();
         if (!target) return;
         const last_ms = Math.max(0, Math.floor(Number(ui_state.place.camera_target.last_follow_update_ms) || 0));
@@ -8475,13 +8559,18 @@ export function create_app_state(): AppState {
 
         make_place_module({
             id: 'place',
-            rect: { x0: L_X0, y0: Y_PLACE0, x1: L_X1, y1: Y_PLACE1 },
+            rect: get_persisted_rect('place', { x0: L_X0, y0: Y_PLACE0, x1: L_X1, y1: Y_PLACE1 }),
+            on_move: (new_rect) => persist_module_rect('place', new_rect),
+            on_resize: (new_rect) => persist_module_rect('place', new_rect),
+            on_move_end: (final_rect) => persist_module_rect('place', final_rect),
+            on_resize_end: (final_rect) => persist_module_rect('place', final_rect),
             get_place: get_current_place,
             get_scene_places: () => ui_state.place.scene_places,
             get_scene_selected_place_id: () => ui_state.place.scene_selected_place_id,
             get_actor_current_place_id: () => ui_state.place.actor_current_place_id,
             get_scene_connector_hops_visible: () => ui_state.place.scene_connector_hops_visible,
             grid_height: APP_CONFIG.grid_height,
+            get_grid_height: () => APP_CONFIG.grid_height,
             font_family: APP_CONFIG.font_family,
             base_font_size_px: APP_CONFIG.base_font_size_px,
             get_focus_z: () => ui_state.place.focus_z,
@@ -8651,91 +8740,6 @@ export function create_app_state(): AppState {
                 if (!place) return;
                 const cid = build_place_tile_container_id(place.id, tile_x, tile_y, world_z);
                 void open_owner_inventory_view(cid);
-            },
-            on_place_transition: async (target_place_id: string, direction: string): Promise<boolean> => {
-                // Handle place transition when user clicks on a connector
-                const place = get_current_place();
-                if (!place) {
-                    flash_status(['No place loaded'], 1200);
-                    return false;
-                }
-                
-                // Check if timed event is active
-                const slot = APP_CONFIG.selected_data_slot;
-                const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
-                
-                try {
-                    // First check timed event status
-                    const place_response = await fetch(
-                        `${base_url}/api/place?slot=${slot}&place_id=${encodeURIComponent(place.id)}`
-                    );
-                    
-                    if (!place_response.ok) {
-                        flash_status(['Failed to check place status'], 1200);
-                        return false;
-                    }
-                    
-                    const place_data = await place_response.json();
-                    if (place_data.timed_event_active) {
-                        flash_status(['Cannot travel during a timed event'], 2000);
-                        return false;
-                    }
-                    
-                    // Attempt the travel
-                    flash_status([`Traveling ${direction}...`], 1500);
-                    
-                    const travel_response = await fetch(
-                        `${base_url}/api/place/travel?slot=${slot}`,
-                        {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                session_token: get_session_token(),
-                                entity_ref: get_input_actor_ref(),
-                                target_place_id: target_place_id
-                            })
-                        }
-                    );
-                    
-                    if (!travel_response.ok) {
-                        const error_data = await travel_response.json();
-                        if (error_data.error === 'travel_disabled_during_event') {
-                            flash_status(['Cannot travel during a timed event'], 2000);
-                        } else {
-                            flash_status([`Travel failed: ${error_data.error || 'unknown error'}`], 2000);
-                        }
-                        return false;
-                    }
-                    
-                    const travel_data = await travel_response.json();
-                    if (travel_data.ok) {
-                        flash_status([`Arrived at ${target_place_id.split('_').pop()}`], 2000);
-                        const selected_place_id = ui_state.place_painter.active
-                            ? (ui_state.place.scene_selected_place_id ?? target_place_id)
-                            : target_place_id;
-                        const refreshed = await refresh_scene_topology_preserving_selection(target_place_id, {
-                            preferred_selected_place_id: selected_place_id,
-                            mirror_to_current_place: true,
-                        });
-                        if (refreshed) {
-                            const actor_place = get_scene_place(target_place_id) ?? null;
-                            if (actor_place && !ui_state.place_painter.active) {
-                                const actor_tile = actor_place.contents?.actors_present?.find((a: any) => a.actor_ref === get_input_actor_ref())?.tile_position;
-                                if (actor_tile) snap_place_camera_follow_to_actor();
-                            }
-                        } else {
-                            await update_current_place(target_place_id, { source: 'travel_scene_refresh_fallback' });
-                        }
-                        return true;
-                    } else {
-                        flash_status([`Travel failed: ${travel_data.error || 'unknown error'}`], 2000);
-                        return false;
-                    }
-                } catch (err) {
-                    debug_warn('[app_state]', 'Place transition failed:', err);
-                    flash_status(['Travel failed - check console'], 2000);
-                    return false;
-                }
             },
             border_rgb: get_color_by_name('light_gray').rgb,
             bg_rgb: get_color_by_name('off_black').rgb,
@@ -9374,6 +9378,18 @@ export function create_app_state(): AppState {
             text_rgb: get_color_by_name('pale_gray').rgb,
             bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
             base_weight_index: 3,
+            title: 'STATUS',
+            gizmos: {
+                enabled: ['move', 'resize', 'close', 'seamless'],
+                can_close: true,
+                can_move: true,
+                can_save_position: false,
+                on_close: () => set_module_visible('status', false),
+                on_move: (new_rect) => persist_module_rect('status', new_rect),
+                on_move_end: (final_rect) => persist_module_rect('status', final_rect),
+                on_resize: (new_rect) => persist_module_rect('status', new_rect),
+                on_resize_end: (final_rect) => persist_module_rect('status', final_rect),
+            },
         }),
 
         make_text_window_module({
@@ -9387,11 +9403,23 @@ export function create_app_state(): AppState {
             hint_rgb: get_color_by_name('pale_yellow').rgb,
             npc_rgb: get_color_by_name('pumpkin').rgb,
             state_rgb: get_color_by_name('dark_gray').rgb,
+            title: 'TRANSCRIPT',
+            gizmos: {
+                enabled: ['move', 'resize', 'close', 'seamless'],
+                can_close: true,
+                can_move: true,
+                can_save_position: false,
+                on_close: () => set_module_visible('transcript', false),
+                on_move: (new_rect) => persist_module_rect('transcript', new_rect),
+                on_move_end: (final_rect) => persist_module_rect('transcript', final_rect),
+                on_resize: (new_rect) => persist_module_rect('transcript', new_rect),
+                on_resize_end: (final_rect) => persist_module_rect('transcript', final_rect),
+            },
         }),
 
         make_input_module({
             id: 'input',
-            rect: { x0: L_X0, y0: Y_INPUT0, x1: L_X1, y1: Y_INPUT1 },
+            rect: get_persisted_rect('input', { x0: L_X0, y0: Y_INPUT0, x1: L_X1, y1: Y_INPUT1 }),
             target_id: 'transcript',
             on_submit: (target_id, message) => {
                 void send_action_input(message);
@@ -9408,33 +9436,27 @@ export function create_app_state(): AppState {
                     ui_state.controls.suggested_matched = hint.matched_keyword ?? null;
                 }, 1000);
             },
-            bind_submit: (submit) => { input_submit = submit; },
             border_rgb: get_color_by_name('light_gray').rgb,
             text_rgb: get_color_by_name('off_white').rgb,
             cursor_rgb: get_color_by_name('off_white').rgb,
             bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
             base_weight_index: 3,
             placeholder: 'Type… (Enter=send, Shift+Enter=new line, Backspace=delete)',
-        }),
-
-        make_button_module({
-            id: 'btn_send',
-            rect: { x0: BTN_X0, y0: BTN_Y0, x1: BTN_X0 + 12, y1: BTN_Y0 + 2 },
-            label: 'send',
-            rgb: get_color_by_name('pale_orange').rgb,
-            get_rgb: () => {
-                const gate = get_submit_action_gate();
-                return gate.locked ? get_color_by_name('dark_gray').rgb : get_color_by_name('pale_orange').rgb;
-            },
-            bg: { char: '-', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            OnPress() {
-                const gate = get_submit_action_gate();
-                if (gate.locked) {
-                    flash_status([format_action_gate_reason(gate.reason, gate.action_cost ?? undefined)], 1200);
-                    return;
-                }
-                input_submit?.();
+            header_buttons: [
+                { id: 'vol_whisper', label: 'WSP', width: 5, on_press: () => { ui_state.controls.volume = 'WHISPER'; flash_status(['volume: WHISPER'], 800); }, is_active: () => ui_state.controls.volume === 'WHISPER' },
+                { id: 'vol_normal', label: 'NRM', width: 5, on_press: () => { ui_state.controls.volume = 'NORMAL'; flash_status(['volume: NORMAL'], 800); }, is_active: () => ui_state.controls.volume === 'NORMAL' },
+                { id: 'vol_shout', label: 'SHT', width: 5, on_press: () => { ui_state.controls.volume = 'SHOUT'; flash_status(['volume: SHOUT'], 800); }, is_active: () => ui_state.controls.volume === 'SHOUT' },
+            ],
+            gizmos: {
+                enabled: ['move', 'resize', 'close', 'seamless'],
+                can_close: true,
+                can_move: true,
+                can_save_position: false,
+                on_close: () => set_module_visible('input', false),
+                on_move: (new_rect) => persist_module_rect('input', new_rect),
+                on_move_end: (final_rect) => persist_module_rect('input', final_rect),
+                on_resize: (new_rect) => persist_module_rect('input', new_rect),
+                on_resize_end: (final_rect) => persist_module_rect('input', final_rect),
             },
         }),
 
@@ -9489,6 +9511,7 @@ export function create_app_state(): AppState {
                 current_turn: ui_state.timed_event_debug.current_turn,
                 current_round: ui_state.timed_event_debug.current_round,
                 active_actor_ref: ui_state.timed_event_debug.active_actor_ref,
+                controlled_actor_ref: get_input_actor_ref(),
                 turn_window_breaths: ui_state.timed_event_debug.turn_window_breaths,
                 turn_breaths_remaining: ui_state.timed_event_debug.turn_breaths_remaining,
                 timed_event_world_breath_index: ui_state.timed_event_debug.timed_event_world_breath_index,
@@ -9502,6 +9525,17 @@ export function create_app_state(): AppState {
                 set_module_visible('initiative', false);
                 flash_status(['Initiative hidden'], 800);
             },
+            on_end_turn: () => {
+                void (async () => {
+                    const result = await advance_timed_event_turn_for_controlled_actor();
+                    if (!result.ok) {
+                        flash_status([`End turn failed: ${result.error ?? 'unknown'}`], 1800);
+                        return;
+                    }
+                    flash_status([`Turn ${result.new_turn ?? '?'}`, `active: ${result.active_actor ?? '(none)'}`], 1500);
+                    void refresh_timed_event_debug_state();
+                })();
+            },
             on_move: (new_rect) => {
                 ui_state.modules.positions.set('initiative', new_rect);
                 persist_module_layout_debounced();
@@ -9510,120 +9544,6 @@ export function create_app_state(): AppState {
                 ui_state.modules.positions.set('initiative', new_rect);
                 persist_module_layout_debounced();
             },
-        }),
-
-        // Action cost buttons
-        make_button_module({
-            id: 'cost_free',
-            rect: { x0: BTN_X0, y0: BTN_Y0 + 12, x1: BTN_X0 + 6, y1: BTN_Y0 + 14 },
-            label: 'FREE',
-            rgb: get_color_by_name('pale_orange').rgb,
-            bg: { char: '.', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            OnPress() { ui_state.controls.override_cost = 'FREE'; flash_status(['action cost: FREE'], 800); },
-        }),
-        make_button_module({
-            id: 'cost_part',
-            rect: { x0: BTN_X0 + 7, y0: BTN_Y0 + 12, x1: BTN_X0 + 13, y1: BTN_Y0 + 14 },
-            label: 'PART',
-            rgb: get_color_by_name('pale_orange').rgb,
-            bg: { char: '.', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            OnPress() { ui_state.controls.override_cost = 'PARTIAL'; flash_status(['action cost: PARTIAL'], 800); },
-        }),
-        make_button_module({
-            id: 'cost_full',
-            rect: { x0: BTN_X0 + 14, y0: BTN_Y0 + 12, x1: BTN_X0 + 20, y1: BTN_Y0 + 14 },
-            label: 'FULL',
-            rgb: get_color_by_name('pale_orange').rgb,
-            bg: { char: '.', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            OnPress() { ui_state.controls.override_cost = 'FULL'; flash_status(['action cost: FULL'], 800); },
-        }),
-        make_button_module({
-            id: 'cost_ext',
-            rect: { x0: BTN_X0 + 21, y0: BTN_Y0 + 12, x1: BTN_X0 + 27, y1: BTN_Y0 + 14 },
-            label: 'EXT',
-            rgb: get_color_by_name('pale_orange').rgb,
-            bg: { char: '.', rgb: get_color_by_name('dark_gray').rgb },
-            base_weight_index: 3,
-            OnPress() { ui_state.controls.override_cost = 'EXTENDED'; flash_status(['action cost: EXTENDED'], 800); },
-        }),
-
-        // Action intent buttons - Updated for Action Pipeline
-        // Only showing actions currently implemented in the Action Pipeline:
-        // - USE (handles all tool-based actions including attacks)
-        // - COMMUNICATE (talking to NPCs)
-        // - MOVE (movement)
-        // - INSPECT (looking at things)
-        make_button_module({ id: 'verb_use', rect: { x0: BTN_X0, y0: BTN_Y0 + 9, x1: BTN_X0 + 7, y1: BTN_Y0 + 11 }, label: 'USE', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'USE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'USE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, base_weight_index: 3, OnPress() { ui_state.controls.override_intent = 'USE'; flash_status(['intent: USE'], 800); } }),
-        make_button_module({ id: 'verb_com', rect: { x0: BTN_X0 + 8, y0: BTN_Y0 + 9, x1: BTN_X0 + 15, y1: BTN_Y0 + 11 }, label: 'TALK', rgb: WHITE, get_rgb: () => { const gate = get_timed_event_action_gate('COMMUNICATE'); return gate.locked ? get_color_by_name('dark_gray').rgb : (ui_state.controls.override_intent === 'COMMUNICATE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'COMMUNICATE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)); }, bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, base_weight_index: 3, OnPress() { const gate = get_timed_event_action_gate('COMMUNICATE'); if (gate.locked) { flash_status([format_action_gate_reason(gate.reason, gate.action_cost)], 1200); return; } ui_state.controls.override_intent = 'COMMUNICATE'; flash_status(['intent: COMMUNICATE'], 800); } }),
-        make_button_module({ id: 'verb_mov', rect: { x0: BTN_X0 + 16, y0: BTN_Y0 + 9, x1: BTN_X0 + 23, y1: BTN_Y0 + 11 }, label: 'MOVE', rgb: WHITE, get_rgb: () => (ui_state.controls.override_intent === 'MOVE' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'MOVE' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)), bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, base_weight_index: 3, OnPress() { ui_state.controls.override_intent = 'MOVE'; flash_status(['intent: MOVE'], 800); } }),
-        make_button_module({ id: 'verb_ins', rect: { x0: BTN_X0 + 24, y0: BTN_Y0 + 9, x1: BTN_X1, y1: BTN_Y0 + 11 }, label: 'LOOK', rgb: WHITE, get_rgb: () => { const gate = get_timed_event_action_gate('INSPECT'); return gate.locked ? get_color_by_name('dark_gray').rgb : (ui_state.controls.override_intent === 'INSPECT' ? get_color_by_name('pale_yellow').rgb : (ui_state.controls.suggested_intent === 'INSPECT' ? get_color_by_name('pale_gray').rgb : get_color_by_name('dark_gray').rgb)); }, bg: { char: '-', rgb: get_color_by_name('off_black').rgb }, base_weight_index: 3, OnPress() { const gate = get_timed_event_action_gate('INSPECT'); if (gate.locked) { flash_status([format_action_gate_reason(gate.reason, gate.action_cost)], 1200); return; } ui_state.controls.override_intent = 'INSPECT'; flash_status(['intent: INSPECT'], 800); } }),
-        make_button_module({ id: 'verb_clear', rect: { x0: BTN_X0 + 28, y0: BTN_Y0 + 12, x1: BTN_X1, y1: BTN_Y0 + 14 }, label: 'CLR', rgb: get_color_by_name('pale_yellow').rgb, bg: { char: '.', rgb: get_color_by_name('dark_gray').rgb }, base_weight_index: 3, OnPress() { ui_state.controls.override_intent = null; ui_state.controls.override_cost = null; flash_status(['overrides cleared'], 800); } }),
-
-        // COMMUNICATE volume buttons (non-debug)
-        make_button_module({
-            id: 'vol_whisper',
-            rect: { x0: BTN_X0, y0: BTN_Y0 + 6, x1: BTN_X0 + 10, y1: BTN_Y0 + 8 },
-            label: 'WSP',
-            rgb: WHITE,
-            get_rgb: () => (ui_state.controls.volume === 'WHISPER' ? get_color_by_name('pale_yellow').rgb : get_color_by_name('dark_gray').rgb),
-            bg: { char: '-', rgb: get_color_by_name('off_black').rgb },
-            base_weight_index: 3,
-            OnPress() { ui_state.controls.volume = 'WHISPER'; flash_status(['volume: WHISPER'], 800); },
-        }),
-        make_button_module({
-            id: 'vol_normal',
-            rect: { x0: BTN_X0 + 11, y0: BTN_Y0 + 6, x1: BTN_X0 + 21, y1: BTN_Y0 + 8 },
-            label: 'NRM',
-            rgb: WHITE,
-            get_rgb: () => (ui_state.controls.volume === 'NORMAL' ? get_color_by_name('pale_yellow').rgb : get_color_by_name('dark_gray').rgb),
-            bg: { char: '-', rgb: get_color_by_name('off_black').rgb },
-            base_weight_index: 3,
-            OnPress() { ui_state.controls.volume = 'NORMAL'; flash_status(['volume: NORMAL'], 800); },
-        }),
-        make_button_module({
-            id: 'vol_shout',
-            rect: { x0: BTN_X0 + 22, y0: BTN_Y0 + 6, x1: BTN_X1, y1: BTN_Y0 + 8 },
-            label: 'SHT',
-            rgb: WHITE,
-            get_rgb: () => (ui_state.controls.volume === 'SHOUT' ? get_color_by_name('pale_yellow').rgb : get_color_by_name('dark_gray').rgb),
-            bg: { char: '-', rgb: get_color_by_name('off_black').rgb },
-            base_weight_index: 3,
-            OnPress() { ui_state.controls.volume = 'SHOUT'; flash_status(['volume: SHOUT'], 800); },
-        }),
-
-        // Movement mode buttons (non-debug)
-        make_button_module({
-            id: 'mv_walk',
-            rect: { x0: BTN_X0, y0: BTN_Y0 + 3, x1: BTN_X0 + 10, y1: BTN_Y0 + 5 },
-            label: 'WLK',
-            rgb: WHITE,
-            get_rgb: () => (ui_state.controls.move_mode === 'WALK' ? get_color_by_name('pale_yellow').rgb : get_color_by_name('dark_gray').rgb),
-            bg: { char: '-', rgb: get_color_by_name('off_black').rgb },
-            base_weight_index: 3,
-            OnPress() { ui_state.controls.move_mode = 'WALK'; flash_status(['move: WALK'], 800); },
-        }),
-        make_button_module({
-            id: 'mv_sneak',
-            rect: { x0: BTN_X0 + 11, y0: BTN_Y0 + 3, x1: BTN_X0 + 21, y1: BTN_Y0 + 5 },
-            label: 'SNK',
-            rgb: WHITE,
-            get_rgb: () => (ui_state.controls.move_mode === 'SNEAK' ? get_color_by_name('pale_yellow').rgb : get_color_by_name('dark_gray').rgb),
-            bg: { char: '-', rgb: get_color_by_name('off_black').rgb },
-            base_weight_index: 3,
-            OnPress() { ui_state.controls.move_mode = 'SNEAK'; flash_status(['move: SNEAK'], 800); },
-        }),
-        make_button_module({
-            id: 'mv_sprint',
-            rect: { x0: BTN_X0 + 22, y0: BTN_Y0 + 3, x1: BTN_X1, y1: BTN_Y0 + 5 },
-            label: 'SPR',
-            rgb: WHITE,
-            get_rgb: () => (ui_state.controls.move_mode === 'SPRINT' ? get_color_by_name('pale_yellow').rgb : get_color_by_name('dark_gray').rgb),
-            bg: { char: '-', rgb: get_color_by_name('off_black').rgb },
-            base_weight_index: 3,
-            OnPress() { ui_state.controls.move_mode = 'SPRINT'; flash_status(['move: SPRINT'], 800); },
         }),
 
         make_debug_commander_module({
@@ -9650,7 +9570,8 @@ export function create_app_state(): AppState {
 
         make_roller_module({
             id: 'roller',
-            rect: { x0: ROLL_X0, y0: BTN_Y0, x1: ROLL_X1, y1: BTN_Y1 },
+            rect: get_persisted_rect('roller', { x0: ROLL_X0, y0: BTN_Y0, x1: ROLL_X1, y1: BTN_Y1 }),
+            get_is_visible: () => Boolean(ui_state.modules.visibility.get('roller')),
             get_state: () => ui_state.roller,
             on_roll: async (roll_id) => {
                 await fetch(APP_CONFIG.roller_roll_endpoint, {
@@ -9664,6 +9585,17 @@ export function create_app_state(): AppState {
             border_rgb: get_color_by_name('dark_gray').rgb,
             bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
             base_weight_index: 3,
+            gizmos: {
+                enabled: ['move', 'resize', 'close', 'seamless'],
+                can_close: true,
+                can_move: true,
+                can_save_position: false,
+                on_close: () => set_module_visible('roller', false),
+                on_move: (new_rect) => persist_module_rect('roller', new_rect),
+                on_move_end: (final_rect) => persist_module_rect('roller', final_rect),
+                on_resize: (new_rect) => persist_module_rect('roller', new_rect),
+                on_resize_end: (final_rect) => persist_module_rect('roller', final_rect),
+            },
         }),
 
         // Character Module (body slots) - TOP
@@ -10620,6 +10552,18 @@ export function create_app_state(): AppState {
         },
     ];
 
+    function update_layout(grid_width: number, grid_height: number): void {
+        const next_width = Math.max(1, Math.floor(Number(grid_width) || APP_CONFIG.grid_width));
+        const next_height = Math.max(1, Math.floor(Number(grid_height) || APP_CONFIG.grid_height));
+        (APP_CONFIG as any).grid_width = next_width;
+        (APP_CONFIG as any).grid_height = next_height;
+
+        const bg_module = module_registry.get?.('bg') ?? modules.find((entry) => entry.id === 'bg');
+        if (bg_module) {
+            bg_module.rect = { x0: 0, y0: 0, x1: next_width - 1, y1: next_height - 1 };
+        }
+    }
+
     // Register all static modules to the registry (Phase 7.5)
     for (const module of modules) {
         module_registry.register(module);
@@ -10640,6 +10584,24 @@ export function create_app_state(): AppState {
     }
     if (!ui_state.modules.visibility.has('debug')) {
         ui_state.modules.visibility.set('debug', module_registry.is_visible('debug'));
+    }
+    ui_state.modules.visibility.set('place_painter_toolbar', true);
+    module_registry.set_visibility('place_painter_toolbar', has_active_actor_claim() && ui_state.actor_claim.game_ready);
+    if (!ui_state.modules.visibility.has('status')) {
+        ui_state.modules.visibility.set('status', true);
+        module_registry.set_visibility('status', true);
+    }
+    if (!ui_state.modules.visibility.has('transcript')) {
+        ui_state.modules.visibility.set('transcript', true);
+        module_registry.set_visibility('transcript', true);
+    }
+    if (!ui_state.modules.visibility.has('input')) {
+        ui_state.modules.visibility.set('input', true);
+        module_registry.set_visibility('input', true);
+    }
+    if (!ui_state.modules.visibility.has('roller')) {
+        ui_state.modules.visibility.set('roller', true);
+        module_registry.set_visibility('roller', true);
     }
     if (!ui_state.modules.visibility.has('debug_commander_module')) {
         ui_state.modules.visibility.set('debug_commander_module', true);
@@ -11615,6 +11577,7 @@ export function create_app_state(): AppState {
 
     return {
         modules: module_registry.get_all(),
+        update_layout,
         start_window_feed_polling,
         module_registry,  // Expose for subscription
         // Called when drag ends outside any module - triggers rejection animation

@@ -20,13 +20,16 @@ import {
 } from "../action_system/index.js";
 
 import { load_actor, save_actor } from "../actor_storage/store.js";
-import { load_npc, find_npcs, type NpcSearchHit } from "../npc_storage/store.js";
+import { load_npc, find_npcs, save_npc, type NpcSearchHit } from "../npc_storage/store.js";
 import { get_npc_location } from "../npc_storage/location.js";
 import { get_configured_data_slot } from "../shared/boot_env.js";
 import { is_timed_event_active, get_timed_event_state, get_region_by_coords } from "../world_storage/store.js";
 import { debug_log, debug_warn } from "../shared/debug.js";
 import type { ActionVerb, ActionCost } from "../shared/constants.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
+import { has_awareness_entry, set_awareness_entry } from "../shared/awareness.js";
+import { reconcile_awareness_for_pair, update_awareness_from_perception } from "../shared/awareness_runtime.js";
+import { get_perceivable_entities_in_place } from "../shared/perceivable_entities.js";
 
 const data_slot_number = get_configured_data_slot();
 
@@ -42,39 +45,36 @@ export function createPipelineDependencies(): PipelineDependencies {
     // Get available targets from actor/npc storage
     getAvailableTargets: async (location: Location, radius: number) => {
       const targets: AvailableTarget[] = [];
-      
-      // Get all NPCs
-      const npcs = find_npcs(data_slot_number, {});
-      
-      for (const npc of npcs) {
-        // Load full NPC data to get location
-        const npc_result = load_npc(data_slot_number, npc.id);
-        if (!npc_result.ok || !npc_result.npc) continue;
-        
-        const npc_loc_data = get_npc_location(npc_result.npc);
-        if (!npc_loc_data) continue;
-        
-        const npc_loc: Location = {
-          world_x: npc_loc_data.world_tile?.x ?? 0,
-          world_y: npc_loc_data.world_tile?.y ?? 0,
-          region_x: npc_loc_data.region_tile?.x ?? 0,
-          region_y: npc_loc_data.region_tile?.y ?? 0,
-          x: npc_loc_data.tile?.x ?? 0,
-          y: npc_loc_data.tile?.y ?? 0
-        };
-        
-        const distance = calculateDistance(location, npc_loc);
-        if (distance <= radius) {
-          targets.push({
-            ref: `npc.${npc.id}`,
-            type: "character",
-            name: npc.name || npc.id,
-            location: npc_loc,
-            distance,
-            isHostile: false,  // Would check faction system
-            isFriendly: false
-          });
-        }
+      const place_id = String((location as any)?.place_id ?? "").trim();
+      if (!place_id) return targets;
+
+      const candidates = get_perceivable_entities_in_place({
+        slot: data_slot_number,
+        place_id,
+        origin: { x: location.x ?? 0, y: location.y ?? 0, z: (location as any).z },
+        radius,
+        include_kinds: ["character"],
+      });
+
+      for (const candidate of candidates) {
+        targets.push({
+          ref: candidate.ref,
+          type: "character",
+          name: candidate.name || candidate.ref.replace(/^(actor|npc)\./, ""),
+          location: {
+            world_x: location.world_x,
+            world_y: location.world_y,
+            region_x: location.region_x,
+            region_y: location.region_y,
+            x: candidate.position.x,
+            y: candidate.position.y,
+            z: candidate.position.z,
+            place_id: candidate.position.place_id,
+          },
+          distance: candidate.distance,
+          isHostile: false,
+          isFriendly: false,
+        });
       }
       
       return targets;
@@ -98,15 +98,37 @@ export function createPipelineDependencies(): PipelineDependencies {
         region_x: (loc.region_tile as any)?.x ?? 0,
         region_y: (loc.region_tile as any)?.y ?? 0,
         x: loc.x ?? 0,
-        y: loc.y ?? 0
+        y: loc.y ?? 0,
+        z: Number.isFinite(Number(loc.z)) ? Number(loc.z) : (Number.isFinite(Number((loc.tile as any)?.z)) ? Number((loc.tile as any).z) : undefined)
       };
     },
     
     // Check if actor is aware of target
     checkActorAwareness: async (actorRef: string, targetRef: string) => {
-      // TODO: Implement awareness system check
-      // For now, assume everyone is aware of everyone in the same place
-      return true;
+      if (!targetRef || targetRef === actorRef) return true;
+      reconcile_awareness_for_pair(data_slot_number, actorRef, targetRef);
+      if (actorRef.startsWith("actor.")) {
+        const actor_id = actorRef.replace(/^actor\./, "");
+        const result = load_actor(data_slot_number, actor_id);
+        return result.ok && result.actor ? has_awareness_entry(result.actor as any, targetRef) : false;
+      }
+      if (actorRef.startsWith("npc.")) {
+        const npc_id = actorRef.replace(/^npc\./, "");
+        const result = load_npc(data_slot_number, npc_id);
+        return result.ok && result.npc ? has_awareness_entry(result.npc as any, targetRef) : false;
+      }
+      return false;
+    },
+    recordPerceivedAwareness: async (event) => {
+      console.info("[ActionSystemAdapter] recordPerceivedAwareness", {
+        observer_ref: event?.observerRef,
+        target_ref: event?.actorRef,
+        verb: event?.verb,
+        visibility: event?.actorVisibility,
+        identityKnown: event?.identityKnown,
+        locationKnown: event?.locationKnown,
+      });
+      update_awareness_from_perception(data_slot_number, event);
     },
     
     // Check if actor can afford action cost
@@ -216,12 +238,34 @@ async function executeApplyHeal(effect: ActionEffect): Promise<boolean> {
 }
 
 async function executeSetAwareness(effect: ActionEffect): Promise<boolean> {
-  const { target, of } = effect.parameters;
-  debug_log("ActionSystem", `${target} is now aware of ${of}`);
-  
-  // TODO: Update awareness tracking
-  
-  return true;
+  const observer = typeof effect.parameters.observer === "string" ? effect.parameters.observer : effect.targetRef;
+  const target = typeof effect.parameters.target === "string" ? effect.parameters.target : effect.parameters.of;
+  debug_log("ActionSystem", `${observer} is now aware of ${target}`);
+  if (!observer || !target) return false;
+
+  if (typeof observer === "string" && observer.startsWith("actor.")) {
+    const actor_id = observer.replace(/^actor\./, "");
+    const result = load_actor(data_slot_number, actor_id);
+    if (!result.ok || !result.actor) return false;
+    set_awareness_entry(result.actor as any, String(target), effect.parameters.clarity ?? null, {
+      identity_known: typeof effect.parameters.identity_known === "boolean" ? effect.parameters.identity_known : undefined,
+    });
+    save_actor(data_slot_number, actor_id, result.actor as any);
+    return true;
+  }
+
+  if (typeof observer === "string" && observer.startsWith("npc.")) {
+    const npc_id = observer.replace(/^npc\./, "");
+    const result = load_npc(data_slot_number, npc_id);
+    if (!result.ok || !result.npc) return false;
+    set_awareness_entry(result.npc as any, String(target), effect.parameters.clarity ?? null, {
+      identity_known: typeof effect.parameters.identity_known === "boolean" ? effect.parameters.identity_known : undefined,
+    });
+    save_npc(data_slot_number, npc_id, result.npc as any);
+    return true;
+  }
+
+  return false;
 }
 
 async function executeSetOccupancy(effect: ActionEffect): Promise<boolean> {

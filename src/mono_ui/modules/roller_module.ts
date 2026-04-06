@@ -1,5 +1,7 @@
 import type { Canvas, Module, PointerEvent, Rect, Rgb } from "../types.js";
 import { rect_height, rect_width } from "../types.js";
+import type { ModuleGizmosConfig } from "../module_gizmos.js";
+import { make_floating_panel_module } from "./floating_panel_module.js";
 
 export type RollerState = {
     spinner: string;
@@ -12,6 +14,7 @@ export type RollerState = {
 export type RollerModuleOptions = {
     id: string;
     rect: Rect;
+    get_is_visible?: () => boolean;
     get_state: () => RollerState;
     on_roll: (roll_id: string) => void;
     text_rgb: Rgb;
@@ -19,6 +22,7 @@ export type RollerModuleOptions = {
     border_rgb: Rgb;
     bg?: { char: string; rgb: Rgb };
     base_weight_index?: number;
+    gizmos?: ModuleGizmosConfig;
 };
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -28,6 +32,7 @@ function clamp(n: number, lo: number, hi: number): number {
 export function make_roller_module(opts: RollerModuleOptions): Module {
     let hovered = false;
     let pressed = false;
+    let rect = opts.rect;
 
     function base_weight(): number {
         const w = opts.base_weight_index ?? 3;
@@ -43,26 +48,36 @@ export function make_roller_module(opts: RollerModuleOptions): Module {
     }
 
     function button_rect(): Rect {
-        return { x0: opts.rect.x0 + 1, y0: opts.rect.y0 + 1, x1: opts.rect.x1 - 1, y1: opts.rect.y0 + 3 };
+        return { x0: rect.x0 + 1, y0: rect.y0 + 1, x1: rect.x1 - 1, y1: rect.y0 + 3 };
     }
 
     function is_in_rect(r: Rect, x: number, y: number): boolean {
         return x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1;
     }
 
-    return {
+    return make_floating_panel_module({
         id: opts.id,
         rect: opts.rect,
-        Focusable: true,
-
-        Draw(c: Canvas): void {
+        title: 'ROLLER',
+        is_visible: opts.get_is_visible,
+        gizmos: opts.gizmos,
+        background: opts.bg,
+        border: {
+            border_rgb: opts.border_rgb,
+            text_rgb: opts.text_rgb,
+        },
+        resize: opts.gizmos ? {
+            min_width: 14,
+            min_height: 6,
+            max_width: 40,
+            max_height: 20,
+        } : undefined,
+        draw_content(c: Canvas, next_rect: Rect): void {
+            rect = next_rect;
             const state = opts.get_state();
             const w_base = base_weight();
-            const rect = opts.rect;
 
-            if (opts.bg) {
-                c.fill_rect(rect, { char: opts.bg.char, rgb: opts.bg.rgb, style: "regular", weight_index: w_base });
-            }
+            c.fill_rect(rect, { char: opts.bg?.char ?? ' ', rgb: opts.bg?.rgb ?? { r: 0, g: 0, b: 0 }, style: "regular", weight_index: w_base });
 
             const text_rgb = state.disabled ? opts.dim_rgb : opts.text_rgb;
             const label = state.disabled ? ":3" : state.dice_label;
@@ -91,31 +106,23 @@ export function make_roller_module(opts: RollerModuleOptions): Module {
                 c.set(btn.x0, btn.y1, { char: "P", rgb: btn_rgb, style: "regular", weight_index: w_base + 2 });
             }
         },
-
-        OnPointerEnter(): void {
+        on_pointer_enter_content(): void {
             hovered = true;
         },
-
-        OnPointerLeave(): void {
+        on_pointer_leave_content(): void {
             hovered = false;
             pressed = false;
         },
-
-        OnPointerDown(e: PointerEvent): void {
-            if (e.button !== 0) return;
-            if (is_in_rect(button_rect(), e.x, e.y)) pressed = true;
-        },
-
-        OnPointerUp(): void {
-            pressed = false;
-        },
-
-        OnClick(e: PointerEvent): void {
+        on_pointer_down_content(e: PointerEvent): void {
             if (e.button !== 0) return;
             const state = opts.get_state();
             if (state.disabled || !state.roll_id) return;
             if (!is_in_rect(button_rect(), e.x, e.y)) return;
+            pressed = true;
             opts.on_roll(state.roll_id);
         },
-    };
+        on_pointer_up_content(): void {
+            pressed = false;
+        },
+    });
 }

@@ -1,11 +1,12 @@
 /**
- * NPC Movement State Management
+ * NPC Behavior Runtime State Management
  * 
- * Tracks real-time movement state for each NPC during free movement mode.
+ * Tracks the lightweight behavior/runtime state for each NPC during ambient play.
  * Each NPC has a MovementState that persists across ticks but not across server restarts.
  * 
  * State includes:
- * - Current goal (what they want to do)
+ * - Current routine (high-level behavior pattern)
+ * - Current goal (what they want to do right now)
  * - Current action (what they're doing right now)
  * - Movement path and progress
  * - Timestamps for reassessment decisions
@@ -18,6 +19,14 @@ import type { TilePosition } from "../types/place.js";
 import { debug_log } from "../shared/debug.js";
 
 /** Types of goals NPCs can pursue */
+export type RoutineKind =
+  | "idle_wander"
+  | "attend_place"
+  | "guard_place"
+  | "sleep_at_home"
+  | "follow_target"
+  | "socialize";
+
 export type GoalType = 
   | "wander"      // Random exploration
   | "patrol"      // Follow waypoints
@@ -59,6 +68,11 @@ export type Action = {
 /** Complete movement state for an NPC */
 export type MovementState = {
   npc_ref: string;
+
+  // High-level behavior selection
+  current_routine: RoutineKind | null;
+  current_mode: "ambient" | "conversation" | "timed_event" | "scripted" | null;
+  routine_reason?: string;
   
   // Current state
   current_goal: Goal | null;
@@ -116,6 +130,8 @@ export function init_movement_state(
   const now = Date.now();
   const state: MovementState = {
     npc_ref,
+    current_routine: null,
+    current_mode: "ambient",
     current_goal: null,
     current_action: null,
     path: [],

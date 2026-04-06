@@ -236,7 +236,7 @@ export const ACTION_REGISTRY: Record<ActionVerb, ActionDefinition> = {
       stealthAllowed: false,
       visualObscurable: false
     },
-    effectTemplate: "SYSTEM.SET_AWARENESS(target={target}, of={actor}, context={message})",
+    effectTemplate: "SYSTEM.SET_AWARENESS(observer={target}, target={actor}, clarity={clear}, identity_known={true}, context={message})",
     aiPriority: 50,
     aiConditions: ["player_nearby", "not_hostile", "has_information"],
     requiresAwareness: false  // Can communicate without being aware

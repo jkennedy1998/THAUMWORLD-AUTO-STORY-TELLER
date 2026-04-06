@@ -36,7 +36,8 @@ import {
   get_movement_state,
   set_goal,
   clear_goal,
-  init_movement_state
+  init_movement_state,
+  update_movement_state,
 } from "./movement_state.js";
 
 import {
@@ -44,13 +45,9 @@ import {
 } from "./goal_selector.js";
 
 import {
-  resume_npc_wandering,
-  cancel_npc_wandering
-} from "./movement_loop.js";
-
-import {
-  stop_entity_movement
-} from "../shared/movement_engine.js";
+  resume_npc_ambient_behavior,
+  cancel_npc_ambient_behavior,
+} from "./ambient_behavior.js";
 
 import {
   send_stop_command,
@@ -352,12 +349,12 @@ function can_npc_perceive(observer_ref: string, event: PerceptionEvent): boolean
   const observer_state = ensure_movement_state(observer_ref);
   const observer_pos =
     details_pos && typeof details_pos.x === "number" && typeof details_pos.y === "number"
-      ? { x: details_pos.x, y: details_pos.y }
+      ? { x: details_pos.x, y: details_pos.y, z: Number.isFinite(Number(details_pos.z)) ? Number(details_pos.z) : undefined }
       : observer_state?.last_position;
 
   const actor_pos =
     typeof event.location?.x === "number" && typeof event.location?.y === "number"
-      ? { x: event.location.x, y: event.location.y }
+      ? { x: event.location.x, y: event.location.y, z: Number.isFinite(Number((event.location as any)?.z)) ? Number((event.location as any).z) : undefined }
       : undefined;
 
   let best_sense: string | null = null;
@@ -766,11 +763,10 @@ function start_conversation_with_actor(
   send_face_command(observer_ref, event.actorRef, "IMMEDIATE: Face speaker");
   
   // Cancel any pending wandering and stop current movement
-  cancel_npc_wandering(observer_ref);
-  stop_entity_movement(observer_ref);
+  cancel_npc_ambient_behavior(observer_ref);
 
-  // Send movement commands to renderer (Phase 8: Unified Movement Authority)
-  // NPC_AI is the sole authority for movement decisions
+  // Conversation interruption projects visible stop/facing state while the
+  // authoritative server runtime owns actual movement execution.
   send_stop_command(observer_ref, "Entering conversation");
   
   // Send face command again after stop to ensure it takes effect
@@ -801,6 +797,11 @@ function start_conversation_with_actor(
   debug_log("[Witness]", `Generating conversation goal for ${observer_ref} at (${target_pos.x}, ${target_pos.y})`);
   const converse_goal = generate_conversation_goal(observer_ref, event.actorRef, target_pos);
   debug_log("[Witness]", `Setting goal for ${observer_ref}:`, { goal_type: converse_goal.type, priority: converse_goal.priority });
+  update_movement_state(observer_ref, {
+    current_mode: "conversation",
+    current_routine: null,
+    routine_reason: `conversation_with:${event.actorRef}`,
+  });
   set_goal(observer_ref, converse_goal);
   face_actor(observer_ref, event);
   
@@ -865,9 +866,13 @@ function restore_previous_goal(npc_ref: string, ended_conv?: any | null): void {
   } else {
     // No previous goal to restore, resume wandering
     clear_goal(npc_ref, "Conversation ended - no previous goal");
-    resume_npc_wandering(npc_ref);
-    debug_log("Witness", `${npc_ref} resumed wandering after conversation`);
+    resume_npc_ambient_behavior(npc_ref);
+    debug_log("Witness", `${npc_ref} resumed ambient behavior after conversation`);
   }
+  update_movement_state(npc_ref, {
+    current_mode: "ambient",
+    routine_reason: "conversation_ended",
+  });
   
   // Update NPC status back to "present"
   set_conversation_visual_state(npc_ref, "present", "Exiting conversation");

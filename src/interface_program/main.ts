@@ -97,7 +97,7 @@ import { build_tile_owner_inventory_view } from "../inventory_surfaces/tile_owne
 import { resolve_inventory_target_id } from "../inventory_surfaces/transfer_targets.js";
 import type { PlaceItem, PlaceConnectorDirection } from "../types/place.js";
 import { DEFAULT_CHARACTER_BODY_SLOT_REPRESENTATION } from "../shared/body_slot_representation.js";
-import { can_place_volume, get_place_world_z_bounds } from "../place_storage/movement_legality.js";
+import { can_place_volume, can_walk_step_up_from_blocked_forward, get_place_world_z_bounds } from "../place_storage/movement_legality.js";
 import { ensure_place_tiles } from "../place_storage/tiles.js";
 import {
     validate_transfer_destination,
@@ -147,7 +147,7 @@ type PlaceBreathState = {
     place_dirty: boolean;
     tile_physics_cache: Array<{ x: number; y: number; z: number; layer_key: string; kind: string }>;
     tile_physics_cache_dirty: boolean;
-    tile_updates: Array<{ place_id: string; kind: string; from: { x: number; y: number; z: number }; to: { x: number; y: number; z: number } }>;
+    tile_updates: Array<{ place_id: string; kind: string; from: { x: number; y: number; z: number }; to: { x: number; y: number; z: number }; from_place_id?: string; to_place_id?: string }>;
     item_refresh_intents: ItemMutationRefreshIntent[];
 };
 
@@ -823,8 +823,9 @@ function try_select_walk_incline_for_direction(place_any: any, entity_ref: strin
                     blocker: push_check.blocker ?? null,
                     tile_kind: push_check.tile_kind ?? null,
                 });
+                return null;
             } else {
-                debug_log('MOVE_UNIFY_TEST', 'pushable tile blocked and not climbable', {
+                debug_log('MOVE_UNIFY_TEST', 'pushable tile push failed, continuing fallback resolution', {
                     entity_ref,
                     at: { x: cur_x, y: cur_y, z: cur_z },
                     desired,
@@ -833,40 +834,41 @@ function try_select_walk_incline_for_direction(place_any: any, entity_ref: strin
                     reason: 'push_failed',
                 });
             }
-            return null;
         }
-        if (!blocker_profile?.can_step_up) {
-            debug_log('MOVE_UNIFY_TEST', 'incline rejected because blocker lacks STEP_UP', {
+        const step_up = can_walk_step_up_from_blocked_forward(
+            place_any as any,
+            owner as any,
+            { x: cur_x, y: cur_y, z: cur_z },
+            desired,
+            forward,
+            {
+                exclude_owner: owner as any,
+                support_policy: 'any_footprint' as any,
+            },
+        );
+        if (!step_up.ok) {
+            debug_log('MOVE_UNIFY_TEST', 'incline rejected because blocked forward has no legal walk step-up', {
                 entity_ref,
                 at: { x: cur_x, y: cur_y, z: cur_z },
                 desired,
                 blocked_by: forward_blocked_by || null,
                 blocker_profile,
+                step_up_reason: step_up.reason,
                 detail: (forward as any)?.detail ?? null,
             });
             return null;
         }
-        const up = can_place_volume(place_any as any, owner as any, { x: cur_x, y: cur_y, z: cur_z + 1 }, 'WALK' as any, {
-            exclude_owner: owner as any,
-            support_policy: 'any_footprint' as any,
-            allow_unsupported: true,
+        debug_log('MOVE_VEL_TEST', 'incline check blocked->up', {
+            entity_ref,
+            at: { x: cur_x, y: cur_y, z: cur_z },
+            desired,
+            blocker_profile: step_up.blocker_profile,
+            forward,
+            up: step_up.up,
+            up_forward: step_up.up_forward,
         });
-        const up_forward = can_place_volume(place_any as any, owner as any, { x: cur_x + desired.dx, y: cur_y + desired.dy, z: cur_z + 1 }, 'WALK' as any, {
-            exclude_owner: owner as any,
-            support_policy: 'any_footprint' as any,
-        });
-    debug_log('MOVE_VEL_TEST', 'incline check blocked->up', {
-        entity_ref,
-        at: { x: cur_x, y: cur_y, z: cur_z },
-        desired,
-        blocker_profile,
-        forward,
-        up,
-        up_forward,
-    });
-    if (up.ok && up_forward.ok) return { subtype: 'incline_up', dz: 1, axis };
-    return null;
-  }
+        return { subtype: 'incline_up', dz: 1, axis };
+    }
 
     if (forward.reason === 'no_support') {
         const down_forward = can_place_volume(place_any as any, owner as any, { x: cur_x + desired.dx, y: cur_y + desired.dy, z: cur_z - 1 }, 'WALK' as any, {
@@ -1968,6 +1970,206 @@ function coalesce_movement_updates(updates: any[], visible_place_keys: Set<strin
     return [...ordered_visible, ...Array.from(last_by_key.values())];
 }
 
+const authoritative_move_perception_last_emit_ms = new Map<string, number>();
+const AUTHORITATIVE_MOVE_PERCEPTION_MIN_INTERVAL_MS = 350;
+type MovementMutationKind = 'step' | 'transition' | 'teleport' | 'impulse';
+
+function estimate_move_speed_tpm(mode: MoveMode): number {
+    if (mode === 'SPRINT') return 540;
+    if (mode === 'SNEAK') return 180;
+    return 300;
+}
+
+function maybe_emit_authoritative_move_perception(options: {
+    slot: number;
+    mover_ref: string;
+    place_id: string;
+    mover_position: { x: number; y: number; z?: number };
+    mode: MoveMode;
+    step_number: number;
+    total_steps: number;
+    reason: 'step';
+}): void {
+    const now = Date.now();
+    const last = authoritative_move_perception_last_emit_ms.get(options.mover_ref) ?? 0;
+    if ((now - last) < AUTHORITATIVE_MOVE_PERCEPTION_MIN_INTERVAL_MS) {
+        return;
+    }
+    authoritative_move_perception_last_emit_ms.set(options.mover_ref, now);
+
+    try {
+        const events = build_move_perception_events(options.slot, {
+            mover_ref: options.mover_ref,
+            mover_position: options.mover_position,
+            place_id: options.place_id,
+            step_number: Math.max(1, Math.floor(Number(options.step_number) || 1)),
+            total_steps: Math.max(1, Math.floor(Number(options.total_steps) || 1)),
+            speed_tpm: estimate_move_speed_tpm(options.mode),
+            subtype: options.mode,
+            timestamp: now,
+        });
+        if (events.length <= 0) return;
+
+        for (const ev of events) {
+            update_awareness_from_perception(options.slot, ev);
+            process_witness_event(ev.observerRef, ev);
+        }
+
+        debug_log('MOVE_VEL_TEST', 'authoritative movement perception emitted', {
+            mover_ref: options.mover_ref,
+            place_id: options.place_id,
+            reason: options.reason,
+            mode: options.mode,
+            step_number: options.step_number,
+            total_steps: options.total_steps,
+            event_count: events.length,
+        });
+    } catch (err) {
+        debug_warn('MOVE_VEL_TEST', 'authoritative movement perception failed', {
+            mover_ref: options.mover_ref,
+            place_id: options.place_id,
+            reason: options.reason,
+            error: err instanceof Error ? err.message : String(err),
+        });
+    }
+}
+
+function resolve_mutation_breath_index(slot: number, place_id: string, entity_any: any): number {
+    const active_state = get_active_place_breath_state(slot, place_id);
+    if (active_state) {
+        return Math.max(0, Math.floor(Number(active_state.breath_index ?? 0)) || 0);
+    }
+    return Math.max(
+        0,
+        Math.floor(Number(entity_any?.breath_last_processed ?? 0)) || 0,
+        Math.floor(Number(entity_any?.breath_index ?? 0)) || 0,
+    );
+}
+
+function bump_entity_move_seq(entity_any: any): number {
+    const next_seq = (typeof entity_any?.move_seq === 'number' && Number.isFinite(entity_any.move_seq))
+        ? Math.floor(entity_any.move_seq) + 1
+        : 1;
+    entity_any.move_seq = next_seq;
+    return next_seq;
+}
+
+function finalize_authoritative_entity_mutation(options: {
+    slot: number;
+    entity_ref: string;
+    entity_any: any;
+    kind: MovementMutationKind;
+    persist_mode: 'save' | 'queue';
+    place_id?: string;
+    from_place_id?: string;
+    triggered_by?: string | null;
+}): { ok: true; entity_type: 'actor' | 'npc'; entity_id: string; place_id: string; x: number; y: number; z: number; seq: number; breath_index: number } | { ok: false; error: string } {
+    const entity_type = infer_entity_type(options.entity_ref);
+    if (entity_type !== 'actor' && entity_type !== 'npc') return { ok: false, error: 'unsupported_entity_type' };
+    const entity_id = options.entity_ref.replace(/^(actor|npc)\./, '').trim();
+    if (!entity_id) return { ok: false, error: 'invalid_entity_ref' };
+
+    const place_id = String(options.place_id ?? options.entity_any?.location?.place_id ?? '').trim();
+    if (!place_id) return { ok: false, error: 'missing_place_id' };
+
+    const tile = options.entity_any?.location?.tile ?? { x: 0, y: 0 };
+    const x = Math.floor(Number(tile?.x ?? 0)) || 0;
+    const y = Math.floor(Number(tile?.y ?? 0)) || 0;
+    const z = Math.floor(Number(options.entity_any?.location?.elevation ?? options.entity_any?.location?.tile?.z ?? 0)) || 0;
+    const breath_index = resolve_mutation_breath_index(options.slot, place_id, options.entity_any);
+    options.entity_any.breath_index = breath_index;
+    options.entity_any.breath_last_processed = breath_index;
+    options.entity_any.breath_last_processed_ms = Date.now();
+    const seq = bump_entity_move_seq(options.entity_any);
+
+    if (entity_type === 'actor') {
+        actor_cache.set(entity_key(options.slot, entity_id), options.entity_any);
+        if (options.persist_mode === 'save') save_actor(options.slot, entity_id, options.entity_any);
+        else queue_save_actor(options.slot, entity_id);
+    } else {
+        npc_cache.set(entity_key(options.slot, entity_id), options.entity_any);
+        if (options.persist_mode === 'save') save_npc(options.slot, entity_id, options.entity_any);
+        else queue_save_npc(options.slot, entity_id);
+    }
+
+    publish_authoritative_movement_mutation({
+        slot: options.slot,
+        entity_ref: options.entity_ref,
+        entity_type,
+        place_id,
+        x,
+        y,
+        z,
+        seq,
+        breath_index,
+        kind: options.kind,
+        from_place_id: options.from_place_id,
+        triggered_by: options.triggered_by ?? null,
+    });
+
+    return { ok: true, entity_type, entity_id, place_id, x, y, z, seq, breath_index };
+}
+
+function publish_authoritative_movement_mutation(options: {
+    slot: number;
+    entity_ref: string;
+    entity_type: 'actor' | 'npc';
+    place_id: string;
+    x: number;
+    y: number;
+    z: number;
+    seq: number;
+    breath_index: number;
+    kind: MovementMutationKind;
+    from_place_id?: string;
+    triggered_by?: string | null;
+}): void {
+    const sent_at_ms = Date.now();
+    void emitBridgeMessage('ENTITY_MOVED_BATCH', {
+        sent_at_ms,
+        updates: [{
+            slot: options.slot,
+            place_id: options.place_id,
+            entity_ref: options.entity_ref,
+            x: options.x,
+            y: options.y,
+            z: options.z,
+            breath_index: options.breath_index,
+            seq: options.seq,
+        }],
+    });
+    if (options.kind === 'transition' && options.from_place_id && options.from_place_id !== options.place_id) {
+        void emitBridgeMessage('ENTITY_PLACE_TRANSITION', {
+            sent_at_ms,
+            slot: options.slot,
+            entity_ref: options.entity_ref,
+            entity_type: options.entity_type,
+            from_place_id: options.from_place_id,
+            to_place_id: options.place_id,
+            x: options.x,
+            y: options.y,
+            z: options.z,
+            breath_index: options.breath_index,
+            seq: options.seq,
+            triggered_by: options.triggered_by ?? options.kind,
+        });
+    }
+    debug_log('MOVE_UNIFY_TEST', 'authoritative movement mutation published', {
+        slot: options.slot,
+        entity_ref: options.entity_ref,
+        entity_type: options.entity_type,
+        place_id: options.place_id,
+        from_place_id: options.from_place_id ?? null,
+        x: options.x,
+        y: options.y,
+        z: options.z,
+        breath_index: options.breath_index,
+        seq: options.seq,
+        kind: options.kind,
+        triggered_by: options.triggered_by ?? null,
+    });
+}
+
 function flush_place_breath_outputs(now: number, breath_ticks: Array<{ slot: number; place_id: string; breath_index: number }>, movement_updates: any[], tile_updates: any[], item_refresh_intents: ItemMutationRefreshIntent[]): void {
     const flush_started_ms = Date.now();
     let breath_emit_duration_ms = 0;
@@ -2321,6 +2523,41 @@ type PendingConnectorTransition = {
     step_seq: number;
     triggered_by: 'entry' | 'border';
 };
+
+type SeamMoverKind = 'actor' | 'npc' | 'pushable_tile';
+
+type SeamMoverPolicy = {
+    mover_kind: SeamMoverKind;
+    allow_vertical_snap: boolean;
+    allow_alternate_entry_search: boolean;
+};
+
+type ResolvedCrossPlaceTarget = {
+    to_place_id: string;
+    connector_id: string;
+    entry_tile_hint_local: { x: number; y: number; z: number };
+    target_entry_volume_local: { origin: { x: number; y: number; z: number }; size: { x: number; y: number; z: number } };
+    triggered_by: 'entry' | 'border';
+};
+
+function get_seam_mover_policy(mover_kind: SeamMoverKind): SeamMoverPolicy {
+    switch (mover_kind) {
+        case 'pushable_tile':
+            return {
+                mover_kind,
+                allow_vertical_snap: false,
+                allow_alternate_entry_search: true,
+            };
+        case 'npc':
+        case 'actor':
+        default:
+            return {
+                mover_kind,
+                allow_vertical_snap: true,
+                allow_alternate_entry_search: true,
+            };
+    }
+}
 
 function same_tile_xyz(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }): boolean {
     return Math.floor(Number(a.x)) === Math.floor(Number(b.x))
@@ -2776,13 +3013,7 @@ function get_effective_place_connectors_for_current_place(state: PlaceBreathStat
     return local;
 }
 
-function resolve_connector_transition_for_step(state: PlaceBreathState, entity_ref: string, entity_type: 'actor' | 'npc', from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }): {
-    to_place_id: string;
-    connector_id: string;
-    entry_tile_hint_local: { x: number; y: number; z: number };
-    target_entry_volume_local: { origin: { x: number; y: number; z: number }; size: { x: number; y: number; z: number } };
-    triggered_by: 'entry' | 'border';
-} | null {
+function resolve_cross_place_target_for_step(state: PlaceBreathState, entity_ref: string, mover_kind: SeamMoverKind, from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }): ResolvedCrossPlaceTarget | null {
     const place_any: any = state.place_base;
     const current_place_id = String(state.place_id ?? '');
     const place_base_z = get_place_base_z(place_any);
@@ -2834,7 +3065,7 @@ function resolve_connector_transition_for_step(state: PlaceBreathState, entity_r
             debug_log('MOVE_UNIFY_TEST', 'seam transition scan no-match', {
                 slot: state.slot,
                 entity_ref,
-                entity_type,
+                mover_kind,
                 place_id: current_place_id,
                 current_region_bounds: region_bounds,
                 from,
@@ -2852,7 +3083,7 @@ function resolve_connector_transition_for_step(state: PlaceBreathState, entity_r
     debug_log('MOVE_UNIFY_TEST', 'seam transition scan hit', {
         slot: state.slot,
         entity_ref,
-        entity_type,
+        mover_kind,
         place_id: current_place_id,
         from,
         to,
@@ -2878,12 +3109,62 @@ function resolve_connector_transition_for_step(state: PlaceBreathState, entity_r
     };
 }
 
-function resolve_connector_entry_tile(
+function resolve_connector_transition_for_step(state: PlaceBreathState, entity_ref: string, entity_type: 'actor' | 'npc', from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }): ResolvedCrossPlaceTarget | null {
+    return resolve_cross_place_target_for_step(state, entity_ref, entity_type, from, to);
+}
+
+function build_seam_entry_candidates(
+    preferred: { x: number; y: number; z: number },
+    interior_bounds: { min_x: number; max_x: number; min_y: number; max_y: number },
+    target_entry_volume_local?: { origin: { x: number; y: number; z: number }; size: { x: number; y: number; z: number } },
+): Array<{ x: number; y: number; z: number }> {
+    const candidates: Array<{ x: number; y: number; z: number }> = [];
+    const seen = new Set<string>();
+    const push = (x: number, y: number, z: number) => {
+        const cx = Math.max(interior_bounds.min_x, Math.min(interior_bounds.max_x, Math.floor(Number(x) || 0)));
+        const cy = Math.max(interior_bounds.min_y, Math.min(interior_bounds.max_y, Math.floor(Number(y) || 0)));
+        const cz = Math.floor(Number(z) || 0);
+        const key = `${cx}:${cy}:${cz}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        candidates.push({ x: cx, y: cy, z: cz });
+    };
+    push(preferred.x, preferred.y, preferred.z);
+    if (!target_entry_volume_local) return candidates;
+
+    const ox = Math.floor(Number(target_entry_volume_local.origin?.x ?? preferred.x));
+    const oy = Math.floor(Number(target_entry_volume_local.origin?.y ?? preferred.y));
+    const oz = Math.floor(Number(target_entry_volume_local.origin?.z ?? preferred.z));
+    const sx = Math.max(1, Math.floor(Number(target_entry_volume_local.size?.x ?? 1)) || 1);
+    const sy = Math.max(1, Math.floor(Number(target_entry_volume_local.size?.y ?? 1)) || 1);
+    const z = preferred.z;
+
+    const ring: Array<{ x: number; y: number; dist: number }> = [];
+    for (let y = oy; y < (oy + sy); y += 1) {
+        for (let x = ox; x < (ox + sx); x += 1) {
+            ring.push({ x, y, dist: Math.abs(x - preferred.x) + Math.abs(y - preferred.y) });
+        }
+    }
+    ring.sort((a, b) => a.dist - b.dist || a.y - b.y || a.x - b.x);
+    for (const entry of ring) push(entry.x, entry.y, z);
+    if (sx === 1 && sy === 1) {
+        for (let dy = -1; dy <= 1; dy += 1) {
+            for (let dx = -1; dx <= 1; dx += 1) {
+                if (dx === 0 && dy === 0) continue;
+                push(preferred.x + dx, preferred.y + dy, z);
+            }
+        }
+    }
+    return candidates;
+}
+
+function resolve_seam_entry_tile_for_owner(
     place_any: any,
+    owner: { kind: 'actor' | 'npc' | 'item'; id: string },
     entity_ref: string,
-    entity_type: 'actor' | 'npc',
     hint: { x: number; y: number; z: number },
     target_entry_volume_local?: { origin: { x: number; y: number; z: number }; size: { x: number; y: number; z: number } },
+    mover_policy?: SeamMoverPolicy,
 ): { ok: true; tile: { x: number; y: number; z: number } } | { ok: false; error: string; tile: { x: number; y: number; z: number } } {
     const width = Math.max(1, Math.floor(Number(place_any?.tile_grid?.width ?? 1)) || 1);
     const height = Math.max(1, Math.floor(Number(place_any?.tile_grid?.height ?? 1)) || 1);
@@ -2899,7 +3180,7 @@ function resolve_connector_entry_tile(
             ? Math.floor(hint.z)
             : (Math.floor(Number(place_any?.coordinates?.elevation ?? 0)) || 0),
     };
-    const owner = { kind: entity_type as any, id: entity_ref };
+    const policy = mover_policy ?? get_seam_mover_policy(owner.kind === 'item' ? 'pushable_tile' : owner.kind);
     const check = can_place_volume(place_any as any, owner as any, { x: target.x, y: target.y, z: target.z }, 'WALK' as any, {
             exclude_owner: owner as any,
             support_policy: 'any_footprint' as any,
@@ -2917,7 +3198,7 @@ function resolve_connector_entry_tile(
         return { ok: true, tile: target };
     }
 
-    if (String((check as any).reason ?? '') === 'no_support' && target_entry_volume_local) {
+    if (policy.allow_vertical_snap && String((check as any).reason ?? '') === 'no_support' && target_entry_volume_local) {
         const base_z = get_place_base_z(place_any);
         const z0 = Math.floor(Number(target_entry_volume_local.origin?.z ?? NaN));
         const sz = Math.max(1, Math.floor(Number(target_entry_volume_local.size?.z ?? 1)) || 1);
@@ -2956,8 +3237,32 @@ function resolve_connector_entry_tile(
         }
     }
 
+    if (policy.allow_alternate_entry_search) {
+        const candidates = build_seam_entry_candidates(target, { min_x, max_x, min_y, max_y }, target_entry_volume_local);
+        for (const candidate of candidates) {
+            if (same_tile_xyz(candidate, target)) continue;
+            const alt = can_place_volume(place_any as any, owner as any, { x: candidate.x, y: candidate.y, z: candidate.z }, 'WALK' as any, {
+                exclude_owner: owner as any,
+                support_policy: 'any_footprint' as any,
+            });
+            if (!alt.ok) continue;
+            debug_log('MOVE_UNIFY_TEST', 'connector entry tile resolved with alternate search', {
+                entity_ref,
+                mover_kind: policy.mover_kind,
+                place_id: String(place_any?.id ?? ''),
+                hint,
+                preferred: target,
+                chosen: candidate,
+                interior_bounds: { min_x, max_x, min_y, max_y },
+                linear_mapping: true,
+            });
+            return { ok: true, tile: candidate };
+        }
+    }
+
     debug_warn('MOVE_UNIFY_TEST', 'connector entry tile invalid for linear transfer', {
         entity_ref,
+        mover_kind: policy.mover_kind,
         place_id: String(place_any?.id ?? ''),
         hint,
         preferred: target,
@@ -2967,6 +3272,24 @@ function resolve_connector_entry_tile(
         linear_mapping: true,
     });
     return { ok: false, error: 'connector_transfer_invalid_target_stance', tile: target };
+}
+
+function resolve_connector_entry_tile(
+    place_any: any,
+    entity_ref: string,
+    entity_type: 'actor' | 'npc',
+    hint: { x: number; y: number; z: number },
+    target_entry_volume_local?: { origin: { x: number; y: number; z: number }; size: { x: number; y: number; z: number } },
+    mover_policy?: SeamMoverPolicy,
+): { ok: true; tile: { x: number; y: number; z: number } } | { ok: false; error: string; tile: { x: number; y: number; z: number } } {
+    return resolve_seam_entry_tile_for_owner(
+        place_any,
+        { kind: entity_type, id: entity_ref },
+        entity_ref,
+        hint,
+        target_entry_volume_local,
+        mover_policy,
+    );
 }
 
 function apply_pending_connector_transition(state: PlaceBreathState, pending: PendingConnectorTransition, movement_updates: any[]): { ok: boolean; error?: string } {
@@ -3004,7 +3327,7 @@ function apply_pending_connector_transition(state: PlaceBreathState, pending: Pe
         x: pending.entry_tile_hint_local.x,
         y: pending.entry_tile_hint_local.y,
         z: preferred_entry_world_z,
-    }, pending.target_entry_volume_local);
+    }, pending.target_entry_volume_local, get_seam_mover_policy(pending.entity_type));
     if (!entry_tile_result.ok) {
         return { ok: false, error: entry_tile_result.error };
     }
@@ -3570,7 +3893,7 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
             runtime.input_goal_queued_at_ms = null;
         }
         if (target.axis === 'z' && resolved_transient_subtype === 'move.walk.incline_up') {
-            debug_log('MOVE_UNIFY_TEST', 'incline allowed by STEP_UP', {
+            debug_log('MOVE_UNIFY_TEST', 'incline allowed by derived walk step-up legality', {
                 entity_ref,
                 place_id: state.place_id,
                 breath_index: place_bi,
@@ -3666,6 +3989,23 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
         profile.persist_ms += Math.max(0, Date.now() - persist_started_ms);
         move_ctl.set(key, ctl);
         profile.stepped_count += 1;
+
+        const perception_total_steps = intent_active
+            ? 1
+            : Math.max(1, Array.isArray(ctl.path) ? ctl.path.length : 1);
+        const perception_step_number = intent_active
+            ? 1
+            : Math.max(1, Math.min(perception_total_steps, ctl.path_index + 1));
+        maybe_emit_authoritative_move_perception({
+            slot: state.slot,
+            mover_ref: entity_ref,
+            place_id: state.place_id,
+            mover_position: { x: target.x, y: target.y, z: target.z },
+            mode: ctl.mode,
+            step_number: perception_step_number,
+            total_steps: perception_total_steps,
+            reason: 'step',
+        });
 
         movement_updates.push({
             slot: state.slot,
@@ -6027,19 +6367,19 @@ function mutate_place_painter_move_and_sync(
         const full_ref = `${entity_type}.${id}`;
         const target_ok = validate_owner_target({ kind: entity_type, id: full_ref } as any, { allow_unsupported: true });
         if (!target_ok.ok) return target_ok;
+        let entity_any: any = null;
 
         if (entity_type === 'actor') {
             const ar = load_actor(slot, id);
             if (!ar.ok) return { ok: false, error: 'actor_not_found' };
             const actor_any: any = ar.actor;
+            entity_any = actor_any;
             if (!actor_any.location || typeof actor_any.location !== 'object') actor_any.location = {};
             actor_any.location.world_tile = place_any?.coordinates?.world_tile ?? { x: 0, y: 0 };
             actor_any.location.region_tile = place_any?.coordinates?.region_tile ?? { x: 0, y: 0 };
             actor_any.location.place_id = normalized_place_id;
             actor_any.location.tile = { x: tx, y: ty };
             actor_any.location.elevation = tz;
-            actor_cache.set(entity_key(slot, id), actor_any);
-            save_actor(slot, id, actor_any);
             const snap = Array.isArray(place_any?.contents?.actors_present)
                 ? place_any.contents.actors_present.find((a: any) => String(a?.actor_ref ?? '') === full_ref)
                 : null;
@@ -6052,14 +6392,13 @@ function mutate_place_painter_move_and_sync(
             const nr = load_npc(slot, id);
             if (!nr.ok) return { ok: false, error: 'npc_not_found' };
             const npc_any: any = nr.npc;
+            entity_any = npc_any;
             if (!npc_any.location || typeof npc_any.location !== 'object') npc_any.location = {};
             npc_any.location.world_tile = place_any?.coordinates?.world_tile ?? { x: 0, y: 0 };
             npc_any.location.region_tile = place_any?.coordinates?.region_tile ?? { x: 0, y: 0 };
             npc_any.location.place_id = normalized_place_id;
             npc_any.location.tile = { x: tx, y: ty };
             npc_any.location.elevation = tz;
-            npc_cache.set(entity_key(slot, id), npc_any);
-            save_npc(slot, id, npc_any);
             const snap = Array.isArray(place_any?.contents?.npcs_present)
                 ? place_any.contents.npcs_present.find((n: any) => String(n?.npc_ref ?? '') === full_ref)
                 : null;
@@ -6071,6 +6410,25 @@ function mutate_place_painter_move_and_sync(
         }
 
         clear_entity_goal_and_path(slot, full_ref, normalized_place_id);
+        const finalized = entity_any
+            ? finalize_authoritative_entity_mutation({
+                slot,
+                entity_ref: full_ref,
+                entity_any,
+                kind: 'teleport',
+                persist_mode: 'save',
+                place_id: normalized_place_id,
+                triggered_by: 'place_painter',
+            })
+            : { ok: false as const, error: 'entity_not_loaded' };
+        if (!finalized.ok) return { ok: false, error: finalized.error };
+        const snaps = entity_type === 'actor'
+            ? (Array.isArray(place_any?.contents?.actors_present) ? place_any.contents.actors_present : [])
+            : (Array.isArray(place_any?.contents?.npcs_present) ? place_any.contents.npcs_present : []);
+        const snap = snaps.find((entry: any) => String(entry?.actor_ref ?? entry?.npc_ref ?? '') === full_ref);
+        if (snap) {
+            (snap as any).move_seq = finalized.seq;
+        }
         save_place_with_ground_and_sync_active(slot, normalized_place_id, place_any, { merge_active_runtime: false });
         return { ok: true, moved_count: 1 };
     }
@@ -6442,6 +6800,132 @@ function can_tile_move_to(place_any: any, from: { x: number; y: number; z: numbe
     });
 }
 
+type WorldAwareTileMoveTarget =
+    | {
+        ok: true;
+        kind: 'same_place';
+        place_id: string;
+        place_any: any;
+        target: { x: number; y: number; z: number };
+    }
+    | {
+        ok: true;
+        kind: 'connected_place';
+        from_place_id: string;
+        to_place_id: string;
+        source_place_any: any;
+        target_place_any: any;
+        connector_id: string;
+        target: { x: number; y: number; z: number };
+        preferred_target: { x: number; y: number; z: number };
+    }
+    | {
+        ok: false;
+        reason: string;
+        detail?: any;
+    };
+
+type WorldAwareTileMoveResult =
+    | {
+        ok: true;
+        tile: any;
+        kind: 'same_place' | 'connected_place';
+        place_id: string;
+        from_place_id: string;
+        to_place_id: string;
+        from: { x: number; y: number; z: number };
+        to: { x: number; y: number; z: number };
+        connector_id?: string;
+    }
+    | {
+        ok: false;
+        reason?: string;
+        detail?: any;
+    };
+
+function resolve_world_aware_tile_move_target(
+    state: PlaceBreathState,
+    tile: any,
+    from: { x: number; y: number; z: number },
+    to: { x: number; y: number; z: number },
+): WorldAwareTileMoveTarget {
+    const place_any: any = state.place_base;
+    const place_id = String(state.place_id ?? '');
+    const mover_owner = { kind: 'item' as const, id: 'place_tile_body' };
+    const empty_destination = is_empty_tile_destination(place_any, to, from);
+    const place_bounds = get_place_region_bounds(place_any as any);
+    const target_local_in_bounds =
+        to.x >= 0 && to.y >= 0 && to.x < Math.max(1, Math.floor(Number(place_any?.tile_grid?.width ?? 1)) || 1) && to.y < Math.max(1, Math.floor(Number(place_any?.tile_grid?.height ?? 1)) || 1);
+    if (empty_destination.ok && target_local_in_bounds) {
+        const local_ok = with_temporarily_cleared_tile(place_any, from.x, from.y, from.z, () => can_place_volume(place_any as any, mover_owner as any, { x: to.x, y: to.y, z: to.z }, 'FLY' as any, {
+            exclude_owner: mover_owner as any,
+        }));
+        if (local_ok.ok) {
+            return { ok: true, kind: 'same_place', place_id, place_any, target: { x: to.x, y: to.y, z: to.z } };
+        }
+        return { ok: false, reason: String(local_ok.reason ?? 'blocked'), detail: local_ok.detail };
+    }
+
+    const tile_entity_ref = get_tile_physics_entity_ref(from.x, from.y, from.z, tile);
+    const cross_place = resolve_cross_place_target_for_step(state, tile_entity_ref, 'pushable_tile', from, to);
+    if (!cross_place) {
+        if (!empty_destination.ok) {
+            return { ok: false, reason: 'blocked', detail: empty_destination.detail };
+        }
+        return { ok: false, reason: 'out_of_bounds', detail: { from, to, place_bounds } };
+    }
+
+    const target_place_res = load_place(state.slot, cross_place.to_place_id);
+    if (!target_place_res.ok) {
+        return { ok: false, reason: 'target_place_not_found', detail: { to_place_id: cross_place.to_place_id } };
+    }
+    const target_place_any: any = target_place_res.place;
+    build_place_contents_for_legality(state.slot, cross_place.to_place_id, target_place_any);
+    const preferred_world_z = Math.floor(Number(to.z ?? cross_place.entry_tile_hint_local.z ?? get_place_base_z(target_place_any))) || get_place_base_z(target_place_any);
+    const resolved_entry = resolve_seam_entry_tile_for_owner(
+        target_place_any,
+        mover_owner,
+        tile_entity_ref,
+        {
+            x: cross_place.entry_tile_hint_local.x,
+            y: cross_place.entry_tile_hint_local.y,
+            z: preferred_world_z,
+        },
+        cross_place.target_entry_volume_local,
+        get_seam_mover_policy('pushable_tile'),
+    );
+    if (!resolved_entry.ok) {
+        return { ok: false, reason: resolved_entry.error, detail: { preferred: resolved_entry.tile, connector_id: cross_place.connector_id } };
+    }
+
+    const target_empty = is_empty_tile_destination(target_place_any, resolved_entry.tile);
+    if (!target_empty.ok) {
+        return { ok: false, reason: 'blocked', detail: target_empty.detail };
+    }
+    const target_ok = can_place_volume(target_place_any as any, mover_owner as any, { x: resolved_entry.tile.x, y: resolved_entry.tile.y, z: resolved_entry.tile.z }, 'FLY' as any, {
+        exclude_owner: mover_owner as any,
+    });
+    if (!target_ok.ok) {
+        return { ok: false, reason: String(target_ok.reason ?? 'blocked'), detail: target_ok.detail };
+    }
+
+    return {
+        ok: true,
+        kind: 'connected_place',
+        from_place_id: place_id,
+        to_place_id: cross_place.to_place_id,
+        source_place_any: place_any,
+        target_place_any,
+        connector_id: cross_place.connector_id,
+        target: resolved_entry.tile,
+        preferred_target: {
+            x: cross_place.entry_tile_hint_local.x,
+            y: cross_place.entry_tile_hint_local.y,
+            z: preferred_world_z,
+        },
+    };
+}
+
 function move_tile_runtime_body(place_any: any, from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }): { ok: boolean; tile?: any } {
     const tile = get_place_tile_at_world_z(place_any, from.x, from.y, from.z);
     if (!tile) return { ok: false };
@@ -6453,12 +6937,90 @@ function move_tile_runtime_body(place_any: any, from: { x: number; y: number; z:
     return { ok: true, tile };
 }
 
+function move_tile_runtime_body_world_aware(
+    state: PlaceBreathState,
+    from: { x: number; y: number; z: number },
+    to: { x: number; y: number; z: number },
+): WorldAwareTileMoveResult {
+    const place_any: any = state.place_base;
+    const tile = get_place_tile_at_world_z(place_any, from.x, from.y, from.z);
+    if (!tile) return { ok: false, reason: 'missing_source_tile' };
+
+    const resolved = resolve_world_aware_tile_move_target(state, tile, from, to);
+    if (!resolved.ok) return resolved;
+
+    if (resolved.kind === 'same_place') {
+        const moved = move_tile_runtime_body(place_any, from, resolved.target);
+        if (!moved.ok || !moved.tile) return { ok: false, reason: 'same_place_move_failed' };
+        return {
+            ok: true,
+            tile: moved.tile,
+            kind: 'same_place',
+            place_id: resolved.place_id,
+            from_place_id: resolved.place_id,
+            to_place_id: resolved.place_id,
+            from,
+            to: resolved.target,
+        };
+    }
+
+    const source_place_any = resolved.source_place_any;
+    const target_place_any = resolved.target_place_any;
+    if (!set_place_tile_at_world_z(source_place_any, from.x, from.y, from.z, null)) {
+        return { ok: false, reason: 'source_tile_clear_failed' };
+    }
+    if (!set_place_tile_at_world_z(target_place_any, resolved.target.x, resolved.target.y, resolved.target.z, tile)) {
+        set_place_tile_at_world_z(source_place_any, from.x, from.y, from.z, tile);
+        return { ok: false, reason: 'target_tile_set_failed' };
+    }
+
+    save_place_and_sync_active(state.slot, source_place_any);
+    save_place_and_sync_active(state.slot, target_place_any);
+    state.place_dirty = true;
+    state.tile_physics_cache_dirty = true;
+
+    debug_log('MOVE_UNIFY_TEST', 'pushable tile transferred across seam', {
+        slot: state.slot,
+        from_place_id: resolved.from_place_id,
+        to_place_id: resolved.to_place_id,
+        connector_id: resolved.connector_id,
+        tile_kind: String(tile?.kind ?? ''),
+        from,
+        preferred_target: resolved.preferred_target,
+        to: resolved.target,
+        breath_index: state.breath_index,
+    });
+
+    return {
+        ok: true,
+        tile,
+        kind: 'connected_place',
+        place_id: resolved.to_place_id,
+        from_place_id: resolved.from_place_id,
+        to_place_id: resolved.to_place_id,
+        from,
+        to: resolved.target,
+        connector_id: resolved.connector_id,
+    };
+}
+
 function record_tile_update(state: PlaceBreathState, tile: any, from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }): void {
     state.tile_updates.push({
         place_id: state.place_id,
         kind: String(tile?.kind ?? ''),
         from: { x: Math.floor(from.x), y: Math.floor(from.y), z: Math.floor(from.z) },
         to: { x: Math.floor(to.x), y: Math.floor(to.y), z: Math.floor(to.z) },
+    });
+}
+
+function record_cross_place_tile_update(state: PlaceBreathState, tile: any, from_place_id: string, to_place_id: string, from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }): void {
+    state.tile_updates.push({
+        place_id: to_place_id,
+        kind: String(tile?.kind ?? ''),
+        from: { x: Math.floor(from.x), y: Math.floor(from.y), z: Math.floor(from.z) },
+        to: { x: Math.floor(to.x), y: Math.floor(to.y), z: Math.floor(to.z) },
+        from_place_id,
+        to_place_id,
     });
 }
 
@@ -6475,13 +7037,22 @@ function try_push_tile_by_impulse(
     const tags = get_tile_effective_tags(tile);
     if (!has_simple_tag(tags, 'PUSHABLE')) return false;
     const runtime = ensure_tile_runtime_physics(tile);
+    const velocity_before = {
+        vx: Math.floor(Number(runtime.velocity.vx) || 0),
+        vy: Math.floor(Number(runtime.velocity.vy) || 0),
+        vz: Math.floor(Number(runtime.velocity.vz) || 0),
+    };
     if (axis === 'x') runtime.velocity.vx += Math.sign(sign);
     else runtime.velocity.vy += Math.sign(sign);
     const attempts = get_tile_velocity_attempts(tile, from.x, from.y, from.z, state.breath_index).filter((attempt) => attempt.axis === axis);
     const target = attempts[0];
-    if (!target) return false;
-    const move_ok = can_tile_move_to(place_any, from, { x: target.x, y: target.y, z: target.z });
-    if (!move_ok.ok) {
+    if (!target) {
+        runtime.velocity = { ...velocity_before };
+        return false;
+    }
+    const moved = move_tile_runtime_body_world_aware(state, from, { x: target.x, y: target.y, z: target.z });
+    if (!moved.ok) {
+        runtime.velocity = { ...velocity_before };
         debug_log('MOVE_UNIFY_TEST', 'pushable tile blocked during impulse resolve', {
             place_id: state.place_id,
             breath_index: state.breath_index,
@@ -6489,26 +7060,31 @@ function try_push_tile_by_impulse(
             tile_kind: String(tile?.kind ?? ''),
             from,
             target,
-            reason: move_ok.reason ?? null,
-            detail: move_ok.detail ?? null,
+            reason: moved.reason ?? null,
+            detail: moved.detail ?? null,
+            velocity_before,
         });
         return false;
     }
-    const moved = move_tile_runtime_body(place_any, from, { x: target.x, y: target.y, z: target.z });
-    if (!moved.ok) return false;
     apply_friction_to_axis({ velocity: runtime.velocity } as any, axis);
     runtime.last_breath_processed = state.breath_index;
     state.place_dirty = true;
     state.tile_physics_cache_dirty = true;
-    if (moved.tile) record_tile_update(state, moved.tile, from, { x: target.x, y: target.y, z: target.z });
+    if (moved.tile) {
+        if (moved.kind === 'connected_place') record_cross_place_tile_update(state, moved.tile, moved.from_place_id, moved.to_place_id, from, moved.to);
+        else record_tile_update(state, moved.tile, from, moved.to);
+    }
     debug_log('MOVE_UNIFY_TEST', 'pushable tile moved from impulse', {
-        place_id: state.place_id,
+        place_id: moved.place_id,
+        from_place_id: moved.from_place_id,
+        to_place_id: moved.to_place_id,
         breath_index: state.breath_index,
         source: source.entity_ref,
         tile_kind: String(tile?.kind ?? ''),
         from,
-        to: { x: target.x, y: target.y, z: target.z },
+        to: moved.to,
         velocity: runtime.velocity,
+        connector_id: moved.kind === 'connected_place' ? (moved.connector_id ?? null) : null,
     });
     return true;
 }
@@ -6586,29 +7162,35 @@ function apply_gravity_to_place_tiles(state: PlaceBreathState): GravityBreathPro
         const attempts = get_tile_velocity_attempts(tile, ref.x, ref.y, ref.z, state.breath_index);
         const target = attempts.find((attempt) => {
             const tile_move_started_ms = Date.now();
-            const move_ok = can_tile_move_to(place_any, { x: ref.x, y: ref.y, z: ref.z }, { x: attempt.x, y: attempt.y, z: attempt.z });
+            const move_ok = resolve_world_aware_tile_move_target(state, tile, { x: ref.x, y: ref.y, z: ref.z }, { x: attempt.x, y: attempt.y, z: attempt.z });
             profile.gravity_tile_move_checks_ms += Math.max(0, Date.now() - tile_move_started_ms);
             profile.gravity_tile_move_checks += 1;
             return move_ok.ok;
         }) ?? null;
         if (!target) continue;
-        const moved = move_tile_runtime_body(place_any, { x: ref.x, y: ref.y, z: ref.z }, { x: target.x, y: target.y, z: target.z });
+        const moved = move_tile_runtime_body_world_aware(state, { x: ref.x, y: ref.y, z: ref.z }, { x: target.x, y: target.y, z: target.z });
         if (!moved.ok) continue;
         apply_friction_to_axis({ velocity: runtime.velocity } as any, target.axis);
         runtime.last_breath_processed = state.breath_index;
         moved_any = true;
         profile.gravity_tiles_moved += 1;
         state.tile_physics_cache_dirty = true;
-        if (moved.tile) record_tile_update(state, moved.tile, { x: ref.x, y: ref.y, z: ref.z }, { x: target.x, y: target.y, z: target.z });
+        if (moved.tile) {
+            if (moved.kind === 'connected_place') record_cross_place_tile_update(state, moved.tile, moved.from_place_id, moved.to_place_id, { x: ref.x, y: ref.y, z: ref.z }, moved.to);
+            else record_tile_update(state, moved.tile, { x: ref.x, y: ref.y, z: ref.z }, moved.to);
+        }
         debug_log('MOVE_UNIFY_TEST', 'tile physics moved gravity tile', {
-            place_id: state.place_id,
+            place_id: moved.place_id,
+            from_place_id: moved.from_place_id,
+            to_place_id: moved.to_place_id,
             breath_index: state.breath_index,
             tile_kind: String(tile?.kind ?? ''),
             effective_weight: weight,
             from: { x: ref.x, y: ref.y, z: ref.z },
-            to: { x: target.x, y: target.y, z: target.z },
+            to: moved.to,
             moved_axis: target.axis,
             velocity: runtime.velocity,
+            connector_id: moved.kind === 'connected_place' ? (moved.connector_id ?? null) : null,
         });
     }
 
@@ -8432,6 +9014,8 @@ import {
   process_witness_event,
   update_conversations as update_witness_conversations,
 } from "../npc_ai/witness_handler.js";
+import { update_awareness_from_perception } from "../shared/awareness_runtime.js";
+import { build_move_perception_events } from "../shared/movement_perception_runtime.js";
 import { load_time, format_short_time, type GameTime } from "../time_system/tracker.js";
 import { set_free_roam_place_breath } from "../shared/free_roam_breath_store.js";
 import { get_boot_role, get_configured_data_slot, should_manage_ollama, should_run_host_cli } from "../shared/boot_env.js";
@@ -10759,7 +11343,7 @@ function start_http_server(log_path: string): void {
             return;
         }
 
-        if (url.pathname === "/api/timed_event/debug/next_turn") {
+        if (url.pathname === "/api/timed_event/next_turn" || url.pathname === "/api/timed_event/debug/next_turn") {
             if (req.method !== "POST") {
                 res.writeHead(405, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
@@ -10774,21 +11358,60 @@ function start_http_server(log_path: string): void {
                 return;
             }
 
-            const result = advance_turn(slot);
-            if (!result.ok) {
-                if (result.error === 'world_sim_interstitial_started') {
-                    res.writeHead(200, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ ok: true, interstitial_started: true, timed_event_phase: get_timed_event_phase(slot) }));
-                    return;
-                }
-                res.writeHead(400, { "Content-Type": "application/json" });
-                res.end(JSON.stringify(result));
-                return;
-            }
+            let body = "";
+            req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+            req.on("end", () => {
+                try {
+                    const data = body ? JSON.parse(body) : {};
+                    const client_session_id = require_request_client_session_id(slot, { session_token: data?.session_token });
+                    const actor_ref = require_authorized_actor_ref(slot, client_session_id, data?.actor_ref);
+                    const active_actor_ref = get_active_actor_ref(slot);
+                    if (!active_actor_ref) {
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "no_active_timed_event" }));
+                        return;
+                    }
+                    if (active_actor_ref !== actor_ref) {
+                        debug_log("TIMED_EVENT_TURN", "blocked turn advance for non-active actor", {
+                            slot,
+                            actor_ref,
+                            active_actor_ref,
+                            timed_event_phase: get_timed_event_phase(slot),
+                            world_breath_index: get_timed_event_world_breath_index(slot),
+                        });
+                        res.writeHead(403, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "not_your_turn" }));
+                        return;
+                    }
 
-            debug_log("API", "Advanced timed event turn via debug", { slot, ...result });
-            res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify(result));
+                    const result = advance_turn(slot);
+                    if (!result.ok) {
+                        if (result.error === 'world_sim_interstitial_started') {
+                            res.writeHead(200, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: true, interstitial_started: true, timed_event_phase: get_timed_event_phase(slot) }));
+                            return;
+                        }
+                        res.writeHead(400, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify(result));
+                        return;
+                    }
+
+                    debug_log("API", "Advanced timed event turn via actor request", { slot, actor_ref, ...result });
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify(result));
+                } catch (err: any) {
+                    const error = err?.message ?? "timed_event_turn_advance_failed";
+                    const status = error === "actor_ref_not_authorized"
+                        ? 403
+                        : error === "invalid_session_token" || error === "controlled_actor_binding_required"
+                            ? 401
+                            : error === "not_your_turn"
+                                ? 403
+                                : 400;
+                    res.writeHead(status, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error }));
+                }
+            });
             return;
         }
 
@@ -10948,6 +11571,28 @@ function start_http_server(log_path: string): void {
                     const result = await travel_between_places(slot, entity_ref, target_place_id);
                     
                     if (result.ok) {
+                        try {
+                            const entity_any = get_entity_any_cached_or_load(slot, entity_ref) as any;
+                            if (entity_any) {
+                                finalize_authoritative_entity_mutation({
+                                    slot,
+                                    entity_ref,
+                                    entity_any,
+                                    kind: 'transition',
+                                    persist_mode: 'queue',
+                                    place_id: String(entity_any?.location?.place_id ?? result.to_place_id ?? target_place_id),
+                                    from_place_id: result.from_place_id,
+                                    triggered_by: 'api.place.travel',
+                                });
+                            }
+                        } catch (mutation_err) {
+                            debug_warn('API', 'travel mutation publication failed', {
+                                slot,
+                                entity_ref,
+                                target_place_id,
+                                error: mutation_err instanceof Error ? mutation_err.message : String(mutation_err),
+                            });
+                        }
                         debug_log("API", `Travel successful: ${result.from_place_id} -> ${result.to_place_id}`);
                         res.writeHead(200, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ 
@@ -12456,7 +13101,23 @@ function start_http_server(log_path: string): void {
                     const slot = slot_raw ? Number(slot_raw) : data_slot_number;
                     const client_session_id = require_request_client_session_id(slot, { session_token: url.searchParams.get("session_token") });
                     const preferred_actor_ref = url.searchParams.get("actor_ref");
-                    const actor_ref = assign_controlled_actor_ref_for_client_session(slot, client_session_id, preferred_actor_ref);
+                    let actor_ref = get_controlled_actor_ref_for_client_session(slot, client_session_id);
+                    const preferred_ref = String(preferred_actor_ref ?? "").trim();
+                    if (!actor_ref && preferred_ref) {
+                        actor_ref = assign_controlled_actor_ref_for_client_session(slot, client_session_id, preferred_ref);
+                    }
+                    if (!actor_ref) {
+                        res.writeHead(200, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({
+                            ok: true,
+                            boot_session_id: SESSION_ID,
+                            binding_state: "unbound",
+                            controlled_actor_ref: null,
+                            controlled_actor_id: null,
+                            controlled_actor_name: null,
+                        }));
+                        return;
+                    }
                     const actor_ready = ensure_claimed_actor_ready(slot, actor_ref);
                     if (!actor_ready.ok) {
                         res.writeHead(400, { "Content-Type": "application/json" });
@@ -12469,6 +13130,7 @@ function start_http_server(log_path: string): void {
                     res.end(JSON.stringify({
                         ok: true,
                         boot_session_id: SESSION_ID,
+                        binding_state: "bound",
                         controlled_actor_ref: actor_ref,
                         controlled_actor_id: actor_id,
                         controlled_actor_name: actor_name || null,
@@ -12478,9 +13140,7 @@ function start_http_server(log_path: string): void {
                     const error = err?.message ?? "session_control_get_failed";
                     const status = error === "controlled_actor_already_claimed" || error === "controlled_actor_release_required"
                         ? 409
-                        : error === "controlled_actor_binding_required"
-                            ? 400
-                            : error === "invalid_session_token"
+                        : error === "invalid_session_token"
                                 ? 401
                             : 500;
                     res.writeHead(status, { "Content-Type": "application/json" });
@@ -20544,11 +21204,32 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
                     const events = Array.isArray(parsed?.events) ? parsed.events : [];
                     for (const ev of events) {
                         if (ev?.observerRef && ev?.verb) {
+                            update_awareness_from_perception(data_slot_number, ev);
                             process_witness_event(ev.observerRef, ev);
                         }
                     }
                 } catch (err) {
                     console.error("[Breath] Failed to process perception_event_batch:", err);
+                }
+
+                displayedMessageIds.add(msg.id);
+                messagesToRemove.push(msg);
+                continue;
+            }
+
+            if (msg.type === "movement_perception_batch") {
+                try {
+                    const parsed = JSON.parse(msg.content || "{}") as any;
+                    console.info("[MovementPerceptionBatch] ignored_legacy_renderer_batch", {
+                        message_id: msg.id,
+                        mover_ref: parsed?.mover_ref,
+                        place_id: parsed?.place_id,
+                        subtype: parsed?.subtype,
+                        step_number: parsed?.step_number,
+                        total_steps: parsed?.total_steps,
+                    });
+                } catch (err) {
+                    console.error("[MovementPerceptionBatch] failed_to_parse_legacy_batch", err);
                 }
 
                 displayedMessageIds.add(msg.id);

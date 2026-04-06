@@ -156,6 +156,17 @@ export function get_entities_in_place(slot: number, place_id: string): { npcs: s
   };
 }
 
+export function get_place_entity_entry(slot: number, place_id: string): PlaceEntityEntry | null {
+  const index = ensure_index_file(slot);
+  const entry = index.places[place_id];
+  if (!entry) return null;
+  return {
+    npcs: [...entry.npcs],
+    actors: [...entry.actors],
+    last_updated: entry.last_updated,
+  };
+}
+
 /**
  * Add entity to a place in the index
  */

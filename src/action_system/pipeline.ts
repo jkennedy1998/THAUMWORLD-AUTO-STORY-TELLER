@@ -69,6 +69,7 @@ export interface PipelineDependencies {
     stats?: Record<string, number>;
   } | null>;
   getTargetData?: (targetRef: string) => Promise<UseTargetData | null>;
+  recordPerceivedAwareness?: (event: PerceptionEvent) => Promise<void>;
   
   // Effect execution
   executeEffect: (effect: ActionEffect) => Promise<boolean>;
@@ -445,7 +446,8 @@ export class ActionPipeline {
     intent = setIntentStage(intent, "broadcast_before");
     
     const events = await broadcastPerception(intent, "before", undefined, {
-      getCharactersInRange: this.deps.getAvailableTargets
+      getCharactersInRange: this.deps.getAvailableTargets,
+      onPerceived: this.deps.recordPerceivedAwareness,
     });
     
     this.log(`Broadcast before: ${events.length} observers`);
@@ -721,7 +723,8 @@ export class ActionPipeline {
     
     // Broadcast perception and get list of observers who perceived the action
     const events = await broadcastPerception(intent, "after", result, {
-      getCharactersInRange: this.deps.getAvailableTargets
+      getCharactersInRange: this.deps.getAvailableTargets,
+      onPerceived: this.deps.recordPerceivedAwareness,
     });
     
     debug_event("ACTION_PIPELINE", "broadcast_after.perception", {
@@ -810,6 +813,8 @@ export class ActionPipeline {
       if (value === "actor") value = intent.actorRef;
       else if (value === "target") value = intent.targetRef || "";
       else if (value === "tool") value = intent.toolRef || "";
+      else if (value === "true") value = true;
+      else if (value === "false") value = false;
       else if (value !== undefined && intent.parameters[value] !== undefined) {
         value = intent.parameters[value];
       }

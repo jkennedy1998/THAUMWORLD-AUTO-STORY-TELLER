@@ -12,8 +12,10 @@ import * as http from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { debug_event } from '../shared/debug_event.js';
 import type { TagChangeEvent } from '../shared/event_emitter.js';
+import { load_actor } from '../actor_storage/store.js';
+import { emitBridgeMessage } from '../shared/event_bridge_client.js';
 import { resolve_multiplayer_session_by_token, touch_multiplayer_session_by_token } from '../shared/multiplayer_session.js';
-import { refresh_controlled_actor_lease_for_client_session } from '../shared/session_control.js';
+import { get_controlled_actor_ref_for_client_session, refresh_controlled_actor_lease_for_client_session, release_controlled_actor_ref_for_client_session } from '../shared/session_control.js';
 
 type BridgeMessage = {
   type: string;
@@ -223,15 +225,23 @@ export class EventBridge {
       }));
 
       ws.on('close', () => {
+        const meta = this.wsClientMeta.get(ws) ?? null;
         debug_event('EVENT_BRIDGE', 'renderer_disconnected', { clientCount: this.wsClients.size - 1 });
         this.wsClients.delete(ws);
         this.wsClientMeta.delete(ws);
+        if (meta) {
+          void this.handleRendererDisconnect(meta, 'close');
+        }
       });
 
       ws.on('error', (err: Error) => {
+        const meta = this.wsClientMeta.get(ws) ?? null;
         debug_event('EVENT_BRIDGE', 'renderer_error', { error: err.message });
         this.wsClients.delete(ws);
         this.wsClientMeta.delete(ws);
+        if (meta) {
+          void this.handleRendererDisconnect(meta, 'error');
+        }
       });
 
       ws.on('message', (raw: Buffer) => {
@@ -295,6 +305,66 @@ export class EventBridge {
         } : null,
       },
     }));
+  }
+
+  private async handleRendererDisconnect(meta: BridgeClientMeta, reason: 'close' | 'error'): Promise<void> {
+    try {
+      const slot = Number(meta.slot ?? 0);
+      const client_session_id = String(meta.client_session_id ?? '').trim();
+      if (!slot || !client_session_id) return;
+
+      const actor_ref = String(meta.last_claimed_actor_ref ?? '').trim()
+        || String(get_controlled_actor_ref_for_client_session(slot, client_session_id) ?? '').trim();
+      if (!actor_ref) {
+        debug_event('EVENT_BRIDGE', 'renderer_disconnect_cleanup', {
+          reason,
+          slot,
+          client_session_id,
+          connection_id: meta.connection_id,
+          actor_ref: null,
+          released_claim: false,
+          place_id: null,
+        });
+        return;
+      }
+
+      let place_id: string | null = null;
+      const actor_id = actor_ref.startsWith('actor.') ? actor_ref.slice('actor.'.length) : '';
+      if (actor_id) {
+        const actor_result = load_actor(slot, actor_id);
+        if (actor_result.ok) {
+          const candidate = String((actor_result.actor as any)?.location?.place_id ?? '').trim();
+          if (candidate) place_id = candidate;
+        }
+      }
+
+      const released_claim = release_controlled_actor_ref_for_client_session(slot, client_session_id);
+      if (released_claim && place_id) {
+        await emitBridgeMessage('PLACE_PRESENCE_CHANGED', {
+          place_id,
+          actor_ref,
+          reason: reason === 'error' ? 'disconnect_error' : 'disconnect',
+          sent_at_ms: Date.now(),
+        });
+      }
+
+      debug_event('EVENT_BRIDGE', 'renderer_disconnect_cleanup', {
+        reason,
+        slot,
+        client_session_id,
+        connection_id: meta.connection_id,
+        actor_ref,
+        released_claim,
+        place_id,
+      });
+    } catch (err) {
+      debug_event('EVENT_BRIDGE', 'renderer_disconnect_cleanup_error', {
+        reason,
+        connection_id: meta.connection_id,
+        client_session_id: meta.client_session_id,
+        error: (err as Error).message,
+      });
+    }
   }
 
   /**

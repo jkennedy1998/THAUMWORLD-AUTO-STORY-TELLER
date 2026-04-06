@@ -231,7 +231,10 @@ export function get_hearing_tiles(
 function calculate_distance(from: TilePosition, to: TilePosition): number {
   const dx = to.x - from.x;
   const dy = to.y - from.y;
-  return Math.sqrt(dx * dx + dy * dy);
+  const from_z = Number.isFinite(Number(from.z)) ? Number(from.z) : 0;
+  const to_z = Number.isFinite(Number(to.z)) ? Number(to.z) : 0;
+  const dz = to_z - from_z;
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
 
 /**
