@@ -59,7 +59,7 @@ export function resolve_cell(payload: DiscriminatedRenderPayload, ctx: RenderCon
     return reduce_layers_to_cell(out.layers, {
         fallback_rgb,
         fallback_style: 'regular',
-        fallback_weight_index: 5,
+        fallback_weight_index: 1,
         fallback_render_index: 0,
         quantize_to_palette: false,
     });

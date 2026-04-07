@@ -98,27 +98,8 @@ export function add_item_to_ground(
 }
 
 /**
- * Add item to main ground (no specific position)
- */
-export function add_item_to_main_ground(
-    place: Record<string, unknown>,
-    item: InlineItem
-): { ok: true } | { ok: false; error: string } {
-    const ground = place.ground as InlineGround;
-    if (!ground) {
-        return { ok: false, error: 'ground_not_initialized' };
-    }
-    
-    ground.main.push(item);
-
-    const name = (resolve_inline_item(String(item.def_id ?? ''), item) ?? null)?.name ?? String(item.def_id ?? 'item');
-    debug_log("ground_items", `Added ${name} to main ground`);
-    return { ok: true };
-}
-
-/**
  * Remove item from ground by ID
- * Searches both main and scattered
+ * Searches scattered entries only
  */
 export function remove_item_from_ground(
     place: Record<string, unknown>,
@@ -127,17 +108,6 @@ export function remove_item_from_ground(
     const ground = place.ground as InlineGround;
     if (!ground) {
         return { ok: false, error: 'ground_not_initialized' };
-    }
-    
-    // Check main ground
-    const main_index = ground.main.findIndex(item => item.id === item_id);
-    if (main_index >= 0) {
-        const [item] = ground.main.splice(main_index, 1);
-        if (item) {
-            const name = (resolve_inline_item(String(item.def_id ?? ''), item) ?? null)?.name ?? String(item.def_id ?? 'item');
-            debug_log("ground_items", `Removed ${name} from main ground`);
-            return { ok: true, item };
-        }
     }
     
     // Check scattered ground
@@ -187,8 +157,7 @@ export function get_items_at_position(
 }
 
 /**
- * Get all ground items (both main and scattered)
- * Returns with position info for scattered items
+ * Get all ground items with position info
  */
 export function get_all_ground_items(
     place: Record<string, unknown>
@@ -205,12 +174,7 @@ export function get_all_ground_items(
     
     const ground = place.ground as InlineGround;
     if (!ground) return result;
-    
-    // Main ground items
-    for (const item of ground.main) {
-        result.push({ item });
-    }
-    
+
     // Scattered items
     for (const [position_key, items] of Object.entries(ground.scattered)) {
         const p = parse_scattered_key(position_key);
@@ -327,7 +291,8 @@ export function pickup_item_to_actor(
         if (remove_result.from_position) {
             add_item_to_ground(place, remove_result.from_position.x, remove_result.from_position.y, remove_result.item);
         } else {
-            add_item_to_main_ground(place, remove_result.item);
+            debug_error('ground_items', `Cannot roll back pickup of ${String(remove_result.item?.id ?? 'unknown')}: ground item has no coordinates`);
+            return { ok: false, error: 'ground_item_missing_coordinates' };
         }
         return { ok: false, error: 'no_container_available' };
     }
@@ -339,7 +304,8 @@ export function pickup_item_to_actor(
         if (remove_result.from_position) {
             add_item_to_ground(place, remove_result.from_position.x, remove_result.from_position.y, remove_result.item);
         } else {
-            add_item_to_main_ground(place, remove_result.item);
+            debug_error('ground_items', `Cannot roll back pickup of ${String(remove_result.item?.id ?? 'unknown')}: ground item has no coordinates`);
+            return { ok: false, error: 'ground_item_missing_coordinates' };
         }
         return { ok: false, error: add_result.error };
     }
@@ -402,7 +368,6 @@ export function drop_item_to_ground(
 export function initialize_ground(place: Record<string, unknown>): void {
     if (!place.ground) {
         place.ground = {
-            main: [],
             scattered: {}
         };
     }

@@ -18,7 +18,7 @@ export function apply_ui_tool_mismatch_modifier(layers: RenderLayer[], ctx: Rend
     for (const l of layers) {
         l.fg = rgb;
         lock_fg(l);
-        const cur = typeof l.weight_index === 'number' ? l.weight_index : 5;
+        const cur = typeof l.weight_index === 'number' ? l.weight_index : 1;
         l.weight_index = Math.min(cur, 3);
     }
 }

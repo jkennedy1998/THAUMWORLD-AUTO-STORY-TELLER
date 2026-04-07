@@ -4,6 +4,7 @@ import { get_color_by_name } from "../colors.js";
 import { PANEL_BORDER_PRESETS } from "../module_borders.js";
 import type { ModuleGizmosConfig } from "../module_gizmos.js";
 import { make_floating_panel_module } from "./floating_panel_module.js";
+import { clamp_weight_index, DEFAULT_WEIGHT_INDEX } from "../weight_system.js";
 
 export type TextWindowMessage = {
     content: string;
@@ -28,7 +29,7 @@ export type TextWindowOptions = {
     text_rgb?: Rgb;
     border_rgb?: Rgb;
     bg?: { char: string; rgb: Rgb };
-    base_weight_index?: number; // 0..7
+    base_weight_index?: number; // 0..3
     hint_rgb?: Rgb; // color for 'hint' sender messages
     npc_rgb?: Rgb; // color for NPC messages
     state_rgb?: Rgb; // color for state applier messages
@@ -201,8 +202,7 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
     let cached_lines: LineInfo[] = [];
 
     function base_weight(): number {
-        const w = opts.base_weight_index ?? 3;
-        return clamp((w | 0), 0, 7);
+        return clamp_weight_index(opts.base_weight_index ?? DEFAULT_WEIGHT_INDEX);
     }
 
     function ensure_layout(text_w: number) {

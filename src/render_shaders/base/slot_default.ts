@@ -11,8 +11,7 @@ function get_slot_rgb(slot_type: string | undefined): { r: number; g: number; b:
 
 function pulse_weight(time_ms: number | undefined): number {
     const t = typeof time_ms === 'number' ? time_ms : 0;
-    // Flash between medium and bold.
-    return (Math.floor(t / 220) % 2) === 0 ? 5 : 7;
+    return Math.floor(t / 220) % 4;
 }
 
 export function shade_ui_slot_default(payload: UiSlotPayload, ctx: RenderContext): RenderOutput {
@@ -22,9 +21,9 @@ export function shade_ui_slot_default(payload: UiSlotPayload, ctx: RenderContext
     const placeholder = Boolean(payload.is_placeholder);
 
     // Keep slots visually light by default; emphasize via hover/highlight.
-    let weight_index = placeholder ? 2 : 3;
+    let weight_index = placeholder ? 0 : 1;
     if (highlighted) weight_index = pulse_weight(ctx.time_ms);
-    if (hovered) weight_index = Math.max(weight_index, 6);
+    if (hovered) weight_index = Math.min(3, weight_index + 1);
 
     const layer: RenderLayer = {
         char: '·',

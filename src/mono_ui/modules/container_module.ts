@@ -167,7 +167,7 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
           char: '?',
           rgb: is_highlighted ? { r: 0, g: 255, b: 100 } : { r: 255, g: 100, b: 100 },
           style: 'regular',
-          weight_index: 4,
+          weight_index: 2,
           render_index: 0,
         },
       });
@@ -261,7 +261,7 @@ export function make_container_module(opts: ContainerModuleConfig): Module {
         const msg_y = rect.y0 + Math.floor((rect.y1 - rect.y0 + 1) / 2);
         for (let i = 0; i < msg.length; i++) {
           const char = msg.charAt(i);
-          c.set(msg_x + i, msg_y, { char, rgb: { r: 150, g: 0, b: 0 }, style: 'regular', weight_index: 5 });
+          c.set(msg_x + i, msg_y, { char, rgb: { r: 150, g: 0, b: 0 }, style: 'regular', weight_index: 2 });
         }
       }
     },

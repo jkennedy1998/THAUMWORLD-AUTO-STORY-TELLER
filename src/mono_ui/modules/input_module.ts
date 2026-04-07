@@ -16,6 +16,7 @@ import {
     should_draw_module_chrome,
     update_gizmo_hover_state,
 } from "../module_gizmos.js";
+import { clamp_weight_index, DEFAULT_WEIGHT_INDEX } from "../weight_system.js";
 
 export type InputModuleOptions = {
     id: string;
@@ -38,7 +39,7 @@ export type InputModuleOptions = {
     border_rgb?: Rgb;
     bg?: { char: string; rgb: Rgb };
     cursor_rgb?: Rgb;
-    base_weight_index?: number; // 0..7
+    base_weight_index?: number; // 0..3
     placeholder?: string;
     gizmos?: ModuleGizmosConfig;
     header_buttons?: Array<{
@@ -122,7 +123,7 @@ export function make_input_module(opts: InputModuleOptions): Module {
     const text_rgb: Rgb = opts.text_rgb ?? get_color_by_name("off_white").rgb;
     const border_rgb: Rgb = opts.border_rgb ?? get_color_by_name("light_gray").rgb;
     const cursor_rgb: Rgb = opts.cursor_rgb ?? get_color_by_name("off_white").rgb;
-    const w_base = typeof opts.base_weight_index === "number" ? clamp(Math.trunc(opts.base_weight_index), 0, 7) : 3;
+    const w_base = typeof opts.base_weight_index === "number" ? clamp_weight_index(opts.base_weight_index) : DEFAULT_WEIGHT_INDEX;
 
     let focused = false;
     let buffer = ""; // raw text (can include \n)
@@ -353,7 +354,7 @@ export function make_input_module(opts: InputModuleOptions): Module {
                         char: button.label[i]!,
                         rgb,
                         style: "regular",
-                        weight_index: button.is_active?.() ? w_base + 2 : w_base,
+                        weight_index: button.is_active?.() ? w_base + 1 : w_base,
                     });
                 }
             }

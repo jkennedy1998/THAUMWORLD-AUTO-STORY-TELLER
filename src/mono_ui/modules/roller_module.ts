@@ -2,6 +2,7 @@ import type { Canvas, Module, PointerEvent, Rect, Rgb } from "../types.js";
 import { rect_height, rect_width } from "../types.js";
 import type { ModuleGizmosConfig } from "../module_gizmos.js";
 import { make_floating_panel_module } from "./floating_panel_module.js";
+import { clamp_weight_index, DEFAULT_WEIGHT_INDEX } from "../weight_system.js";
 
 export type RollerState = {
     spinner: string;
@@ -35,8 +36,7 @@ export function make_roller_module(opts: RollerModuleOptions): Module {
     let rect = opts.rect;
 
     function base_weight(): number {
-        const w = opts.base_weight_index ?? 3;
-        return clamp((w | 0), 0, 7);
+        return clamp_weight_index(opts.base_weight_index ?? DEFAULT_WEIGHT_INDEX);
     }
 
     function draw_text(c: Canvas, x: number, y: number, text: string, rgb: Rgb, weight_index: number): void {
@@ -103,7 +103,7 @@ export function make_roller_module(opts: RollerModuleOptions): Module {
             draw_text(c, start_x, y, btn_label, btn_rgb, weight);
 
             if (pressed) {
-                c.set(btn.x0, btn.y1, { char: "P", rgb: btn_rgb, style: "regular", weight_index: w_base + 2 });
+                c.set(btn.x0, btn.y1, { char: "P", rgb: btn_rgb, style: "regular", weight_index: w_base + 1 });
             }
         },
         on_pointer_enter_content(): void {

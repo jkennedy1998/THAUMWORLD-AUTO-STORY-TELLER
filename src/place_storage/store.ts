@@ -178,7 +178,6 @@ export function load_place(slot: number, place_id: string): PlaceResult {
     // Ensure ground storage is initialized (Phase 5)
     if (!place.ground) {
       place.ground = {
-        main: [],
         scattered: {}
       };
       dirty = true;

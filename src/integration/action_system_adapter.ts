@@ -42,6 +42,7 @@ const data_slot_number = get_configured_data_slot();
  */
 export function createPipelineDependencies(): PipelineDependencies {
   return {
+    getDataSlot: () => data_slot_number,
     // Get available targets from actor/npc storage
     getAvailableTargets: async (location: Location, radius: number) => {
       const targets: AvailableTarget[] = [];

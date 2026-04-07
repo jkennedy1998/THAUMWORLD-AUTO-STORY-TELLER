@@ -505,9 +505,7 @@ function find_ground_inline_item(place: Place, item_ref: string): InlineItem | n
       if (found) return found as InlineItem;
     }
   }
-  const main = Array.isArray((place as any)?.ground?.main) ? (place as any).ground.main : [];
-  const found = main.find((item: any) => String(item?.id ?? '') === item_id);
-  return found ? found as InlineItem : null;
+  return null;
 }
 
 function get_place_item_name(place: Place, slot: number, item_ref: string): string {
@@ -661,17 +659,6 @@ function summarize_all_place_items(place: Place, slot: number): TileItemSummary[
         });
       }
     }
-  }
-
-  const ground_main = Array.isArray((place as any)?.ground?.main) ? (place as any).ground.main as InlineItem[] : [];
-  for (const item of ground_main) {
-    const resolved = resolve_inline_item(String(item?.def_id ?? ''), item);
-    pushSummary({
-      ref: `item.${String(item?.id ?? '')}`,
-      name: String(resolved?.name ?? item?.def_id ?? 'item'),
-      description: String(resolved?.def?.description ?? ''),
-      quantity: Math.max(1, Number(item?.qty ?? 1) || 1),
-    });
   }
 
   const containers = (place as any)?.containers;

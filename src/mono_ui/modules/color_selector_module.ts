@@ -174,7 +174,7 @@ export function make_color_selector_module(opts: ColorSelectorOptions): Module {
                 char: marker_char,
                 rgb: marker_rgb,
                 style: 'regular',
-                weight_index: 5,
+                weight_index: 2,
               });
             }
           }
@@ -191,7 +191,7 @@ export function make_color_selector_module(opts: ColorSelectorOptions): Module {
             char: '│',
             rgb: get_color_by_name('pale_yellow').rgb,
             style: 'regular',
-            weight_index: 5
+            weight_index: 2
           });
         }
       }

@@ -1,6 +1,8 @@
 import { CanvasRuntime } from '../mono_ui/runtime/canvas_runtime.js';
 import type { Module } from '../mono_ui/types.js';
 import { compute_dom_viewport_for_rect } from '../mono_ui/runtime/dom_viewport.js';
+import { clamp_ui_scale, compute_responsive_grid_size, get_ui_cell_metrics } from '../mono_ui/runtime/ui_metrics.js';
+import { get_theme_font_primary_family, THAUMWORLD_RENDER_THEME } from '../mono_ui/runtime/render_theme.js';
 import { APP_CONFIG, create_app_state } from './app_state.js';
 import { PAINTER_CONFIG, create_painter_app_state } from './painter_app_state.js';
 
@@ -60,25 +62,7 @@ const layout_state = IS_PAINTER_MODE ? painter_state : game_state;
 function compute_responsive_grid(scale: number): { width: number; height: number } | null {
     const viewport = canvasEl.parentElement;
     if (!viewport) return null;
-
-    const metricsCanvas = document.createElement('canvas');
-    const metricsCtx = metricsCanvas.getContext('2d');
-    if (!metricsCtx) return null;
-
-    const s = Number.isFinite(scale) ? Math.max(0.25, Math.min(6.0, scale)) : 1.0;
-    const fontSizePx = config.base_font_size_px * s;
-    const lineHeightPx = fontSizePx * config.base_line_height_mult;
-    const letterSpacingPx = fontSizePx * config.base_letter_spacing_mult;
-    metricsCtx.font = `400 ${fontSizePx}px ${config.font_family}`;
-    const glyphW = metricsCtx.measureText('M').width;
-    const tileW = glyphW + letterSpacingPx;
-    const tileH = lineHeightPx;
-    if (!Number.isFinite(tileW) || !Number.isFinite(tileH) || tileW <= 0 || tileH <= 0) return null;
-
-    return {
-        width: Math.max(1, Math.floor(viewport.clientWidth / tileW)),
-        height: Math.max(1, Math.floor(viewport.clientHeight / tileH)),
-    };
+    return compute_responsive_grid_size(viewport.clientWidth, viewport.clientHeight, scale);
 }
 
 function get_visible_modules(): readonly Module[] {
@@ -103,6 +87,8 @@ const runtime = new CanvasRuntime({
     base_line_height_mult: config.base_line_height_mult,
     base_letter_spacing_mult: config.base_letter_spacing_mult,
     weight_index_to_css: config.weight_index_to_css,
+    render_backend: config.render_backend,
+    render_theme_id: config.render_theme_id,
     modules: get_visible_modules(),
     on_drag_end_outside,
     on_pointer_move_global,
@@ -136,21 +122,13 @@ if (IS_PAINTER_MODE && painter_state) {
     let boot_frames_left = 10;
     let boot_recentering_done = false;
 
-    const metricsCanvas = document.createElement('canvas');
-    const metricsCtx = metricsCanvas.getContext('2d');
-
     function computeTileMetrics(scale: number): { tileW: number; tileH: number; fontSizePx: number } | null {
-        if (!metricsCtx) return null;
-        const s = Number.isFinite(scale) ? Math.max(0.25, Math.min(6.0, scale)) : 1.0;
-        const fontSizePx = config.base_font_size_px * s;
-        const lineHeightPx = fontSizePx * config.base_line_height_mult;
-        const letterSpacingPx = fontSizePx * config.base_letter_spacing_mult;
-        metricsCtx.font = `400 ${fontSizePx}px ${config.font_family}`;
-        const glyphW = metricsCtx.measureText('M').width;
-        const tileW = glyphW + letterSpacingPx;
-        const tileH = lineHeightPx;
-        if (!Number.isFinite(tileW) || !Number.isFinite(tileH) || tileW <= 0 || tileH <= 0) return null;
-        return { tileW, tileH, fontSizePx };
+        const metrics = get_ui_cell_metrics(scale, config.base_font_size_px);
+        return {
+            tileW: metrics.cell_w_px,
+            tileH: metrics.cell_h_px,
+            fontSizePx: metrics.font_size_px,
+        };
     }
     
     // Listen to canvas pan events for tile size and global pan updates
@@ -288,7 +266,7 @@ function update_texture_filter_for_scale(scale: number): void {
 }
 
 function update_background_for_scale(scale: number): void {
-    const s = Number.isFinite(scale) ? Math.max(0.25, Math.min(6.0, scale)) : 1.0;
+    const s = clamp_ui_scale(scale);
     try {
         document.documentElement.style.setProperty('--ui-scale', String(s));
     } catch {
@@ -315,7 +293,7 @@ function load_saved_ui_scale(): number {
         if (!raw) return 1.0;
         const v = Number(raw);
         if (!Number.isFinite(v)) return 1.0;
-        return Math.max(0.5, Math.min(3.0, v));
+        return clamp_ui_scale(v);
     } catch {
         return 1.0;
     }
@@ -326,6 +304,7 @@ async function boot() {
     if ((document as any).fonts?.load) {
         try {
             await (document as any).fonts.load(`${config.base_font_size_px * saved_scale}px "${config.font_family}"`);
+            await (document as any).fonts.load(`${config.base_font_size_px * saved_scale}px "${get_theme_font_primary_family(THAUMWORLD_RENDER_THEME)}"`);
             await (document as any).fonts.ready;
         } catch {
             // best-effort

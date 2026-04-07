@@ -17,7 +17,7 @@ export function shade_ui_widget_default(payload: UiWidgetPayload, _ctx: RenderCo
         fg: payload.base_fg,
         z: 0,
         style: 'regular',
-        weight_index: active ? 5 : 4,
+        weight_index: active ? 2 : 2,
     };
     return { layers: [layer] };
 }

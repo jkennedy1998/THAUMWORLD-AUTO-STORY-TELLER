@@ -26,6 +26,7 @@ import {
 export async function exampleUIIntegration() {
   // Create pipeline dependencies
   const pipelineDeps: PipelineDependencies = {
+    getDataSlot: () => 0,
     // Get available targets from actor/npc storage
     getAvailableTargets: async (location: Location, radius: number) => {
       // Query your existing storage system
@@ -172,6 +173,7 @@ export async function exampleUIIntegration() {
  */
 export async function exampleNPCIntegration() {
   const pipelineDeps: PipelineDependencies = {
+    getDataSlot: () => 0,
     getAvailableTargets: async (location, radius) => {
       // Query nearby entities
       return [];

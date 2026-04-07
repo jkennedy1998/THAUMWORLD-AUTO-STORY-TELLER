@@ -22,7 +22,7 @@ export function shade_entity_default(payload: EntityPayload, _ctx: RenderContext
     const shaded = apply_shader_bindings({
         char: base_char,
         fg: payload.base_fg,
-        weight_index: 6,
+        weight_index: 3,
     }, _ctx, binding);
     const layer: RenderLayer = {
         char: shaded.char,

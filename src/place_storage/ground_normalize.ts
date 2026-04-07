@@ -22,7 +22,7 @@ export function make_scattered_key(x: number, y: number, z: number): string {
 export function normalize_ground_scattered(place_any: any): boolean {
     try {
         if (!place_any || typeof place_any !== 'object') return false;
-        if (!place_any.ground) place_any.ground = { main: [], scattered: {} };
+        if (!place_any.ground) place_any.ground = { scattered: {} };
         if (!place_any.ground.scattered || typeof place_any.ground.scattered !== 'object') place_any.ground.scattered = {};
 
         const base_z = get_place_base_z(place_any);

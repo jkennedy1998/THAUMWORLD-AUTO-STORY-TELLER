@@ -296,7 +296,7 @@ export function draw_module_gizmos(
         char: module_name[i]!,
         rgb: name_color,
         style: 'regular',
-        weight_index: 4,
+        weight_index: 2,
         render_index: MODULE_CHROME_RENDER_INDEX,
       });
     }

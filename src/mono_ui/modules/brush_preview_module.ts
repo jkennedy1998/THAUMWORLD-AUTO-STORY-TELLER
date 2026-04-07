@@ -69,7 +69,7 @@ export function make_brush_preview_module(opts: BrushPreviewOptions): Module {
           char: left_label[i]!,
           rgb: active === 'left' ? get_color_by_name('vivid_blue').rgb : get_color_by_name('medium_gray').rgb,
           style: 'regular',
-          weight_index: 4
+          weight_index: 2
         });
       }
       for (let i = 0; i < right_label.length && right_x - 1 + i <= rect.x1 - 1; i++) {
@@ -77,7 +77,7 @@ export function make_brush_preview_module(opts: BrushPreviewOptions): Module {
           char: right_label[i]!,
           rgb: active === 'right' ? get_color_by_name('vivid_red').rgb : get_color_by_name('medium_gray').rgb,
           style: 'regular',
-          weight_index: 4
+          weight_index: 2
         });
       }
     },

@@ -13,8 +13,7 @@ export type StyleName = string;
 export type Cell = {
     char: string; // expected length 1; space ' ' means clear
 
-    // 0..7 mapped to Martian Mono weights 100..800
-    // 0=thin ... 3=regular-ish ... 7=black-ish
+    // 0..3 logical weights mapped directly to the active theme/font pack.
     weight_index: number;
 
     // Z-index / render layer

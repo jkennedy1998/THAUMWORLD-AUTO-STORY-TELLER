@@ -31,6 +31,9 @@ function createMockDependencies(): PipelineDependencies {
   const locations = new Map<string, Location>();
 
   const deps: any = {
+    getDataSlot() {
+      return 0;
+    },
     async getAvailableTargets(location: Location, radius: number) {
       debugLogger.debug(`Getting targets within ${radius} tiles of (${location.x},${location.y})`);
       

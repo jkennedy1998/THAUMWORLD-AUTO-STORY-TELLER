@@ -27,6 +27,25 @@ export type GradiatorState = {
   editCursorX: number;  // Position within the gradiator being edited
 };
 
+const DEFAULT_GRADIATOR_SLOTS = [DEFAULT_GRADIATOR_1, DEFAULT_GRADIATOR_2, DEFAULT_GRADIATOR_3] as const;
+
+function get_default_gradiator_slot(slot: number): string {
+  return DEFAULT_GRADIATOR_SLOTS[slot] ?? DEFAULT_GRADIATOR_1;
+}
+
+export function getSafeGradiatorSlot(state: GradiatorState, slot: number): string {
+  const value = state.slots[slot];
+  if (typeof value === 'string' && value.length >= MIN_GRADIATOR_WIDTH) return value;
+  return get_default_gradiator_slot(slot);
+}
+
+function set_safe_gradiator_slot(state: GradiatorState, slot: GradiatorSlot, value: string): string {
+  const normalized = typeof value === 'string' ? value.slice(0, MAX_GRADIATOR_WIDTH) : '';
+  const next = normalized.length >= MIN_GRADIATOR_WIDTH ? normalized : get_default_gradiator_slot(slot);
+  state.slots[slot] = next;
+  return next;
+}
+
 /**
  * Create initial gradiator state with defaults
  */
@@ -48,7 +67,7 @@ export function createGradiatorState(): GradiatorState {
  * Get the active gradiator string
  */
 export function getActiveGradiator(state: GradiatorState): string {
-  return state.slots[state.activeSlot]!;
+  return getSafeGradiatorSlot(state, state.activeSlot);
 }
 
 /**
@@ -86,7 +105,7 @@ export function stopEditingGradiator(state: GradiatorState): void {
 export function selectGradiatorChar(state: GradiatorState, slot: GradiatorSlot, x: number): void {
   state.isEditing = true;
   state.editSlot = slot;
-  const gradiator = state.slots[slot]!;
+  const gradiator = getSafeGradiatorSlot(state, slot);
   state.editCursorX = Math.max(0, Math.min(gradiator.length - 1, x));
 }
 
@@ -94,29 +113,29 @@ export function selectGradiatorChar(state: GradiatorState, slot: GradiatorSlot, 
  * Add a character to the end of a gradiator
  */
 export function addGradiatorChar(state: GradiatorState, slot: GradiatorSlot): void {
-  const current = state.slots[slot]!;
+  const current = getSafeGradiatorSlot(state, slot);
   if (current.length >= MAX_GRADIATOR_WIDTH) return;
   
   // Add a space character to the end
-  state.slots[slot] = current + ' ';
+  const next = set_safe_gradiator_slot(state, slot, current + ' ');
   // Select the new character
   state.isEditing = true;
   state.editSlot = slot;
-  state.editCursorX = state.slots[slot]!.length - 1;
+  state.editCursorX = next.length - 1;
 }
 
 /**
  * Remove the last character from a gradiator
  */
 export function removeGradiatorChar(state: GradiatorState, slot: GradiatorSlot): void {
-  const current = state.slots[slot]!;
+  const current = getSafeGradiatorSlot(state, slot);
   if (current.length <= MIN_GRADIATOR_WIDTH) return;
   
   // Remove last character
-  state.slots[slot] = current.slice(0, -1);
+  const next = set_safe_gradiator_slot(state, slot, current.slice(0, -1));
   // Update cursor if needed
-  if (state.editSlot === slot && state.editCursorX >= state.slots[slot]!.length) {
-    state.editCursorX = state.slots[slot]!.length - 1;
+  if (state.editSlot === slot && state.editCursorX >= next.length) {
+    state.editCursorX = next.length - 1;
   }
 }
 
@@ -126,46 +145,41 @@ export function removeGradiatorChar(state: GradiatorState, slot: GradiatorSlot):
 export function setGradiatorChar(state: GradiatorState, slot: GradiatorSlot, x: number, char: string): void {
   if (x < 0 || x >= MAX_GRADIATOR_WIDTH) return;
   
-  const current = state.slots[slot]!;
+  const current = getSafeGradiatorSlot(state, slot);
   if (x >= current.length) {
     // Extend the string if needed
-    state.slots[slot] = current.padEnd(x + 1, ' ');
+    set_safe_gradiator_slot(state, slot, current.padEnd(x + 1, ' '));
   }
   
   // Replace character at position
-  const chars = state.slots[slot]!.split('');
+  const chars = getSafeGradiatorSlot(state, slot).split('');
   chars[x] = char;
-  state.slots[slot] = chars.join('').trimEnd();  // Trim trailing spaces
-  
-  // Ensure minimum width
-  if (state.slots[slot]!.length < MIN_GRADIATOR_WIDTH) {
-    state.slots[slot] = state.slots[slot]!.padEnd(MIN_GRADIATOR_WIDTH, ' ');
-  }
+  set_safe_gradiator_slot(state, slot, chars.join('').trimEnd());
 }
 
 /**
  * Insert a character into a gradiator at the specified position
  */
 export function insertGradiatorChar(state: GradiatorState, slot: GradiatorSlot, x: number, char: string): void {
-  const current = state.slots[slot]!;
+  const current = getSafeGradiatorSlot(state, slot);
   if (current.length >= MAX_GRADIATOR_WIDTH) return;
   
   const chars = current.split('');
   chars.splice(x, 0, char);
-  state.slots[slot] = chars.join('');
+  set_safe_gradiator_slot(state, slot, chars.join(''));
 }
 
 /**
  * Delete a character from a gradiator at the specified position
  */
 export function deleteGradiatorChar(state: GradiatorState, slot: GradiatorSlot, x: number): void {
-  const current = state.slots[slot]!;
+  const current = getSafeGradiatorSlot(state, slot);
   if (current.length <= MIN_GRADIATOR_WIDTH) return;
   if (x < 0 || x >= current.length) return;
   
   const chars = current.split('');
   chars.splice(x, 1);
-  state.slots[slot] = chars.join('');
+  set_safe_gradiator_slot(state, slot, chars.join(''));
 }
 
 /**
@@ -174,7 +188,7 @@ export function deleteGradiatorChar(state: GradiatorState, slot: GradiatorSlot, 
 export function moveGradiatorCursor(state: GradiatorState, deltaX: number): void {
   if (!state.isEditing || state.editSlot === null) return;
   
-  const slotWidth = state.slots[state.editSlot]!.length;
+  const slotWidth = getSafeGradiatorSlot(state, state.editSlot).length;
   state.editCursorX = Math.max(0, Math.min(slotWidth - 1, state.editCursorX + deltaX));
 }
 
@@ -275,7 +289,7 @@ export function scaleTextToCopyData(
           row.push({
             char,
             rgb: { r: 255, g: 255, b: 255 },
-            weight_index: 4
+            weight_index: 2
           });
         } else {
           row.push(null);
@@ -315,7 +329,7 @@ export function scaleTextToCopyData(
         row.push({
           char,
           rgb: { r: 255, g: 255, b: 255 },
-          weight_index: 4
+          weight_index: 2
         });
       } else {
         row.push(null);

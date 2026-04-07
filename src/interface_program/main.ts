@@ -75,7 +75,6 @@ import {
     load_place_with_ground,
     save_place_with_ground,
     add_item_to_ground,
-    add_item_to_main_ground,
     remove_item_from_ground,
     get_items_at_position,
     find_nearby_items,
@@ -2012,7 +2011,9 @@ function maybe_emit_authoritative_move_perception(options: {
 
         for (const ev of events) {
             update_awareness_from_perception(options.slot, ev);
-            process_witness_event(ev.observerRef, ev);
+            if (ev.observerRef.startsWith("npc.")) {
+                process_witness_event(ev.observerRef, ev);
+            }
         }
 
         debug_log('MOVE_VEL_TEST', 'authoritative movement perception emitted', {
@@ -2873,7 +2874,7 @@ function resize_place_bounds_and_sync(
     if (!next_layers.has('tiles')) {
         place_any.tiles = { width: new_w, height: new_h, cells: Array.from({ length: new_h }, () => Array.from({ length: new_w }, () => null)) };
     }
-    if (!place_any.ground) place_any.ground = { main: [], scattered: {} };
+    if (!place_any.ground) place_any.ground = { scattered: {} };
     place_any.ground.scattered = scattered_next;
     place_any.region_bounds = next_bounds;
     place_any.coordinates = { ...(place_any.coordinates ?? {}), elevation: next_bounds.origin.z };
@@ -5907,10 +5908,7 @@ function find_item_in_contents_for_editor(contents: any[], item_id: string, base
 }
 
 function find_item_in_place_for_editor(place_any: any, item_id: string): { item: any; path: string } | null {
-    const ground_main = Array.isArray(place_any?.ground?.main) ? place_any.ground.main : [];
-    const found_main = find_item_in_contents_for_editor(ground_main, item_id, 'ground.main');
-    if (found_main) return found_main;
-    const scattered = place_any?.ground?.scattered;
+                    const scattered = place_any?.ground?.scattered;
     if (scattered && typeof scattered === 'object') {
         for (const [key, value] of Object.entries(scattered as Record<string, any[]>)) {
             const found = find_item_in_contents_for_editor(Array.isArray(value) ? value : [], item_id, `ground.scattered.${key}`);
@@ -6315,7 +6313,7 @@ function mutate_place_painter_erase_and_sync(
         if (!Number.isFinite(sx) || !Number.isFinite(sy) || !Number.isFinite(sz)) return { ok: false, error: 'invalid_source' };
         const src_norm = normalize_voxel_position_key(place_any, `${sx}_${sy}_${sz}`);
         if (!src_norm) return { ok: false, error: 'invalid_source_voxel' };
-        if (!place_any.ground) place_any.ground = { main: [], scattered: {} };
+        if (!place_any.ground) place_any.ground = { scattered: {} };
         if (!place_any.ground.scattered) place_any.ground.scattered = {};
         const from_items: any[] = Array.isArray(place_any.ground.scattered[src_norm.key]) ? place_any.ground.scattered[src_norm.key] : [];
         if (from_items.length < 1) return { ok: false, error: 'pile_empty' };
@@ -6458,7 +6456,7 @@ function mutate_place_painter_move_and_sync(
         const sz = Math.floor(Number(source.z));
         const src_norm = normalize_voxel_position_key(place_any, `${sx}_${sy}_${sz}`);
         if (!src_norm) return { ok: false, error: 'invalid_source_voxel' };
-        if (!place_any.ground) place_any.ground = { main: [], scattered: {} };
+        if (!place_any.ground) place_any.ground = { scattered: {} };
         if (!place_any.ground.scattered) place_any.ground.scattered = {};
         const from_items: any[] = Array.isArray(place_any.ground.scattered[src_norm.key]) ? place_any.ground.scattered[src_norm.key] : [];
         if (from_items.length < 1) return { ok: false, error: 'pile_empty' };
@@ -6641,10 +6639,7 @@ function remap_place_layer_order_and_sync(
             },
         });
     }
-    const all_ground_items: any[] = [
-        ...(Array.isArray(place_any.ground?.main) ? place_any.ground.main : []),
-        ...Object.values(place_any.ground?.scattered ?? {}).flatMap((items: any) => Array.isArray(items) ? items : []),
-    ];
+    const all_ground_items: any[] = Object.values(place_any.ground?.scattered ?? {}).flatMap((items: any) => Array.isArray(items) ? items : []);
     for (const item of all_ground_items) {
         const z = Math.floor(Number(item?.elevation ?? place_any?.coordinates?.elevation ?? 0)) || 0;
         translate_candidates.push({
@@ -7304,7 +7299,7 @@ function ensure_resolved_container_capacity(container_obj: any, def_id: string):
 }
 
 function drop_inline_item_to_ground_stacking(place_any: any, gx: number, gy: number, gz: number, item: any, def: any): void {
-    if (!place_any.ground) place_any.ground = { main: [], scattered: {} };
+    if (!place_any.ground) place_any.ground = { scattered: {} };
     if (!place_any.ground.scattered) place_any.ground.scattered = {};
     const key = `${gx}_${gy}_${gz}`;
     if (!place_any.ground.scattered[key]) place_any.ground.scattered[key] = [];
@@ -7685,8 +7680,6 @@ function apply_place_breath_reactive_tags(state: PlaceBreathState, breath_index_
         if (Array.isArray(structure?.contents)) route_breath_tags_for_inline_item_array({ ...ctx, owner_container_kind: 'structure' }, structure.contents);
     }
 
-    const ground_main = Array.isArray(place_any?.ground?.main) ? place_any.ground.main : [];
-    route_breath_tags_for_inline_item_array({ ...ctx, owner_container_kind: 'ground' }, ground_main);
     const scattered_entries = place_any?.ground?.scattered && typeof place_any.ground.scattered === 'object'
         ? Object.values(place_any.ground.scattered)
         : [];
@@ -10811,13 +10804,13 @@ function start_http_server(log_path: string): void {
                 }
 
                 // Sync items_on_ground from inline ground storage (Phase 5)
-                // Read from place.ground.scattered and place.ground.main
+                // Render-facing ground items must come from explicit scattered voxel positions.
                 place.contents.items_on_ground = [];
                 let synced_count = 0;
                 
                 // Ensure ground structure exists
                 if (!place.ground) {
-                    place.ground = { main: [], scattered: {} };
+                    place.ground = { scattered: {} };
                 }
                 
                 // Sync from scattered items (position-specific)
@@ -10845,23 +10838,6 @@ function start_http_server(log_path: string): void {
                     }
                 }
                 
-                // Sync from main ground (items without specific position)
-                    if (place.ground.main) {
-                        const default_entry = place.tile_grid?.default_entry || { x: 20, y: 20 };
-                        for (const item of place.ground.main) {
-                            const place_item: PlaceItem = {
-                                item_ref: item.id,
-                                quantity: item.qty,
-                                tile_position: { ...default_entry },
-                                elevation: (typeof (item as any)?.elevation === 'number' && Number.isFinite((item as any).elevation))
-                                    ? Math.floor((item as any).elevation)
-                                    : Math.floor(Number((place as any)?.coordinates?.elevation ?? 0))
-                            };
-                            place.contents.items_on_ground.push(place_item);
-                            synced_count++;
-                        }
-                    }
-
                     // Devlog test: 3dification wall-top item exists in tavern.
                     try {
                         if (place_id === 'eden_crossroads_tavern') {
@@ -10881,8 +10857,7 @@ function start_http_server(log_path: string): void {
                 if (synced_count > 0) {
                     debug_log("API", `/api/place: Synced ${synced_count} ground items from inline ground storage`, {
                         place_id,
-                        scattered_keys: Object.keys(place.ground.scattered || {}).length,
-                        main_count: place.ground.main?.length || 0
+                        scattered_keys: Object.keys(place.ground.scattered || {}).length
                     });
                 }
 
@@ -15489,11 +15464,13 @@ function start_http_server(log_path: string): void {
 
                     if (!add_result.ok) {
                         // Put item back on ground
-                        if (target_item.position) {
-                            add_item_to_ground(place_result.place, target_item.position.x, target_item.position.y, remove_result.item);
-                        } else {
-                            add_item_to_main_ground(place_result.place, remove_result.item);
+                        if (!target_item.position) {
+                            debug_error('ground_items', `Cannot roll back pickup of ${String(remove_result.item?.id ?? 'unknown')} in ${place_id}: item has no ground coordinates`);
+                            res.writeHead(500, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: false, error: 'ground_item_missing_coordinates' }));
+                            return;
                         }
+                        add_item_to_ground(place_result.place, target_item.position.x, target_item.position.y, remove_result.item);
                         save_place_with_ground_and_sync_active(data_slot_number, place_id, place_result.place, { merge_active_runtime: false });
                         res.writeHead(500, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: add_result.error }));
@@ -15780,11 +15757,13 @@ function start_http_server(log_path: string): void {
 
                     if (!add_ok.ok) {
                         // Roll back to ground
-                        if (found.position) {
-                            add_item_to_ground(place_result.place, found.position.x, found.position.y, remove_result.item);
-                        } else {
-                            add_item_to_main_ground(place_result.place, remove_result.item);
+                        if (!found.position) {
+                            debug_error('ground_items', `Cannot roll back pickup_to of ${String(remove_result.item?.id ?? 'unknown')} in ${place_id}: item has no ground coordinates`);
+                            res.writeHead(400, { "Content-Type": "application/json" });
+                            res.end(JSON.stringify({ ok: false, error: 'ground_item_missing_coordinates' }));
+                            return;
                         }
+                        add_item_to_ground(place_result.place, found.position.x, found.position.y, remove_result.item);
                         save_place_with_ground_and_sync_active(data_slot_number, place_id, place_result.place);
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: false, error: add_ok.error }));
@@ -18189,7 +18168,7 @@ function start_http_server(log_path: string): void {
                     }
 
                     const place_any = place_result.place as any;
-                    if (!place_any.ground) place_any.ground = { main: [], scattered: {} };
+                    if (!place_any.ground) place_any.ground = { scattered: {} };
                     if (!place_any.ground.scattered) place_any.ground.scattered = {};
 
                     const base_z = get_place_base_z(place_any);
@@ -19026,7 +19005,6 @@ function start_http_server(log_path: string): void {
                             if (Array.isArray(structure.contents)) collect_inline_item_occurrences(structure.contents, item_id, `${structure_path}.contents`, out);
                         }
 
-                        if (Array.isArray(place_any?.ground?.main)) collect_inline_item_occurrences(place_any.ground.main, item_id, `place.ground.main.${place_any.id}`, out);
                         const scattered = place_any?.ground?.scattered;
                         if (scattered && typeof scattered === 'object') {
                             for (const [key, list] of Object.entries(scattered as Record<string, any[]>)) {
@@ -19083,7 +19061,7 @@ function start_http_server(log_path: string): void {
                         }
                         if (from_place?.kind === 'place_ground') {
                             const prefix = `place.ground.${from_place.place_id}.${from_place.x}_${from_place.y}_${from_place.z}`;
-                            return (path: string) => path.startsWith(`${prefix}.`) || path.startsWith(`place.ground.main.${from_place.place_id}.`);
+                            return (path: string) => path.startsWith(`${prefix}.`);
                         }
                         return null;
                     }
@@ -19148,7 +19126,6 @@ function start_http_server(log_path: string): void {
                                 const structure_path = `place.structure.${place_any.id}.${i}`;
                                 prune_inline_item_occurrences(structure.contents, item_id, `${structure_path}.contents`, keep, removed_paths);
                             }
-                            if (Array.isArray(place_any?.ground?.main)) prune_inline_item_occurrences(place_any.ground.main, item_id, `place.ground.main.${place_any.id}`, keep, removed_paths);
                             const scattered = place_any?.ground?.scattered;
                             if (scattered && typeof scattered === 'object') {
                                 for (const [key, list] of Object.entries(scattered as Record<string, any[]>)) {
@@ -21205,7 +21182,9 @@ function Breath(log_path: string, inbox_path: string, outbox_path: string): void
                     for (const ev of events) {
                         if (ev?.observerRef && ev?.verb) {
                             update_awareness_from_perception(data_slot_number, ev);
-                            process_witness_event(ev.observerRef, ev);
+                            if (ev.observerRef.startsWith("npc.")) {
+                                process_witness_event(ev.observerRef, ev);
+                            }
                         }
                     }
                 } catch (err) {

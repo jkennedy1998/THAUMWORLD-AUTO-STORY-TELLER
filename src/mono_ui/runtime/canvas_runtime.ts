@@ -6,6 +6,10 @@ import { debug_warn, debug_log, DEBUG_LEVEL } from '../../shared/debug.js';
 // NOTE: debug overlays are toggled from UI buttons (not hotkeys).
 import { unlock_sfx } from '../sfx/sfx_player.js';
 import { handle_keydown, handle_keyup, reset_all } from './input_actions.js';
+import { clamp_ui_scale, get_ui_cell_metrics, screen_px_to_grid_cell } from './ui_metrics.js';
+import type { RenderBackendKind } from './render_theme.js';
+import { create_canvas_cell_renderer, type CanvasCellRenderer } from './cell_renderer.js';
+import { clamp_weight_index, DEFAULT_WEIGHT_INDEX_TO_CSS } from '../weight_system.js';
 
 export type CanvasRuntimeOptions = {
     canvas: HTMLCanvasElement;
@@ -19,6 +23,8 @@ export type CanvasRuntimeOptions = {
     base_line_height_mult: number;
     base_letter_spacing_mult: number;
     weight_index_to_css?: readonly number[];
+    render_backend?: RenderBackendKind;
+    render_theme_id?: string;
 
     modules: readonly Module[];
     
@@ -31,14 +37,6 @@ export type CanvasRuntimeOptions = {
     // Called after modules compose each frame (for overlays)
     on_after_compose?: (canvas: Canvas) => void;
 };
-
-const DEFAULT_WEIGHT_INDEX_TO_CSS: readonly number[] = [100, 200, 300, 400, 500, 600, 700, 800] as const;
-
-function clamp_weight_index(w: unknown): number {
-    const v = typeof w === 'number' ? Math.trunc(w) : 3;
-    if (!Number.isFinite(v)) return 3;
-    return Math.max(0, Math.min(7, v));
-}
 
 export class CanvasRuntime {
     private canvas_el: HTMLCanvasElement;
@@ -55,6 +53,9 @@ export class CanvasRuntime {
     private base_line_height_mult: number;
     private base_letter_spacing_mult: number;
     private weight_index_to_css: readonly number[];
+    private render_backend: RenderBackendKind;
+    private render_theme_id: string;
+    private cell_renderer: CanvasCellRenderer;
 
     private scale = 1.0;
     private raf_id: number | null = null;
@@ -128,6 +129,12 @@ export class CanvasRuntime {
         this.base_line_height_mult = opts.base_line_height_mult;
         this.base_letter_spacing_mult = opts.base_letter_spacing_mult;
         this.weight_index_to_css = opts.weight_index_to_css ?? DEFAULT_WEIGHT_INDEX_TO_CSS;
+        this.render_backend = opts.render_backend ?? 'font';
+        this.render_theme_id = opts.render_theme_id ?? 'default';
+        this.cell_renderer = create_canvas_cell_renderer({
+            backend: this.render_backend,
+            theme_id: this.render_theme_id,
+        });
         this.modules = opts.modules;
         this.on_drag_end_outside = opts.on_drag_end_outside ?? null;
         this.on_pointer_move_global = opts.on_pointer_move_global ?? null;
@@ -168,9 +175,7 @@ export class CanvasRuntime {
     }
 
     private clamp_scale(scale: number): number {
-        if (!Number.isFinite(scale)) return 1.0;
-        // Conservative clamp; this is UI-only and can be tuned later.
-        return Math.max(0.25, Math.min(6.0, scale));
+        return clamp_ui_scale(scale);
     }
 
     private persist_scale_best_effort(scale: number): void {
@@ -260,6 +265,13 @@ export class CanvasRuntime {
 
     private focus_key_sink(): void {
         this.key_sink.focus({ preventScroll: true });
+    }
+
+    private update_focused_owner(next_owner: Module | null): void {
+        if (next_owner === this.focused_owner) return;
+        this.focused_owner?.OnBlur?.();
+        this.focused_owner = next_owner;
+        this.focused_owner?.OnFocus?.();
     }
 
     private make_pointer_event(
@@ -356,16 +368,12 @@ export class CanvasRuntime {
     }
 
     private get_metrics() {
-        const font_size_px = this.base_font_size_px * this.scale;
-        const line_height_px = font_size_px * this.base_line_height_mult;
-        const letter_spacing_px = font_size_px * this.base_letter_spacing_mult;
-
-        this.ctx.font = `400 ${font_size_px}px ${this.font_family}`;
-        const glyph_w = this.ctx.measureText('M').width;
-
-        const tile_w = glyph_w + letter_spacing_px;
-        const tile_h = line_height_px;
-
+        const metrics = get_ui_cell_metrics(this.scale, this.base_font_size_px);
+        const font_size_px = metrics.font_size_px;
+        const line_height_px = metrics.cell_h_px;
+        const letter_spacing_px = 0;
+        const tile_w = metrics.cell_w_px;
+        const tile_h = metrics.cell_h_px;
         return { font_size_px, line_height_px, letter_spacing_px, tile_w, tile_h };
     }
 
@@ -459,6 +467,8 @@ export class CanvasRuntime {
             window.dispatchEvent(
                 new CustomEvent('thaumworld_ui_pan', {
                     detail: {
+                        render_backend: this.render_backend,
+                        render_theme_id: this.render_theme_id,
                         pan_x_px: final_x,
                         pan_y_px: final_y,
                         tile_w_px: tile_w,
@@ -488,15 +498,17 @@ export class CanvasRuntime {
                 const canvas_y = (c.height - 1 - y) * tile_h;
 
                 const wi = clamp_weight_index((cell as any).weight_index);
-                const css_w = this.weight_index_to_css[wi] ?? 400;
-                this.ctx.font = `${css_w} ${font_size_px}px ${this.font_family}`;
-
-                this.ctx.fillStyle = `rgb(${cell.rgb.r},${cell.rgb.g},${cell.rgb.b})`;
-
                 const cx = x * tile_w + tile_w / 2;
                 const cy = canvas_y + tile_h / 2;
-
-                this.ctx.fillText(cell.char, cx, cy);
+                this.cell_renderer.draw_cell({
+                    ctx: this.ctx,
+                    cell: { ...cell, weight_index: wi },
+                    center_x_px: cx,
+                    center_y_px: cy,
+                    font_family: this.font_family,
+                    font_size_px,
+                    weight_index_to_css: this.weight_index_to_css,
+                });
             }
         }
     }
@@ -504,16 +516,16 @@ export class CanvasRuntime {
     private mouse_to_tile(ev: MouseEvent): { x: number; y: number } | null {
         const { tile_w, tile_h } = this.get_metrics();
         const rect = this.canvas_el.getBoundingClientRect();
-
-        const mx = ev.clientX - rect.left;
-        const my = ev.clientY - rect.top;
-
-        const x = Math.floor(mx / tile_w);
-        const y_canvas = Math.floor(my / tile_h);
-        const y = this.grid_height - 1 - y_canvas;
-
-        if (x < 0 || x >= this.grid_width || y < 0 || y >= this.grid_height) return null;
-        return { x, y };
+        return screen_px_to_grid_cell({
+            client_x_px: ev.clientX,
+            client_y_px: ev.clientY,
+            rect_left_px: rect.left,
+            rect_top_px: rect.top,
+            grid_width: this.grid_width,
+            grid_height: this.grid_height,
+            cell_w_px: tile_w,
+            cell_h_px: tile_h,
+        });
     }
 
     private dispatch_global_keydown(ev: KeyboardEvent): boolean {
@@ -879,10 +891,10 @@ export class CanvasRuntime {
             this.dragging = false;
             this.capture_owner = top;
 
-            if (top?.Focusable && top !== this.focused_owner) {
-                this.focused_owner?.OnBlur?.();
-                this.focused_owner = top;
-                this.focused_owner?.OnFocus?.();
+            if (top?.Focusable) {
+                this.update_focused_owner(top);
+            } else if (this.focused_owner?.id === 'painter_canvas') {
+                this.update_focused_owner(null);
             }
 
             const pe: any = this.make_pointer_event('down', t.x, t.y, { ...ev, buttons: nb.buttons, button: nb.button }, this.engine_canvas.get(t.x, t.y));
@@ -1224,10 +1236,10 @@ export class CanvasRuntime {
             this.down_tile = t;
             this.dragging = false;
             this.capture_owner = top;
-            if (top?.Focusable && top !== this.focused_owner) {
-                this.focused_owner?.OnBlur?.();
-                this.focused_owner = top;
-                this.focused_owner?.OnFocus?.();
+            if (top?.Focusable) {
+                this.update_focused_owner(top);
+            } else if (this.focused_owner?.id === 'painter_canvas') {
+                this.update_focused_owner(null);
             }
             top?.OnPointerDown?.(
                 this.make_pointer_event('down', t.x, t.y, ev, this.engine_canvas.get(t.x, t.y)),

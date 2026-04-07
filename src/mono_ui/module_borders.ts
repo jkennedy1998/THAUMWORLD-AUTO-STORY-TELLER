@@ -67,19 +67,19 @@ export const BORDER_STYLES = {
 export const PANEL_BORDER_PRESETS = {
   default_double: {
     style: BORDER_STYLES.double,
-    weight_index: 3,
+    weight_index: 1,
   },
   compact_double: {
     style: BORDER_STYLES.double,
-    weight_index: 2,
+    weight_index: 1,
   },
   single: {
     style: BORDER_STYLES.single,
-    weight_index: 2,
+    weight_index: 1,
   },
   thick: {
     style: BORDER_STYLES.thick,
-    weight_index: 3,
+    weight_index: 2,
   },
 } as const;
 
@@ -169,7 +169,7 @@ export function draw_module_border(
     style = BORDER_STYLES.double,
     border_rgb = { r: 150, g: 150, b: 150 },
     bg_rgb,
-    weight_index = 3,
+    weight_index = 1,
     header,
     markers,
   } = config;
@@ -217,7 +217,7 @@ export function draw_module_border(
       char: String(markers.top).charAt(0) || style.horizontal,
       rgb: border_rgb,
       style: 'regular',
-      weight_index: Math.min(7, weight_index + 2),
+      weight_index: Math.min(3, weight_index + 1),
       render_index: MODULE_CHROME_RENDER_INDEX,
     });
   }
@@ -314,7 +314,7 @@ export function draw_module_border(
       char: String(markers.bottom).charAt(0) || style.horizontal,
       rgb: border_rgb,
       style: 'regular',
-      weight_index: Math.min(7, weight_index + 2),
+      weight_index: Math.min(3, weight_index + 1),
       render_index: MODULE_CHROME_RENDER_INDEX,
     });
   }
@@ -327,7 +327,7 @@ export function draw_module_border(
       char: String(markers.left).charAt(0) || style.vertical,
       rgb: border_rgb,
       style: 'regular',
-      weight_index: Math.min(7, weight_index + 2),
+      weight_index: Math.min(3, weight_index + 1),
       render_index: MODULE_CHROME_RENDER_INDEX,
     });
   }
@@ -340,7 +340,7 @@ export function draw_module_border(
       char: String(markers.right).charAt(0) || style.vertical,
       rgb: border_rgb,
       style: 'regular',
-      weight_index: Math.min(7, weight_index + 2),
+      weight_index: Math.min(3, weight_index + 1),
       render_index: MODULE_CHROME_RENDER_INDEX,
     });
   }
@@ -366,7 +366,7 @@ export function draw_container_box(
   center_char: string | undefined,
   char_rgb: Rgb,
   border_rgb: Rgb = { r: 150, g: 150, b: 150 },
-  weight_index: number = 3
+  weight_index: number = 1
 ): void {
   const { x0, y0, x1, y1 } = rect;
 
@@ -398,7 +398,7 @@ export function draw_container_box(
     char: center_char || "C",
     rgb: char_rgb,
     style: "regular",
-    weight_index: weight_index + 1,
+    weight_index: Math.min(3, weight_index + 1),
   });
 }
 
@@ -412,7 +412,7 @@ export function draw_horizontal_divider(
   x1: number,
   style: BorderStyle = BORDER_STYLES.double,
   rgb: Rgb = { r: 150, g: 150, b: 150 },
-  weight_index: number = 3
+  weight_index: number = 1
 ): void {
   for (let x = x0; x <= x1; x++) {
     let char = style.horizontal;
@@ -431,7 +431,7 @@ export function draw_panel_horizontal_divider(
     rect,
     style = BORDER_STYLES.double,
     rgb = { r: 150, g: 150, b: 150 },
-    weight_index = 3,
+    weight_index = 1,
     inset_left = 0,
     inset_right = 0,
   } = config;
@@ -451,7 +451,7 @@ export function draw_vertical_divider(
   y1: number,
   style: BorderStyle = BORDER_STYLES.double,
   rgb: Rgb = { r: 150, g: 150, b: 150 },
-  weight_index: number = 3
+  weight_index: number = 1
 ): void {
   for (let y = y1; y >= y0; y--) {
     let char = style.vertical;
@@ -470,7 +470,7 @@ export function draw_panel_vertical_divider(
     rect,
     style = BORDER_STYLES.double,
     rgb = { r: 150, g: 150, b: 150 },
-    weight_index = 3,
+    weight_index = 1,
     inset_top = 0,
     inset_bottom = 0,
   } = config;

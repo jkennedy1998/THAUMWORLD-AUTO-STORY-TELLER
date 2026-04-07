@@ -4,9 +4,11 @@
 import type { ActionVerb } from "../shared/constants.js";
 import type { ActionIntent, ActionResult, Location } from "./intent.js";
 import { ACTION_REGISTRY } from "./registry.js";
+import { get_broadcast_mag, get_senses_for_action } from "./sense_broadcast.js";
 import { calculateDistance } from "./target_resolution.js";
 import { DEBUG_LEVEL } from "../shared/debug.js";
 import { debug_event } from "../shared/debug_event.js";
+import { evaluate_sense_detection, get_observer_sense_mag, is_supported_runtime_sense } from "../shared/sense_mag.js";
 
 // Perception event types
 export type PerceptionEventType = 
@@ -127,6 +129,11 @@ interface PerceptionCheck {
   clarity: PerceptionClarity;
   senses: SenseType[];
   distance: number;
+  detectable?: boolean;
+  bestSense?: SenseType;
+  detections?: PerceptionDetection[];
+  observerPositionWorld?: Location;
+  actorPositionWorld?: Location;
   details: Partial<PerceptionDetails>;
   obscured?: boolean;
 }
@@ -213,8 +220,34 @@ class PerceptionMemory {
 // Global perception memory instance
 export const perceptionMemory = new PerceptionMemory();
 
+function toDetectionClarity(clarity: PerceptionClarity): RuntimeDetectionClarity {
+  return clarity === "clear" ? "clear" : clarity === "obscured" ? "obscured" : "none";
+}
+
+function summarize_clarity(bestSense: SenseType | undefined, anyIdentity: boolean, anyClear: boolean): PerceptionClarity {
+  if (bestSense === "pressure") return "sensed";
+  if (anyClear && anyIdentity) return "clear";
+  if (anyClear) return "vague";
+  return "obscured";
+}
+
+function make_fallback_detection(sense: SenseType, clarity: PerceptionClarity): PerceptionDetection {
+  const detection_clarity = toDetectionClarity(clarity);
+  return {
+    sense,
+    clarity: detection_clarity,
+    identityKnown: sense === "light" && clarity === "clear",
+    locationKnown: detection_clarity !== "none",
+    observerSenseMag: 0,
+    broadcastMag: 0,
+    detailedRangeTiles: 0,
+    obscuredRangeTiles: 0,
+  };
+}
+
 // Check if observer can perceive an action
 export async function checkPerception(
+  dataSlot: number,
   observerRef: string,
   observerLocation: Location,
   intent: ActionIntent,
@@ -227,51 +260,94 @@ export async function checkPerception(
   
   const distance = calculateDistance(observerLocation, actorLocation);
   const perceptibility = actionDef.perceptibility;
+  const subtype_raw = typeof intent.parameters?.subtype === "string"
+    ? intent.parameters.subtype
+    : typeof intent.parameters?.volume === "string"
+      ? intent.parameters.volume
+      : undefined;
+  const subtype = typeof subtype_raw === "string" ? subtype_raw.toUpperCase() : undefined;
+  const broadcasts = get_senses_for_action(intent.verb, subtype);
   
   // Check if within perception range
   if (distance > perceptibility.radius) {
     return { canPerceive: false, clarity: "obscured", senses: [], distance, details: {} };
   }
-  
-  // Determine which senses can perceive (using 4 canonical senses)
+
+  const runtime_detections = broadcasts
+    .filter((broadcast): broadcast is typeof broadcast & { sense: "light" | "pressure" } => is_supported_runtime_sense(broadcast.sense))
+    .map((broadcast) => evaluate_sense_detection(
+      broadcast.sense,
+      get_observer_sense_mag(dataSlot, observerRef, broadcast.sense),
+      get_broadcast_mag(broadcast),
+      distance,
+    ))
+    .filter((result) => result.clarity !== "none")
+    .map((result): PerceptionDetection => ({
+      sense: result.sense,
+      clarity: result.clarity,
+      identityKnown: result.identity_known,
+      locationKnown: result.location_known,
+      observerSenseMag: result.observer_sense_mag,
+      broadcastMag: result.broadcast_mag,
+      detailedRangeTiles: result.detailed_range_tiles,
+      obscuredRangeTiles: result.obscured_range_tiles,
+    }));
+
+  if (runtime_detections.length > 0) {
+    const anyIdentity = runtime_detections.some((entry) => entry.identityKnown);
+    const anyClear = runtime_detections.some((entry) => entry.clarity === "clear");
+    const best = runtime_detections.reduce((current, candidate) => {
+      const current_score = (current.identityKnown ? 4 : 0) + (current.locationKnown ? 2 : 0) + (current.clarity === "clear" ? 1 : 0);
+      const candidate_score = (candidate.identityKnown ? 4 : 0) + (candidate.locationKnown ? 2 : 0) + (candidate.clarity === "clear" ? 1 : 0);
+      return candidate_score > current_score ? candidate : current;
+    });
+    const clarity = summarize_clarity(best.sense, anyIdentity, anyClear);
+    return {
+      canPerceive: true,
+      clarity,
+      senses: runtime_detections.map((entry) => entry.sense),
+      distance,
+      detectable: true,
+      bestSense: best.sense,
+      detections: runtime_detections,
+      observerPositionWorld: observerLocation,
+      actorPositionWorld: actorLocation,
+      details: {},
+      obscured: !anyIdentity,
+    };
+  }
+
   const senses: SenseType[] = [];
-  
-  if (perceptibility.visual) {
-    // TODO: Check line of sight, lighting, stealth
-    senses.push("light");  // light = sight/vision
-  }
-  
-  if (perceptibility.auditory) {
-    // TODO: Check hearing range, stealth, obstacles
-    senses.push("pressure");  // pressure = sound vibrations (hearing)
-  }
-  
+  if (perceptibility.visual) senses.push("light");
+  if (perceptibility.auditory) senses.push("pressure");
   if (senses.length === 0) {
     return { canPerceive: false, clarity: "obscured", senses: [], distance, details: {} };
   }
-  
-  // Determine clarity based on distance and senses
+
   let clarity: PerceptionClarity = "clear";
   const rangeRatio = distance / perceptibility.radius;
-  
   if (rangeRatio > 0.8) {
     clarity = "vague";
   } else if (rangeRatio > 0.5) {
     clarity = perceptibility.visual ? "vague" : "sensed";
   }
-  
-  // If only auditory, clarity is limited
   if (!perceptibility.visual && perceptibility.auditory) {
     clarity = "sensed";
   }
 
-  const identityKnown = clarity === "clear" && perceptibility.visual;
+  const fallback_detections = senses.map((sense) => make_fallback_detection(sense, clarity));
+  const identityKnown = fallback_detections.some((entry) => entry.identityKnown);
   
   return {
     canPerceive: true,
     clarity,
     senses,
     distance,
+    detectable: true,
+    bestSense: fallback_detections[0]?.sense,
+    detections: fallback_detections,
+    observerPositionWorld: observerLocation,
+    actorPositionWorld: actorLocation,
     details: {},
     obscured: !identityKnown
   };
@@ -387,13 +463,22 @@ function createPerceptionEvent(
     actorIdentity: perception.clarity === "obscured" || perception.clarity === "sensed" ? undefined : intent.actorRef,
     identityKnown: !(perception.clarity === "obscured" || perception.clarity === "sensed"),
     verb: intent.verb,
-    subtype: typeof intent.parameters?.subtype === "string" ? intent.parameters.subtype : undefined,
+    subtype: typeof intent.parameters?.subtype === "string"
+      ? intent.parameters.subtype.toUpperCase()
+      : typeof intent.parameters?.volume === "string"
+        ? intent.parameters.volume.toUpperCase()
+        : undefined,
     verbClarity: perception.clarity,
     targetRef: intent.targetRef,
     targetVisibility: intent.targetRef ? perception.clarity : undefined,
     location: intent.actorLocation,
     distance: perception.distance,
     senses: perception.senses,
+    detectable: perception.detectable,
+    bestSense: perception.bestSense,
+    detections: perception.detections,
+    observerPositionWorld: perception.observerPositionWorld,
+    actorPositionWorld: perception.actorPositionWorld,
     details,
     threatLevel: 0,
     interestLevel: 0,
@@ -413,11 +498,12 @@ function createPerceptionEvent(
 export async function broadcastPerception(
   intent: ActionIntent,
   timing: "before" | "after",
-  result?: ActionResult,
+  result: ActionResult | undefined,
   options: {
+    dataSlot: number;
     getCharactersInRange?: (location: Location, radius: number) => Promise<Array<{ ref: string; location: Location }>>;
     onPerceived?: (event: PerceptionEvent) => Promise<void>;
-  } = {}
+  }
 ): Promise<PerceptionEvent[]> {
   const actionDef = ACTION_REGISTRY[intent.verb];
   if (!actionDef) {
@@ -490,7 +576,8 @@ export async function broadcastPerception(
     if (observer.ref === intent.actorRef) continue;
     
     // Check perception
-    const perception = await checkPerception(
+      const perception = await checkPerception(
+      options.dataSlot,
       observer.ref,
       observer.location,
       intent,

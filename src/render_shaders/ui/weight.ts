@@ -8,7 +8,7 @@ export function apply_ui_weight_modifier(layers: RenderLayer[], ctx: RenderConte
     if (!hovered && !selected && !targeted) return;
 
     for (const l of layers) {
-        const cur = typeof l.weight_index === 'number' ? l.weight_index : 5;
-        l.weight_index = Math.max(cur, 6);
+        const cur = typeof l.weight_index === 'number' ? l.weight_index : 1;
+        l.weight_index = Math.min(3, cur + 1);
     }
 }

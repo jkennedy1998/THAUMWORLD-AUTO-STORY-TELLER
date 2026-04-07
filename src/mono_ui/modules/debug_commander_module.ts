@@ -41,7 +41,7 @@ export function make_debug_commander_module(opts: DebugCommanderModuleConfig): M
     return `${text.slice(0, width - 1)}~`;
   }
 
-  function draw_line(c: Canvas, x: number, y: number, text: string, rgb: Rgb, weight_index = 4): void {
+  function draw_line(c: Canvas, x: number, y: number, text: string, rgb: Rgb, weight_index = 2): void {
     for (let i = 0; i < text.length; i += 1) {
       c.set(x + i, y, { char: text[i]!, rgb, weight_index, render_index: 6, style: "regular" });
     }

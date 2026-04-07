@@ -1,9 +1,9 @@
 /**
  * Weight Selector Module
  * 
- * A floating, movable module showing an 8-weight draggable slider.
+ * A floating, movable module showing a 4-weight draggable slider.
  * Drag the slider handle to change the brush weight in real-time.
- * Weights 0-7 correspond to font weights 100-800.
+ * Weights 0-3 map directly to the four physical theme weights.
  */
 
 import type { Canvas, Module, Rect, PointerEvent, DragEvent } from '../types.js';
@@ -22,8 +22,8 @@ export type WeightSelectorOptions = {
   on_close?: () => void;
 };
 
-const NUM_WEIGHTS = 8;
-const WEIGHT_LABELS = ['Thin', 'XLight', 'Light', 'Regular', 'Medium', 'SBold', 'Bold', 'Black'];
+const NUM_WEIGHTS = 4;
+const WEIGHT_LABELS = ['Thin', 'Regular', 'Bold', 'Black'];
 export function make_weight_selector_module(opts: WeightSelectorOptions): Module {
   const MIN_WIDTH = 12;
   const MAX_WIDTH = 32;
@@ -98,7 +98,7 @@ export function make_weight_selector_module(opts: WeightSelectorOptions): Module
         });
       }
       
-      // Draw weight markers (0-7)
+      // Draw weight markers (0-3)
       const segment_width = (slider_end_x - slider_start_x) / (NUM_WEIGHTS - 1);
       for (let i = 0; i < NUM_WEIGHTS; i++) {
         const marker_x = Math.round(slider_start_x + (i * segment_width));
@@ -109,7 +109,7 @@ export function make_weight_selector_module(opts: WeightSelectorOptions): Module
           char: is_selected ? '●' : '○',
           rgb: is_selected ? slider_fg : slider_bg,
           style: 'regular',
-          weight_index: is_selected ? 6 : 3
+          weight_index: is_selected ? 3 : 1
         });
 
         const has_left = i === left_weight;
@@ -123,7 +123,7 @@ export function make_weight_selector_module(opts: WeightSelectorOptions): Module
                 ? get_color_by_name('vivid_blue').rgb
                 : get_color_by_name('vivid_red').rgb,
             style: 'regular',
-            weight_index: 4
+            weight_index: 2
           });
         }
       }
@@ -138,7 +138,7 @@ export function make_weight_selector_module(opts: WeightSelectorOptions): Module
           char: weight_label[i]!,
           rgb: text_color,
           style: 'regular',
-          weight_index: 4
+          weight_index: 2
         });
       }
     },

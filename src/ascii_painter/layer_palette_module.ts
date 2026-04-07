@@ -175,15 +175,15 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
       const titleY = rect.y1 - 1;
       
       // [+] button
-      c.set(rect.x1 - 2, titleY, { char: '[', rgb: borderColor, weight_index: 3, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
-      c.set(rect.x1 - 1, titleY, { char: '+', rgb: visibleColor, weight_index: 5, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+      c.set(rect.x1 - 2, titleY, { char: '[', rgb: borderColor, weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+      c.set(rect.x1 - 1, titleY, { char: '+', rgb: visibleColor, weight_index: 2, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
       
       // Column headers
       const headerY = rect.y1 - 2;
-      c.set(rect.x0 + HEADER_COL_DRAG, headerY, { char: '☰', rgb: dragHandleColor, weight_index: 3, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
-      c.set(rect.x0 + HEADER_COL_VIS, headerY, { char: 'V', rgb: borderColor, weight_index: 3, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
-      c.set(rect.x0 + HEADER_COL_LOCK, headerY, { char: 'L', rgb: borderColor, weight_index: 3, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
-      c.set(rect.x0 + COL_ORDER_START, headerY, { char: '#', rgb: borderColor, weight_index: 3, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+      c.set(rect.x0 + HEADER_COL_DRAG, headerY, { char: '☰', rgb: dragHandleColor, weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+      c.set(rect.x0 + HEADER_COL_VIS, headerY, { char: 'V', rgb: borderColor, weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+      c.set(rect.x0 + HEADER_COL_LOCK, headerY, { char: 'L', rgb: borderColor, weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+      c.set(rect.x0 + COL_ORDER_START, headerY, { char: '#', rgb: borderColor, weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
       
       // Separator
       const separatorY = rect.y1 - 3;
@@ -192,7 +192,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
         rect,
         style: PANEL_BORDER_PRESETS.default_double.style,
         rgb: borderColor,
-        weight_index: 2,
+        weight_index: 1,
       });
       
       const layers = getSortedLayers();
@@ -213,7 +213,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
             c.set(x, dropY, { 
               char: '━', 
               rgb: dropIndicatorColor, 
-              weight_index: 5,
+              weight_index: 2,
               render_index: 2 
             });
           }
@@ -240,7 +240,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
         c.set(rect.x0 + COL_DRAG, rowY, { 
           char: '☰', 
           rgb: dragHandleColor,
-          weight_index: 3,
+          weight_index: 1,
           render_index: 1 
         });
         
@@ -248,7 +248,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
         c.set(rect.x0 + COL_VIS, rowY, { 
           char: layer.visible ? '●' : '○', 
           rgb: layer.visible ? visibleColor : hiddenColor,
-          weight_index: 4,
+          weight_index: 2,
           render_index: 1 
         });
         
@@ -256,7 +256,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
         c.set(rect.x0 + COL_LOCK, rowY, { 
           char: layer.locked ? '🔒' : ' ',
           rgb: lockedColor,
-          weight_index: 4,
+          weight_index: 2,
           render_index: 1 
         });
         
@@ -266,7 +266,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
           c.set(rect.x0 + COL_ORDER_START + j, rowY, { 
             char: orderStr[j]!, 
             rgb: orderNumColor,
-            weight_index: isSelected ? 5 : 3,
+            weight_index: isSelected ? 2 : 1,
             render_index: 1 
           });
         }
@@ -293,7 +293,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
             c.set(nameStart + j, rowY, { 
               char: displayText[j]!, 
               rgb: isCursor ? editCursorColor : textColor,
-              weight_index: isCursor ? 5 : 4,
+              weight_index: isCursor ? 2 : 2,
               render_index: 2 
             });
           }
@@ -303,7 +303,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
             c.set(nameStart + displayText.length, rowY, { 
               char: '▏', 
               rgb: editCursorColor,
-              weight_index: 5,
+              weight_index: 2,
               render_index: 2 
             });
           }
@@ -315,7 +315,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
             c.set(nameStart + j, rowY, { 
               char: displayName[j]!, 
               rgb: rowColor,
-              weight_index: isSelected ? 5 : 3,
+              weight_index: isSelected ? 2 : 1,
               render_index: 1 
             });
           }
@@ -326,7 +326,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
           c.set(rect.x1 - 2, rowY, { 
             char: '✕', 
             rgb: deleteColor,
-            weight_index: 4,
+            weight_index: 2,
             render_index: 1 
           });
         }
@@ -336,7 +336,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
           c.set(rect.x1 - 1, rowY, { 
             char: '▶', 
             rgb: selectedColor,
-            weight_index: 5,
+            weight_index: 2,
             render_index: 1 
           });
         }
@@ -362,21 +362,21 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
         c.set(rect.x0 + COL_DRAG, mouseY, { 
           char: '☰', 
           rgb: dragHandleColor,
-          weight_index: 3,
+          weight_index: 1,
           render_index: 2 
         });
         
         c.set(rect.x0 + COL_VIS, mouseY, { 
           char: layer.visible ? '●' : '○', 
           rgb: layer.visible ? visibleColor : hiddenColor,
-          weight_index: 4,
+          weight_index: 2,
           render_index: 2 
         });
         
         c.set(rect.x0 + COL_LOCK, mouseY, { 
           char: layer.locked ? '🔒' : ' ',
           rgb: lockedColor,
-          weight_index: 4,
+          weight_index: 2,
           render_index: 2 
         });
         
@@ -386,7 +386,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
           c.set(rect.x0 + COL_ORDER_START + j, mouseY, { 
             char: orderStr[j]!, 
             rgb: orderNumColor,
-            weight_index: isSelected ? 5 : 3,
+            weight_index: isSelected ? 2 : 1,
             render_index: 2 
           });
         }
@@ -399,7 +399,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
           c.set(nameStart + j, mouseY, { 
             char: displayName[j]!, 
             rgb: rowColor,
-            weight_index: isSelected ? 5 : 3,
+            weight_index: isSelected ? 2 : 1,
             render_index: 2 
           });
         }

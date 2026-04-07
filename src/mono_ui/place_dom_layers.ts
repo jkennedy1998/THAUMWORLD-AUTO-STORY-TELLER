@@ -5,8 +5,11 @@ import { createVoxelSpace } from "../ascii_painter/voxel_space.js";
 import { createVoxelDOMRenderer, type ViewportState, VoxelDOMRenderer } from "../ascii_painter/voxel_dom_renderer.js";
 
 export type PlaceDomLayersOpts = {
+  render_backend: 'font' | 'atlas';
+  render_theme_id: string;
   font_family: string;
   base_font_size_px: number;
+  weight_index_to_css: readonly number[];
 };
 
 const DEFAULT_PLACE_LAYER_COUNT = 17;
@@ -81,7 +84,14 @@ export class PlaceDomLayers {
     this.root.setAttribute('data-place-world-layers', place_id);
     container.appendChild(this.root);
 
-    this.renderer = createVoxelDOMRenderer(this.root, this.opts.font_family, this.opts.base_font_size_px);
+    this.renderer = createVoxelDOMRenderer(
+      this.root,
+      this.opts.font_family,
+      this.opts.base_font_size_px,
+      this.opts.weight_index_to_css,
+      this.opts.render_backend,
+      this.opts.render_theme_id,
+    );
   }
 
   ensure_space(width: number, height: number, layer_count: number = DEFAULT_PLACE_LAYER_COUNT): void {
@@ -97,7 +107,7 @@ export class PlaceDomLayers {
     const s = createVoxelSpace(w, h, { minZ, maxZ, defaultZ: focus_layer });
 
     // Ensure layers exist for 0 and 2.
-    const empty: GridCell = { char: ' ', rgb: { r: 0, g: 0, b: 0 } as Rgb, weight_index: 3 };
+    const empty: GridCell = { char: ' ', rgb: { r: 0, g: 0, b: 0 } as Rgb, weight_index: 1 };
     const mk = (z: number, name: string, opacity: number): VoxelLayer => ({
       z,
       name,

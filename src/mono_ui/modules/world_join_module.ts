@@ -27,7 +27,7 @@ export function make_world_join_module(opts: WorldJoinModuleConfig): Module {
   let row_hits: Array<{ y: number; world_id: string }> = [];
   let button_hits: Array<{ x0: number; x1: number; y: number; action: "join" | "refresh" | "back" }> = [];
 
-  function draw_line(c: Canvas, x: number, y: number, text: string, rgb = get_color_by_name("off_white").rgb, weight_index = 4): void {
+  function draw_line(c: Canvas, x: number, y: number, text: string, rgb = get_color_by_name("off_white").rgb, weight_index = 2): void {
     for (let i = 0; i < text.length; i += 1) {
       c.set(x + i, y, { char: text[i]!, rgb, weight_index, render_index: 6, style: "regular" });
     }

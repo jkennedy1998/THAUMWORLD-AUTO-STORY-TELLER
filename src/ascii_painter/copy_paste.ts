@@ -63,8 +63,8 @@ export function encodeToSpecialFormat(data: CopyData): string {
     for (let x = 0; x < data.width; x++) {
       const cell = data.cells[y]?.[x];
       const weight = cell?.weight_index ?? 0;
-      // Encode weight 0-7 as characters
-      line += String.fromCharCode(48 + weight); // '0' to '7'
+      // Encode weight 0-3 as characters
+      line += String.fromCharCode(48 + weight); // '0' to '3'
     }
     weightLines.push(line);
   }
@@ -136,7 +136,7 @@ export function decodeFromSpecialFormat(encoded: string): CopyData | null {
           // and should remain null so paste doesn't clear the target
           if (char !== ' ') {
             if (!cells[y]![x]) {
-              cells[y]![x] = { char, rgb: { r: 255, g: 255, b: 255 }, weight_index: 4 };
+              cells[y]![x] = { char, rgb: { r: 255, g: 255, b: 255 }, weight_index: 1 };
               textCellsCreated++;
             } else {
               cells[y]![x]!.char = char;
@@ -155,7 +155,7 @@ export function decodeFromSpecialFormat(encoded: string): CopyData | null {
         const line = lines[lineIndex] ?? '';
         for (let x = 0; x < width && x < line.length; x++) {
           const weightChar = line[x];
-          if (weightChar && weightChar >= '0' && weightChar <= '7') {
+          if (weightChar && weightChar >= '0' && weightChar <= '3') {
             // Only update existing cells - don't create new ones
             // If TEXT didn't create a cell here, it means it was empty in the original
             if (cells[y]![x]) {
@@ -285,7 +285,7 @@ export function textToCopyData(text: string): CopyData {
         row.push({
           char,
           rgb: { r: 255, g: 255, b: 255 },
-          weight_index: 4
+          weight_index: 1
         });
       } else {
         row.push(null);

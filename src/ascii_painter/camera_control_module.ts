@@ -190,7 +190,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
     const x = COL_TOGGLE + rect.x0;
     
     c.set(x, y, { char: '[', rgb: borderColor, weight_index: 0, render_index: 10 });
-    c.set(x + 1, y, { char: icon, rgb: color, weight_index: 4, render_index: 10 });
+    c.set(x + 1, y, { char: icon, rgb: color, weight_index: 2, render_index: 10 });
     c.set(x + 2, y, { char: ']', rgb: borderColor, weight_index: 0, render_index: 10 });
     
     for (let i = 0; i < label.length && x + 4 + i <= rect.x1 - 2; i++) {
@@ -210,7 +210,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
       c.set(x + 1 + i, y, { 
         char: label[i]!, 
         rgb: fg, 
-        weight_index: isActive ? 5 : 3, 
+        weight_index: isActive ? 2 : 1, 
         render_index: 10,
         style: 'regular'
       });
@@ -227,7 +227,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
       rect,
       style: PANEL_BORDER_PRESETS.default_double.style,
       rgb: borderColor,
-      weight_index: 2,
+      weight_index: 1,
     });
   }
   
@@ -249,28 +249,28 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
     const y = get_screen_y(row);
     
     // Label
-    c.set(COL_EULER_LABEL + rect.x0, y, { char: axis, rgb: eulerColor, weight_index: 4, render_index: 10 });
+    c.set(COL_EULER_LABEL + rect.x0, y, { char: axis, rgb: eulerColor, weight_index: 2, render_index: 10 });
     c.set(COL_EULER_LABEL + rect.x0 + 1, y, { char: ':', rgb: labelColor, weight_index: 0, render_index: 10 });
     
     // Decrease button
     const decPressed = pressedButtons.has(`euler_${axis}_dec`);
     const decColor = decPressed ? accentColor : buttonColor;
     c.set(COL_EULER_LABEL + rect.x0 + 3, y, { char: '[', rgb: borderColor, weight_index: 0, render_index: 10 });
-    c.set(COL_EULER_LABEL + rect.x0 + 4, y, { char: '←', rgb: decColor, weight_index: 4, render_index: 10 });
+    c.set(COL_EULER_LABEL + rect.x0 + 4, y, { char: '←', rgb: decColor, weight_index: 2, render_index: 10 });
     c.set(COL_EULER_LABEL + rect.x0 + 5, y, { char: ']', rgb: borderColor, weight_index: 0, render_index: 10 });
     
     // Increase button
     const incPressed = pressedButtons.has(`euler_${axis}_inc`);
     const incColor = incPressed ? accentColor : buttonColor;
     c.set(COL_EULER_LABEL + rect.x0 + 7, y, { char: '[', rgb: borderColor, weight_index: 0, render_index: 10 });
-    c.set(COL_EULER_LABEL + rect.x0 + 8, y, { char: '→', rgb: incColor, weight_index: 4, render_index: 10 });
+    c.set(COL_EULER_LABEL + rect.x0 + 8, y, { char: '→', rgb: incColor, weight_index: 2, render_index: 10 });
     c.set(COL_EULER_LABEL + rect.x0 + 9, y, { char: ']', rgb: borderColor, weight_index: 0, render_index: 10 });
     
     // Value display
     const valueStr = `${value}°`;
     const valueX = COL_EULER_VALUE + rect.x0;
     for (let i = 0; i < valueStr.length && valueX + i <= rect.x1 - 2; i++) {
-      c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 3, render_index: 10 });
+      c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 1, render_index: 10 });
     }
   }
 
@@ -283,7 +283,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
     
     // Minus button
     c.set(rect.x0 + 2, y, { char: '[', rgb: borderColor, weight_index: 0, render_index: 10 });
-    c.set(rect.x0 + 3, y, { char: '-', rgb: minusPressed ? accentColor : buttonColor, weight_index: 4, render_index: 10 });
+    c.set(rect.x0 + 3, y, { char: '-', rgb: minusPressed ? accentColor : buttonColor, weight_index: 2, render_index: 10 });
     c.set(rect.x0 + 4, y, { char: ']', rgb: borderColor, weight_index: 0, render_index: 10 });
     
     // Track
@@ -298,14 +298,14 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
       c.set(x, y, { 
         char: isFilled ? '█' : '░', 
         rgb: isFilled ? sliderFgColor : sliderBgColor, 
-        weight_index: 2, 
+        weight_index: 1, 
         render_index: 10 
       });
     }
     
     // Plus button
     c.set(rect.x1 - 3, y, { char: '[', rgb: borderColor, weight_index: 0, render_index: 10 });
-    c.set(rect.x1 - 2, y, { char: '+', rgb: plusPressed ? accentColor : buttonColor, weight_index: 4, render_index: 10 });
+    c.set(rect.x1 - 2, y, { char: '+', rgb: plusPressed ? accentColor : buttonColor, weight_index: 2, render_index: 10 });
     c.set(rect.x1 - 1, y, { char: ']', rgb: borderColor, weight_index: 0, render_index: 10 });
   }
 
@@ -414,15 +414,15 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
         const resetX = rect.x0 + Math.floor((rect.x1 - rect.x0 - 10) / 2);
         const resetColor = resetPressed ? accentColor : buttonColor;
         c.set(resetX, y, { char: '[', rgb: borderColor, weight_index: 0, render_index: 10 });
-        c.set(resetX + 1, y, { char: 'P', rgb: resetColor, weight_index: 4, render_index: 10 });
-        c.set(resetX + 2, y, { char: 'a', rgb: resetColor, weight_index: 4, render_index: 10 });
-        c.set(resetX + 3, y, { char: 'n', rgb: resetColor, weight_index: 4, render_index: 10 });
-        c.set(resetX + 4, y, { char: ' ', rgb: resetColor, weight_index: 4, render_index: 10 });
-        c.set(resetX + 5, y, { char: 'R', rgb: resetColor, weight_index: 4, render_index: 10 });
-        c.set(resetX + 6, y, { char: 'e', rgb: resetColor, weight_index: 4, render_index: 10 });
-        c.set(resetX + 7, y, { char: 's', rgb: resetColor, weight_index: 4, render_index: 10 });
-        c.set(resetX + 8, y, { char: 'e', rgb: resetColor, weight_index: 4, render_index: 10 });
-        c.set(resetX + 9, y, { char: 't', rgb: resetColor, weight_index: 4, render_index: 10 });
+        c.set(resetX + 1, y, { char: 'P', rgb: resetColor, weight_index: 2, render_index: 10 });
+        c.set(resetX + 2, y, { char: 'a', rgb: resetColor, weight_index: 2, render_index: 10 });
+        c.set(resetX + 3, y, { char: 'n', rgb: resetColor, weight_index: 2, render_index: 10 });
+        c.set(resetX + 4, y, { char: ' ', rgb: resetColor, weight_index: 2, render_index: 10 });
+        c.set(resetX + 5, y, { char: 'R', rgb: resetColor, weight_index: 2, render_index: 10 });
+        c.set(resetX + 6, y, { char: 'e', rgb: resetColor, weight_index: 2, render_index: 10 });
+        c.set(resetX + 7, y, { char: 's', rgb: resetColor, weight_index: 2, render_index: 10 });
+        c.set(resetX + 8, y, { char: 'e', rgb: resetColor, weight_index: 2, render_index: 10 });
+        c.set(resetX + 9, y, { char: 't', rgb: resetColor, weight_index: 2, render_index: 10 });
         c.set(resetX + 10, y, { char: ']', rgb: borderColor, weight_index: 0, render_index: 10 });
       }
       
@@ -438,7 +438,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
         const valueStr = `X:${Math.round(cal.x)}`;
         const valueX = rect.x0 + Math.floor((rect.x1 - rect.x0 - valueStr.length) / 2);
         for (let i = 0; i < valueStr.length; i++) {
-          c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 3, render_index: 10 });
+          c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 1, render_index: 10 });
         }
       }
       
@@ -451,7 +451,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
         const valueStr = `Y:${Math.round(cal.y)}`;
         const valueX = rect.x0 + Math.floor((rect.x1 - rect.x0 - valueStr.length) / 2);
         for (let i = 0; i < valueStr.length; i++) {
-          c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 3, render_index: 10 });
+          c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 1, render_index: 10 });
         }
       }
       
@@ -468,7 +468,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
         // Value display centered
         const valueX = rect.x0 + Math.floor((rect.x1 - rect.x0 - valueStr.length) / 2);
         for (let i = 0; i < valueStr.length; i++) {
-          c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 3, render_index: 10 });
+          c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 1, render_index: 10 });
         }
       }
       
@@ -485,7 +485,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
         // Value display centered
         const valueX = rect.x0 + Math.floor((rect.x1 - rect.x0 - valueStr.length) / 2);
         for (let i = 0; i < valueStr.length; i++) {
-          c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 3, render_index: 10 });
+          c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 1, render_index: 10 });
         }
       }
       
@@ -501,7 +501,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
         const valueStr = (camera.base_layer_scale ?? DEFAULT_CAMERA_VALUES.base_layer_scale).toFixed(2);
         const valueX = rect.x0 + Math.floor((rect.x1 - rect.x0 - valueStr.length) / 2);
         for (let i = 0; i < valueStr.length; i++) {
-          c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 3, render_index: 10 });
+          c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 1, render_index: 10 });
         }
       }
       
@@ -517,7 +517,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
         const valueStr = (camera.char_spacing_x ?? DEFAULT_CAMERA_VALUES.char_spacing_x).toFixed(2);
         const valueX = rect.x0 + Math.floor((rect.x1 - rect.x0 - valueStr.length) / 2);
         for (let i = 0; i < valueStr.length; i++) {
-          c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 3, render_index: 10 });
+          c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 1, render_index: 10 });
         }
       }
       
@@ -533,7 +533,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
         const valueStr = (camera.char_spacing_y ?? DEFAULT_CAMERA_VALUES.char_spacing_y).toFixed(2);
         const valueX = rect.x0 + Math.floor((rect.x1 - rect.x0 - valueStr.length) / 2);
         for (let i = 0; i < valueStr.length; i++) {
-          c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 3, render_index: 10 });
+          c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 1, render_index: 10 });
         }
       }
       
@@ -549,7 +549,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
         const valueStr = Math.round(camera.pan_x ?? DEFAULT_CAMERA_VALUES.pan_x).toString();
         const valueX = rect.x0 + Math.floor((rect.x1 - rect.x0 - valueStr.length) / 2);
         for (let i = 0; i < valueStr.length; i++) {
-          c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 3, render_index: 10 });
+          c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 1, render_index: 10 });
         }
       }
       
@@ -565,7 +565,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
         const valueStr = Math.round(camera.pan_y ?? DEFAULT_CAMERA_VALUES.pan_y).toString();
         const valueX = rect.x0 + Math.floor((rect.x1 - rect.x0 - valueStr.length) / 2);
         for (let i = 0; i < valueStr.length; i++) {
-          c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 3, render_index: 10 });
+          c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 1, render_index: 10 });
         }
       }
       

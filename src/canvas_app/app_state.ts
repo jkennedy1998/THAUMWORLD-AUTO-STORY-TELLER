@@ -66,17 +66,22 @@ import { compute_adjacent_place_bounds, get_place_region_bounds, region_bounds_o
 import {
     api_transfer_inline,
 } from './transfer_api.js';
+import {
+    THAUMWORLD_RENDER_THEME,
+    get_theme_base_font_size_px,
+    get_theme_font_family,
+    get_theme_weight_index_to_css,
+} from '../mono_ui/runtime/render_theme.js';
 
 export const APP_CONFIG = {
-    font_family: 'Martian Mono',
-    // Typography tuned to match the design reference:
-    // - size: 32.23px
-    // - line height: 29.8px (29.8 / 32.23 ≈ 0.925)
-    // - letter spacing: -18% (of font size)
-    base_font_size_px: 32.23,
-    base_line_height_mult: 29.8 / 32.23,
-    base_letter_spacing_mult: -0.10,
-    weight_index_to_css: [100, 200, 300, 400, 500, 600, 700, 800] as const,
+    render_backend: THAUMWORLD_RENDER_THEME.backend,
+    render_theme_id: THAUMWORLD_RENDER_THEME.id,
+    font_family: get_theme_font_family(THAUMWORLD_RENDER_THEME),
+    // Cell geometry is authoritative at 12x16. Font rendering fits inside that box.
+    base_font_size_px: get_theme_base_font_size_px(THAUMWORLD_RENDER_THEME),
+    base_line_height_mult: 1,
+    base_letter_spacing_mult: 0,
+    weight_index_to_css: get_theme_weight_index_to_css(THAUMWORLD_RENDER_THEME),
 
     grid_width: 200,  // Expanded: 160 for main UI + 40 for debug button column
     grid_height: 50,
@@ -124,6 +129,27 @@ type ItemMutationRefreshIntent = {
     npc_id?: string | null;
     scopes?: ItemMutationRefreshScope[];
     reasons?: string[];
+};
+
+type GroundItemMetaRecord = {
+    id: string;
+    def_id: string;
+    name: string;
+    qty: number;
+    weight: number;
+    tags: any[];
+    display_char?: string;
+    display_color?: string;
+    elevation?: number;
+    position_key?: string;
+    voxel_key?: string;
+    position?: { x: number; y: number };
+};
+
+type PlaceGroundItemCache = {
+    by_id: Map<string, GroundItemMetaRecord>;
+    by_voxel: Map<string, string[]>;
+    by_position: Map<string, string[]>;
 };
 
 export type AppState = {
@@ -482,21 +508,13 @@ export function create_app_state(): AppState {
                 pause_sources: [] as string[],
             },
             // Ground item cache (inline ground_store) for richer interactions (pile/single/container detection)
-            ground_items_by_id: new Map<string, {
-                id: string;
-                def_id: string;
-                name: string;
-                qty: number;
-                weight: number;
-                tags: any[];
-                elevation?: number;
-                position_key?: string;
-                position?: { x: number; y: number };
-            }>(),
+            ground_items_by_id: new Map<string, GroundItemMetaRecord>(),
             // Map of voxel position keys: "x_y_z" -> [item ids]
             ground_items_by_voxel: new Map<string, string[]>(),
             // Convenience map: "x_y" -> [item ids across all z]
             ground_items_by_position: new Map<string, string[]>(),
+            // Authoritative per-place ground item caches used by the renderer.
+            ground_item_caches_by_place: new Map<string, PlaceGroundItemCache>(),
         },
     place_painter: {
         active: false,
@@ -1264,7 +1282,7 @@ export function create_app_state(): AppState {
                 }
                 return false;
             }
-            await update_current_place(place_id, { source: 'layer_mutation' });
+            await refresh_selected_scene_place(place_id, { source: 'layer_mutation', preserve_place_painter: true });
             return true;
         } catch {
             return false;
@@ -1624,7 +1642,7 @@ export function create_app_state(): AppState {
                 debug_warn(`[PLACE_PAINTER] place item failed ${JSON.stringify({ place_id, x, y, z, def_id, status: res.status, data })}`);
                 return false;
             }
-            await update_current_place(place_id, { source: 'place_item_refresh' });
+            await refresh_selected_scene_place(place_id, { source: 'place_item_refresh', preserve_place_painter: true });
             debug_log(`[PLACE_PAINTER] place item success ${JSON.stringify({ place_id, x, y, z, def_id, item_id: data?.item_id ?? null })}`);
             return true;
         } catch {
@@ -1790,17 +1808,20 @@ export function create_app_state(): AppState {
         if (entity_type === 'item') {
             const item_id = String(entity_ref).replace(/^item\./, '');
             if (item_id) {
-                remove_ground_item_from_local_maps(item_id);
-                ui_state.place.ground_items_by_id.delete(item_id);
+                remove_ground_item_from_local_maps(item_id, place_id);
+                ensure_ground_item_cache(place_id).by_id.delete(item_id);
+                if (ui_state.place.current_place_id === place_id) sync_current_place_ground_item_cache_aliases();
             }
         } else if (entity_type === 'pile') {
             const voxel_key = `${source_x}_${source_y}_${Math.floor(source_z)}`;
-            const item_ids = [...(ui_state.place.ground_items_by_voxel.get(voxel_key) ?? [])];
+            const cache = ensure_ground_item_cache(place_id);
+            const item_ids = [...(cache.by_voxel.get(voxel_key) ?? [])];
             for (const item_id of item_ids) {
-                remove_ground_item_from_local_maps(item_id);
-                ui_state.place.ground_items_by_id.delete(item_id);
+                remove_ground_item_from_local_maps(item_id, place_id);
+                cache.by_id.delete(item_id);
             }
-            ui_state.place.ground_items_by_voxel.delete(voxel_key);
+            cache.by_voxel.delete(voxel_key);
+            if (ui_state.place.current_place_id === place_id) sync_current_place_ground_item_cache_aliases();
         }
         debug_log(`[PLACE_PAINTER] local entity erase mirrored ${JSON.stringify({ place_id, entity_ref, entity_type, source_x, source_y, source_z })}`);
     }
@@ -2105,10 +2126,7 @@ export function create_app_state(): AppState {
                     else apply_local_place_tile_mutation(place_id, op.x, op.y, op.z, op.kind);
                 }
             }
-            if (get_scene_place(place_id)) await refresh_single_scene_place(place_id);
-            if (ui_state.place.current_place_id === place_id) {
-                await update_current_place(place_id, { source: 'place_tile_batch_refresh', preserve_place_painter: true });
-            }
+            await refresh_selected_scene_place(place_id, { source: 'place_tile_batch_refresh', preserve_place_painter: true });
             debug_log(`[PLACE_PAINTER] batch tile success ${JSON.stringify({ place_id, count: normalized_ops.length })}`);
             return true;
         } catch {
@@ -2960,10 +2978,7 @@ export function create_app_state(): AppState {
                 return;
             }
 
-            if (get_scene_place(target.place_id)) await refresh_single_scene_place(target.place_id);
-            if (ui_state.place.current_place_id === target.place_id) {
-                await update_current_place(target.place_id, { source: 'place_painter_move' });
-            }
+            await refresh_selected_scene_place(target.place_id, { source: 'place_painter_move', preserve_place_painter: true });
             flash_status([
                 `Moved ${pending.entity_ref}`,
                 `to ${target.tile_position.x},${target.tile_position.y},${target.world_z}`,
@@ -3518,15 +3533,15 @@ export function create_app_state(): AppState {
                 const activeLabel = ui_state.place_painter.selected_palette_kind === 'item' ? '[ITEMS]' : '[TILES]';
                 const inactiveLabel = ui_state.place_painter.selected_palette_kind === 'item' ? ' tiles ' : ' items ';
                 for (let i = 0; i < activeLabel.length && rect.x0 + 2 + i < rect.x1; i += 1) {
-                    c.set(rect.x0 + 2 + i, rect.y1 - 2, { char: activeLabel[i]!, rgb: get_color_by_name('vivid_yellow').rgb, weight_index: 5, render_index: 6, style: 'regular' });
+                    c.set(rect.x0 + 2 + i, rect.y1 - 2, { char: activeLabel[i]!, rgb: get_color_by_name('vivid_yellow').rgb, weight_index: 2, render_index: 6, style: 'regular' });
                 }
                 for (let i = 0; i < inactiveLabel.length && rect.x0 + 11 + i < rect.x1; i += 1) {
-                    c.set(rect.x0 + 11 + i, rect.y1 - 2, { char: inactiveLabel[i]!, rgb: get_color_by_name('medium_gray').rgb, weight_index: 4, render_index: 6, style: 'regular' });
+                    c.set(rect.x0 + 11 + i, rect.y1 - 2, { char: inactiveLabel[i]!, rgb: get_color_by_name('medium_gray').rgb, weight_index: 2, render_index: 6, style: 'regular' });
                 }
                 if (ui_state.place_painter.selected_palette_kind === 'tile') {
                     const sectionLabel = `[${ui_state.place_painter.selected_tile_palette_section.toUpperCase()}]`;
                     for (let i = 0; i < sectionLabel.length && rect.x0 + 20 + i < rect.x1; i += 1) {
-                        c.set(rect.x0 + 20 + i, rect.y1 - 2, { char: sectionLabel[i]!, rgb: get_color_by_name('vivid_blue').rgb, weight_index: 5, render_index: 6, style: 'regular' });
+                        c.set(rect.x0 + 20 + i, rect.y1 - 2, { char: sectionLabel[i]!, rgb: get_color_by_name('vivid_blue').rgb, weight_index: 2, render_index: 6, style: 'regular' });
                     }
                 }
                 const entries = ui_state.place_painter.selected_palette_kind === 'item'
@@ -3550,9 +3565,9 @@ export function create_app_state(): AppState {
                     const y = rect.y1 - 3 - row;
                     if (y <= rect.y0 || x >= rect.x1) continue;
                     const isSelected = entry.id === selectedId;
-                    c.set(x, y, { char: entry.display_char, rgb: isSelected ? get_color_by_name('off_white').rgb : get_color_by_name('off_white').rgb, weight_index: isSelected ? 6 : 4, render_index: 6, style: 'regular' });
+                    c.set(x, y, { char: entry.display_char, rgb: isSelected ? get_color_by_name('off_white').rgb : get_color_by_name('off_white').rgb, weight_index: isSelected ? 3 : 2, render_index: 6, style: 'regular' });
                     if (isSelected && x - 1 > rect.x0) {
-                        c.set(x - 1, y, { char: '>', rgb: get_color_by_name('vivid_yellow').rgb, weight_index: 6, render_index: 6, style: 'regular' });
+                        c.set(x - 1, y, { char: '>', rgb: get_color_by_name('vivid_yellow').rgb, weight_index: 3, render_index: 6, style: 'regular' });
                     }
                 }
             },
@@ -3977,51 +3992,88 @@ export function create_app_state(): AppState {
         }
     };
 
-    function remove_ground_item_from_local_maps(item_id: string): void {
-        const meta = ui_state.place.ground_items_by_id.get(item_id);
+    function create_empty_ground_item_cache(): PlaceGroundItemCache {
+        return {
+            by_id: new Map<string, GroundItemMetaRecord>(),
+            by_voxel: new Map<string, string[]>(),
+            by_position: new Map<string, string[]>(),
+        };
+    }
+
+    function ensure_ground_item_cache(place_id: string): PlaceGroundItemCache {
+        let cache = ui_state.place.ground_item_caches_by_place.get(place_id);
+        if (!cache) {
+            cache = create_empty_ground_item_cache();
+            ui_state.place.ground_item_caches_by_place.set(place_id, cache);
+        }
+        return cache;
+    }
+
+    function sync_current_place_ground_item_cache_aliases(): void {
+        const place_id = ui_state.place.current_place_id;
+        const cache = place_id ? (ui_state.place.ground_item_caches_by_place.get(place_id) ?? create_empty_ground_item_cache()) : create_empty_ground_item_cache();
+        if (place_id && !ui_state.place.ground_item_caches_by_place.has(place_id)) {
+            ui_state.place.ground_item_caches_by_place.set(place_id, cache);
+        }
+        ui_state.place.ground_items_by_id = cache.by_id;
+        ui_state.place.ground_items_by_voxel = cache.by_voxel;
+        ui_state.place.ground_items_by_position = cache.by_position;
+    }
+
+    function remove_ground_item_from_local_maps(item_id: string, place_id?: string | null): void {
+        const cache = place_id ? ensure_ground_item_cache(place_id) : null;
+        const meta = (cache?.by_id ?? ui_state.place.ground_items_by_id).get(item_id);
         if (!meta) return;
         const old_voxel_key = meta.position && typeof meta.elevation === 'number'
             ? `${meta.position.x}_${meta.position.y}_${Math.floor(meta.elevation)}`
             : null;
         if (old_voxel_key) {
-            const arr = (ui_state.place.ground_items_by_voxel.get(old_voxel_key) ?? []).filter((id) => id !== item_id);
-            if (arr.length > 0) ui_state.place.ground_items_by_voxel.set(old_voxel_key, arr);
-            else ui_state.place.ground_items_by_voxel.delete(old_voxel_key);
+            const map = cache?.by_voxel ?? ui_state.place.ground_items_by_voxel;
+            const arr = (map.get(old_voxel_key) ?? []).filter((id) => id !== item_id);
+            if (arr.length > 0) map.set(old_voxel_key, arr);
+            else map.delete(old_voxel_key);
         }
         if (meta.position) {
             const xy_key = `${meta.position.x}_${meta.position.y}`;
-            const arr = (ui_state.place.ground_items_by_position.get(xy_key) ?? []).filter((id) => id !== item_id);
-            if (arr.length > 0) ui_state.place.ground_items_by_position.set(xy_key, arr);
-            else ui_state.place.ground_items_by_position.delete(xy_key);
+            const map = cache?.by_position ?? ui_state.place.ground_items_by_position;
+            const arr = (map.get(xy_key) ?? []).filter((id) => id !== item_id);
+            if (arr.length > 0) map.set(xy_key, arr);
+            else map.delete(xy_key);
         }
     }
 
-    function apply_local_ground_item_move(item_id: string, tile_x: number, tile_y: number, z: number): void {
-        const meta = ui_state.place.ground_items_by_id.get(item_id);
+    function apply_local_ground_item_move(item_id: string, tile_x: number, tile_y: number, z: number, place_id?: string | null): void {
+        const cache = place_id ? ensure_ground_item_cache(place_id) : null;
+        const meta = (cache?.by_id ?? ui_state.place.ground_items_by_id).get(item_id);
         if (!meta) {
             debug_log('[GROUND_DRAG] local optimistic move skipped - item missing from cache', { item_id, tile_x, tile_y, z });
             return;
         }
-        remove_ground_item_from_local_maps(item_id);
+        remove_ground_item_from_local_maps(item_id, place_id);
         meta.position = { x: tile_x, y: tile_y };
         meta.elevation = Math.floor(z);
         meta.position_key = `${tile_x}_${tile_y}_${Math.floor(z)}`;
-        ui_state.place.ground_items_by_id.set(item_id, meta);
+        meta.voxel_key = meta.position_key;
+        const by_id = cache?.by_id ?? ui_state.place.ground_items_by_id;
+        const by_voxel = cache?.by_voxel ?? ui_state.place.ground_items_by_voxel;
+        const by_position = cache?.by_position ?? ui_state.place.ground_items_by_position;
+        by_id.set(item_id, meta);
         const voxel_key = `${tile_x}_${tile_y}_${Math.floor(z)}`;
-        const voxel_arr = ui_state.place.ground_items_by_voxel.get(voxel_key) ?? [];
+        const voxel_arr = by_voxel.get(voxel_key) ?? [];
         if (!voxel_arr.includes(item_id)) voxel_arr.push(item_id);
-        ui_state.place.ground_items_by_voxel.set(voxel_key, voxel_arr);
+        by_voxel.set(voxel_key, voxel_arr);
         const xy_key = `${tile_x}_${tile_y}`;
-        const xy_arr = ui_state.place.ground_items_by_position.get(xy_key) ?? [];
+        const xy_arr = by_position.get(xy_key) ?? [];
         if (!xy_arr.includes(item_id)) xy_arr.push(item_id);
-        ui_state.place.ground_items_by_position.set(xy_key, xy_arr);
+        by_position.set(xy_key, xy_arr);
         debug_log('[GROUND_DRAG] local optimistic move applied', { item_id, tile_x, tile_y, z, voxel_key });
     }
 
-    function log_ground_item_cache_position(label: string, item_id: string, tile_x: number, tile_y: number, z: number): void {
-        const meta = ui_state.place.ground_items_by_id.get(item_id) ?? null;
+    function log_ground_item_cache_position(label: string, item_id: string, tile_x: number, tile_y: number, z: number, place_id?: string | null): void {
+        const cache = place_id ? ensure_ground_item_cache(place_id) : null;
+        const meta = (cache?.by_id ?? ui_state.place.ground_items_by_id).get(item_id) ?? null;
         const voxel_key = `${tile_x}_${tile_y}_${Math.floor(z)}`;
-        const at_target = (ui_state.place.ground_items_by_voxel.get(voxel_key) ?? []).includes(item_id);
+        const at_target = ((cache?.by_voxel ?? ui_state.place.ground_items_by_voxel).get(voxel_key) ?? []).includes(item_id);
         debug_log(`[GROUND_DRAG] ${label} ${JSON.stringify({
             item_id,
             expected: { tile_x, tile_y, z, voxel_key },
@@ -4693,7 +4745,7 @@ export function create_app_state(): AppState {
             void poll_window_feeds();
             void refresh_character_data(true);
             const current_place_id = ui_state.place.scene_selected_place_id ?? ui_state.place.current_place_id;
-            if (current_place_id) void update_current_place(current_place_id, { source: 'character_editor_save', preserve_place_painter: true });
+            if (current_place_id) void refresh_selected_scene_place(current_place_id, { source: 'character_editor_save', preserve_place_painter: true });
         } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
             ui_state.character_editor.status_lines = [get_character_editor_subject_label(character_ref), `save failed: ${message}`];
@@ -5037,13 +5089,13 @@ export function create_app_state(): AppState {
             if (is_tile && tile_ref) {
                 populate_tile_editor_state(entity_ref, payload as Record<string, unknown>);
                 const selected_place_id = ui_state.place.scene_selected_place_id ?? ui_state.place.current_place_id;
-                if (selected_place_id === tile_ref.place_id) void update_current_place(tile_ref.place_id, { source: 'tile_tag_update', preserve_place_painter: true });
+                if (selected_place_id === tile_ref.place_id) void refresh_selected_scene_place(tile_ref.place_id, { source: 'tile_tag_update', preserve_place_painter: true });
                 else void refresh_single_scene_place(tile_ref.place_id);
             } else if (is_item && ui_state.item_editor.owner_kind && ui_state.item_editor.owner_id) {
                 populate_item_editor_state({ item_ref: entity_ref, owner_kind: ui_state.item_editor.owner_kind, owner_id: ui_state.item_editor.owner_id }, payload as Record<string, unknown>);
                 if (ui_state.item_editor.owner_kind === 'place') {
                     const selected_place_id = ui_state.place.scene_selected_place_id ?? ui_state.place.current_place_id;
-                    if (selected_place_id === ui_state.item_editor.owner_id) void update_current_place(ui_state.item_editor.owner_id, { source: 'item_tag_update', preserve_place_painter: true });
+                    if (selected_place_id === ui_state.item_editor.owner_id) void refresh_selected_scene_place(ui_state.item_editor.owner_id, { source: 'item_tag_update', preserve_place_painter: true });
                     else void refresh_single_scene_place(ui_state.item_editor.owner_id);
                 } else {
                     void refresh_actor_owner_inventory_view();
@@ -5119,13 +5171,13 @@ export function create_app_state(): AppState {
             if (is_tile && tile_ref) {
                 populate_tile_editor_state(entity_ref, payload as Record<string, unknown>);
                 const selected_place_id = ui_state.place.scene_selected_place_id ?? ui_state.place.current_place_id;
-                if (selected_place_id === tile_ref.place_id) void update_current_place(tile_ref.place_id, { source: 'tile_tag_remove', preserve_place_painter: true });
+                if (selected_place_id === tile_ref.place_id) void refresh_selected_scene_place(tile_ref.place_id, { source: 'tile_tag_remove', preserve_place_painter: true });
                 else void refresh_single_scene_place(tile_ref.place_id);
             } else if (is_item && ui_state.item_editor.owner_kind && ui_state.item_editor.owner_id) {
                 populate_item_editor_state({ item_ref: entity_ref, owner_kind: ui_state.item_editor.owner_kind, owner_id: ui_state.item_editor.owner_id }, payload as Record<string, unknown>);
                 if (ui_state.item_editor.owner_kind === 'place') {
                     const selected_place_id = ui_state.place.scene_selected_place_id ?? ui_state.place.current_place_id;
-                    if (selected_place_id === ui_state.item_editor.owner_id) void update_current_place(ui_state.item_editor.owner_id, { source: 'item_tag_remove', preserve_place_painter: true });
+                    if (selected_place_id === ui_state.item_editor.owner_id) void refresh_selected_scene_place(ui_state.item_editor.owner_id, { source: 'item_tag_remove', preserve_place_painter: true });
                     else void refresh_single_scene_place(ui_state.item_editor.owner_id);
                 } else {
                     void refresh_actor_owner_inventory_view();
@@ -6490,8 +6542,7 @@ export function create_app_state(): AppState {
             const place = get_current_place();
             if (place) {
                 const place_to_place = source.startsWith('place.') && target.startsWith('place.');
-                if (place_to_place) await refresh_place_visual_state(place.id);
-                else await update_current_place(place.id);
+                await refresh_place_visual_state(place.id);
             }
         }
 
@@ -6625,6 +6676,11 @@ export function create_app_state(): AppState {
         return ui_state.place.current_place;
     }
 
+    function get_render_place(): Place | null {
+        return get_scene_place(ui_state.place.scene_selected_place_id)
+            ?? ui_state.place.current_place;
+    }
+
     function get_scene_place(place_id: string | null): Place | null {
         if (!place_id) return null;
         return ui_state.place.scene_places.find((p) => p.id === place_id) ?? null;
@@ -6641,7 +6697,7 @@ export function create_app_state(): AppState {
         } else {
             ui_state.place.scene_places = [...ui_state.place.scene_places, place];
         }
-        if (ui_state.place.scene_selected_place_id === place.id || ui_state.place.current_place_id === place.id) {
+        if (ui_state.place.current_place_id === place.id) {
             ui_state.place.current_place = place;
             ui_state.place.current_place_id = place.id;
             set_command_handler_place(place);
@@ -6684,6 +6740,7 @@ export function create_app_state(): AppState {
         const refreshed = await fetch_place_snapshot(place_id);
         if (!refreshed) return null;
         merge_place_into_scene(refreshed);
+        await refresh_ground_item_cache_for_place(place_id);
         debug_log(`[PLACE_SCENE] single place refresh ${JSON.stringify({ place_id, scene_places: ui_state.place.scene_places.map((p) => p.id) })}`);
         return refreshed;
     }
@@ -6695,11 +6752,9 @@ export function create_app_state(): AppState {
             if (!items_res.ok) return;
             const items_data = await items_res.json();
             if (!items_data.ok || !Array.isArray(items_data.items)) return;
-            ui_state.place.ground_items_by_id.clear();
-            ui_state.place.ground_items_by_voxel.clear();
-            ui_state.place.ground_items_by_position.clear();
+            const cache = create_empty_ground_item_cache();
             for (const it of items_data.items) {
-                const rec = {
+                const rec: GroundItemMetaRecord = {
                     id: String(it.id),
                     def_id: String(it.def_id ?? ''),
                     name: String(it.name ?? it.def_id ?? it.id),
@@ -6709,39 +6764,40 @@ export function create_app_state(): AppState {
                     display_color: typeof it.display_color === 'string' ? it.display_color : undefined,
                     tags: Array.isArray(it.tags) ? it.tags : [],
                     elevation: (typeof it.elevation === 'number' && Number.isFinite(it.elevation)) ? Math.floor(it.elevation) : undefined,
-                    position_key: typeof it.position_key === 'string' ? it.position_key : undefined,
                     position: it.position && typeof it.position.x === 'number' && typeof it.position.y === 'number'
                         ? { x: it.position.x, y: it.position.y }
                         : undefined,
                 };
 
-                const key = rec.position_key || (rec.position ? `${rec.position.x}_${rec.position.y}` : null);
-                if (key) rec.position_key = key;
-
                 const voxel_key = (rec.position && typeof rec.elevation === 'number' && Number.isFinite(rec.elevation))
                     ? `${rec.position.x}_${rec.position.y}_${Math.floor(rec.elevation)}`
                     : null;
+                rec.voxel_key = voxel_key ?? undefined;
+                rec.position_key = voxel_key ?? undefined;
 
-                ui_state.place.ground_items_by_id.set(rec.id, rec);
-                if (voxel_key) {
-                    const arr = ui_state.place.ground_items_by_voxel.get(voxel_key) ?? [];
-                    arr.push(rec.id);
-                    ui_state.place.ground_items_by_voxel.set(voxel_key, arr);
+                if (!rec.position || !voxel_key) {
+                    debug_warn('[mono_ui]', 'ground item missing coordinates from /api/place/items', { place_id, item_id: rec.id, item: it });
+                    continue;
                 }
-                if (rec.position) {
-                    const xy_key = `${rec.position.x}_${rec.position.y}`;
-                    const arr = ui_state.place.ground_items_by_position.get(xy_key) ?? [];
-                    arr.push(rec.id);
-                    ui_state.place.ground_items_by_position.set(xy_key, arr);
-                }
+
+                cache.by_id.set(rec.id, rec);
+                const voxel_arr = cache.by_voxel.get(voxel_key) ?? [];
+                voxel_arr.push(rec.id);
+                cache.by_voxel.set(voxel_key, voxel_arr);
+                const xy_key = `${rec.position.x}_${rec.position.y}`;
+                const xy_arr = cache.by_position.get(xy_key) ?? [];
+                xy_arr.push(rec.id);
+                cache.by_position.set(xy_key, xy_arr);
             }
+            ui_state.place.ground_item_caches_by_place.set(place_id, cache);
+            if (ui_state.place.current_place_id === place_id) sync_current_place_ground_item_cache_aliases();
 
             try {
                 const next_place = get_scene_place(place_id) ?? (ui_state.place.current_place_id === place_id ? ui_state.place.current_place : null);
                 if (next_place?.id === 'eden_crossroads_tavern') {
                     const base_z = Math.floor(Number((next_place as any)?.coordinates?.elevation ?? 0)) || 0;
                     const want_z = base_z + 1;
-                    const elevated = Array.from(ui_state.place.ground_items_by_id.values()).filter((r: any) => Math.floor(Number(r?.elevation ?? base_z)) === want_z);
+                    const elevated = Array.from(cache.by_id.values()).filter((r: any) => Math.floor(Number(r?.elevation ?? base_z)) === want_z);
                     if (elevated.length > 0) {
                         debug_log('3DIFICATION_TEST', `PASS ground item cache includes elevated item(s) (place=${next_place.id} z=${want_z} count=${elevated.length})`);
                     } else {
@@ -6757,9 +6813,11 @@ export function create_app_state(): AppState {
             for (const cid of open) {
                 if (cid.startsWith('place.pile.')) {
                     const parts = cid.split('.');
+                    const cache_place_id = parts[2];
                     const position_key = parts[3];
-                    if (!position_key) continue;
-                    const ids = ui_state.place.ground_items_by_voxel.get(position_key) ?? [];
+                    if (!cache_place_id || !position_key) continue;
+                    const open_cache = ui_state.place.ground_item_caches_by_place.get(cache_place_id);
+                    const ids = open_cache?.by_voxel.get(position_key) ?? [];
                     if (ids.length <= 1) {
                         close_owner_inventory_view(cid);
                     }
@@ -6775,9 +6833,6 @@ export function create_app_state(): AppState {
         const is_current_place = ui_state.place.current_place_id === place_id;
         if (is_scene_place || is_current_place) {
             await refresh_single_scene_place(place_id);
-        }
-        if (is_current_place) {
-            await refresh_ground_item_cache_for_place(place_id);
         }
     }
 
@@ -6917,11 +6972,11 @@ export function create_app_state(): AppState {
         ui_state.place.scene_places = scene.places;
         const selected_place_id = opts?.selected_place_id ?? scene.selected_place_id;
         ui_state.place.scene_selected_place_id = selected_place_id;
-        const selected_place = scene.places.find((p) => p.id === selected_place_id) ?? scene.places.find((p) => p.id === scene.actor_current_place_id) ?? null;
-        if (opts?.mirror_to_current_place !== false && selected_place) {
-            ui_state.place.current_place_id = selected_place.id;
-            ui_state.place.current_place = selected_place;
-            set_command_handler_place(selected_place);
+        const actor_place = scene.places.find((p) => p.id === scene.actor_current_place_id) ?? null;
+        if (opts?.mirror_to_current_place !== false) {
+            ui_state.place.current_place_id = scene.actor_current_place_id;
+            ui_state.place.current_place = actor_place;
+            if (actor_place) set_command_handler_place(actor_place);
         }
     }
 
@@ -6934,13 +6989,11 @@ export function create_app_state(): AppState {
         ui_state.place.scene_places = ui_state.place.scene_places.filter((p) => ui_state.place.scene_visible_place_ids.includes(p.id));
         const selected_place_id = opts?.selected_place_id ?? scene.selected_place_id;
         ui_state.place.scene_selected_place_id = selected_place_id;
-        const selected_place = ui_state.place.scene_places.find((p) => p.id === selected_place_id)
-            ?? ui_state.place.scene_places.find((p) => p.id === scene.actor_current_place_id)
-            ?? null;
-        if (opts?.mirror_to_current_place !== false && selected_place) {
-            ui_state.place.current_place_id = selected_place.id;
-            ui_state.place.current_place = selected_place;
-            set_command_handler_place(selected_place);
+        const actor_place = ui_state.place.scene_places.find((p) => p.id === scene.actor_current_place_id) ?? null;
+        if (opts?.mirror_to_current_place !== false) {
+            ui_state.place.current_place_id = scene.actor_current_place_id;
+            ui_state.place.current_place = actor_place;
+            if (actor_place) set_command_handler_place(actor_place);
         }
     }
 
@@ -7042,7 +7095,7 @@ export function create_app_state(): AppState {
             } else {
                 const scene = await fetch_scene_topology(place_id);
                 if (scene && scene.places.length > 0) {
-                    apply_scene_topology(scene, { selected_place_id: place_id, mirror_to_current_place: true });
+                    apply_scene_topology(scene, { selected_place_id: place_id, mirror_to_current_place: false });
                     selected = scene.places.find((p) => p.id === place_id) ?? scene.places.find((p) => p.id === scene.selected_place_id) ?? selected;
                     debug_log(`[PLACE_SCENE] topology refresh applied ${JSON.stringify({ place_id, selected_place_id: scene.selected_place_id, actor_current_place_id: scene.actor_current_place_id, region_id: scene.region_id, graph_version: scene.graph_version, visible_place_ids: scene.visible_place_ids, scene_places: scene.places.map((p) => p.id) })}`);
                 } else if (!selected) {
@@ -7059,9 +7112,6 @@ export function create_app_state(): AppState {
             return false;
         }
         ui_state.place.scene_selected_place_id = place_id;
-        ui_state.place.current_place_id = place_id;
-        ui_state.place.current_place = selected;
-        set_command_handler_place(selected);
         if (had_painter) {
             ui_state.place_painter.active = true;
             set_place_painter_modules_visible(true);
@@ -7076,6 +7126,24 @@ export function create_app_state(): AppState {
         }
         debug_log(`[PLACE_SCENE] select applied ${JSON.stringify({ place_id, had_painter, pause_sources: ui_state.place.pause_state.pause_sources, current_place_id: ui_state.place.current_place_id, selected_scene_place_id: ui_state.place.scene_selected_place_id })}`);
         return true;
+    }
+
+    async function refresh_selected_scene_place(place_id: string | null, opts?: { preserve_place_painter?: boolean; source?: string; center_camera?: boolean }): Promise<void> {
+        if (!place_id) return;
+        const preserve_place_painter = opts?.preserve_place_painter === true && ui_state.place_painter.active;
+        const source = String(opts?.source ?? 'unspecified');
+        debug_log(`[PLACE_SCENE] selected place refresh start ${JSON.stringify({ source, place_id, preserve_place_painter, current_place_id: ui_state.place.current_place_id, scene_selected_place_id: ui_state.place.scene_selected_place_id, scene_places: ui_state.place.scene_places.map((p) => p.id) })}`);
+        const ok = await set_scene_selected_place(place_id, { refresh: true, center_camera: opts?.center_camera });
+        if (!ok) return;
+        await refresh_ground_item_cache_for_place(place_id);
+        if (preserve_place_painter) {
+            ui_state.place_painter.active = true;
+            set_place_painter_modules_visible(true);
+            if (!is_current_place_paused_by('place_painter')) {
+                await set_current_place_pause_source('place_painter', true);
+            }
+        }
+        debug_log(`[PLACE_SCENE] selected place refresh applied ${JSON.stringify({ source, place_id, current_place_id: ui_state.place.current_place_id, scene_selected_place_id: ui_state.place.scene_selected_place_id, scene_places: ui_state.place.scene_places.map((p) => p.id) })}`);
     }
 
     async function focus_scene_place_for_painter(place_id: string): Promise<boolean> {
@@ -7208,6 +7276,7 @@ export function create_app_state(): AppState {
             ui_state.place.scene_graph_version = 0;
             ui_state.place.camera_target.region_pose = null;
             ui_state.place.camera_target.last_follow_update_ms = 0;
+            sync_current_place_ground_item_cache_aliases();
             apply_place_pause_state(null);
             stop_place_touch_heartbeat();
             return;
@@ -7228,6 +7297,7 @@ export function create_app_state(): AppState {
             ui_state.place.scene_graph_version = 0;
             ui_state.place.camera_target.region_pose = null;
             ui_state.place.camera_target.last_follow_update_ms = 0;
+            sync_current_place_ground_item_cache_aliases();
             if (!preserve_place_painter) {
                 ui_state.place_painter.active = false;
                 ui_state.place_painter.last_primary_target = null;
@@ -8239,7 +8309,7 @@ export function create_app_state(): AppState {
     }
 
     function get_focus_world_z_for_current_place(): number {
-        const place = get_current_place();
+        const place = get_render_place();
         if (!place) return ui_state.place.world_z_center;
         const base_z = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
         const planes = get_defined_place_world_zs(place);
@@ -8259,7 +8329,7 @@ export function create_app_state(): AppState {
     }
 
     function sync_place_camera_focus_z(world_z: number): void {
-        const place = get_current_place();
+        const place = get_render_place();
         const next_world_z = Math.floor(Number(world_z));
         if (!Number.isFinite(next_world_z)) return;
         ui_state.place.world_z_center = next_world_z;
@@ -8329,7 +8399,7 @@ export function create_app_state(): AppState {
     }
 
     function center_camera_on_current_place(): void {
-        const center = get_place_center_tile(get_current_place());
+        const center = get_place_center_tile(get_render_place());
         if (!center) return;
         set_place_camera_target_position(center, 'free');
     }
@@ -8413,7 +8483,7 @@ export function create_app_state(): AppState {
         }
 
         const pose = ui_state.place.camera_target.region_pose;
-        const place = get_current_place();
+        const place = get_render_place();
         const origin = get_place_region_origin(place);
         if (pose && origin) {
             return {
@@ -8536,7 +8606,7 @@ export function create_app_state(): AppState {
         if (tx.ok) {
             flash_status(['Moved'], 900);
             drag_state.end_drag();
-            await update_current_place(place.id);
+            await refresh_place_visual_state(place.id);
             void refresh_container_data();
             void refresh_character_data();
             return true;
@@ -8564,15 +8634,18 @@ export function create_app_state(): AppState {
             on_resize: (new_rect) => persist_module_rect('place', new_rect),
             on_move_end: (final_rect) => persist_module_rect('place', final_rect),
             on_resize_end: (final_rect) => persist_module_rect('place', final_rect),
-            get_place: get_current_place,
+            get_place: get_render_place,
             get_scene_places: () => ui_state.place.scene_places,
             get_scene_selected_place_id: () => ui_state.place.scene_selected_place_id,
             get_actor_current_place_id: () => ui_state.place.actor_current_place_id,
             get_scene_connector_hops_visible: () => ui_state.place.scene_connector_hops_visible,
             grid_height: APP_CONFIG.grid_height,
             get_grid_height: () => APP_CONFIG.grid_height,
+            render_backend: APP_CONFIG.render_backend,
+            render_theme_id: APP_CONFIG.render_theme_id,
             font_family: APP_CONFIG.font_family,
             base_font_size_px: APP_CONFIG.base_font_size_px,
+            weight_index_to_css: APP_CONFIG.weight_index_to_css,
             get_focus_z: () => ui_state.place.focus_z,
             set_focus_z: (z) => { ui_state.place.focus_z = z; save_place_focus_z(); },
             get_world_z_center: () => ui_state.place.world_z_center,
@@ -8839,7 +8912,7 @@ export function create_app_state(): AppState {
                         }
 
                         flash_status([`Picked up ${meta.name}`], 1500);
-                        await update_current_place(place.id);
+                        await refresh_place_visual_state(place.id);
                         void refresh_character_data();
                         void refresh_container_data();
                     })();
@@ -8952,15 +9025,15 @@ export function create_app_state(): AppState {
 
             // Single source of truth for ground items in the PlaceModule.
             // Rendering + interaction should use the same cache (ui_state.place.ground_items_by_*).
-            get_ground_item_position_keys: (): string[] => {
-                return Array.from(ui_state.place.ground_items_by_voxel.keys());
+            get_ground_item_position_keys: (place_id: string): string[] => {
+                return Array.from((ui_state.place.ground_item_caches_by_place.get(place_id)?.by_voxel ?? new Map()).keys());
             },
 
-            get_ground_item_ids_at: (tile_x: number, tile_y: number): string[] => {
-                return ui_state.place.ground_items_by_position.get(`${tile_x}_${tile_y}`) ?? [];
+            get_ground_item_ids_at: (place_id: string, tile_x: number, tile_y: number): string[] => {
+                return ui_state.place.ground_item_caches_by_place.get(place_id)?.by_position.get(`${tile_x}_${tile_y}`) ?? [];
             },
-            get_ground_item_meta: (item_instance_id: string): any | null => {
-                return ui_state.place.ground_items_by_id.get(item_instance_id) ?? null;
+            get_ground_item_meta: (place_id: string, item_instance_id: string): any | null => {
+                return ui_state.place.ground_item_caches_by_place.get(place_id)?.by_id.get(item_instance_id) ?? null;
             },
 
             get_open_containers: () => ui_state.container.open_containers,
@@ -9046,12 +9119,12 @@ export function create_app_state(): AppState {
                         });
                         if (mv.ok) {
                             const moved_item_id = String(drag_state.item_instance_id ?? '');
-                            apply_local_ground_item_move(moved_item_id, tile_x, tile_y, target_z);
-                            log_ground_item_cache_position('pre-refresh optimistic check', moved_item_id, tile_x, tile_y, target_z);
+                            apply_local_ground_item_move(moved_item_id, tile_x, tile_y, target_z, place_id);
+                            log_ground_item_cache_position('pre-refresh optimistic check', moved_item_id, tile_x, tile_y, target_z, place_id);
                             flash_status(['Dragged'], 900);
                             drag_state.end_drag();
                             await refresh_place_visual_state(place_id);
-                            log_ground_item_cache_position('post-refresh authoritative check', moved_item_id, tile_x, tile_y, target_z);
+                            log_ground_item_cache_position('post-refresh authoritative check', moved_item_id, tile_x, tile_y, target_z, place_id);
                             void refresh_container_data();
                             return true;
                         }
@@ -9098,12 +9171,12 @@ export function create_app_state(): AppState {
                         });
                         if (mv.ok) {
                             const moved_item_id = String(drag_state.item_instance_id ?? '');
-                            apply_local_ground_item_move(moved_item_id, tile_x, tile_y, target_z);
-                            log_ground_item_cache_position('pre-refresh optimistic check', moved_item_id, tile_x, tile_y, target_z);
+                            apply_local_ground_item_move(moved_item_id, tile_x, tile_y, target_z, place_id);
+                            log_ground_item_cache_position('pre-refresh optimistic check', moved_item_id, tile_x, tile_y, target_z, place_id);
                             flash_status(['Dragged'], 900);
                             drag_state.end_drag();
                             await refresh_place_visual_state(place_id);
-                            log_ground_item_cache_position('post-refresh authoritative check', moved_item_id, tile_x, tile_y, target_z);
+                            log_ground_item_cache_position('post-refresh authoritative check', moved_item_id, tile_x, tile_y, target_z, place_id);
                             void refresh_container_data();
                             return true;
                         }
@@ -9162,7 +9235,7 @@ export function create_app_state(): AppState {
                             if (tx.ok) {
                                 flash_status([`Moved into ${meta?.name ?? 'container'}`], 1500);
                                 drag_state.end_drag();
-                                await update_current_place(place.id);
+                                await refresh_place_visual_state(place.id);
                                 void refresh_container_data();
                                 void refresh_character_data();
                                 return true;
@@ -9195,7 +9268,7 @@ export function create_app_state(): AppState {
                         if (sp.ok) {
                             flash_status(['Dropped'], 1200);
                             drag_state.end_drag();
-                            await update_current_place(place.id);
+                            await refresh_place_visual_state(place.id);
                             void refresh_container_data();
                             void refresh_character_data();
                             return true;
@@ -9224,7 +9297,7 @@ export function create_app_state(): AppState {
                         if (sp.ok) {
                             flash_status(['Dropped'], 1200);
                             drag_state.end_drag();
-                            await update_current_place(place.id);
+                            await refresh_place_visual_state(place.id);
                             void refresh_container_data();
                             void refresh_character_data();
                             return true;
@@ -9266,7 +9339,7 @@ export function create_app_state(): AppState {
                         debug_log(`[PlaceModule] on_drop: SUCCESS!`);
                         flash_status([`Dropped item at (${tile_x}, ${tile_y})`], 1500);
                         // Refresh place view to show dropped item
-                        await update_current_place(place.id);
+                        await refresh_place_visual_state(place.id);
                         // BUG FIX: Refresh source container to remove item from inventory display
                         void refresh_container_data();
                         // Clear drag state
@@ -9350,7 +9423,7 @@ export function create_app_state(): AppState {
                     if (throw_res.ok) {
                         debug_log(`[PlaceModule] on_throw: SUCCESS!`);
                         flash_status([`Threw item to (${tile_x}, ${tile_y})`], 1500);
-                        await update_current_place(place.id);
+                        await refresh_place_visual_state(place.id);
                         void refresh_character_data();
                         drag_state.end_drag();
                         return true;
@@ -9377,7 +9450,7 @@ export function create_app_state(): AppState {
             border_rgb: get_color_by_name('medium_gray').rgb,
             text_rgb: get_color_by_name('pale_gray').rgb,
             bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
-            base_weight_index: 3,
+            base_weight_index: 0,
             title: 'STATUS',
             gizmos: {
                 enabled: ['move', 'resize', 'close', 'seamless'],
@@ -9399,7 +9472,7 @@ export function create_app_state(): AppState {
             border_rgb: get_color_by_name('light_gray').rgb,
             text_rgb: get_color_by_name('off_white').rgb,
             bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
-            base_weight_index: 3,
+            base_weight_index: 0,
             hint_rgb: get_color_by_name('pale_yellow').rgb,
             npc_rgb: get_color_by_name('pumpkin').rgb,
             state_rgb: get_color_by_name('dark_gray').rgb,
@@ -9440,7 +9513,7 @@ export function create_app_state(): AppState {
             text_rgb: get_color_by_name('off_white').rgb,
             cursor_rgb: get_color_by_name('off_white').rgb,
             bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
-            base_weight_index: 3,
+            base_weight_index: 0,
             placeholder: 'Type… (Enter=send, Shift+Enter=new line, Backspace=delete)',
             header_buttons: [
                 { id: 'vol_whisper', label: 'WSP', width: 5, on_press: () => { ui_state.controls.volume = 'WHISPER'; flash_status(['volume: WHISPER'], 800); }, is_active: () => ui_state.controls.volume === 'WHISPER' },
@@ -9468,7 +9541,7 @@ export function create_app_state(): AppState {
             border_rgb: get_color_by_name('light_gray').rgb,
             text_rgb: get_color_by_name('off_white').rgb,
             bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
-            base_weight_index: 3,
+            base_weight_index: 0,
             hint_rgb: get_color_by_name('pale_yellow').rgb,
             npc_rgb: get_color_by_name('pumpkin').rgb,
             state_rgb: get_color_by_name('dark_gray').rgb,
@@ -9584,7 +9657,7 @@ export function create_app_state(): AppState {
             dim_rgb: get_color_by_name('medium_gray').rgb,
             border_rgb: get_color_by_name('dark_gray').rgb,
             bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
-            base_weight_index: 3,
+            base_weight_index: 0,
             gizmos: {
                 enabled: ['move', 'resize', 'close', 'seamless'],
                 can_close: true,
@@ -9740,7 +9813,7 @@ export function create_app_state(): AppState {
                                 flash_status([`Moved into ${existing.name || 'container'}`], 1500);
                                 drag_state.end_drag();
                                 const place = get_current_place();
-                                if (place) await update_current_place(place.id);
+                                if (place) await refresh_place_visual_state(place.id);
                                 void refresh_container_data();
                                 void refresh_character_data();
                                 return true;
@@ -9809,7 +9882,7 @@ export function create_app_state(): AppState {
                             const place = get_current_place();
                             flash_status([`${drag_state.item_definition?.name} picked up`], 1500);
                             drag_state.end_drag();
-                            if (place) await update_current_place(place.id);
+                            if (place) await refresh_place_visual_state(place.id);
                             void refresh_container_data();
                             void refresh_character_data();
                             return true;
@@ -9839,7 +9912,7 @@ export function create_app_state(): AppState {
                             flash_status([`${drag_state.item_definition?.name || 'Item'} withdrawn`], 1500);
                             drag_state.end_drag();
                             const place = get_current_place();
-                            if (place) await update_current_place(place.id);
+                            if (place) await refresh_place_visual_state(place.id);
                             void refresh_container_data();
                             void refresh_character_data();
                             return true;
@@ -10675,6 +10748,7 @@ export function create_app_state(): AppState {
                 : null;
             debug_log(`[PLACE_SCENE] actor place transition event ${JSON.stringify({ entity_ref, from_place_id: payload?.from_place_id ?? null, to_place_id: target_place_id, prev_actor_place_id, prev_selected_place_id, painter_lock_selection, follow_actor_selection, graph_version: ui_state.place.scene_graph_version, visible_place_ids: ui_state.place.scene_visible_place_ids, transition_bridge_latency_ms, breath_index: payload?.breath_index ?? null, seq: payload?.seq ?? null })}`);
             ui_state.place.actor_current_place_id = target_place_id;
+            ui_state.place.current_place_id = target_place_id;
             const cached_target_place = get_scene_place(target_place_id);
             if (cached_target_place) {
                 const actor_ref = get_input_actor_ref();
@@ -10713,15 +10787,15 @@ export function create_app_state(): AppState {
                 }
                 const next_selected_place_id = follow_actor_selection ? target_place_id : (prev_selected_place_id ?? target_place_id);
                 ui_state.place.scene_selected_place_id = next_selected_place_id;
+                ui_state.place.current_place = cached_target_place;
+                set_command_handler_place(cached_target_place);
                 if (!painter_lock_selection) {
-                    ui_state.place.current_place_id = cached_target_place.id;
-                    ui_state.place.current_place = cached_target_place;
-                    set_command_handler_place(cached_target_place);
                     const actor_tile = cached_target_place.contents?.actors_present?.find((a: any) => a.actor_ref === get_input_actor_ref())?.tile_position;
                     if (actor_tile) snap_place_camera_follow_to_actor();
                 }
                 debug_log(`[PLACE_SCENE] actor place transition local handoff ${JSON.stringify({ target_place_id, used_cached_scene_place: true, next_selected_place_id, mirror_to_current_place: !painter_lock_selection, scene_places: ui_state.place.scene_places.map((p) => p.id) })}`);
             } else {
+                ui_state.place.current_place = null;
                 debug_log(`[PLACE_SCENE] actor place transition local handoff ${JSON.stringify({ target_place_id, used_cached_scene_place: false, visible_place_ids: ui_state.place.scene_visible_place_ids, scene_places: ui_state.place.scene_places.map((p) => p.id) })}`);
             }
             void refresh_scene_topology_preserving_selection(target_place_id, {

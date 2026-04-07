@@ -172,6 +172,10 @@ type SceneViewBounds = {
 
 let scene_place_cache: ScenePlaceCache | null = null;
 
+function invalidate_scene_place_cache(): void {
+  scene_place_cache = null;
+}
+
 // Simple entity tag cache - populated from place data, updated via events
   const entityTagCache = new Map<string, TagInstance[]>();
 
@@ -281,6 +285,9 @@ export type PlaceModuleConfig = {
   get_grid_height?: () => number;
   font_family: string;
   base_font_size_px: number;
+  weight_index_to_css: readonly number[];
+  render_backend: 'font' | 'atlas';
+  render_theme_id: string;
 
   // World focus layer selection within the visible z window.
   get_focus_z?: () => number;
@@ -315,9 +322,9 @@ export type PlaceModuleConfig = {
 
   // Optional ground item metadata (instance ids, tags, display_char). If provided, prefer this over place.contents.items_on_ground.
   // When present, ground item rendering and interaction should use this cache as the single source of truth.
-  get_ground_item_position_keys?: () => string[];
-  get_ground_item_ids_at?: (tile_x: number, tile_y: number) => string[];
-  get_ground_item_meta?: (item_instance_id: string) => any | null;
+  get_ground_item_position_keys?: (place_id: string) => string[];
+  get_ground_item_ids_at?: (place_id: string, tile_x: number, tile_y: number) => string[];
+  get_ground_item_meta?: (place_id: string, item_instance_id: string) => any | null;
 
   // Optional open container ids, used to show "open" state on ground container-items.
   get_open_containers?: () => Set<string>;
@@ -686,8 +693,11 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
   // DOM world layers (z=0/1/2) renderer
   const dom_layers = new PlaceDomLayers({
+    render_backend: config.render_backend,
+    render_theme_id: config.render_theme_id,
     font_family: config.font_family,
     base_font_size_px: config.base_font_size_px,
+    weight_index_to_css: config.weight_index_to_css,
   });
   let dom_pan_px = { x: 0, y: 0, tileW: 0, tileH: 0, scale: 1 };
   let dom_last_place_id: string | null = null;
@@ -793,7 +803,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         row.push({
           char: c?.char ?? ' ',
           rgb: c?.rgb ?? { r: 0, g: 0, b: 0 },
-          weight_index: (c as any)?.weight_index ?? 3,
+          weight_index: (c as any)?.weight_index ?? 1,
           render_index: (c as any)?.render_index,
         });
       }
@@ -807,7 +817,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     for (let y = 0; y < h; y++) {
       const row: GridCell[] = [];
       for (let x = 0; x < w; x++) {
-        row.push({ char: ' ', rgb: { r: 0, g: 0, b: 0 }, weight_index: 3, render_index: undefined });
+        row.push({ char: ' ', rgb: { r: 0, g: 0, b: 0 }, weight_index: 1, render_index: undefined });
       }
       rows.push(row);
     }
@@ -828,7 +838,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
         const next_char = c?.char ?? ' ';
         const next_rgb = c?.rgb ?? { r: 0, g: 0, b: 0 };
-        const next_weight = (c as any)?.weight_index ?? 3;
+        const next_weight = (c as any)?.weight_index ?? 1;
         const next_render = (c as any)?.render_index;
 
         if (
@@ -1479,10 +1489,10 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
     // Preferred: use the ground item cache (ids + meta) when available so render/interaction stay consistent.
     if (config.get_ground_item_ids_at && config.get_ground_item_meta) {
-      const ids = config.get_ground_item_ids_at(tile_x, tile_y) ?? [];
+      const ids = config.get_ground_item_ids_at(place.id, tile_x, tile_y) ?? [];
       const out: string[] = [];
       for (const id of ids) {
-        const meta: any = config.get_ground_item_meta(id);
+        const meta: any = config.get_ground_item_meta(place.id, id);
         const iz = (typeof meta?.elevation === 'number' && Number.isFinite(meta.elevation))
           ? Math.floor(meta.elevation)
           : base_z;
@@ -1981,6 +1991,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
     // Render the place
     function draw_place(canvas: Canvas, place: Place): void {
+      invalidate_scene_place_cache();
       const inner = inner_rect();
       const { width, height } = inner_size();
       const place_breath_index = Math.floor(Number((place as any)?.breath_index ?? 0)) || 0;
@@ -2055,7 +2066,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
                     base_fg: connector_hit
                       ? get_color_by_name('off_white').rgb
                       : ((border_hit?.is_corner ?? false) ? get_color_by_name('light_orange').rgb : (border_hit?.is_edge ?? false) ? get_color_by_name('medium_gray').rgb : get_color_by_name('dark_gray').rgb),
-                    weight_index: connector_hit ? 5 : 1,
+                    weight_index: connector_hit ? 2 : 0,
                     render_shader: undefined,
                   }) as any,
                   ctx: ctx_place_tile({
@@ -2081,7 +2092,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
               const has_connector_tag = tile_has_tag(tile, 'CONNECTOR');
               const has_container_tag = tile_has_tag(tile, 'CONTAINER');
               const world_xy = { x: scene_tile_x, y: scene_tile_y };
-              const weight_index = local_world_z < scene_base_z ? 1 : 2;
+              const weight_index = local_world_z < scene_base_z ? 0 : 1;
               const key_prefix = has_connector_tag ? 'connector' : (local_world_z < scene_base_z ? 'tile_lower' : 'tile');
               rq.push({
                 pass: 'tile',
@@ -2095,7 +2106,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
                   char: display.char,
                   tags: (tile as any).tags ?? [],
                   base_fg: hex_to_rgb(display.color),
-                  weight_index: has_connector_tag ? 5 : weight_index,
+                  weight_index: has_connector_tag ? 2 : weight_index,
                   render_shader: (tile as any).render_shader,
                 }) as any,
                 ctx: ctx_place_tile({
@@ -2131,7 +2142,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
                     char: container_char,
                     tags: (tile as any).tags ?? [],
                     base_fg: hex_to_rgb(display.color),
-                    weight_index: 4,
+                    weight_index: 2,
                     render_shader: (tile as any).render_shader,
                   }) as any,
                   ctx: ctx_place_tile({
@@ -2229,7 +2240,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
               char: display_char,
               tags,
               base_fg: hex_to_rgb(display_color),
-              weight_index: 3,
+              weight_index: 1,
               render_shader: (s as any).render_shader,
             }) as any,
             ctx: {
@@ -2304,7 +2315,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
       if (screen_x >= inner.x0 && screen_x <= inner.x1 &&
           screen_y >= inner.y0 && screen_y <= inner.y1) {
-        const weight = p.weight ?? 4;
+        const weight = p.weight ?? 2;
         const render_index = p.render_index ?? 3;
         const wz = Number.isFinite(Number(p.world_z)) ? Math.floor(Number(p.world_z)) : DEFAULT_FOCUS_Z;
         const target_q = q_for_slot(wz);
@@ -2504,11 +2515,11 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         const scene_base_z = get_place_base_z(scene_place);
         let keys: string[] = [];
         let fallback_qty_by_key: Map<string, number> | null = null;
-        const use_cache = scene_place.id === place.id && !!config.get_ground_item_position_keys && !!config.get_ground_item_ids_at;
+        const use_cache = !!config.get_ground_item_position_keys && !!config.get_ground_item_ids_at && !!config.get_ground_item_meta;
 
         if (use_cache) {
           try {
-            keys = config.get_ground_item_position_keys?.() ?? [];
+            keys = config.get_ground_item_position_keys?.(scene_place.id) ?? [];
           } catch {
             keys = [];
           }
@@ -2553,7 +2564,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           if (item_slot === null) continue;
 
           const ids_raw = use_cache
-            ? (config.get_ground_item_ids_at?.(tile_x, tile_y) ?? [])
+            ? (config.get_ground_item_ids_at?.(scene_place.id, tile_x, tile_y) ?? [])
             : (scene_place.contents.items_on_ground ?? [])
                 .filter((it: any) => {
                   const iz = (typeof it?.elevation === 'number' && Number.isFinite(it.elevation)) ? Math.floor(it.elevation) : scene_base_z;
@@ -2567,7 +2578,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
           const item_ids: string[] = [];
           for (const id of ids_raw) {
-            const meta: any = use_cache ? (config.get_ground_item_meta?.(id) ?? null) : null;
+            const meta: any = use_cache ? (config.get_ground_item_meta?.(scene_place.id, id) ?? null) : null;
             const iz = (typeof meta?.elevation === 'number' && Number.isFinite(meta.elevation))
               ? Math.floor(meta.elevation)
               : voxel_z;
@@ -2584,7 +2595,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           const pile_open = Boolean(open_containers && open_containers.has(pile_container_id));
 
           if (use_cache && item_ids.length === 1) {
-            const meta: any = config.get_ground_item_meta?.(item_ids[0]!) ?? null;
+            const meta: any = config.get_ground_item_meta?.(scene_place.id, item_ids[0]!) ?? null;
             if (meta) {
               const item_container_id = `place.item.${scene_place.id}.${String(meta.id ?? item_ids[0])}`;
               const item_open = Boolean(open_containers && open_containers.has(item_container_id));
@@ -2627,7 +2638,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           }
 
           if (use_cache && item_ids.length >= 2) {
-            const meta0: any = config.get_ground_item_meta?.(item_ids[0]!) ?? null;
+            const meta0: any = config.get_ground_item_meta?.(scene_place.id, item_ids[0]!) ?? null;
             if (meta0) {
               q_for_slot(item_slot).push({
                 pass: 'item',
@@ -2666,8 +2677,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           }
 
           const single_qty = item_ids.length === 1
-            ? (use_cache && typeof (config.get_ground_item_meta?.(item_ids[0]!) as any)?.qty === 'number'
-              ? Number((config.get_ground_item_meta?.(item_ids[0]!) as any).qty)
+            ? (use_cache && typeof (config.get_ground_item_meta?.(scene_place.id, item_ids[0]!) as any)?.qty === 'number'
+              ? Number((config.get_ground_item_meta?.(scene_place.id, item_ids[0]!) as any).qty)
               : (fallback_qty_by_key?.get(key) ?? undefined))
             : undefined;
           q_for_slot(item_slot).push({
@@ -2714,7 +2725,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           order: 0,
           key: `ui:target:${targeted.ref}`,
           op: 'tint_fg',
-          cell: { char: ' ', rgb: get_color_by_name('vivid_cyan').rgb, style: 'bold', weight_index: 7, render_index: 5 },
+          cell: { char: ' ', rgb: get_color_by_name('vivid_cyan').rgb, style: 'bold', weight_index: 3, render_index: 5 },
         });
       }
     } else if (targeted) {
@@ -2735,7 +2746,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           order: 1,
           key: `ui:hover:${hovered.x},${hovered.y}`,
           op: 'tint_fg',
-          cell: { char: ' ', rgb: get_color_by_name('pale_orange').rgb, style: 'regular', weight_index: 6, render_index: 5 },
+          cell: { char: ' ', rgb: get_color_by_name('pale_orange').rgb, style: 'regular', weight_index: 3, render_index: 5 },
         });
       }
     }
@@ -2754,7 +2765,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           y: info_y,
           order: 2,
           key: `ui:info:${info_x}`,
-          cell: { char: ch, rgb: get_color_by_name('off_white').rgb, style: 'regular', weight_index: 3, render_index: 6 },
+          cell: { char: ch, rgb: get_color_by_name('off_white').rgb, style: 'regular', weight_index: 1, render_index: 6 },
         });
         info_x++;
       }
@@ -2774,7 +2785,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           y,
           order: 2,
           key: `ui:talk:${x}`,
-          cell: { char: ch, rgb: get_color_by_name('pale_yellow').rgb, style: 'bold', weight_index: 4, render_index: 6 },
+          cell: { char: ch, rgb: get_color_by_name('pale_yellow').rgb, style: 'bold', weight_index: 2, render_index: 6 },
         });
         x++;
       }
@@ -2794,7 +2805,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           y,
           order: 2,
           key: `ui:hoverinfo:${x}`,
-          cell: { char: ch, rgb: get_color_by_name('pale_yellow').rgb, style: 'regular', weight_index: 3, render_index: 6 },
+          cell: { char: ch, rgb: get_color_by_name('pale_yellow').rgb, style: 'regular', weight_index: 1, render_index: 6 },
         });
         x++;
       }
@@ -2922,7 +2933,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
               y: sy,
               order: 3,
               key: `painter_topology_preview:${painter_tool}:${hovered_tile.place_id ?? place.id}:${cell.x},${cell.y}`,
-              cell: { char: cell.char, rgb: tint, style: 'regular', weight_index: is_valid ? 6 : 7, render_index: 6 },
+              cell: { char: cell.char, rgb: tint, style: 'regular', weight_index: is_valid ? 3 : 3, render_index: 6 },
             });
           }
         }
@@ -2943,7 +2954,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           y: hint_y,
           order: 2,
           key: `ui:selected_place_hint:${hint_x}`,
-          cell: { char: ch, rgb: get_color_by_name('vivid_cyan').rgb, style: 'regular', weight_index: 4, render_index: 6 },
+          cell: { char: ch, rgb: get_color_by_name('vivid_cyan').rgb, style: 'regular', weight_index: 2, render_index: 6 },
         });
         hint_x += 1;
       }
@@ -2959,7 +2970,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           y: actor_hint_y,
           order: 2,
           key: `ui:actor_place_hint:${actor_hint_x}`,
-          cell: { char: ch, rgb: get_color_by_name('vivid_green').rgb, style: 'regular', weight_index: 4, render_index: 6 },
+          cell: { char: ch, rgb: get_color_by_name('vivid_green').rgb, style: 'regular', weight_index: 2, render_index: 6 },
         });
         actor_hint_x += 1;
       }
@@ -3008,7 +3019,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
                   ? make_pile_payload({ id: `painter_move_preview:${move_preview.entity_ref}`, pile_count: 2, rep: { display_char: move_preview.display_char, name: move_preview.name }, base_fg: rgb }) as any
                   : move_preview.entity_type === 'item'
                     ? make_item_like_payload({ id: `painter_move_preview:${move_preview.entity_ref}`, name: move_preview.name, display_char: move_preview.display_char, tags: Array.isArray(move_preview.tags) ? move_preview.tags : [], base_fg: rgb }) as any
-                    : make_simple_tile_payload({ id: `painter_move_preview:${move_preview.entity_ref}`, char: move_preview.display_char, tags: [], base_fg: rgb, weight_index: 6 }) as any;
+                    : make_simple_tile_payload({ id: `painter_move_preview:${move_preview.entity_ref}`, char: move_preview.display_char, tags: [], base_fg: rgb, weight_index: 3 }) as any;
                 rq.push({
                   pass: 'tile',
                   x: sx,
@@ -3036,7 +3047,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
               y: sy,
               order: 3,
               key: `painter_shape_preview:${point.x},${point.y}`,
-              cell: { char: '#', rgb: tint, style: 'regular', weight_index: 6, render_index: 6 },
+              cell: { char: '#', rgb: tint, style: 'regular', weight_index: 3, render_index: 6 },
             });
           }
         }
@@ -3065,7 +3076,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
                   char: preview.display_char,
                   tags: [],
                   base_fg: hex_to_rgb(preview.display_color),
-                  weight_index: 5,
+                  weight_index: 2,
                 }) as any,
                 ctx: ctx_place_tile({ selected: true }),
               });
@@ -3209,21 +3220,25 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   let last_local_move_batch_applied_ms = 0;
   
   wsClient.on('TAG_CHANGED', (event: TagChangeEvent) => {
+    invalidate_scene_place_cache();
     debug_log_place('WebSocket TAG_CHANGED:', event.entityRef, event.tagName, 'mag:', event.oldMag, '->', event.newMag);
     updateCacheFromEvent(event);
   });
   
   wsClient.on('TAG_ADDED', (event: TagChangeEvent) => {
+    invalidate_scene_place_cache();
     debug_log_place('WebSocket TAG_ADDED:', event.entityRef, event.tagName, 'mag:', event.newMag);
     updateCacheFromEvent(event);
   });
   
   wsClient.on('TAG_REMOVED', (event: TagChangeEvent) => {
+    invalidate_scene_place_cache();
     debug_log_place('WebSocket TAG_REMOVED:', event.entityRef, event.tagName);
     updateCacheFromEvent(event);
   });
   
   wsClient.on('TAG_DISPERSING', (event: TagChangeEvent) => {
+    invalidate_scene_place_cache();
     debug_log_place('WebSocket TAG_DISPERSING:', event.entityRef, event.tagName, 'mag:', event.oldMag, '->', event.newMag);
     updateCacheFromEvent(event);
   });
@@ -3311,6 +3326,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   // Server-authoritative movement updates (batched)
   wsClient.on('ENTITY_MOVED_BATCH', (msg: any) => {
     try {
+      invalidate_scene_place_cache();
       const place = config.get_place();
       if (!place) return;
       const scene_places = Array.isArray(config.get_scene_places?.()) ? (config.get_scene_places?.() ?? []) : [];
@@ -3804,8 +3820,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
       // Ground hover callback for highlighting (single item only)
       if (config.on_hover_ground_item) {
-        const ids = resolved.place.id === place.id && config.get_ground_item_ids_at
-          ? config.get_ground_item_ids_at(resolved.tile_x, resolved.tile_y)
+        const ids = config.get_ground_item_ids_at
+          ? config.get_ground_item_ids_at(resolved.place.id, resolved.tile_x, resolved.tile_y)
           : get_items_on_ground_at_world_z(resolved.place, resolved.tile_x, resolved.tile_y, local_world_z);
 
         if (ids.length === 1) {

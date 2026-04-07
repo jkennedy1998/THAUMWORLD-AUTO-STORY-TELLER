@@ -15,6 +15,7 @@
 
 import type { VoxelSpace, VoxelLayer, CalibrationOffset } from './voxel_space.js';
 import { DEFAULT_CAMERA_VALUES } from './voxel_space.js';
+import { create_canvas_cell_renderer, type CanvasCellRenderer } from '../mono_ui/runtime/cell_renderer.js';
 
 export interface ViewportState {
   // Canvas module position and size in screen pixels
@@ -50,6 +51,10 @@ export class VoxelDOMRenderer {
   private baseFontSize: number;
   private letterSpacing: number;
   private lineHeight: number;
+  private weightIndexToCss: readonly number[];
+  private renderBackend: 'font' | 'atlas';
+  private renderThemeId: string;
+  private cellRenderer: CanvasCellRenderer;
 
   // Viewport tracking
   private viewport: ViewportState = { x: 0, y: 0, width: 0, height: 0 };
@@ -60,13 +65,23 @@ export class VoxelDOMRenderer {
     fontFamily: string = '"Martian Mono", "Noto Sans Mono", monospace',
     baseFontSize: number = 32,
     letterSpacing: number = -0.10,
-    lineHeight: number = 29.8 / 32
+    lineHeight: number = 29.8 / 32,
+    weightIndexToCss: readonly number[] = [80, 160, 320, 640],
+    renderBackend: 'font' | 'atlas' = 'font',
+    renderThemeId: string = 'default'
   ) {
     this.container = container;
     this.fontFamily = fontFamily;
     this.baseFontSize = baseFontSize;
     this.letterSpacing = letterSpacing;
     this.lineHeight = lineHeight;
+    this.weightIndexToCss = weightIndexToCss;
+    this.renderBackend = renderBackend;
+    this.renderThemeId = renderThemeId;
+    this.cellRenderer = create_canvas_cell_renderer({
+      backend: this.renderBackend,
+      theme_id: this.renderThemeId,
+    });
 
     // Create clip container to mask layers outside canvas bounds
     this.clipContainer = document.createElement('div');
@@ -392,8 +407,6 @@ export class VoxelDOMRenderer {
     const startY = padY;
 
     // Weight index to CSS font weight mapping
-    const weightMap = [100, 200, 300, 400, 500, 600, 700, 800];
-
     // Render cells with Y-flip (grid Y=0 at bottom, canvas Y=0 is top)
     for (let gridY = 0; gridY < layer.cells.length; gridY++) {
       const row = layer.cells[gridY];
@@ -411,12 +424,16 @@ export class VoxelDOMRenderer {
         const py = startY + canvasY * cellH + cellH / 2;
 
         // Apply font weight from cell
-        const weightIndex = cell.weight_index ?? 4;
-        const cssWeight = weightMap[weightIndex] ?? 400;
-        ctx.font = `${cssWeight} ${fontSizePx}px ${this.fontFamily}`;
-
-        ctx.fillStyle = `rgb(${cell.rgb.r}, ${cell.rgb.g}, ${cell.rgb.b})`;
-        ctx.fillText(cell.char, px, py);
+        const weightIndex = cell.weight_index ?? 1;
+        this.cellRenderer.draw_cell({
+          ctx,
+          cell: { ...cell, weight_index: weightIndex },
+          center_x_px: px,
+          center_y_px: py,
+          font_family: this.fontFamily,
+          font_size_px: fontSizePx,
+          weight_index_to_css: this.weightIndexToCss,
+        });
       }
     }
   }
@@ -491,7 +508,10 @@ export class VoxelDOMRenderer {
 export function createVoxelDOMRenderer(
   container: HTMLElement,
   fontFamily?: string,
-  baseFontSize?: number
+  baseFontSize?: number,
+  weightIndexToCss?: readonly number[],
+  renderBackend?: 'font' | 'atlas',
+  renderThemeId?: string
 ): VoxelDOMRenderer {
-  return new VoxelDOMRenderer(container, fontFamily, baseFontSize);
+  return new VoxelDOMRenderer(container, fontFamily, baseFontSize, undefined, undefined, weightIndexToCss, renderBackend, renderThemeId);
 }

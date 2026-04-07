@@ -149,7 +149,7 @@ export function make_toolbox_module<TTool extends string = ToolType>(opts: Toolb
           char: indicator,
           rgb: indicator_color,
           style: 'regular',
-          weight_index: is_current ? 6 : 4
+          weight_index: is_current ? 3 : 2
         });
         
         // Draw icon
@@ -158,7 +158,7 @@ export function make_toolbox_module<TTool extends string = ToolType>(opts: Toolb
           char: tool.icon,
           rgb: icon_color,
           style: 'regular',
-          weight_index: is_current ? 6 : 4
+          weight_index: is_current ? 3 : 2
         });
         
         // Draw label
@@ -168,7 +168,7 @@ export function make_toolbox_module<TTool extends string = ToolType>(opts: Toolb
             char: tool.label[j]!,
             rgb: label_color,
             style: 'regular',
-            weight_index: is_current ? 6 : 4
+            weight_index: is_current ? 3 : 2
           });
         }
       }

@@ -471,17 +471,17 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
         const is_add = i === visible_tags.length;
         let text = "";
         let rgb = get_color_by_name("medium_gray").rgb;
-        let weight_index = 3;
+        let weight_index = 1;
         if (tag) {
           const key = tag_key(tag as any);
           const selected = key === selected_tag_key;
           text = `${selected ? ">" : " "}${String(tag.name ?? "")} ${Math.max(0, Math.floor(Number((tag as any).mag ?? 0) || 0))}`;
           rgb = selected ? get_color_by_name("vivid_yellow").rgb : get_color_by_name("off_white").rgb;
-          weight_index = selected ? 6 : 4;
+          weight_index = selected ? 3 : 2;
         } else if (is_add) {
           text = "+ add tag";
           rgb = get_color_by_name("vivid_green").rgb;
-          weight_index = 5;
+          weight_index = 2;
         } else {
           text = ".";
         }
@@ -514,7 +514,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
           char, 
           rgb: i < filled_width ? weight_color : { r: 60, g: 60, b: 60 }, 
           style: "regular", 
-          weight_index: 3 
+          weight_index: 1 
         });
       }
       
@@ -526,7 +526,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
           char: weight_text.charAt(i), 
           rgb: weight_color, 
           style: "regular", 
-          weight_index: 4 
+          weight_index: 2 
         });
       }
       
@@ -632,7 +632,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
               char: label.charAt(i),
               rgb: label_rgb,
               style: "regular",
-              weight_index: group_hovered ? 5 : 3,
+              weight_index: group_hovered ? 2 : 1,
             });
           }
         }

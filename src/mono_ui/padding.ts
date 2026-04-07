@@ -24,7 +24,7 @@ export function draw_border(
     c: Canvas,
     rect: Rect,
     rgb: Rgb,
-    weight_index = 3,
+    weight_index = 1,
     style: BorderStyle = {},
     markers: BorderMarkers = {},
 ): Rect {
@@ -52,8 +52,8 @@ export function draw_border(
 
     // markers overwrite border if present
     const cx = Math.floor((rect.x0 + rect.x1) / 2);
-    if (markers.top) c.set(cx, rect.y1, { char: markers.top, rgb, style: "regular", weight_index: Math.min(7, weight_index + 2) });
-    if (markers.bottom) c.set(cx, rect.y0, { char: markers.bottom, rgb, style: "regular", weight_index: Math.min(7, weight_index + 2) });
+    if (markers.top) c.set(cx, rect.y1, { char: markers.top, rgb, style: "regular", weight_index: Math.min(3, weight_index + 1) });
+    if (markers.bottom) c.set(cx, rect.y0, { char: markers.bottom, rgb, style: "regular", weight_index: Math.min(3, weight_index + 1) });
 
     return inner_rect(rect, 1);
 }

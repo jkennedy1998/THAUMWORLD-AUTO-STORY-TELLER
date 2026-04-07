@@ -215,7 +215,7 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
             char: char,
             rgb: is_selected ? selected_text : text_color,
             style: 'regular',
-            weight_index: is_selected ? 6 : 4
+            weight_index: is_selected ? 3 : 2
           });
           
           // Highlight background for selected
@@ -238,7 +238,7 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
               char: marker_char,
               rgb: marker_rgb,
               style: 'regular',
-              weight_index: 4,
+              weight_index: 2,
             });
           }
         }
@@ -254,7 +254,7 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
             char: '│',
             rgb: get_color_by_name('pale_yellow').rgb,
             style: 'regular',
-            weight_index: 5
+            weight_index: 2
           });
         }
       }

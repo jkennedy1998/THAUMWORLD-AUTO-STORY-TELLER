@@ -251,6 +251,11 @@ export function process_witness_event(
     visibility: event.actorVisibility
   });
   debug_log("[Witness]", `Processing event for ${observer_ref}:`, { verb: event.verb, actor: event.actorRef });
+
+  if (!observer_ref.startsWith("npc.")) {
+    debug_log("[Witness]", `Skipping ${observer_ref} - non-NPC observer`);
+    return;
+  }
   
   // Skip if in combat/timed event
   if (is_timed_event_active(data_slot)) {
@@ -314,6 +319,27 @@ function can_npc_perceive(observer_ref: string, event: PerceptionEvent): boolean
     debug_event("WITNESS", "perception.visibility_failed", { observer_ref });
     return false;
   }
+
+  if (typeof event.detectable === "boolean") {
+    const detections = Array.isArray(event.detections) ? event.detections : [];
+    debug_event("WITNESS", "perception.detection", {
+      observer_ref,
+      verb: event.verb,
+      detectable: event.detectable,
+      best_sense: event.bestSense ?? null,
+      senses: detections.map((entry) => entry.sense),
+    });
+    if (!event.detectable) {
+      debug_event("WITNESS", "perception.detection_failed", {
+        observer_ref,
+        verb: event.verb,
+        reason: "event_verdict",
+      });
+      return false;
+    }
+    debug_event("WITNESS", "perception.ok", { observer_ref, verb: event.verb, source: "event_verdict" });
+    return true;
+  }
   
   // Get observer position - need to look this up from storage
   // For now, skip position-based checks if we don't have observer location
@@ -345,16 +371,17 @@ function can_npc_perceive(observer_ref: string, event: PerceptionEvent): boolean
   // Positions (optional): used for vision cone/hearing capacity checks.
   // Prefer explicit positions provided in event details (renderer -> backend batches),
   // then fall back to local movement_state (backend-only), then storage init.
-  const details_pos = (details as any)?.observer_pos;
+  const details_pos = event.observerPositionWorld ?? (details as any)?.observer_pos;
   const observer_state = ensure_movement_state(observer_ref);
   const observer_pos =
     details_pos && typeof details_pos.x === "number" && typeof details_pos.y === "number"
       ? { x: details_pos.x, y: details_pos.y, z: Number.isFinite(Number(details_pos.z)) ? Number(details_pos.z) : undefined }
       : observer_state?.last_position;
 
+  const actor_world_pos = event.actorPositionWorld ?? event.location;
   const actor_pos =
-    typeof event.location?.x === "number" && typeof event.location?.y === "number"
-      ? { x: event.location.x, y: event.location.y, z: Number.isFinite(Number((event.location as any)?.z)) ? Number((event.location as any).z) : undefined }
+    typeof actor_world_pos?.x === "number" && typeof actor_world_pos?.y === "number"
+      ? { x: actor_world_pos.x, y: actor_world_pos.y, z: Number.isFinite(Number((actor_world_pos as any)?.z)) ? Number((actor_world_pos as any).z) : undefined }
       : undefined;
 
   let best_sense: string | null = null;

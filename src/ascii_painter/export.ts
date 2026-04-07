@@ -68,7 +68,7 @@ export function importFromText(text: string): Grid {
       row[x] = {
         char,
         rgb: { r: 255, g: 255, b: 255 },
-        weight_index: 4
+        weight_index: 2
       };
     }
   }

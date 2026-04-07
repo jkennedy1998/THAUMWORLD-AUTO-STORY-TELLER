@@ -158,7 +158,7 @@ export async function imageToAscii(
       row.push({
         char,
         rgb: finalRgb,
-        weight_index: 4
+        weight_index: 2
       });
     }
     cells.push(row);

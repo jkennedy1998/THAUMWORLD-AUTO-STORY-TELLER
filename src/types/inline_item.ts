@@ -48,8 +48,7 @@ export interface InlineBodySlot {
  * Items stored inline, no container lookups needed
  */
 export interface InlineGround {
-    main: InlineItem[];            // Items without specific position
-    scattered: Record<string, InlineItem[]>;  // Key = "x_y", items at that position
+    scattered: Record<string, InlineItem[]>;  // Key = "x_y_z", items at that position
 }
 
 /**

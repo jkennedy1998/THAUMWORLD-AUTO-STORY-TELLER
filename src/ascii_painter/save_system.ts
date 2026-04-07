@@ -9,6 +9,43 @@ import type { Grid, GridExport } from './types.js';
 import { exportGrid, importGrid } from './types.js';
 import type { VoxelSpace, VoxelSpaceExport } from './voxel_space.js';
 import { exportVoxelSpace, importVoxelSpace, gridToVoxelSpace, voxelSpaceToGrid } from './voxel_space.js';
+import type { ToolType } from './types.js';
+import { clamp_weight_index } from '../mono_ui/weight_system.js';
+
+const VALID_TOOL_TYPES: readonly ToolType[] = ['pencil', 'eraser', 'line', 'rect_stroke', 'rect_fill', 'bucket', 'eyedropper', 'text', 'weighter', 'colorer', 'selectangle', 'lassoselect', 'copy', 'paste'] as const;
+
+function clamp_integer(value: unknown, fallback: number, min: number, max: number): number {
+  const n = typeof value === 'number' ? Math.trunc(value) : fallback;
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+function clamp_number(value: unknown, fallback: number, min: number, max: number): number {
+  const n = typeof value === 'number' ? value : fallback;
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+function sanitize_char(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.length > 0 ? value[0]! : fallback;
+}
+
+function sanitize_rgb(value: unknown, fallback: { r: number; g: number; b: number }): { r: number; g: number; b: number } {
+  const rgb = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  return {
+    r: clamp_integer(rgb.r, fallback.r, 0, 255),
+    g: clamp_integer(rgb.g, fallback.g, 0, 255),
+    b: clamp_integer(rgb.b, fallback.b, 0, 255),
+  };
+}
+
+function sanitize_tool_type(value: unknown, fallback: ToolType): ToolType {
+  return typeof value === 'string' && (VALID_TOOL_TYPES as readonly string[]).includes(value) ? value as ToolType : fallback;
+}
+
+function sanitize_boolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback;
+}
 
 /**
  * Export grid to JSON string
@@ -69,7 +106,7 @@ export function importFromText(text: string): Grid {
       row[x] = {
         char,
         rgb: { r: 255, g: 255, b: 255 },
-        weight_index: 4
+        weight_index: 1
       };
     }
   }
@@ -302,8 +339,8 @@ const DEFAULT_TOOL_PROPERTIES: ToolProperties = {
   right_brush_char: '█',
   left_brush_rgb: { r: 255, g: 255, b: 255 },
   right_brush_rgb: { r: 255, g: 255, b: 255 },
-  left_brush_weight_index: 4,
-  right_brush_weight_index: 4,
+  left_brush_weight_index: 1,
+  right_brush_weight_index: 1,
   text_spacing: 1,
   text_charlead: 0,
   text_enterlead: 1,
@@ -341,19 +378,36 @@ export function loadToolProperties(): ToolProperties {
     const data = localStorage.getItem(TOOL_PROPERTIES_KEY);
     if (!data) return DEFAULT_TOOL_PROPERTIES;
     
-    const parsed = JSON.parse(data);
-    return {
-      ...DEFAULT_TOOL_PROPERTIES,
-      ...parsed,
-      left_brush_size: parsed.left_brush_size ?? parsed.brush_size ?? DEFAULT_TOOL_PROPERTIES.left_brush_size,
-      right_brush_size: parsed.right_brush_size ?? parsed.brush_size ?? DEFAULT_TOOL_PROPERTIES.right_brush_size,
-      left_brush_char: parsed.left_brush_char ?? DEFAULT_TOOL_PROPERTIES.left_brush_char,
-      right_brush_char: parsed.right_brush_char ?? DEFAULT_TOOL_PROPERTIES.right_brush_char,
-      left_brush_rgb: parsed.left_brush_rgb ?? DEFAULT_TOOL_PROPERTIES.left_brush_rgb,
-      right_brush_rgb: parsed.right_brush_rgb ?? DEFAULT_TOOL_PROPERTIES.right_brush_rgb,
-      left_brush_weight_index: parsed.left_brush_weight_index ?? DEFAULT_TOOL_PROPERTIES.left_brush_weight_index,
-      right_brush_weight_index: parsed.right_brush_weight_index ?? DEFAULT_TOOL_PROPERTIES.right_brush_weight_index,
+    const parsed = JSON.parse(data) as Record<string, unknown>;
+    const sanitized: ToolProperties = {
+      brush_size: clamp_integer(parsed.brush_size, DEFAULT_TOOL_PROPERTIES.brush_size, 1, 5),
+      left_brush_size: clamp_integer(parsed.left_brush_size ?? parsed.brush_size, DEFAULT_TOOL_PROPERTIES.left_brush_size, 1, 5),
+      right_brush_size: clamp_integer(parsed.right_brush_size ?? parsed.brush_size, DEFAULT_TOOL_PROPERTIES.right_brush_size, 1, 5),
+      left_brush_char: sanitize_char(parsed.left_brush_char, DEFAULT_TOOL_PROPERTIES.left_brush_char),
+      right_brush_char: sanitize_char(parsed.right_brush_char, DEFAULT_TOOL_PROPERTIES.right_brush_char),
+      left_brush_rgb: sanitize_rgb(parsed.left_brush_rgb, DEFAULT_TOOL_PROPERTIES.left_brush_rgb),
+      right_brush_rgb: sanitize_rgb(parsed.right_brush_rgb, DEFAULT_TOOL_PROPERTIES.right_brush_rgb),
+      left_brush_weight_index: clamp_weight_index(parsed.left_brush_weight_index),
+      right_brush_weight_index: clamp_weight_index(parsed.right_brush_weight_index),
+      text_spacing: clamp_integer(parsed.text_spacing, DEFAULT_TOOL_PROPERTIES.text_spacing, -16, 16),
+      text_charlead: clamp_integer(parsed.text_charlead, DEFAULT_TOOL_PROPERTIES.text_charlead, -16, 16),
+      text_enterlead: clamp_integer(parsed.text_enterlead, DEFAULT_TOOL_PROPERTIES.text_enterlead, -16, 16),
+      text_enterspace: clamp_integer(parsed.text_enterspace, DEFAULT_TOOL_PROPERTIES.text_enterspace, -16, 16),
+      paste_space_replace: sanitize_boolean(parsed.paste_space_replace, DEFAULT_TOOL_PROPERTIES.paste_space_replace),
+      paste_scale: clamp_number(parsed.paste_scale, DEFAULT_TOOL_PROPERTIES.paste_scale, 0.1, 3.0),
+      paste_ignore_space: sanitize_boolean(parsed.paste_ignore_space, DEFAULT_TOOL_PROPERTIES.paste_ignore_space),
+      paste_ignore_color: sanitize_boolean(parsed.paste_ignore_color, DEFAULT_TOOL_PROPERTIES.paste_ignore_color),
+      paste_ignore_color_rgb: sanitize_rgb(parsed.paste_ignore_color_rgb, DEFAULT_TOOL_PROPERTIES.paste_ignore_color_rgb),
+      paste_ignore_black: sanitize_boolean(parsed.paste_ignore_black, DEFAULT_TOOL_PROPERTIES.paste_ignore_black),
+      paste_ignore_white: sanitize_boolean(parsed.paste_ignore_white, DEFAULT_TOOL_PROPERTIES.paste_ignore_white),
+      left_click_tool: sanitize_tool_type(parsed.left_click_tool, DEFAULT_TOOL_PROPERTIES.left_click_tool as ToolType),
+      right_click_tool: sanitize_tool_type(parsed.right_click_tool, DEFAULT_TOOL_PROPERTIES.right_click_tool as ToolType),
+      active_property_side: parsed.active_property_side === 'right' ? 'right' : 'left',
     };
+    if (JSON.stringify(parsed) !== JSON.stringify(sanitized)) {
+      localStorage.setItem(TOOL_PROPERTIES_KEY, JSON.stringify(sanitized));
+    }
+    return sanitized;
   } catch (e) {
     console.warn('Load tool properties failed:', e);
     return DEFAULT_TOOL_PROPERTIES;

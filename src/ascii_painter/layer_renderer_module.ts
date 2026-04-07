@@ -111,18 +111,18 @@ export function makeLayerRendererModule(opts: LayerRendererOptions): Module {
         const borderColor = get_color_by_name('vivid_yellow').rgb;
         for (let x = rect.x0; x <= rect.x1; x++) {
           if (c.get(x, rect.y0)?.char === ' ') {
-            c.set(x, rect.y0, { char: '·', rgb: borderColor, weight_index: 2, render_index: 100 });
+            c.set(x, rect.y0, { char: '·', rgb: borderColor, weight_index: 1, render_index: 100 });
           }
           if (c.get(x, rect.y1)?.char === ' ') {
-            c.set(x, rect.y1, { char: '·', rgb: borderColor, weight_index: 2, render_index: 100 });
+            c.set(x, rect.y1, { char: '·', rgb: borderColor, weight_index: 1, render_index: 100 });
           }
         }
         for (let y = rect.y0; y <= rect.y1; y++) {
           if (c.get(rect.x0, y)?.char === ' ') {
-            c.set(rect.x0, y, { char: '·', rgb: borderColor, weight_index: 2, render_index: 100 });
+            c.set(rect.x0, y, { char: '·', rgb: borderColor, weight_index: 1, render_index: 100 });
           }
           if (c.get(rect.x1, y)?.char === ' ') {
-            c.set(rect.x1, y, { char: '·', rgb: borderColor, weight_index: 2, render_index: 100 });
+            c.set(rect.x1, y, { char: '·', rgb: borderColor, weight_index: 1, render_index: 100 });
           }
         }
       }

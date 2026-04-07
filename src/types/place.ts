@@ -67,8 +67,7 @@ export type Place = {
 
   // Ground storage - inline items on the ground (Phase 5)
   ground?: {
-    main: InlineItem[];                    // Items without specific position
-    scattered: Record<string, InlineItem[]>;  // Key = "x_y", items at that position
+    scattered: Record<string, InlineItem[]>;  // Key = "x_y_z", items at that position
   };
 
   // Multi-voxel structures stored as explicit instances.

@@ -1,4 +1,5 @@
 import type { Rect } from "../types.js";
+import { get_ui_cell_metrics, grid_rect_to_screen_rect } from "./ui_metrics.js";
 
 export type DomViewportOpts = {
   // Global CSS pan applied to the mono canvas element.
@@ -30,36 +31,30 @@ export type DomViewport = {
 };
 
 export function compute_dom_viewport_for_rect(opts: DomViewportOpts): DomViewport | null {
-  const pan_x_px = Number(opts.pan_x_px);
-  const pan_y_px = Number(opts.pan_y_px);
-  const tile_w_px = Number(opts.tile_w_px);
-  const tile_h_px = Number(opts.tile_h_px);
-  const grid_h = Number(opts.grid_height);
   const base_font = Number(opts.base_font_size_px);
   const ui_scale = Number.isFinite(opts.ui_scale) ? opts.ui_scale : 1.0;
-
-  if (!Number.isFinite(pan_x_px) || !Number.isFinite(pan_y_px)) return null;
-  if (!Number.isFinite(tile_w_px) || !Number.isFinite(tile_h_px) || tile_w_px <= 0 || tile_h_px <= 0) return null;
-  if (!Number.isFinite(grid_h) || grid_h <= 0) return null;
   if (!Number.isFinite(base_font) || base_font <= 0) return null;
 
-  const rect = opts.rect;
-  const w_tiles = rect.x1 - rect.x0 + 1;
-  const h_tiles = rect.y1 - rect.y0 + 1;
-  if (w_tiles <= 0 || h_tiles <= 0) return null;
-
-  // Module rects are bottom-left origin.
-  // DOM pixel space is top-left origin.
-  const x = pan_x_px + rect.x0 * tile_w_px;
-  const y = pan_y_px + (grid_h - 1 - rect.y1) * tile_h_px;
+  const metrics = get_ui_cell_metrics(ui_scale, base_font);
+  const tile_w_px = Number(opts.tile_w_px);
+  const tile_h_px = Number(opts.tile_h_px);
+  const rect_px = grid_rect_to_screen_rect({
+    pan_x_px: opts.pan_x_px,
+    pan_y_px: opts.pan_y_px,
+    grid_height: opts.grid_height,
+    rect: opts.rect,
+    cell_w_px: Number.isFinite(tile_w_px) && tile_w_px > 0 ? tile_w_px : metrics.cell_w_px,
+    cell_h_px: Number.isFinite(tile_h_px) && tile_h_px > 0 ? tile_h_px : metrics.cell_h_px,
+  });
+  if (!rect_px) return null;
 
   return {
-    x,
-    y,
-    width: w_tiles * tile_w_px,
-    height: h_tiles * tile_h_px,
-    tileW: tile_w_px,
-    tileH: tile_h_px,
-    fontSizePx: base_font * (Number.isFinite(ui_scale) ? ui_scale : 1.0),
+    x: rect_px.x,
+    y: rect_px.y,
+    width: rect_px.width,
+    height: rect_px.height,
+    tileW: rect_px.width / (opts.rect.x1 - opts.rect.x0 + 1),
+    tileH: rect_px.height / (opts.rect.y1 - opts.rect.y0 + 1),
+    fontSizePx: metrics.font_size_px,
   };
 }

@@ -24,7 +24,7 @@ export function shade_tile_ground_items(payload: TilePayload, _ctx: RenderContex
         fg: payload.base_fg ?? get_color_by_name('vivid_yellow').rgb,
         z: 0,
         style: 'regular',
-        weight_index: 5,
+        weight_index: 2,
     };
     return { layers: [layer] };
 }

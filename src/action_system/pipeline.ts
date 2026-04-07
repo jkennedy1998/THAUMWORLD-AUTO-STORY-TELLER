@@ -52,6 +52,7 @@ export const DEFAULT_PIPELINE_CONFIG: PipelineConfig = {
 
 // Dependencies required by pipeline
 export interface PipelineDependencies {
+  getDataSlot: () => number;
   // Storage access
   getAvailableTargets: (location: Location, radius: number) => Promise<AvailableTarget[]>;
   getActorLocation: (actorRef: string) => Promise<Location | null>;
@@ -446,6 +447,7 @@ export class ActionPipeline {
     intent = setIntentStage(intent, "broadcast_before");
     
     const events = await broadcastPerception(intent, "before", undefined, {
+      dataSlot: this.deps.getDataSlot(),
       getCharactersInRange: this.deps.getAvailableTargets,
       onPerceived: this.deps.recordPerceivedAwareness,
     });
@@ -723,6 +725,7 @@ export class ActionPipeline {
     
     // Broadcast perception and get list of observers who perceived the action
     const events = await broadcastPerception(intent, "after", result, {
+      dataSlot: this.deps.getDataSlot(),
       getCharactersInRange: this.deps.getAvailableTargets,
       onPerceived: this.deps.recordPerceivedAwareness,
     });
@@ -742,7 +745,9 @@ export class ActionPipeline {
           verb: event.verb,
         });
       }
-      process_witness_event(event.observerRef, event);
+      if (event.observerRef.startsWith("npc.")) {
+        process_witness_event(event.observerRef, event);
+      }
     }
     
     debug_event("ACTION_PIPELINE", "broadcast_after.complete", {

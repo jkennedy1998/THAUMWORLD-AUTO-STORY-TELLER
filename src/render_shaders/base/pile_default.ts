@@ -40,7 +40,7 @@ export function shade_pile_default(payload: PilePayload, ctx: RenderContext): Re
     // If this is a multi-item pile, render the pile glyph but keep the rep item's styling.
     if (count >= 2) {
         layer.char = pick_pile_char(count, undefined);
-        layer.weight_index = Math.max(typeof layer.weight_index === 'number' ? layer.weight_index : 5, 5);
+        layer.weight_index = Math.max(typeof layer.weight_index === 'number' ? layer.weight_index : 1, 5);
     }
 
     return { layers: [layer] };

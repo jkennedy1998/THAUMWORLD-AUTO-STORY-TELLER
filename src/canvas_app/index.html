@@ -5,19 +5,40 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>THAUMWORLD Mono UI (Canvas)</title>
 
-    <!-- Martian Mono -->
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Martian+Mono:wght@100;200;300;400;500;600;700;800&display=swap"
-          rel="stylesheet" />
-
-
     <style>
+        @font-face {
+            font-family: 'Thaum Mono';
+            src: url('../../fontbook/ThaumMono-W80.ttf') format('truetype');
+            font-style: normal;
+            font-weight: 80;
+        }
+
+        @font-face {
+            font-family: 'Thaum Mono';
+            src: url('../../fontbook/ThaumMono-W160.ttf') format('truetype');
+            font-style: normal;
+            font-weight: 160;
+        }
+
+        @font-face {
+            font-family: 'Thaum Mono';
+            src: url('../../fontbook/ThaumMono-W320.ttf') format('truetype');
+            font-style: normal;
+            font-weight: 320;
+        }
+
+        @font-face {
+            font-family: 'Thaum Mono';
+            src: url('../../fontbook/ThaumMono-W640.ttf') format('truetype');
+            font-style: normal;
+            font-weight: 640;
+        }
+
         :root {
             --ui-scale: 1;
             --pan-x: 0px;
             --pan-y: 0px;
-            --tile-w: 16px;
+            --tile-w: 12px;
             --tile-h: 16px;
 
             /* Background dot grid: tied to canvas pan + tile size. */

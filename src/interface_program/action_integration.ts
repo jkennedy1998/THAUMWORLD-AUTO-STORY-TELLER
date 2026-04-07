@@ -38,6 +38,7 @@ function createPipelineDependencies(dataSlot: number) {
   };
 
   return {
+    getDataSlot: () => dataSlot,
     // Get available targets at a location
     getAvailableTargets: async (location: any, radius: number) => {
       // Use the shared target resolution system

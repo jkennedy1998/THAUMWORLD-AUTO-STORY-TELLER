@@ -213,7 +213,7 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
           char: summary_text[i]!,
           rgb: state.active ? accent_color : muted_color,
           style: 'regular',
-          weight_index: 5,
+          weight_index: 2,
         });
       }
 
@@ -223,7 +223,7 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
           char: detail_text[i]!,
           rgb: state.phase === 'world_sim_interstitial' ? world_color : muted_color,
           style: 'regular',
-          weight_index: 4,
+          weight_index: 2,
         });
       }
 
@@ -250,7 +250,7 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
           char: action_label[i]!,
           rgb: action_rgb,
           style: 'regular',
-          weight_index: can_end_turn ? 6 : 4,
+          weight_index: can_end_turn ? 3 : 2,
         });
       }
 
@@ -259,7 +259,7 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
         rect,
         style: PANEL_BORDER_PRESETS.default_double.style,
         rgb: border_color,
-        weight_index: 2,
+        weight_index: 1,
       });
 
       if (!state.active || rows.length === 0) {
@@ -271,7 +271,7 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
             char: empty[i]!,
             rgb: muted_color,
             style: 'regular',
-            weight_index: 4,
+            weight_index: 2,
           });
         }
         return;
@@ -304,7 +304,7 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
           char: marker,
           rgb: row_rgb,
           style: 'regular',
-          weight_index: row.is_active ? 6 : 4,
+          weight_index: row.is_active ? 3 : 2,
         });
 
         if (row.kind === 'world') {
@@ -314,7 +314,7 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
               char: label[j]!,
               rgb: row_rgb,
               style: 'regular',
-              weight_index: 5,
+              weight_index: 2,
             });
           }
           const detail_text_world = row.detail.slice(0, Math.max(1, rect.x1 - status_x));
@@ -323,7 +323,7 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
               char: detail_text_world[j]!,
               rgb: status_color,
               style: 'regular',
-              weight_index: 4,
+              weight_index: 2,
             });
           }
           continue;
@@ -335,7 +335,7 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
             char: roll[j]!,
             rgb: accent_color,
             style: 'regular',
-            weight_index: row.is_active ? 6 : 4,
+            weight_index: row.is_active ? 3 : 2,
           });
         }
 
@@ -345,7 +345,7 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
             char: name[j]!,
             rgb: row_rgb,
             style: 'regular',
-            weight_index: row.is_active ? 6 : 4,
+            weight_index: row.is_active ? 3 : 2,
           });
         }
 
@@ -355,7 +355,7 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
             char: status[j]!,
             rgb: row.is_active ? row_rgb : status_color,
             style: 'regular',
-            weight_index: 4,
+            weight_index: 2,
           });
         }
       }

@@ -2,6 +2,7 @@ import type { Canvas, Module, Rect, Rgb, PointerEvent } from '../types.js';
 import { get_color_by_name } from '../colors.js';
 import { draw_module_border, PANEL_BORDER_PRESETS } from '../module_borders.js';
 import { play_sfx } from '../sfx/sfx_player.js';
+import { clamp_weight_index, DEFAULT_WEIGHT_INDEX } from '../weight_system.js';
 
 export type ButtonOptions = {
     id: string;
@@ -21,7 +22,7 @@ export type ButtonOptions = {
     get_bg?: () => { char: string; rgb: Rgb } | undefined;
     get_base_weight_index?: () => number;
     // baseline typographic weight for this button
-    // 0..7, default = 3 (regular-ish)
+    // 0..3, default = 1 (regular)
     base_weight_index?: number;
     Focusable?: boolean;
 
@@ -44,15 +45,9 @@ export function make_button_module(opts: ButtonOptions): Module {
 
 
 
-    function clamp_wi(w: number): number {
-        if (w < 0) return 0;
-        if (w > 7) return 7;
-        return w | 0;
-    }
-
     function base_weight(): number {
-        if (opts.get_base_weight_index) return clamp_wi(opts.get_base_weight_index());
-        return clamp_wi(opts.base_weight_index ?? 3);
+        if (opts.get_base_weight_index) return clamp_weight_index(opts.get_base_weight_index());
+        return clamp_weight_index(opts.base_weight_index ?? DEFAULT_WEIGHT_INDEX);
     }
 
     // hover = +1 from base
@@ -68,7 +63,7 @@ export function make_button_module(opts: ButtonOptions): Module {
         else if (pressed) delta = -1;
         else if (hovered) delta = 1;
 
-        return clamp_wi(base + delta);
+        return clamp_weight_index(base + delta);
     }
 
 
@@ -123,7 +118,7 @@ export function make_button_module(opts: ButtonOptions): Module {
             const bg = opts.get_bg ? opts.get_bg() : opts.bg;
             if (bg) {
                 const rgb = pressed ? tweak_rgb(bg.rgb, -20) : (hovered ? tweak_rgb(bg.rgb, 18) : bg.rgb);
-                c.fill_rect(rect, { char: bg.char, rgb, style: 'regular', weight_index: 3 });
+                c.fill_rect(rect, { char: bg.char, rgb, style: 'regular', weight_index: 1 });
             }
 
             // Standard double-border chrome for all buttons.

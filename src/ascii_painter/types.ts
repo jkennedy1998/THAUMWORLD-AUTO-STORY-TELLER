@@ -14,7 +14,7 @@ import type { PlaneId, Point2 } from '../shared/coords.js';
 export interface GridCell {
   char: string;
   rgb: Rgb;
-  weight_index: number; // 0-7
+  weight_index: number; // 0-1
   render_index?: number; // Optional layer index
 }
 

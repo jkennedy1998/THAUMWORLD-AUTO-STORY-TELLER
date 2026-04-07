@@ -30,6 +30,7 @@ export function createPlaceIntegratedPipeline(
 ): { pipeline: ActionPipeline; deps: PipelineDependencies } {
   
   const deps: PipelineDependencies = {
+    getDataSlot: () => 0,
     async getAvailableTargets(location, radius) {
       // Get NPCs from place module
       const npcs = placeModule.getNPCLocations();

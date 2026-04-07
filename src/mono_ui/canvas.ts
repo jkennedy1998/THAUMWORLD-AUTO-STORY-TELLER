@@ -1,19 +1,12 @@
 import type { Canvas, Cell, Rect, Rgb, StyleName } from "./types.js";
 import { get_color_by_name } from "./colors.js";
+import { clamp_weight_index, DEFAULT_WEIGHT_INDEX } from "./weight_system.js";
 
 const DEFAULT_RGB: Rgb = get_color_by_name("off_white").rgb;
 const DEFAULT_STYLE: StyleName = "regular";
 const DEFAULT_CHAR = " ";
 
-// 0..7 => 8 weights. default 3 ≈ "regular"
-const DEFAULT_WEIGHT_INDEX = 3;
 const DEFAULT_RENDER_INDEX = 0;
-
-function clamp_weight_index(n: unknown): number {
-    const v = typeof n === "number" ? Math.trunc(n) : DEFAULT_WEIGHT_INDEX;
-    if (!Number.isFinite(v)) return DEFAULT_WEIGHT_INDEX;
-    return Math.max(0, Math.min(7, v));
-}
 
 function clamp_render_index(n: unknown): number {
     const v = typeof n === "number" ? Math.trunc(n) : DEFAULT_RENDER_INDEX;

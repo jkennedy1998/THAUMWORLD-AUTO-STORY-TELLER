@@ -243,7 +243,7 @@ export function make_screen_overlay_bar_module(opts: OverlayBarOptions): Module 
       const accent_rgb = get_color_by_name('vivid_yellow').rgb;
       const handle = get_handle_bounds(rect);
 
-      c.fill_rect(rect, { char: ' ', rgb: bg_rgb, style: 'regular', weight_index: 3 });
+      c.fill_rect(rect, { char: ' ', rgb: bg_rgb, style: 'regular', weight_index: 1 });
       draw_module_border(c, {
         rect,
         style: PANEL_BORDER_PRESETS.default_double.style,
@@ -255,7 +255,7 @@ export function make_screen_overlay_bar_module(opts: OverlayBarOptions): Module 
         char: get_target_expanded() ? 'v' : '^',
         rgb: accent_rgb,
         style: 'regular',
-        weight_index: 6,
+        weight_index: 3,
         render_index: 7,
       });
 
@@ -269,7 +269,7 @@ export function make_screen_overlay_bar_module(opts: OverlayBarOptions): Module 
               char: label[i]!,
               rgb: color,
               style: 'regular',
-              weight_index: entry.tab.id === active_tab_id ? 6 : 4,
+              weight_index: entry.tab.id === active_tab_id ? 3 : 2,
               render_index: 6,
             });
           }
@@ -286,7 +286,7 @@ export function make_screen_overlay_bar_module(opts: OverlayBarOptions): Module 
               char: label[i]!,
               rgb: color,
               style: 'regular',
-              weight_index: entry.button.is_active?.() ? 6 : 4,
+              weight_index: entry.button.is_active?.() ? 3 : 2,
               render_index: 6,
             });
           }
@@ -300,7 +300,7 @@ export function make_screen_overlay_bar_module(opts: OverlayBarOptions): Module 
                 char: status_text[i]!,
                 rgb: text_rgb,
                 style: 'regular',
-                weight_index: 4,
+                weight_index: 2,
                 render_index: 6,
               });
             }

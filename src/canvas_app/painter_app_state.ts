@@ -77,14 +77,22 @@ import { makeLayerPaletteModule } from '../ascii_painter/layer_palette_module.js
 import { makeCameraControlModule } from '../ascii_painter/camera_control_module.js';
 import { VoxelDOMRenderer, createVoxelDOMRenderer } from '../ascii_painter/voxel_dom_renderer.js';
 import { touch_world_layers_owner } from '../mono_ui/world_layers_owner.js';
+import {
+  THAUMWORLD_RENDER_THEME,
+  get_theme_base_font_size_px,
+  get_theme_font_family,
+  get_theme_weight_index_to_css,
+} from '../mono_ui/runtime/render_theme.js';
 
 // Configuration matching the game but with relaxed letter spacing
 export const PAINTER_CONFIG = {
-  font_family: '"Martian Mono", "Noto Sans Mono", monospace',
-  base_font_size_px: 32,
-  base_line_height_mult: 29.8 / 32,
-  base_letter_spacing_mult: -0.10,
-  weight_index_to_css: [100, 200, 300, 400, 500, 600, 700, 800] as const,
+  render_backend: THAUMWORLD_RENDER_THEME.backend,
+  render_theme_id: THAUMWORLD_RENDER_THEME.id,
+  font_family: get_theme_font_family(THAUMWORLD_RENDER_THEME),
+  base_font_size_px: get_theme_base_font_size_px(THAUMWORLD_RENDER_THEME),
+  base_line_height_mult: 1,
+  base_letter_spacing_mult: 0,
+  weight_index_to_css: get_theme_weight_index_to_css(THAUMWORLD_RENDER_THEME),
   grid_width: 200,
   grid_height: 50,
 } as const;
@@ -213,7 +221,10 @@ export function create_painter_app_state(): PainterAppState {
     domRenderer = createVoxelDOMRenderer(
       domRoot,
       PAINTER_CONFIG.font_family,
-      PAINTER_CONFIG.base_font_size_px
+      PAINTER_CONFIG.base_font_size_px,
+      PAINTER_CONFIG.weight_index_to_css,
+      PAINTER_CONFIG.render_backend,
+      PAINTER_CONFIG.render_theme_id,
     );
     domRenderer.setSpace(voxelSpace);
     console.log('[Painter] DOM renderer initialized');
@@ -243,6 +254,7 @@ export function create_painter_app_state(): PainterAppState {
   // Try to load auto-save on startup (try VoxelSpace first, then fallback to Grid)
   const saved_voxel_space = loadAutoSaveVoxelSpace();
   if (saved_voxel_space) {
+    console.log('[Painter bootstrap] restoring autosaved VoxelSpace');
     voxelSpace = saved_voxel_space;
     // Re-apply saved camera config after loading auto-save (camera settings are global, not per-artwork)
     const savedCameraConfig = loadCameraConfig();
@@ -263,6 +275,7 @@ export function create_painter_app_state(): PainterAppState {
     // Fallback to legacy grid auto-save
     const saved_grid = loadAutoSave();
     if (saved_grid) {
+      console.log('[Painter bootstrap] restoring legacy autosaved grid');
       grid.width = saved_grid.width;
       grid.height = saved_grid.height;
       grid.cells = saved_grid.cells;
@@ -296,12 +309,12 @@ export function create_painter_app_state(): PainterAppState {
   const left_brush: Brush = {
     char: saved_tool_props.left_brush_char ?? '█',
     rgb: { ...saved_tool_props.left_brush_rgb },
-    weight_index: saved_tool_props.left_brush_weight_index ?? 4,
+    weight_index: saved_tool_props.left_brush_weight_index ?? 1,
   };
   const right_brush: Brush = {
     char: saved_tool_props.right_brush_char ?? '█',
     rgb: { ...saved_tool_props.right_brush_rgb },
-    weight_index: saved_tool_props.right_brush_weight_index ?? 4,
+    weight_index: saved_tool_props.right_brush_weight_index ?? 1,
   };
 
   let left_brush_size = saved_tool_props.left_brush_size ?? saved_tool_props.brush_size ?? 1;
@@ -387,6 +400,11 @@ export function create_painter_app_state(): PainterAppState {
   
   // Gradiator state for image/text conversion - load from storage or create default
   const gradiator_state = loadGradiatorState();
+  console.log('[Painter bootstrap] tool properties loaded');
+  console.log('[Painter bootstrap] gradiator state loaded', {
+    activeSlot: gradiator_state.activeSlot,
+    slotLengths: gradiator_state.slots.map((slot) => typeof slot === 'string' ? slot.length : -1),
+  });
   
   // Selection mode
   let selection_mode: SelectionMode = 'replace';
@@ -479,6 +497,7 @@ export function create_painter_app_state(): PainterAppState {
   });
 
   async function loadArtworkFromContent(content: string, loadedPath?: string): Promise<void> {
+    console.log('[Painter bootstrap] loading artwork content', { loadedPath: loadedPath ?? null, size: content.length });
     voxelSpace = importVoxelSpaceFromJSON(content);
 
     // Apply persisted camera/UI settings (do not import from file)

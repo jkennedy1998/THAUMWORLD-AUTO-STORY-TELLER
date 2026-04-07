@@ -114,7 +114,7 @@ export function make_painter_toolbar_module(opts: PainterToolbarOptions): Module
           char: ch, 
           rgb: text_color, 
           style: 'regular',
-          weight_index: 5
+          weight_index: 2
         });
       }
     },

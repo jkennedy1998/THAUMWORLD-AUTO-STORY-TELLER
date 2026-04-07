@@ -37,7 +37,7 @@ function nearest_indexed_rgb(rgb: Rgb): Rgb {
 export function reduce_layers_to_cell(layers: readonly RenderLayer[], opts?: ReduceOptions): Cell {
     const fallback_rgb: Rgb = opts?.fallback_rgb ?? { r: 200, g: 200, b: 200 };
     const fallback_style = (opts?.fallback_style ?? 'regular') as any;
-    const fallback_weight_index = typeof opts?.fallback_weight_index === 'number' ? opts.fallback_weight_index : 4;
+    const fallback_weight_index = typeof opts?.fallback_weight_index === 'number' ? opts.fallback_weight_index : 0;
     const fallback_render_index = typeof opts?.fallback_render_index === 'number' ? opts.fallback_render_index : 0;
     const quantize = Boolean(opts?.quantize_to_palette);
 

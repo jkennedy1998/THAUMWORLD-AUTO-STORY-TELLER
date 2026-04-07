@@ -36,7 +36,7 @@ export function shade_item_default(payload: ItemPayload, _ctx: RenderContext): R
         fg: payload.base_fg,
         z: 0,
         style: 'regular',
-        weight_index: 5,
+        weight_index: 2,
         // Style/weight/color are filled by caller/reducer for now.
     };
 

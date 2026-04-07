@@ -13,6 +13,7 @@ import { make_floating_panel_module } from './floating_panel_module.js';
 import type { ToolType } from '../../ascii_painter/types.js';
 import type { SelectionMode } from '../../ascii_painter/selection.js';
 import type { GradiatorState, GradiatorSlot } from '../../ascii_painter/gradiator.js';
+import { getSafeGradiatorSlot } from '../../ascii_painter/gradiator.js';
 
 type ToolPropertiesCustomPanel = {
   should_render: () => boolean;
@@ -217,7 +218,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
     const gradiatorState = opts.get_gradiator_state();
     for (let slot = 0; slot < 3; slot++) {
       const y_pos = gradiator_start_y - (slot * 2);
-      const gradiator = gradiatorState.slots[slot]!;
+      const gradiator = getSafeGradiatorSlot(gradiatorState, slot);
       // Clickable area is within the brackets based on actual gradiator length
       const endX = rect.x0 + 6 + Math.min(gradiator.length, 12);
       if (y === y_pos && x >= rect.x0 + 6 && x < endX) {
@@ -233,7 +234,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
     const gradiatorState = opts.get_gradiator_state();
     for (let slot = 0; slot < 3; slot++) {
       const y_pos = gradiator_start_y - (slot * 2);
-      const gradiator = gradiatorState.slots[slot]!;
+      const gradiator = getSafeGradiatorSlot(gradiatorState, slot);
       // + button appears after the closing bracket
       const buttonX = rect.x0 + 6 + Math.min(gradiator.length, 12) + 1;
       if (y === y_pos && x === buttonX) {
@@ -249,7 +250,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
     const gradiatorState = opts.get_gradiator_state();
     for (let slot = 0; slot < 3; slot++) {
       const y_pos = gradiator_start_y - (slot * 2);
-      const gradiator = gradiatorState.slots[slot]!;
+      const gradiator = getSafeGradiatorSlot(gradiatorState, slot);
       // - button appears after the + button
       const buttonX = rect.x0 + 6 + Math.min(gradiator.length, 12) + 2;
       if (y === y_pos && x === buttonX) {
@@ -447,7 +448,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             char: size_label[i]!,
             rgb: text_color,
             style: 'regular',
-            weight_index: 4
+            weight_index: 2
           });
         }
         
@@ -461,7 +462,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             char: '─',
             rgb: slider_bg,
             style: 'regular',
-            weight_index: 3
+            weight_index: 1
           });
         }
         
@@ -477,7 +478,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             char: is_left && is_right ? '◆' : is_selected ? '●' : '○',
             rgb: is_selected ? slider_fg : slider_bg,
             style: 'regular',
-            weight_index: is_selected ? 6 : 3
+            weight_index: is_selected ? 3 : 1
           });
           if (is_left || is_right) {
             c.set(marker_x, slider_y - 1, {
@@ -488,7 +489,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
                   ? left_indicator_rgb
                   : right_indicator_rgb,
               style: 'regular',
-              weight_index: 5
+              weight_index: 2
             });
           }
         }
@@ -501,7 +502,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
           char: space_replace ? '☑' : '☐',
           rgb: text_color,
           style: 'regular',
-          weight_index: 4
+          weight_index: 2
         });
         
         const space_label = 'space→" "';
@@ -510,7 +511,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             char: space_label[i]!,
             rgb: text_color,
             style: 'regular',
-            weight_index: 4
+            weight_index: 2
           });
         }
         y_pos--;
@@ -523,11 +524,11 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             char: spacing_label[i]!,
             rgb: text_color,
             style: 'regular',
-            weight_index: 4
+            weight_index: 2
           });
         }
-        c.set(rect.x1 - 3, y_pos, { char: '-', rgb: slider_fg, style: 'regular', weight_index: 5 });
-        c.set(rect.x1 - 1, y_pos, { char: '+', rgb: slider_fg, style: 'regular', weight_index: 5 });
+        c.set(rect.x1 - 3, y_pos, { char: '-', rgb: slider_fg, style: 'regular', weight_index: 2 });
+        c.set(rect.x1 - 1, y_pos, { char: '+', rgb: slider_fg, style: 'regular', weight_index: 2 });
         y_pos--;
         
         // Charlead control (Y per char)
@@ -538,11 +539,11 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             char: charlead_label[i]!,
             rgb: text_color,
             style: 'regular',
-            weight_index: 4
+            weight_index: 2
           });
         }
-        c.set(rect.x1 - 3, y_pos, { char: '-', rgb: slider_fg, style: 'regular', weight_index: 5 });
-        c.set(rect.x1 - 1, y_pos, { char: '+', rgb: slider_fg, style: 'regular', weight_index: 5 });
+        c.set(rect.x1 - 3, y_pos, { char: '-', rgb: slider_fg, style: 'regular', weight_index: 2 });
+        c.set(rect.x1 - 1, y_pos, { char: '+', rgb: slider_fg, style: 'regular', weight_index: 2 });
         y_pos--;
         
         // Enterlead control (Y on Enter)
@@ -553,11 +554,11 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             char: enterlead_label[i]!,
             rgb: text_color,
             style: 'regular',
-            weight_index: 4
+            weight_index: 2
           });
         }
-        c.set(rect.x1 - 3, y_pos, { char: '-', rgb: slider_fg, style: 'regular', weight_index: 5 });
-        c.set(rect.x1 - 1, y_pos, { char: '+', rgb: slider_fg, style: 'regular', weight_index: 5 });
+        c.set(rect.x1 - 3, y_pos, { char: '-', rgb: slider_fg, style: 'regular', weight_index: 2 });
+        c.set(rect.x1 - 1, y_pos, { char: '+', rgb: slider_fg, style: 'regular', weight_index: 2 });
         y_pos--;
         
         // Enterspace control (X on Enter)
@@ -568,11 +569,11 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             char: enterspace_label[i]!,
             rgb: text_color,
             style: 'regular',
-            weight_index: 4
+            weight_index: 2
           });
         }
-        c.set(rect.x1 - 3, y_pos, { char: '-', rgb: slider_fg, style: 'regular', weight_index: 5 });
-        c.set(rect.x1 - 1, y_pos, { char: '+', rgb: slider_fg, style: 'regular', weight_index: 5 });
+        c.set(rect.x1 - 3, y_pos, { char: '-', rgb: slider_fg, style: 'regular', weight_index: 2 });
+        c.set(rect.x1 - 1, y_pos, { char: '+', rgb: slider_fg, style: 'regular', weight_index: 2 });
       } else if (opts.get_current_tool() === 'selectangle' || opts.get_current_tool() === 'lassoselect') {
         // Show selection mode options
         const modes: SelectionMode[] = ['replace', 'additive', 'subtract', 'intersect'];
@@ -585,7 +586,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             char: is_selected ? '●' : '○',
             rgb: is_selected ? slider_fg : text_color,
             style: 'regular',
-            weight_index: is_selected ? 6 : 3
+            weight_index: is_selected ? 3 : 1
           });
           
           const label = mode.charAt(0).toUpperCase() + mode.slice(1);
@@ -594,7 +595,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
               char: label[i]!,
               rgb: is_selected ? slider_fg : text_color,
               style: 'regular',
-              weight_index: is_selected ? 5 : 3
+              weight_index: is_selected ? 2 : 1
             });
           }
           y_pos--;
@@ -611,7 +612,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
               char: btn[i]!,
               rgb: text_color,
               style: 'regular',
-              weight_index: 4
+              weight_index: 2
             });
           }
           btn_x += btn.length + 1;
@@ -628,7 +629,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
         
         for (let slot = 0; slot < 3; slot++) {
           const isActive = slot === gradiatorState.activeSlot;
-          const gradiator = gradiatorState.slots[slot]!;
+          const gradiator = getSafeGradiatorSlot(gradiatorState, slot);
           const y_pos = gradiator_start_y - (slot * 2);
           
           // Draw slot label
@@ -638,12 +639,12 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
               char: label[i]!,
               rgb: isActive ? activeColor : inactiveColor,
               style: 'regular',
-              weight_index: isActive ? 5 : 3
+              weight_index: isActive ? 2 : 1
             });
           }
           
           // Draw gradiator characters in brackets
-          c.set(rect.x0 + 5, y_pos, { char: '[', rgb: text_color, style: 'regular', weight_index: 3 });
+          c.set(rect.x0 + 5, y_pos, { char: '[', rgb: text_color, style: 'regular', weight_index: 1 });
           
           for (let x = 0; x < gradiator.length && x < 12; x++) {
             const char = gradiator[x]!;
@@ -654,7 +655,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
               char: char,
               rgb: isSelected ? activeColor : text_color,
               style: isSelected ? 'reverse' : 'regular',
-              weight_index: isSelected ? 5 : 4
+              weight_index: isSelected ? 2 : 2
             });
           }
           
@@ -662,7 +663,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             char: ']', 
             rgb: text_color, 
             style: 'regular', 
-            weight_index: 3 
+            weight_index: 1 
           });
           
           // Draw + and - buttons
@@ -671,7 +672,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             char: '+',
             rgb: get_color_by_name('vivid_yellow').rgb,
             style: 'regular',
-            weight_index: 4
+            weight_index: 2
           });
           
           // Only show - if gradiator has more than minimum characters
@@ -680,7 +681,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
               char: '-',
               rgb: get_color_by_name('vivid_red').rgb,
               style: 'regular',
-              weight_index: 4
+              weight_index: 2
             });
           }
         }
@@ -693,7 +694,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             char: scale_label[i]!,
             rgb: text_color,
             style: 'regular',
-            weight_index: 4
+            weight_index: 2
           });
         }
         
@@ -702,7 +703,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
           char: '-',
           rgb: get_color_by_name('vivid_red').rgb,
           style: 'regular',
-          weight_index: 4
+          weight_index: 2
         });
         
         // Scale slider track
@@ -716,7 +717,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             char: x === slider_pos ? '◆' : '─',
             rgb: x === slider_pos ? get_color_by_name('vivid_yellow').rgb : get_color_by_name('medium_gray').rgb,
             style: 'regular',
-            weight_index: x === slider_pos ? 5 : 3
+            weight_index: x === slider_pos ? 2 : 1
           });
         }
         
@@ -725,7 +726,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
           char: '+',
           rgb: get_color_by_name('vivid_green').rgb,
           style: 'regular',
-          weight_index: 4
+          weight_index: 2
         });
         
         // Scale percentage display
@@ -736,7 +737,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             char: percent_str[i]!,
             rgb: get_color_by_name('vivid_yellow').rgb,
             style: 'regular',
-            weight_index: 4
+            weight_index: 2
           });
         }
         
@@ -753,7 +754,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
           char: ignore_space ? '☑' : '☐',
           rgb: text_color,
           style: 'regular',
-          weight_index: 4
+          weight_index: 2
         });
         
         const ignore_space_label = 'ignore space';
@@ -762,7 +763,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             char: ignore_space_label[i]!,
             rgb: text_color,
             style: 'regular',
-            weight_index: 4
+            weight_index: 2
           });
         }
         
@@ -772,7 +773,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
           char: ignore_black ? '☑' : '☐',
           rgb: text_color,
           style: 'regular',
-          weight_index: 4
+          weight_index: 2
         });
         
         const ignore_black_label = 'ignore black';
@@ -781,7 +782,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             char: ignore_black_label[i]!,
             rgb: text_color,
             style: 'regular',
-            weight_index: 4
+            weight_index: 2
           });
         }
         
@@ -790,7 +791,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
           char: '█',
           rgb: { r: 0, g: 0, b: 0 },
           style: 'regular',
-          weight_index: 4
+          weight_index: 2
         });
         
         // Show ignore white checkbox and label
@@ -799,7 +800,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
           char: ignore_white ? '☑' : '☐',
           rgb: text_color,
           style: 'regular',
-          weight_index: 4
+          weight_index: 2
         });
         
         const ignore_white_label = 'ignore white';
@@ -808,7 +809,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             char: ignore_white_label[i]!,
             rgb: text_color,
             style: 'regular',
-            weight_index: 4
+            weight_index: 2
           });
         }
         
@@ -817,7 +818,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
           char: '█',
           rgb: { r: 255, g: 255, b: 255 },
           style: 'regular',
-          weight_index: 4
+          weight_index: 2
         });
         
         // Show ignore color checkbox and label
@@ -826,7 +827,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
           char: ignore_color ? '☑' : '☐',
           rgb: text_color,
           style: 'regular',
-          weight_index: 4
+          weight_index: 2
         });
         
         const ignore_color_label = 'ignore color';
@@ -835,7 +836,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             char: ignore_color_label[i]!,
             rgb: text_color,
             style: 'regular',
-            weight_index: 4
+            weight_index: 2
           });
         }
         
@@ -844,19 +845,19 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
           char: '[',
           rgb: text_color,
           style: 'regular',
-          weight_index: 3
+          weight_index: 1
         });
         c.set(rect.x0 + 15, ignore_color_y, {
           char: '█',
           rgb: ignore_color_rgb,
           style: 'regular',
-          weight_index: 4
+          weight_index: 2
         });
         c.set(rect.x0 + 16, ignore_color_y, {
           char: ']',
           rgb: text_color,
           style: 'regular',
-          weight_index: 3
+          weight_index: 1
         });
       } else if (should_render_property_rows()) {
         const rows = get_property_rows();
@@ -867,7 +868,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             char: header[i]!,
             rgb: text_color,
             style: 'regular',
-            weight_index: 4,
+            weight_index: 2,
           });
         }
         let cursor_y = rect.y1 - 3;
@@ -883,7 +884,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
                 char: label[j]!,
                 rgb: label_rgb,
                 style: 'regular',
-                weight_index: 4,
+                weight_index: 2,
               });
             }
             const left_text = row.left_enabled === false ? ' - ' : (row.left_value ? '[x]' : '[ ]');
@@ -891,10 +892,10 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             const left_rgb = active_side === 'left' ? get_color_by_name('vivid_blue').rgb : text_color;
             const right_rgb = active_side === 'right' ? get_color_by_name('vivid_red').rgb : text_color;
             for (let j = 0; j < left_text.length; j++) {
-              c.set(rect.x0 + 15 + j, y, { char: left_text[j]!, rgb: left_rgb, style: 'regular', weight_index: 4 });
+              c.set(rect.x0 + 15 + j, y, { char: left_text[j]!, rgb: left_rgb, style: 'regular', weight_index: 2 });
             }
             for (let j = 0; j < right_text.length; j++) {
-              c.set(rect.x0 + 19 + j, y, { char: right_text[j]!, rgb: right_rgb, style: 'regular', weight_index: 4 });
+              c.set(rect.x0 + 19 + j, y, { char: right_text[j]!, rgb: right_rgb, style: 'regular', weight_index: 2 });
             }
           } else if (row.type === 'dual_slider') {
             const value_label = row.format_value
@@ -906,7 +907,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
                 char: value_label[j]!,
                 rgb: text_color,
                 style: 'regular',
-                weight_index: 4,
+                weight_index: 2,
               });
             }
             const slider_y = y - 1;
@@ -914,7 +915,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             const slider_start_x = rect.x0 + 3;
             const slider_end_x = rect.x1 - 3;
             for (let sx = slider_start_x; sx <= slider_end_x; sx++) {
-              c.set(sx, slider_y, { char: '─', rgb: slider_bg, style: 'regular', weight_index: 3 });
+              c.set(sx, slider_y, { char: '─', rgb: slider_bg, style: 'regular', weight_index: 1 });
             }
             const denom = Math.max(1, row.max - row.min);
             for (let value = row.min; value <= row.max; value++) {
@@ -926,7 +927,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
                 char: is_left && is_right ? '◆' : (is_left || is_right) ? '●' : '○',
                 rgb: is_left || is_right ? slider_fg : slider_bg,
                 style: 'regular',
-                weight_index: is_left || is_right ? 5 : 3,
+                weight_index: is_left || is_right ? 2 : 1,
               });
               if (is_left || is_right) {
                 c.set(marker_x, slider_y - 1, {
@@ -937,7 +938,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
                       ? get_color_by_name('vivid_blue').rgb
                       : get_color_by_name('vivid_red').rgb,
                   style: 'regular',
-                  weight_index: 5,
+                  weight_index: 2,
                 });
               }
             }
@@ -953,7 +954,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
                 char: label[j]!,
                 rgb: label_rgb,
                 style: 'regular',
-                weight_index: 4,
+                weight_index: 2,
               });
             }
             const value_x = Math.min(rect.x1 - value.length - 1, rect.x0 + 2 + label.length + 1);
@@ -962,7 +963,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
                 char: value[j]!,
                 rgb: value_rgb,
                 style: 'regular',
-                weight_index: 5,
+                weight_index: 2,
               });
             }
           } else if (row.type === 'info') {
@@ -971,7 +972,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
                 char: row.text[j]!,
                 rgb: row.rgb ?? get_color_by_name('medium_gray').rgb,
                 style: 'regular',
-                weight_index: 3,
+                weight_index: 1,
               });
             }
           }
@@ -990,7 +991,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             char: msg[i]!,
             rgb: get_color_by_name('medium_gray').rgb,
             style: 'regular',
-            weight_index: 3
+            weight_index: 1
           });
         }
       }

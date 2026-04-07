@@ -5,38 +5,172 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>THAUMWORLD Mono UI (Canvas)</title>
 
-    <!-- Martian Mono -->
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Martian+Mono:wght@100;200;300;400;500;600;700;800&display=swap"
-          rel="stylesheet" />
-
-
     <style>
+        @font-face {
+            font-family: 'Thaum Mono';
+            src: url('/assets/ThaumMono-W80-CzIZsxYw.ttf') format('truetype');
+            font-style: normal;
+            font-weight: 80;
+        }
+
+        @font-face {
+            font-family: 'Thaum Mono';
+            src: url('/assets/ThaumMono-W160-J71pCOhV.ttf') format('truetype');
+            font-style: normal;
+            font-weight: 160;
+        }
+
+        @font-face {
+            font-family: 'Thaum Mono';
+            src: url('/assets/ThaumMono-W320-D8Xq7-oD.ttf') format('truetype');
+            font-style: normal;
+            font-weight: 320;
+        }
+
+        @font-face {
+            font-family: 'Thaum Mono';
+            src: url('/assets/ThaumMono-W640-2VHrWmGu.ttf') format('truetype');
+            font-style: normal;
+            font-weight: 640;
+        }
+
+        :root {
+            --ui-scale: 1;
+            --pan-x: 0px;
+            --pan-y: 0px;
+            --tile-w: 12px;
+            --tile-h: 16px;
+
+            /* Background dot grid: tied to canvas pan + tile size. */
+            --dot-step-mult: 1;
+            --dot-r: 1.2px;
+        }
+
         html,
         body {
             margin: 0;
             height: 100%;
-            background: #0b0b0b;
+            /* indexed color 0 (off_black) from src/mono_ui/colors.ts */
+            background-color: #120a1a;
+            /* Subtle indexed texture (deep_red) to make deformation readable */
+            background-image: radial-gradient(circle,
+                    rgba(61, 35, 41, 0.38) 0,
+                    rgba(61, 35, 41, 0.38) calc(1.1px * var(--ui-scale)),
+                    transparent calc(1.6px * var(--ui-scale)));
+            background-size: calc(var(--bg-dot-step-px) * 1px * var(--ui-scale)) calc(var(--bg-dot-step-px) * 1px * var(--ui-scale));
+            overflow: hidden;
         }
 
         #root {
             height: 100%;
-            display: grid;
-            place-items: center;
+            width: 100%;
+            overflow: hidden;
+            position: relative;
+            display: block;
+        }
+
+        #bg_dots {
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+            /* Subtle indexed texture (deep_red) to make deformation readable */
+            background-image: radial-gradient(circle,
+                    rgba(61, 35, 41, 0.38) 0,
+                    rgba(61, 35, 41, 0.38) calc(var(--dot-r) * var(--ui-scale)),
+                    transparent calc((var(--dot-r) + 0.8px) * var(--ui-scale)));
+
+            /* Move WITH the canvas (and lock step to tile sizes). */
+            background-position: var(--pan-x) var(--pan-y);
+            background-size: calc(var(--tile-w) * var(--dot-step-mult)) calc(var(--tile-h) * var(--dot-step-mult));
         }
 
         canvas {
             image-rendering: pixelated;
+            position: absolute;
+            left: 0;
+            top: 0;
+            will-change: transform;
+            filter: url(#uiTextureDeform);
+        }
+
+        /* Voxel Layer Container */
+        #voxel_layers_container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 5;
+            overflow: hidden;
+        }
+
+        /* Individual Voxel Layer Canvases */
+        .voxel-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            transform-origin: center center;
+            will-change: transform;
+            image-rendering: pixelated;
+            pointer-events: none;
+        }
+
+        /* UI Layer (mono_canvas) should be above voxel layers */
+        #mono_canvas {
+            z-index: 10;
         }
     </style>
-  <script type="module" crossorigin src="/assets/index-B6tDGDZk.js"></script>
+  <script type="module" crossorigin src="/assets/index-DgXghouk.js"></script>
 </head>
 
 <body>
     <div id="root">
+        <div id="bg_dots" aria-hidden="true"></div>
+        <div id="voxel_layers_container"></div>
         <canvas id="mono_canvas"></canvas>
     </div>
+
+    <!-- SVG filter for texture deformation (2-pass turbulence displacement).
+         Strength/frequency are tuned at runtime based on UI scale in src/canvas_app/main.ts. -->
+    <svg width="0" height="0" style="position: absolute; left: -9999px; top: -9999px;">
+        <filter id="uiTextureDeform"
+                x="-20%" y="-20%" width="140%" height="140%"
+                color-interpolation-filters="sRGB"
+                primitiveUnits="userSpaceOnUse">
+
+            <!-- A) Wobble: large kernels (~5-10 glyphs), paper breathing -->
+            <feTurbulence id="uiNoiseWobble"
+                          type="fractalNoise"
+                          baseFrequency="0.0065"
+                          numOctaves="1"
+                          seed="11"
+                          result="noiseWobble" />
+            <feOffset id="uiOffsetWobble" in="noiseWobble" dx="0" dy="0" result="noiseWobbleShift" />
+            <feDisplacementMap id="uiDispWobble"
+                               in="SourceGraphic"
+                               in2="noiseWobbleShift"
+                               scale="7.5"
+                               xChannelSelector="R"
+                               yChannelSelector="G"
+                               result="wobbled" />
+
+            <!-- B) Texture: smaller kernels (edge texture) -->
+            <feTurbulence id="uiNoiseTexture"
+                          type="fractalNoise"
+                          baseFrequency="0.11"
+                          numOctaves="2"
+                          seed="23"
+                          result="noiseTexture" />
+            <feOffset id="uiOffsetTexture" in="noiseTexture" dx="0" dy="0" result="noiseTextureShift" />
+            <feDisplacementMap id="uiDispTexture"
+                               in="wobbled"
+                               in2="noiseTextureShift"
+                               scale="4"
+                               xChannelSelector="R"
+                               yChannelSelector="G" />
+        </filter>
+    </svg>
 
     <textarea id="key_sink"
               autocapitalize="off"

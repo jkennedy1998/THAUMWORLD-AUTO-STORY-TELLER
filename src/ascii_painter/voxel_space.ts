@@ -11,6 +11,44 @@ import type { Grid, GridCell, GridExport } from './types.js';
 import type { EditPlaneId, GridPoint } from './types.js';
 import type { Voxel3 } from '../shared/coords.js';
 
+function clamp_imported_weight_index(weight_index: unknown): number {
+  const value = typeof weight_index === 'number' ? Math.trunc(weight_index) : 1;
+  if (!Number.isFinite(value)) return 1;
+  return Math.max(0, Math.min(3, value));
+}
+
+function clamp_imported_color_channel(value: unknown): number {
+  const n = typeof value === 'number' ? Math.round(value) : 255;
+  if (!Number.isFinite(n)) return 255;
+  return Math.max(0, Math.min(255, n));
+}
+
+function sanitize_imported_layer_cells(cells: unknown, width: number, height: number): GridCell[][] {
+  const rows = Array.isArray(cells) ? cells : [];
+  const sanitized: GridCell[][] = [];
+  for (let y = 0; y < height; y += 1) {
+    const row = Array.isArray(rows[y]) ? rows[y] : [];
+    const out_row: GridCell[] = [];
+    for (let x = 0; x < width; x += 1) {
+      const cell = row[x];
+      const maybe = cell && typeof cell === 'object' ? cell as Record<string, unknown> : null;
+      const char_value = typeof maybe?.char === 'string' && maybe.char.length > 0 ? maybe.char[0]! : ' ';
+      const rgb_value = maybe?.rgb && typeof maybe.rgb === 'object' ? maybe.rgb as Record<string, unknown> : {};
+      out_row.push({
+        char: char_value,
+        rgb: {
+          r: clamp_imported_color_channel(rgb_value.r),
+          g: clamp_imported_color_channel(rgb_value.g),
+          b: clamp_imported_color_channel(rgb_value.b),
+        },
+        weight_index: clamp_imported_weight_index(maybe?.weight_index),
+      });
+    }
+    sanitized.push(out_row);
+  }
+  return sanitized;
+}
+
 /**
  * Camera modes for viewing the voxel space
  * These are VIEW transformations, not data modes
@@ -96,8 +134,8 @@ export const DEFAULT_CAMERA_VALUES = {
   scale_per_layer: 0.12,
   movement_per_layer: 29,
   base_layer_scale: 1.0,
-  char_spacing_x: 0.9,      // Match PAINTER_CONFIG: 1 + (-0.10) letter spacing
-  char_spacing_y: 0.93125,  // Match PAINTER_CONFIG: 29.8/32 line height
+  char_spacing_x: 1.0,
+  char_spacing_y: 1.0,
   pan_x: 0,
   pan_y: 0,
 };
@@ -586,29 +624,46 @@ export function importVoxelSpace(data: VoxelSpaceExport): VoxelSpace {
   if (data.version !== 2) {
     throw new Error(`Unsupported VoxelSpace version: ${data.version}`);
   }
+
+  const bounds_width = Math.max(1, Math.floor(Number(data?.bounds?.width ?? 1)) || 1);
+  const bounds_height = Math.max(1, Math.floor(Number(data?.bounds?.height ?? 1)) || 1);
+  const bounds_depth = Math.max(1, Math.floor(Number(data?.bounds?.depth ?? 1)) || 1);
+  const bounds_min_z = Math.floor(Number(data?.bounds?.minZ ?? 0)) || 0;
+  const bounds_max_z = Math.floor(Number(data?.bounds?.maxZ ?? (bounds_min_z + bounds_depth - 1))) || (bounds_min_z + bounds_depth - 1);
   
   const layers = new Map<number, VoxelLayer>();
   
-  for (const layerData of data.layers) {
+  for (const layerData of Array.isArray(data.layers) ? data.layers : []) {
     const layer: VoxelLayer = {
-      z: layerData.z,
-      name: layerData.name,
-      visible: layerData.visible,
-      opacity: layerData.opacity,
-      locked: layerData.locked,
-      cells: layerData.cells.map(row =>
-        row.map(cell => ({
-          char: cell.char,
-          rgb: { ...cell.rgb },
-          weight_index: cell.weight_index,
-        }))
-      ),
+      z: Math.floor(Number(layerData?.z ?? 0)) || 0,
+      name: typeof layerData?.name === 'string' ? layerData.name : 'Layer',
+      visible: layerData?.visible !== false,
+      opacity: Number.isFinite(Number(layerData?.opacity)) ? Math.max(0, Math.min(1, Number(layerData.opacity))) : 1,
+      locked: layerData?.locked === true,
+      cells: sanitize_imported_layer_cells(layerData?.cells, bounds_width, bounds_height),
     };
     layers.set(layer.z, layer);
   }
+
+  if (layers.size < 1) {
+    layers.set(0, {
+      z: 0,
+      name: 'Layer 0',
+      visible: true,
+      opacity: 1,
+      locked: false,
+      cells: sanitize_imported_layer_cells([], bounds_width, bounds_height),
+    });
+  }
   
   return {
-    bounds: { ...data.bounds },
+    bounds: {
+      width: bounds_width,
+      height: bounds_height,
+      depth: Math.max(1, bounds_max_z - bounds_min_z + 1, bounds_depth),
+      minZ: Math.min(bounds_min_z, bounds_max_z),
+      maxZ: Math.max(bounds_min_z, bounds_max_z),
+    },
     layers,
     camera: { ...(data.camera ?? createDefaultCamera()) },
     metadata: data.metadata ? { ...data.metadata } : undefined,

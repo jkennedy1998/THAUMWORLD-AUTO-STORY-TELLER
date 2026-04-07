@@ -95,7 +95,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
   function getBrushForButton(button: number): Brush {
     if (opts.get_brush_for_button) return opts.get_brush_for_button(button === 2 ? 2 : 0);
-    return opts.brush ?? opts.get_preview_brush?.() ?? { char: '█', rgb: get_color_by_name('off_white').rgb, weight_index: 4 };
+    return opts.brush ?? opts.get_preview_brush?.() ?? { char: '█', rgb: get_color_by_name('off_white').rgb, weight_index: 2 };
   }
 
   function getBrushSizeForButton(button: number): number {
@@ -249,6 +249,16 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   // Paste preview state
   let paste_preview_data: CopyData | null = null;
   let paste_preview_pos: { x: number; y: number } | null = null;
+
+  function exitTextMode(commitPending: boolean): void {
+    if (!text_mode_active) return;
+    if (commitPending && pending_changes.length > 0) {
+      logCellAction(opts.history, 'draw_cells', 'Type Text', opts.get_selected_z(), pending_changes);
+      pending_changes = [];
+      opts.on_push_snapshot();
+    }
+    text_mode_active = false;
+  }
 
   // Function to emit viewport updates for DOM renderer
   function emitViewport() {
@@ -543,9 +553,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
     Draw(c: Canvas): void {
       updateFlash();
-      
-      const bg_color = get_color_by_name('off_black').rgb;
-      c.fill_rect(rect, { char: ' ', rgb: bg_color, style: 'regular' });
 
       const totalPan = getTotalPan();
       const viewport_width = getViewportWidth();
@@ -647,7 +654,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
                 char: '•',
                 rgb: border_color,
                 style: 'regular',
-                weight_index: 5,
+                weight_index: 2,
                 render_index: 2
               });
             } else if (is_empty && flash_state === 1) {
@@ -656,7 +663,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
                 char: '•',
                 rgb: flash_color,
                 style: 'regular',
-                weight_index: 3,
+                weight_index: 1,
                 render_index: 2
               });
             }
@@ -786,7 +793,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
               char: preview_char,
               rgb: preview_color,
               style: 'regular',
-              weight_index: 5,
+              weight_index: 2,
               render_index: 1
             });
           }
@@ -803,7 +810,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             char: msg[i]!,
             rgb: status_color,
             style: 'regular',
-            weight_index: 5,
+            weight_index: 2,
             render_index: 10
           });
         }
@@ -848,7 +855,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             char: '_',
             rgb: cursor_color,
             style: 'regular',
-            weight_index: 6,
+            weight_index: 3,
             render_index: 2
           });
         }
@@ -868,7 +875,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             char: debug_text[i] ?? ' ',
             rgb: debug_color,
             style: 'regular',
-            weight_index: 5,
+            weight_index: 2,
             render_index: 999
           });
         }
@@ -902,33 +909,33 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (x0 <= x1 && y0 <= y1) {
           for (let x = x0; x <= x1; x++) {
             if (bottom >= rect.y0 && bottom <= rect.y1) {
-              c.set(x, bottom, { char: '─', rgb: bounds_color, style: 'regular', weight_index: 3, render_index: 996 });
+              c.set(x, bottom, { char: '─', rgb: bounds_color, style: 'regular', weight_index: 1, render_index: 996 });
             }
             if (top >= rect.y0 && top <= rect.y1) {
-              c.set(x, top, { char: '─', rgb: bounds_color, style: 'regular', weight_index: 3, render_index: 996 });
+              c.set(x, top, { char: '─', rgb: bounds_color, style: 'regular', weight_index: 1, render_index: 996 });
             }
           }
 
           for (let y = y0; y <= y1; y++) {
             if (left >= rect.x0 && left <= rect.x1) {
-              c.set(left, y, { char: '│', rgb: bounds_color, style: 'regular', weight_index: 3, render_index: 996 });
+              c.set(left, y, { char: '│', rgb: bounds_color, style: 'regular', weight_index: 1, render_index: 996 });
             }
             if (right >= rect.x0 && right <= rect.x1) {
-              c.set(right, y, { char: '│', rgb: bounds_color, style: 'regular', weight_index: 3, render_index: 996 });
+              c.set(right, y, { char: '│', rgb: bounds_color, style: 'regular', weight_index: 1, render_index: 996 });
             }
           }
 
           if (left >= rect.x0 && left <= rect.x1 && bottom >= rect.y0 && bottom <= rect.y1) {
-            c.set(left, bottom, { char: '└', rgb: bounds_color, style: 'regular', weight_index: 3, render_index: 996 });
+            c.set(left, bottom, { char: '└', rgb: bounds_color, style: 'regular', weight_index: 1, render_index: 996 });
           }
           if (right >= rect.x0 && right <= rect.x1 && bottom >= rect.y0 && bottom <= rect.y1) {
-            c.set(right, bottom, { char: '┘', rgb: bounds_color, style: 'regular', weight_index: 3, render_index: 996 });
+            c.set(right, bottom, { char: '┘', rgb: bounds_color, style: 'regular', weight_index: 1, render_index: 996 });
           }
           if (left >= rect.x0 && left <= rect.x1 && top >= rect.y0 && top <= rect.y1) {
-            c.set(left, top, { char: '┌', rgb: bounds_color, style: 'regular', weight_index: 3, render_index: 996 });
+            c.set(left, top, { char: '┌', rgb: bounds_color, style: 'regular', weight_index: 1, render_index: 996 });
           }
           if (right >= rect.x0 && right <= rect.x1 && top >= rect.y0 && top <= rect.y1) {
-            c.set(right, top, { char: '┐', rgb: bounds_color, style: 'regular', weight_index: 3, render_index: 996 });
+            c.set(right, top, { char: '┐', rgb: bounds_color, style: 'regular', weight_index: 1, render_index: 996 });
           }
         }
       }
@@ -942,7 +949,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             char: 'M',
             rgb: get_color_by_name('vivid_magenta').rgb,
             style: 'bold',
-            weight_index: 5,
+            weight_index: 2,
             render_index: 997
           });
         }
@@ -960,7 +967,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             char: 'X',
             rgb: get_color_by_name('vivid_green').rgb,
             style: 'bold',
-            weight_index: 5,
+            weight_index: 2,
             render_index: 1000
           });
         }
@@ -973,7 +980,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             char: '+',
             rgb: get_color_by_name('vivid_red').rgb,
             style: 'bold',
-            weight_index: 5,
+            weight_index: 2,
             render_index: 1001
           });
         }
@@ -1156,6 +1163,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         }
 
         if (tool_for_button === 'text') {
+          text_mode_active = false;
           text_mode_active = true;
           text_cursor_x = grid_x;
           text_cursor_y = grid_y;
@@ -1966,13 +1974,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         }
         
         if (e.key === 'Escape') {
-          // Log text action before exiting text mode
-          if (pending_changes.length > 0) {
-            logCellAction(opts.history, 'draw_cells', `Type Text`, selected_z, pending_changes);
-            pending_changes = [];
-            opts.on_push_snapshot();
-          }
-          text_mode_active = false;
+          exitTextMode(true);
           e.preventDefault();
           return;
         }
@@ -2102,6 +2104,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     },
 
     OnBlur(): void {
+      exitTextMode(true);
       space_held = false;
       is_panning = false;
       is_drawing = false;
