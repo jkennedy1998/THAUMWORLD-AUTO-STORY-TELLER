@@ -1,4 +1,5 @@
 import type { RenderContext, RenderSpace, RenderUiState, RenderWhere } from "./types.js";
+import type { CardinalDirection, ViewDirection } from "./graphics_contract.js";
 
 export function make_render_ctx(where: RenderWhere, space: RenderSpace, ui?: RenderUiState): RenderContext {
     return { where, space, ui };
@@ -16,12 +17,15 @@ type PlaceTileCtxOpts = {
     focus_world_z?: number;
     place_base_z?: number;
     breath_index?: number;
+    view_direction?: ViewDirection;
+    light_mag?: number;
+    tile_neighbors?: Partial<Record<CardinalDirection, string | null>>;
 };
 
 export function ctx_place_tile(ui?: RenderUiState): RenderContext;
 export function ctx_place_tile(opts?: PlaceTileCtxOpts): RenderContext;
 export function ctx_place_tile(arg?: RenderUiState | PlaceTileCtxOpts): RenderContext {
-    const opts = (arg && ('ui' in arg || 'screen_x' in arg || 'screen_y' in arg || 'place_x' in arg || 'place_y' in arg || 'world_x' in arg || 'world_y' in arg || 'world_z' in arg || 'focus_world_z' in arg || 'place_base_z' in arg || 'breath_index' in arg))
+    const opts = (arg && ('ui' in arg || 'screen_x' in arg || 'screen_y' in arg || 'place_x' in arg || 'place_y' in arg || 'world_x' in arg || 'world_y' in arg || 'world_z' in arg || 'focus_world_z' in arg || 'place_base_z' in arg || 'breath_index' in arg || 'view_direction' in arg || 'light_mag' in arg || 'tile_neighbors' in arg))
         ? arg as PlaceTileCtxOpts
         : { ui: arg as RenderUiState | undefined };
     return {
@@ -38,6 +42,9 @@ export function ctx_place_tile(arg?: RenderUiState | PlaceTileCtxOpts): RenderCo
         focus_world_z: opts?.focus_world_z,
         place_base_z: opts?.place_base_z,
         breath_index: opts?.breath_index,
+        view_direction: opts?.view_direction,
+        light_mag: opts?.light_mag,
+        tile_neighbors: opts?.tile_neighbors,
     };
 }
 

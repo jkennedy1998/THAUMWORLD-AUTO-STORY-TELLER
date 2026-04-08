@@ -19,6 +19,7 @@ import { normalize_place_character_presence_records } from "../shared/place_char
 import { normalize_ground_scattered } from "./ground_normalize.js";
 import { get_region_place_index_record, list_place_ids_in_region_index, list_region_place_index_records, remove_place_from_region_place_index, sync_place_to_region_place_index } from "./region_place_index.js";
 import { sync_region_place_graph_for_place } from "./region_place_graph.js";
+import { resolve_light_mag } from "../mag/index.js";
 
 const PLACES_DIR = "places";
 
@@ -134,6 +135,21 @@ function normalize_place_region_bounds_to_content(place: Place): { changed: bool
   return { changed, used_min_z, used_max_z };
 }
 
+function migrate_place_environment_light_mag(place: Place): boolean {
+  const env_any = ((place as any).environment ??= {});
+  const next_light_mag = resolve_light_mag(env_any.light_mag, env_any.lighting);
+  let changed = false;
+  if (env_any.light_mag !== next_light_mag) {
+    env_any.light_mag = next_light_mag;
+    changed = true;
+  }
+  if (Object.prototype.hasOwnProperty.call(env_any, 'lighting')) {
+    delete env_any.lighting;
+    changed = true;
+  }
+  return changed;
+}
+
 /**
  * Load a place from storage
  */
@@ -194,6 +210,7 @@ export function load_place(slot: number, place_id: string): PlaceResult {
       };
       dirty = true;
     }
+    if (migrate_place_environment_light_mag(place)) dirty = true;
     const normalized_bounds = normalize_place_region_bounds_to_content(place);
     if (normalized_bounds.changed) dirty = true;
     if (!Array.isArray(place.place_connectors)) {
@@ -268,6 +285,8 @@ export function load_place(slot: number, place_id: string): PlaceResult {
             (tile as any).display_color = r.display_color;
             (tile as any).container_glyphs = r.container_glyphs ?? null;
             (tile as any).render_shader = r.render_shader ?? undefined;
+            (tile as any).graphics = r.graphics ?? undefined;
+            (tile as any).material_options = r.material_options ?? undefined;
             (tile as any).__derived_runtime = true;
           }
         }
@@ -298,6 +317,8 @@ export function load_place(slot: number, place_id: string): PlaceResult {
           (s as any).tags = r.effective_tags;
           (s as any).container_glyphs = r.container_glyphs ?? null;
           (s as any).render_shader = r.render_shader ?? undefined;
+          (s as any).graphics = r.graphics ?? undefined;
+          (s as any).material_options = r.material_options ?? undefined;
 
           const bm = (r.def as any)?.body_model;
           const phys_raw = Array.isArray(bm?.physical) ? bm.physical : null;
@@ -359,6 +380,7 @@ export function save_place(slot: number, place: Place): string {
   const persisted = JSON.parse(JSON.stringify(place)) as Place;
   normalize_place_region_bounds_to_content(persisted);
   normalize_place_character_presence_records(persisted as any);
+  migrate_place_environment_light_mag(persisted);
 
   // defs+deltas migration: strip derived/legacy inline fields before persisting.
   // (Important because some API paths augment tiles/items for UI and may later save.)
@@ -530,7 +552,7 @@ export function create_basic_place(
     region_connectors: [],
     connections: [],
     environment: {
-      lighting: "bright",
+      light_mag: 1,
       terrain: "dirt",
       cover_available: [],
       temperature_offset: 0

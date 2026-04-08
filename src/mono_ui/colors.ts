@@ -137,3 +137,34 @@ export function get_color_by_index(index: number): IndexedColor {
 export function list_indexed_colors(): readonly IndexedColor[] {
     return INDEXED_COLORS;
 }
+
+export function get_darkest_indexed_rgb(): Rgb {
+    return { ...INDEXED_COLORS[0]!.rgb };
+}
+
+export function get_brightest_indexed_rgb(): Rgb {
+    return { ...INDEXED_COLORS[1]!.rgb };
+}
+
+export function nearest_indexed_rgb(rgb: Rgb): Rgb {
+    const safe = {
+        r: Number.isFinite(rgb?.r) ? Math.max(0, Math.min(255, Math.round(rgb.r))) : 0,
+        g: Number.isFinite(rgb?.g) ? Math.max(0, Math.min(255, Math.round(rgb.g))) : 0,
+        b: Number.isFinite(rgb?.b) ? Math.max(0, Math.min(255, Math.round(rgb.b))) : 0,
+    };
+    let best = INDEXED_COLORS[0]?.rgb ?? { r: 255, g: 255, b: 255 };
+    let best_d = Number.POSITIVE_INFINITY;
+
+    for (const c of INDEXED_COLORS) {
+        const dr = c.rgb.r - safe.r;
+        const dg = c.rgb.g - safe.g;
+        const db = c.rgb.b - safe.b;
+        const d = (dr * dr) + (dg * dg) + (db * db);
+        if (d < best_d) {
+            best_d = d;
+            best = c.rgb;
+        }
+    }
+
+    return { ...best };
+}

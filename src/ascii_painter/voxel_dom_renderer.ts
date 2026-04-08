@@ -430,6 +430,8 @@ export class VoxelDOMRenderer {
           cell: { ...cell, weight_index: weightIndex },
           center_x_px: px,
           center_y_px: py,
+          cell_w_px: cellW,
+          cell_h_px: cellH,
           font_family: this.fontFamily,
           font_size_px: fontSizePx,
           weight_index_to_css: this.weightIndexToCss,

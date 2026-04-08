@@ -275,10 +275,15 @@ export function make_owner_inventory_module(opts: OwnerInventoryModuleConfig): M
                     id: slot.item.def_id,
                     name: slot.item.name,
                     display_char: slot.item.display_char,
+                    graphics: slot.item.graphics,
+                    materials: slot.item.material_options,
                     tags: slot.item.tags,
                     resolved_tag_states: slot.item.resolved_tag_states,
                     value_mag: slot.item.value_mag,
                   } as unknown as ItemDefinition;
+                  (item_instance as any).materials = slot.item.materials;
+                  (item_instance as any).state = slot.item.state;
+                  (item_instance as any).facing = slot.item.facing;
                   rq.push({
                     pass: "item",
                     x: slot_x,

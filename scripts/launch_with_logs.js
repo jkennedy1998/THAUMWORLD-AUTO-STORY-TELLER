@@ -9,6 +9,7 @@ import path from "path";
 import { spawn } from "child_process";
 import { fileURLToPath, pathToFileURL } from "url";
 import { acquireHostLaunchLock, detectLocalHost, detectVite, readHostLaunchLock, recoverHostLaunchLock, releaseHostLaunchLock, waitForLocalHost, writeHostSessionFile } from "./launcher_common.mjs";
+import { syncAtlasAssets } from "./atlas_sync.mjs";
 
 // Get __dirname in ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -25,6 +26,15 @@ console.log("🎮 Starting THAUMWORLD with log capture...");
 console.log(`💾 Data slot: ${data_slot}`);
 console.log(`🧭 Launch mode: ${launch_mode}`);
 console.log("");
+
+const atlasSync = syncAtlasAssets();
+if (atlasSync.missingSource) {
+  console.warn(`⚠️ atlas sync source missing: ${atlasSync.sourceDir}`);
+} else if (atlasSync.copied.length > 0) {
+  console.log(`🖼️ atlas sync copied: ${atlasSync.copied.join(', ')}`);
+} else {
+  console.log(`🖼️ atlas sync: no atlas copies needed`);
+}
 
 // Import the compiled log capture module
 const log_capture_path = path.join(__dirname, "..", "dist", "launcher", "log_capture.js");

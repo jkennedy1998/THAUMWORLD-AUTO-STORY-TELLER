@@ -5,6 +5,35 @@
   "weight": 4,
   "display_char": "⍞",
   "display_color": "#8B4513",
+  "graphics": {
+    "base_graphic_id": "tile_chest_single_closed",
+    "default_weight": 1,
+    "views": {
+      "north": { "graphic_id": "tile_chest_single_closed" },
+      "south": { "same_as": "north" },
+      "east": { "same_as": "north" },
+      "west": { "same_as": "north" },
+      "up": { "same_as": "north" },
+      "down": { "same_as": "north" }
+    },
+    "overrides": [
+      {
+        "kind": "state",
+        "when_state": [
+          { "path": "open", "equals": true }
+        ],
+        "graphic_id": "tile_chest_single_open"
+      }
+    ]
+  },
+  "materials": {
+    "defaults": {
+      "1": "WOOD_LIVE"
+    },
+    "allowed": {
+      "1": ["WOOD_LIVE"]
+    }
+  },
   "tags": [
     {
       "name": "STRUCTURE",

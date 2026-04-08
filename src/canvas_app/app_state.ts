@@ -72,6 +72,7 @@ import {
     get_theme_font_family,
     get_theme_weight_index_to_css,
 } from '../mono_ui/runtime/render_theme.js';
+import { build_visible_plane_coordinates, get_principal_view_plane_axis, make_place_view_state, normalize_place_principal_view, normalize_place_view_roll_quarter_turn, rotate_place_view_roll, swing_place_view, type PlacePrincipalView, type PlaceViewRollQuarterTurn } from '../mono_ui/runtime/place_view_projection.js';
 
 export const APP_CONFIG = {
     render_backend: THAUMWORLD_RENDER_THEME.backend,
@@ -497,6 +498,9 @@ export function create_app_state(): AppState {
             },
             // World focus layer for Place DOM renderer (0/1/2)
             focus_z: 0,
+            principal_view: 'top' as PlacePrincipalView,
+            view_roll_quarter_turn: 0 as PlaceViewRollQuarterTurn,
+            use_focus_layer_opacity: true,
             // World-Z center for the 3-layer viewport window.
             // Interpreted as an absolute elevation value; layers represent [center-1, center, center+1].
             world_z_center: 0,
@@ -3626,6 +3630,10 @@ export function create_app_state(): AppState {
 
     const MODULE_LAYOUT_STORAGE_KEY = 'thaumworld:module_layout:v1';
     const PLACE_FOCUS_Z_STORAGE_KEY = 'thaumworld:place_focus_z:v1';
+    const PLACE_PRINCIPAL_VIEW_STORAGE_KEY = 'thaumworld:place_principal_view:v1';
+    const PLACE_MATRIX_VIEW_DIRECTION_STORAGE_KEY = 'thaumworld:place_matrix_view_direction:v1';
+    const PLACE_VIEW_ROLL_STORAGE_KEY = 'thaumworld:place_view_roll_quarter_turn:v1';
+    const PLACE_FOCUS_LAYER_OPACITY_STORAGE_KEY = 'thaumworld:place_focus_layer_opacity:v1';
     const PLACE_PAINTER_PREFS_STORAGE_KEY = 'thaumworld:place_painter_prefs:v1';
     const PLACE_VISIBLE_PLANE_RADIUS = 0;
 
@@ -3678,6 +3686,96 @@ export function create_app_state(): AppState {
         } catch {
             // ignore
         }
+    }
+
+    function load_place_principal_view(): void {
+        try {
+            const raw = window.localStorage.getItem(PLACE_PRINCIPAL_VIEW_STORAGE_KEY) ?? window.localStorage.getItem(PLACE_MATRIX_VIEW_DIRECTION_STORAGE_KEY);
+            if (!raw) return;
+            ui_state.place.principal_view = normalize_place_principal_view(raw === 'north' ? 'top' : raw);
+        } catch {
+            // ignore
+        }
+    }
+
+    function load_place_view_roll_quarter_turn(): void {
+        try {
+            const raw = window.localStorage.getItem(PLACE_VIEW_ROLL_STORAGE_KEY);
+            if (!raw) return;
+            ui_state.place.view_roll_quarter_turn = normalize_place_view_roll_quarter_turn(raw);
+        } catch {
+            // ignore
+        }
+    }
+
+    function load_place_focus_layer_opacity(): void {
+        try {
+            const raw = window.localStorage.getItem(PLACE_FOCUS_LAYER_OPACITY_STORAGE_KEY);
+            if (!raw) return;
+            ui_state.place.use_focus_layer_opacity = raw !== 'false';
+        } catch {
+            // ignore
+        }
+    }
+
+    function save_place_principal_view(): void {
+        try {
+            window.localStorage.setItem(PLACE_PRINCIPAL_VIEW_STORAGE_KEY, ui_state.place.principal_view);
+        } catch {
+            // ignore
+        }
+    }
+
+    function save_place_view_roll_quarter_turn(): void {
+        try {
+            window.localStorage.setItem(PLACE_VIEW_ROLL_STORAGE_KEY, String(ui_state.place.view_roll_quarter_turn));
+        } catch {
+            // ignore
+        }
+    }
+
+    function save_place_focus_layer_opacity(): void {
+        try {
+            window.localStorage.setItem(PLACE_FOCUS_LAYER_OPACITY_STORAGE_KEY, ui_state.place.use_focus_layer_opacity ? 'true' : 'false');
+        } catch {
+            // ignore
+        }
+    }
+
+    function set_place_principal_view(next: PlacePrincipalView): void {
+        ui_state.place.principal_view = normalize_place_principal_view(next);
+        save_place_principal_view();
+    }
+
+    function set_place_view_roll_quarter_turn(next: PlaceViewRollQuarterTurn): void {
+        ui_state.place.view_roll_quarter_turn = normalize_place_view_roll_quarter_turn(next);
+        save_place_view_roll_quarter_turn();
+    }
+
+    function set_place_focus_layer_opacity_enabled(enabled: boolean): void {
+        ui_state.place.use_focus_layer_opacity = !!enabled;
+        save_place_focus_layer_opacity();
+    }
+
+    function toggle_place_focus_layer_opacity(): boolean {
+        set_place_focus_layer_opacity_enabled(!ui_state.place.use_focus_layer_opacity);
+        return ui_state.place.use_focus_layer_opacity;
+    }
+
+    function swing_place_camera(direction: 'left' | 'right' | 'up' | 'down'): void {
+        const next = swing_place_view(make_place_view_state(ui_state.place.principal_view, ui_state.place.view_roll_quarter_turn), direction);
+        ui_state.place.principal_view = next.principal_view;
+        ui_state.place.view_roll_quarter_turn = next.roll_quarter_turn;
+        save_place_principal_view();
+        save_place_view_roll_quarter_turn();
+    }
+
+    function roll_place_camera(direction: 'left' | 'right'): void {
+        const next = rotate_place_view_roll(make_place_view_state(ui_state.place.principal_view, ui_state.place.view_roll_quarter_turn), direction);
+        ui_state.place.principal_view = next.principal_view;
+        ui_state.place.view_roll_quarter_turn = next.roll_quarter_turn;
+        save_place_principal_view();
+        save_place_view_roll_quarter_turn();
     }
 
     let persist_timer: number | null = null;
@@ -3824,6 +3922,9 @@ export function create_app_state(): AppState {
     // Load persisted module state early so it affects initial rects/visibility.
     load_persisted_module_layout();
     load_place_focus_z();
+    load_place_principal_view();
+    load_place_view_roll_quarter_turn();
+    load_place_focus_layer_opacity();
     load_place_painter_prefs();
 
     // Shared drag state for cross-module drag-and-drop
@@ -5727,6 +5828,142 @@ export function create_app_state(): AppState {
 
     function build_debug_commander_actions(): DebugCommanderAction[] {
         return [
+            {
+                id: 'place_view_swing_left',
+                label: 'SWING LEFT',
+                description: 'swing camera left 90 degrees',
+                rgb: get_color_by_name('vivid_cyan').rgb,
+                on_trigger: () => {
+                    swing_place_camera('left');
+                    flash_status([`View: ${ui_state.place.principal_view} r${ui_state.place.view_roll_quarter_turn}`], 900);
+                },
+            },
+            {
+                id: 'place_view_swing_right',
+                label: 'SWING RIGHT',
+                description: 'swing camera right 90 degrees',
+                rgb: get_color_by_name('vivid_cyan').rgb,
+                on_trigger: () => {
+                    swing_place_camera('right');
+                    flash_status([`View: ${ui_state.place.principal_view} r${ui_state.place.view_roll_quarter_turn}`], 900);
+                },
+            },
+            {
+                id: 'place_view_swing_up',
+                label: 'SWING UP',
+                description: 'swing camera up 90 degrees',
+                rgb: get_color_by_name('vivid_cyan').rgb,
+                on_trigger: () => {
+                    swing_place_camera('up');
+                    flash_status([`View: ${ui_state.place.principal_view} r${ui_state.place.view_roll_quarter_turn}`], 900);
+                },
+            },
+            {
+                id: 'place_view_swing_down',
+                label: 'SWING DOWN',
+                description: 'swing camera down 90 degrees',
+                rgb: get_color_by_name('vivid_cyan').rgb,
+                on_trigger: () => {
+                    swing_place_camera('down');
+                    flash_status([`View: ${ui_state.place.principal_view} r${ui_state.place.view_roll_quarter_turn}`], 900);
+                },
+            },
+            {
+                id: 'place_view_roll_left',
+                label: 'ROLL LEFT',
+                description: 'roll camera left 90 degrees',
+                rgb: get_color_by_name('vivid_blue').rgb,
+                on_trigger: () => {
+                    roll_place_camera('left');
+                    flash_status([`View: ${ui_state.place.principal_view} r${ui_state.place.view_roll_quarter_turn}`], 900);
+                },
+            },
+            {
+                id: 'place_view_roll_right',
+                label: 'ROLL RIGHT',
+                description: 'roll camera right 90 degrees',
+                rgb: get_color_by_name('vivid_blue').rgb,
+                on_trigger: () => {
+                    roll_place_camera('right');
+                    flash_status([`View: ${ui_state.place.principal_view} r${ui_state.place.view_roll_quarter_turn}`], 900);
+                },
+            },
+            {
+                id: 'place_focus_layer_opacity_toggle',
+                label: ui_state.place.use_focus_layer_opacity ? 'FOCUS OPACITY: ON' : 'FOCUS OPACITY: OFF',
+                description: 'toggle opacity fade on unfocused place layers',
+                rgb: get_color_by_name('light_orange').rgb,
+                on_trigger: () => {
+                    const enabled = toggle_place_focus_layer_opacity();
+                    flash_status([`Focus opacity: ${enabled ? 'on' : 'off'}`], 900);
+                },
+            },
+            {
+                id: 'place_view_top',
+                label: ui_state.place.principal_view === 'top' ? 'VIEW TOP*' : 'VIEW TOP',
+                description: 'set place view top',
+                rgb: get_color_by_name('vivid_cyan').rgb,
+                on_trigger: () => {
+                    set_place_principal_view('top');
+                    set_place_view_roll_quarter_turn(0);
+                    flash_status(['Place view: top'], 900);
+                },
+            },
+            {
+                id: 'place_view_bottom',
+                label: ui_state.place.principal_view === 'bottom' ? 'VIEW BOTTOM*' : 'VIEW BOTTOM',
+                description: 'set place view bottom',
+                rgb: get_color_by_name('vivid_cyan').rgb,
+                on_trigger: () => {
+                    set_place_principal_view('bottom');
+                    set_place_view_roll_quarter_turn(0);
+                    flash_status(['Place view: bottom'], 900);
+                },
+            },
+            {
+                id: 'place_view_north',
+                label: ui_state.place.principal_view === 'north' ? 'VIEW NORTH*' : 'VIEW NORTH',
+                description: 'set place view north',
+                rgb: get_color_by_name('vivid_blue').rgb,
+                on_trigger: () => {
+                    set_place_principal_view('north');
+                    set_place_view_roll_quarter_turn(0);
+                    flash_status(['Place view: north'], 900);
+                },
+            },
+            {
+                id: 'place_view_east',
+                label: ui_state.place.principal_view === 'east' ? 'VIEW EAST*' : 'VIEW EAST',
+                description: 'set place view east',
+                rgb: get_color_by_name('vivid_blue').rgb,
+                on_trigger: () => {
+                    set_place_principal_view('east');
+                    set_place_view_roll_quarter_turn(0);
+                    flash_status(['Place view: east'], 900);
+                },
+            },
+            {
+                id: 'place_view_south',
+                label: ui_state.place.principal_view === 'south' ? 'VIEW SOUTH*' : 'VIEW SOUTH',
+                description: 'set place view south',
+                rgb: get_color_by_name('vivid_blue').rgb,
+                on_trigger: () => {
+                    set_place_principal_view('south');
+                    set_place_view_roll_quarter_turn(0);
+                    flash_status(['Place view: south'], 900);
+                },
+            },
+            {
+                id: 'place_view_west',
+                label: ui_state.place.principal_view === 'west' ? 'VIEW WEST*' : 'VIEW WEST',
+                description: 'set place view west',
+                rgb: get_color_by_name('vivid_blue').rgb,
+                on_trigger: () => {
+                    set_place_principal_view('west');
+                    set_place_view_roll_quarter_turn(0);
+                    flash_status(['Place view: west'], 900);
+                },
+            },
             {
                 id: 'debug_add_fire',
                 label: 'FIRE',
@@ -8311,11 +8548,56 @@ export function create_app_state(): AppState {
     function get_focus_world_z_for_current_place(): number {
         const place = get_render_place();
         if (!place) return ui_state.place.world_z_center;
+        if (get_principal_view_plane_axis(ui_state.place.principal_view) !== 'z') {
+            return Math.floor(ui_state.place.world_z_center);
+        }
         const base_z = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
-        const planes = get_defined_place_world_zs(place);
+        const planes = get_active_place_focus_planes(place);
         const slot = Math.max(0, Math.min(planes.length - 1, Math.floor(ui_state.place.focus_z)));
         const wz = Math.floor(Number(planes[slot] ?? ui_state.place.world_z_center));
         return Number.isFinite(wz) ? wz : base_z;
+    }
+
+    function get_active_place_focus_planes(place: Place | null | undefined): number[] {
+        if (!place) return [Math.floor(ui_state.place.world_z_center) || 0];
+        const bounds = get_place_region_bounds(place);
+        const origin = bounds.origin;
+        const size = bounds.size;
+        return build_visible_plane_coordinates({
+            min_x: Math.floor(Number(origin.x) || 0),
+            min_y: Math.floor(Number(origin.y) || 0),
+            min_z: Math.floor(Number(origin.z) || 0),
+            width: Math.max(1, Math.floor(Number(size.x) || 1)),
+            height: Math.max(1, Math.floor(Number(size.y) || 1)),
+            depth: Math.max(1, Math.floor(Number(size.z) || 1)),
+        }, get_defined_place_world_zs(place), ui_state.place.principal_view);
+    }
+
+    function get_focus_anchor_plane_value(anchor: { x?: number; y?: number; z?: number } | null | undefined): number {
+        const plane_axis = get_principal_view_plane_axis(ui_state.place.principal_view);
+        if (plane_axis === 'x') return Math.floor(Number(anchor?.x) || 0);
+        if (plane_axis === 'y') return Math.floor(Number(anchor?.y) || 0);
+        return Math.floor(Number(anchor?.z) || 0);
+    }
+
+    function sync_place_focus_plane_from_anchor(anchor: { x?: number; y?: number; z?: number } | null | undefined): void {
+        const place = get_render_place();
+        const planes = get_active_place_focus_planes(place);
+        const target_plane = get_focus_anchor_plane_value(anchor);
+        if (planes.length < 1) {
+            ui_state.place.focus_z = 0;
+            return;
+        }
+        let best_i = 0;
+        let best_d = Math.abs(Math.floor(Number(planes[0] ?? 0)) - target_plane);
+        for (let i = 1; i < planes.length; i += 1) {
+            const d = Math.abs(Math.floor(Number(planes[i] ?? 0)) - target_plane);
+            if (d < best_d) {
+                best_d = d;
+                best_i = i;
+            }
+        }
+        ui_state.place.focus_z = best_i;
     }
 
     function get_place_region_origin(place: Place | null | undefined): { x: number; y: number; z: number } | null {
@@ -8333,19 +8615,7 @@ export function create_app_state(): AppState {
         const next_world_z = Math.floor(Number(world_z));
         if (!Number.isFinite(next_world_z)) return;
         ui_state.place.world_z_center = next_world_z;
-        if (!place) return;
-        const zs = get_defined_place_world_zs(place);
-        if (zs.length < 1) return;
-        let best_i = 0;
-        let best_d = Math.abs(zs[0]! - next_world_z);
-        for (let i = 1; i < zs.length; i += 1) {
-            const d = Math.abs(zs[i]! - next_world_z);
-            if (d < best_d) {
-                best_d = d;
-                best_i = i;
-            }
-        }
-        ui_state.place.focus_z = best_i;
+        sync_place_focus_plane_from_anchor(place ? { x: undefined, y: undefined, z: next_world_z } : { z: next_world_z });
     }
 
     function get_candidate_follow_camera_places(): Place[] {
@@ -8445,16 +8715,12 @@ export function create_app_state(): AppState {
             z: target.world_z,
         };
         ui_state.place.camera_target.last_follow_update_ms = Date.now();
-        sync_place_camera_focus_z(target.world_z);
+        sync_place_focus_plane_from_anchor({ x: target.region_x, y: target.region_y, z: target.world_z });
+        ui_state.place.world_z_center = Math.floor(target.world_z);
     }
 
     function update_place_camera_follow(now_ms: number): void {
         if (ui_state.place.camera_target.mode === 'free') return;
-        const actor_ref = get_follow_camera_entity_ref();
-        const recently_changed_ms = Math.max(0, now_ms - Math.max(0, renderer_debug.last_actor_pos_changed_ms || 0));
-        const actor_is_repositioning = recently_changed_ms <= 220;
-        const always_track_follow_target = ui_state.timed_event_debug.active;
-        if (!always_track_follow_target && !actor_is_repositioning) return;
         const target = resolve_follow_actor_camera_focus_region();
         if (!target) return;
         const last_ms = Math.max(0, Math.floor(Number(ui_state.place.camera_target.last_follow_update_ms) || 0));
@@ -8464,7 +8730,8 @@ export function create_app_state(): AppState {
         const pose = ui_state.place.camera_target.region_pose;
         if (!pose) {
             ui_state.place.camera_target.region_pose = { x: target.region_x, y: target.region_y, z: target.world_z };
-            sync_place_camera_focus_z(target.world_z);
+            sync_place_focus_plane_from_anchor({ x: target.region_x, y: target.region_y, z: target.world_z });
+            ui_state.place.world_z_center = Math.floor(target.world_z);
             return;
         }
         const follow_tau_xy = 0.10;
@@ -8474,7 +8741,8 @@ export function create_app_state(): AppState {
         pose.x += (target.region_x - pose.x) * alpha_xy;
         pose.y += (target.region_y - pose.y) * alpha_xy;
         pose.z += (target.world_z - pose.z) * alpha_z;
-        sync_place_camera_focus_z(pose.z);
+        ui_state.place.world_z_center = Math.floor(pose.z);
+        sync_place_focus_plane_from_anchor({ x: pose.x, y: pose.y, z: pose.z });
     }
 
     function get_place_camera_target_position(): { x: number; y: number } | null {
@@ -8648,6 +8916,9 @@ export function create_app_state(): AppState {
             weight_index_to_css: APP_CONFIG.weight_index_to_css,
             get_focus_z: () => ui_state.place.focus_z,
             set_focus_z: (z) => { ui_state.place.focus_z = z; save_place_focus_z(); },
+            get_principal_view: () => ui_state.place.principal_view,
+            get_view_roll_quarter_turn: () => ui_state.place.view_roll_quarter_turn,
+            get_use_focus_layer_opacity: () => ui_state.place.use_focus_layer_opacity,
             get_world_z_center: () => ui_state.place.world_z_center,
             get_mouse_parallax: () => ui_state.place.mouse_parallax,
             get_move_mode: () => ui_state.controls.move_mode,
@@ -11745,14 +12016,10 @@ export function create_app_state(): AppState {
                     renderer_debug.last_place_breath_changed_ms = now_wall;
                 }
 
-                const actor = place?.contents?.actors_present?.[0] ?? null;
-                const actor_tile = actor?.tile_position ?? null;
-                const actor_z = get_entity_camera_anchor_world_z(
-                    actor,
-                    String(actor?.actor_ref ?? get_input_actor_ref()),
-                    Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0,
-                ) + 1;
-                const actor_key = (actor && actor_tile) ? `${actor.actor_ref}:${actor_tile.x},${actor_tile.y},${actor_z}` : null;
+                const follow_target = resolve_follow_actor_camera_focus_region();
+                const actor_key = follow_target
+                    ? `${get_follow_camera_entity_ref() ?? 'unknown'}:${follow_target.place_id}:${follow_target.local_x},${follow_target.local_y},${follow_target.world_z}`
+                    : null;
                 if (actor_key && actor_key !== renderer_debug.last_actor_pos_key) {
                     renderer_debug.last_actor_pos_key = actor_key;
                     renderer_debug.actor_pos_change_count += 1;

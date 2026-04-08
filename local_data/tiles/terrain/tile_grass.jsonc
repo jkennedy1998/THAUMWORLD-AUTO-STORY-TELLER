@@ -5,6 +5,26 @@
   "weight": 0,
   "display_char": "v",
   "display_color": "#8c9d4f",
+  "graphics": {
+    "base_graphic_id": "tile_small_grass",
+    "default_weight": 2,
+    "views": {
+      "north": { "graphic_id": "tile_small_grass" },
+      "south": { "same_as": "north" },
+      "east": { "same_as": "north" },
+      "west": { "same_as": "north" },
+      "up": { "same_as": "north" },
+      "down": { "same_as": "north" }
+    }
+  },
+  "materials": {
+    "defaults": {
+      "1": "FOLIAGE_GREEN"
+    },
+    "allowed": {
+      "1": ["FOLIAGE_GREEN"]
+    }
+  },
   "render_shader": {
     "shader_id": "perlin_noise",
     "params": {

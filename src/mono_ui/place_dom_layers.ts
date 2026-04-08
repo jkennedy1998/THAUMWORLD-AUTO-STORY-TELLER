@@ -44,6 +44,7 @@ export class PlaceDomLayers {
   private height = 0;
   private layer_count = 0;
   private place_id: string | null = null;
+  private focus_layer_opacity_enabled = true;
 
   constructor(opts: PlaceDomLayersOpts) {
     this.opts = opts;
@@ -164,18 +165,21 @@ export class PlaceDomLayers {
     const focus = Math.max(0, Math.min(max_index, Math.floor(z)));
     this.space.camera.focus_plane = focus;
 
-    // Visual affordance: de-emphasize non-focused layers.
-    // (All layers remain visible; focus affects alignment + opacity.)
     for (const [lz, layer] of this.space.layers.entries()) {
       if (!layer) continue;
-      if (lz === focus) {
+      if (!this.focus_layer_opacity_enabled) {
+        layer.opacity = 1.0;
+      } else if (lz === focus) {
         layer.opacity = 1.0;
       } else {
-        // Keep a little more presence for adjacent layers.
         const dist = Math.abs(lz - z);
         layer.opacity = dist === 1 ? 0.62 : 0.45;
       }
     }
+  }
+
+  set_focus_layer_opacity_enabled(enabled: boolean): void {
+    this.focus_layer_opacity_enabled = !!enabled;
   }
 
   apply_shared_camera_tuning(tuning: {

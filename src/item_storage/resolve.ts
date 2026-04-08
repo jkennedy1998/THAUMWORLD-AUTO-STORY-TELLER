@@ -6,6 +6,7 @@ import { build_entity_value_mag_breakdown, type EntityValueMagBreakdown } from "
 import { tag_key } from "../tag_system/tag_key.js";
 import { load_master_item, type ItemDefinition } from "./store.js";
 import { debug_warn } from "../shared/debug.js";
+import type { GraphicsModel, InlineMaterialAssignments, MaterialOptionsBySlot, ViewDirection } from "../render_shaders/graphics_contract.js";
 
 const warned_legacy_item_ids = new Set<string>();
 
@@ -19,6 +20,11 @@ export type ResolvedItem = {
   display_char: string;
   display_color: string | null;
   max_stack_size: number;
+  graphics?: GraphicsModel;
+  material_options?: MaterialOptionsBySlot;
+  materials?: InlineMaterialAssignments;
+  state?: Record<string, unknown>;
+  facing?: ViewDirection | string;
 };
 
 function pick_display_char(def: ItemDefinition): string {
@@ -72,6 +78,11 @@ export function resolve_inline_item(def_id: string, item: InlineItem): ResolvedI
     display_char: pick_display_char(def),
     display_color: display_color_override ?? def_color,
     max_stack_size: Number((def as any).max_stack_size ?? 1),
+    graphics: def.graphics,
+    material_options: def.materials,
+    materials: (item as any)?.materials,
+    state: (item as any)?.state,
+    facing: (item as any)?.facing,
   };
 }
 

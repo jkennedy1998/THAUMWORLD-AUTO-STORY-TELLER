@@ -30,6 +30,7 @@ import { create_canvas } from "../canvas.js";
 import { touch_world_layers_owner } from "../world_layers_owner.js";
 import { compute_dom_viewport_for_rect } from "../runtime/dom_viewport.js";
 import { create_place_camera_controller } from "../runtime/place_camera_controller.js";
+import { build_visible_plane_coordinates, get_atlas_view_direction, get_plane_cardinal_neighbor_offsets_for_view_state, get_projected_bounds_with_roll, make_place_view_state, normalize_place_principal_view, normalize_place_view_roll_quarter_turn, project_world_point_with_roll, type PlacePrincipalView, type PlaceViewRollQuarterTurn, type SceneProjectionBounds, unproject_plane_point_with_roll } from "../runtime/place_view_projection.js";
 import { get_move_intent, is_jump_down, subscribe_move_intent_changes, type MoveIntent, type MoveIntentChangeMeta } from "../runtime/input_actions.js";
 import type { GizmoState, ModuleGizmosConfig } from "../module_gizmos.js";
 import {
@@ -46,6 +47,7 @@ import {
   update_gizmo_hover_state,
 } from "../module_gizmos.js";
 import { get_character_camera_focus_tile } from "../../shared/character_camera_focus.js";
+import { resolve_light_mag } from "../../mag/index.js";
 import type { ItemInstance } from "../../item_instances/store.js";
 import type { ItemDefinition } from "../../item_storage/store.js";
 import { get_defined_place_world_zs as get_authored_place_world_zs, get_place_base_z, get_place_tile_at_world_z as get_shared_place_tile_at_world_z, tile_offset_to_layer_key } from "../../shared/place_layers.js";
@@ -78,6 +80,21 @@ function hex_to_rgb(hex: string): { r: number; g: number; b: number } {
   }
   
   return { r, g, b };
+}
+
+function get_place_light_mag(place: Pick<Place, 'environment'>): number {
+  return resolve_light_mag(place.environment?.light_mag);
+}
+
+function clamp_scene_projection_bounds(bounds: SceneProjectionBounds): SceneProjectionBounds {
+  return {
+    min_x: Math.floor(Number(bounds.min_x ?? 0)) || 0,
+    min_y: Math.floor(Number(bounds.min_y ?? 0)) || 0,
+    min_z: Math.floor(Number(bounds.min_z ?? 0)) || 0,
+    width: Math.max(1, Math.floor(Number(bounds.width ?? 1)) || 1),
+    height: Math.max(1, Math.floor(Number(bounds.height ?? 1)) || 1),
+    depth: Math.max(1, Math.floor(Number(bounds.depth ?? 1)) || 1),
+  };
 }
 
 function footstep_cooldown_ms(speed_tpm: number): number {
@@ -159,6 +176,7 @@ type ScenePlaceCache = {
   hops_visible: number;
   places: Place[];
   entries: ScenePlaceCacheEntry[];
+  scene_bounds: SceneProjectionBounds;
   scene_world_zs: number[];
   connector_lookup: Map<string, { place_id: string; connector: PlaceConnector }>;
 };
@@ -295,6 +313,9 @@ export type PlaceModuleConfig = {
 
   // World-Z center (absolute elevation) for the visible viewport window.
   get_world_z_center?: () => number;
+  get_principal_view?: () => PlacePrincipalView;
+  get_view_roll_quarter_turn?: () => PlaceViewRollQuarterTurn;
+  get_use_focus_layer_opacity?: () => boolean;
 
   // Mouse parallax normalized (-1..+1), centered on place viewport.
   get_mouse_parallax?: () => { x: number; y: number };
@@ -579,12 +600,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     approach_y: number;
     label: string;
   } | null {
-    const inner = inner_rect();
-    const rel_x = sx - inner.x0;
-    const rel_y = sy - inner.y0;
-    const tile_x = Math.floor(view.offset_x + rel_x * view.scale);
-    const tile_y = Math.floor(view.offset_y + rel_y * view.scale);
-    const resolved = resolve_scene_tile(selected_place, tile_x, tile_y);
+    const scene_tile = screen_to_tile(sx, sy);
+    if (!scene_tile) return null;
+    const resolved = resolve_scene_tile(selected_place, scene_tile.x, scene_tile.y);
     if (!resolved) return null;
     return get_connector_at_tile(selected_place, place, resolved.tile_x, resolved.tile_y, world_z);
   }
@@ -701,6 +719,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   });
   let dom_pan_px = { x: 0, y: 0, tileW: 0, tileH: 0, scale: 1 };
   let dom_last_place_id: string | null = null;
+  let dom_last_view_signature: string | null = null;
 
   // Reuse offscreen canvases to avoid allocating every frame.
   let dom_off_w = 0;
@@ -763,6 +782,18 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     const container = document.getElementById('voxel_layers_container');
     if (!container) return;
     dom_layers.mount(container, place_id);
+  }
+
+  function reset_dom_render_state(): void {
+    dom_layers.destroy();
+    dom_last_place_id = null;
+    dom_off_w = 0;
+    dom_off_h = 0;
+    dom_off_layers = [];
+    dom_cells_w = 0;
+    dom_cells_h = 0;
+    dom_cells_layers = [];
+    dom_cells_versions = [];
   }
 
   function clamp_int(n: number, lo: number, hi: number): number {
@@ -837,20 +868,28 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         if (!dst) continue;
 
         const next_char = c?.char ?? ' ';
+        const next_graphic = (c as any)?.graphic;
+        const next_materials = (c as any)?.materials;
         const next_rgb = c?.rgb ?? { r: 0, g: 0, b: 0 };
         const next_weight = (c as any)?.weight_index ?? 1;
         const next_render = (c as any)?.render_index;
+        const same_graphic = JSON.stringify((dst as any).graphic ?? null) === JSON.stringify(next_graphic ?? null);
+        const same_materials = JSON.stringify((dst as any).materials ?? null) === JSON.stringify(next_materials ?? null);
 
         if (
           dst.char !== next_char ||
           dst.weight_index !== next_weight ||
           (dst as any).render_index !== next_render ||
+          !same_graphic ||
+          !same_materials ||
           dst.rgb.r !== next_rgb.r ||
           dst.rgb.g !== next_rgb.g ||
           dst.rgb.b !== next_rgb.b
         ) {
           changed = true;
           dst.char = next_char;
+          (dst as any).graphic = next_graphic;
+          (dst as any).materials = next_materials;
           dst.rgb = next_rgb;
           dst.weight_index = next_weight;
           (dst as any).render_index = next_render;
@@ -997,11 +1036,12 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
     const rel_x = screen_x - inner.x0;
     const rel_y = screen_y - inner.y0;
-
-    const tile_x = view.offset_x + rel_x * view.scale;
-    const tile_y = view.offset_y + rel_y * view.scale;
-
-    return { x: Math.floor(tile_x), y: Math.floor(tile_y) };
+    const view_x = Math.floor(view.offset_x + rel_x * view.scale);
+    const view_y = Math.floor(view.offset_y + rel_y * view.scale);
+    const selected_place = config.get_place();
+    if (!selected_place) return null;
+    const scene_tile = view_to_scene_tile(selected_place, view_x, view_y, get_focus_world_z_for_place(selected_place));
+    return { x: Math.floor(scene_tile.x), y: Math.floor(scene_tile.y), z: Math.floor(scene_tile.z) };
   }
 
   function center_on_tile(tile_x: number, tile_y: number, place: Place): void {
@@ -1012,25 +1052,11 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   function get_scene_view_bounds(selected_place: Place, inner_w: number, inner_h: number): SceneViewBounds {
     const tiles_visible_x = Math.max(1, Math.floor(inner_w)) * view.scale;
     const tiles_visible_y = Math.max(1, Math.floor(inner_h)) * view.scale;
-    const scene_entries = build_scene_place_cache(selected_place).entries;
-    if (scene_entries.length < 1) {
-      return camera.get_bounds(selected_place, inner_w, inner_h);
-    }
-    let min_x = Number.POSITIVE_INFINITY;
-    let min_y = Number.POSITIVE_INFINITY;
-    let max_x = Number.NEGATIVE_INFINITY;
-    let max_y = Number.NEGATIVE_INFINITY;
-    for (const entry of scene_entries) {
-      const w = Math.max(1, Math.floor(Number(entry.place?.tile_grid?.width ?? 1)) || 1);
-      const h = Math.max(1, Math.floor(Number(entry.place?.tile_grid?.height ?? 1)) || 1);
-      min_x = Math.min(min_x, entry.offset.x - PADDING_TILES);
-      min_y = Math.min(min_y, entry.offset.y - PADDING_TILES);
-      max_x = Math.max(max_x, entry.offset.x + w + PADDING_TILES - tiles_visible_x);
-      max_y = Math.max(max_y, entry.offset.y + h + PADDING_TILES - tiles_visible_y);
-    }
-    if (!Number.isFinite(min_x) || !Number.isFinite(min_y) || !Number.isFinite(max_x) || !Number.isFinite(max_y)) {
-      return camera.get_bounds(selected_place, inner_w, inner_h);
-    }
+    const projected = get_projected_bounds_with_roll(get_scene_rotation_bounds(selected_place), get_place_view_state());
+    const min_x = projected.min_u - PADDING_TILES;
+    const min_y = projected.min_v - PADDING_TILES;
+    const max_x = projected.min_u + projected.width + PADDING_TILES - tiles_visible_x;
+    const max_y = projected.min_v + projected.height + PADDING_TILES - tiles_visible_y;
     return {
       min_x,
       min_y,
@@ -1045,8 +1071,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     const tiles_visible_y = Math.max(1, Math.floor(height)) * view.scale;
     const bounds = get_scene_view_bounds(selected_place, width, height);
     const margin = 2;
-    const target_offset_x = Math.floor(tile_x - tiles_visible_x / 2 + margin);
-    const target_offset_y = Math.floor(tile_y - tiles_visible_y / 2 + margin);
+    const projected = scene_to_view_tile(selected_place, tile_x, tile_y, get_focus_world_z_for_place(selected_place));
+    const target_offset_x = Math.floor(projected.x - tiles_visible_x / 2 + margin);
+    const target_offset_y = Math.floor(projected.y - tiles_visible_y / 2 + margin);
     const clamped_x = clamp(target_offset_x, bounds.min_x, bounds.max_x);
     const clamped_y = clamp(target_offset_y, bounds.min_y, bounds.max_y);
     if ((clamped_x !== target_offset_x || clamped_y !== target_offset_y) && should_sample_place_debug('camera-follow-clamp', 20)) {
@@ -1104,7 +1131,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       scene_place_cache.actor_current_place_id === actor_current_place_id &&
       scene_place_cache.hops_visible === hops_visible
     ) {
-      return scene_place_cache;
+      return scene_place_cache as ScenePlaceCache;
     }
 
     const raw = Array.isArray(raw_scene_places) ? raw_scene_places : [];
@@ -1143,30 +1170,114 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
     const scene_world_zs_set = new Set<number>();
     const connector_lookup = new Map<string, { place_id: string; connector: PlaceConnector }>();
+    let scene_min_x = Number.POSITIVE_INFINITY;
+    let scene_min_y = Number.POSITIVE_INFINITY;
+    let scene_min_z = Number.POSITIVE_INFINITY;
+    let scene_max_x = Number.NEGATIVE_INFINITY;
+    let scene_max_y = Number.NEGATIVE_INFINITY;
+    let scene_max_z = Number.NEGATIVE_INFINITY;
     for (const entry of entries) {
+      const width = Math.max(1, Math.floor(Number(entry.place?.tile_grid?.width ?? 1)) || 1);
+      const height = Math.max(1, Math.floor(Number(entry.place?.tile_grid?.height ?? 1)) || 1);
+      scene_min_x = Math.min(scene_min_x, entry.offset.x - 1);
+      scene_min_y = Math.min(scene_min_y, entry.offset.y - 1);
+      scene_max_x = Math.max(scene_max_x, entry.offset.x + width);
+      scene_max_y = Math.max(scene_max_y, entry.offset.y + height);
       for (const z of get_defined_place_world_zs(entry.place)) scene_world_zs_set.add(z);
       const bounds = get_place_render_region_bounds(entry.place);
       const z0 = Math.floor(Number(bounds.origin.z ?? 0)) || 0;
       const sz = Math.max(1, Math.floor(Number(bounds.size.z ?? 1)) || 1);
+      scene_min_z = Math.min(scene_min_z, z0 - 1);
+      scene_max_z = Math.max(scene_max_z, z0 + sz);
       for (let dz = 0; dz < sz; dz += 1) scene_world_zs_set.add(z0 + dz);
     }
 
-    scene_place_cache = {
+    const scene_bounds = clamp_scene_projection_bounds({
+      min_x: Number.isFinite(scene_min_x) ? scene_min_x : -1,
+      min_y: Number.isFinite(scene_min_y) ? scene_min_y : -1,
+      min_z: Number.isFinite(scene_min_z) ? scene_min_z : (get_place_base_z(selected_place) - 1),
+      width: Number.isFinite(scene_max_x) && Number.isFinite(scene_min_x) ? (scene_max_x - scene_min_x + 1) : Math.max(1, selected_place.tile_grid.width + 2),
+      height: Number.isFinite(scene_max_y) && Number.isFinite(scene_min_y) ? (scene_max_y - scene_min_y + 1) : Math.max(1, selected_place.tile_grid.height + 2),
+      depth: Number.isFinite(scene_max_z) && Number.isFinite(scene_min_z) ? (scene_max_z - scene_min_z + 1) : 3,
+    });
+
+    const next_cache: ScenePlaceCache = {
       selected_place_ref: selected_place,
       raw_scene_places_ref: raw_scene_places,
       actor_current_place_id,
       hops_visible,
       places: visible_places,
       entries,
+      scene_bounds,
       scene_world_zs: scene_world_zs_set.size > 0 ? Array.from(scene_world_zs_set).sort((a, b) => a - b) : [get_place_base_z(selected_place)],
       connector_lookup,
     };
+    scene_place_cache = next_cache;
     debug_log_place(`SEAM_SCENE visible ${JSON.stringify({ selected_place_id: selected_place.id, actor_current_place_id, hops_visible, visible_place_ids: visible_places.map((p) => p.id) })}`);
-    return scene_place_cache;
+    return next_cache;
   }
 
   function get_scene_places(selected_place: Place): Place[] {
     return build_scene_place_cache(selected_place).places;
+  }
+
+  function get_place_principal_view(): PlacePrincipalView {
+    return normalize_place_principal_view(config.get_principal_view?.() ?? 'top');
+  }
+
+  function get_place_view_roll_quarter_turn(): PlaceViewRollQuarterTurn {
+    return normalize_place_view_roll_quarter_turn(config.get_view_roll_quarter_turn?.() ?? 0);
+  }
+
+  function get_place_view_state() {
+    return make_place_view_state(get_place_principal_view(), get_place_view_roll_quarter_turn());
+  }
+
+  function get_place_view_signature(): string {
+    const state = get_place_view_state();
+    return `${state.principal_view}:${state.roll_quarter_turn}`;
+  }
+
+  function get_scene_rotation_bounds(selected_place: Place): SceneProjectionBounds {
+    return build_scene_place_cache(selected_place).scene_bounds;
+  }
+
+  function get_visible_plane_values(selected_place: Place): number[] {
+    return build_visible_plane_coordinates(get_scene_rotation_bounds(selected_place), get_defined_scene_world_zs(selected_place), get_place_principal_view());
+  }
+
+  function scene_to_view_tile(selected_place: Place, scene_x: number, scene_y: number, world_z: number): { x: number; y: number; plane: number } {
+    const projected = project_world_point_with_roll({ x: scene_x, y: scene_y, z: world_z }, get_place_view_state());
+    return { x: projected.u, y: projected.v, plane: projected.plane };
+  }
+
+  function view_to_scene_tile(selected_place: Place, view_x: number, view_y: number, plane: number): { x: number; y: number; z: number } {
+    return unproject_plane_point_with_roll({ u: view_x, v: view_y, plane }, get_place_view_state());
+  }
+
+  function scene_to_screen(selected_place: Place, scene_x: number, scene_y: number, world_z: number, inner: Rect): { x: number; y: number; plane: number } {
+    const view_tile = scene_to_view_tile(selected_place, scene_x, scene_y, world_z);
+    return {
+      x: inner.x0 + Math.floor((view_tile.x - view.offset_x) / view.scale),
+      y: inner.y0 + Math.floor((view_tile.y - view.offset_y) / view.scale),
+      plane: view_tile.plane,
+    };
+  }
+
+  function get_tile_plane_neighbor_kinds(place: Place, tile_x: number, tile_y: number, world_z: number) {
+    const offsets = get_plane_cardinal_neighbor_offsets_for_view_state(get_place_view_state());
+    const resolve_kind = (dir: 'north' | 'east' | 'south' | 'west') => {
+      const offset = offsets[dir];
+      if (!offset) return null;
+      const tile = get_shared_place_tile_at_world_z(place, tile_x + offset.dx, tile_y + offset.dy, world_z + offset.dz);
+      return tile ? String((tile as any).kind ?? '') : null;
+    };
+    return {
+      north: resolve_kind('north'),
+      east: resolve_kind('east'),
+      south: resolve_kind('south'),
+      west: resolve_kind('west'),
+    };
   }
 
   function get_scene_offset_tiles(selected_place: Place, other_place: Place): { x: number; y: number; z: number } {
@@ -1292,9 +1403,10 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   function update_painter_camera_target_from_view(place: Place): void {
     if (!config.set_camera_target_position) return;
     const { width, height } = inner_size();
-    const center_x = Math.floor(view.offset_x + (width * view.scale) / 2);
-    const center_y = Math.floor(view.offset_y + (height * view.scale) / 2);
-    config.set_camera_target_position({ x: center_x, y: center_y }, 'free');
+    const center_view_x = Math.floor(view.offset_x + (width * view.scale) / 2);
+    const center_view_y = Math.floor(view.offset_y + (height * view.scale) / 2);
+    const center_scene = view_to_scene_tile(place, center_view_x, center_view_y, get_focus_world_z_for_place(place));
+    config.set_camera_target_position({ x: center_scene.x, y: center_scene.y }, 'free');
   }
 
   // Get all entities at tile position (for cycling)
@@ -1428,9 +1540,10 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
   function get_focus_world_z_for_place(place: Place): number {
     const center_world_z = get_world_z_center_for_place(place);
-    const visible_planes_z = get_defined_scene_world_zs(place);
+    if (get_place_principal_view() !== 'top' && get_place_principal_view() !== 'bottom') return center_world_z;
+    const visible_planes_z = get_visible_plane_values(place);
     const focus_slot = config.get_focus_z ? config.get_focus_z() : DEFAULT_FOCUS_Z;
-    return Math.floor(Number(visible_planes_z[focus_slot]));
+    return Math.floor(Number(visible_planes_z[Math.max(0, Math.min(visible_planes_z.length - 1, focus_slot))] ?? center_world_z));
   }
 
   function get_controlled_place_actor(place: Place | null | undefined): PlaceActor | null {
@@ -1991,6 +2104,12 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
     // Render the place
     function draw_place(canvas: Canvas, place: Place): void {
+      const view_signature = get_place_view_signature();
+      if (dom_last_view_signature !== view_signature) {
+        invalidate_scene_place_cache();
+        reset_dom_render_state();
+        dom_last_view_signature = view_signature;
+      }
       invalidate_scene_place_cache();
       const inner = inner_rect();
       const { width, height } = inner_size();
@@ -2000,9 +2119,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const breath_index = timed_event_active ? timed_event_world_breath_index : place_breath_index;
       const scene_places = get_scene_places(place);
 
-       // 3-layer window of absolute world-z values.
+       // Visible plane coordinates depend on the principal view.
        const center_world_z = get_world_z_center_for_place(place);
-       const visible_planes_z = get_defined_scene_world_zs(place);
+       const visible_planes_z = get_visible_plane_values(place);
        const base_z = get_place_base_z(place);
 
       const open_containers = config.get_open_containers ? config.get_open_containers() : null;
@@ -2015,6 +2134,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const rq_ui: RenderRequest[] = [];
       const plane_count = Math.max(1, visible_planes_z.length);
       const rq_layers: RenderRequest[][] = Array.from({ length: plane_count }, () => []);
+      const semantic_view_direction = get_atlas_view_direction(get_place_principal_view());
 
       const q_for_slot = (slot: number): RenderRequest[] => rq_layers[slot] ?? rq_layers[0]!;
 
@@ -2034,16 +2154,18 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         const scene_offset = get_scene_offset_tiles(place, scene_place);
         const scene_base_z = get_place_base_z(scene_place);
 
-        for (const world_z of visible_planes_z) {
-          const local_world_z = world_z - scene_offset.z;
-          const slot = slot_for_world_z(world_z, visible_planes_z);
+        for (const plane_value of visible_planes_z) {
+          const slot = slot_for_world_z(plane_value, visible_planes_z);
           if (slot === null) continue;
           const rq = q_for_slot(slot);
 
           for (let sy = inner.y0; sy <= inner.y1; sy++) {
             for (let sx = inner.x0; sx <= inner.x1; sx++) {
-              const scene_tile_x = Math.floor(view.offset_x + (sx - inner.x0) * view.scale);
-              const scene_tile_y = Math.floor(view.offset_y + (sy - inner.y0) * view.scale);
+              const scene_tile = view_to_scene_tile(place, Math.floor(view.offset_x + (sx - inner.x0) * view.scale), Math.floor(view.offset_y + (sy - inner.y0) * view.scale), plane_value);
+              const scene_tile_x = Math.floor(scene_tile.x);
+              const scene_tile_y = Math.floor(scene_tile.y);
+              const world_z = Math.floor(scene_tile.z);
+              const local_world_z = world_z - scene_offset.z;
               const tile_x = scene_tile_x - scene_offset.x;
               const tile_y = scene_tile_y - scene_offset.y;
 
@@ -2088,7 +2210,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
               const tile = get_place_tile_at_world_z(scene_place, tile_x, tile_y, local_world_z);
               if (!tile) continue;
               const open = scene_place.id === place.id ? is_tile_container_open(tile_x, tile_y, local_world_z) : false;
+              const tile_state = { ...((tile as any).state ?? {}), open };
               const display = get_tile_display(tile, tile_x, tile_y);
+              const tile_neighbors = get_tile_plane_neighbor_kinds(scene_place, tile_x, tile_y, local_world_z);
               const has_connector_tag = tile_has_tag(tile, 'CONNECTOR');
               const has_container_tag = tile_has_tag(tile, 'CONTAINER');
               const world_xy = { x: scene_tile_x, y: scene_tile_y };
@@ -2104,6 +2228,10 @@ export function make_place_module(config: PlaceModuleConfig): Module {
                   id: `${key_prefix}:${scene_place.id}:${world_z}:${tile_x},${tile_y}`,
                   def_id: String(tile.kind ?? ''),
                   char: display.char,
+                  graphics: (tile as any).graphics,
+                  materials: (tile as any).materials ?? (tile as any).material_options?.defaults,
+                  state: tile_state,
+                  facing: (tile as any).facing,
                   tags: (tile as any).tags ?? [],
                   base_fg: hex_to_rgb(display.color),
                   weight_index: has_connector_tag ? 2 : weight_index,
@@ -2121,10 +2249,12 @@ export function make_place_module(config: PlaceModuleConfig): Module {
                   focus_world_z: center_world_z,
                   place_base_z: scene_base_z,
                   breath_index,
+                  view_direction: semantic_view_direction,
+                  tile_neighbors,
                 }),
               });
 
-              if (has_container_tag && scene_place.id === place.id) {
+              if (has_container_tag && scene_place.id === place.id && !(tile as any).graphics) {
                 const container_glyphs = (tile as any).container_glyphs;
                 let container_char = display.char;
                 if (container_glyphs && typeof container_glyphs === 'object') {
@@ -2140,6 +2270,10 @@ export function make_place_module(config: PlaceModuleConfig): Module {
                     id: `tile_container:${scene_place.id}:${world_z}:${tile_x},${tile_y}`,
                     def_id: String(tile.kind ?? ''),
                     char: container_char,
+                    graphics: (tile as any).graphics,
+                    materials: (tile as any).materials ?? (tile as any).material_options?.defaults,
+                    state: tile_state,
+                    facing: (tile as any).facing,
                     tags: (tile as any).tags ?? [],
                     base_fg: hex_to_rgb(display.color),
                     weight_index: 2,
@@ -2157,6 +2291,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
                     focus_world_z: center_world_z,
                     place_base_z: scene_base_z,
                     breath_index,
+                    view_direction: semantic_view_direction,
+                    tile_neighbors,
                   }),
                 });
               }
@@ -2217,11 +2353,12 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           const tile_y = Math.floor(oy) + Math.floor(Number((v as any)?.dy ?? 0));
           const wz = oz + Math.floor(Number((v as any)?.dz ?? 0));
 
-          const slot = slot_for_world_z(wz, visible_planes_z);
+          const projected = scene_to_screen(place, tile_x, tile_y, wz, inner);
+          const slot = slot_for_world_z(projected.plane, visible_planes_z);
           if (slot === null) continue;
 
-          const screen_x = inner.x0 + Math.floor((tile_x - view.offset_x) / view.scale);
-          const screen_y = inner.y0 + Math.floor((tile_y - view.offset_y) / view.scale);
+          const screen_x = projected.x;
+          const screen_y = projected.y;
           if (!(screen_x >= inner.x0 && screen_x <= inner.x1 && screen_y >= inner.y0 && screen_y <= inner.y1)) continue;
 
           const tags = Array.isArray((v as any)?.tags)
@@ -2256,6 +2393,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
                 focus_world_z: center_world_z,
                 place_base_z: base_z,
                 breath_index,
+                view_direction: semantic_view_direction,
               }),
               body_part: String((v as any)?.part ?? 'body'),
               facing: (s as any)?.facing,
@@ -2310,15 +2448,18 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     // Update particles (path visualization and effects), but enqueue them to draw later.
     update_particles();
     for (const p of particles) {
-      const screen_x = inner.x0 + Math.floor((p.x - view.offset_x) / view.scale);
-      const screen_y = inner.y0 + Math.floor((p.y - view.offset_y) / view.scale);
+      const wz = Number.isFinite(Number(p.world_z)) ? Math.floor(Number(p.world_z)) : DEFAULT_FOCUS_Z;
+      const projected = scene_to_screen(place, p.x, p.y, wz, inner);
+      const screen_x = projected.x;
+      const screen_y = projected.y;
 
       if (screen_x >= inner.x0 && screen_x <= inner.x1 &&
           screen_y >= inner.y0 && screen_y <= inner.y1) {
         const weight = p.weight ?? 2;
         const render_index = p.render_index ?? 3;
-        const wz = Number.isFinite(Number(p.world_z)) ? Math.floor(Number(p.world_z)) : DEFAULT_FOCUS_Z;
-        const target_q = q_for_slot(wz);
+        const slot = slot_for_world_z(projected.plane, visible_planes_z);
+        if (slot === null) continue;
+        const target_q = q_for_slot(slot);
         target_q.push({
           pass: 'particle',
           x: screen_x,
@@ -2449,16 +2590,16 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
         for (const v of voxels) {
           const wz = wz0 + Math.floor(Number(v.dz ?? 0));
-          const slot = slot_for_world_z(wz, visible_planes_z);
-          if (slot === null) continue;
-
           const tile_x = tile_x0 + Math.floor(Number(v.dx ?? 0));
           const tile_y = tile_y0 + Math.floor(Number(v.dy ?? 0));
           const scene_tile_x = tile_x + scene_offset.x;
           const scene_tile_y = tile_y + scene_offset.y;
 
-          const screen_x = inner.x0 + Math.floor((scene_tile_x - view.offset_x) / view.scale);
-          const screen_y = inner.y0 + Math.floor((scene_tile_y - view.offset_y) / view.scale);
+          const projected = scene_to_screen(place, scene_tile_x, scene_tile_y, wz, inner);
+          const slot = slot_for_world_z(projected.plane, visible_planes_z);
+          if (slot === null) continue;
+          const screen_x = projected.x;
+          const screen_y = projected.y;
           if (!(screen_x >= inner.x0 && screen_x <= inner.x1 && screen_y >= inner.y0 && screen_y <= inner.y1)) continue;
 
           character_occupied.add(`${slot}:${scene_tile_x}_${scene_tile_y}`);
@@ -2487,6 +2628,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
                 focus_world_z: center_world_z,
                 place_base_z: scene_base_z,
                 breath_index,
+                view_direction: semantic_view_direction,
               }),
               body_part: String(v.part ?? ''),
               facing,
@@ -2553,15 +2695,15 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           const scene_tile_x = tile_x + scene_offset.x;
           const scene_tile_y = tile_y + scene_offset.y;
 
-          const screen_x = inner.x0 + Math.floor((scene_tile_x - view.offset_x) / view.scale);
-          const screen_y = inner.y0 + Math.floor((scene_tile_y - view.offset_y) / view.scale);
+          const projected = scene_to_screen(place, scene_tile_x, scene_tile_y, voxel_z, inner);
+          const item_slot = slot_for_world_z(projected.plane, visible_planes_z);
+          if (item_slot === null) continue;
+          const screen_x = projected.x;
+          const screen_y = projected.y;
 
           if (!(screen_x >= inner.x0 && screen_x <= inner.x1 && screen_y >= inner.y0 && screen_y <= inner.y1)) {
             continue;
           }
-
-          const item_slot = slot_for_world_z(voxel_z, visible_planes_z);
-          if (item_slot === null) continue;
 
           const ids_raw = use_cache
             ? (config.get_ground_item_ids_at?.(scene_place.id, tile_x, tile_y) ?? [])
@@ -2631,6 +2773,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
                   focus_world_z: center_world_z,
                   place_base_z: scene_base_z,
                   breath_index,
+                  view_direction: semantic_view_direction,
                 }),
               });
               continue;
@@ -2670,6 +2813,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
                   focus_world_z: center_world_z,
                   place_base_z: scene_base_z,
                   breath_index,
+                  view_direction: semantic_view_direction,
                 }),
               });
               continue;
@@ -2698,14 +2842,15 @@ export function make_place_module(config: PlaceModuleConfig): Module {
               screen_x,
               screen_y,
               place_x: tile_x,
-              place_y: tile_y,
-              world_x: scene_tile_x,
-              world_y: scene_tile_y,
-              world_z: voxel_z,
-              focus_world_z: center_world_z,
-              place_base_z: scene_base_z,
-              breath_index,
-            }),
+                place_y: tile_y,
+                world_x: scene_tile_x,
+                world_y: scene_tile_y,
+                world_z: voxel_z,
+                focus_world_z: center_world_z,
+                place_base_z: scene_base_z,
+                breath_index,
+                view_direction: semantic_view_direction,
+              }),
           });
         }
       }
@@ -2715,8 +2860,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     // Target highlight (follows entity movement).
     const target_pos = get_target_current_position(place);
     if (target_pos && targeted) {
-      const screen_x = inner.x0 + Math.floor((target_pos.x - view.offset_x) / view.scale);
-      const screen_y = inner.y0 + Math.floor((target_pos.y - view.offset_y) / view.scale);
+      const projected = scene_to_screen(place, target_pos.x, target_pos.y, get_focus_world_z_for_place(place), inner);
+      const screen_x = projected.x;
+      const screen_y = projected.y;
       if (screen_x >= inner.x0 && screen_x <= inner.x1 && screen_y >= inner.y0 && screen_y <= inner.y1) {
         rq_ui.push({
           pass: 'ui',
@@ -2736,8 +2882,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     // Hover highlight (on top of target if different).
     const target_current_pos = get_target_current_position(place);
     if (hovered && (!target_current_pos || hovered.x !== target_current_pos.x || hovered.y !== target_current_pos.y)) {
-      const screen_x = inner.x0 + Math.floor((hovered.x - view.offset_x) / view.scale);
-      const screen_y = inner.y0 + Math.floor((hovered.y - view.offset_y) / view.scale);
+      const projected = scene_to_screen(place, hovered.x, hovered.y, Number.isFinite(Number(hovered.world_z)) ? Math.floor(Number(hovered.world_z)) : get_focus_world_z_for_place(place), inner);
+      const screen_x = projected.x;
+      const screen_y = projected.y;
       if (screen_x >= inner.x0 && screen_x <= inner.x1 && screen_y >= inner.y0 && screen_y <= inner.y1) {
         rq_ui.push({
           pass: 'ui',
@@ -2924,8 +3071,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           }
 
           for (const cell of overlay_cells) {
-            const sx = inner.x0 + Math.floor((cell.x - view.offset_x) / view.scale);
-            const sy = inner.y0 + Math.floor((cell.y - view.offset_y) / view.scale);
+            const projected = scene_to_screen(place, cell.x, cell.y, get_focus_world_z_for_place(place), inner);
+            const sx = projected.x;
+            const sy = projected.y;
             if (sx < inner.x0 || sx > inner.x1 || sy < inner.y0 || sy > inner.y1) continue;
             rq_ui.push({
               pass: 'ui',
@@ -2984,10 +3132,11 @@ export function make_place_module(config: PlaceModuleConfig): Module {
             const voxels = eval_body_model_voxels(def, { mode: 'render', facing: (move_preview.facing ?? null) as any });
             for (const v of voxels) {
               const wz = move_preview.target.z + Math.floor(Number((v as any)?.dz ?? 0));
-              const slot = slot_for_world_z(wz, visible_planes_z);
+              const projected = scene_to_screen(place, move_preview.target.x + Math.floor(Number((v as any)?.dx ?? 0)), move_preview.target.y + Math.floor(Number((v as any)?.dy ?? 0)), wz, inner);
+              const slot = slot_for_world_z(projected.plane, visible_planes_z);
               if (slot === null) continue;
-              const sx = inner.x0 + Math.floor((move_preview.target.x + Math.floor(Number((v as any)?.dx ?? 0)) - view.offset_x) / view.scale);
-              const sy = inner.y0 + Math.floor((move_preview.target.y + Math.floor(Number((v as any)?.dy ?? 0)) - view.offset_y) / view.scale);
+              const sx = projected.x;
+              const sy = projected.y;
               if (sx < inner.x0 || sx > inner.x1 || sy < inner.y0 || sy > inner.y1) continue;
               q_for_slot(slot).push({
                 pass: 'character',
@@ -3001,20 +3150,21 @@ export function make_place_module(config: PlaceModuleConfig): Module {
                   entity_render: move_preview.entity_render,
                   render_shader: move_preview.entity_render?.render_shader,
                 }) as any,
-                ctx: ctx_place_tile({ selected: true }),
+                ctx: ctx_place_tile({ ui: { selected: true }, light_mag: get_place_light_mag(place), view_direction: semantic_view_direction }),
               });
             }
           } else {
-            const slot = slot_for_world_z(move_preview.target.z, visible_planes_z);
-            if (slot !== null) {
+            const voxels = Array.isArray(move_preview.body_model?.physical) && move_preview.body_model!.physical!.length > 1
+              ? move_preview.body_model!.physical!
+              : [{ dx: 0, dy: 0, dz: 0 }];
+            for (const v of voxels) {
+              const projected = scene_to_screen(place, move_preview.target.x + Math.floor(Number((v as any)?.dx ?? 0)), move_preview.target.y + Math.floor(Number((v as any)?.dy ?? 0)), move_preview.target.z + Math.floor(Number((v as any)?.dz ?? 0)), inner);
+              const slot = slot_for_world_z(projected.plane, visible_planes_z);
+              if (slot === null) continue;
               const rq = q_for_slot(slot);
-              const voxels = Array.isArray(move_preview.body_model?.physical) && move_preview.body_model!.physical!.length > 1
-                ? move_preview.body_model!.physical!
-                : [{ dx: 0, dy: 0, dz: 0 }];
-              for (const v of voxels) {
-                const sx = inner.x0 + Math.floor((move_preview.target.x + Math.floor(Number((v as any)?.dx ?? 0)) - view.offset_x) / view.scale);
-                const sy = inner.y0 + Math.floor((move_preview.target.y + Math.floor(Number((v as any)?.dy ?? 0)) - view.offset_y) / view.scale);
-                if (sx < inner.x0 || sx > inner.x1 || sy < inner.y0 || sy > inner.y1) continue;
+              const sx = projected.x;
+              const sy = projected.y;
+              if (sx < inner.x0 || sx > inner.x1 || sy < inner.y0 || sy > inner.y1) continue;
                 const payload = move_preview.entity_type === 'pile'
                   ? make_pile_payload({ id: `painter_move_preview:${move_preview.entity_ref}`, pile_count: 2, rep: { display_char: move_preview.display_char, name: move_preview.name }, base_fg: rgb }) as any
                   : move_preview.entity_type === 'item'
@@ -3027,9 +3177,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
                   order: 60,
                   key: `painter_move_preview:${move_preview.entity_ref}:${move_preview.target.x},${move_preview.target.y},${move_preview.target.z}:${(v as any)?.dx ?? 0},${(v as any)?.dy ?? 0},${(v as any)?.dz ?? 0}`,
                   payload,
-                  ctx: ctx_place_tile({ selected: true }),
+                  ctx: ctx_place_tile({ ui: { selected: true }, light_mag: get_place_light_mag(place), view_direction: semantic_view_direction }),
                 });
-              }
             }
           }
         }
@@ -3038,8 +3187,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         if (shape_preview.length > 0) {
           const tint = get_color_by_name('vivid_yellow').rgb;
           for (const point of shape_preview) {
-            const sx = inner.x0 + Math.floor((point.x - view.offset_x) / view.scale);
-            const sy = inner.y0 + Math.floor((point.y - view.offset_y) / view.scale);
+            const projected = scene_to_screen(place, point.x, point.y, get_focus_world_z_for_place(place), inner);
+            const sx = projected.x;
+            const sy = projected.y;
             if (sx < inner.x0 || sx > inner.x1 || sy < inner.y0 || sy > inner.y1) continue;
             rq_ui.push({
               pass: 'ui',
@@ -3055,16 +3205,17 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         const preview = config.get_place_painter_preview?.() ?? null;
         if (preview && !topology_tool && painter_tool !== 'move') {
           const hover_world_z = Number.isFinite(Number(hovered_tile.world_z)) ? Math.floor(Number(hovered_tile.world_z)) : get_focus_world_z_for_place(place);
-          const slot = slot_for_world_z(hover_world_z, visible_planes_z);
-          if (slot !== null) {
+          const voxels = Array.isArray(preview.body_model?.physical) && preview.body_model!.physical!.length > 1
+            ? preview.body_model!.physical!
+            : [{ dx: 0, dy: 0, dz: 0 }];
+          for (const v of voxels) {
+            const projected = scene_to_screen(place, hovered_tile.x + Math.floor(Number((v as any)?.dx ?? 0)), hovered_tile.y + Math.floor(Number((v as any)?.dy ?? 0)), hover_world_z + Math.floor(Number((v as any)?.dz ?? 0)), inner);
+            const slot = slot_for_world_z(projected.plane, visible_planes_z);
+            if (slot === null) continue;
             const rq = q_for_slot(slot);
-            const voxels = Array.isArray(preview.body_model?.physical) && preview.body_model!.physical!.length > 1
-              ? preview.body_model!.physical!
-              : [{ dx: 0, dy: 0, dz: 0 }];
-            for (const v of voxels) {
-              const sx = inner.x0 + Math.floor((hovered_tile.x + Math.floor(Number((v as any)?.dx ?? 0)) - view.offset_x) / view.scale);
-              const sy = inner.y0 + Math.floor((hovered_tile.y + Math.floor(Number((v as any)?.dy ?? 0)) - view.offset_y) / view.scale);
-              if (sx < inner.x0 || sx > inner.x1 || sy < inner.y0 || sy > inner.y1) continue;
+            const sx = projected.x;
+            const sy = projected.y;
+            if (sx < inner.x0 || sx > inner.x1 || sy < inner.y0 || sy > inner.y1) continue;
               rq.push({
                 pass: 'tile',
                 x: sx,
@@ -3078,9 +3229,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
                   base_fg: hex_to_rgb(preview.display_color),
                   weight_index: 2,
                 }) as any,
-                ctx: ctx_place_tile({ selected: true }),
+                ctx: ctx_place_tile({ ui: { selected: true }, light_mag: get_place_light_mag(place), view_direction: semantic_view_direction }),
               });
-            }
           }
         }
       }
@@ -3097,6 +3247,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
     // Apply shared camera tuning from painter, but keep focus/pan per Place.
     dom_layers.apply_shared_camera_tuning(camera.get_shared_dom_tuning());
+    dom_layers.set_focus_layer_opacity_enabled(config.get_use_focus_layer_opacity ? config.get_use_focus_layer_opacity() : true);
     dom_layers.set_focus_z(focus_z);
 
     // Parallax neutral point is Henry (or later: highlighted target).
@@ -3120,8 +3271,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       let anchor_screen_y = cy;
 
       if (anchor_tile) {
-        const sx = inner.x0 + Math.floor((anchor_tile.x - view.offset_x) / view.scale);
-        const sy = inner.y0 + Math.floor((anchor_tile.y - view.offset_y) / view.scale);
+        const projected = scene_to_screen(place, anchor_tile.x, anchor_tile.y, get_focus_world_z_for_place(place), inner);
+        const sx = projected.x;
+        const sy = projected.y;
         if (sx >= inner.x0 && sx <= inner.x1 && sy >= inner.y0 && sy <= inner.y1) {
           anchor_screen_x = sx;
           anchor_screen_y = sy;
@@ -3659,8 +3811,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
       if (!place) {
         // Ensure DOM world layers are not left mounted on an empty session.
-        dom_layers.destroy();
-        dom_last_place_id = null;
+        reset_dom_render_state();
+        dom_last_view_signature = null;
 
         // No place loaded - show placeholder
         const inner = inner_rect();

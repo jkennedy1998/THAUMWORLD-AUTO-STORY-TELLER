@@ -1,4 +1,18 @@
 export { normalize_signed_mag, normalize_nonnegative_mag, clamp_mag } from "./core.js";
+export {
+  DEFAULT_LIGHT_MAG,
+  LIGHT_MAG_TRANSFER_TABLES,
+  SUPPORTED_LIGHT_MAGS,
+  describe_light_mag,
+  get_lighting_transfer_table,
+  light_mag_from_legacy_label,
+  normalize_light_mag,
+  project_lit_semantic_value,
+  resolve_light_mag,
+  type LightMag,
+  type LightingTransferTable,
+  type SemanticValue,
+} from "./light.js";
 export { get_damage_dice_from_mag } from "./damage.js";
 export { calculate_weight_mag } from "./weight.js";
 export {

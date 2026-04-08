@@ -4,6 +4,7 @@
 import type { TagInstance } from "../tag_system/registry.js";
 import type { BodyModelVoxel } from "../shared/body_model.js";
 import type { RenderShaderBindings } from "../render_shaders/definitions.js";
+import type { GraphicsModel, MaterialOptionsBySlot } from "../render_shaders/graphics_contract.js";
 import type { InspectFeatureDef, InspectProfile } from "../inspection/types.js";
 
 export type TileCategory = "structures" | "foliage" | "terrain" | "water" | "features" | "special";
@@ -31,6 +32,8 @@ export interface TileDefinition {
     display_char: string;          // Single char for UI
     display_color: string;         // Hex color or named color
     render_shader?: RenderShaderBindings;
+    graphics?: GraphicsModel;
+    materials?: MaterialOptionsBySlot;
     
     // Tags drive all behavior
     tags: TagInstance[];           // System tags (OCCUPIES, CONTAINER, GROW, etc.)
@@ -55,6 +58,10 @@ export interface TileDefinition {
     body_model?: {
       anchor_part?: string;
       physical: BodyModelVoxel[];
+    };
+    group_render?: {
+      part_roles?: string[];
+      main_part_role?: string;
     };
 }
 

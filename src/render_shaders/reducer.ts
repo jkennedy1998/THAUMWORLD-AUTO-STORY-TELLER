@@ -1,5 +1,5 @@
 import type { Cell, Rgb } from "../mono_ui/types.js";
-import { list_indexed_colors } from "../mono_ui/colors.js";
+import { nearest_indexed_rgb } from "../mono_ui/colors.js";
 import type { RenderLayer } from "./types.js";
 
 export type ReduceOptions = {
@@ -8,30 +8,12 @@ export type ReduceOptions = {
     fallback_weight_index?: number;
     fallback_render_index?: number;
     quantize_to_palette?: boolean;
+    light_mag?: number;
 };
 
 function clamp_byte(n: number): number {
     if (!Number.isFinite(n)) return 0;
     return Math.max(0, Math.min(255, Math.round(n)));
-}
-
-function nearest_indexed_rgb(rgb: Rgb): Rgb {
-    const colors = list_indexed_colors();
-    let best = colors[0]?.rgb ?? { r: 255, g: 255, b: 255 };
-    let best_d = Number.POSITIVE_INFINITY;
-
-    for (const c of colors) {
-        const dr = c.rgb.r - rgb.r;
-        const dg = c.rgb.g - rgb.g;
-        const db = c.rgb.b - rgb.b;
-        const d = (dr * dr) + (dg * dg) + (db * db);
-        if (d < best_d) {
-            best_d = d;
-            best = c.rgb;
-        }
-    }
-
-    return best;
 }
 
 export function reduce_layers_to_cell(layers: readonly RenderLayer[], opts?: ReduceOptions): Cell {
@@ -44,6 +26,9 @@ export function reduce_layers_to_cell(layers: readonly RenderLayer[], opts?: Red
     if (!layers || layers.length === 0) {
         return {
             char: ' ',
+            graphic: undefined,
+            materials: undefined,
+            light_mag: opts?.light_mag,
             rgb: quantize ? nearest_indexed_rgb(fallback_rgb) : fallback_rgb,
             style: fallback_style,
             weight_index: fallback_weight_index,
@@ -66,6 +51,9 @@ export function reduce_layers_to_cell(layers: readonly RenderLayer[], opts?: Red
 
     return {
         char,
+        graphic: top.graphic,
+        materials: top.materials,
+        light_mag: opts?.light_mag,
         rgb: out_rgb,
         style: (top.style ?? fallback_style) as any,
         weight_index: typeof top.weight_index === 'number' ? top.weight_index : fallback_weight_index,

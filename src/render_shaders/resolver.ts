@@ -10,6 +10,9 @@ import { TAG_MODIFIERS } from "./tags/index.js";
 import { UI_MODIFIERS } from "./ui/index.js";
 import { reduce_layers_to_cell } from "./reducer.js";
 import type { Cell } from "../mono_ui/types.js";
+import { resolve_effective_render_state } from './graphic_resolver.js';
+
+let loggedGrassPayload = false;
 
 export function resolve_render(payload: DiscriminatedRenderPayload, ctx: RenderContext): RenderOutput {
     let out: RenderOutput;
@@ -40,6 +43,29 @@ export function resolve_render(payload: DiscriminatedRenderPayload, ctx: RenderC
             // ignore
         }
     }
+    for (const layer of out.layers) {
+        const effective = resolve_effective_render_state(layer, ctx, payload);
+        if (!loggedGrassPayload && effective.graphic_id === 'tile_small_grass') {
+            loggedGrassPayload = true;
+            console.log('[atlas debug] resolved grass graphic', {
+                payload_kind: payload.kind,
+                payload_def_id: (payload as any).def_id ?? null,
+                payload_graphics: (payload as any).graphics ?? null,
+                effective,
+            });
+        }
+        if (!layer.graphic) {
+            layer.graphic = {
+                graphic_id: effective.graphic_id,
+                view_direction: effective.view_direction,
+                facing: effective.facing,
+                weight_index: effective.weight,
+            };
+        }
+        if (!layer.materials || Object.keys(layer.materials).length <= 0) {
+            layer.materials = effective.material_slots;
+        }
+    }
     return out;
 }
 
@@ -62,5 +88,6 @@ export function resolve_cell(payload: DiscriminatedRenderPayload, ctx: RenderCon
         fallback_weight_index: 1,
         fallback_render_index: 0,
         quantize_to_palette: false,
+        light_mag: ctx.light_mag,
     });
 }

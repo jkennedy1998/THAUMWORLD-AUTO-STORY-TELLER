@@ -5,6 +5,50 @@
   "weight": 8,
   "display_char": "#",
   "display_color": "#787d8b",
+  "graphics": {
+    "base_graphic_id": "tile_stone_brick_isolated",
+    "default_weight": 1,
+    "views": {
+      "north": { "graphic_id": "tile_stone_brick_isolated" },
+      "south": { "same_as": "north" },
+      "east": { "same_as": "north" },
+      "west": { "same_as": "north" },
+      "up": { "same_as": "north" },
+      "down": { "same_as": "north" }
+    },
+    "connectivity": {
+      "family": "stone_brick_block",
+      "mode": "cardinal_4",
+      "connect_tile_ids": ["tile_stone_brick"],
+      "variant_graphic_ids": {
+        "isolated": "tile_stone_brick_isolated",
+        "end_cap_n": "tile_stone_brick_end_cap_n",
+        "end_cap_e": "tile_stone_brick_end_cap_e",
+        "end_cap_s": "tile_stone_brick_end_cap_s",
+        "end_cap_w": "tile_stone_brick_end_cap_w",
+        "straight_horizontal": "tile_stone_brick_straight_horizontal",
+        "straight_vertical": "tile_stone_brick_straight_vertical",
+        "corner_ne": "tile_stone_brick_corner_ne",
+        "corner_se": "tile_stone_brick_corner_se",
+        "corner_sw": "tile_stone_brick_corner_sw",
+        "corner_nw": "tile_stone_brick_corner_nw",
+        "t_missing_n": "tile_stone_brick_t_missing_n",
+        "t_missing_e": "tile_stone_brick_t_missing_e",
+        "t_missing_s": "tile_stone_brick_t_missing_s",
+        "t_missing_w": "tile_stone_brick_t_missing_w",
+        "center": "tile_stone_brick_center",
+        "cross": "tile_stone_brick_center"
+      }
+    }
+  },
+  "materials": {
+    "defaults": {
+      "1": "STONE_PALE"
+    },
+    "allowed": {
+      "1": ["STONE_PALE"]
+    }
+  },
   "tags": [
     {
       "name": "OCCUPIES",

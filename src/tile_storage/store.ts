@@ -72,7 +72,10 @@ export function load_master_tile(def_id: string): TileDefLookupResult {
                 display_char: String(raw.display_char ?? "?"),
                 display_color: String(raw.display_color ?? "#888888"),
                 render_shader: (raw.render_shader && typeof raw.render_shader === 'object') ? (raw.render_shader as TileDefinition["render_shader"]) : undefined,
+                graphics: (raw as any).graphics as TileDefinition["graphics"],
+                materials: (raw as any).materials as TileDefinition["materials"],
                 tags: (raw.tags as TileDefinition["tags"]) ?? [],
+                group_render: (raw as any).group_render as TileDefinition["group_render"],
             };
             
             // Apply container_capacity defaults if present

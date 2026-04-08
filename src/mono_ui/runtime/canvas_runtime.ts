@@ -505,6 +505,8 @@ export class CanvasRuntime {
                     cell: { ...cell, weight_index: wi },
                     center_x_px: cx,
                     center_y_px: cy,
+                    cell_w_px: tile_w,
+                    cell_h_px: tile_h,
                     font_family: this.font_family,
                     font_size_px,
                     weight_index_to_css: this.weight_index_to_css,

@@ -5,6 +5,7 @@ import { ensure_dir_exists } from "../engine/log_store.js";
 import { get_item_dir, get_item_path, get_default_item_path, get_legacy_default_item_path, get_master_items_dir } from "../engine/paths.js";
 import type { TagInstance } from "../tag_system/registry.js";
 import { get_max_stack_size_from_size_mag, is_size_mag_stackable, normalize_size_mag } from "../mag/size.js";
+import type { GraphicsModel, MaterialOptionsBySlot } from "../render_shaders/graphics_contract.js";
 
 export type ItemDefLookupResult =
     | { ok: true; item: ItemDefinition; path: string }
@@ -39,6 +40,8 @@ export interface ItemDefinition {
         closed: string;
         open: string;
     };
+    graphics?: GraphicsModel;
+    materials?: MaterialOptionsBySlot;
     notes?: string;
 }
 
@@ -68,6 +71,8 @@ function apply_item_runtime_defaults(raw: Record<string, unknown>, def_id: strin
         stackable: derived_stackable,
         container: raw.container as { capacity_weight?: number; capacity_slots?: number } | undefined,
         container_glyphs: (raw as any).container_glyphs as any,
+        graphics: (raw as any).graphics as GraphicsModel | undefined,
+        materials: (raw as any).materials as MaterialOptionsBySlot | undefined,
         notes: raw.notes as string | undefined,
     };
 }

@@ -7,6 +7,7 @@ import { load_master_tile } from "./store.js";
 import type { TileDefinition } from "./types.js";
 import { debug_warn } from "../shared/debug.js";
 import type { RenderShaderBindings } from "../render_shaders/definitions.js";
+import type { GraphicsModel, MaterialOptionsBySlot } from "../render_shaders/graphics_contract.js";
 
 const warned_legacy_tile_kinds = new Set<string>();
 
@@ -20,6 +21,8 @@ export type ResolvedTile = {
   display_color: string;
   container_glyphs: TileDefinition["container_glyphs"] | null;
   render_shader: RenderShaderBindings | null;
+  graphics: GraphicsModel | null;
+  material_options: MaterialOptionsBySlot | null;
 };
 
 function normalize_remove_ops(rm: PlaceTile["tag_remove"]): TagRemoveOp[] {
@@ -77,6 +80,8 @@ export function resolve_place_tile(kind: string, tile: PlaceTile): ResolvedTile 
     display_color: String(def.display_color ?? "#888888"),
     container_glyphs: def.container_glyphs ?? null,
     render_shader: def.render_shader ?? null,
+    graphics: def.graphics ?? null,
+    material_options: def.materials ?? null,
   };
 }
 

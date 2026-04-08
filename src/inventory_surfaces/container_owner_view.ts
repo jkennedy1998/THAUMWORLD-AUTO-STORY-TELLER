@@ -46,6 +46,11 @@ function summarize_item(item: InlineItem): StorageSlotItemSummary {
     display_color: resolved?.display_color ?? (typeof (item as any)?.display_color === "string" ? String((item as any).display_color) : null),
     is_container: !!resolved && has_effective_tag(resolved.effective_tags, "CONTAINER"),
     tags: Array.isArray(resolved?.effective_tags) ? resolved.effective_tags : [],
+    graphics: resolved?.graphics,
+    material_options: resolved?.material_options,
+    materials: resolved?.materials,
+    state: resolved?.state,
+    facing: resolved?.facing,
   };
 }
 

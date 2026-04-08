@@ -1,3 +1,5 @@
+import type { GraphicsModel, InlineMaterialAssignments, MaterialOptionsBySlot, ViewDirection } from "../render_shaders/graphics_contract.js";
+
 export type StorageOwnerRef =
   | { kind: "actor"; id: string }
   | { kind: "npc"; id: string }
@@ -37,6 +39,11 @@ export type StorageSlotItemSummary = {
   tags: any[];
   resolved_tag_states?: any[];
   value_mag?: any;
+  graphics?: GraphicsModel;
+  material_options?: MaterialOptionsBySlot;
+  materials?: InlineMaterialAssignments;
+  state?: Record<string, unknown>;
+  facing?: ViewDirection | string;
 };
 
 export type StorageSlot = {

@@ -6,6 +6,7 @@
  */
 
 import type { Rgb } from '../mono_ui/types.js';
+import type { InlineMaterialAssignments, RenderGraphicRef } from '../render_shaders/graphics_contract.js';
 import type { PlaneId, Point2 } from '../shared/coords.js';
 
 /**
@@ -13,8 +14,10 @@ import type { PlaneId, Point2 } from '../shared/coords.js';
  */
 export interface GridCell {
   char: string;
+  graphic?: RenderGraphicRef;
+  materials?: InlineMaterialAssignments;
   rgb: Rgb;
-  weight_index: number; // 0-1
+  weight_index: number; // 0-3
   render_index?: number; // Optional layer index
 }
 

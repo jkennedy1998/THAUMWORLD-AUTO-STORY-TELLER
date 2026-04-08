@@ -102,7 +102,7 @@ function record_to_stub_place(record: ReturnType<typeof list_region_place_index_
     region_connectors: [],
     connections: [],
     environment: {
-      lighting: "bright",
+      light_mag: 1,
       terrain: "dirt",
       cover_available: [],
       temperature_offset: 0,

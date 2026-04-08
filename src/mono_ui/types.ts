@@ -1,5 +1,7 @@
 // mono_ui core types (pure, no DOM / no Node)
 
+import type { ViewDirection } from "../render_shaders/graphics_contract.js";
+
 export type Rgb = {
     r: number; // 0-255
     g: number; // 0-255
@@ -12,6 +14,22 @@ export type StyleName = string;
 // One tile / cell in the canvas
 export type Cell = {
     char: string; // expected length 1; space ' ' means clear
+
+    // Optional semantic graphic identity for atlas/text rendering.
+    graphic?: {
+        graphic_id: string;
+        view_direction: ViewDirection;
+        facing?: ViewDirection;
+        weight_index: 0 | 1 | 2 | 3;
+        variant?: string;
+        frame?: string;
+    };
+
+    // Optional active material assignment slots for atlas rendering.
+    materials?: Partial<Record<1 | 2 | 3, string>>;
+
+    // Optional per-cell lighting context for atlas/material rendering.
+    light_mag?: number;
 
     // 0..3 logical weights mapped directly to the active theme/font pack.
     weight_index: number;

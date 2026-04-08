@@ -17,6 +17,7 @@ import {
   updateLatestPointer,
 } from "../src/launcher/log_utils.js";
 import { acquireHostLaunchLock, detectLocalHost, detectVite, readHostLaunchLock, recoverHostLaunchLock, releaseHostLaunchLock, waitForLocalHost, writeHostSessionFile as writeHostSessionManifest } from "./launcher_common.mjs";
+import { syncAtlasAssets } from "./atlas_sync.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -32,6 +33,14 @@ console.log("Code changes will be reflected immediately (no rebuild needed)");
 console.log(`Data slot: ${data_slot}`);
 console.log(`Launch mode: ${launch_mode}`);
 console.log("");
+
+const atlasSync = syncAtlasAssets();
+if (atlasSync.missingSource) {
+  console.warn(`[atlas sync] source directory missing: ${atlasSync.sourceDir}`);
+} else {
+  const copiedSummary = atlasSync.copied.length > 0 ? `copied ${atlasSync.copied.join(', ')}` : 'no atlas copies needed';
+  console.log(`[atlas sync] ${copiedSummary}`);
+}
 
 const session = initLogSession(data_slot, "game");
 const { sessionId, logDir, mainLog } = session;

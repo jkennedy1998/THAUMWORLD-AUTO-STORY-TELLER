@@ -33,12 +33,22 @@ function normalize_cell(partial: Partial<Cell> & { char: string }): Cell {
     const weight_index = clamp_weight_index((partial as any).weight_index);
     const render_index = clamp_render_index((partial as any).render_index);
 
-    return { char, rgb, style, weight_index, render_index };
+    return {
+        char,
+        graphic: partial.graphic,
+        materials: partial.materials,
+        rgb,
+        style,
+        weight_index,
+        render_index,
+    };
 
 }
 
 function assign_cell(dst: Cell, src: Cell): void {
     dst.char = src.char;
+    dst.graphic = src.graphic;
+    dst.materials = src.materials;
     dst.rgb = src.rgb;
     dst.style = src.style;
     dst.weight_index = src.weight_index;

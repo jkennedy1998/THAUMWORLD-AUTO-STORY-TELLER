@@ -15,6 +15,7 @@ import { resolve_inline_item } from "../item_storage/resolve.js";
 import type { TagInstance } from "../tag_system/registry.js";
 import { resolve_grow_tag_configs } from "../mag/grow.js";
 import { get_damage_dice_from_mag } from "../mag/damage.js";
+import { describe_light_mag } from "../mag/index.js";
 import { resolve_spoils_tag_config_from_states } from "../tag_system/spoils.js";
 import { get_tag_dim_mag, resolve_tag_states_from_instances, type ResolvedTagState } from "../tag_system/resolved.js";
 import type { Place, PlaceStructureInstance, PlaceTile, PlaceItem, PlaceActor, PlaceNPC } from "../types/place.js";
@@ -758,7 +759,7 @@ function build_place_overview(place: Place, slot: number, inspector_ref: string,
   }
 
   const envBits: string[] = [];
-  if (place.environment?.lighting) envBits.push(`The light is ${String(place.environment.lighting).toLowerCase()}.`);
+  if (place.environment) envBits.push(`The light is ${describe_light_mag(place.environment.light_mag)}.`);
   const tempText = describe_temperature_offset(Number(place.environment?.temperature_offset ?? 0));
   if (tempText) envBits.push(tempText);
   if (Array.isArray(place.environment?.cover_available) && place.environment.cover_available.length > 0) {
@@ -766,7 +767,7 @@ function build_place_overview(place: Place, slot: number, inspector_ref: string,
   }
   if (envBits.length > 0) selected_facts.push(envBits.join(' '));
 
-  if (place.environment?.lighting) sensory_details.light = [`The space sits in ${String(place.environment.lighting).toLowerCase()} light.`];
+  if (place.environment) sensory_details.light = [`The space sits in ${describe_light_mag(place.environment.light_mag)} light.`];
   if (tempText) sensory_details.touch = [tempText];
 
   if (peopleNames.length > 0) features.push(create_tag_feature('place:population', 'Present Figures', selected_facts[0] ?? 'People are here.', 'clear'));

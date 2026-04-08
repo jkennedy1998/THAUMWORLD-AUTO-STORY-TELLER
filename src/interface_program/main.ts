@@ -54,7 +54,7 @@ import { resolve_tag_state_from_instance } from "../tag_system/resolved.js";
 import { get_tag_definition, list_tag_definitions } from "../tag_system/index.js";
 import { get_tag_stacking_mode, is_tag_editor_visible } from "../tag_system/definitions.js";
 import { MetaTagProcessor } from "../tag_system/meta_processor.js";
-import { clamp_mag, project_container_max_slots, resolve_container_capacity_mag_from_states, timed_event_stat_to_bps } from "../mag/index.js";
+import { clamp_mag, project_container_max_slots, resolve_container_capacity_mag_from_states, resolve_light_mag, timed_event_stat_to_bps } from "../mag/index.js";
 import { build_physics_tag_flags, has_tag_name, resolve_structure_physics_tags, resolve_tile_physics_tags } from "../shared/physics_tags.js";
 import { get_awareness_list } from "../shared/awareness.js";
 import {
@@ -4541,6 +4541,8 @@ function ensure_place_runtime_augmented(place_any: any, place_id: string): void 
                         (tile as any).resolved_tag_states = resolved.resolved_tag_states;
                         (tile as any).value_mag = resolved.value_mag;
                         (tile as any).render_shader = resolved.render_shader ?? undefined;
+                        (tile as any).graphics = resolved.graphics ?? undefined;
+                        (tile as any).material_options = resolved.material_options ?? undefined;
                         tile.__derived_runtime = true;
                         augmentedTiles++;
                         if (resolved.container_glyphs) {
@@ -4599,6 +4601,8 @@ function ensure_place_runtime_augmented(place_any: any, place_id: string): void 
             (s as any).value_mag = resolved.value_mag;
             (s as any).container_glyphs = resolved.container_glyphs ?? null;
             (s as any).render_shader = resolved.render_shader ?? undefined;
+            (s as any).graphics = resolved.graphics ?? undefined;
+            (s as any).material_options = resolved.material_options ?? undefined;
 
             const bm = (resolved.def as any)?.body_model;
             const raw = Array.isArray(bm?.physical) ? bm.physical : null;
@@ -4982,7 +4986,10 @@ function create_connected_place_and_sync(
             place_connectors: [],
             region_connectors: [],
             connections: [],
-            environment: { ...(source_place.environment ?? { lighting: 'bright', terrain: 'dirt', cover_available: [], temperature_offset: 0 }) },
+            environment: {
+                ...(source_place.environment ?? { light_mag: 1, terrain: 'dirt', cover_available: [], temperature_offset: 0 }),
+                light_mag: resolve_light_mag(source_place.environment?.light_mag),
+            },
             contents: { npcs_present: [], actors_present: [], items_on_ground: [], features: [] },
             structures: [],
             is_public: true,

@@ -31,8 +31,8 @@ export type RenderTheme = {
 };
 
 export const THAUMWORLD_RENDER_THEME: RenderTheme = {
-  id: 'thaumworld-font-v1',
-  backend: 'font',
+  id: 'thaumworld-atlas-v1',
+  backend: 'atlas',
   cell: {
     width_px: 12,
     height_px: 16,
@@ -50,8 +50,8 @@ export const THAUMWORLD_RENDER_THEME: RenderTheme = {
     ] as const,
   },
   atlas: {
-    image_src: null,
-    manifest_src: null,
+    image_src: 'internal:terrain',
+    manifest_src: 'internal:terrain',
     glyph_cell_width_px: 12,
     glyph_cell_height_px: 16,
     tint_mode: 'multiply',

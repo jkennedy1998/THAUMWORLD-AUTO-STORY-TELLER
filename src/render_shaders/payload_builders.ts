@@ -3,6 +3,7 @@ import type { ItemDefinition } from "../item_storage/store.js";
 import type { Rgb } from "../mono_ui/types.js";
 import type { DiscriminatedRenderPayload } from "./types.js";
 import type { EntityRenderProfile, RenderShaderBindings } from "./definitions.js";
+import type { GroupRenderContext, InlineMaterialAssignments, ViewDirection } from "./graphics_contract.js";
 
 export function pick_tags(instance: any, definition: any): any[] {
     const inst_tags = instance && Array.isArray(instance.tags) ? instance.tags : null;
@@ -23,6 +24,10 @@ export function make_item_payload(
         name: (definition as any)?.name ?? (instance as any)?.name,
         qty: instance.qty,
         display_char: (instance as any).display_char ?? (definition as any).display_char,
+        graphics: (definition as any)?.graphics,
+        materials: ((instance as any)?.materials ?? (definition as any)?.materials?.defaults) as InlineMaterialAssignments | undefined,
+        state: (instance as any)?.state,
+        facing: (instance as any)?.facing as ViewDirection | string | undefined,
         tags: pick_tags(instance as any, definition as any),
         base_fg: opts?.base_fg,
     } as any;
@@ -34,6 +39,11 @@ export function make_item_like_payload(opts: {
     name?: string;
     qty?: number;
     display_char?: string;
+    graphics?: any;
+    materials?: InlineMaterialAssignments;
+    state?: Record<string, unknown>;
+    facing?: ViewDirection | string;
+    group_context?: GroupRenderContext;
     tags?: any[];
     base_fg?: Rgb;
 }): DiscriminatedRenderPayload {
@@ -44,6 +54,11 @@ export function make_item_like_payload(opts: {
         name: opts.name,
         qty: opts.qty,
         display_char: typeof opts.display_char === 'string' ? String(opts.display_char).charAt(0) : undefined,
+        graphics: opts.graphics,
+        materials: opts.materials,
+        state: opts.state,
+        facing: opts.facing,
+        group_context: opts.group_context,
         tags: Array.isArray(opts.tags) ? opts.tags : [],
         base_fg: opts.base_fg,
     } as any;
@@ -121,6 +136,8 @@ export function make_entity_payload(
         base_fg: opts?.base_fg,
         kind_id: opts?.kind_id,
         entity_render: opts?.entity_render,
+        graphics: opts?.entity_render?.graphics,
+        materials: opts?.entity_render?.materials?.defaults,
         render_shader: opts?.render_shader,
     } as any;
 }
@@ -150,6 +167,11 @@ export function make_simple_tile_payload(opts: {
     weight_index?: number;
     style?: any;
     render_shader?: RenderShaderBindings;
+    graphics?: any;
+    materials?: InlineMaterialAssignments;
+    state?: Record<string, unknown>;
+    facing?: ViewDirection | string;
+    group_context?: GroupRenderContext;
 }): DiscriminatedRenderPayload {
     return {
         kind: 'tile',
@@ -158,6 +180,11 @@ export function make_simple_tile_payload(opts: {
         def_id: typeof opts.def_id === 'string' ? opts.def_id : undefined,
         tags: Array.isArray(opts.tags) ? opts.tags : [],
         char: String(opts.char ?? ' ').charAt(0) || ' ',
+        graphics: opts.graphics,
+        materials: opts.materials,
+        state: opts.state,
+        facing: opts.facing,
+        group_context: opts.group_context,
         base_fg: opts.base_fg,
         weight_index: typeof opts.weight_index === 'number' ? opts.weight_index : undefined,
         style: opts.style,

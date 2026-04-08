@@ -1,6 +1,7 @@
 import type { Rgb, StyleName } from "../mono_ui/types.js";
 import type { TagInstance } from "../tag_system/registry.js";
 import type { EntityRenderProfile, RenderShaderBindings } from "./definitions.js";
+import type { CardinalDirection, GraphicsModel, GroupRenderContext, InlineMaterialAssignments, RenderGraphicRef, ViewDirection } from "./graphics_contract.js";
 
 export type RenderKind = 'tile' | 'item' | 'pile' | 'actor' | 'npc' | 'particle' | 'ui';
 
@@ -23,6 +24,11 @@ export type RenderPayloadBase = {
     // Optional base style inputs supplied by the compositor/module.
     base_fg?: Rgb;
     render_shader?: RenderShaderBindings;
+    graphics?: GraphicsModel;
+    materials?: InlineMaterialAssignments;
+    state?: Record<string, unknown>;
+    facing?: ViewDirection | string;
+    group_context?: GroupRenderContext;
 };
 
 export type ItemPayload = RenderPayloadBase & {
@@ -119,16 +125,21 @@ export type RenderContext = {
     // These are intentionally loose so modules can pass richer semantics
     // without expanding the discriminated payload surface.
     body_part?: string;
-    facing?: string;
+    facing?: ViewDirection | string;
+    view_direction?: ViewDirection;
+    light_mag?: number;
     world_z?: number;
     focus_world_z?: number;
     place_base_z?: number;
+    group_context?: GroupRenderContext;
+    tile_neighbors?: Partial<Record<CardinalDirection, string | null>>;
 };
 
 export type RenderBlendMode = 'normal' | 'add' | 'multiply';
 
 export type RenderLayer = {
     char: string;
+    graphic?: RenderGraphicRef;
     fg?: Rgb;
     bg?: Rgb;
     z: number;
@@ -136,6 +147,7 @@ export type RenderLayer = {
     style?: StyleName;
     weight_index?: number;
     flags?: string[];
+    materials?: InlineMaterialAssignments;
 };
 
 export type RenderOutput = {
