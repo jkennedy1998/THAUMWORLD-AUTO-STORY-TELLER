@@ -4,6 +4,8 @@ export type PlacePrincipalView = 'top' | 'bottom' | 'north' | 'east' | 'south' |
 export type PlaceViewRollQuarterTurn = 0 | 1 | 2 | 3;
 export type PlaceSwingDirection = 'left' | 'right' | 'up' | 'down';
 export type PlaceRollDirection = 'left' | 'right';
+export type PlaceTransitionEuler = { x: number; y: number; z: number };
+export type ScreenMoveDirection = 'up' | 'down' | 'left' | 'right';
 
 export type PlaceViewState = {
   principal_view: PlacePrincipalView;
@@ -37,7 +39,7 @@ const AXIS_NEG_Z: Axis3 = { x: 0, y: 0, z: -1 };
 
 const BASE_VIEW_BASIS: Record<PlacePrincipalView, { forward: Axis3; up: Axis3; right: Axis3 }> = {
   top: { forward: AXIS_POS_Z, up: AXIS_NEG_Y, right: AXIS_POS_X },
-  bottom: { forward: AXIS_NEG_Z, up: AXIS_NEG_Y, right: AXIS_POS_X },
+  bottom: { forward: AXIS_NEG_Z, up: AXIS_POS_Y, right: AXIS_POS_X },
   north: { forward: AXIS_POS_Y, up: AXIS_POS_Z, right: AXIS_POS_X },
   east: { forward: AXIS_POS_X, up: AXIS_POS_Z, right: AXIS_NEG_Y },
   south: { forward: AXIS_NEG_Y, up: AXIS_POS_Z, right: AXIS_NEG_X },
@@ -102,6 +104,93 @@ function get_view_basis(state: PlaceViewState): { forward: Axis3; up: Axis3; rig
   return { forward: base.forward, up: rotated.up, right: rotated.right };
 }
 
+export function get_view_basis_for_state(state: PlaceViewState): {
+  forward: WorldPoint3;
+  up: WorldPoint3;
+  right: WorldPoint3;
+} {
+  const basis = get_view_basis(make_place_view_state(state.principal_view, state.roll_quarter_turn));
+  return {
+    forward: { x: basis.forward.x, y: basis.forward.y, z: basis.forward.z },
+    up: { x: basis.up.x, y: basis.up.y, z: basis.up.z },
+    right: { x: basis.right.x, y: basis.right.y, z: basis.right.z },
+  };
+}
+
+function project_axis_to_ground(axis: WorldPoint3): { dx: number; dy: number } | null {
+  const abs_x = Math.abs(axis.x);
+  const abs_y = Math.abs(axis.y);
+  if (abs_x < 1 && abs_y < 1) return null;
+  if (abs_x >= abs_y) {
+    return { dx: axis.x > 0 ? 1 : -1, dy: 0 };
+  }
+  return { dx: 0, dy: axis.y > 0 ? 1 : -1 };
+}
+
+function negate_ground_delta(delta: { dx: number; dy: number } | null): { dx: number; dy: number } | null {
+  if (!delta) return null;
+  return { dx: -delta.dx, dy: -delta.dy };
+}
+
+export function map_screen_direction_to_ground_delta(state: PlaceViewState, direction: ScreenMoveDirection): { dx: number; dy: number } {
+  const basis = get_view_basis_for_state(make_place_view_state(state.principal_view, state.roll_quarter_turn));
+  const horizontal = project_axis_to_ground(basis.right) ?? project_axis_to_ground(basis.forward) ?? { dx: 1, dy: 0 };
+  const vertical = project_axis_to_ground(basis.up) ?? project_axis_to_ground(basis.forward) ?? { dx: 0, dy: -1 };
+  switch (direction) {
+    case 'left':
+      return negate_ground_delta(horizontal) ?? { dx: -1, dy: 0 };
+    case 'right':
+      return horizontal;
+    case 'down':
+      return vertical;
+    case 'up':
+    default:
+      return negate_ground_delta(vertical) ?? { dx: 0, dy: -1 };
+  }
+}
+
+export function map_screen_direction_to_world_delta(state: PlaceViewState, direction: ScreenMoveDirection): WorldPoint3 {
+  const basis = get_view_basis_for_state(make_place_view_state(state.principal_view, state.roll_quarter_turn));
+  switch (direction) {
+    case 'left':
+      return { x: -basis.right.x, y: -basis.right.y, z: -basis.right.z };
+    case 'right':
+      return basis.right;
+    case 'down':
+      return basis.up;
+    case 'up':
+    default:
+      return { x: -basis.up.x, y: -basis.up.y, z: -basis.up.z };
+  }
+}
+
+export function map_screen_move_intent_to_ground_delta(state: PlaceViewState, intent: { dx: number; dy: number } | null): { dx: number; dy: number } | null {
+  if (!intent) return null;
+  const out = { dx: 0, dy: 0 };
+  if (intent.dx < 0) {
+    const delta = map_screen_direction_to_ground_delta(state, 'left');
+    out.dx += delta.dx;
+    out.dy += delta.dy;
+  } else if (intent.dx > 0) {
+    const delta = map_screen_direction_to_ground_delta(state, 'right');
+    out.dx += delta.dx;
+    out.dy += delta.dy;
+  }
+  if (intent.dy < 0) {
+    const delta = map_screen_direction_to_ground_delta(state, 'down');
+    out.dx += delta.dx;
+    out.dy += delta.dy;
+  } else if (intent.dy > 0) {
+    const delta = map_screen_direction_to_ground_delta(state, 'up');
+    out.dx += delta.dx;
+    out.dy += delta.dy;
+  }
+  const dx = Math.max(-1, Math.min(1, out.dx));
+  const dy = Math.max(-1, Math.min(1, out.dy));
+  if (dx === 0 && dy === 0) return null;
+  return { dx, dy };
+}
+
 function axis_to_principal_view(axis: Axis3): PlacePrincipalView {
   if (same_axis(axis, AXIS_POS_Z)) return 'top';
   if (same_axis(axis, AXIS_NEG_Z)) return 'bottom';
@@ -120,32 +209,89 @@ function resolve_state_from_basis(forward: Axis3, up: Axis3): PlaceViewState {
   return make_place_view_state(principal_view, 0);
 }
 
+function negate_axis(axis: Axis3): Axis3 {
+  return {
+    x: -axis.x as -1 | 0 | 1,
+    y: -axis.y as -1 | 0 | 1,
+    z: -axis.z as -1 | 0 | 1,
+  };
+}
+
+function get_state_key(state: PlaceViewState): string {
+  const current = make_place_view_state(state.principal_view, state.roll_quarter_turn);
+  return `${current.principal_view}:${current.roll_quarter_turn}`;
+}
+
+function rotate_state_for_swing(state: PlaceViewState, direction: PlaceSwingDirection): PlaceViewState {
+  const basis = get_view_basis(make_place_view_state(state.principal_view, state.roll_quarter_turn));
+  switch (direction) {
+    case 'left':
+      return resolve_state_from_basis(basis.right, basis.up);
+    case 'right':
+      return resolve_state_from_basis(negate_axis(basis.right), basis.up);
+    case 'up':
+      return resolve_state_from_basis(basis.up, negate_axis(basis.forward));
+    case 'down':
+    default:
+      return resolve_state_from_basis(negate_axis(basis.up), basis.forward);
+  }
+}
+
+const ALL_VIEW_STATES: readonly PlaceViewState[] = ALL_PRINCIPAL_VIEWS.flatMap((principal_view) =>
+  ([0, 1, 2, 3] as const).map((roll_quarter_turn) => make_place_view_state(principal_view, roll_quarter_turn))
+);
+
+const SWING_GRAPH: Readonly<Record<string, Record<PlaceSwingDirection, PlaceViewState>>> = Object.freeze(
+  Object.fromEntries(
+    ALL_VIEW_STATES.map((state) => {
+      const key = get_state_key(state);
+      return [
+        key,
+        {
+          left: rotate_state_for_swing(state, 'left'),
+          right: rotate_state_for_swing(state, 'right'),
+          up: rotate_state_for_swing(state, 'up'),
+          down: rotate_state_for_swing(state, 'down'),
+        },
+      ];
+    })
+  )
+);
+
 export function rotate_place_view_roll(state: PlaceViewState, direction: PlaceRollDirection): PlaceViewState {
   const current = make_place_view_state(state.principal_view, state.roll_quarter_turn);
   const delta = direction === 'right' ? 1 : 3;
   return make_place_view_state(current.principal_view, current.roll_quarter_turn + delta);
 }
 
-export function swing_place_view(state: PlaceViewState, direction: PlaceSwingDirection): PlaceViewState {
-  const basis = get_view_basis(make_place_view_state(state.principal_view, state.roll_quarter_turn));
-  switch (direction) {
-    case 'left':
-      return resolve_state_from_basis({ x: -basis.right.x as -1 | 0 | 1, y: -basis.right.y as -1 | 0 | 1, z: -basis.right.z as -1 | 0 | 1 }, basis.up);
-    case 'right':
-      return resolve_state_from_basis(basis.right, basis.up);
-    case 'up':
-      return resolve_state_from_basis(basis.up, { x: -basis.forward.x as -1 | 0 | 1, y: -basis.forward.y as -1 | 0 | 1, z: -basis.forward.z as -1 | 0 | 1 });
-    case 'down':
-    default:
-      return resolve_state_from_basis({ x: -basis.up.x as -1 | 0 | 1, y: -basis.up.y as -1 | 0 | 1, z: -basis.up.z as -1 | 0 | 1 }, basis.forward);
+export function get_transition_tilt_for_command(
+  state: PlaceViewState,
+  kind: 'swing' | 'roll',
+  direction: PlaceSwingDirection | PlaceRollDirection,
+  breakpoint_deg: number,
+): PlaceTransitionEuler {
+  const mag = Math.max(1, Math.abs(Number(breakpoint_deg) || 45));
+  if (kind === 'roll') {
+    return { x: 0, y: 0, z: direction === 'left' ? -mag : mag };
   }
+  return {
+    x: direction === 'up' ? -mag : direction === 'down' ? mag : 0,
+    y: direction === 'left' ? mag : direction === 'right' ? -mag : 0,
+    z: 0,
+  };
+}
+
+export function swing_place_view(state: PlaceViewState, direction: PlaceSwingDirection): PlaceViewState {
+  const current = make_place_view_state(state.principal_view, state.roll_quarter_turn);
+  const next = SWING_GRAPH[get_state_key(current)]?.[direction];
+  return next ? make_place_view_state(next.principal_view, next.roll_quarter_turn) : current;
 }
 
 function apply_roll_to_uv(u: number, v: number, roll_quarter_turn: PlaceViewRollQuarterTurn): { u: number; v: number } {
   switch (normalize_place_view_roll_quarter_turn(roll_quarter_turn)) {
-    case 1: return { u: -v, v: u };
+    case 1: return { u: v, v: -u };
     case 2: return { u: -u, v: -v };
-    case 3: return { u: v, v: -u };
+    case 3: return { u: -v, v: u };
     case 0:
     default: return { u, v };
   }
@@ -153,9 +299,9 @@ function apply_roll_to_uv(u: number, v: number, roll_quarter_turn: PlaceViewRoll
 
 function unapply_roll_to_uv(u: number, v: number, roll_quarter_turn: PlaceViewRollQuarterTurn): { u: number; v: number } {
   switch (normalize_place_view_roll_quarter_turn(roll_quarter_turn)) {
-    case 1: return { u: v, v: -u };
+    case 1: return { u: -v, v: u };
     case 2: return { u: -u, v: -v };
-    case 3: return { u: -v, v: u };
+    case 3: return { u: v, v: -u };
     case 0:
     default: return { u, v };
   }
@@ -216,7 +362,7 @@ export function project_world_point_with_roll(point: WorldPoint3, state: PlaceVi
   let projected: ProjectedPoint;
   switch (normalize_place_principal_view(state.principal_view)) {
     case 'bottom':
-      projected = { u: x, v: y, plane: z };
+      projected = { u: x, v: -y, plane: z };
       break;
     case 'north':
       projected = { u: x, v: -z, plane: y };
@@ -250,7 +396,7 @@ export function unproject_plane_point_with_roll(point: { u: number; v: number; p
   const plane = Math.floor(point.plane);
   switch (normalize_place_principal_view(state.principal_view)) {
     case 'bottom':
-      return { x: u, y: v, z: plane };
+      return { x: u, y: -v, z: plane };
     case 'north':
       return { x: u, y: plane, z: -v };
     case 'south':

@@ -54,6 +54,7 @@ type FloatingPanelCallbacks = {
   on_key_down?: (e: KeyboardEvent) => void;
   on_key_up?: (e: KeyboardEvent) => void;
   on_text_input?: (text: string) => void;
+  wants_text_capture?: () => boolean;
   on_focus?: () => void;
   on_blur?: () => void;
   on_global_key_down?: (e: KeyboardEvent) => void;
@@ -289,6 +290,11 @@ export function make_floating_panel_module(opts: FloatingPanelOptions): Module {
     OnTextInput(text: string): void {
       if (opts.is_visible && !opts.is_visible()) return;
       opts.on_text_input?.(text);
+    },
+
+    WantsTextCapture(): boolean {
+      if (opts.is_visible && !opts.is_visible()) return false;
+      return opts.wants_text_capture?.() ?? false;
     },
 
     OnGlobalKeyDown(e: KeyboardEvent): void {

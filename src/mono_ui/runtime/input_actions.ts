@@ -33,8 +33,10 @@ export type InputContext = {
 export type MoveIntent = { dx: number; dy: number } | null;
 export type MoveIntentChangeMeta = {
   source: 'keydown' | 'keyup' | 'reset';
+  kind: 'press' | 'release' | 'replace';
   action: ActionName | null;
   code: string | null;
+  input_seq: number;
 };
 
 type KeyMapping = Record<string, ActionName>;
@@ -59,6 +61,7 @@ const action_states: Record<ActionName, ActionState> = {
 };
 
 let global_seq = 0;
+let global_input_seq = 0;
 let last_emitted_intent_key = 'none';
 const move_intent_listeners = new Set<(intent: MoveIntent, meta: MoveIntentChangeMeta) => void>();
 
@@ -117,6 +120,7 @@ export function handle_keydown(ev: KeyboardEvent, ctx: InputContext): void {
   const was_down = state.down;
   if (!was_down) {
     global_seq++;
+    global_input_seq++;
     state.down_seq = global_seq;
   }
   
@@ -124,7 +128,7 @@ export function handle_keydown(ev: KeyboardEvent, ctx: InputContext): void {
 
   if (!was_down) {
     record_input_transition(action, ev.code, true, ctx.typing);
-    emit_move_intent_if_changed({ source: 'keydown', action, code: ev.code });
+    emit_move_intent_if_changed({ source: 'keydown', kind: 'press', action, code: ev.code, input_seq: global_input_seq });
   }
 
   if (!was_down && DEBUG_LEVEL >= 3) {
@@ -151,11 +155,14 @@ export function handle_keyup(ev: KeyboardEvent, ctx: InputContext): void {
   // Always clear on keyup, even while typing (prevents stuck state)
   const state = action_states[action];
   const was_down = state.down;
+  if (was_down) {
+    global_input_seq++;
+  }
   state.down = false;
 
   if (was_down) {
     record_input_transition(action, ev.code, false, ctx.typing);
-    emit_move_intent_if_changed({ source: 'keyup', action, code: ev.code });
+    emit_move_intent_if_changed({ source: 'keyup', kind: get_move_intent() ? 'replace' : 'release', action, code: ev.code, input_seq: global_input_seq });
   }
 
   if (was_down && DEBUG_LEVEL >= 3) {
@@ -187,7 +194,8 @@ export function reset_all(): void {
     action_states[action].down = false;
     action_states[action].down_seq = 0;
   }
-  emit_move_intent_if_changed({ source: 'reset', action: null, code: null });
+  global_input_seq++;
+  emit_move_intent_if_changed({ source: 'reset', kind: 'release', action: null, code: null, input_seq: global_input_seq });
 }
 
 /**
@@ -205,33 +213,33 @@ export function is_down(action: ActionName): boolean {
 }
 
 /**
- * Get movement intent as a blended directional input.
- * Opposed inputs cancel per axis; orthogonal inputs blend 50/50 for diagonals.
- * Returns: { dx, dy } where dx/dy are -1/0/1, or null if no movement.
+ * Get movement intent as the newest held cardinal direction.
+ * Newest press wins across all four movement actions.
+ * Returns: { dx, dy } where exactly one axis is non-zero, or null if no movement.
  */
 export function get_move_intent(): { dx: number; dy: number } | null {
-  const up = action_states.move_up;
-  const down = action_states.move_down;
-  const left = action_states.move_left;
-  const right = action_states.move_right;
-
-  // No movement if nothing held
-  if (!up.down && !down.down && !left.down && !right.down) {
-    return null;
+  let winner: ActionName | null = null;
+  let winner_seq = -1;
+  for (const action of ['move_up', 'move_down', 'move_left', 'move_right'] as const) {
+    const state = action_states[action];
+    if (!state.down) continue;
+    if (state.down_seq > winner_seq) {
+      winner = action;
+      winner_seq = state.down_seq;
+    }
   }
-
-  let dx = 0;
-  let dy = 0;
-
-  if (left.down !== right.down) {
-    dx = left.down ? -1 : 1;
+  switch (winner) {
+    case 'move_up':
+      return { dx: 0, dy: 1 };
+    case 'move_down':
+      return { dx: 0, dy: -1 };
+    case 'move_left':
+      return { dx: -1, dy: 0 };
+    case 'move_right':
+      return { dx: 1, dy: 0 };
+    default:
+      return null;
   }
-  if (up.down !== down.down) {
-    dy = up.down ? 1 : -1;
-  }
-
-  if (dx === 0 && dy === 0) return null;
-  return { dx, dy };
 }
 
 /**

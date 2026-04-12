@@ -45,6 +45,9 @@ export type CameraControlOptions = {
   onCalibrationReset?: () => void;
   onScalePerLayerChange?: (value: number) => void;
   onMovementPerLayerChange?: (value: number) => void;
+  onMouseAngleYawDegChange?: (value: number) => void;
+  onMouseAnglePitchDegChange?: (value: number) => void;
+  onMouseAngleSpringChange?: (value: number) => void;
   onBaseLayerScaleChange?: (value: number) => void;
   onCharSpacingXChange?: (value: number) => void;
   onCharSpacingYChange?: (value: number) => void;
@@ -93,28 +96,40 @@ const ROW_LAYER_MOVE_LABEL = 27;
 const ROW_LAYER_MOVE = 28;
 const ROW_LAYER_MOVE_SLIDER = 29;
 const ROW_SEPARATOR_8 = 30;
-const ROW_BASE_SCALE_LABEL = 31;
-const ROW_BASE_SCALE = 32;
-const ROW_BASE_SCALE_SLIDER = 33;
+const ROW_MOUSE_YAW_LABEL = 31;
+const ROW_MOUSE_YAW = 32;
+const ROW_MOUSE_YAW_SLIDER = 33;
 const ROW_SEPARATOR_9 = 34;
-const ROW_CHAR_SPACING_X_LABEL = 35;
-const ROW_CHAR_SPACING_X = 36;
-const ROW_CHAR_SPACING_X_SLIDER = 37;
+const ROW_MOUSE_PITCH_LABEL = 35;
+const ROW_MOUSE_PITCH = 36;
+const ROW_MOUSE_PITCH_SLIDER = 37;
 const ROW_SEPARATOR_10 = 38;
-const ROW_CHAR_SPACING_Y_LABEL = 39;
-const ROW_CHAR_SPACING_Y = 40;
-const ROW_CHAR_SPACING_Y_SLIDER = 41;
+const ROW_MOUSE_SPRING_LABEL = 39;
+const ROW_MOUSE_SPRING = 40;
+const ROW_MOUSE_SPRING_SLIDER = 41;
 const ROW_SEPARATOR_11 = 42;
-const ROW_PAN_X_LABEL = 43;
-const ROW_PAN_X_VALUE = 44;
-const ROW_PAN_X_SLIDER = 45;
+const ROW_BASE_SCALE_LABEL = 43;
+const ROW_BASE_SCALE = 44;
+const ROW_BASE_SCALE_SLIDER = 45;
 const ROW_SEPARATOR_12 = 46;
-const ROW_PAN_Y_LABEL = 47;
-const ROW_PAN_Y_VALUE = 48;
-const ROW_PAN_Y_SLIDER = 49;
+const ROW_CHAR_SPACING_X_LABEL = 47;
+const ROW_CHAR_SPACING_X = 48;
+const ROW_CHAR_SPACING_X_SLIDER = 49;
+const ROW_SEPARATOR_13 = 50;
+const ROW_CHAR_SPACING_Y_LABEL = 51;
+const ROW_CHAR_SPACING_Y = 52;
+const ROW_CHAR_SPACING_Y_SLIDER = 53;
+const ROW_SEPARATOR_14 = 54;
+const ROW_PAN_X_LABEL = 55;
+const ROW_PAN_X_VALUE = 56;
+const ROW_PAN_X_SLIDER = 57;
+const ROW_SEPARATOR_15 = 58;
+const ROW_PAN_Y_LABEL = 59;
+const ROW_PAN_Y_VALUE = 60;
+const ROW_PAN_Y_SLIDER = 61;
 
 // Total content height
-const CONTENT_HEIGHT = 50;
+const CONTENT_HEIGHT = 62;
 
 // Column positions
 const COL_TOGGLE = 2;
@@ -125,12 +140,13 @@ const COL_EULER_VALUE = 16;
 
 function makeCameraControlModule(opts: CameraControlOptions): Module {
   let rect = opts.rect;
+  type ButtonHitbox = { id: string; x0: number; y0: number; x1: number; y1: number };
   
   // Scroll offset for when module is too short
   let scroll_offset = 0;
   
   // Track what we're dragging
-  let is_dragging_slider: 'scale_per_layer' | 'movement_per_layer' | 'calibration_x' | 'calibration_y' | 'base_layer_scale' | 'char_spacing_x' | 'char_spacing_y' | 'pan_x' | 'pan_y' | null = null;
+  let is_dragging_slider: 'scale_per_layer' | 'movement_per_layer' | 'mouse_angle_yaw_deg' | 'mouse_angle_pitch_deg' | 'mouse_angle_spring' | 'calibration_x' | 'calibration_y' | 'base_layer_scale' | 'char_spacing_x' | 'char_spacing_y' | 'pan_x' | 'pan_y' | null = null;
   
   // Colors
   const bgColor = get_color_by_name('off_black').rgb;
@@ -158,6 +174,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
   
   // Button press states for visual feedback
   let pressedButtons = new Set<string>();
+  let buttonHitboxes: ButtonHitbox[] = [];
   
   // Get visible height accounting for scroll
   function get_visible_height(): number {
@@ -181,6 +198,24 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
   function get_screen_y(row: number): number {
     return rect.y1 - 1 - (row - scroll_offset);
   }
+
+  function set_button_hitbox(id: string, x0: number, y0: number, x1: number, y1: number): void {
+    buttonHitboxes.push({
+      id,
+      x0: Math.min(x0, x1),
+      y0: Math.min(y0, y1),
+      x1: Math.max(x0, x1),
+      y1: Math.max(y0, y1),
+    });
+  }
+
+  function find_button_hitbox(x: number, y: number): ButtonHitbox | null {
+    for (let i = buttonHitboxes.length - 1; i >= 0; i -= 1) {
+      const hit = buttonHitboxes[i]!;
+      if (x >= hit.x0 && x <= hit.x1 && y >= hit.y0 && y <= hit.y1) return hit;
+    }
+    return null;
+  }
   
   function drawToggle(c: Canvas, row: number, enabled: boolean, label: string): void {
     if (!is_row_visible(row)) return;
@@ -196,6 +231,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
     for (let i = 0; i < label.length && x + 4 + i <= rect.x1 - 2; i++) {
       c.set(x + 4 + i, y, { char: label[i]!, rgb: textColor, weight_index: 0, render_index: 10 });
     }
+    set_button_hitbox(`toggle:${row}`, rect.x0 + 1, y, rect.x1 - 2, y);
   }
   
   function drawButton(c: Canvas, x: number, row: number, label: string, isActive: boolean, isPressed: boolean): void {
@@ -217,6 +253,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
     }
     
     c.set(x + 1 + label.length, y, { char: ']', rgb: borderColor, weight_index: 0, render_index: 10 });
+    set_button_hitbox(`button:${row}:${label.toLowerCase()}`, x, y, Math.min(rect.x1 - 2, x + 1 + label.length), y);
   }
   
   function drawSeparator(c: Canvas, row: number): void {
@@ -258,6 +295,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
     c.set(COL_EULER_LABEL + rect.x0 + 3, y, { char: '[', rgb: borderColor, weight_index: 0, render_index: 10 });
     c.set(COL_EULER_LABEL + rect.x0 + 4, y, { char: '←', rgb: decColor, weight_index: 2, render_index: 10 });
     c.set(COL_EULER_LABEL + rect.x0 + 5, y, { char: ']', rgb: borderColor, weight_index: 0, render_index: 10 });
+    set_button_hitbox(`euler:${axis}:dec`, COL_EULER_LABEL + rect.x0 + 3, y, COL_EULER_LABEL + rect.x0 + 5, y);
     
     // Increase button
     const incPressed = pressedButtons.has(`euler_${axis}_inc`);
@@ -265,6 +303,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
     c.set(COL_EULER_LABEL + rect.x0 + 7, y, { char: '[', rgb: borderColor, weight_index: 0, render_index: 10 });
     c.set(COL_EULER_LABEL + rect.x0 + 8, y, { char: '→', rgb: incColor, weight_index: 2, render_index: 10 });
     c.set(COL_EULER_LABEL + rect.x0 + 9, y, { char: ']', rgb: borderColor, weight_index: 0, render_index: 10 });
+    set_button_hitbox(`euler:${axis}:inc`, COL_EULER_LABEL + rect.x0 + 7, y, COL_EULER_LABEL + rect.x0 + 9, y);
     
     // Value display
     const valueStr = `${value}°`;
@@ -368,6 +407,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
     draw_content(c: Canvas, next_rect: Rect): void {
       rect = next_rect;
       clamp_scroll();
+      buttonHitboxes = [];
       
       const camera = opts.getSpace().camera;
       
@@ -424,6 +464,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
         c.set(resetX + 8, y, { char: 'e', rgb: resetColor, weight_index: 2, render_index: 10 });
         c.set(resetX + 9, y, { char: 't', rgb: resetColor, weight_index: 2, render_index: 10 });
         c.set(resetX + 10, y, { char: ']', rgb: borderColor, weight_index: 0, render_index: 10 });
+        set_button_hitbox('pan_reset', resetX, y, resetX + 10, y);
       }
       
       drawSeparator(c, ROW_SEPARATOR_5);
@@ -476,8 +517,8 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
       
       drawSeparator(c, ROW_SEPARATOR_7);
       
-      // Movement per layer with slider
-      drawLabel(c, ROW_LAYER_MOVE_LABEL, 'Move/Layer:');
+      // Depth movement multiplier with slider
+      drawLabel(c, ROW_LAYER_MOVE_LABEL, 'Depth Move:');
       
       if (is_row_visible(ROW_LAYER_MOVE)) {
         const y = get_screen_y(ROW_LAYER_MOVE);
@@ -492,7 +533,43 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
       drawSlider(c, ROW_LAYER_MOVE_SLIDER, camera.movement_per_layer ?? DEFAULT_CAMERA_VALUES.movement_per_layer, -500, 500, 1);
       
       drawSeparator(c, ROW_SEPARATOR_8);
-      
+
+      // Mouse yaw angle
+      drawLabel(c, ROW_MOUSE_YAW_LABEL, 'Mouse Yaw°:');
+      if (is_row_visible(ROW_MOUSE_YAW)) {
+        const y = get_screen_y(ROW_MOUSE_YAW);
+        const valueStr = (camera.mouse_angle_yaw_deg ?? DEFAULT_CAMERA_VALUES.mouse_angle_yaw_deg).toFixed(1);
+        const valueX = rect.x0 + Math.floor((rect.x1 - rect.x0 - valueStr.length) / 2);
+        for (let i = 0; i < valueStr.length; i++) c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 1, render_index: 10 });
+      }
+      drawSlider(c, ROW_MOUSE_YAW_SLIDER, camera.mouse_angle_yaw_deg ?? DEFAULT_CAMERA_VALUES.mouse_angle_yaw_deg, 0, 45, 0.1);
+
+      drawSeparator(c, ROW_SEPARATOR_9);
+
+      // Mouse pitch angle
+      drawLabel(c, ROW_MOUSE_PITCH_LABEL, 'Mouse Pitch°:');
+      if (is_row_visible(ROW_MOUSE_PITCH)) {
+        const y = get_screen_y(ROW_MOUSE_PITCH);
+        const valueStr = (camera.mouse_angle_pitch_deg ?? DEFAULT_CAMERA_VALUES.mouse_angle_pitch_deg).toFixed(1);
+        const valueX = rect.x0 + Math.floor((rect.x1 - rect.x0 - valueStr.length) / 2);
+        for (let i = 0; i < valueStr.length; i++) c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 1, render_index: 10 });
+      }
+      drawSlider(c, ROW_MOUSE_PITCH_SLIDER, camera.mouse_angle_pitch_deg ?? DEFAULT_CAMERA_VALUES.mouse_angle_pitch_deg, 0, 45, 0.1);
+
+      drawSeparator(c, ROW_SEPARATOR_10);
+
+      // Mouse spring strength
+      drawLabel(c, ROW_MOUSE_SPRING_LABEL, 'Mouse Spring:');
+      if (is_row_visible(ROW_MOUSE_SPRING)) {
+        const y = get_screen_y(ROW_MOUSE_SPRING);
+        const valueStr = (camera.mouse_angle_spring ?? DEFAULT_CAMERA_VALUES.mouse_angle_spring).toFixed(1);
+        const valueX = rect.x0 + Math.floor((rect.x1 - rect.x0 - valueStr.length) / 2);
+        for (let i = 0; i < valueStr.length; i++) c.set(valueX + i, y, { char: valueStr[i]!, rgb: eulerColor, weight_index: 1, render_index: 10 });
+      }
+      drawSlider(c, ROW_MOUSE_SPRING_SLIDER, camera.mouse_angle_spring ?? DEFAULT_CAMERA_VALUES.mouse_angle_spring, 1, 30, 0.1);
+
+      drawSeparator(c, ROW_SEPARATOR_11);
+
       // Base Layer Scale
       drawLabel(c, ROW_BASE_SCALE_LABEL, 'Base Scale:');
       
@@ -507,7 +584,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
       
       drawSlider(c, ROW_BASE_SCALE_SLIDER, camera.base_layer_scale ?? DEFAULT_CAMERA_VALUES.base_layer_scale, 0.2, 1.5, 0.01);
       
-      drawSeparator(c, ROW_SEPARATOR_9);
+      drawSeparator(c, ROW_SEPARATOR_12);
       
       // Char Spacing X
       drawLabel(c, ROW_CHAR_SPACING_X_LABEL, 'Char Spacing X:');
@@ -523,7 +600,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
       
       drawSlider(c, ROW_CHAR_SPACING_X_SLIDER, camera.char_spacing_x ?? DEFAULT_CAMERA_VALUES.char_spacing_x, 0.5, 2.0, 0.01);
       
-      drawSeparator(c, ROW_SEPARATOR_10);
+      drawSeparator(c, ROW_SEPARATOR_13);
       
       // Char Spacing Y
       drawLabel(c, ROW_CHAR_SPACING_Y_LABEL, 'Char Spacing Y:');
@@ -539,7 +616,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
       
       drawSlider(c, ROW_CHAR_SPACING_Y_SLIDER, camera.char_spacing_y ?? DEFAULT_CAMERA_VALUES.char_spacing_y, 0.5, 2.0, 0.01);
       
-      drawSeparator(c, ROW_SEPARATOR_11);
+      drawSeparator(c, ROW_SEPARATOR_14);
       
       // Pan X
       drawLabel(c, ROW_PAN_X_LABEL, 'Pan X:');
@@ -555,7 +632,7 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
       
       drawSlider(c, ROW_PAN_X_SLIDER, camera.pan_x ?? DEFAULT_CAMERA_VALUES.pan_x, -100, 100, 1);
       
-      drawSeparator(c, ROW_SEPARATOR_12);
+      drawSeparator(c, ROW_SEPARATOR_15);
       
       // Pan Y
       drawLabel(c, ROW_PAN_Y_LABEL, 'Pan Y:');
@@ -594,6 +671,30 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
         opts.onMovementPerLayerChange?.(opts.getSpace().camera.movement_per_layer);
         return;
       }
+
+      if (is_on_slider(e.x, e.y, ROW_MOUSE_YAW_SLIDER)) {
+        is_dragging_slider = 'mouse_angle_yaw_deg';
+        const newValue = get_slider_value(e.x, 0, 45);
+        opts.getSpace().camera.mouse_angle_yaw_deg = Math.max(0, Math.min(45, Math.round(newValue * 10) / 10));
+        opts.onMouseAngleYawDegChange?.(opts.getSpace().camera.mouse_angle_yaw_deg);
+        return;
+      }
+
+      if (is_on_slider(e.x, e.y, ROW_MOUSE_PITCH_SLIDER)) {
+        is_dragging_slider = 'mouse_angle_pitch_deg';
+        const newValue = get_slider_value(e.x, 0, 45);
+        opts.getSpace().camera.mouse_angle_pitch_deg = Math.max(0, Math.min(45, Math.round(newValue * 10) / 10));
+        opts.onMouseAnglePitchDegChange?.(opts.getSpace().camera.mouse_angle_pitch_deg);
+        return;
+      }
+
+      if (is_on_slider(e.x, e.y, ROW_MOUSE_SPRING_SLIDER)) {
+        is_dragging_slider = 'mouse_angle_spring';
+        const newValue = get_slider_value(e.x, 1, 30);
+        opts.getSpace().camera.mouse_angle_spring = Math.max(1, Math.min(30, Math.round(newValue * 10) / 10));
+        opts.onMouseAngleSpringChange?.(opts.getSpace().camera.mouse_angle_spring);
+        return;
+      }
       
       // Check slider buttons
       if (is_on_minus(e.x, e.y, ROW_LAYER_SCALE_SLIDER)) {
@@ -624,6 +725,54 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
         const current = opts.getSpace().camera.movement_per_layer ?? DEFAULT_CAMERA_VALUES.movement_per_layer;
         opts.getSpace().camera.movement_per_layer = Math.min(500, current + 5);
         opts.onMovementPerLayerChange?.(opts.getSpace().camera.movement_per_layer);
+        pressedButtons.add('slider_plus');
+        return;
+      }
+
+      if (is_on_minus(e.x, e.y, ROW_MOUSE_YAW_SLIDER)) {
+        const current = opts.getSpace().camera.mouse_angle_yaw_deg ?? DEFAULT_CAMERA_VALUES.mouse_angle_yaw_deg;
+        opts.getSpace().camera.mouse_angle_yaw_deg = Math.max(0, Math.round((current - 0.5) * 10) / 10);
+        opts.onMouseAngleYawDegChange?.(opts.getSpace().camera.mouse_angle_yaw_deg);
+        pressedButtons.add('slider_minus');
+        return;
+      }
+
+      if (is_on_plus(e.x, e.y, ROW_MOUSE_YAW_SLIDER)) {
+        const current = opts.getSpace().camera.mouse_angle_yaw_deg ?? DEFAULT_CAMERA_VALUES.mouse_angle_yaw_deg;
+        opts.getSpace().camera.mouse_angle_yaw_deg = Math.min(45, Math.round((current + 0.5) * 10) / 10);
+        opts.onMouseAngleYawDegChange?.(opts.getSpace().camera.mouse_angle_yaw_deg);
+        pressedButtons.add('slider_plus');
+        return;
+      }
+
+      if (is_on_minus(e.x, e.y, ROW_MOUSE_PITCH_SLIDER)) {
+        const current = opts.getSpace().camera.mouse_angle_pitch_deg ?? DEFAULT_CAMERA_VALUES.mouse_angle_pitch_deg;
+        opts.getSpace().camera.mouse_angle_pitch_deg = Math.max(0, Math.round((current - 0.5) * 10) / 10);
+        opts.onMouseAnglePitchDegChange?.(opts.getSpace().camera.mouse_angle_pitch_deg);
+        pressedButtons.add('slider_minus');
+        return;
+      }
+
+      if (is_on_plus(e.x, e.y, ROW_MOUSE_PITCH_SLIDER)) {
+        const current = opts.getSpace().camera.mouse_angle_pitch_deg ?? DEFAULT_CAMERA_VALUES.mouse_angle_pitch_deg;
+        opts.getSpace().camera.mouse_angle_pitch_deg = Math.min(45, Math.round((current + 0.5) * 10) / 10);
+        opts.onMouseAnglePitchDegChange?.(opts.getSpace().camera.mouse_angle_pitch_deg);
+        pressedButtons.add('slider_plus');
+        return;
+      }
+
+      if (is_on_minus(e.x, e.y, ROW_MOUSE_SPRING_SLIDER)) {
+        const current = opts.getSpace().camera.mouse_angle_spring ?? DEFAULT_CAMERA_VALUES.mouse_angle_spring;
+        opts.getSpace().camera.mouse_angle_spring = Math.max(1, Math.round((current - 0.5) * 10) / 10);
+        opts.onMouseAngleSpringChange?.(opts.getSpace().camera.mouse_angle_spring);
+        pressedButtons.add('slider_minus');
+        return;
+      }
+
+      if (is_on_plus(e.x, e.y, ROW_MOUSE_SPRING_SLIDER)) {
+        const current = opts.getSpace().camera.mouse_angle_spring ?? DEFAULT_CAMERA_VALUES.mouse_angle_spring;
+        opts.getSpace().camera.mouse_angle_spring = Math.min(30, Math.round((current + 0.5) * 10) / 10);
+        opts.onMouseAngleSpringChange?.(opts.getSpace().camera.mouse_angle_spring);
         pressedButtons.add('slider_plus');
         return;
       }
@@ -753,109 +902,76 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
         return;
       }
 
-      // Convert to local coordinates
-      const localX = e.x - rect.x0;
-      const localY = rect.y1 - e.y + scroll_offset; // Account for scroll
       const camera = opts.getSpace().camera;
-      
-      // Check toggles
-      if (localY === ROW_PARALLAX_MOVE && localX >= COL_TOGGLE && localX <= COL_TOGGLE + 2) {
-        const newValue = !(camera.parallax_move_enabled ?? false);
-        camera.parallax_move_enabled = newValue;
-
-        // Treat Parallax Move as the master "perspective" switch.
-        // When disabled, force orthographic behavior by also disabling size parallax.
-        if (!newValue) {
-          camera.parallax_size_enabled = false;
-          opts.onParallaxSizeToggle?.(false);
-        }
-
-        opts.onParallaxMoveToggle?.(newValue);
-        pressedButtons.add('parallax_move');
-        return;
-      }
-      
-      if (localY === ROW_PARALLAX_SIZE && localX >= COL_TOGGLE && localX <= COL_TOGGLE + 2) {
-        const newValue = !(camera.parallax_size_enabled ?? false);
-
-        // Size parallax only makes sense when perspective is enabled.
-        // Enabling size parallax auto-enables Parallax Move.
-        if (newValue && !(camera.parallax_move_enabled ?? false)) {
-          camera.parallax_move_enabled = true;
-          opts.onParallaxMoveToggle?.(true);
-        }
-
-        camera.parallax_size_enabled = newValue;
-        opts.onParallaxSizeToggle?.(newValue);
-        pressedButtons.add('parallax_size');
-        return;
-      }
-      
-      if (localY === ROW_OCCLUSION && localX >= COL_TOGGLE && localX <= COL_TOGGLE + 2) {
-        const currentOcclusionEnabled = !(camera.show_all_layers ?? true);
-        const newOcclusionEnabled = !currentOcclusionEnabled;
-        camera.show_all_layers = !newOcclusionEnabled;
-        opts.onOcclusionToggle?.(newOcclusionEnabled);
-        pressedButtons.add('occlusion');
-        return;
-      }
-      
-      // Check orientation buttons
-      if (localY === ROW_ORIENTATION_BUTTONS) {
-        const orientations: CameraOrientation[] = ['xy', 'yz', 'xz'];
-        let btnX = COL_BUTTON_START;
-        for (const orient of orientations) {
-          if (localX >= btnX && localX <= btnX + 3) {
-            camera.orientation = orient;
-            opts.onOrientationChange?.(orient);
-            pressedButtons.add(`orient_${orient}`);
-            return;
+      const hit = find_button_hitbox(e.x, e.y);
+      if (hit) {
+        if (hit.id === `toggle:${ROW_PARALLAX_MOVE}`) {
+          const newValue = !(camera.parallax_move_enabled ?? false);
+          camera.parallax_move_enabled = newValue;
+          if (!newValue) {
+            camera.parallax_size_enabled = false;
+            opts.onParallaxSizeToggle?.(false);
           }
-          btnX += 5;
+          opts.onParallaxMoveToggle?.(newValue);
+          pressedButtons.add('parallax_move');
+          return;
         }
-      }
-      
-      // Check Euler rotation buttons
-      const eulerRows = [
-        { row: ROW_EULER_X, axis: 'x' as const },
-        { row: ROW_EULER_Y, axis: 'y' as const },
-        { row: ROW_EULER_Z, axis: 'z' as const },
-      ];
-      
-      for (const { row, axis } of eulerRows) {
-        if (localY === row) {
-          if (localX >= COL_EULER_LABEL + 3 && localX <= COL_EULER_LABEL + 5) {
-            const euler = camera.euler_rotation ?? { x: 0, y: 0, z: 0 };
-            const newValue = Math.max(-30, euler[axis] - 5);
-            euler[axis] = newValue;
-            camera.euler_rotation = euler;
-            opts.onEulerRotate?.(axis, newValue);
-            pressedButtons.add(`euler_${axis}_dec`);
-            return;
+        if (hit.id === `toggle:${ROW_PARALLAX_SIZE}`) {
+          const newValue = !(camera.parallax_size_enabled ?? false);
+          if (newValue && !(camera.parallax_move_enabled ?? false)) {
+            camera.parallax_move_enabled = true;
+            opts.onParallaxMoveToggle?.(true);
           }
-          if (localX >= COL_EULER_LABEL + 7 && localX <= COL_EULER_LABEL + 9) {
-            const euler = camera.euler_rotation ?? { x: 0, y: 0, z: 0 };
-            const newValue = Math.min(30, euler[axis] + 5);
-            euler[axis] = newValue;
-            camera.euler_rotation = euler;
-            opts.onEulerRotate?.(axis, newValue);
-            pressedButtons.add(`euler_${axis}_inc`);
-            return;
-          }
+          camera.parallax_size_enabled = newValue;
+          opts.onParallaxSizeToggle?.(newValue);
+          pressedButtons.add('parallax_size');
+          return;
         }
-      }
-      
-      // Check Pan Reset button
-      if (localY === ROW_PAN_RESET) {
-        const resetX = Math.floor((rect.x1 - rect.x0 - 10) / 2);
-        if (localX >= resetX && localX <= resetX + 10) {
+        if (hit.id === `toggle:${ROW_OCCLUSION}`) {
+          const currentOcclusionEnabled = !(camera.show_all_layers ?? true);
+          const newOcclusionEnabled = !currentOcclusionEnabled;
+          camera.show_all_layers = !newOcclusionEnabled;
+          opts.onOcclusionToggle?.(newOcclusionEnabled);
+          pressedButtons.add('occlusion');
+          return;
+        }
+        if (hit.id === 'button:8:xy') {
+          camera.orientation = 'xy';
+          opts.onOrientationChange?.('xy');
+          pressedButtons.add('orient_xy');
+          return;
+        }
+        if (hit.id === 'button:8:yz') {
+          camera.orientation = 'yz';
+          opts.onOrientationChange?.('yz');
+          pressedButtons.add('orient_yz');
+          return;
+        }
+        if (hit.id === 'button:8:xz') {
+          camera.orientation = 'xz';
+          opts.onOrientationChange?.('xz');
+          pressedButtons.add('orient_xz');
+          return;
+        }
+        if (hit.id === 'euler:x:dec' || hit.id === 'euler:y:dec' || hit.id === 'euler:z:dec' || hit.id === 'euler:x:inc' || hit.id === 'euler:y:inc' || hit.id === 'euler:z:inc') {
+          const [, axis, dir] = hit.id.split(':') as ['euler', 'x' | 'y' | 'z', 'dec' | 'inc'];
+          const euler = camera.euler_rotation ?? { x: 0, y: 0, z: 0 };
+          const delta = dir === 'dec' ? -5 : 5;
+          const newValue = Math.max(-30, Math.min(30, euler[axis] + delta));
+          euler[axis] = newValue;
+          camera.euler_rotation = euler;
+          opts.onEulerRotate?.(axis, newValue);
+          pressedButtons.add(`euler_${axis}_${dir}`);
+          return;
+        }
+        if (hit.id === 'pan_reset') {
           opts.onPanReset?.();
           opts.onCalibrationReset?.();
           pressedButtons.add('pan_reset');
           return;
         }
       }
-      
+       
       // Check Calibration X slider (-500 to +500 pixels)
       if (is_on_slider(e.x, e.y, ROW_CALIBRATION_X_SLIDER)) {
         is_dragging_slider = 'calibration_x';
@@ -921,6 +1037,27 @@ function makeCameraControlModule(opts: CameraControlOptions): Module {
         const newValue = get_slider_value(e.x, -500, 500);
         opts.getSpace().camera.movement_per_layer = Math.max(-500, Math.min(500, Math.round(newValue)));
         opts.onMovementPerLayerChange?.(opts.getSpace().camera.movement_per_layer);
+        return;
+      }
+
+      if (is_dragging_slider === 'mouse_angle_yaw_deg') {
+        const newValue = get_slider_value(e.x, 0, 45);
+        opts.getSpace().camera.mouse_angle_yaw_deg = Math.max(0, Math.min(45, Math.round(newValue * 10) / 10));
+        opts.onMouseAngleYawDegChange?.(opts.getSpace().camera.mouse_angle_yaw_deg);
+        return;
+      }
+
+      if (is_dragging_slider === 'mouse_angle_pitch_deg') {
+        const newValue = get_slider_value(e.x, 0, 45);
+        opts.getSpace().camera.mouse_angle_pitch_deg = Math.max(0, Math.min(45, Math.round(newValue * 10) / 10));
+        opts.onMouseAnglePitchDegChange?.(opts.getSpace().camera.mouse_angle_pitch_deg);
+        return;
+      }
+
+      if (is_dragging_slider === 'mouse_angle_spring') {
+        const newValue = get_slider_value(e.x, 1, 30);
+        opts.getSpace().camera.mouse_angle_spring = Math.max(1, Math.min(30, Math.round(newValue * 10) / 10));
+        opts.onMouseAngleSpringChange?.(opts.getSpace().camera.mouse_angle_spring);
         return;
       }
       

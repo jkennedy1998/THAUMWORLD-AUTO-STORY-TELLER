@@ -13,7 +13,7 @@ import {
 } from "./log_capture.js";
 import * as path from "path";
 import * as fs from "fs";
-import { get_host_session_file_path } from "../shared/boot_env.js";
+import { write_host_session_file } from "../shared/host_session_store.js";
 
 // Determine if running from compiled executable
 const is_packaged = typeof process !== "undefined" && (process as any).pkg !== undefined;
@@ -56,17 +56,6 @@ async function detect_vite(): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-function write_host_session_file(): void {
-  const filePath = get_host_session_file_path(data_slot);
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify({
-    session_id: `session_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
-    boot_time: new Date().toISOString(),
-    boot_timestamp: Date.now(),
-    version: 1,
-  }, null, 2));
 }
 
 /**
@@ -158,13 +147,13 @@ async function launch_services(session: LogSession): Promise<void> {
   }
 
   if (launch_mode === 'host') {
-    write_host_session_file();
+    write_host_session_file(data_slot);
     await launch_named_services(session, services, 'host');
     return;
   }
 
   if (!hostExists) {
-    write_host_session_file();
+    write_host_session_file(data_slot);
     await launch_named_services(session, services, 'host');
   }
   await launch_named_services(session, clientServices, 'client');

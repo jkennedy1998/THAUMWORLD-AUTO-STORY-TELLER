@@ -10,6 +10,7 @@
 import type { Grid, GridCell, GridExport } from './types.js';
 import type { EditPlaneId, GridPoint } from './types.js';
 import type { Voxel3 } from '../shared/coords.js';
+import type { PlacePrincipalView, PlaceViewRollQuarterTurn } from '../mono_ui/runtime/place_view_projection.js';
 
 function clamp_imported_weight_index(weight_index: unknown): number {
   const value = typeof weight_index === 'number' ? Math.trunc(weight_index) : 1;
@@ -91,14 +92,20 @@ export interface EditPlaneState {
 export interface CameraConfig {
   mode: CameraMode;
   orientation: CameraOrientation;
+  principal_view: PlacePrincipalView;
+  roll_quarter_turn: PlaceViewRollQuarterTurn;
   focus_plane: number;           // The Z/X/Y coordinate being edited (depends on orientation)
   parallax_intensity: number;    // 0.0 to 1.0, how much layers shift
   show_all_layers: boolean;      // If false, only show focus plane (like current behavior)
+  use_focus_layer_opacity: boolean; // If true, fade non-focused projected layers like place mode
+  center_target_in_view: boolean; // If true, keep the active camera target centered in the module
 
   // New 3D camera features
   parallax_move_enabled: boolean;     // Enable mouse-driven parallax movement
   parallax_size_enabled: boolean;     // Enable size-based parallax (layers in front bigger)
   euler_rotation: EulerRotation;      // Euler rotation angles for view transform
+  transition_euler?: EulerRotation;   // Transient place-view transition angles
+  visual_pivot_px?: { x: number; y: number }; // Visual pivot in local viewport pixels
 
   // Calibration for aligning rendered layers with the ASCII grid
   calibration: CalibrationOffset;     // Pixel offset to align layers with grid
@@ -106,6 +113,9 @@ export interface CameraConfig {
   // Per-layer calibration for fine-tuning the 3D effect
   scale_per_layer: number;            // Scale multiplier per Z layer (default 0.12)
   movement_per_layer: number;         // Parallax movement per Z layer in pixels (default 50)
+  mouse_angle_yaw_deg: number;        // Max spring-centered yaw from mouse input
+  mouse_angle_pitch_deg: number;      // Max spring-centered pitch from mouse input
+  mouse_angle_spring: number;         // Spring strength returning camera angle toward target
 
   // Base layer scale and character spacing for grid alignment
   base_layer_scale: number;           // Scale of the selected/reference layer (default 0.5, range 0.2-1.5)
@@ -124,15 +134,24 @@ export interface CameraConfig {
 export const DEFAULT_CAMERA_VALUES = {
   mode: 'straight_ortho' as const,
   orientation: 'xy' as const,
+  principal_view: 'top' as const,
+  roll_quarter_turn: 0 as const,
   focus_plane: 0,
   parallax_intensity: 0.7,
   show_all_layers: false,
+  use_focus_layer_opacity: true,
+  center_target_in_view: false,
   parallax_move_enabled: false,
   parallax_size_enabled: false,
   euler_rotation: { x: 0, y: 0, z: 0 },
+  transition_euler: { x: 0, y: 0, z: 0 },
+  visual_pivot_px: { x: 0, y: 0 },
   calibration: { x: 0, y: 0 },
   scale_per_layer: 0.12,
   movement_per_layer: 29,
+  mouse_angle_yaw_deg: 18,
+  mouse_angle_pitch_deg: 14,
+  mouse_angle_spring: 12,
   base_layer_scale: 1.0,
   char_spacing_x: 1.0,
   char_spacing_y: 1.0,
@@ -727,7 +746,7 @@ export function debugVoxelSpace(space: VoxelSpace): string {
     '=== VoxelSpace Debug ===',
     `Bounds: ${space.bounds.width}x${space.bounds.height}x${space.bounds.depth}`,
     `Z range: ${space.bounds.minZ} to ${space.bounds.maxZ}`,
-    `Camera: ${space.camera.mode} (${space.camera.orientation})`,
+    `Camera: ${space.camera.mode} (${space.camera.principal_view}:${space.camera.roll_quarter_turn})`,
     `Focus plane: ${space.camera.focus_plane}`,
     `Parallax: ${space.camera.parallax_intensity}`,
     'Layers:',

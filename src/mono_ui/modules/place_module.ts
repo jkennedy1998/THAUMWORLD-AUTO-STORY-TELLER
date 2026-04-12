@@ -29,8 +29,10 @@ import type { GridCell } from "../../ascii_painter/types.js";
 import { create_canvas } from "../canvas.js";
 import { touch_world_layers_owner } from "../world_layers_owner.js";
 import { compute_dom_viewport_for_rect } from "../runtime/dom_viewport.js";
+import { compute_anchor_relative_mouse_parallax } from "../runtime/camera_anchor_runtime.js";
 import { create_place_camera_controller } from "../runtime/place_camera_controller.js";
-import { build_visible_plane_coordinates, get_atlas_view_direction, get_plane_cardinal_neighbor_offsets_for_view_state, get_projected_bounds_with_roll, make_place_view_state, normalize_place_principal_view, normalize_place_view_roll_quarter_turn, project_world_point_with_roll, type PlacePrincipalView, type PlaceViewRollQuarterTurn, type SceneProjectionBounds, unproject_plane_point_with_roll } from "../runtime/place_view_projection.js";
+import { build_visible_plane_coordinates, get_atlas_view_direction, get_plane_cardinal_neighbor_offsets_for_view_state, get_projected_bounds_with_roll, make_place_view_state, map_screen_move_intent_to_ground_delta, normalize_place_principal_view, normalize_place_view_roll_quarter_turn, project_world_point_with_roll, type PlacePrincipalView, type PlaceViewRollQuarterTurn, type PlaceViewState, type SceneProjectionBounds, unproject_plane_point_with_roll } from "../runtime/place_view_projection.js";
+import type { PlaceViewTransitionFrame } from "../runtime/place_view_camera_runtime.js";
 import { get_move_intent, is_jump_down, subscribe_move_intent_changes, type MoveIntent, type MoveIntentChangeMeta } from "../runtime/input_actions.js";
 import type { GizmoState, ModuleGizmosConfig } from "../module_gizmos.js";
 import {
@@ -55,6 +57,7 @@ import { compute_adjacent_place_bounds, find_place_containing_region_voxel, get_
 import {
   record_intent_observed,
   record_intent_post_result,
+  record_intent_server_accept,
   record_intent_post_started,
   record_local_actor_step_applied,
   record_move_batch_received,
@@ -96,6 +99,24 @@ function clamp_scene_projection_bounds(bounds: SceneProjectionBounds): SceneProj
     depth: Math.max(1, Math.floor(Number(bounds.depth ?? 1)) || 1),
   };
 }
+
+type PlaceCameraFrame = {
+  anchor_world: PlaceCameraAnchor;
+  hard_view: PlaceViewState;
+  transition_kind: 'swing' | 'roll' | null;
+  transition_euler: { x: number; y: number; z: number };
+  transition_active: boolean;
+  view_signature: string;
+  visible_planes: number[];
+  focus_slot: number;
+  focus_world_plane: number;
+  view_offset: { x: number; y: number; scale: number };
+  inner: Rect;
+  viewport_px: ReturnType<typeof compute_dom_viewport_for_rect>;
+  anchor_view: { x: number; y: number; plane: number };
+  anchor_screen_px: { x: number; y: number; plane: number };
+  pivot_px: { x: number; y: number };
+};
 
 function footstep_cooldown_ms(speed_tpm: number): number {
   const tpm = Number.isFinite(speed_tpm) && speed_tpm > 0 ? speed_tpm : 300;
@@ -188,6 +209,27 @@ type SceneViewBounds = {
   max_y: number;
 };
 
+type PlaceCameraAnchor = {
+  x: number;
+  y: number;
+  z: number;
+  source: 'focus_target' | 'selected_target' | 'actor_fallback' | 'bootstrap';
+};
+
+type PlaceCameraDebugSnapshot = {
+  anchor: PlaceCameraAnchor | null;
+  projected_view: { x: number; y: number; plane: number } | null;
+  projected_screen: { x: number; y: number } | null;
+  module_center_screen: { x: number; y: number };
+  module_center_local: { x: number; y: number };
+  offsets: { x: number; y: number };
+  dom_viewport: { ready: boolean; x: number; y: number; width: number; height: number; tileW: number; tileH: number } | null;
+  dom_selected_layer: { left: number; top: number; dleft: number; dtop: number; pan_x: number; pan_y: number; dpan_x: number; dpan_y: number } | null;
+  dom_layer_events: string[];
+  transition_euler: { x: number; y: number; z: number };
+  hard_rotation_debug: boolean;
+};
+
 let scene_place_cache: ScenePlaceCache | null = null;
 
 function invalidate_scene_place_cache(): void {
@@ -210,6 +252,10 @@ function invalidate_scene_place_cache(): void {
   let painter_pan_start = { x: 0, y: 0 };
   let painter_pan_view_start = { x: 0, y: 0 };
   let last_painter_key_pan_ms = 0;
+  let last_camera_debug_snapshot: PlaceCameraDebugSnapshot | null = null;
+  let last_dom_viewport_ready = false;
+  let last_camera_anchor_key: string | null = null;
+  let last_dom_pending_swap_logged: string | null = null;
 
 /**
  * Populate tag cache from place data
@@ -315,6 +361,9 @@ export type PlaceModuleConfig = {
   get_world_z_center?: () => number;
   get_principal_view?: () => PlacePrincipalView;
   get_view_roll_quarter_turn?: () => PlaceViewRollQuarterTurn;
+  get_view_transition_frame?: () => PlaceViewTransitionFrame;
+  get_view_transition_euler?: () => { x: number; y: number; z: number };
+  get_view_transition_kind?: () => 'swing' | 'roll' | null;
   get_use_focus_layer_opacity?: () => boolean;
 
   // Mouse parallax normalized (-1..+1), centered on place viewport.
@@ -333,6 +382,7 @@ export type PlaceModuleConfig = {
   request_scene_place_refresh?: (place_id: string) => void;
   get_actor_position?: () => { x: number; y: number } | null;  // For distance checking
   get_camera_target_position?: () => { x: number; y: number } | null;
+  get_active_focus_target?: () => { x: number; y: number; z: number } | null;
   get_camera_target_mode?: () => 'follow_actor' | 'free';
   set_camera_target_position?: (tile: { x: number; y: number }, mode?: 'follow_actor' | 'free') => void;
 
@@ -537,8 +587,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
   let hovered: HoveredTile = null;
   let targeted: TargetedEntity = null; // Track selected target for communication (follows entity)
-  let last_pointer_x = 0;
-  let last_pointer_y = 0;
+  let last_pointer_x = Number.NaN;
+  let last_pointer_y = Number.NaN;
 
   // Tile cycling state for multiple entities
   type EntityCycleState = {
@@ -720,6 +770,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   let dom_pan_px = { x: 0, y: 0, tileW: 0, tileH: 0, scale: 1 };
   let dom_last_place_id: string | null = null;
   let dom_last_view_signature: string | null = null;
+  let dom_pending_view_signature: string | null = null;
+  let last_transition_frame_log_ms = 0;
+  let current_draw_transition_frame: PlaceViewTransitionFrame | null = null;
 
   // Reuse offscreen canvases to avoid allocating every frame.
   let dom_off_w = 0;
@@ -731,6 +784,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   let dom_cells_h = 0;
   let dom_cells_layers: Array<GridCell[][] | null> = [];
   let dom_cells_versions: number[] = [];
+  let atlas_frame_dirty = false;
 
   try {
     window.addEventListener('thaumworld_ui_pan', (ev: any) => {
@@ -739,6 +793,14 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       dom_pan_px.tileW = Number(ev?.detail?.tile_w_px) || dom_pan_px.tileW;
       dom_pan_px.tileH = Number(ev?.detail?.tile_h_px) || dom_pan_px.tileH;
       dom_pan_px.scale = Number(ev?.detail?.scale) || dom_pan_px.scale;
+    });
+  } catch {
+    // ignore
+  }
+
+  try {
+    window.addEventListener('thaumworld_atlas_frame_ready', () => {
+      atlas_frame_dirty = true;
     });
   } catch {
     // ignore
@@ -784,7 +846,26 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     dom_layers.mount(container, place_id);
   }
 
-  function reset_dom_render_state(): void {
+  function reset_dom_render_state(reason: string = 'unknown'): void {
+    try {
+      console.log('[PLACE_CAMERA_DEBUG] dom reset', JSON.stringify({
+        reason,
+        last_place_id: dom_last_place_id,
+        last_view_signature: dom_last_view_signature,
+        pending_view_signature: dom_pending_view_signature,
+        offscreen: { w: dom_off_w, h: dom_off_h, layers: dom_off_layers.length },
+        cells: { w: dom_cells_w, h: dom_cells_h, layers: dom_cells_layers.length },
+        camera: last_camera_debug_snapshot ? {
+          anchor: last_camera_debug_snapshot.anchor,
+          projected_screen: last_camera_debug_snapshot.projected_screen,
+          dom_viewport: last_camera_debug_snapshot.dom_viewport,
+          dom_selected_layer: last_camera_debug_snapshot.dom_selected_layer,
+          transition_euler: last_camera_debug_snapshot.transition_euler,
+        } : null,
+      }));
+    } catch {
+      // ignore debug logging failures
+    }
     dom_layers.destroy();
     dom_last_place_id = null;
     dom_off_w = 0;
@@ -794,34 +875,37 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     dom_cells_h = 0;
     dom_cells_layers = [];
     dom_cells_versions = [];
+    atlas_frame_dirty = false;
+  }
+
+  function invalidate_dom_content_state(reason: string = 'unknown'): void {
+    try {
+      console.log('[PLACE_CAMERA_DEBUG] dom content invalidate', JSON.stringify({
+        reason,
+        last_place_id: dom_last_place_id,
+        last_view_signature: dom_last_view_signature,
+        pending_view_signature: dom_pending_view_signature,
+        offscreen: { w: dom_off_w, h: dom_off_h, layers: dom_off_layers.length },
+        cells: { w: dom_cells_w, h: dom_cells_h, layers: dom_cells_layers.length, versions: dom_cells_versions },
+        camera: last_camera_debug_snapshot ? {
+          anchor: last_camera_debug_snapshot.anchor,
+          projected_screen: last_camera_debug_snapshot.projected_screen,
+          dom_viewport: last_camera_debug_snapshot.dom_viewport,
+          dom_selected_layer: last_camera_debug_snapshot.dom_selected_layer,
+          transition_euler: last_camera_debug_snapshot.transition_euler,
+        } : null,
+      }));
+    } catch {
+      // ignore debug logging failures
+    }
+    atlas_frame_dirty = true;
+    if (dom_cells_versions.length > 0) {
+      dom_cells_versions = dom_cells_versions.map((v) => (v ?? 0) + 1);
+    }
   }
 
   function clamp_int(n: number, lo: number, hi: number): number {
     return Math.max(lo, Math.min(hi, Math.trunc(n)));
-  }
-
-  function compute_mouse_parallax_for_place(opts: {
-    inner: Rect;
-    anchor_screen_x: number;
-    anchor_screen_y: number;
-    pointer_x: number;
-    pointer_y: number;
-  }): { x: number; y: number } {
-    const inner = opts.inner;
-    const max_dx = (inner.x1 - inner.x0) / 2;
-    const max_dy = (inner.y1 - inner.y0) / 2;
-
-    const px = clamp(opts.pointer_x, inner.x0, inner.x1);
-    const py = clamp(opts.pointer_y, inner.y0, inner.y1);
-
-    // Neutral point is the anchor (Henry / later: highlighted target).
-    // Clamp to -1..+1 so camera tuning stays stable.
-    const ox = max_dx > 0 ? (px - opts.anchor_screen_x) / max_dx : 0;
-    const oy = max_dy > 0 ? (py - opts.anchor_screen_y) / max_dy : 0;
-  return {
-      x: Math.max(-1, Math.min(1, ox)),
-      y: Math.max(-1, Math.min(1, oy)),
-    };
   }
 
   function export_grid_cells_from_canvas(local: any): GridCell[][] {
@@ -974,42 +1058,42 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   }
 
   // Get current position of targeted entity (follows movement)
-  function get_target_current_position(place: Place): { x: number; y: number } | null {
+  function get_target_current_position(place: Place): { x: number; y: number; z: number } | null {
     if (!targeted) return null;
     
     // Find entity in current place data (using correct property paths)
     if (targeted.type === "npc" && place.contents?.npcs_present) {
       const npc = place.contents.npcs_present.find(n => n.npc_ref === targeted!.ref);
       if (npc) {
+        const base_z = get_place_base_z(place);
+        const z0 = get_entity_world_z(npc as any, base_z);
         try {
-          const base_z = get_place_base_z(place);
-          const z0 = get_entity_world_z(npc as any, base_z);
           const anchor = compute_anchor_world_voxel({
             origin: { x: npc.tile_position.x, y: npc.tile_position.y, z: z0 },
             body_model_id: (npc as any)?.body_model_id,
             facing: get_facing(String((npc as any)?.npc_ref ?? targeted!.ref)),
             mode: 'physical',
           });
-          return { x: anchor.x, y: anchor.y };
+          return { x: anchor.x, y: anchor.y, z: anchor.z };
         } catch {
-          return npc.tile_position;
+          return { x: npc.tile_position.x, y: npc.tile_position.y, z: z0 };
         }
       }
     } else if (targeted.type === "actor" && place.contents?.actors_present) {
       const actor = place.contents.actors_present.find(a => a.actor_ref === targeted!.ref);
       if (actor) {
+        const base_z = get_place_base_z(place);
+        const z0 = get_entity_world_z(actor as any, base_z);
         try {
-          const base_z = get_place_base_z(place);
-          const z0 = get_entity_world_z(actor as any, base_z);
           const anchor = compute_anchor_world_voxel({
             origin: { x: actor.tile_position.x, y: actor.tile_position.y, z: z0 },
             body_model_id: (actor as any)?.body_model_id,
             facing: get_facing(String((actor as any)?.actor_ref ?? targeted!.ref)),
             mode: 'physical',
           });
-          return { x: anchor.x, y: anchor.y };
+          return { x: anchor.x, y: anchor.y, z: anchor.z };
         } catch {
-          return actor.tile_position;
+          return { x: actor.tile_position.x, y: actor.tile_position.y, z: z0 };
         }
       }
     }
@@ -1049,14 +1133,31 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     camera.center_on_tile(place, width, height, tile_x, tile_y);
   }
 
+  function get_snapped_screen_center(inner: Rect): { x: number; y: number; local_x: number; local_y: number } {
+    const center_x = Math.round((inner.x0 + inner.x1) / 2);
+    const center_y = Math.round((inner.y0 + inner.y1) / 2);
+    return {
+      x: center_x,
+      y: center_y,
+      local_x: center_x - inner.x0,
+      local_y: center_y - inner.y0,
+    };
+  }
+
   function get_scene_view_bounds(selected_place: Place, inner_w: number, inner_h: number): SceneViewBounds {
     const tiles_visible_x = Math.max(1, Math.floor(inner_w)) * view.scale;
     const tiles_visible_y = Math.max(1, Math.floor(inner_h)) * view.scale;
     const projected = get_projected_bounds_with_roll(get_scene_rotation_bounds(selected_place), get_place_view_state());
-    const min_x = projected.min_u - PADDING_TILES;
-    const min_y = projected.min_v - PADDING_TILES;
-    const max_x = projected.min_u + projected.width + PADDING_TILES - tiles_visible_x;
-    const max_y = projected.min_v + projected.height + PADDING_TILES - tiles_visible_y;
+    const padded_min_x = projected.min_u - PADDING_TILES;
+    const padded_min_y = projected.min_v - PADDING_TILES;
+    const padded_max_x = projected.min_u + projected.width + PADDING_TILES - tiles_visible_x;
+    const padded_max_y = projected.min_v + projected.height + PADDING_TILES - tiles_visible_y;
+    const half_visible_x = Math.floor(tiles_visible_x / 2);
+    const half_visible_y = Math.floor(tiles_visible_y / 2);
+    const min_x = Math.min(padded_min_x, padded_min_x - half_visible_x);
+    const min_y = Math.min(padded_min_y, padded_min_y - half_visible_y);
+    const max_x = Math.max(padded_max_x, padded_max_x + half_visible_x);
+    const max_y = Math.max(padded_max_y, padded_max_y + half_visible_y);
     return {
       min_x,
       min_y,
@@ -1065,28 +1166,40 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     };
   }
 
-  function center_on_scene_tile(tile_x: number, tile_y: number, selected_place: Place): void {
-    const { width, height } = inner_size();
-    const tiles_visible_x = Math.max(1, Math.floor(width)) * view.scale;
-    const tiles_visible_y = Math.max(1, Math.floor(height)) * view.scale;
-    const bounds = get_scene_view_bounds(selected_place, width, height);
-    const margin = 2;
-    const projected = scene_to_view_tile(selected_place, tile_x, tile_y, get_focus_world_z_for_place(selected_place));
-    const target_offset_x = Math.floor(projected.x - tiles_visible_x / 2 + margin);
-    const target_offset_y = Math.floor(projected.y - tiles_visible_y / 2 + margin);
-    const clamped_x = clamp(target_offset_x, bounds.min_x, bounds.max_x);
-    const clamped_y = clamp(target_offset_y, bounds.min_y, bounds.max_y);
-    if ((clamped_x !== target_offset_x || clamped_y !== target_offset_y) && should_sample_place_debug('camera-follow-clamp', 20)) {
-      debug_log_place('PLACE_CAMERA follow clamp', {
-        selected_place_id: selected_place.id,
-        target: { x: tile_x, y: tile_y },
-        requested_offset: { x: target_offset_x, y: target_offset_y },
-        clamped_offset: { x: clamped_x, y: clamped_y },
-        bounds,
-      });
+  function center_on_scene_tile(tile_x: number, tile_y: number, world_z: number, selected_place: Place, opts?: { force_center?: boolean }): void {
+    const prev_view_override = render_view_state_override;
+    if (current_draw_transition_frame) {
+      render_view_state_override = current_draw_transition_frame.hard_view;
     }
-    view.offset_x = clamped_x;
-    view.offset_y = clamped_y;
+    try {
+      const inner = inner_rect();
+      const { width, height } = inner_size();
+      const bounds = get_scene_view_bounds(selected_place, width, height);
+      const projected = scene_to_view_tile(selected_place, tile_x, tile_y, world_z);
+      const snapped_center = get_snapped_screen_center(inner);
+      const target_offset_x = projected.x - snapped_center.local_x * view.scale;
+      const target_offset_y = projected.y - snapped_center.local_y * view.scale;
+      if (opts?.force_center) {
+        view.offset_x = target_offset_x;
+        view.offset_y = target_offset_y;
+        return;
+      }
+      const clamped_x = clamp(target_offset_x, bounds.min_x, bounds.max_x);
+      const clamped_y = clamp(target_offset_y, bounds.min_y, bounds.max_y);
+      if ((clamped_x !== target_offset_x || clamped_y !== target_offset_y) && should_sample_place_debug('camera-follow-clamp', 20)) {
+        debug_log_place('PLACE_CAMERA follow clamp', {
+          selected_place_id: selected_place.id,
+          target: { x: tile_x, y: tile_y },
+          requested_offset: { x: target_offset_x, y: target_offset_y },
+          clamped_offset: { x: clamped_x, y: clamped_y },
+          bounds,
+        });
+      }
+      view.offset_x = clamped_x;
+      view.offset_y = clamped_y;
+    } finally {
+      render_view_state_override = prev_view_override;
+    }
   }
 
   function get_place_region_origin(place: Place): { x: number; y: number; z: number } {
@@ -1229,34 +1342,47 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     return normalize_place_view_roll_quarter_turn(config.get_view_roll_quarter_turn?.() ?? 0);
   }
 
-  function get_place_view_state() {
+  let render_view_state_override: PlaceViewState | null = null;
+
+  function get_configured_place_view_state(): PlaceViewState {
     return make_place_view_state(get_place_principal_view(), get_place_view_roll_quarter_turn());
   }
 
-  function get_place_view_signature(): string {
-    const state = get_place_view_state();
-    return `${state.principal_view}:${state.roll_quarter_turn}`;
+  function get_place_view_state(): PlaceViewState {
+    return render_view_state_override ?? get_configured_place_view_state();
+  }
+
+  function get_place_view_signature(state?: PlaceViewState): string {
+    const resolved = state ?? get_place_view_state();
+    return `${resolved.principal_view}:${resolved.roll_quarter_turn}`;
+  }
+
+  function parse_place_view_signature(signature: string | null | undefined): PlaceViewState | null {
+    if (!signature) return null;
+    const [principal_view, roll_quarter_turn] = String(signature).split(':');
+    return make_place_view_state(principal_view, Number(roll_quarter_turn ?? 0));
   }
 
   function get_scene_rotation_bounds(selected_place: Place): SceneProjectionBounds {
     return build_scene_place_cache(selected_place).scene_bounds;
   }
 
-  function get_visible_plane_values(selected_place: Place): number[] {
-    return build_visible_plane_coordinates(get_scene_rotation_bounds(selected_place), get_defined_scene_world_zs(selected_place), get_place_principal_view());
+  function get_visible_plane_values(selected_place: Place, state?: PlaceViewState): number[] {
+    const resolved = state ?? get_place_view_state();
+    return build_visible_plane_coordinates(get_scene_rotation_bounds(selected_place), get_defined_scene_world_zs(selected_place), resolved.principal_view);
   }
 
-  function scene_to_view_tile(selected_place: Place, scene_x: number, scene_y: number, world_z: number): { x: number; y: number; plane: number } {
-    const projected = project_world_point_with_roll({ x: scene_x, y: scene_y, z: world_z }, get_place_view_state());
+  function scene_to_view_tile(selected_place: Place, scene_x: number, scene_y: number, world_z: number, state?: PlaceViewState): { x: number; y: number; plane: number } {
+    const projected = project_world_point_with_roll({ x: scene_x, y: scene_y, z: world_z }, state ?? get_place_view_state());
     return { x: projected.u, y: projected.v, plane: projected.plane };
   }
 
-  function view_to_scene_tile(selected_place: Place, view_x: number, view_y: number, plane: number): { x: number; y: number; z: number } {
-    return unproject_plane_point_with_roll({ u: view_x, v: view_y, plane }, get_place_view_state());
+  function view_to_scene_tile(selected_place: Place, view_x: number, view_y: number, plane: number, state?: PlaceViewState): { x: number; y: number; z: number } {
+    return unproject_plane_point_with_roll({ u: view_x, v: view_y, plane }, state ?? get_place_view_state());
   }
 
-  function scene_to_screen(selected_place: Place, scene_x: number, scene_y: number, world_z: number, inner: Rect): { x: number; y: number; plane: number } {
-    const view_tile = scene_to_view_tile(selected_place, scene_x, scene_y, world_z);
+  function scene_to_screen(selected_place: Place, scene_x: number, scene_y: number, world_z: number, inner: Rect, state?: PlaceViewState): { x: number; y: number; plane: number } {
+    const view_tile = scene_to_view_tile(selected_place, scene_x, scene_y, world_z, state);
     return {
       x: inner.x0 + Math.floor((view_tile.x - view.offset_x) / view.scale),
       y: inner.y0 + Math.floor((view_tile.y - view.offset_y) / view.scale),
@@ -1264,8 +1390,157 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     };
   }
 
-  function get_tile_plane_neighbor_kinds(place: Place, tile_x: number, tile_y: number, world_z: number) {
-    const offsets = get_plane_cardinal_neighbor_offsets_for_view_state(get_place_view_state());
+  function get_visual_pivot_px(selected_place: Place, inner: Rect, state?: PlaceViewState, anchor?: { x: number; y: number; z: number } | null): { x: number; y: number } {
+    const fallback_tile_w = Number.isFinite(dom_pan_px.tileW) && dom_pan_px.tileW > 0 ? dom_pan_px.tileW : 1;
+    const fallback_tile_h = Number.isFinite(dom_pan_px.tileH) && dom_pan_px.tileH > 0 ? dom_pan_px.tileH : 1;
+    const snapped_center = get_snapped_screen_center(inner);
+    const target = anchor ?? get_camera_anchor(selected_place);
+    if (!target) {
+      return {
+        x: Math.floor((snapped_center.local_x + 0.5) * fallback_tile_w),
+        y: Math.floor((snapped_center.local_y + 0.5) * fallback_tile_h),
+      };
+    }
+    const projected = scene_to_screen(selected_place, target.x, target.y, target.z, inner, state);
+    return {
+      x: Math.floor(((projected.x - inner.x0) + 0.5) * fallback_tile_w),
+      y: Math.floor(((projected.y - inner.y0) + 0.5) * fallback_tile_h),
+    };
+  }
+
+  function build_place_camera_frame(selected_place: Place, inner: Rect, transition_euler: { x: number; y: number; z: number }, transition_kind: 'swing' | 'roll' | null): PlaceCameraFrame {
+    const configured_view = get_configured_place_view_state();
+    const configured_signature = get_place_view_signature(configured_view);
+    const transition_active = Math.abs(transition_euler.x) > 0.01 || Math.abs(transition_euler.y) > 0.01 || Math.abs(transition_euler.z) > 0.01;
+    const visible_planes = get_visible_plane_values(selected_place, configured_view);
+    const focus_slot = Math.max(0, Math.min(Math.max(0, visible_planes.length - 1), config.get_focus_z ? config.get_focus_z() : DEFAULT_FOCUS_Z));
+    const anchor_world = get_camera_anchor(selected_place);
+    const viewport_px = compute_dom_viewport_for_rect({
+      pan_x_px: dom_pan_px.x,
+      pan_y_px: dom_pan_px.y,
+      tile_w_px: dom_pan_px.tileW,
+      tile_h_px: dom_pan_px.tileH,
+      grid_height: config.get_grid_height ? config.get_grid_height() : config.grid_height,
+      rect: inner,
+      base_font_size_px: config.base_font_size_px,
+      ui_scale: dom_pan_px.scale,
+    });
+    const anchor_view = scene_to_view_tile(selected_place, anchor_world.x, anchor_world.y, anchor_world.z, configured_view);
+    const anchor_screen_px = scene_to_screen(selected_place, anchor_world.x, anchor_world.y, anchor_world.z, inner, configured_view);
+    const pivot_px = get_visual_pivot_px(selected_place, inner, configured_view, anchor_world);
+    return {
+      anchor_world,
+      hard_view: configured_view,
+      transition_kind,
+      transition_euler,
+      transition_active,
+      view_signature: configured_signature,
+      visible_planes,
+      focus_slot,
+      focus_world_plane: Math.floor(visible_planes[focus_slot] ?? anchor_view.plane),
+      view_offset: { x: Math.floor(view.offset_x), y: Math.floor(view.offset_y), scale: view.scale },
+      inner,
+      viewport_px,
+      anchor_view,
+      anchor_screen_px,
+      pivot_px,
+    };
+  }
+
+  function get_active_place_focus_target(place: Place): { x: number; y: number; z: number } | null {
+    const explicit = config.get_active_focus_target?.() ?? null;
+    if (explicit && Number.isFinite(Number(explicit.x)) && Number.isFinite(Number(explicit.y)) && Number.isFinite(Number(explicit.z))) {
+      return {
+        x: Math.floor(Number(explicit.x)),
+        y: Math.floor(Number(explicit.y)),
+        z: Math.floor(Number(explicit.z)),
+      };
+    }
+    if ((config.get_camera_target_mode?.() ?? 'follow_actor') !== 'free') return null;
+    const actor = get_controlled_place_actor(place);
+    if (actor) {
+      const ref = String(actor?.actor_ref ?? '');
+      const focus = get_entity_focus_tile(actor, place, ref);
+      if (focus) return focus;
+    }
+    const free_target = config.get_camera_target_position?.() ?? config.get_actor_position?.() ?? null;
+    if (free_target && Number.isFinite(Number(free_target.x)) && Number.isFinite(Number(free_target.y))) {
+      return {
+        x: Math.floor(Number(free_target.x)),
+        y: Math.floor(Number(free_target.y)),
+        z: get_focus_world_z_for_place(place),
+      };
+    }
+    return null;
+  }
+
+  function should_persist_camera_view(): boolean {
+    return (config.get_camera_target_mode?.() ?? (config.is_place_painter_active?.() ? 'free' : 'follow_actor')) === 'free';
+  }
+
+  function get_scene_bootstrap_focus_target(place: Place): { x: number; y: number; z: number } {
+    const entry = place.tile_grid.default_entry;
+    if (entry && Number.isFinite(Number(entry.x)) && Number.isFinite(Number(entry.y))) {
+      return {
+        x: Math.floor(Number(entry.x)),
+        y: Math.floor(Number(entry.y)),
+        z: get_focus_world_z_for_place(place),
+      };
+    }
+    return {
+      x: Math.floor((Math.max(1, place.tile_grid.width) - 1) / 2),
+      y: Math.floor((Math.max(1, place.tile_grid.height) - 1) / 2),
+      z: get_focus_world_z_for_place(place),
+    };
+  }
+
+  function get_camera_anchor(place: Place): PlaceCameraAnchor {
+    const focus_target = get_active_place_focus_target(place);
+    if (focus_target) return { ...focus_target, source: 'focus_target' };
+
+    const selected_target = get_target_current_position(place);
+    if (selected_target) return { ...selected_target, source: 'selected_target' };
+
+    const a0 = place.contents.actors_present?.[0];
+    if (a0?.tile_position) {
+      const base_z = get_place_base_z(place);
+      return {
+        x: Math.floor(a0.tile_position.x),
+        y: Math.floor(a0.tile_position.y),
+        z: get_entity_world_z(a0 as any, base_z),
+        source: 'actor_fallback',
+      };
+    }
+
+    return { ...get_scene_bootstrap_focus_target(place), source: 'bootstrap' };
+  }
+
+  function get_current_transition_euler(): { x: number; y: number; z: number } {
+    return config.get_view_transition_frame ? config.get_view_transition_frame().euler : (config.get_view_transition_euler ? config.get_view_transition_euler() : { x: 0, y: 0, z: 0 });
+  }
+
+  function get_current_transition_frame(): PlaceViewTransitionFrame {
+    if (current_draw_transition_frame) return current_draw_transition_frame;
+    if (config.get_view_transition_frame) return config.get_view_transition_frame();
+    const hard_view = get_place_view_state();
+    return {
+      hard_view,
+      target_view: hard_view,
+      transition_kind: config.get_view_transition_kind?.() ?? null,
+      phase: null,
+      euler: config.get_view_transition_euler ? config.get_view_transition_euler() : { x: 0, y: 0, z: 0 },
+      active: false,
+      committed_this_frame: false,
+    };
+  }
+
+  function is_hard_rotation_debug_active(): boolean {
+    const t = get_current_transition_euler();
+    return Math.abs(t.x) > 0.01 || Math.abs(t.y) > 0.01 || Math.abs(t.z) > 0.01;
+  }
+
+  function get_tile_plane_neighbor_kinds(place: Place, tile_x: number, tile_y: number, world_z: number, state?: PlaceViewState) {
+    const offsets = get_plane_cardinal_neighbor_offsets_for_view_state(state ?? get_place_view_state());
     const resolve_kind = (dir: 'north' | 'east' | 'south' | 'west') => {
       const offset = offsets[dir];
       if (!offset) return null;
@@ -1735,9 +2010,19 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     self_exclusion_logged: false,
     // Track last polled intent to detect changes
     last_polled_intent: null as { dx: number; dy: number } | null,
-    // Timestamp of the last successful intent POST (for periodic resend while held)
-    last_intent_sent_ms: 0,
+    // Monotonic sequence for server-side edge ordering.
+    last_input_seq_sent: 0,
   };
+
+  function next_input_seq(explicit_seq?: number | null): number {
+    const requested = Math.max(0, Math.floor(Number(explicit_seq ?? 0)) || 0);
+    if (requested > input_state.last_input_seq_sent) {
+      input_state.last_input_seq_sent = requested;
+      return requested;
+    }
+    input_state.last_input_seq_sent += 1;
+    return input_state.last_input_seq_sent;
+  }
 
   async function post_intent_update(meta: {
     actor_ref: string;
@@ -1745,6 +2030,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     dx: number;
     dy: number;
     mode: MoveMode;
+    kind: 'press' | 'release' | 'replace';
+    input_seq: number;
     reason: 'change' | 'resend' | 'release';
   }): Promise<void> {
     record_intent_post_started(meta);
@@ -1759,6 +2046,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           dx: meta.dx,
           dy: meta.dy,
           mode: meta.mode,
+          kind: meta.kind,
+          input_seq: meta.input_seq,
           reason: meta.reason,
         }),
       });
@@ -1767,7 +2056,27 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         console.warn('[PlaceModule] intent POST non-2xx', response.status, meta.actor_ref);
         return;
       }
+      const data = await response.json().catch(() => null);
       record_intent_post_result(true, { status: response.status });
+      if (data) {
+        record_intent_server_accept({
+          input_seq: Number(data.input_seq ?? meta.input_seq) || 0,
+          kind: String(data.kind ?? meta.kind),
+          actor_ref: String(data.entity_ref ?? meta.actor_ref),
+          place_id: String(data.place_id ?? meta.place_id),
+          direction: (Number(data.dx ?? meta.dx) === 0 && Number(data.dy ?? meta.dy) === 0)
+            ? null
+            : { dx: Number(data.dx ?? meta.dx) || 0, dy: Number(data.dy ?? meta.dy) || 0 },
+          accepted_breath: Number(data.accepted_breath ?? 0) || 0,
+          next_control_breath: Number(data.next_control_breath ?? 0) || 0,
+          breaths_per_step: Number(data.breaths_per_step ?? 0) || 0,
+          move_budget_walk: Number(data.move_budget_walk ?? 0) || 0,
+          move_debt_walk: Number(data.move_debt_walk ?? 0) || 0,
+          tap_buffered: Number(data.tap_buffered ?? 0) || 0,
+          ms_until_next_eligible_move: Number(data.ms_until_next_eligible_move ?? 0) || 0,
+          gate: typeof data.gate === 'string' ? data.gate : (data.ignored ? 'ignored' : null),
+        });
+      }
     } catch (err: any) {
       record_intent_post_result(false, { error: err?.message ?? String(err) });
       console.warn('[PlaceModule] intent POST failed', err?.message ?? String(err));
@@ -1817,27 +2126,26 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     const actor = get_controlled_place_actor(place);
     if (!actor) return;
     const mode = get_move_mode();
-    const now_ms = Date.now();
-    const is_release = intent === null;
+    const mapped_intent = map_screen_move_intent_to_ground_delta(get_place_view_state(), intent);
+    const is_release = meta.kind === 'release' || mapped_intent === null;
     const reason = is_release ? 'release' : 'change';
-    const dx = intent?.dx ?? 0;
-    const dy = intent?.dy ?? 0;
+    const dx = mapped_intent?.dx ?? 0;
+    const dy = mapped_intent?.dy ?? 0;
+    const input_seq = next_input_seq(meta.input_seq);
 
-    record_intent_observed(intent, { mode, place_id: place.id, actor_ref: actor.actor_ref });
-    input_state.last_polled_intent = intent ? { dx: intent.dx, dy: intent.dy } : null;
-    if (!is_release) {
-      input_state.last_intent_sent_ms = now_ms;
-    } else {
-      input_state.last_intent_sent_ms = 0;
-    }
+    record_intent_observed(mapped_intent, { mode, place_id: place.id, actor_ref: actor.actor_ref });
+    input_state.last_polled_intent = mapped_intent ? { dx: mapped_intent.dx, dy: mapped_intent.dy } : null;
 
     debug_log_place('MOVE_VEL_TEST immediate input intent dispatch', {
       version: PLACE_MODULE_TIMING_VERSION,
       source: meta.source,
+      kind: meta.kind,
+      input_seq,
       action: meta.action,
       code: meta.code,
       actor_ref: actor.actor_ref,
       place_id: place.id,
+      screen_intent: intent,
       dx,
       dy,
       mode,
@@ -1850,6 +2158,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       dx,
       dy,
       mode,
+      kind: meta.kind,
+      input_seq,
       reason,
     });
   }
@@ -2104,14 +2414,59 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
     // Render the place
     function draw_place(canvas: Canvas, place: Place): void {
-      const view_signature = get_place_view_signature();
-      if (dom_last_view_signature !== view_signature) {
+      const transition_frame = get_current_transition_frame();
+      const transition_euler_frame = transition_frame.euler;
+      const transition_kind = transition_frame.transition_kind;
+      const configured_view = get_configured_place_view_state();
+      const configured_view_signature = get_place_view_signature(configured_view);
+      const now_ms = performance.now();
+      if (dom_last_view_signature === null) dom_last_view_signature = configured_view_signature;
+      if (dom_last_view_signature !== configured_view_signature) {
+        try {
+          console.log('[PLACE_CAMERA_DEBUG] dom immediate swap', JSON.stringify({
+            from: dom_last_view_signature,
+            to: configured_view_signature,
+            transition_kind,
+            transition_euler: transition_euler_frame,
+          }));
+        } catch {
+          // ignore debug logging failures
+        }
         invalidate_scene_place_cache();
-        reset_dom_render_state();
-        dom_last_view_signature = view_signature;
+        reset_dom_render_state(transition_kind === 'roll' ? 'roll_display_view_commit' : 'immediate_swap');
+        dom_last_view_signature = configured_view_signature;
+        dom_pending_view_signature = null;
+        last_dom_pending_swap_logged = null;
       }
       invalidate_scene_place_cache();
       const inner = inner_rect();
+      const camera_frame = build_place_camera_frame(place, inner, transition_euler_frame, transition_kind);
+      if (camera_frame.transition_active && (now_ms - last_transition_frame_log_ms) >= 16) {
+        last_transition_frame_log_ms = now_ms;
+        try {
+          console.log('[PLACE_CAMERA_DEBUG] render frame', JSON.stringify({
+            kind: camera_frame.transition_kind,
+            phase: transition_frame.phase,
+            committed_this_frame: transition_frame.committed_this_frame,
+            view_signature: camera_frame.view_signature,
+            hard_view: camera_frame.hard_view,
+            anchor_world: camera_frame.anchor_world,
+            anchor_view: camera_frame.anchor_view,
+            anchor_screen_px: camera_frame.anchor_screen_px,
+            pivot_px: camera_frame.pivot_px,
+            visible_planes: camera_frame.visible_planes,
+            focus_slot: camera_frame.focus_slot,
+            transition_euler: camera_frame.transition_euler,
+            view_offset: camera_frame.view_offset,
+            viewport_px: camera_frame.viewport_px,
+          }));
+        } catch {
+          // ignore debug logging failures
+        }
+      } else if (!camera_frame.transition_active) {
+        last_transition_frame_log_ms = 0;
+      }
+      render_view_state_override = camera_frame.hard_view;
       const { width, height } = inner_size();
       const place_breath_index = Math.floor(Number((place as any)?.breath_index ?? 0)) || 0;
       const timed_event_active = !!((place as any)?.timed_event_active);
@@ -2121,8 +2476,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
        // Visible plane coordinates depend on the principal view.
        const center_world_z = get_world_z_center_for_place(place);
-       const visible_planes_z = get_visible_plane_values(place);
-       const base_z = get_place_base_z(place);
+       const visible_planes_z = camera_frame.visible_planes;
+        const base_z = get_place_base_z(place);
 
       const open_containers = config.get_open_containers ? config.get_open_containers() : null;
       const is_tile_container_open = (tile_x: number, tile_y: number, world_z: number): boolean => {
@@ -2134,7 +2489,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const rq_ui: RenderRequest[] = [];
       const plane_count = Math.max(1, visible_planes_z.length);
       const rq_layers: RenderRequest[][] = Array.from({ length: plane_count }, () => []);
-      const semantic_view_direction = get_atlas_view_direction(get_place_principal_view());
+      const semantic_view_direction = get_atlas_view_direction(camera_frame.hard_view.principal_view);
 
       const q_for_slot = (slot: number): RenderRequest[] => rq_layers[slot] ?? rq_layers[0]!;
 
@@ -2860,7 +3215,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     // Target highlight (follows entity movement).
     const target_pos = get_target_current_position(place);
     if (target_pos && targeted) {
-      const projected = scene_to_screen(place, target_pos.x, target_pos.y, get_focus_world_z_for_place(place), inner);
+      const projected = scene_to_screen(place, target_pos.x, target_pos.y, target_pos.z, inner);
       const screen_x = projected.x;
       const screen_y = projected.y;
       if (screen_x >= inner.x0 && screen_x <= inner.x1 && screen_y >= inner.y0 && screen_y <= inner.y1) {
@@ -2915,6 +3270,66 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           cell: { char: ch, rgb: get_color_by_name('off_white').rgb, style: 'regular', weight_index: 1, render_index: 6 },
         });
         info_x++;
+      }
+    }
+
+    // Camera instrumentation for hard rotation debugging.
+    {
+      const snap = last_camera_debug_snapshot;
+      const center = get_snapped_screen_center(inner);
+      const center_x = inner.x0 + center.local_x;
+      const center_y = inner.y0 + center.local_y;
+      const center_chars: Array<{ x: number; y: number; ch: string }> = [
+        { x: center_x, y: center_y, ch: '+' },
+        { x: center_x - 1, y: center_y, ch: '-' },
+        { x: center_x + 1, y: center_y, ch: '-' },
+        { x: center_x, y: center_y - 1, ch: '|' },
+        { x: center_x, y: center_y + 1, ch: '|' },
+      ];
+      for (const marker of center_chars) {
+        if (marker.x < inner.x0 || marker.x > inner.x1 || marker.y < inner.y0 || marker.y > inner.y1) continue;
+        rq_ui.push({
+          pass: 'ui',
+          x: marker.x,
+          y: marker.y,
+          order: 4,
+          key: `ui:cam_center:${marker.x},${marker.y}`,
+          cell: { char: marker.ch, rgb: get_color_by_name('vivid_blue').rgb, style: 'regular', weight_index: 2, render_index: 7 },
+        });
+      }
+      if (snap?.projected_screen) {
+        rq_ui.push({
+          pass: 'ui',
+          x: snap.projected_screen.x,
+          y: snap.projected_screen.y,
+          order: 5,
+          key: 'ui:cam_anchor',
+          cell: { char: '*', rgb: get_color_by_name('vivid_red').rgb, style: 'bold', weight_index: 3, render_index: 7 },
+        });
+      }
+      if (snap) {
+        const line1 = `CAM ${snap.hard_rotation_debug ? 'HARD*' : 'LIVE '} A:${snap.anchor?.source ?? 'none'} W:${snap.anchor ? `${snap.anchor.x},${snap.anchor.y},${snap.anchor.z}` : '-'} O:${snap.offsets.x},${snap.offsets.y}`;
+        const line2 = `CTR:${snap.module_center_local.x},${snap.module_center_local.y} SCR:${snap.projected_screen ? `${snap.projected_screen.x - inner.x0},${snap.projected_screen.y - inner.y0}` : '-'} V:${snap.projected_view ? `${snap.projected_view.x},${snap.projected_view.y},${snap.projected_view.plane}` : '-'} T:${Math.round(snap.transition_euler.x)},${Math.round(snap.transition_euler.y)},${Math.round(snap.transition_euler.z)}`;
+        const line3 = `DOM VP:${snap.dom_viewport ? `${snap.dom_viewport.ready ? 'ready' : 'wait'} ${snap.dom_viewport.width}x${snap.dom_viewport.height}@${snap.dom_viewport.tileW},${snap.dom_viewport.tileH}` : 'none'}`;
+        const line4 = `DOM SEL:${snap.dom_selected_layer ? `L${snap.dom_selected_layer.left}/${snap.dom_selected_layer.top} d${snap.dom_selected_layer.dleft}/${snap.dom_selected_layer.dtop} P${snap.dom_selected_layer.pan_x}/${snap.dom_selected_layer.pan_y} d${snap.dom_selected_layer.dpan_x}/${snap.dom_selected_layer.dpan_y}` : 'none'}`;
+        const line5 = `DOM EVT:${snap.dom_layer_events.length > 0 ? snap.dom_layer_events[snap.dom_layer_events.length - 1] : 'none'}`;
+        const lines = [line1, line2, line3, line4, line5];
+        for (let li = 0; li < lines.length; li += 1) {
+          let x = inner.x0;
+          const y = Math.max(inner.y0, inner.y1 - 1 - li);
+          for (const ch of lines[li]!) {
+            if (x > inner.x1) break;
+            rq_ui.push({
+              pass: 'ui',
+              x,
+              y,
+              order: 3,
+              key: `ui:cam_dbg:${li}:${x}`,
+              cell: { char: ch, rgb: get_color_by_name(li === 0 ? 'vivid_cyan' : 'medium_gray').rgb, style: 'regular', weight_index: 1, render_index: 6 },
+            });
+            x += 1;
+          }
+        }
       }
     }
 
@@ -3237,7 +3652,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       draw_render_queue(canvas, rq_ui, { now_ms: Date.now(), pass_order: ['ui'], character_flash_period_ms: 240 });
 
     // World layers render into DOM canvases clipped to the place inner rect.
-    const focus_z = config.get_focus_z ? config.get_focus_z() : DEFAULT_FOCUS_Z;
+    const focus_z = camera_frame.focus_slot;
 
      // Phase 0.5: explicit ownership heartbeat (prevents stale layers when place isn't drawn).
      touch_world_layers_owner('place');
@@ -3246,7 +3661,11 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     dom_layers.ensure_space(width, height);
 
     // Apply shared camera tuning from painter, but keep focus/pan per Place.
-    dom_layers.apply_shared_camera_tuning(camera.get_shared_dom_tuning());
+    dom_layers.apply_shared_camera_tuning({
+      ...camera.get_shared_dom_tuning(),
+      transition_euler: camera_frame.transition_euler,
+      visual_pivot_px: camera_frame.pivot_px,
+    });
     dom_layers.set_focus_layer_opacity_enabled(config.get_use_focus_layer_opacity ? config.get_use_focus_layer_opacity() : true);
     dom_layers.set_focus_z(focus_z);
 
@@ -3254,63 +3673,131 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     // This makes the perspective effect much easier to read around the player.
     {
       const inner = inner_rect();
-
-      // Anchor: targeted entity (if it's on-screen), else Henry, else fallback to viewport center.
-      let anchor_tile = get_target_current_position(place);
-      if (!anchor_tile) anchor_tile = get_primary_actor_focus_position(place);
-      if (!anchor_tile) anchor_tile = config.get_actor_position?.() ?? null;
-      if (!anchor_tile) {
-        const a0 = place.contents.actors_present?.[0];
-        anchor_tile = a0?.tile_position ?? null;
-      }
+      const transition_euler = camera_frame.transition_euler;
+      const hard_rotation_debug = camera_frame.transition_active;
+      const anchor_tile = camera_frame.anchor_world;
+      const snapped_center = get_snapped_screen_center(inner);
+      const dom_debug = dom_layers.get_debug_state();
 
       const cx = (inner.x0 + inner.x1) / 2;
       const cy = (inner.y0 + inner.y1) / 2;
 
       let anchor_screen_x = cx;
       let anchor_screen_y = cy;
+      let projected_screen: { x: number; y: number } | null = null;
+      let projected_view: { x: number; y: number; plane: number } | null = null;
 
       if (anchor_tile) {
-        const projected = scene_to_screen(place, anchor_tile.x, anchor_tile.y, get_focus_world_z_for_place(place), inner);
+        projected_view = camera_frame.anchor_view;
+        const projected = camera_frame.anchor_screen_px;
         const sx = projected.x;
         const sy = projected.y;
+        projected_screen = { x: sx, y: sy };
         if (sx >= inner.x0 && sx <= inner.x1 && sy >= inner.y0 && sy <= inner.y1) {
           anchor_screen_x = sx;
           anchor_screen_y = sy;
         }
       }
 
-      // Use last pointer position captured by OnPointerMove.
-      // If pointer hasn't moved yet (or is outside Place), default to neutral at the anchor.
-      const pointer_in_inner =
-        last_pointer_x >= inner.x0 && last_pointer_x <= inner.x1 &&
-        last_pointer_y >= inner.y0 && last_pointer_y <= inner.y1;
-      const px = pointer_in_inner ? last_pointer_x : anchor_screen_x;
-      const py = pointer_in_inner ? last_pointer_y : anchor_screen_y;
-      const mp = compute_mouse_parallax_for_place({
-        inner,
-        anchor_screen_x,
-        anchor_screen_y,
-        pointer_x: px,
-        pointer_y: py,
-      });
+      const configured_mouse_parallax = config.get_mouse_parallax?.() ?? null;
+      const mp = hard_rotation_debug
+        ? { x: 0, y: 0 }
+        : configured_mouse_parallax && Number.isFinite(configured_mouse_parallax.x) && Number.isFinite(configured_mouse_parallax.y)
+        ? {
+            x: Math.max(-1, Math.min(1, configured_mouse_parallax.x)),
+            y: Math.max(-1, Math.min(1, configured_mouse_parallax.y)),
+          }
+        : (() => {
+            const pointer_seen = Number.isFinite(last_pointer_x) && Number.isFinite(last_pointer_y);
+            const px = pointer_seen ? last_pointer_x : anchor_screen_x;
+            const py = pointer_seen ? last_pointer_y : anchor_screen_y;
+            return compute_anchor_relative_mouse_parallax({
+              viewport: inner,
+              anchor_screen_x,
+              anchor_screen_y,
+              pointer_x: px,
+              pointer_y: py,
+            });
+          })();
       dom_layers.set_mouse_parallax(mp.x, mp.y);
+
+      last_camera_debug_snapshot = {
+        anchor: anchor_tile,
+        projected_view,
+        projected_screen,
+        module_center_screen: { x: Math.floor(cx), y: Math.floor(cy) },
+        module_center_local: { x: snapped_center.local_x, y: snapped_center.local_y },
+        offsets: { x: Math.floor(view.offset_x), y: Math.floor(view.offset_y) },
+        dom_viewport: dom_debug ? {
+          ready: !!dom_debug.viewport_ready,
+          x: Math.floor(dom_debug.viewport.x),
+          y: Math.floor(dom_debug.viewport.y),
+          width: Math.floor(dom_debug.viewport.width),
+          height: Math.floor(dom_debug.viewport.height),
+          tileW: Math.round(dom_debug.viewport.tileW * 100) / 100,
+          tileH: Math.round(dom_debug.viewport.tileH * 100) / 100,
+        } : null,
+        dom_selected_layer: dom_debug ? {
+          left: Math.round(dom_debug.selected_layer.layer_left_px * 100) / 100,
+          top: Math.round(dom_debug.selected_layer.layer_top_px * 100) / 100,
+          dleft: Math.round(dom_debug.selected_layer.delta_left_px * 100) / 100,
+          dtop: Math.round(dom_debug.selected_layer.delta_top_px * 100) / 100,
+          pan_x: Math.round(dom_debug.selected_layer.pan_x * 100) / 100,
+          pan_y: Math.round(dom_debug.selected_layer.pan_y * 100) / 100,
+          dpan_x: Math.round(dom_debug.selected_layer.delta_pan_x * 100) / 100,
+          dpan_y: Math.round(dom_debug.selected_layer.delta_pan_y * 100) / 100,
+        } : null,
+        dom_layer_events: dom_debug ? dom_debug.layer_events.map((ev) => `${ev.kind}:${ev.z}:${ev.width}x${ev.height}${ev.selected ? ':sel' : ''}`) : [],
+        transition_euler,
+        hard_rotation_debug,
+      };
+
+      const debug_snapshot = last_camera_debug_snapshot;
+
+      const viewport_ready = !!debug_snapshot.dom_viewport?.ready;
+      if (viewport_ready && !last_dom_viewport_ready) {
+        try {
+          console.log('[PLACE_CAMERA_DEBUG] viewport_ready', JSON.stringify(debug_snapshot.dom_viewport));
+        } catch {
+          // ignore debug logging failures
+        }
+      }
+      last_dom_viewport_ready = viewport_ready;
+
+      const anchor_key = anchor_tile ? `${anchor_tile.x},${anchor_tile.y},${anchor_tile.z}` : null;
+      if (anchor_key && anchor_key !== last_camera_anchor_key) {
+        try {
+          console.log('[PLACE_CAMERA_DEBUG] anchor_step', JSON.stringify({
+            anchor: anchor_tile,
+            offsets: debug_snapshot.offsets,
+            projected_screen: debug_snapshot.projected_screen,
+            dom_selected_layer: debug_snapshot.dom_selected_layer,
+          }));
+        } catch {
+          // ignore debug logging failures
+        }
+      }
+      last_camera_anchor_key = anchor_key;
     }
 
-    if (dom_pan_px.tileW > 0 && dom_pan_px.tileH > 0) {
-      const vp = compute_dom_viewport_for_rect({
-        pan_x_px: dom_pan_px.x,
-        pan_y_px: dom_pan_px.y,
-        tile_w_px: dom_pan_px.tileW,
-        tile_h_px: dom_pan_px.tileH,
-        grid_height: config.get_grid_height ? config.get_grid_height() : config.grid_height,
-        rect: inner,
-        base_font_size_px: config.base_font_size_px,
-        ui_scale: dom_pan_px.scale,
-      });
+    {
+      const vp = camera_frame.viewport_px;
 
-      if (!vp) return;
+      if (!vp) {
+        render_view_state_override = null;
+        return;
+      }
       dom_layers.set_viewport(vp);
+      // Place DOM layers are already rasterized from the current camera window.
+      // Applying view.offset again in CSS shifts that window twice.
+      dom_layers.set_camera_pan(0, 0);
+      const defer_dom_content_swap = !!dom_pending_view_signature && dom_pending_view_signature !== dom_last_view_signature;
+      if (defer_dom_content_swap) {
+        dom_layers.render();
+        dom_last_place_id = place.id;
+        render_view_state_override = null;
+        return;
+      }
 
       // z=0: floor is now emitted via rq_z0 (inside bounds only).
       // Reuse offscreen canvases across frames.
@@ -3326,10 +3813,30 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       let buffers_rebuilt = false;
       if (dom_cells_layers.length !== plane_count || dom_cells_layers.some((layer) => !layer) || dom_cells_w !== width || dom_cells_h !== height) {
         buffers_rebuilt = true;
+        try {
+          console.log('[PLACE_CAMERA_DEBUG] dom buffers rebuild', JSON.stringify({
+            reason: 'buffer_dimensions_changed',
+            width,
+            height,
+            plane_count,
+            prev_width: dom_cells_w,
+            prev_height: dom_cells_h,
+            prev_layers: dom_cells_layers.length,
+            view_signature: camera_frame.view_signature,
+            transition_kind,
+            transition_euler: transition_euler_frame,
+          }));
+        } catch {
+          // ignore debug logging failures
+        }
         dom_cells_w = width;
         dom_cells_h = height;
         dom_cells_layers = Array.from({ length: plane_count }, () => ensure_grid_cell_buffer(width, height));
         dom_cells_versions = Array.from({ length: plane_count }, (_, idx) => dom_cells_versions[idx] ?? 1);
+      }
+      if (atlas_frame_dirty) {
+        dom_cells_versions = Array.from({ length: plane_count }, (_, idx) => (dom_cells_versions[idx] ?? 0) + 1);
+        atlas_frame_dirty = false;
       }
 
       const wrap = (local: any) => ({
@@ -3350,14 +3857,41 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
       // Only notify DOM layers when content changes (renderer still updates transforms every frame).
       // When buffers are (re)allocated, bind them to layers at least once.
+      const pushed_slots: number[] = [];
       for (let slot = 0; slot < plane_count; slot += 1) {
         if (buffers_rebuilt || changed_layers[slot]) {
           dom_layers.set_layer_cells(slot, dom_cells_layers[slot]!, dom_cells_versions[slot]);
+          pushed_slots.push(slot);
+        }
+      }
+      if (transition_kind === 'roll' && camera_frame.transition_active) {
+        const selected_slot = Math.max(0, Math.min(plane_count - 1, focus_z));
+        const near_midpoint = Math.abs(transition_euler_frame.z) >= 35;
+        if (near_midpoint || pushed_slots.includes(selected_slot)) {
+          try {
+            console.log('[PLACE_CAMERA_DEBUG] dom roll content handoff', JSON.stringify({
+              view_signature: camera_frame.view_signature,
+              focus_z,
+              selected_slot,
+              selected_world_z: visible_planes_z[selected_slot] ?? null,
+              visible_planes_z,
+              buffers_rebuilt,
+              changed_layers,
+              pushed_slots,
+              versions: dom_cells_versions,
+              selected_changed: !!changed_layers[selected_slot],
+              selected_pushed: pushed_slots.includes(selected_slot),
+              transition_euler: transition_euler_frame,
+            }));
+          } catch {
+            // ignore debug logging failures
+          }
         }
       }
       dom_layers.render();
 
       dom_last_place_id = place.id;
+      render_view_state_override = null;
     }
   }
 
@@ -3810,8 +4344,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
 
       if (!place) {
+        current_draw_transition_frame = null;
         // Ensure DOM world layers are not left mounted on an empty session.
-        reset_dom_render_state();
+        reset_dom_render_state('place_changed');
         dom_last_view_signature = null;
 
         // No place loaded - show placeholder
@@ -3831,37 +4366,72 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
 
       // Phase 0.6: per-place view persistence (camera controller).
+      const painter_active = !!config.is_place_painter_active?.();
       const { width: inner_w, height: inner_h } = inner_size();
-      const view_loaded = camera.ensure_loaded_for_place(place, inner_w, inner_h);
+      const camera_target_mode = config.get_camera_target_mode?.() ?? (painter_active ? 'free' : 'follow_actor');
+      const persist_camera_view = should_persist_camera_view();
+      const view_loaded = camera.ensure_loaded_for_place(place, inner_w, inner_h, persist_camera_view);
+      current_draw_transition_frame = config.get_view_transition_frame ? config.get_view_transition_frame() : null;
 
       // First render: center on the actor when available; otherwise default entry.
       // Only do this if we did not load a persisted view state for this place.
       if (!view_loaded && view.offset_x === 0 && view.offset_y === 0) {
-        const initial_target = config.get_camera_target_position?.() ?? get_primary_actor_focus_position(place) ?? config.get_actor_position?.() ?? null;
-        const target = initial_target ?? place.tile_grid.default_entry;
+        const initial_target = get_active_place_focus_target(place);
+        const target = initial_target ?? get_camera_anchor(place);
         debug_log_place("First render, centering on", {
           target,
           using_actor: !!initial_target,
           default_entry: place.tile_grid.default_entry,
           place_size: { w: place.tile_grid.width, h: place.tile_grid.height }
         });
-        center_on_scene_tile(target.x, target.y, place);
-        camera.schedule_save(place);
+        if (target) {
+          const before_offset = { x: view.offset_x, y: view.offset_y };
+          center_on_scene_tile(target.x, target.y, target.z, place, { force_center: true });
+          if (current_draw_transition_frame?.committed_this_frame) {
+            try {
+              console.log('[PLACE_CAMERA_DEBUG] center_on_scene_tile handoff', JSON.stringify({
+                reason: 'initial_target',
+                transition_phase: current_draw_transition_frame.phase,
+                committed_this_frame: current_draw_transition_frame.committed_this_frame,
+                hard_view: current_draw_transition_frame.hard_view,
+                target: { x: target.x, y: target.y, z: target.z },
+                before_offset,
+                after_offset: { x: view.offset_x, y: view.offset_y },
+              }));
+            } catch {
+              // ignore debug logging failures
+            }
+          }
+          camera.schedule_save(place, persist_camera_view);
+        }
       }
 
-      const painter_active = !!config.is_place_painter_active?.();
-      const camera_target_mode = config.get_camera_target_mode?.() ?? (painter_active ? 'free' : 'follow_actor');
-
       // Follow actor normally; in painter mode preserve free camera view.
-      const camera_target = (config.get_camera_target_position?.() ?? get_primary_actor_focus_position(place) ?? config.get_actor_position?.() ?? null);
-      if (camera_target && camera_target_mode !== 'free') {
-        center_on_scene_tile(camera_target.x, camera_target.y, place);
+      const camera_target = get_camera_anchor(place);
+      if (camera_target_mode !== 'free') {
+        const before_offset = { x: view.offset_x, y: view.offset_y };
+        center_on_scene_tile(camera_target.x, camera_target.y, camera_target.z, place, { force_center: true });
+        if (current_draw_transition_frame?.committed_this_frame) {
+          try {
+            console.log('[PLACE_CAMERA_DEBUG] center_on_scene_tile handoff', JSON.stringify({
+              reason: 'follow_target',
+              transition_phase: current_draw_transition_frame.phase,
+              committed_this_frame: current_draw_transition_frame.committed_this_frame,
+              hard_view: current_draw_transition_frame.hard_view,
+              target: { x: camera_target.x, y: camera_target.y, z: camera_target.z },
+              before_offset,
+              after_offset: { x: view.offset_x, y: view.offset_y },
+            }));
+          } catch {
+            // ignore debug logging failures
+          }
+        }
       }
 
       // Poll input actions and update movement intent every frame.
       // This removes reliance on event timing for movement.
-      const INTENT_RESEND_INTERVAL_MS = 750;
-      const intent = get_move_intent();
+      const screen_intent = get_move_intent();
+      const intent = map_screen_move_intent_to_ground_delta(get_place_view_state(), screen_intent);
       const actor = get_controlled_place_actor(place);
       if (actor && !painter_active) {
         const mode = get_move_mode();
@@ -3873,46 +4443,18 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           intent.dx !== last_intent.dx || 
           intent.dy !== last_intent.dy
         );
-        const now_ms = Date.now();
-        // Resend periodically while a direction is held (survives server restarts / silent failures).
-        const intent_stale = has_movement && (now_ms - input_state.last_intent_sent_ms) >= INTENT_RESEND_INTERVAL_MS;
-
-        if (has_movement && (intent_changed || intent_stale)) {
-          const reason = intent_changed ? 'change' : 'resend';
-          // Server-authoritative: send intent update to backend (held intent wins).
+        if (has_movement && intent_changed) {
+          const input_seq = next_input_seq(null);
           void post_intent_update({
             actor_ref: actor.actor_ref,
             place_id: place.id,
             dx: intent.dx,
             dy: intent.dy,
             mode,
-            reason,
+            kind: 'replace',
+            input_seq,
+            reason: 'change',
           });
-          input_state.last_intent_sent_ms = now_ms;
-        } else if (!has_movement && last_intent) {
-          // No movement intent - stop realtime movement
-          try {
-            const ae: any = (typeof document !== 'undefined') ? (document as any).activeElement : null;
-            const payload = {
-              actor_ref: actor.actor_ref,
-              place_id: place.id,
-              stop_reason: 'no_move_intent',
-              last_intent,
-              active_element: ae ? { tag: String(ae.tagName || ''), id: String(ae.id || ''), cls: String(ae.className || '') } : null,
-            };
-            debug_log_place('MOVE_UNIFY_TEST realtime stop requested', payload);
-          } catch {
-            // ignore
-          }
-          void post_intent_update({
-            actor_ref: actor.actor_ref,
-            place_id: place.id,
-            dx: 0,
-            dy: 0,
-            mode,
-            reason: 'release',
-          });
-          input_state.last_intent_sent_ms = 0;
         }
 
         // Track last intent
@@ -3920,17 +4462,17 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
 
       if (painter_active) {
-        const intent = get_move_intent();
-        if (intent) {
+        const painter_intent = screen_intent;
+        if (painter_intent) {
           const now_ms = Date.now();
           if (now_ms - last_painter_key_pan_ms >= 90) {
             last_painter_key_pan_ms = now_ms;
-            view.offset_x += intent.dx;
-            view.offset_y += intent.dy;
+            view.offset_x += painter_intent.dx;
+            view.offset_y += painter_intent.dy;
             camera.clamp_to_bounds(place, inner_w, inner_h);
             update_painter_camera_target_from_view(place);
-            camera.schedule_save(place);
-            debug_log_place('PLACE_PAINTER camera key pan', { dx: intent.dx, dy: intent.dy, offset_x: view.offset_x, offset_y: view.offset_y });
+            camera.schedule_save(place, should_persist_camera_view());
+            debug_log_place('PLACE_PAINTER camera key pan', { dx: painter_intent.dx, dy: painter_intent.dy, offset_x: view.offset_x, offset_y: view.offset_y });
           }
         }
       }
@@ -3944,7 +4486,11 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
       // Unified movement engine handles all position updates
       // Just need to render the current state
-      draw_place(canvas, place);
+      try {
+        draw_place(canvas, place);
+      } finally {
+        current_draw_transition_frame = null;
+      }
     },
 
     OnGlobalPointerDown(e: PointerEvent): void {
@@ -4202,7 +4748,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         const { width, height } = inner_size();
         camera.clamp_to_bounds(place, width, height);
         update_painter_camera_target_from_view(place);
-        camera.schedule_save(place);
+        camera.schedule_save(place, should_persist_camera_view());
         return;
       }
       void e;
@@ -5046,7 +5592,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
             const actor_pos = config.get_actor_position?.() ?? null;
             const target = actor_pos ?? place.tile_grid.default_entry;
             center_on_tile(target.x, target.y, place);
-            camera.schedule_save(place);
+            camera.schedule_save(place, should_persist_camera_view());
           }
           break;
         case "m":
@@ -5066,8 +5612,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     const pos = config.get_actor_position?.() ?? null;
     if (!pos) return;
     center_on_tile(pos.x, pos.y, place);
-    camera.schedule_save(place);
+    camera.schedule_save(place, should_persist_camera_view());
   };
+  (mod as any).get_debug_dom_space = (): any => dom_layers.get_space();
 
   return mod as any;
 }

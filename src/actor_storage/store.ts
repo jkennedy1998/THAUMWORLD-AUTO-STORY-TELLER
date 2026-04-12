@@ -286,6 +286,13 @@ export function save_actor(slot: number, actor_id: string, actor: Record<string,
     return actor_path;
 }
 
+export function delete_actor(slot: number, actor_id: string): boolean {
+    const actor_path = get_actor_path(slot, actor_id);
+    if (!fs.existsSync(actor_path)) return false;
+    fs.unlinkSync(actor_path);
+    return true;
+}
+
 export function create_actor_from_template(slot: number, name: string): ActorLookupResult {
     const template = load_default_actor();
     if (!template.ok) return template;

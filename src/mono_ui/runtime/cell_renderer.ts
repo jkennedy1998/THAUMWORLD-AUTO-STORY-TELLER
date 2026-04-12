@@ -73,6 +73,16 @@ function draw_atlas_cell(opts: DrawCellOpts): boolean {
     pending_atlas_loads.add(key);
     void load_resolved_atlas_frame(graphic, materials, opts.cell.light_mag).finally(() => {
       pending_atlas_loads.delete(key);
+      try {
+        window.dispatchEvent(new CustomEvent('thaumworld_atlas_frame_ready', {
+          detail: {
+            graphic_id: graphic.graphic_id,
+            view_direction: graphic.view_direction,
+          },
+        }));
+      } catch {
+        // ignore
+      }
     });
   }
   return false;

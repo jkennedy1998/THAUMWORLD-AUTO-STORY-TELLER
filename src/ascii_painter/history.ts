@@ -6,7 +6,7 @@
  */
 
 import type { Grid, GridCell, HistorySnapshot } from './types.js';
-import type { VoxelSpace, VoxelLayer } from './voxel_space.js';
+import { getOrCreateLayer, type VoxelSpace, type VoxelLayer } from './voxel_space.js';
 import type { SelectionBitmap } from './selection.js';
 
 // Action types
@@ -25,6 +25,9 @@ export type ActionType =
 export interface CellChange {
   x: number;
   y: number;
+  worldX: number;
+  worldY: number;
+  worldZ: number;
   oldCell: GridCell;
   newCell: GridCell;
 }
@@ -151,6 +154,9 @@ export function logCellAction(
     cellChanges: changes.map(c => ({
       x: c.x,
       y: c.y,
+      worldX: c.worldX,
+      worldY: c.worldY,
+      worldZ: c.worldZ,
       oldCell: cloneCell(c.oldCell),
       newCell: cloneCell(c.newCell)
     }))
@@ -294,6 +300,9 @@ export function addToBatch(history: HistoryManager, change: CellChange): void {
     history.batchAction.cellChanges!.push({
       x: change.x,
       y: change.y,
+      worldX: change.worldX,
+      worldY: change.worldY,
+      worldZ: change.worldZ,
       oldCell: cloneCell(change.oldCell),
       newCell: cloneCell(change.newCell)
     });
@@ -432,26 +441,20 @@ export function redo(history: HistoryManager, space: VoxelSpace): string | null 
 
 // Undo helper functions
 function undoCellAction(space: VoxelSpace, action: HistoryAction): void {
-  const layer = space.layers.get(action.z);
-  if (!layer || !action.cellChanges) return;
-  
+  if (!action.cellChanges) return;
   for (const change of action.cellChanges) {
-    const row = layer.cells[change.y];
-    if (row && row[change.x]) {
-      row[change.x] = cloneCell(change.oldCell);
-    }
+    const layer = getOrCreateLayer(space, change.worldZ);
+    const row = layer.cells[change.worldY];
+    if (row && row[change.worldX]) row[change.worldX] = cloneCell(change.oldCell);
   }
 }
 
 function redoCellAction(space: VoxelSpace, action: HistoryAction): void {
-  const layer = space.layers.get(action.z);
-  if (!layer || !action.cellChanges) return;
-  
+  if (!action.cellChanges) return;
   for (const change of action.cellChanges) {
-    const row = layer.cells[change.y];
-    if (row && row[change.x]) {
-      row[change.x] = cloneCell(change.newCell);
-    }
+    const layer = getOrCreateLayer(space, change.worldZ);
+    const row = layer.cells[change.worldY];
+    if (row && row[change.worldX]) row[change.worldX] = cloneCell(change.newCell);
   }
 }
 

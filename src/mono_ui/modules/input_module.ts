@@ -198,6 +198,7 @@ export function make_input_module(opts: InputModuleOptions): Module {
 
         OnFocus() { focused = true; },
         OnBlur() { focused = false; },
+        WantsTextCapture() { return focused; },
 
         OnGlobalPointerDown(e: PointerEvent) {
             handle_global_pointer_down_for_gizmos(e, rect, gizmos, gizmo_state);

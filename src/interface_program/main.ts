@@ -20,7 +20,7 @@ import type { MessageEnvelope } from "../engine/types.js";
 import type { LogFile } from "../engine/types.js";
 import { ensure_status_exists, read_status, write_status_line } from "../engine/status_store.js";
 import { ensure_roller_status_exists, read_roller_status, write_roller_status } from "../engine/roller_status_store.js";
-import { ensure_actor_exists, ensure_actor_has_spawn_location, find_actors, load_actor, load_default_actor, save_actor, create_actor_from_kind, make_actor_id, resolve_runtime_player_actor_id } from "../actor_storage/store.js";
+import { ensure_actor_exists, ensure_actor_has_spawn_location, find_actors, load_actor, load_default_actor, save_actor, create_actor_from_kind, make_actor_id, resolve_runtime_player_actor_id, delete_actor } from "../actor_storage/store.js";
 import { create_npc_from_kind, find_npcs, save_npc } from "../npc_storage/store.js";
 import { find_kind, load_kind_definitions } from "../kind_storage/store.js";
 import { advance_timed_event_world_breaths, advance_turn, can_actor_afford_action_cost, can_actor_afford_movement_cost, consume_actor_action_cost, consume_actor_movement_cost, end_timed_event, finalize_timed_event_turn_if_exhausted, finalize_world_sim_interstitial, get_active_actor_ref, get_current_turn_breaths_remaining, get_timed_event_phase, get_timed_event_state, get_timed_event_turn_window_breaths, get_timed_event_world_breath_index, get_region_by_coords, is_current_turn_window_expired, is_timed_event_active, is_timed_event_world_sim_interstitial, load_region, mark_actor_done, note_current_turn_started_breath, perform_move_action_refresh, save_region, start_timed_event, TIMED_EVENT_TURN_WINDOW_BREATHS } from "../world_storage/store.js";
@@ -88,7 +88,7 @@ import { augment_inline_character_items_for_api } from "../shared/character_payl
 import { apply_character_patch, load_character_by_ref, save_character_by_ref } from "../shared/character_store.js";
 import { remove_character_tag, remove_character_tag_by_selector, upsert_character_tag, upsert_character_tag_by_selector } from "../shared/character_tags.js";
 import { get_character_id_from_ref, get_character_role_from_ref } from "../shared/character_storage.js";
-import { assign_controlled_actor_ref_for_client_session, get_claiming_client_session_id_for_actor_ref, get_controlled_actor_ref_for_client_session, list_controlled_actor_claims, release_controlled_actor_ref_for_client_session, set_controlled_actor_ref_for_client_session, touch_controlled_actor_ref_for_client_session } from "../shared/session_control.js";
+import { assign_controlled_actor_ref_for_client_session, get_claiming_client_session_id_for_actor_ref, get_controlled_actor_ref_for_client_session, list_controlled_actor_claims, release_controlled_actor_claim_by_actor_ref, release_controlled_actor_ref_for_client_session, set_controlled_actor_ref_for_client_session, touch_controlled_actor_ref_for_client_session } from "../shared/session_control.js";
 import { normalize_place_actor_presence, normalize_place_npc_presence, project_public_place_actor_presence, project_public_place_npc_presence } from "../shared/place_character_presence.js";
 import { build_actor_owner_inventory_view, build_npc_owner_inventory_view } from "../inventory_surfaces/actor_owner_view.js";
 import { build_container_owner_inventory_view } from "../inventory_surfaces/container_owner_view.js";
@@ -122,6 +122,8 @@ type PlaceBreathState = {
     breath_last_processed: number;
     last_seen_ms: number;
     last_tick_ms: number;
+    last_full_tick_ms: number;
+    last_gravity_tick_ms: number;
     last_persist_ms: number;
     realtime_visible: boolean;
     last_visible_pulse_ms: number;
@@ -153,6 +155,10 @@ type PlaceBreathState = {
 type MovementPulseOptions = {
     entity_filter_ref?: string | null;
     pulse_breath_index?: number;
+    skip_brain?: boolean;
+    skip_thinking?: boolean;
+    skip_gravity?: boolean;
+    skip_legality_refresh?: boolean;
 };
 
 const BREATH_MS = 33; // Fast fixed tick; most entities won't step every breath.
@@ -161,6 +167,8 @@ const PLACE_PERSIST_COOLDOWN_MS = 5_000;
 const CATCHUP_MAX_BREATHS = 300;
 const CATCHUP_MAX_GRAVITY_STEPS = 64;
 const MOVE_TIMING_INVESTIGATION_VERSION = '2026-03-14-visible-pulse-v2';
+const VISIBLE_CONTROLLED_FULL_PULSE_INTERVAL_MS = BREATH_MS * 5;
+const VISIBLE_CONTROLLED_GRAVITY_INTERVAL_MS = BREATH_MS * 45;
 const MOVE_INTERVAL_HOT_THRESHOLD_MS = 25;
 const MOVE_PLACE_HOT_THRESHOLD_MS = 12;
 const MOVE_PHASE_HOT_THRESHOLD_MS = 6;
@@ -361,6 +369,9 @@ type EntityMoveController = {
     place_id: string;
     mode: MoveMode;
     intent: { dx: number; dy: number } | null;
+    tap_intent: { dx: number; dy: number } | null;
+    tap_buffered: number;
+    last_input_seq: number;
     // Click-to-move goal (renderer sends a tile; server plans path on think ticks).
     goal: { x: number; y: number } | null;
     path: Array<{ x: number; y: number; z?: number }> | null;
@@ -379,6 +390,13 @@ type EntityMoveController = {
     } | null;
     updated_at_ms: number;
     move_seq: number;
+    blocked_hold: {
+        dx: number;
+        dy: number;
+        target_key: string | null;
+        reason: string | null;
+        next_retry_breath: number;
+    } | null;
 };
 
 type MovementPhysicsRuntimeState = {
@@ -391,6 +409,7 @@ type MovementPhysicsRuntimeState = {
         dy: number;
         modality: MoveModality;
         mode: MoveMode;
+        input_seq?: number;
         updated_breath: number;
     } | null;
     move_budget: MovementBudgetState;
@@ -453,6 +472,9 @@ function get_or_init_move_controller(
         place_id,
         mode,
         intent: null,
+        tap_intent: null,
+        tap_buffered: 0,
+        last_input_seq: 0,
         goal: null,
         path: null,
         path_index: 0,
@@ -463,6 +485,7 @@ function get_or_init_move_controller(
         last_plan_query: null,
         updated_at_ms: Date.now(),
         move_seq: 0,
+        blocked_hold: null,
     };
     move_ctl.set(key, ctl);
     return ctl;
@@ -471,6 +494,8 @@ function get_or_init_move_controller(
 function clear_entity_goal_and_path(slot: number, entity_ref: string, place_id: string): EntityMoveController {
     const ctl = get_or_init_move_controller(slot, entity_ref, place_id);
     ctl.intent = null;
+    ctl.tap_intent = null;
+    ctl.tap_buffered = 0;
     ctl.goal = null;
     ctl.path = null;
     ctl.path_index = 0;
@@ -483,6 +508,8 @@ function clear_entity_goal_and_path(slot: number, entity_ref: string, place_id: 
 function clear_entity_controller_for_blocked_turn(slot: number, entity_ref: string, place_id: string): EntityMoveController {
     const ctl = get_or_init_move_controller(slot, entity_ref, place_id);
     ctl.intent = null;
+    ctl.tap_intent = null;
+    ctl.tap_buffered = 0;
     ctl.goal = null;
     ctl.path = null;
     ctl.path_index = 0;
@@ -504,6 +531,8 @@ function queue_entity_goal(
     if (!entity_any) return null;
     const ctl = get_or_init_move_controller(slot, entity_ref, place_id);
     ctl.intent = null;
+    ctl.tap_intent = null;
+    ctl.tap_buffered = 0;
     ctl.goal = { x: Math.floor(goal.x), y: Math.floor(goal.y) };
     ctl.path = null;
     ctl.path_index = 0;
@@ -606,16 +635,18 @@ function normalize_movement_physics_state(any_entity: any): PersistedMovementPhy
 
 function get_or_init_movement_physics_state(entity_ref: string, place_id: string, any_entity: any, ctl: EntityMoveController | null, breath_index: number): MovementPhysicsRuntimeState {
     const persisted = normalize_movement_physics_state(any_entity);
+    const active_intent = ctl ? get_controller_active_intent(ctl) : null;
     return {
         entity_ref,
         entity_type: infer_entity_type(entity_ref),
         place_id,
         velocity: { ...persisted.velocity },
-        latest_intent: ctl && ctl.intent ? {
-            dx: clamp_intent(ctl.intent.dx),
-            dy: clamp_intent(ctl.intent.dy),
+        latest_intent: active_intent ? {
+            dx: clamp_intent(active_intent.dx),
+            dy: clamp_intent(active_intent.dy),
             modality: 'walk',
-            mode: ctl.mode,
+            mode: ctl?.mode ?? 'WALK',
+            input_seq: ctl?.last_input_seq ?? 0,
             updated_breath: breath_index,
         } : null,
         move_budget: { ...persisted.move_budget },
@@ -723,10 +754,54 @@ function hash_entity_ref(entity_ref: string): number {
     return Math.abs(h);
 }
 
+function is_active_controller_intent(intent: { dx: number; dy: number } | null | undefined): boolean {
+    return !!(intent && (intent.dx !== 0 || intent.dy !== 0));
+}
+
+function get_controller_active_intent(ctl: EntityMoveController): { dx: number; dy: number } | null {
+    if (ctl.tap_buffered > 0 && is_active_controller_intent(ctl.tap_intent)) {
+        return { dx: clamp_intent(ctl.tap_intent!.dx), dy: clamp_intent(ctl.tap_intent!.dy) };
+    }
+    if (is_active_controller_intent(ctl.intent)) {
+        return { dx: clamp_intent(ctl.intent!.dx), dy: clamp_intent(ctl.intent!.dy) };
+    }
+    return null;
+}
+
+function has_controller_pending_movement(ctl: EntityMoveController | null | undefined): boolean {
+    if (!ctl) return false;
+    return !!get_controller_active_intent(ctl);
+}
+
+function get_visible_controlled_actor_controller(slot: number, place_id: string): EntityMoveController | null {
+    for (const ctl of move_ctl.values()) {
+        if (ctl.slot !== slot || ctl.place_id !== place_id || ctl.entity_type !== 'actor') continue;
+        if (!has_controller_pending_movement(ctl)) continue;
+        return ctl;
+    }
+    return null;
+}
+
+function clear_blocked_hold(ctl: EntityMoveController): void {
+    ctl.blocked_hold = null;
+}
+
+function get_blocked_hold_retry_breath(current_breath: number, breaths_per_step: number): number {
+    const retry_gap = Math.max(8, breaths_per_step * 4);
+    return current_breath + retry_gap;
+}
+
+function is_blocked_hold_suppressed(ctl: EntityMoveController, desired: { dx: number; dy: number } | null, breath_index: number): boolean {
+    if (!ctl.blocked_hold || !desired) return false;
+    return ctl.blocked_hold.next_retry_breath > breath_index
+        && ctl.blocked_hold.dx === clamp_intent(desired.dx)
+        && ctl.blocked_hold.dy === clamp_intent(desired.dy);
+}
+
 function desired_step_from_controller(ctl: EntityMoveController, cur_x: number, cur_y: number): { dx: number; dy: number } | null {
-    const intent_active = !!(ctl.intent && (ctl.intent.dx !== 0 || ctl.intent.dy !== 0));
-    if (intent_active && ctl.intent) {
-        return { dx: clamp_intent(ctl.intent.dx), dy: clamp_intent(ctl.intent.dy) };
+    const active_intent = get_controller_active_intent(ctl);
+    if (active_intent) {
+        return active_intent;
     }
 
     if (ctl.path && ctl.path_index < ctl.path.length) {
@@ -1351,6 +1426,15 @@ function normalize_intent_reason(reason_raw: any): 'change' | 'resend' | 'releas
     return 'unknown';
 }
 
+function normalize_input_kind(kind_raw: any, reason: ReturnType<typeof normalize_intent_reason>, dx: number, dy: number): 'press' | 'release' | 'replace' {
+    const kind = String(kind_raw ?? '').toLowerCase();
+    if (kind === 'press') return 'press';
+    if (kind === 'release') return 'release';
+    if (kind === 'replace') return 'replace';
+    if (reason === 'release' || (dx === 0 && dy === 0)) return 'release';
+    return 'press';
+}
+
 function clamp_intent(v: any): number {
     const n = Number(v);
     if (!Number.isFinite(n)) return 0;
@@ -1505,7 +1589,9 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState, options
     const place_any: any = state.place_base;
     if (!place_any) return;
 
-    build_place_contents_for_legality(state.slot, state.place_id, place_any);
+    if (options?.skip_legality_refresh !== true) {
+        build_place_contents_for_legality(state.slot, state.place_id, place_any);
+    }
 
     const place_bi = Math.floor(Number(options?.pulse_breath_index ?? state.breath_index ?? 0)) || 0;
     const entity_filter_ref = String(options?.entity_filter_ref ?? '').trim() || null;
@@ -1531,11 +1617,13 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState, options
         const debug_ascend_active = runtime.transient_selection?.movement_subtype === 'debug.ascend'
             && Math.abs(Number(runtime.velocity.vz) || 0) > 0;
         const walk_accel = get_walk_accel_per_breath(any_entity, ctl.mode);
-        runtime.latest_intent = ctl.intent ? {
-            dx: clamp_intent(ctl.intent.dx),
-            dy: clamp_intent(ctl.intent.dy),
+        const active_intent = get_controller_active_intent(ctl);
+        runtime.latest_intent = active_intent ? {
+            dx: clamp_intent(active_intent.dx),
+            dy: clamp_intent(active_intent.dy),
             modality: 'walk',
             mode: ctl.mode,
+            input_seq: ctl.last_input_seq,
             updated_breath: place_bi,
         } : null;
         const cur_x = Math.floor(Number(any_entity?.location?.tile?.x ?? 0)) || 0;
@@ -1553,6 +1641,13 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState, options
 
         if (walk_accel) {
             const spend_gate = refill_move_budget_and_apply_debt(runtime, 'walk', walk_accel);
+            const tap_active = ctl.tap_buffered > 0 && is_active_controller_intent(ctl.tap_intent);
+            const blocked_hold_active = !tap_active
+                && !!desired
+                && !!ctl.blocked_hold
+                && ctl.blocked_hold.next_retry_breath > place_bi
+                && ctl.blocked_hold.dx === clamp_intent(desired.dx)
+                && ctl.blocked_hold.dy === clamp_intent(desired.dy);
             if (spend_gate.debt_suppressed && (place_bi % 15 === 0)) {
                 debug_log('MOVE_VEL_TEST', 'PASS move_debt suppresses MOVE spending while intent persists', {
                     entity_ref,
@@ -1589,7 +1684,36 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState, options
                 runtime.velocity.vx = 0;
                 runtime.velocity.vy = 0;
                 runtime.transient_selection = null;
+            } else if (blocked_hold_active && !debug_ascend_active) {
+                runtime.velocity.vx = 0;
+                runtime.velocity.vy = 0;
+                runtime.transient_selection = null;
+                if ((place_bi % 6) === 0) {
+                    debug_log('MOVE_RESP_TRACE', 'held movement suppressed by blocked retry cooldown', {
+                        entity_ref,
+                        place_id: state.place_id,
+                        breath_index: place_bi,
+                        input_seq: runtime.latest_intent?.input_seq ?? ctl.last_input_seq,
+                        desired,
+                        blocked_reason: ctl.blocked_hold?.reason ?? null,
+                        blocked_target: ctl.blocked_hold?.target_key ?? null,
+                        next_retry_breath: ctl.blocked_hold?.next_retry_breath ?? place_bi,
+                    });
+                }
             } else if (spend_gate.can_spend && desired && airborne_horizontal_can_spend && !debug_ascend_active) {
+                if (tap_active) {
+                    ctl.tap_buffered = Math.max(0, ctl.tap_buffered - 1);
+                    if (ctl.tap_buffered === 0) ctl.tap_intent = null;
+                    debug_log('MOVE_RESP_TRACE', 'tap consumed on eligible control breath', {
+                        entity_ref,
+                        place_id: state.place_id,
+                        breath_index: place_bi,
+                        input_seq: runtime.latest_intent?.input_seq ?? ctl.last_input_seq,
+                        desired,
+                        tap_buffered_after: ctl.tap_buffered,
+                        next_control_breath: runtime.next_control_breath.walk,
+                    });
+                }
                 apply_entity_control_steering(runtime, desired, incline);
                 let moves_applied = 0;
                 if (incline) {
@@ -1614,7 +1738,7 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState, options
                     };
                 } else {
                     let loop_guard = 0;
-                    const spend_cap = timed_movement_gate.active ? 1 : max_move_spend_per_breath('walk');
+                    const spend_cap = (timed_movement_gate.active || tap_active) ? 1 : max_move_spend_per_breath('walk');
                     while ((Number(runtime.move_budget.walk) || 0) >= 1 && loop_guard < spend_cap) {
                         apply_move_acceleration(runtime, desired);
                         spend_move_budget(runtime, 'walk', 1);
@@ -1731,10 +1855,13 @@ function apply_movement_physics_phase_one_breath(state: PlaceBreathState, moveme
     return apply_server_movement_one_breath(state, movement_updates, options);
 }
 
-function run_place_breaths(state: PlaceBreathState, ticks_to_run: number, now: number, movement_updates: any[], cause?: string): Array<{ slot: number; place_id: string; breath_index: number }> {
+function run_place_breaths(state: PlaceBreathState, ticks_to_run: number, now: number, movement_updates: any[], cause?: string, options?: MovementPulseOptions): Array<{ slot: number; place_id: string; breath_index: number }> {
     const breath_ticks: Array<{ slot: number; place_id: string; breath_index: number }> = [];
     const ticks = Math.max(0, Math.floor(Number(ticks_to_run)) || 0);
     const pulse_started_ms = Date.now();
+    const skip_brain = options?.skip_brain === true;
+    const skip_thinking = options?.skip_thinking === true;
+    const skip_gravity = options?.skip_gravity === true;
     let brain_duration_ms = 0;
     let think_duration_ms = 0;
     let action_duration_ms = 0;
@@ -1780,7 +1907,7 @@ function run_place_breaths(state: PlaceBreathState, ticks_to_run: number, now: n
             (state.place_base as any).breath_index = state.breath_index;
             (state.place_base as any).breath_last_processed = state.breath_last_processed;
 
-            if ((state.breath_index % BRAIN_EVERY_BREATHS) === 0) {
+            if (!skip_brain && (state.breath_index % BRAIN_EVERY_BREATHS) === 0) {
                 const started_ms = Date.now();
                 const brain_subprofile = apply_server_brain_one_breath(state);
                 brain_duration_ms += Math.max(0, Date.now() - started_ms);
@@ -1793,7 +1920,7 @@ function run_place_breaths(state: PlaceBreathState, ticks_to_run: number, now: n
                 brain_profile.pathfind_ms += brain_subprofile.pathfind_ms;
                 brain_profile.pathfind_calls += brain_subprofile.pathfind_calls;
             }
-            if ((state.breath_index % THINK_EVERY_BREATHS) === 0) {
+            if (!skip_thinking && (state.breath_index % THINK_EVERY_BREATHS) === 0) {
                 const started_ms = Date.now();
                 const think_subprofile = apply_server_thinking_one_breath(state);
                 think_duration_ms += Math.max(0, Date.now() - started_ms);
@@ -1824,34 +1951,36 @@ function run_place_breaths(state: PlaceBreathState, ticks_to_run: number, now: n
             movement_profile.can_place_calls += physics_profile.can_place_calls;
             movement_profile.pushable_ms += physics_profile.pushable_ms;
             movement_profile.persist_ms += physics_profile.persist_ms;
-            const gravity_started_ms = Date.now();
-            const ground_profile = apply_gravity_to_place_ground(state);
-            const tiles_profile = apply_gravity_to_place_tiles(state);
-            apply_place_breath_reactive_tags(state);
-            apply_entity_owned_item_breath_reactive_tags(state);
-            gravity_duration_ms += Math.max(0, Date.now() - gravity_started_ms);
-            gravity_profile.ground_total_ms += ground_profile.ground_total_ms;
-            gravity_profile.ground_entries += ground_profile.ground_entries;
-            gravity_profile.ground_items_considered += ground_profile.ground_items_considered;
-            gravity_profile.ground_support_checks_ms += ground_profile.ground_support_checks_ms;
-            gravity_profile.ground_support_checks += ground_profile.ground_support_checks;
-            gravity_profile.ground_fall_checks_ms += ground_profile.ground_fall_checks_ms;
-            gravity_profile.ground_fall_checks += ground_profile.ground_fall_checks;
-            gravity_profile.ground_items_moved += ground_profile.ground_items_moved;
-            gravity_profile.tiles_total_ms += tiles_profile.tiles_total_ms;
-            gravity_profile.tile_cache_refresh_ms += tiles_profile.tile_cache_refresh_ms;
-            gravity_profile.structure_candidates += tiles_profile.structure_candidates;
-            gravity_profile.structure_support_checks_ms += tiles_profile.structure_support_checks_ms;
-            gravity_profile.structure_support_checks += tiles_profile.structure_support_checks;
-            gravity_profile.structure_move_checks_ms += tiles_profile.structure_move_checks_ms;
-            gravity_profile.structure_move_checks += tiles_profile.structure_move_checks;
-            gravity_profile.structures_moved += tiles_profile.structures_moved;
-            gravity_profile.gravity_tile_candidates += tiles_profile.gravity_tile_candidates;
-            gravity_profile.gravity_tile_support_checks_ms += tiles_profile.gravity_tile_support_checks_ms;
-            gravity_profile.gravity_tile_support_checks += tiles_profile.gravity_tile_support_checks;
-            gravity_profile.gravity_tile_move_checks_ms += tiles_profile.gravity_tile_move_checks_ms;
-            gravity_profile.gravity_tile_move_checks += tiles_profile.gravity_tile_move_checks;
-            gravity_profile.gravity_tiles_moved += tiles_profile.gravity_tiles_moved;
+            if (!skip_gravity) {
+                const gravity_started_ms = Date.now();
+                const ground_profile = apply_gravity_to_place_ground(state);
+                const tiles_profile = apply_gravity_to_place_tiles(state);
+                apply_place_breath_reactive_tags(state);
+                apply_entity_owned_item_breath_reactive_tags(state);
+                gravity_duration_ms += Math.max(0, Date.now() - gravity_started_ms);
+                gravity_profile.ground_total_ms += ground_profile.ground_total_ms;
+                gravity_profile.ground_entries += ground_profile.ground_entries;
+                gravity_profile.ground_items_considered += ground_profile.ground_items_considered;
+                gravity_profile.ground_support_checks_ms += ground_profile.ground_support_checks_ms;
+                gravity_profile.ground_support_checks += ground_profile.ground_support_checks;
+                gravity_profile.ground_fall_checks_ms += ground_profile.ground_fall_checks_ms;
+                gravity_profile.ground_fall_checks += ground_profile.ground_fall_checks;
+                gravity_profile.ground_items_moved += ground_profile.ground_items_moved;
+                gravity_profile.tiles_total_ms += tiles_profile.tiles_total_ms;
+                gravity_profile.tile_cache_refresh_ms += tiles_profile.tile_cache_refresh_ms;
+                gravity_profile.structure_candidates += tiles_profile.structure_candidates;
+                gravity_profile.structure_support_checks_ms += tiles_profile.structure_support_checks_ms;
+                gravity_profile.structure_support_checks += tiles_profile.structure_support_checks;
+                gravity_profile.structure_move_checks_ms += tiles_profile.structure_move_checks_ms;
+                gravity_profile.structure_move_checks += tiles_profile.structure_move_checks;
+                gravity_profile.structures_moved += tiles_profile.structures_moved;
+                gravity_profile.gravity_tile_candidates += tiles_profile.gravity_tile_candidates;
+                gravity_profile.gravity_tile_support_checks_ms += tiles_profile.gravity_tile_support_checks_ms;
+                gravity_profile.gravity_tile_support_checks += tiles_profile.gravity_tile_support_checks;
+                gravity_profile.gravity_tile_move_checks_ms += tiles_profile.gravity_tile_move_checks_ms;
+                gravity_profile.gravity_tile_move_checks += tiles_profile.gravity_tile_move_checks;
+                gravity_profile.gravity_tiles_moved += tiles_profile.gravity_tiles_moved;
+            }
         }
     }
     const pulse_duration_ms = Math.max(0, Date.now() - pulse_started_ms);
@@ -2278,6 +2407,97 @@ function maybe_run_immediate_visible_place_pulse(slot: number, place_id: string,
     }
 }
 
+function run_entity_only_visible_place_pulse(slot: number, place_id: string, entity_ref: string, reason: 'intent' | 'move_to' | 'debug_ascend' | 'held_repeat'): void {
+    const now = Date.now();
+    const key = place_breath_key(slot, place_id);
+    const state = place_breath.get(key);
+    if (!state?.place_base || !state.realtime_visible) return;
+    if (is_place_breath_paused(state)) return;
+
+    const any_entity = get_entity_any_cached_or_load(slot, entity_ref);
+    if (!any_entity) return;
+
+    const ctl = move_ctl.get(move_ctl_key(slot, entity_ref));
+    if (!ctl || ctl.place_id !== place_id) return;
+
+    const movement_updates: any[] = [];
+    const start_x = Math.floor(Number(any_entity?.location?.tile?.x ?? 0)) || 0;
+    const start_y = Math.floor(Number(any_entity?.location?.tile?.y ?? 0)) || 0;
+    const start_z = Math.floor(Number(any_entity?.location?.elevation ?? any_entity?.location?.tile?.elevation ?? 0)) || 0;
+    const pulse_breath_index = Math.max(
+        Math.floor(Number(state.breath_index ?? 0)) || 0,
+        Math.floor(Number((any_entity as any)?.movement_physics?.last_breath_processed ?? 0)) || 0,
+        Math.floor(Number((any_entity as any)?.breath_last_processed ?? 0)) || 0,
+        Math.floor(Number((any_entity as any)?.breath_index ?? 0)) || 0,
+    ) + 1;
+    const desired = get_controller_active_intent(ctl);
+    if (reason === 'held_repeat' && is_blocked_hold_suppressed(ctl, desired, pulse_breath_index)) {
+        debug_log('MOVE_RESP_TRACE', 'held movement suppressed by blocked retry cooldown', {
+            entity_ref,
+            place_id,
+            breath_index: pulse_breath_index,
+            input_seq: ctl.last_input_seq,
+            desired,
+            blocked_reason: ctl.blocked_hold?.reason ?? null,
+            blocked_target: ctl.blocked_hold?.target_key ?? null,
+            next_retry_breath: ctl.blocked_hold?.next_retry_breath ?? pulse_breath_index,
+        });
+        state.breath_index = Math.max(Math.floor(Number(state.breath_index ?? 0)) || 0, pulse_breath_index);
+        state.breath_last_processed = state.breath_index;
+        state.last_tick_ms = now;
+        set_free_roam_place_breath(slot, place_id, state.breath_index);
+        return;
+    }
+
+    const action_started_ms = Date.now();
+    apply_movement_action_phase_one_breath(state, { entity_filter_ref: entity_ref, pulse_breath_index, skip_legality_refresh: true });
+    const action_duration_ms = Math.max(0, Date.now() - action_started_ms);
+    const physics_started_ms = Date.now();
+    apply_movement_physics_phase_one_breath(state, movement_updates, { entity_filter_ref: entity_ref, pulse_breath_index });
+    const physics_duration_ms = Math.max(0, Date.now() - physics_started_ms);
+    const pulse_duration_ms = Math.max(0, Date.now() - now);
+    const end_x = Math.floor(Number(any_entity?.location?.tile?.x ?? 0)) || 0;
+    const end_y = Math.floor(Number(any_entity?.location?.tile?.y ?? 0)) || 0;
+    const end_z = Math.floor(Number(any_entity?.location?.elevation ?? any_entity?.location?.tile?.elevation ?? 0)) || 0;
+
+    debug_log('MOVE_VEL_TEST', 'immediate entity-only place pulse', {
+        slot,
+        place_id,
+        entity_ref,
+        reason,
+        pulse_breath_index,
+        from: { x: start_x, y: start_y, z: start_z },
+        to: { x: end_x, y: end_y, z: end_z },
+        movement_updates: movement_updates.length,
+        action_duration_ms,
+        physics_duration_ms,
+        pulse_duration_ms,
+    });
+    debug_log('MOVE_RESP_TRACE', 'entity-only input pulse executed', {
+        slot,
+        place_id,
+        entity_ref,
+        reason,
+        pulse_breath_index,
+        movement_updates: movement_updates.length,
+        action_duration_ms,
+        physics_duration_ms,
+        pulse_duration_ms,
+    });
+
+    state.breath_index = Math.max(Math.floor(Number(state.breath_index ?? 0)) || 0, pulse_breath_index);
+    state.breath_last_processed = state.breath_index;
+    state.last_tick_ms = now;
+    state.last_full_tick_ms = now;
+    state.sim_accum_ms = 0;
+    set_free_roam_place_breath(slot, place_id, state.breath_index);
+
+    flush_place_breath_outputs(now, [], movement_updates, state.tile_updates.splice(0), state.item_refresh_intents.splice(0));
+    if (state.place_dirty) {
+        persist_place_breath_if_needed(state);
+    }
+}
+
 function run_timed_event_entity_pulse(slot: number, place_id: string, entity_ref: string, reason: 'intent' | 'move_to' | 'debug_ascend'): void {
     if (!is_timed_event_active(slot) || is_timed_event_world_sim_interstitial(slot)) return;
     const now = Date.now();
@@ -2313,7 +2533,7 @@ function run_timed_event_entity_pulse(slot: number, place_id: string, entity_ref
         timed_event_phase: get_timed_event_phase(slot),
         world_breath_index: get_timed_event_world_breath_index(slot),
         controller_mode: ctl.mode,
-        has_intent: !!(ctl.intent && (((ctl.intent as any).dx ?? 0) !== 0 || ((ctl.intent as any).dy ?? 0) !== 0)),
+        has_intent: !!get_controller_active_intent(ctl),
         has_goal: !!ctl.goal,
         path_remaining: Array.isArray(ctl.path) ? Math.max(0, ctl.path.length - Math.max(0, ctl.path_index)) : 0,
     });
@@ -3499,7 +3719,7 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
         const debug_vertical_impulse = is_debug_vertical_impulse_active(runtime, place_bi);
         const vertical_motion_active = is_vertical_motion_active(runtime, unsupported, debug_vertical_impulse);
 
-        const intent_active = !!(ctl.intent && (ctl.intent.dx !== 0 || ctl.intent.dy !== 0));
+        const intent_active = !!get_controller_active_intent(ctl);
         const has_path = !!(ctl.path && ctl.path_index < ctl.path.length);
         const has_goal = !!(ctl.goal && Number.isFinite(ctl.goal.x) && Number.isFinite(ctl.goal.y));
         if (!intent_active && !has_path && !has_goal && !pending_followthrough && !vertical_motion_active) return;
@@ -3774,6 +3994,26 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
                 at: { x: cur_x, y: cur_y, z: cur_z },
                 attempts: failed_attempts,
             });
+            debug_log('MOVE_RESP_TRACE', 'movement blocked on eligible step', {
+                entity_ref,
+                place_id: state.place_id,
+                breath_index: place_bi,
+                input_seq: runtime.latest_intent?.input_seq ?? ctl.last_input_seq ?? 0,
+                desired: runtime.latest_intent ? { dx: runtime.latest_intent.dx, dy: runtime.latest_intent.dy } : null,
+                reasons: Array.from(new Set(failed_attempts.map((a) => String(a.reason ?? 'unknown')))),
+                blocked_target: failed_attempts[0]?.target ?? null,
+                blocked_detail: failed_attempts[0]?.detail ?? null,
+            });
+            if (intent_active && runtime.latest_intent && ctl.tap_buffered <= 0) {
+                const blocked_target = failed_attempts[0]?.target ?? null;
+                ctl.blocked_hold = {
+                    dx: clamp_intent(runtime.latest_intent.dx),
+                    dy: clamp_intent(runtime.latest_intent.dy),
+                    target_key: blocked_target ? `${blocked_target.x},${blocked_target.y},${blocked_target.z}` : null,
+                    reason: Array.from(new Set(failed_attempts.map((a) => String(a.reason ?? 'unknown')))).join('|') || 'blocked',
+                    next_retry_breath: get_blocked_hold_retry_breath(place_bi, get_walk_breaths_per_step(any_entity, ctl.mode)),
+                };
+            }
             if (!intent_active) {
                 ctl.goal = null;
                 ctl.path = null;
@@ -3871,6 +4111,7 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
                 ctl.need_repath = false;
             }
         }
+        clear_blocked_hold(ctl);
         const resolved_transient_subtype = runtime.transient_selection?.movement_subtype ?? null;
         const resolved_preferred_axes = runtime.transient_selection?.preferred_axes ?? null;
         apply_friction_to_axis(runtime, target.axis);
@@ -3879,9 +4120,18 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
             entity_ref,
             place_id: state.place_id,
             breath_index: place_bi,
+            input_seq: runtime.latest_intent?.input_seq ?? null,
             to: { x: target.x, y: target.y, z: target.z },
             axis: target.axis,
             velocity: runtime.velocity,
+        });
+        debug_log('MOVE_RESP_TRACE', 'physics resolved step', {
+            entity_ref,
+            place_id: state.place_id,
+            breath_index: place_bi,
+            input_seq: runtime.latest_intent?.input_seq ?? null,
+            to: { x: target.x, y: target.y, z: target.z },
+            axis: target.axis,
         });
         if (runtime.input_goal_queued_at_ms !== null) {
             debug_log('MOVE_VEL_TEST', 'click-to-first-step latency', {
@@ -4091,7 +4341,7 @@ function apply_server_thinking_one_breath(state: PlaceBreathState): ThinkingBrea
         if (ctl0.place_id !== state.place_id) continue;
         profile.controllers_considered += 1;
 
-        const intent_active = !!(ctl0.intent && (ctl0.intent.dx !== 0 || ctl0.intent.dy !== 0));
+        const intent_active = !!get_controller_active_intent(ctl0);
         if (intent_active) continue;
 
         const has_goal = !!(ctl0.goal && Number.isFinite(ctl0.goal.x) && Number.isFinite(ctl0.goal.y));
@@ -4167,6 +4417,9 @@ function apply_server_brain_one_breath(state: PlaceBreathState): BrainBreathProf
             place_id: state.place_id,
             mode: 'WALK',
             intent: null,
+            tap_intent: null,
+            tap_buffered: 0,
+            last_input_seq: 0,
             goal: null,
             path: null,
             path_index: 0,
@@ -4177,10 +4430,11 @@ function apply_server_brain_one_breath(state: PlaceBreathState): BrainBreathProf
             last_plan_query: null,
             updated_at_ms: Date.now(),
             move_seq: 0,
+            blocked_hold: null,
         };
 
         // Only choose a new wander goal when idle.
-        const intent_active = !!(ctl.intent && (ctl.intent.dx !== 0 || ctl.intent.dy !== 0));
+        const intent_active = !!get_controller_active_intent(ctl);
         const has_goal = !!(ctl.goal);
         const has_path = !!(ctl.path && ctl.path_index < ctl.path.length);
         if (intent_active || has_goal || has_path) {
@@ -5281,6 +5535,8 @@ function touch_place_breath(slot: number, place_any: any, opts?: { realtime_visi
             if (realtime_visible && !existing.realtime_visible) {
                 existing.realtime_visible = true;
                 existing.last_tick_ms = now;
+                existing.last_full_tick_ms = now;
+                existing.last_gravity_tick_ms = now;
                 if (existing.tile_physics_cache_dirty) {
                     try {
                         refresh_tile_physics_cache(existing);
@@ -5332,15 +5588,17 @@ function touch_place_breath(slot: number, place_any: any, opts?: { realtime_visi
         const catchup_applied_to_state = realtime_visible ? 0 : catchup_breaths;
         const passive_catchup_target_breath = realtime_visible ? (bi + catchup_breaths) : null;
 
-        const state: PlaceBreathState = {
-            place_id,
-            slot,
-            breath_index: bi + catchup_applied_to_state,
-            breath_last_processed: (bi + catchup_applied_to_state),
-            last_seen_ms: now,
-            last_tick_ms: now,
-            last_persist_ms: 0,
-            realtime_visible,
+            const state: PlaceBreathState = {
+                place_id,
+                slot,
+                breath_index: bi + catchup_applied_to_state,
+                breath_last_processed: (bi + catchup_applied_to_state),
+                last_seen_ms: now,
+                last_tick_ms: now,
+                last_full_tick_ms: now,
+                last_gravity_tick_ms: now,
+                last_persist_ms: 0,
+                realtime_visible,
             last_visible_pulse_ms: 0,
             last_visible_pulse_duration_ms: 0,
             sim_accum_ms: 0,
@@ -8148,9 +8406,29 @@ setInterval(() => {
             // This keeps timing strict — no extra ticks when the interval fires early.
             if (ticks_to_run > 0) {
                 state.sim_accum_ms -= ticks_to_run * BREATH_MS;
-                breath_ticks.push(...run_place_breaths(state, ticks_to_run, now, movement_updates, 'interval'));
-                if (state.place_dirty) {
-                    persist_place_breath_if_needed(state);
+                const controlled_actor_ctl = state.realtime_visible ? get_visible_controlled_actor_controller(state.slot, state.place_id) : null;
+                const lightweight_control_tick = !!controlled_actor_ctl;
+                const full_visible_tick_due = !lightweight_control_tick || (now - Math.max(0, Number(state.last_full_tick_ms) || 0)) >= VISIBLE_CONTROLLED_FULL_PULSE_INTERVAL_MS;
+                if (lightweight_control_tick && controlled_actor_ctl && !full_visible_tick_due) {
+                    run_entity_only_visible_place_pulse(state.slot, state.place_id, controlled_actor_ctl.entity_ref, 'held_repeat');
+                } else {
+                    const gravity_due = !lightweight_control_tick || state.place_dirty || state.tile_updates.length > 0 || state.item_refresh_intents.length > 0
+                        || (now - Math.max(0, Number(state.last_gravity_tick_ms) || 0)) >= VISIBLE_CONTROLLED_GRAVITY_INTERVAL_MS;
+                    breath_ticks.push(...run_place_breaths(
+                        state,
+                        ticks_to_run,
+                        now,
+                        movement_updates,
+                        lightweight_control_tick ? 'interval_controlled_full' : 'interval',
+                        lightweight_control_tick ? { skip_brain: true, skip_thinking: true, skip_gravity: !gravity_due } : undefined,
+                    ));
+                    if (state.realtime_visible) {
+                        state.last_full_tick_ms = now;
+                        if (gravity_due) state.last_gravity_tick_ms = now;
+                    }
+                    if (state.place_dirty) {
+                        persist_place_breath_if_needed(state);
+                    }
                 }
             } else {
                 // Nothing to run this callback; still update last_tick_ms so elapsed_wall_ms
@@ -9552,10 +9830,43 @@ function is_actor_claim_slot_visible(slot: number, actor_id: string): boolean {
     if (!normalized_actor_id) return false;
     const result = load_actor(slot, normalized_actor_id);
     if (!result.ok) return false;
-    const actor = result.actor as any;
-    if (String(actor?.claim_slot_visibility ?? "show").trim().toLowerCase() === "hide") return false;
-    if (actor?.system_actor === true) return false;
-    return normalized_actor_id.toLowerCase() !== "default_actor";
+    return is_actor_boot_selectable(result.actor, normalized_actor_id);
+}
+
+const BODY_PART_ACTOR_IDS = new Set([
+    'head',
+    'torso',
+    'hand_left',
+    'hand_right',
+    'leg_left',
+    'leg_right',
+]);
+
+function is_actor_boot_selectable(actor_any: any, actor_id: string): boolean {
+    const normalized_actor_id = String(actor_id ?? '').trim().toLowerCase();
+    if (!normalized_actor_id) return false;
+    if (String(actor_any?.claim_slot_visibility ?? 'show').trim().toLowerCase() === 'hide') return false;
+    if (actor_any?.system_actor === true) return false;
+    if (actor_any?.boot_selectable === false) return false;
+    if (normalized_actor_id === 'default_actor') return false;
+    if (BODY_PART_ACTOR_IDS.has(normalized_actor_id)) return false;
+    return true;
+}
+
+function delete_actor_and_reconcile(slot: number, actor_ref: string): { ok: true; actor_id: string; place_id: string | null; released_claim: boolean } | { ok: false; error: string } {
+    const actor_id = get_character_id_from_ref(actor_ref);
+    if (!actor_id) return { ok: false, error: 'invalid_controlled_actor_ref' };
+    const actor_res = load_actor(slot, actor_id);
+    if (!actor_res.ok) return { ok: false, error: actor_res.error };
+    const actor_any = actor_res.actor as any;
+    if (!is_actor_boot_selectable(actor_any, actor_id)) return { ok: false, error: 'actor_delete_forbidden' };
+    const existing_claimant = get_claiming_client_session_id_for_actor_ref(slot, actor_ref);
+    if (existing_claimant) return { ok: false, error: 'actor_delete_claimed' };
+    const place_id = String(actor_any?.location?.place_id ?? '').trim() || null;
+    if (!delete_actor(slot, actor_id)) return { ok: false, error: 'actor_delete_failed' };
+    const released_claim = release_controlled_actor_claim_by_actor_ref(slot, actor_ref);
+    reconcile_entity_place_membership(slot);
+    return { ok: true, actor_id, place_id, released_claim };
 }
 
 function build_creation_preview(kind_id: string): {
@@ -9646,6 +9957,16 @@ function emit_place_presence_changed(place_id: string, actor_ref: string, reason
     if (!normalized_place_id || !normalized_actor_ref) return;
     void emitBridgeMessage('PLACE_PRESENCE_CHANGED', {
         place_id: normalized_place_id,
+        actor_ref: normalized_actor_ref,
+        reason,
+        sent_at_ms: Date.now(),
+    });
+}
+
+function emit_actor_claim_state_changed(actor_ref: string, reason: string): void {
+    const normalized_actor_ref = String(actor_ref ?? '').trim();
+    if (!normalized_actor_ref) return;
+    void emitBridgeMessage('ACTOR_CLAIM_STATE_CHANGED', {
         actor_ref: normalized_actor_ref,
         reason,
         sent_at_ms: Date.now(),
@@ -11850,7 +12171,7 @@ function start_http_server(log_path: string): void {
                     });
                     clear_entity_controller_for_blocked_turn(slot, entity_ref, place_id);
                     res.writeHead(200, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ ok: true, ignored: true, blocked: true, error: movement_gate.reason ?? 'movement_blocked', slot, entity_ref, place_id, release: is_release }));
+                    res.end(JSON.stringify({ ok: true, ignored: true, blocked: true, error: movement_gate.reason ?? 'movement_blocked', gate: String(movement_gate.reason ?? 'movement_blocked'), input_seq: Number((data as any)?.input_seq ?? 0) || 0, accepted_breath: get_timed_event_world_breath_index(slot), next_control_breath: get_timed_event_world_breath_index(slot), breaths_per_step: 0, move_budget_walk: 0, move_debt_walk: 0, tap_buffered: 0, ms_until_next_eligible_move: 0, slot, entity_ref, place_id, dx, dy, kind: normalize_input_kind((data as any)?.kind, intent_reason, dx, dy), release: is_release }));
                     return;
                 }
                 if (is_release && movement_gate.active && !movement_gate.allowed) {
@@ -11865,10 +12186,11 @@ function start_http_server(log_path: string): void {
                     });
                 }
 
-                // Blended directional intent: allow diagonals so acceleration can split 50/50 across axes.
                 const want_dx = dx;
                 const want_dy = dy;
                 const want_intent = (want_dx === 0 && want_dy === 0) ? null : { dx: want_dx, dy: want_dy };
+                const input_kind = normalize_input_kind((data as any)?.kind, intent_reason, dx, dy);
+                const input_seq = Math.max(0, Math.floor(Number((data as any)?.input_seq ?? (data as any)?.seq ?? 0)) || 0);
 
                 const touched = touch_place_breath_by_id(slot, place_id, { realtime_visible: true });
                 if (!touched.ok) {
@@ -11888,6 +12210,9 @@ function start_http_server(log_path: string): void {
                     place_id,
                     mode,
                     intent: null,
+                    tap_intent: null,
+                    tap_buffered: 0,
+                    last_input_seq: 0,
                     goal: null,
                     path: null,
                     path_index: 0,
@@ -11896,14 +12221,45 @@ function start_http_server(log_path: string): void {
                     last_brain_breath: 0,
                     updated_at_ms: Date.now(),
                     move_seq: 0,
+                    blocked_hold: null,
                 };
-
-                const prev_intent_active = !!(ctl.intent && (ctl.intent.dx !== 0 || ctl.intent.dy !== 0));
 
                 ctl.place_id = place_id;
                 ctl.mode = mode;
-                ctl.intent = want_intent;
                 ctl.updated_at_ms = Date.now();
+                if (input_seq > 0 && input_seq <= ctl.last_input_seq) {
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, ignored: true, stale: true, slot, entity_ref, place_id, held_intent: ctl.intent, tap_intent: ctl.tap_intent, tap_buffered: ctl.tap_buffered, mode, reason: intent_reason, kind: input_kind, input_seq, dx, dy, accepted_breath: place_bi, next_control_breath: place_bi, breaths_per_step: 0, move_budget_walk: 0, move_debt_walk: 0, ms_until_next_eligible_move: 0, gate: 'stale_ignored' }));
+                    return;
+                }
+                if (input_seq > 0) ctl.last_input_seq = input_seq;
+
+                const released_same_direction = input_kind === 'release'
+                    && want_intent
+                    && ctl.intent
+                    && clamp_intent(ctl.intent.dx) === clamp_intent(want_intent.dx)
+                    && clamp_intent(ctl.intent.dy) === clamp_intent(want_intent.dy);
+                if (input_kind === 'release') {
+                    if (!want_intent || released_same_direction) {
+                        ctl.intent = null;
+                        clear_blocked_hold(ctl);
+                    }
+                } else {
+                    const direction_changed = !ctl.intent
+                        || !want_intent
+                        || clamp_intent(ctl.intent.dx) !== clamp_intent(want_intent.dx)
+                        || clamp_intent(ctl.intent.dy) !== clamp_intent(want_intent.dy);
+                    ctl.intent = want_intent;
+                    if (direction_changed) clear_blocked_hold(ctl);
+                    if (input_kind === 'press' && want_intent) {
+                        ctl.tap_intent = { dx: want_intent.dx, dy: want_intent.dy };
+                        ctl.tap_buffered = entity_type === 'actor' ? 1 : Math.min(4, Math.max(0, ctl.tap_buffered) + 1);
+                    } else if (input_kind === 'replace') {
+                        ctl.tap_intent = null;
+                        ctl.tap_buffered = 0;
+                        clear_blocked_hold(ctl);
+                    }
+                }
 
                 // Intent updates discard any click-to-move goal/path.
                 // (Held intent wins, and releasing does not resume old goals.)
@@ -11914,10 +12270,14 @@ function start_http_server(log_path: string): void {
 
                 // IMPORTANT: intent updates MUST NOT reset movement budget/debt state.
                 move_ctl.set(key, ctl);
+                let runtime_for_response: MovementPhysicsRuntimeState | null = null;
+                let any_entity_for_response: any = entity_any;
                 try {
                     const any_entity2 = get_entity_any_cached_or_load(slot, entity_ref);
+                    any_entity_for_response = any_entity2 ?? any_entity_for_response;
                     if (any_entity2 && intent_reason !== 'resend') {
                         const runtime = get_or_init_movement_physics_state(entity_ref, place_id, any_entity2, ctl, place_bi);
+                        runtime_for_response = runtime;
                         runtime.input_goal_queued_at_ms = Date.now();
                         persist_entity_movement_state(any_entity2, runtime, place_bi);
                         debug_log('MOVE_VEL_TEST', 'input queued timing anchor', {
@@ -11932,7 +12292,11 @@ function start_http_server(log_path: string): void {
                     // ignore
                 }
                 if (intent_reason === 'change') {
-                    maybe_run_immediate_visible_place_pulse(slot, place_id, 'intent');
+                    if (entity_type === 'actor') {
+                        run_entity_only_visible_place_pulse(slot, place_id, entity_ref, 'intent');
+                    } else {
+                        maybe_run_immediate_visible_place_pulse(slot, place_id, 'intent');
+                    }
                 }
 
                 debug_log('TIMED_EVENT_MOVE', 'movement intent accepted', {
@@ -11942,13 +12306,39 @@ function start_http_server(log_path: string): void {
                     dx,
                     dy,
                     mode,
+                    kind: input_kind,
+                    input_seq,
+                    held_intent: ctl.intent,
+                    tap_intent: ctl.tap_intent,
+                    tap_buffered: ctl.tap_buffered,
                     reason: intent_reason,
                     timed_event_phase: get_timed_event_phase(slot),
                     world_breath_index: get_timed_event_world_breath_index(slot),
                 });
+                const diagnostics_runtime = runtime_for_response;
+                const walk_breaths_per_step = diagnostics_runtime && any_entity_for_response ? get_walk_breaths_per_step(any_entity_for_response, mode) : 0;
+                const next_control_breath = diagnostics_runtime ? (Math.floor(Number(diagnostics_runtime.next_control_breath.walk ?? 0)) || 0) : place_bi;
+                const breaths_until_next = Math.max(0, next_control_breath - place_bi);
+                const ms_until_next_eligible_move = breaths_until_next * 33;
+                const gate_label = movement_gate.active ? (movement_gate.allowed ? 'ok' : String(movement_gate.reason ?? 'blocked')) : 'ok';
+                debug_log('MOVE_RESP_TRACE', 'movement input accepted', {
+                    slot,
+                    entity_ref,
+                    place_id,
+                    input_seq,
+                    kind: input_kind,
+                    accepted_breath: place_bi,
+                    next_control_breath,
+                    breaths_per_step: walk_breaths_per_step,
+                    move_budget_walk: diagnostics_runtime?.move_budget.walk ?? 0,
+                    move_debt_walk: diagnostics_runtime?.move_debt.walk ?? 0,
+                    tap_buffered: ctl.tap_buffered,
+                    gate: gate_label,
+                    ms_until_next_eligible_move,
+                });
 
                 res.writeHead(200, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: true, slot, entity_ref, place_id, intent: ctl.intent, mode, reason: intent_reason }));
+                res.end(JSON.stringify({ ok: true, slot, entity_ref, place_id, intent: ctl.intent, held_intent: ctl.intent, tap_intent: ctl.tap_intent, tap_buffered: ctl.tap_buffered, mode, reason: intent_reason, kind: input_kind, input_seq, dx, dy, accepted_breath: place_bi, next_control_breath, breaths_per_step: walk_breaths_per_step, move_budget_walk: diagnostics_runtime?.move_budget.walk ?? 0, move_debt_walk: diagnostics_runtime?.move_debt.walk ?? 0, ms_until_next_eligible_move, gate: gate_label }));
             });
 
             return;
@@ -12053,7 +12443,7 @@ function start_http_server(log_path: string): void {
 
                 const key = move_ctl_key(slot, entity_ref);
                 const existing = move_ctl.get(key);
-                const intent_active = !!(existing?.intent && ((existing.intent as any).dx !== 0 || (existing.intent as any).dy !== 0));
+                const intent_active = !!(existing && get_controller_active_intent(existing));
                 if (intent_active) {
                     // Held intent wins - discard click goal.
                     res.writeHead(409, { "Content-Type": "application/json" });
@@ -12089,6 +12479,9 @@ function start_http_server(log_path: string): void {
                     place_id,
                     mode,
                     intent: null,
+                    tap_intent: null,
+                    tap_buffered: 0,
+                    last_input_seq: 0,
                     goal: null,
                     path: null,
                     path_index: 0,
@@ -12097,6 +12490,7 @@ function start_http_server(log_path: string): void {
                     last_brain_breath: 0,
                     updated_at_ms: Date.now(),
                     move_seq: 0,
+                    blocked_hold: null,
                 };
 
                 const was_pathing = !!(ctl.path && ctl.path_index < ctl.path.length);
@@ -12104,6 +12498,8 @@ function start_http_server(log_path: string): void {
                 ctl.place_id = place_id;
                 ctl.mode = mode;
                 ctl.intent = null;
+                ctl.tap_intent = null;
+                ctl.tap_buffered = 0;
                 const requested_goal = (typeof z === 'number') ? { x, y, z } as any : { x, y };
                 ctl.goal = requested_goal;
                 ctl.path = null;
@@ -12989,6 +13385,50 @@ function start_http_server(log_path: string): void {
             return;
         }
 
+        if (url.pathname === "/api/actors/delete") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+
+            let body = "";
+            req.on("data", (chunk) => { body += chunk; });
+            req.on("end", () => {
+                try {
+                    const data = JSON.parse(body || "{}");
+                    const slot = Number.isFinite(Number(data?.slot)) ? Number(data.slot) : data_slot_number;
+                    require_request_client_session_id(slot, { session_token: data?.session_token });
+                    const actor_ref = String(data?.actor_ref ?? '').trim();
+                    const deleted = delete_actor_and_reconcile(slot, actor_ref);
+                    if (!deleted.ok) {
+                        const status = deleted.error === 'invalid_session_token'
+                            ? 401
+                            : deleted.error === 'invalid_controlled_actor_ref'
+                                ? 400
+                                : deleted.error === 'actor_not_found'
+                                    ? 404
+                                    : deleted.error === 'actor_delete_claimed' || deleted.error === 'actor_delete_forbidden'
+                                        ? 409
+                                        : 500;
+                        res.writeHead(status, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: deleted.error }));
+                        return;
+                    }
+                    emit_actor_claim_state_changed(actor_ref, 'delete');
+                    if (deleted.place_id) emit_place_presence_changed(deleted.place_id, actor_ref, 'delete');
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, actor_ref, actor_id: deleted.actor_id }));
+                } catch (err: any) {
+                    const error = err?.message ?? 'actor_delete_failed';
+                    const status = error === 'invalid_session_token' ? 401 : 500;
+                    res.writeHead(status, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error }));
+                }
+            });
+            return;
+        }
+
         if (url.pathname === "/api/actors/claim") {
             if (req.method !== "POST") {
                 res.writeHead(405, { "Content-Type": "application/json" });
@@ -13024,6 +13464,7 @@ function start_http_server(log_path: string): void {
                     }
                     const bound_ref = set_controlled_actor_ref_for_client_session(slot, client_session_id, actor_ref);
                     const place_id = String((actor_ready.actor as any)?.location?.place_id ?? '').trim();
+                    emit_actor_claim_state_changed(bound_ref, 'claim');
                     if (place_id) emit_place_presence_changed(place_id, bound_ref, 'claim');
                     res.writeHead(200, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({
@@ -13062,7 +13503,9 @@ function start_http_server(log_path: string): void {
                     const data = JSON.parse(body || "{}");
                     const slot = Number.isFinite(Number(data?.slot)) ? Number(data.slot) : data_slot_number;
                     const client_session_id = require_request_client_session_id(slot, { session_token: data?.session_token });
+                    const current_actor_ref = get_controlled_actor_ref_for_client_session(slot, client_session_id);
                     const released = release_controlled_actor_ref_for_client_session(slot, client_session_id);
+                    if (released && current_actor_ref) emit_actor_claim_state_changed(current_actor_ref, 'release');
                     res.writeHead(200, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: true, released }));
                 } catch (err: any) {
@@ -15423,16 +15866,6 @@ function start_http_server(log_path: string): void {
                     }
 
                     // Add to actor (slot or container-item)
-                    function parse_body_slots_path(p: string): { slot_name: string; slot_type: 'armor'|'tool'|'garb'; garb_index: number | null } | null {
-                        const parts = p.split('.');
-                        if (parts[0] !== 'body_slots') return null;
-                        if (!parts[1] || !parts[2]) return null;
-                        const slot_name = parts[1];
-                        const slot_type = parts[2] as any;
-                        const garb_index = (slot_type === 'garb' && parts[3] !== undefined) ? parseInt(parts[3], 10) : null;
-                        return { slot_name, slot_type, garb_index: isNaN(garb_index as any) ? null : garb_index };
-                    }
-
                     function get_item_at_path(path: string): any {
                         const parsed = parse_body_slots_path(path);
                         if (!parsed) return null;
@@ -15634,23 +16067,6 @@ function start_http_server(log_path: string): void {
                         if (!it || typeof it !== 'object') return false;
                         const p = resolve_inline_item_payload_for_api(it);
                         return build_physics_tag_flags(p.tags).container;
-                    }
-
-                    function parse_body_slots_path(p: string): { slot_name: string; slot_type: 'armor'|'tool'|'garb'; garb_index: number | null } | null {
-                        const parts = p.split('.');
-                        if (parts[0] !== 'body_slots') return null;
-                        if (!parts[1] || !parts[2]) return null;
-                        const slot_name = parts[1];
-                        const slot_type = parts[2] as any;
-                        const garb_index = (slot_type === 'garb' && parts[3] !== undefined) ? parseInt(parts[3], 10) : null;
-                        return { slot_name, slot_type, garb_index: isNaN(garb_index as any) ? null : garb_index };
-                    }
-
-                    function parse_actor_item_container_id(p: string): { actor_id: string; item_id: string } | null {
-                        const parts = p.split('.');
-                        if (parts[0] !== 'actor' || parts[1] !== 'item') return null;
-                        if (!parts[2] || !parts[3]) return null;
-                        return { actor_id: parts[2], item_id: parts[3] };
                     }
 
                     function get_item_at_path(path: string): any {

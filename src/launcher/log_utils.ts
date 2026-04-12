@@ -7,18 +7,9 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import { generateSessionId } from "../shared/session_ids.js";
 
-/**
- * Generate a unique session ID
- * Format: session_${timestamp}_${suffix}
- * - timestamp: Unix epoch milliseconds (13 digits)
- * - suffix: 8-character alphanumeric lowercase
- */
-export function generateSessionId(): string {
-  const timestamp = Date.now();
-  const suffix = Math.random().toString(36).substring(2, 10).toLowerCase();
-  return `session_${timestamp}_${suffix}`;
-}
+export { generateSessionId };
 
 /**
  * Format date as YYYY-MM-DD using local timezone

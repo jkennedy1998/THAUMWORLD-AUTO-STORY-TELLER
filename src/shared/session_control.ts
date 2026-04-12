@@ -1,8 +1,6 @@
-import * as fs from "node:fs";
-import { parse } from "jsonc-parser";
 import { getSessionMeta } from "./session.js";
-import { ensure_dir_exists } from "../engine/log_store.js";
-import { get_data_slot_dir, get_session_control_path } from "../engine/paths.js";
+import { get_session_control_path } from "../engine/paths.js";
+import { read_jsonc_file_or_default, write_json_file } from "./json_file.js";
 
 type SessionControlBinding = {
   controlled_actor_ref: string;
@@ -43,20 +41,14 @@ function make_empty_session_control_file(): SessionControlFile {
 }
 
 function load_session_control_file(slot: number): SessionControlFile {
-  const path = get_session_control_path(slot);
-  try {
-    if (!fs.existsSync(path)) return make_empty_session_control_file();
-    const parsed = parse(fs.readFileSync(path, "utf-8")) as any;
-    if (parsed?.schema_version !== 1 || typeof parsed?.bindings !== "object" || !parsed.bindings) {
-      return make_empty_session_control_file();
-    }
-    return {
-      schema_version: 1,
-      bindings: parsed.bindings as Record<string, SessionControlBinding>,
-    };
-  } catch {
+  const parsed = read_jsonc_file_or_default<any>(get_session_control_path(slot), make_empty_session_control_file);
+  if (parsed?.schema_version !== 1 || typeof parsed?.bindings !== "object" || !parsed.bindings) {
     return make_empty_session_control_file();
   }
+  return {
+    schema_version: 1,
+    bindings: parsed.bindings as Record<string, SessionControlBinding>,
+  };
 }
 
 function prune_inactive_guest_claims(file: SessionControlFile): boolean {
@@ -107,8 +99,7 @@ function now_iso_timestamp(): string {
 }
 
 function save_session_control_file(slot: number, file: SessionControlFile): void {
-  ensure_dir_exists(get_data_slot_dir(slot));
-  fs.writeFileSync(get_session_control_path(slot), JSON.stringify(file, null, 2), "utf-8");
+  write_json_file(get_session_control_path(slot), file);
 }
 
 function find_client_session_binding_by_actor_ref(file: SessionControlFile, actor_ref: string): ClientSessionBindingEntry | null {
@@ -227,6 +218,20 @@ export function release_controlled_actor_ref_for_client_session(slot: number, cl
   delete file.bindings[sid];
   save_session_control_file(slot, file);
   return true;
+}
+
+export function release_controlled_actor_claim_by_actor_ref(slot: number, actor_ref: string): boolean {
+  const ref = String(actor_ref ?? "").trim();
+  if (!ref) return false;
+  const file = load_active_session_control_file(slot);
+  let changed = false;
+  for (const [client_session_id, binding] of Object.entries(file.bindings)) {
+    if (String(binding?.controlled_actor_ref ?? "").trim() !== ref) continue;
+    delete file.bindings[client_session_id];
+    changed = true;
+  }
+  if (changed) save_session_control_file(slot, file);
+  return changed;
 }
 
 export function assign_controlled_actor_ref_for_client_session(slot: number, client_session_id: string, preferred_actor_ref?: string | null): string {

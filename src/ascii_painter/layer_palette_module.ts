@@ -639,6 +639,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
         renameState.editText.slice(renameState.cursorPosition);
       renameState.cursorPosition += text.length;
     },
+    wants_text_capture: () => renameState.isRenaming,
     on_wheel_content(e: { delta_x: number; delta_y: number; delta_mode: number }): void {
       const layers = getSortedLayers();
       const contentHeight = rect.y1 - rect.y0 - 4;

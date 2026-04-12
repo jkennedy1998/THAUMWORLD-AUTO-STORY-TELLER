@@ -329,6 +329,7 @@ function find_blocking_occupant_at(place: Place, x: number, y: number, z: number
   for (const actor of (place as any)?.contents?.actors_present ?? []) {
     const id = String((actor as any)?.actor_ref ?? "");
     if (!id) continue;
+    if (id === "actor.hands") continue;
     if (ex && ex.kind === "actor" && ex.id === id) continue;
     const tp = (actor as any)?.tile_position;
     if (!tp) continue;

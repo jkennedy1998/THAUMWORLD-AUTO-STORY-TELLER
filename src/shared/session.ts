@@ -1,29 +1,12 @@
 // Session management for THAUMWORLD Auto Story Teller
 // Prevents reprocessing of messages from previous boots
 
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-import { get_host_session_file_path } from './boot_env.js';
+import { read_host_session_file } from './host_session_store.js';
+import { generateSessionId } from './session_ids.js';
 
-interface SessionFile {
-  session_id: string;
-  boot_time: string;
-  boot_timestamp: number;
-  version: number;
-}
-
-function generateSessionId(): string {
-  return `session_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-}
-
-function readSessionFile(): SessionFile | null {
+function readSessionFile() {
   try {
-    const sessionFilePath = get_host_session_file_path();
-    if (!fs.existsSync(sessionFilePath)) {
-      return null;
-    }
-    const content = fs.readFileSync(sessionFilePath, 'utf-8');
-    return JSON.parse(content) as SessionFile;
+    return read_host_session_file();
   } catch (e) {
     console.error('[Session] Failed to read session file:', e);
     return null;
@@ -41,7 +24,7 @@ function initializeSessionId(): string {
   }
 
   // Fallback: generate new session ID (for backwards compatibility)
-  const newSessionId = generateSessionId();
+  const newSessionId = generateSessionId({ suffixLength: 7 });
   console.log(`[Session] Generated new session (no file found): ${newSessionId}`);
   return newSessionId;
 }

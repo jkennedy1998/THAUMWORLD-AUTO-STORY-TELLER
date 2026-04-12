@@ -422,9 +422,16 @@ const CAMERA_CONFIG_KEY = 'thaumworld_ascii_painter_camera_config';
  */
 export interface CameraConfigSaveData {
   focus_plane?: number;
+  principal_view?: 'top' | 'bottom' | 'north' | 'east' | 'south' | 'west';
+  roll_quarter_turn?: 0 | 1 | 2 | 3;
   calibration?: { x: number; y: number };
+  painter_calibration?: { x: number; y: number };
+  place_calibration?: { x: number; y: number };
   scale_per_layer?: number;
   movement_per_layer?: number;
+  mouse_angle_yaw_deg?: number;
+  mouse_angle_pitch_deg?: number;
+  mouse_angle_spring?: number;
   base_layer_scale?: number;
   char_spacing_x?: number;
   char_spacing_y?: number;
@@ -433,6 +440,8 @@ export interface CameraConfigSaveData {
   parallax_size_enabled?: boolean;
   euler_rotation?: { x: number; y: number; z: number };
   show_all_layers?: boolean;
+  use_focus_layer_opacity?: boolean;
+  center_target_in_view?: boolean;
   mode?: 'straight_ortho' | 'parallax_ortho' | 'rotated_ortho';
   orientation?: 'xy' | 'yz' | 'xz';
   pan_x?: number;
@@ -464,6 +473,30 @@ export function loadCameraConfig(): CameraConfigSaveData {
     console.warn('Load camera config failed:', e);
     return {};
   }
+}
+
+export function loadPainterCameraConfig(): CameraConfigSaveData {
+  const config = loadCameraConfig();
+  return {
+    ...config,
+    calibration: config.painter_calibration ?? config.calibration,
+  };
+}
+
+export function loadPlaceCameraConfig(): CameraConfigSaveData {
+  const config = loadCameraConfig();
+  return {
+    ...config,
+    calibration: config.place_calibration ?? config.calibration,
+  };
+}
+
+export function savePainterCameraCalibration(calibration: { x: number; y: number }): void {
+  saveCameraConfig({ painter_calibration: calibration });
+}
+
+export function savePlaceCameraCalibration(calibration: { x: number; y: number }): void {
+  saveCameraConfig({ place_calibration: calibration });
 }
 
 /**

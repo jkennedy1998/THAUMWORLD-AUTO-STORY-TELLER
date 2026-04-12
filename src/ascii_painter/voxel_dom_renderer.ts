@@ -34,6 +34,42 @@ export interface ViewportState {
   // The camera owns the view position in world space
 }
 
+export type VoxelDomRendererDebugState = {
+  viewport: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    tileW: number;
+    tileH: number;
+  };
+  viewport_ready: boolean;
+  selected_layer: {
+    z: number | null;
+    grid_w: number;
+    grid_h: number;
+    grid_px_w: number;
+    grid_px_h: number;
+    layer_left_px: number;
+    layer_top_px: number;
+    pan_x: number;
+    pan_y: number;
+    pan_offset_x_px: number;
+    pan_offset_y_px: number;
+    delta_left_px: number;
+    delta_top_px: number;
+    delta_pan_x: number;
+    delta_pan_y: number;
+  };
+  layer_events: Array<{
+    kind: 'create_canvas' | 'resize_canvas';
+    z: number;
+    width: number;
+    height: number;
+    selected: boolean;
+  }>;
+};
+
 export class VoxelDOMRenderer {
   private container: HTMLElement;
   private clipContainer: HTMLElement;
@@ -59,6 +95,30 @@ export class VoxelDOMRenderer {
   // Viewport tracking
   private viewport: ViewportState = { x: 0, y: 0, width: 0, height: 0 };
   private mouseParallax = { x: 0, y: 0 };
+  private smoothedViewAngles = { pitchDeg: 0, yawDeg: 0 };
+  private lastRenderTimestampMs = 0;
+  private debugState: VoxelDomRendererDebugState = {
+    viewport: { x: 0, y: 0, width: 0, height: 0, tileW: 0, tileH: 0 },
+    viewport_ready: false,
+    selected_layer: {
+      z: null,
+      grid_w: 0,
+      grid_h: 0,
+      grid_px_w: 0,
+      grid_px_h: 0,
+      layer_left_px: 0,
+      layer_top_px: 0,
+      pan_x: 0,
+      pan_y: 0,
+      pan_offset_x_px: 0,
+      pan_offset_y_px: 0,
+      delta_left_px: 0,
+      delta_top_px: 0,
+      delta_pan_x: 0,
+      delta_pan_y: 0,
+    },
+    layer_events: [],
+  };
 
   constructor(
     container: HTMLElement,
@@ -115,7 +175,20 @@ export class VoxelDOMRenderer {
    */
   setViewport(viewport: ViewportState): void {
     this.viewport = viewport;
+    this.debugState.viewport = {
+      x: Number(viewport.x) || 0,
+      y: Number(viewport.y) || 0,
+      width: Number(viewport.width) || 0,
+      height: Number(viewport.height) || 0,
+      tileW: Number(viewport.tileW) || 0,
+      tileH: Number(viewport.tileH) || 0,
+    };
+    this.debugState.viewport_ready = this.debugState.viewport.width > 0 && this.debugState.viewport.height > 0 && this.debugState.viewport.tileW > 0 && this.debugState.viewport.tileH > 0;
     this.updateClipContainer();
+  }
+
+  getDebugState(): VoxelDomRendererDebugState {
+    return JSON.parse(JSON.stringify(this.debugState)) as VoxelDomRendererDebugState;
   }
 
   /**
@@ -123,6 +196,25 @@ export class VoxelDOMRenderer {
    */
   setMouseParallax(x: number, y: number): void {
     this.mouseParallax = { x, y };
+  }
+
+  private updateSpringCenteredViewAngles(nowMs: number): void {
+    const camera = this.space?.camera;
+    if (!camera) return;
+    const last = this.lastRenderTimestampMs > 0 ? this.lastRenderTimestampMs : nowMs - 16;
+    const dt = Math.max(0.001, Math.min(0.05, (nowMs - last) / 1000));
+    this.lastRenderTimestampMs = nowMs;
+
+    const intensity = Math.max(0, Math.min(1.5, Number(camera.parallax_intensity ?? DEFAULT_CAMERA_VALUES.parallax_intensity) || 0));
+    const maxYawDeg = (camera.mouse_angle_yaw_deg ?? DEFAULT_CAMERA_VALUES.mouse_angle_yaw_deg) * intensity;
+    const maxPitchDeg = (camera.mouse_angle_pitch_deg ?? DEFAULT_CAMERA_VALUES.mouse_angle_pitch_deg) * intensity;
+    const targetYawDeg = (camera.parallax_move_enabled ? this.mouseParallax.x : 0) * maxYawDeg;
+    const targetPitchDeg = (camera.parallax_move_enabled ? -this.mouseParallax.y : 0) * maxPitchDeg;
+    const springStrength = Math.max(0.5, Math.min(60, Number(camera.mouse_angle_spring ?? DEFAULT_CAMERA_VALUES.mouse_angle_spring) || DEFAULT_CAMERA_VALUES.mouse_angle_spring));
+    const alpha = 1 - Math.exp(-springStrength * dt);
+
+    this.smoothedViewAngles.yawDeg += (targetYawDeg - this.smoothedViewAngles.yawDeg) * alpha;
+    this.smoothedViewAngles.pitchDeg += (targetPitchDeg - this.smoothedViewAngles.pitchDeg) * alpha;
   }
 
   /**
@@ -259,6 +351,8 @@ export class VoxelDOMRenderer {
       this.layerCanvases.set(z, canvas);
       this.layerContexts.set(z, ctx);
       this.clipContainer.appendChild(canvas);
+      this.debugState.layer_events.push({ kind: 'create_canvas', z, width: canvas.width, height: canvas.height, selected: false });
+      this.debugState.layer_events = this.debugState.layer_events.slice(-12);
     }
 
     // Update canvas size based on layer dimensions
@@ -281,6 +375,10 @@ export class VoxelDOMRenderer {
       const prevH = canvas.height;
       if (prevW !== nextW) canvas.width = nextW;
       if (prevH !== nextH) canvas.height = nextH;
+      if (prevW !== nextW || prevH !== nextH) {
+        this.debugState.layer_events.push({ kind: 'resize_canvas', z, width: nextW, height: nextH, selected: isSelected });
+        this.debugState.layer_events = this.debugState.layer_events.slice(-12);
+      }
 
       // If size changed, force raster refresh next render.
       if (prevW !== nextW || prevH !== nextH) {
@@ -300,33 +398,47 @@ export class VoxelDOMRenderer {
    * Selected layer is reference point (scale 1.0, at viewport center)
    * Other layers scale and parallax relative to selected layer
    */
-  private calculateTransform(layer: VoxelLayer, selectedZ: number): string {
+  private calculateTransform(layer: VoxelLayer, selectedZ: number): { transform: string; origin: string } {
     const camera = this.space?.camera;
-    if (!camera) return '';
+    if (!camera) return { transform: '', origin: 'center center' };
 
     const zDistance = layer.z - selectedZ;
     const isSelected = zDistance === 0;
 
-    // Orthographic mode: when parallax is disabled, ALL layers share the same transform
-    // so they align perfectly with the type grid (no perspective effects by layer order).
-    const perspectiveEnabled = !!camera.parallax_move_enabled;
+    // Place mode keeps follow-pan uniform across layers so the target tile remains grounded.
+    // Perspective is supplied separately via rotation / mouse-angle contributions.
+    const moveParallaxEnabled = !!camera.parallax_move_enabled;
+    const sizeParallaxEnabled = !!camera.parallax_size_enabled;
+    const panBehavior = String((camera as any).pan_behavior ?? 'depth_scaled');
+    const uniformPan = panBehavior === 'uniform';
 
     // Get cell size
     const { w: cellW, h: cellH } = this.getCellSize();
+    const gridW = layer.cells[0]?.length ?? 0;
+    const gridH = layer.cells.length;
+    const gridPxW = gridW * cellW;
+    const gridPxH = gridH * cellH;
+    const paddingFactor = isSelected ? 1.0 : 1.5;
+    const canvasW = Math.ceil(gridPxW * paddingFactor);
+    const canvasH = Math.ceil(gridPxH * paddingFactor);
+    const padX = Math.max(0, (canvasW - gridPxW) / 2);
+    const padY = Math.max(0, (canvasH - gridPxH) / 2);
 
-    // Calculate center of viewport
-    const viewportCenterX = this.viewport.width / 2;
-    const viewportCenterY = this.viewport.height / 2;
+    // Calculate pivot of viewport; Place can override this to pivot around camera focus.
+    const visualPivot = (camera as any).visual_pivot_px ?? { x: this.viewport.width / 2, y: this.viewport.height / 2 };
+    const viewportCenterX = Number.isFinite(Number(visualPivot.x)) ? Number(visualPivot.x) : this.viewport.width / 2;
+    const viewportCenterY = Number.isFinite(Number(visualPivot.y)) ? Number(visualPivot.y) : this.viewport.height / 2;
 
-    // Apply pan offset from camera (moves layers with parallax based on Z distance)
-    // The focused layer moves by full amount, other layers scale with distance
+    // Apply camera follow pan. In place mode this remains uniform across layers.
     const panX = camera.pan_x ?? DEFAULT_CAMERA_VALUES.pan_x;
     const panY = camera.pan_y ?? DEFAULT_CAMERA_VALUES.pan_y;
 
-    // Pan factor based on Z distance (perspective mode only)
+    // Painter mode can still depth-scale pan, but place mode should not.
     const basePanFactor = 1.0;
     const panFactorPerLayer = 0.1; // How much pan scales per Z layer
-    const panFactor = perspectiveEnabled
+    const panFactor = uniformPan
+      ? 1.0
+      : moveParallaxEnabled
       ? (isSelected ? basePanFactor : basePanFactor + (zDistance * panFactorPerLayer))
       : 1.0;
 
@@ -340,27 +452,36 @@ export class VoxelDOMRenderer {
     const panOffsetX = -clampedPanX * cellW * panFactor;
     const panOffsetY = clampedPanY * cellH * panFactor;
 
-    // Mouse parallax (non-selected layers only, perspective mode)
+    const baseEuler = camera.euler_rotation ?? { x: 0, y: 0, z: 0 };
+    const transitionEuler = (camera as any).transition_euler ?? { x: 0, y: 0, z: 0 };
+    const totalPitchDeg = baseEuler.x + transitionEuler.x + this.smoothedViewAngles.pitchDeg;
+    const totalYawDeg = baseEuler.y + transitionEuler.y + this.smoothedViewAngles.yawDeg;
+    const totalRollDeg = baseEuler.z + transitionEuler.z;
+
+    // Camera-angle offset derived from the spring-centered mouse pose.
     let parallaxX = 0;
     let parallaxY = 0;
-    if (perspectiveEnabled && !isSelected) {
+    if (moveParallaxEnabled && !isSelected) {
       const movePerLayer = camera.movement_per_layer ?? DEFAULT_CAMERA_VALUES.movement_per_layer;
-      const intensity = camera.parallax_intensity * movePerLayer;
-      parallaxX = -this.mouseParallax.x * zDistance * intensity;
-      parallaxY = this.mouseParallax.y * zDistance * intensity;
+      const depthPx = zDistance * movePerLayer;
+      const yawRad = totalYawDeg * (Math.PI / 180);
+      const pitchRad = totalPitchDeg * (Math.PI / 180);
+      parallaxX = Math.tan(yawRad) * depthPx;
+      parallaxY = -Math.tan(pitchRad) * depthPx;
     }
 
     // Size scale
+    // In place mode, the selected/reference layer must stay at true 1:1 scale so
+    // the hard camera and DOM layer agree on tile pitch. Otherwise calibration only
+    // aligns locally and drifts as the target moves away from the module center.
     const baseLayerScale = camera.base_layer_scale ?? DEFAULT_CAMERA_VALUES.base_layer_scale;
-    let scale = baseLayerScale;
-    if (perspectiveEnabled && camera.parallax_size_enabled && !isSelected) {
+    let scale = uniformPan ? 1.0 : baseLayerScale;
+    if (sizeParallaxEnabled && !isSelected) {
       const scalePerLayer = camera.scale_per_layer ?? 0.12;
       const relativeScale = 1 + (zDistance * scalePerLayer);
-      scale = baseLayerScale * Math.max(0.75, Math.min(1.35, relativeScale));
+      const scaleBase = uniformPan ? 1.0 : baseLayerScale;
+      scale = scaleBase * Math.max(0.75, Math.min(1.35, relativeScale));
     }
-
-    // Euler rotation (pivot around viewport center)
-    const euler = camera.euler_rotation ?? { x: 0, y: 0, z: 0 };
 
     // Get calibration from camera config
     const calibration = camera.calibration ?? { x: 0, y: 0 };
@@ -370,14 +491,56 @@ export class VoxelDOMRenderer {
     const layerX = viewportCenterX + panOffsetX + parallaxX + calibration.x;
     const layerY = viewportCenterY + panOffsetY + parallaxY + calibration.y;
 
-    return `
-      translate3d(${layerX}px, ${layerY}px, 0)
-      translate3d(-50%, -50%, 0)
-      scale(${scale})
-      rotateX(${euler.x}deg)
-      rotateY(${euler.y}deg)
-      rotateZ(${euler.z}deg)
-    `;
+    if (uniformPan) {
+      const layerLeft = -padX + panOffsetX + parallaxX + calibration.x;
+      // Place mode already flips Y when rasterizing cells into the layer canvas.
+      // Keep DOM placement in the same top-left viewport basis as hard camera math.
+      const layerTop = -padY + panOffsetY + parallaxY + calibration.y;
+      const originX = Number.isFinite(viewportCenterX) ? viewportCenterX - layerLeft : canvasW / 2;
+      const originY = Number.isFinite(viewportCenterY) ? viewportCenterY - layerTop : canvasH / 2;
+      if (isSelected) {
+        const prev = this.debugState.selected_layer;
+        this.debugState.selected_layer = {
+          z: layer.z,
+          grid_w: gridW,
+          grid_h: gridH,
+          grid_px_w: gridPxW,
+          grid_px_h: gridPxH,
+          layer_left_px: layerLeft,
+          layer_top_px: layerTop,
+          pan_x: clampedPanX,
+          pan_y: clampedPanY,
+          pan_offset_x_px: panOffsetX,
+          pan_offset_y_px: panOffsetY,
+          delta_left_px: layerLeft - prev.layer_left_px,
+          delta_top_px: layerTop - prev.layer_top_px,
+          delta_pan_x: clampedPanX - prev.pan_x,
+          delta_pan_y: clampedPanY - prev.pan_y,
+        };
+      }
+      return {
+        transform: `
+          translate3d(${layerLeft}px, ${layerTop}px, 0)
+          scale(${scale})
+          rotateX(${totalPitchDeg}deg)
+          rotateY(${totalYawDeg}deg)
+          rotateZ(${totalRollDeg}deg)
+        `,
+        origin: `${originX}px ${originY}px`,
+      };
+    }
+
+    return {
+      transform: `
+        translate3d(${layerX}px, ${layerY}px, 0)
+        translate3d(-50%, -50%, 0)
+        scale(${scale})
+        rotateX(${totalPitchDeg}deg)
+        rotateY(${totalYawDeg}deg)
+        rotateZ(${totalRollDeg}deg)
+      `,
+      origin: 'center center',
+    };
   }
 
   /**
@@ -446,6 +609,7 @@ export class VoxelDOMRenderer {
    */
   render(): void {
     if (!this.space) return;
+    this.updateSpringCenteredViewAngles(performance.now());
 
     // Layers can be added/removed at runtime (e.g. via the layer palette).
     // Keep the backing canvas set in sync so newly-created layers render immediately.
@@ -480,7 +644,9 @@ export class VoxelDOMRenderer {
       }
 
       // Apply transform
-      canvas.style.transform = this.calculateTransform(layer, selectedZ);
+      const placement = this.calculateTransform(layer, selectedZ);
+      canvas.style.transform = placement.transform;
+      canvas.style.transformOrigin = placement.origin;
       canvas.style.opacity = (layer.opacity ?? 1).toString();
       canvas.style.display = 'block';
     }

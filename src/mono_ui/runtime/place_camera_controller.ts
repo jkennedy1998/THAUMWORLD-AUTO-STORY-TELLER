@@ -1,5 +1,5 @@
 import type { Place } from "../../types/place.js";
-import { loadCameraConfig } from "../../ascii_painter/save_system.js";
+import { loadPlaceCameraConfig } from "../../ascii_painter/save_system.js";
 
 export type PlaceViewState = {
   offset_x: number;
@@ -20,21 +20,23 @@ function clamp(n: number, lo: number, hi: number): number {
 
 export type SharedCameraTuning = {
   calibration?: { x: number; y: number };
-  char_spacing_x?: number;
-  char_spacing_y?: number;
   parallax_intensity?: number;
   parallax_move_enabled?: boolean;
   parallax_size_enabled?: boolean;
   scale_per_layer?: number;
   movement_per_layer?: number;
-  base_layer_scale?: number;
+  mouse_angle_yaw_deg?: number;
+  mouse_angle_pitch_deg?: number;
+  mouse_angle_spring?: number;
+  transition_euler?: { x: number; y: number; z: number };
+  visual_pivot_px?: { x: number; y: number };
 };
 
 export type PlaceCameraController = {
   view: PlaceViewState;
 
-  ensure_loaded_for_place: (place: Place, inner_w: number, inner_h: number) => boolean;
-  schedule_save: (place: Place) => void;
+  ensure_loaded_for_place: (place: Place, inner_w: number, inner_h: number, allow_persisted_view?: boolean) => boolean;
+  schedule_save: (place: Place, allow_persisted_view?: boolean) => void;
 
   get_bounds: (place: Place, inner_w: number, inner_h: number) => PlaceViewBounds;
   center_on_tile: (place: Place, inner_w: number, inner_h: number, tile_x: number, tile_y: number) => void;
@@ -61,6 +63,7 @@ export function create_place_camera_controller(opts?: {
 
   let loaded_for_place_id: string | null = null;
   let loaded_for_current_place = false;
+  let loaded_with_persisted_view = true;
   let save_timer: number | null = null;
 
   function get_bounds(place: Place, inner_w: number, inner_h: number): PlaceViewBounds {
@@ -102,10 +105,11 @@ export function create_place_camera_controller(opts?: {
     }
   }
 
-  function ensure_loaded_for_place(place: Place, inner_w: number, inner_h: number): boolean {
-    if (loaded_for_place_id !== place.id) {
+  function ensure_loaded_for_place(place: Place, inner_w: number, inner_h: number, allow_persisted_view: boolean = true): boolean {
+    if (loaded_for_place_id !== place.id || loaded_with_persisted_view !== allow_persisted_view) {
       loaded_for_place_id = place.id;
-      loaded_for_current_place = load_for_place(place, inner_w, inner_h);
+      loaded_with_persisted_view = allow_persisted_view;
+      loaded_for_current_place = allow_persisted_view ? load_for_place(place, inner_w, inner_h) : false;
       if (!loaded_for_current_place) {
         view.offset_x = 0;
         view.offset_y = 0;
@@ -115,9 +119,13 @@ export function create_place_camera_controller(opts?: {
     return loaded_for_current_place;
   }
 
-  function schedule_save(place: Place): void {
+  function schedule_save(place: Place, allow_persisted_view: boolean = true): void {
     try {
       if (save_timer !== null) window.clearTimeout(save_timer);
+      if (!allow_persisted_view) {
+        save_timer = null;
+        return;
+      }
       const key = `${key_prefix}${place.id}`;
       const payload = {
         offset_x: Math.floor(view.offset_x),
@@ -143,25 +151,24 @@ export function create_place_camera_controller(opts?: {
     const tiles_visible_y = h * view.scale;
     const b = get_bounds(place, inner_w, inner_h);
 
-    const MARGIN = 2;
-    const target_offset_x = Math.floor(tile_x - tiles_visible_x / 2 + MARGIN);
-    const target_offset_y = Math.floor(tile_y - tiles_visible_y / 2 + MARGIN);
+    const target_offset_x = Math.floor(tile_x - tiles_visible_x / 2);
+    const target_offset_y = Math.floor(tile_y - tiles_visible_y / 2);
     view.offset_x = clamp(target_offset_x, b.min_x, b.max_x);
     view.offset_y = clamp(target_offset_y, b.min_y, b.max_y);
   }
 
   function get_shared_dom_tuning(): SharedCameraTuning {
-    const cam = loadCameraConfig();
+    const cam = loadPlaceCameraConfig();
     return {
       calibration: cam.calibration,
-      char_spacing_x: cam.char_spacing_x,
-      char_spacing_y: cam.char_spacing_y,
-      parallax_intensity: cam.parallax_intensity,
-      parallax_move_enabled: cam.parallax_move_enabled,
-      parallax_size_enabled: cam.parallax_size_enabled,
+      parallax_intensity: typeof cam.parallax_intensity === 'number' ? Math.max(0, Math.min(1, cam.parallax_intensity)) : undefined,
+      parallax_move_enabled: typeof cam.parallax_move_enabled === 'boolean' ? cam.parallax_move_enabled : true,
+      parallax_size_enabled: typeof cam.parallax_size_enabled === 'boolean' ? cam.parallax_size_enabled : false,
       scale_per_layer: cam.scale_per_layer,
-      movement_per_layer: cam.movement_per_layer,
-      base_layer_scale: cam.base_layer_scale,
+      movement_per_layer: typeof cam.movement_per_layer === 'number' ? Math.max(-120, Math.min(120, cam.movement_per_layer)) : undefined,
+      mouse_angle_yaw_deg: typeof cam.mouse_angle_yaw_deg === 'number' ? Math.max(-45, Math.min(45, cam.mouse_angle_yaw_deg)) : undefined,
+      mouse_angle_pitch_deg: typeof cam.mouse_angle_pitch_deg === 'number' ? Math.max(-45, Math.min(45, cam.mouse_angle_pitch_deg)) : undefined,
+      mouse_angle_spring: typeof cam.mouse_angle_spring === 'number' ? Math.max(1, Math.min(20, cam.mouse_angle_spring)) : undefined,
     };
   }
 

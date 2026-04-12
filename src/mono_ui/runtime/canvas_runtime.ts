@@ -267,6 +267,10 @@ export class CanvasRuntime {
         this.key_sink.focus({ preventScroll: true });
     }
 
+    private focused_owner_wants_text_capture(): boolean {
+        return this.focused_owner?.WantsTextCapture?.() === true;
+    }
+
     private update_focused_owner(next_owner: Module | null): void {
         if (next_owner === this.focused_owner) return;
         this.focused_owner?.OnBlur?.();
@@ -533,7 +537,7 @@ export class CanvasRuntime {
     private dispatch_global_keydown(ev: KeyboardEvent): boolean {
         // Global UI scale (1% steps).
         // Avoid eating '-' / '+' while typing in the input, but allow Ctrl-based override.
-        const typing = this.focused_owner?.id === 'input';
+        const typing = this.focused_owner_wants_text_capture();
         const allow_while_typing = ev.ctrlKey;
 
         if (!typing || allow_while_typing) {
@@ -847,7 +851,7 @@ export class CanvasRuntime {
 
             let top = this.route_to_top_module(t.x, t.y) ?? null;
 
-            const typing = this.focused_owner?.id === 'input';
+            const typing = this.focused_owner_wants_text_capture();
             const is_canvas_module = top?.id === 'painter_canvas' || top?.id?.startsWith('canvas');
             const is_painter_mode2 = (window as any).electronAPI?.appMode === 'ascii_painter';
 
@@ -1181,7 +1185,7 @@ export class CanvasRuntime {
             // - Hold Space + drag anywhere (except while actively typing in input or on canvas module)
             // - Or drag on background/free space
             // NOTE: In painter mode, we use camera-based panning via the canvas module instead
-            const typing = this.focused_owner?.id === 'input';
+            const typing = this.focused_owner_wants_text_capture();
             const is_canvas_module = top?.id === 'painter_canvas' || top?.id?.startsWith('canvas');
             const is_painter_mode = (window as any).electronAPI?.appMode === 'ascii_painter';
             
@@ -1357,7 +1361,7 @@ export class CanvasRuntime {
 
         this.key_sink.addEventListener('keydown', (ev) => {
             unlock_sfx();
-            const typing = this.focused_owner?.id === 'input';
+            const typing = this.focused_owner_wants_text_capture();
 
             // Update authoritative action state (so movement can poll it)
             handle_keydown(ev, { typing });
@@ -1392,7 +1396,7 @@ export class CanvasRuntime {
 
         this.key_sink.addEventListener('keyup', (ev) => {
             // Update authoritative action state (clears action on keyup)
-            handle_keyup(ev, { typing: this.focused_owner?.id === 'input' });
+            handle_keyup(ev, { typing: this.focused_owner_wants_text_capture() });
 
             if (ev.code === 'Space') {
                 this.space_down = false;
@@ -1422,29 +1426,6 @@ export class CanvasRuntime {
             }
         });
 
-        // Reset action states on blur/visibility change to prevent stuck keys
-        window.addEventListener('blur', () => {
-            if (DEBUG_LEVEL >= 3) {
-                try {
-                    debug_log('MOVE_UNIFY_TEST', 'window blur -> input reset_all');
-                } catch {
-                    // ignore
-                }
-            }
-            reset_all();
-        });
-        document.addEventListener('visibilitychange', () => {
-            if (document.hidden) {
-                if (DEBUG_LEVEL >= 3) {
-                    try {
-                        debug_log('MOVE_UNIFY_TEST', 'document hidden -> input reset_all');
-                    } catch {
-                        // ignore
-                    }
-                }
-                reset_all();
-            }
-        });
     }
 
     private tick(): void {

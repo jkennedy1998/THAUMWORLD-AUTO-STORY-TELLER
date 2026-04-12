@@ -339,6 +339,13 @@ export class EventBridge {
       }
 
       const released_claim = release_controlled_actor_ref_for_client_session(slot, client_session_id);
+      if (released_claim) {
+        await emitBridgeMessage('ACTOR_CLAIM_STATE_CHANGED', {
+          actor_ref,
+          reason: reason === 'error' ? 'disconnect_error' : 'disconnect',
+          sent_at_ms: Date.now(),
+        });
+      }
       if (released_claim && place_id) {
         await emitBridgeMessage('PLACE_PRESENCE_CHANGED', {
           place_id,

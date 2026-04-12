@@ -1,9 +1,7 @@
-import * as fs from "node:fs";
 import { randomBytes } from "node:crypto";
-import { parse } from "jsonc-parser";
-import { ensure_dir_exists } from "../engine/log_store.js";
 import { get_data_slot_dir } from "../engine/paths.js";
 import { getSessionMeta } from "./session.js";
+import { read_jsonc_file_or_default, write_json_file } from "./json_file.js";
 
 type MultiplayerSessionRecord = {
   client_session_id: string;
@@ -43,22 +41,16 @@ function make_empty_file(): MultiplayerSessionFile {
 }
 
 function load_file(slot: number): MultiplayerSessionFile {
-  const path = get_multiplayer_session_path(slot);
-  try {
-    if (!fs.existsSync(path)) return make_empty_file();
-    const parsed = parse(fs.readFileSync(path, "utf-8")) as any;
-    if (parsed?.schema_version !== 1 || typeof parsed?.sessions !== "object" || !parsed.sessions) {
-      return make_empty_file();
-    }
-    return { schema_version: 1, sessions: parsed.sessions as Record<string, MultiplayerSessionRecord> };
-  } catch {
+  const filePath = get_multiplayer_session_path(slot);
+  const parsed = read_jsonc_file_or_default<any>(filePath, make_empty_file);
+  if (parsed?.schema_version !== 1 || typeof parsed?.sessions !== "object" || !parsed.sessions) {
     return make_empty_file();
   }
+  return { schema_version: 1, sessions: parsed.sessions as Record<string, MultiplayerSessionRecord> };
 }
 
 function save_file(slot: number, file: MultiplayerSessionFile): void {
-  ensure_dir_exists(get_data_slot_dir(slot));
-  fs.writeFileSync(get_multiplayer_session_path(slot), JSON.stringify(file, null, 2), "utf-8");
+  write_json_file(get_multiplayer_session_path(slot), file);
 }
 
 function prune_inactive_boot_sessions(file: MultiplayerSessionFile): boolean {

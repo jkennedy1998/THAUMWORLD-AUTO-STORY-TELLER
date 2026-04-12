@@ -12,8 +12,8 @@ import { createGrid, exportGrid, importGrid } from '../ascii_painter/types.js';
 import { createHistoryManager, logLayerAction, pushSnapshot, canUndo, canRedo, getHistoryState } from '../ascii_painter/history.js';
 import { get_color_by_name } from '../mono_ui/colors.js';
 import type { SelectionMode } from '../ascii_painter/selection.js';
-import { clearSelection, selectAll, invertSelection } from '../ascii_painter/selection.js';
-import { make_painter_canvas_module } from '../mono_ui/modules/painter_canvas_module.js';
+import { clearSelection, createSelectionBitmap, invertSelection, isSelected, selectAll, setSelected, type SelectionBitmap } from '../ascii_painter/selection.js';
+import { make_painter_canvas_module, type PainterInteractionAnchor } from '../mono_ui/modules/painter_canvas_module.js';
 import { make_painter_toolbar_module } from '../mono_ui/modules/painter_toolbar_module.js';
 import { make_file_menu_module } from '../mono_ui/modules/painter_file_menu_module.js';
 import { make_character_selector_module } from '../mono_ui/modules/character_selector_module.js';
@@ -53,7 +53,8 @@ import {
   saveToolProperties,
   loadToolProperties,
   saveCameraConfig,
-  loadCameraConfig,
+  loadPainterCameraConfig as loadCameraConfig,
+  savePainterCameraCalibration,
   clearCameraConfig,
   type ToolProperties,
 } from '../ascii_painter/save_system.js';
@@ -66,6 +67,7 @@ import {
   addLayer, 
   removeLayer, 
   duplicateLayer,
+  getVoxel,
   getVisibleLayers,
   voxelSpaceToGrid,
   gridToVoxelSpace,
@@ -74,9 +76,16 @@ import {
 } from '../ascii_painter/voxel_space.js';
 import { makeLayerRendererModule } from '../ascii_painter/layer_renderer_module.js';
 import { makeLayerPaletteModule } from '../ascii_painter/layer_palette_module.js';
-import { makeCameraControlModule } from '../ascii_painter/camera_control_module.js';
+import { makePlaceCameraControlModule } from '../mono_ui/modules/place_camera_control_module.js';
 import { VoxelDOMRenderer, createVoxelDOMRenderer } from '../ascii_painter/voxel_dom_renderer.js';
+import { commit_grid_to_painter_world, get_painter_focus_slot_for_anchor, get_painter_projection_focus_content_bounds, get_painter_world_content_bounds_center, painter_projection_grid_point_to_world, painter_projection_world_to_grid_point, project_painter_display_space, sync_grid_to_painter_projection, type PainterDisplayProjection } from '../ascii_painter/painter_view_projection_adapter.js';
 import { touch_world_layers_owner } from '../mono_ui/world_layers_owner.js';
+import { get_transition_tilt_for_command, make_place_view_state, type PlaceViewState } from '../mono_ui/runtime/place_view_projection.js';
+import { start_roll_transition, start_swing_transition, type PlaceCameraTransition } from '../mono_ui/runtime/place_camera_pose.js';
+import { clamp_anchor_to_viewport_px, compute_anchor_relative_mouse_parallax } from '../mono_ui/runtime/camera_anchor_runtime.js';
+import { resolve_place_view_transition_frame } from '../mono_ui/runtime/place_view_camera_runtime.js';
+import { apply_world_selection_mode, clear_world_selection, create_world_copy_data_from_selection, create_world_selection, decode_world_copy_data, encode_world_copy_data, get_world_selection_bounds, has_world_selection, set_world_selected, type WorldCopyData, type WorldSelection } from '../ascii_painter/world_selection.js';
+import { project_world_point_with_roll, unproject_plane_point_with_roll } from '../mono_ui/runtime/place_view_projection.js';
 import {
   THAUMWORLD_RENDER_THEME,
   get_theme_base_font_size_px,
@@ -158,18 +167,38 @@ export type PainterAppState = {
   current_filename: string;
 };
 
+type PainterDomViewport = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  tileW?: number;
+  tileH?: number;
+  fontSizePx?: number;
+  offsetX?: number;
+  offsetY?: number;
+};
+
 export function create_painter_app_state(): PainterAppState {
   // Create the drawing grid (legacy 2D)
   const grid = createGrid(CANVAS_WIDTH, CANVAS_HEIGHT);
   
   // Create VoxelSpace (new 3D system) - wraps the grid
   let voxelSpace = createVoxelSpace(CANVAS_WIDTH, CANVAS_HEIGHT, { defaultZ: 0 });
+
+  function mergeSavedPainterCameraConfig(config: ReturnType<typeof loadCameraConfig> | null | undefined): void {
+    if (!config || Object.keys(config).length < 1) return;
+    voxelSpace.camera = { ...voxelSpace.camera, ...config };
+    if (typeof config.use_focus_layer_opacity !== 'boolean' && typeof config.show_all_layers === 'boolean') {
+      voxelSpace.camera.use_focus_layer_opacity = !config.show_all_layers;
+    }
+  }
   
   // Load saved camera configuration
   const savedCameraConfig = loadCameraConfig();
-  if (savedCameraConfig && Object.keys(savedCameraConfig).length > 0) {
-    voxelSpace.camera = { ...voxelSpace.camera, ...savedCameraConfig };
-  }
+  mergeSavedPainterCameraConfig(savedCameraConfig);
+  voxelSpace.camera.mode = 'rotated_ortho';
+  syncPainterCameraViewTransform();
 
   // Flag to prevent saving during initialization
   let isAppInitialized = false;
@@ -181,6 +210,506 @@ export function create_painter_app_state(): PainterAppState {
   // Create DOM-based voxel renderer for true off-grid rendering
   let domRenderer: VoxelDOMRenderer | null = null;
   let domRoot: HTMLElement | null = null;
+  let painter_view_transition: PlaceCameraTransition | null = null;
+  let last_pointer_x = Number.NaN;
+  let last_pointer_y = Number.NaN;
+  let dom_viewport: PainterDomViewport | null = null;
+  let painter_camera_target_world = { x: Math.floor(voxelSpace.bounds.width / 2), y: Math.floor(voxelSpace.bounds.height / 2), z: voxelSpace.camera.focus_plane };
+  let painter_display_projection!: PainterDisplayProjection;
+
+  // Calculate layout - positions are in grid coordinates
+  // Total grid is 200x50, we center the canvas with padding
+  let GRID_WIDTH: number = PAINTER_CONFIG.grid_width;
+  let GRID_HEIGHT: number = PAINTER_CONFIG.grid_height;
+
+  function get_default_canvas_rect(): Rect {
+    return {
+      x0: 20,
+      y0: 4,
+      x1: 99,
+      y1: 43,
+    };
+  }
+
+  const file_menu_rect: Rect = {
+    x0: 0,
+    y0: 0,
+    x1: GRID_WIDTH - 1,
+    y1: 2
+  };
+
+  const toolbar_rect: Rect = {
+    x0: 0,
+    y0: GRID_HEIGHT - 3,
+    x1: GRID_WIDTH - 1,
+    y1: GRID_HEIGHT - 1
+  };
+
+  let canvas_rect: Rect = get_default_canvas_rect();
+
+  function getPainterViewState(): PlaceViewState {
+    return make_place_view_state(voxelSpace.camera.principal_view, voxelSpace.camera.roll_quarter_turn);
+  }
+
+  function getPainterInteractionAnchor(): PainterInteractionAnchor {
+    const canvasWithAnchor = canvas_module as typeof canvas_module & { getInteractionAnchor?: () => PainterInteractionAnchor };
+    return canvasWithAnchor.getInteractionAnchor?.() ?? { kind: 'viewport_center', screen: null, world: null };
+  }
+
+  function getPainterViewportTiles(): { width: number; height: number } {
+    if (!canvas_rect) {
+      return { width: CANVAS_WIDTH, height: CANVAS_HEIGHT };
+    }
+    return {
+      width: Math.max(1, canvas_rect.x1 - canvas_rect.x0 + 1),
+      height: Math.max(1, canvas_rect.y1 - canvas_rect.y0 + 1),
+    };
+  }
+
+  function getPainterFallbackTargetWorld(): { x: number; y: number; z: number } {
+    const visibleZs = Array.from(voxelSpace.layers.keys()).sort((a, b) => a - b);
+    const fallbackZ = typeof voxelSpace.camera.focus_plane === 'number'
+      ? voxelSpace.camera.focus_plane
+      : (visibleZs[0] ?? 0);
+    return {
+      x: Math.max(0, Math.min(voxelSpace.bounds.width - 1, painter_camera_target_world.x)),
+      y: Math.max(0, Math.min(voxelSpace.bounds.height - 1, painter_camera_target_world.y)),
+      z: Math.max(voxelSpace.bounds.minZ, Math.min(voxelSpace.bounds.maxZ, Number.isFinite(painter_camera_target_world.z) ? painter_camera_target_world.z : fallbackZ)),
+    };
+  }
+
+  function getPainterProjectionAnchorWorld(): { x: number; y: number; z: number } {
+    return get_painter_world_content_bounds_center(voxelSpace);
+  }
+
+  function setPainterCameraTargetWorld(world: { x: number; y: number; z: number } | null | undefined): void {
+    if (!world) return;
+    painter_camera_target_world = {
+      x: Math.max(0, Math.min(voxelSpace.bounds.width - 1, Math.floor(world.x))),
+      y: Math.max(0, Math.min(voxelSpace.bounds.height - 1, Math.floor(world.y))),
+      z: Math.max(voxelSpace.bounds.minZ, Math.min(voxelSpace.bounds.maxZ, Math.floor(world.z))),
+    };
+  }
+
+  function getPainterAnchorScreenPoint(anchor: PainterInteractionAnchor): { x: number; y: number } {
+    if (anchor.world) {
+      const gridPoint = painterWorldToGridPoint(anchor.world);
+      if (gridPoint) {
+        return {
+          x: canvas_rect.x0 + gridPoint.x + 0.5,
+          y: canvas_rect.y0 + gridPoint.y + 0.5,
+        };
+      }
+    }
+    return {
+      x: (canvas_rect.x0 + canvas_rect.x1) / 2,
+      y: (canvas_rect.y0 + canvas_rect.y1) / 2,
+    };
+  }
+
+  function getPainterAnchorPivotPx(anchor: PainterInteractionAnchor): { x: number; y: number } | null {
+    if (!dom_viewport) return null;
+    const screen = getPainterAnchorScreenPoint(anchor);
+    const tileW = Number.isFinite(dom_viewport.tileW) ? dom_viewport.tileW as number : 0;
+    const tileH = Number.isFinite(dom_viewport.tileH) ? dom_viewport.tileH as number : 0;
+    if (!(tileW > 0) || !(tileH > 0)) return null;
+    return clamp_anchor_to_viewport_px({
+      x: (screen.x - canvas_rect.x0) * tileW,
+      y: (screen.y - canvas_rect.y0) * tileH,
+    }, {
+      width: dom_viewport.width,
+      height: dom_viewport.height,
+    });
+  }
+
+  function getPainterAnchorParallax(anchor: PainterInteractionAnchor, transitionActive: boolean): { x: number; y: number } {
+    if (transitionActive) return { x: 0, y: 0 };
+    const screen = getPainterAnchorScreenPoint(anchor);
+    const pointer_x = Number.isFinite(last_pointer_x) ? last_pointer_x : screen.x;
+    const pointer_y = Number.isFinite(last_pointer_y) ? last_pointer_y : screen.y;
+    return compute_anchor_relative_mouse_parallax({
+      viewport: canvas_rect,
+      anchor_screen_x: screen.x,
+      anchor_screen_y: screen.y,
+      pointer_x,
+      pointer_y,
+    });
+  }
+
+  function syncPainterCameraViewTransform(state: PlaceViewState = getPainterViewState()): void {
+    void state;
+    voxelSpace.camera.mode = 'rotated_ortho';
+    voxelSpace.camera.pan_x = 0;
+    voxelSpace.camera.pan_y = 0;
+    voxelSpace.camera.euler_rotation = { x: 0, y: 0, z: 0 };
+  }
+
+  function getCurrentPainterFocusSlot(): number {
+    return painter_display_projection?.focus_slot ?? 0;
+  }
+
+  function shouldCenterPainterTarget(anchor: PainterInteractionAnchor): boolean {
+    if (!(voxelSpace.camera.center_target_in_view ?? false)) return false;
+    switch (anchor.kind) {
+      case 'text_cursor':
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  function rebuildPainterDisplayProjection(viewState: PlaceViewState, anchor: PainterInteractionAnchor): PainterDisplayProjection {
+    setPainterCameraTargetWorld(anchor.world ?? null);
+    const targetWorld = getPainterFallbackTargetWorld();
+    const projectionAnchorWorld = getPainterProjectionAnchorWorld();
+    const viewport = getPainterViewportTiles();
+    const projected = project_painter_display_space({
+      source: voxelSpace,
+      view_state: viewState,
+      focus_slot: getCurrentPainterFocusSlot(),
+      target_world: targetWorld,
+      projection_anchor_world: projectionAnchorWorld,
+      viewport_width: viewport.width,
+      viewport_height: viewport.height,
+      center_target_in_view: shouldCenterPainterTarget(anchor),
+    });
+    const focus = get_painter_focus_slot_for_anchor({
+      anchor_world: targetWorld,
+      view_state: viewState,
+      visible_planes: projected.visible_planes,
+      fallback_world_plane: targetWorld.z,
+    });
+    projected.focus_slot = focus.focus_slot;
+    projected.focus_world_plane = focus.focus_world_plane;
+    projected.space.camera.focus_plane = focus.focus_slot;
+    voxelSpace.camera.focus_plane = focus.focus_world_plane ?? voxelSpace.camera.focus_plane;
+    return projected;
+  }
+
+  function syncProjectedGridFromDisplay(): void {
+    if (!painter_display_projection) return;
+    sync_grid_to_painter_projection(grid, painter_display_projection);
+  }
+
+  function commitProjectedGridToWorld(): void {
+    if (!painter_display_projection) return;
+    commit_grid_to_painter_world({
+      source: voxelSpace,
+      grid,
+      projection: painter_display_projection,
+    });
+  }
+
+  function applyPainterProjectedCameraTuning(args?: {
+    transition_euler?: { x: number; y: number; z: number };
+    visual_pivot_px?: { x: number; y: number } | null;
+  }): void {
+    if (!painter_display_projection) return;
+    const projectedCamera = painter_display_projection.space.camera;
+    projectedCamera.mode = 'rotated_ortho';
+    (projectedCamera as any).pan_behavior = 'uniform';
+    projectedCamera.pan_x = 0;
+    projectedCamera.pan_y = 0;
+    projectedCamera.show_all_layers = true;
+    projectedCamera.use_focus_layer_opacity = voxelSpace.camera.use_focus_layer_opacity;
+    projectedCamera.center_target_in_view = voxelSpace.camera.center_target_in_view;
+    projectedCamera.parallax_intensity = voxelSpace.camera.parallax_intensity;
+    projectedCamera.parallax_move_enabled = voxelSpace.camera.parallax_move_enabled;
+    projectedCamera.parallax_size_enabled = voxelSpace.camera.parallax_size_enabled;
+    projectedCamera.scale_per_layer = voxelSpace.camera.scale_per_layer;
+    projectedCamera.movement_per_layer = voxelSpace.camera.movement_per_layer;
+    projectedCamera.mouse_angle_yaw_deg = voxelSpace.camera.mouse_angle_yaw_deg;
+    projectedCamera.mouse_angle_pitch_deg = voxelSpace.camera.mouse_angle_pitch_deg;
+    projectedCamera.mouse_angle_spring = voxelSpace.camera.mouse_angle_spring;
+    projectedCamera.base_layer_scale = voxelSpace.camera.base_layer_scale;
+    projectedCamera.char_spacing_x = voxelSpace.camera.char_spacing_x;
+    projectedCamera.char_spacing_y = voxelSpace.camera.char_spacing_y;
+    projectedCamera.calibration = { ...voxelSpace.camera.calibration };
+    projectedCamera.euler_rotation = { x: 0, y: 0, z: 0 };
+    (projectedCamera as any).transition_euler = args?.transition_euler ? { ...args.transition_euler } : { x: 0, y: 0, z: 0 };
+    if (args?.visual_pivot_px) {
+      (projectedCamera as any).visual_pivot_px = { ...args.visual_pivot_px };
+    }
+    const focusSlot = painter_display_projection.focus_slot;
+    projectedCamera.focus_plane = focusSlot;
+    for (const [slot, layer] of painter_display_projection.space.layers.entries()) {
+      if (!layer) continue;
+      if (!(projectedCamera.use_focus_layer_opacity ?? true)) {
+        layer.opacity = 1.0;
+      } else if (slot === focusSlot) {
+        layer.opacity = 1.0;
+      } else {
+        const dist = Math.abs(slot - focusSlot);
+        layer.opacity = dist === 1 ? 0.62 : 0.45;
+      }
+    }
+
+  }
+
+  painter_display_projection = project_painter_display_space({
+    source: voxelSpace,
+    view_state: getPainterViewState(),
+    focus_slot: 0,
+    target_world: getPainterFallbackTargetWorld(),
+    projection_anchor_world: getPainterProjectionAnchorWorld(),
+    viewport_width: Math.max(1, canvas_rect.x1 - canvas_rect.x0 + 1),
+    viewport_height: Math.max(1, canvas_rect.y1 - canvas_rect.y0 + 1),
+  });
+  sync_grid_to_painter_projection(grid, painter_display_projection);
+
+  function painterGridPointToWorld(x: number, y: number): { x: number; y: number; z: number } | null {
+    if (!painter_display_projection) return null;
+    return painter_projection_grid_point_to_world({ projection: painter_display_projection, x, y });
+  }
+
+  function painterWorldToGridPoint(world: { x: number; y: number; z: number }): { x: number; y: number } | null {
+    if (!painter_display_projection) return null;
+    return painter_projection_world_to_grid_point({ projection: painter_display_projection, world });
+  }
+
+  function finalizePendingPainterCanvasChanges(): void {
+    const canvasWithFinalize = canvas_module as typeof canvas_module & { finalizePendingChanges?: () => void };
+    canvasWithFinalize.finalizePendingChanges?.();
+  }
+
+  function refreshPainterProjectionFromWorld(anchor: PainterInteractionAnchor = getPainterInteractionAnchor()): void {
+    painter_display_projection = rebuildPainterDisplayProjection(getPainterViewState(), anchor);
+    syncProjectedGridFromDisplay();
+    syncPainterCanvasSelectionFromWorld();
+    applyPainterProjectedCameraTuning();
+    syncDOMRenderer();
+  }
+
+  function addPainterLayer(): void {
+    finalizePendingPainterCanvasChanges();
+    commitProjectedGridToWorld();
+    const zs = Array.from(voxelSpace.layers.keys());
+    const maxZ = zs.length > 0 ? Math.max(...zs) : 0;
+    const newZ = maxZ + 1;
+    addLayer(voxelSpace, newZ, `Layer ${newZ}`);
+    const newLayer = getLayer(voxelSpace, newZ);
+    if (newLayer) {
+      logLayerAction(history, 'add_layer', `Add Layer ${newZ}`, newZ, newLayer);
+    }
+    voxelSpace.camera.focus_plane = newZ;
+    if (isAppInitialized) {
+      saveCameraConfig({ focus_plane: newZ });
+    }
+    refreshPainterProjectionFromWorld();
+    pushSnapshot(history, grid);
+    schedule_auto_save();
+    console.log('➕ Added layer at Z=', newZ);
+  }
+
+  function deletePainterLayer(z: number): void {
+    try {
+      finalizePendingPainterCanvasChanges();
+      commitProjectedGridToWorld();
+      const layerToDelete = getLayer(voxelSpace, z);
+      removeLayer(voxelSpace, z);
+      if (layerToDelete) {
+        logLayerAction(history, 'delete_layer', `Delete Layer ${z}`, z, layerToDelete);
+      }
+      if (z === voxelSpace.camera.focus_plane) {
+        const remainingZs = Array.from(voxelSpace.layers.keys());
+        if (remainingZs.length > 0) {
+          voxelSpace.camera.focus_plane = remainingZs[0]!;
+        }
+      }
+      refreshPainterProjectionFromWorld();
+      console.log('🗑️ Deleted layer at Z=', z);
+    } catch (e) {
+      console.error('Cannot delete layer:', e);
+    }
+  }
+
+  function duplicatePainterLayer(z: number): void {
+    finalizePendingPainterCanvasChanges();
+    commitProjectedGridToWorld();
+    const zs = Array.from(voxelSpace.layers.keys());
+    const maxZ = zs.length > 0 ? Math.max(...zs) : 0;
+    const newZ = maxZ + 1;
+    duplicateLayer(voxelSpace, z, newZ);
+    const newLayer = getLayer(voxelSpace, newZ);
+    if (newLayer) {
+      logLayerAction(history, 'duplicate_layer', `Duplicate Layer ${z} → ${newZ}`, newZ, newLayer, z, newZ);
+    }
+    voxelSpace.camera.focus_plane = newZ;
+    refreshPainterProjectionFromWorld();
+    console.log('📋 Duplicated layer', z, 'to', newZ);
+  }
+
+  function selectPainterLayer(z: number): void {
+    finalizePendingPainterCanvasChanges();
+    commitProjectedGridToWorld();
+    voxelSpace.camera.focus_plane = z;
+    if (isAppInitialized) {
+      saveCameraConfig({ focus_plane: z });
+    }
+    refreshPainterProjectionFromWorld();
+    console.log('✓ Selected layer/plane=', z);
+  }
+
+  function togglePainterLayerVisibility(z: number): void {
+    finalizePendingPainterCanvasChanges();
+    commitProjectedGridToWorld();
+    const layer = getLayer(voxelSpace, z);
+    if (layer) {
+      layer.visible = !layer.visible;
+      refreshPainterProjectionFromWorld();
+      console.log('👁 Layer', z, 'visible:', layer.visible);
+    }
+  }
+
+  function getPainterFocusContentBounds(): { min_x: number; min_y: number; max_x: number; max_y: number } | null {
+    if (!painter_display_projection) return null;
+    return get_painter_projection_focus_content_bounds(painter_display_projection);
+  }
+
+  function getPainterCanvasModuleApi(): (typeof canvas_module & {
+    getSelectionBitmap?: () => SelectionBitmap;
+    setSelectionBitmap?: (bitmap: SelectionBitmap) => void;
+  }) | null {
+    return canvas_module as typeof canvas_module & {
+      getSelectionBitmap?: () => SelectionBitmap;
+      setSelectionBitmap?: (bitmap: SelectionBitmap) => void;
+    };
+  }
+
+  function deriveProjectedSelectionBitmap(): SelectionBitmap {
+    const bitmap = createSelectionBitmap(grid.width, grid.height);
+    if (!painter_display_projection) return bitmap;
+    for (const key of world_selection.cells) {
+      const [rawX, rawY, rawZ] = key.split(',').map((value) => Number.parseInt(value, 10));
+      const x = rawX ?? 0;
+      const y = rawY ?? 0;
+      const z = rawZ ?? 0;
+      const projected = project_world_point_with_roll({ x, y, z }, painter_display_projection.view_state);
+      if (projected.plane !== painter_display_projection.focus_world_plane) continue;
+      const gridPoint = painterWorldToGridPoint({ x, y, z });
+      if (!gridPoint) continue;
+      setSelected(bitmap, gridPoint.x, gridPoint.y, true);
+    }
+    return bitmap;
+  }
+
+  function syncPainterCanvasSelectionFromWorld(): void {
+    getPainterCanvasModuleApi()?.setSelectionBitmap?.(deriveProjectedSelectionBitmap());
+  }
+
+  function getProjectedSelectionOverlayCells(): Array<{ x: number; y: number; char: string; weight_index: number }> {
+    if (!painter_display_projection) return [];
+    const byGrid = new Map<string, { x: number; y: number; char: string; weight_index: number; slot: number }>();
+    for (const key of world_selection.cells) {
+      const [rawX, rawY, rawZ] = key.split(',').map((value) => Number.parseInt(value, 10));
+      const x = rawX ?? 0;
+      const y = rawY ?? 0;
+      const z = rawZ ?? 0;
+      const projected = project_world_point_with_roll({ x, y, z }, painter_display_projection.view_state);
+      const slot = painter_display_projection.visible_planes.findIndex((plane) => Math.floor(plane) === Math.floor(projected.plane));
+      if (slot < 0) continue;
+      const gridPoint = {
+        x: projected.u - painter_display_projection.projected_bounds.min_u,
+        y: projected.v - painter_display_projection.projected_bounds.min_v,
+      };
+      if (gridPoint.x < 0 || gridPoint.x >= painter_display_projection.projected_bounds.width || gridPoint.y < 0 || gridPoint.y >= painter_display_projection.projected_bounds.height) continue;
+      const cell = getVoxel(voxelSpace, x, y, z);
+      if (!cell || cell.char === ' ') continue;
+      const key2 = `${gridPoint.x},${gridPoint.y}`;
+      const prev = byGrid.get(key2);
+      if (!prev || slot >= prev.slot) {
+        byGrid.set(key2, { x: gridPoint.x, y: gridPoint.y, char: cell.char, weight_index: cell.weight_index, slot });
+      }
+    }
+    return Array.from(byGrid.values()).map(({ x, y, char, weight_index }) => ({ x, y, char, weight_index }));
+  }
+
+  function getPainterSelectionStatus(): string | null {
+    if (!has_world_selection(world_selection)) return null;
+    const bounds = get_world_selection_bounds(world_selection);
+    if (!bounds) return null;
+    const planeCount = (bounds.max_z - bounds.min_z + 1);
+    return `SEL ${world_selection.cells.size} vox / ${planeCount} planes / Z:${bounds.min_z}->${bounds.max_z}`;
+  }
+
+  function updateWorldSelectionFromProjectedBitmap(mode: SelectionMode, depthRange?: { depthMin?: number; depthMax?: number; kind?: 'rect' | 'lasso' | 'clear' | 'select_all' | 'invert' | 'other' }): void {
+    if (depthRange?.kind === 'clear') {
+      clear_world_selection(world_selection);
+      syncPainterCanvasSelectionFromWorld();
+      return;
+    }
+    if (depthRange?.kind === 'select_all') {
+      clear_world_selection(world_selection);
+      for (const [z, layer] of voxelSpace.layers.entries()) {
+        for (let y = 0; y < voxelSpace.bounds.height; y += 1) {
+          const row = layer.cells[y];
+          if (!row) continue;
+          for (let x = 0; x < voxelSpace.bounds.width; x += 1) {
+            const cell = row[x];
+            if (!cell || cell.char === ' ') continue;
+            set_world_selected(world_selection, x, y, z, true);
+          }
+        }
+      }
+      syncPainterCanvasSelectionFromWorld();
+      return;
+    }
+    if (depthRange?.kind === 'invert') {
+      const next = create_world_selection();
+      for (const [z, layer] of voxelSpace.layers.entries()) {
+        for (let y = 0; y < voxelSpace.bounds.height; y += 1) {
+          const row = layer.cells[y];
+          if (!row) continue;
+          for (let x = 0; x < voxelSpace.bounds.width; x += 1) {
+            const cell = row[x];
+            if (!cell || cell.char === ' ') continue;
+            const key = `${x},${y},${z}` as const;
+            if (!world_selection.cells.has(key)) set_world_selected(next, x, y, z, true);
+          }
+        }
+      }
+      world_selection.cells = next.cells;
+      syncPainterCanvasSelectionFromWorld();
+      return;
+    }
+    const bitmap = getPainterCanvasModuleApi()?.getSelectionBitmap?.();
+    if (!bitmap || !painter_display_projection) return;
+    const incoming = create_world_selection();
+    const focusPlane = painter_display_projection.focus_world_plane;
+    if (focusPlane === null || focusPlane === undefined) {
+      apply_world_selection_mode(world_selection, incoming, mode);
+      return;
+    }
+    for (let y = 0; y < bitmap.height; y += 1) {
+      for (let x = 0; x < bitmap.width; x += 1) {
+        if (!isSelected(bitmap, x, y)) continue;
+        const u = x + painter_display_projection.projected_bounds.min_u;
+        const v = y + painter_display_projection.projected_bounds.min_v;
+        const depthMin = depthRange?.depthMin ?? focusPlane;
+        const depthMax = depthRange?.depthMax ?? focusPlane;
+        for (let plane = Math.min(depthMin, depthMax); plane <= Math.max(depthMin, depthMax); plane += 1) {
+          const world = unproject_plane_point_with_roll({ u, v, plane }, painter_display_projection.view_state);
+          const cell = getVoxel(voxelSpace, world.x, world.y, world.z);
+          if (!cell || cell.char === ' ') continue;
+          set_world_selected(incoming, world.x, world.y, world.z, true);
+        }
+      }
+    }
+    apply_world_selection_mode(world_selection, incoming, mode);
+  }
+
+  function stepPainterViewAction(action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right'): void {
+    if (painter_view_transition) return;
+    const now = performance.now();
+    const current = getPainterViewState();
+    if (action === 'roll_left' || action === 'roll_right') {
+      const direction = action === 'roll_left' ? 'left' : 'right';
+      painter_view_transition = start_roll_transition(direction, now, current.roll_quarter_turn, get_transition_tilt_for_command(current, 'roll', direction, 45));
+      return;
+    }
+    const direction = action.replace('swing_', '') as 'left' | 'right' | 'up' | 'down';
+    painter_view_transition = start_swing_transition(direction, now, get_transition_tilt_for_command(current, 'swing', direction, 45));
+  }
 
   // Initialize DOM renderer when container is available
   function initDOMRenderer(): void {
@@ -226,14 +755,16 @@ export function create_painter_app_state(): PainterAppState {
       PAINTER_CONFIG.render_backend,
       PAINTER_CONFIG.render_theme_id,
     );
-    domRenderer.setSpace(voxelSpace);
+    applyPainterProjectedCameraTuning();
+    domRenderer.setSpace(painter_display_projection.space);
     console.log('[Painter] DOM renderer initialized');
   }
 
   // Sync DOM renderer with current voxelSpace
   function syncDOMRenderer(): void {
     if (domRenderer) {
-      domRenderer.setSpace(voxelSpace);
+      applyPainterProjectedCameraTuning();
+      domRenderer.setSpace(painter_display_projection.space);
     }
   }
 
@@ -258,17 +789,12 @@ export function create_painter_app_state(): PainterAppState {
     voxelSpace = saved_voxel_space;
     // Re-apply saved camera config after loading auto-save (camera settings are global, not per-artwork)
     const savedCameraConfig = loadCameraConfig();
-    if (savedCameraConfig && Object.keys(savedCameraConfig).length > 0) {
-      voxelSpace.camera = { ...voxelSpace.camera, ...savedCameraConfig };
-    }
+    mergeSavedPainterCameraConfig(savedCameraConfig);
+    syncPainterCameraViewTransform();
     ensureValidFocusPlane();
-    // Sync grid to current layer
-    const currentLayer = getLayer(voxelSpace, voxelSpace.camera.focus_plane);
-    if (currentLayer) {
-      grid.width = voxelSpace.bounds.width;
-      grid.height = voxelSpace.bounds.height;
-      grid.cells = currentLayer.cells;
-    }
+    setPainterCameraTargetWorld({ x: Math.floor(voxelSpace.bounds.width / 2), y: Math.floor(voxelSpace.bounds.height / 2), z: voxelSpace.camera.focus_plane });
+    painter_display_projection = rebuildPainterDisplayProjection(getPainterViewState(), { kind: 'viewport_center', screen: null, world: painter_camera_target_world });
+    syncProjectedGridFromDisplay();
     syncDOMRenderer();
     console.log('🎨 Loaded auto-saved VoxelSpace artwork');
   } else {
@@ -283,10 +809,12 @@ export function create_painter_app_state(): PainterAppState {
       voxelSpace = gridToVoxelSpace(grid, 0);
       // Re-apply saved camera config after loading legacy auto-save
       const savedCameraConfig = loadCameraConfig();
-      if (savedCameraConfig && Object.keys(savedCameraConfig).length > 0) {
-        voxelSpace.camera = { ...voxelSpace.camera, ...savedCameraConfig };
-      }
+      mergeSavedPainterCameraConfig(savedCameraConfig);
+      syncPainterCameraViewTransform();
       ensureValidFocusPlane();
+      setPainterCameraTargetWorld({ x: Math.floor(voxelSpace.bounds.width / 2), y: Math.floor(voxelSpace.bounds.height / 2), z: voxelSpace.camera.focus_plane });
+      painter_display_projection = rebuildPainterDisplayProjection(getPainterViewState(), { kind: 'viewport_center', screen: null, world: painter_camera_target_world });
+      syncProjectedGridFromDisplay();
       syncDOMRenderer();
       console.log('🎨 Loaded auto-saved artwork (legacy format)');
     }
@@ -418,6 +946,8 @@ export function create_painter_app_state(): PainterAppState {
   // Current filename for save operations
   let current_filename = 'untitled';
   let current_file_path: string | null = null;
+  const world_selection: WorldSelection = create_world_selection();
+  let world_clipboard_data: WorldCopyData | null = null;
   const LAST_FILE_PATH_KEY = 'thaumworld_ascii_painter_last_file_path';
 
   async function getAsciiDrawingsDir(): Promise<string | null> {
@@ -499,6 +1029,7 @@ export function create_painter_app_state(): PainterAppState {
   async function loadArtworkFromContent(content: string, loadedPath?: string): Promise<void> {
     console.log('[Painter bootstrap] loading artwork content', { loadedPath: loadedPath ?? null, size: content.length });
     voxelSpace = importVoxelSpaceFromJSON(content);
+    clear_world_selection(world_selection);
 
     // Apply persisted camera/UI settings (do not import from file)
     const savedCam = loadCameraConfig();
@@ -507,14 +1038,10 @@ export function create_painter_app_state(): PainterAppState {
     }
 
     ensureValidFocusPlane();
+    setPainterCameraTargetWorld({ x: Math.floor(voxelSpace.bounds.width / 2), y: Math.floor(voxelSpace.bounds.height / 2), z: voxelSpace.camera.focus_plane });
+    painter_display_projection = rebuildPainterDisplayProjection(getPainterViewState(), { kind: 'viewport_center', screen: null, world: painter_camera_target_world });
+    syncProjectedGridFromDisplay();
     syncDOMRenderer();
-
-    const currentLayer = getLayer(voxelSpace, voxelSpace.camera.focus_plane);
-    if (currentLayer) {
-      grid.width = voxelSpace.bounds.width;
-      grid.height = voxelSpace.bounds.height;
-      grid.cells = currentLayer.cells;
-    }
 
     pushSnapshot(history, grid);
 
@@ -536,18 +1063,17 @@ export function create_painter_app_state(): PainterAppState {
     if (!dir) {
       // Fallback: just create a new in-memory canvas
       voxelSpace = createVoxelSpace(CANVAS_WIDTH, CANVAS_HEIGHT, { defaultZ: 0 });
+      clear_world_selection(world_selection);
       const savedCam = loadCameraConfig();
       if (savedCam && Object.keys(savedCam).length > 0) {
         voxelSpace.camera = { ...voxelSpace.camera, ...savedCam };
       }
+      syncPainterCameraViewTransform();
       ensureValidFocusPlane();
+      setPainterCameraTargetWorld({ x: Math.floor(voxelSpace.bounds.width / 2), y: Math.floor(voxelSpace.bounds.height / 2), z: voxelSpace.camera.focus_plane });
+      painter_display_projection = rebuildPainterDisplayProjection(getPainterViewState(), { kind: 'viewport_center', screen: null, world: painter_camera_target_world });
+      syncProjectedGridFromDisplay();
       syncDOMRenderer();
-      const currentLayer = getLayer(voxelSpace, 0);
-      if (currentLayer) {
-        grid.width = CANVAS_WIDTH;
-        grid.height = CANVAS_HEIGHT;
-        grid.cells = currentLayer.cells;
-      }
       pushSnapshot(history, grid);
       current_filename = 'untitled';
       current_file_path = null;
@@ -559,19 +1085,17 @@ export function create_painter_app_state(): PainterAppState {
     const filePath = `${dir}\\${basename}`;
 
     voxelSpace = createVoxelSpace(CANVAS_WIDTH, CANVAS_HEIGHT, { defaultZ: 0 });
+    clear_world_selection(world_selection);
     const savedCam = loadCameraConfig();
     if (savedCam && Object.keys(savedCam).length > 0) {
       voxelSpace.camera = { ...voxelSpace.camera, ...savedCam };
     }
+    syncPainterCameraViewTransform();
     ensureValidFocusPlane();
+    setPainterCameraTargetWorld({ x: Math.floor(voxelSpace.bounds.width / 2), y: Math.floor(voxelSpace.bounds.height / 2), z: voxelSpace.camera.focus_plane });
+    painter_display_projection = rebuildPainterDisplayProjection(getPainterViewState(), { kind: 'viewport_center', screen: null, world: painter_camera_target_world });
+    syncProjectedGridFromDisplay();
     syncDOMRenderer();
-
-    const currentLayer = getLayer(voxelSpace, 0);
-    if (currentLayer) {
-      grid.width = CANVAS_WIDTH;
-      grid.height = CANVAS_HEIGHT;
-      grid.cells = currentLayer.cells;
-    }
     pushSnapshot(history, grid);
 
     current_file_path = filePath;
@@ -671,36 +1195,6 @@ export function create_painter_app_state(): PainterAppState {
   // Keyboard shortcuts for layer navigation
   // NOTE: Page Up/Down and Tab removed - use Layer Palette UI buttons instead
   
-  // Calculate layout - positions are in grid coordinates
-  // Total grid is 200x50, we center the canvas with padding
-  let GRID_WIDTH: number = PAINTER_CONFIG.grid_width;
-  let GRID_HEIGHT: number = PAINTER_CONFIG.grid_height;
-
-  function get_default_canvas_rect(): Rect {
-    return {
-      x0: 20,
-      y0: 4,
-      x1: 99,
-      y1: 43,
-    };
-  }
-  
-  const file_menu_rect: Rect = {
-    x0: 0,
-    y0: 0,
-    x1: GRID_WIDTH - 1,
-    y1: 2
-  };
-
-  const toolbar_rect: Rect = {
-    x0: 0,
-    y0: GRID_HEIGHT - 3,  // Bottom area
-    x1: GRID_WIDTH - 1,
-    y1: GRID_HEIGHT - 1
-  };
-
-  let canvas_rect: Rect = get_default_canvas_rect();
-  
   // Create toolbar module
   const toolbar_module = make_painter_toolbar_module({
     id: 'painter_toolbar',
@@ -734,6 +1228,14 @@ export function create_painter_app_state(): PainterAppState {
     get_paste_ignore_white: () => paste_ignore_white,
     get_paste_ignore_color: () => paste_ignore_color,
     get_paste_ignore_color_rgb: () => paste_ignore_color_rgb,
+    get_world_point_for_grid: (x, y) => painterGridPointToWorld(x, y),
+    get_grid_point_for_world: (world) => painterWorldToGridPoint(world),
+    get_view_state: () => getPainterViewState(),
+    get_focus_content_bounds: () => getPainterFocusContentBounds(),
+    on_history_applied: () => {
+      refreshPainterProjectionFromWorld();
+    },
+    get_selection_status: () => getPainterSelectionStatus(),
     get_selection_mode: () => selection_mode,
     get_text_spacing: () => text_spacing,
     get_text_charlead: () => text_charlead,
@@ -743,20 +1245,24 @@ export function create_painter_app_state(): PainterAppState {
     get_left_click_tool: () => left_click_tool,
     get_right_click_tool: () => right_click_tool,
     get_focus_layer_z: () => voxelSpace.camera.focus_plane,
+    get_focus_world_plane: () => painter_display_projection?.focus_world_plane ?? voxelSpace.camera.focus_plane,
     cycle_focus_layer: (dir) => {
-      const zs = Array.from(voxelSpace.layers.keys()).sort((a, b) => a - b);
-      const current = voxelSpace.camera.focus_plane;
-      const idx = Math.max(0, zs.findIndex((z) => z === current));
-      const nextIdx = Math.max(0, Math.min(zs.length - 1, idx + dir));
-      const next = zs[nextIdx];
-      if (typeof next === 'number' && next !== current) {
-        voxelSpace.camera.focus_plane = next;
-        const layer = getLayer(voxelSpace, next);
-        if (layer) grid.cells = layer.cells;
+      commitProjectedGridToWorld();
+      const slots = painter_display_projection.visible_planes;
+      const currentSlot = painter_display_projection.focus_slot;
+      const nextSlot = Math.max(0, Math.min(Math.max(0, slots.length - 1), currentSlot + dir));
+      const nextPlane = slots[nextSlot];
+      if (typeof nextPlane === 'number' && nextSlot !== currentSlot) {
+        voxelSpace.camera.focus_plane = nextPlane;
+        painter_display_projection.focus_slot = nextSlot;
+        painter_display_projection.focus_world_plane = nextPlane;
+        painter_display_projection.space.camera.focus_plane = nextSlot;
+        syncProjectedGridFromDisplay();
       }
     },
     history,
     on_push_snapshot: () => {
+      commitProjectedGridToWorld();
       pushSnapshot(history, grid);
       schedule_auto_save();
     },
@@ -768,8 +1274,19 @@ export function create_painter_app_state(): PainterAppState {
       brush.weight_index = cell.weight_index;
       saveBrushState(active_property_side);
     },
-    on_selection_change: () => {
-      // Force redraw when selection changes
+    on_selection_change: (args) => {
+      updateWorldSelectionFromProjectedBitmap(selection_mode, args);
+    },
+    get_selection_overlay_cells: () => getProjectedSelectionOverlayCells(),
+    get_world_copy_data: () => {
+      const data = create_world_copy_data_from_selection(world_selection, voxelSpace);
+      if (!data) return null;
+      world_clipboard_data = data;
+      return encode_world_copy_data(data);
+    },
+    set_world_copy_data: (data) => {
+      const decoded = decode_world_copy_data(data);
+      if (decoded) world_clipboard_data = decoded;
     },
     on_copy_data: async (data) => {
       clipboard_data = data;
@@ -795,21 +1312,27 @@ export function create_painter_app_state(): PainterAppState {
         console.warn('Failed to read from system clipboard:', e);
       }
       // Fall back to internal clipboard
-      return clipboard_data;
+      return world_clipboard_data ? encode_world_copy_data(world_clipboard_data) : clipboard_data;
     },
     on_move: (new_rect) => {
       // Update canvas_rect when moved
       canvas_rect = new_rect;
+      painter_display_projection = rebuildPainterDisplayProjection(getPainterViewState(), getPainterInteractionAnchor());
+      syncProjectedGridFromDisplay();
       console.log('Canvas moved:', new_rect);
     },
     on_resize: (new_rect) => {
       // Update canvas_rect
       canvas_rect = new_rect;
+      painter_display_projection = rebuildPainterDisplayProjection(getPainterViewState(), getPainterInteractionAnchor());
+      syncProjectedGridFromDisplay();
       console.log('Canvas resized:', new_rect);
     },
     on_close: () => {
       // Reset canvas to default position
       canvas_rect = get_default_canvas_rect();
+      painter_display_projection = rebuildPainterDisplayProjection(getPainterViewState(), getPainterInteractionAnchor());
+      syncProjectedGridFromDisplay();
       console.log('Canvas reset to default position');
     },
     on_viewport_change: (viewport) => {
@@ -818,12 +1341,11 @@ export function create_painter_app_state(): PainterAppState {
       void viewport;
     },
     on_mouse_move: (offsetX, offsetY) => {
-      // Forward mouse parallax to DOM renderer
-      if (domRenderer) {
-        domRenderer.setMouseParallax(offsetX, offsetY);
-      }
+      void offsetX;
+      void offsetY;
     }
   });
+  syncPainterCanvasSelectionFromWorld();
 
   function getInitialModuleVisibility(moduleId: string, fallback: boolean): boolean {
     return getModuleVisibility(moduleId) ?? fallback;
@@ -1371,20 +1893,11 @@ export function create_painter_app_state(): PainterAppState {
       rect: layer_palette_rect,
       getSpace: () => voxelSpace,
       onLayerSelect: (z) => {
-        console.log('Layer selected:', z);
-        // Switch to this layer
         const layer = getLayer(voxelSpace, z);
-        if (layer && !layer.locked) {
-          voxelSpace.camera.focus_plane = z;
-          grid.cells = layer.cells; // Sync grid to new layer
-        }
+        if (layer && !layer.locked) selectPainterLayer(z);
       },
       onLayerVisibilityToggle: (z) => {
-        const layer = getLayer(voxelSpace, z);
-        if (layer) {
-          layer.visible = !layer.visible;
-          console.log('Layer', z, 'visibility:', layer.visible);
-        }
+        togglePainterLayerVisibility(z);
       },
       onLayerLockToggle: (z) => {
         const layer = getLayer(voxelSpace, z);
@@ -1402,59 +1915,13 @@ export function create_painter_app_state(): PainterAppState {
         }
       },
       onAddLayer: () => {
-        // Find next available Z
-        const zs = Array.from(voxelSpace.layers.keys());
-        const maxZ = zs.length > 0 ? Math.max(...zs) : -1;
-        const newZ = maxZ + 1;
-        addLayer(voxelSpace, newZ, `Layer ${newZ}`);
-        // Select the new layer
-        voxelSpace.camera.focus_plane = newZ;
-        const newLayer = getLayer(voxelSpace, newZ);
-        if (newLayer) {
-          grid.cells = newLayer.cells;
-        }
-        // Log to history
-        logLayerAction(history, 'add_layer', `Add Layer ${newZ}`, newZ, newLayer);
-        console.log('Added layer at Z:', newZ);
+        addPainterLayer();
       },
       onDeleteLayer: (z) => {
-        try {
-          // Capture layer data before deletion
-          const layerToDelete = getLayer(voxelSpace, z);
-          removeLayer(voxelSpace, z);
-          // Log to history
-          if (layerToDelete) {
-            logLayerAction(history, 'delete_layer', `Delete Layer ${z}`, z, layerToDelete);
-          }
-          // Switch to another layer if needed
-          if (voxelSpace.camera.focus_plane === z) {
-            const remainingZs = Array.from(voxelSpace.layers.keys());
-            if (remainingZs.length > 0) {
-              voxelSpace.camera.focus_plane = remainingZs[0]!;
-              const layer = getLayer(voxelSpace, remainingZs[0]!);
-              if (layer) {
-                grid.cells = layer.cells;
-              }
-            }
-          }
-          console.log('Deleted layer at Z:', z);
-        } catch (e) {
-          console.error('Cannot delete layer:', e);
-        }
+        deletePainterLayer(z);
       },
       onDuplicateLayer: (z) => {
-        const zs = Array.from(voxelSpace.layers.keys());
-        const maxZ = zs.length > 0 ? Math.max(...zs) : -1;
-        const newZ = maxZ + 1;
-        duplicateLayer(voxelSpace, z, newZ);
-        voxelSpace.camera.focus_plane = newZ;
-        const newLayer = getLayer(voxelSpace, newZ);
-        if (newLayer) {
-          grid.cells = newLayer.cells;
-        }
-        // Log to history
-        logLayerAction(history, 'duplicate_layer', `Duplicate Layer ${z} → ${newZ}`, newZ, newLayer, z, newZ);
-        console.log('Duplicated layer', z, 'to', newZ);
+        duplicatePainterLayer(z);
       },
       onMergeDown: (z) => {
         const { mergeLayerDown } = require('../ascii_painter/voxel_space.js');
@@ -1491,11 +1958,8 @@ export function create_painter_app_state(): PainterAppState {
           voxelSpace.camera.focus_plane = oldToNewZ.get(oldFocusPlane)!;
         }
         
-        // Sync grid to current layer
-        const currentLayer = getLayer(voxelSpace, voxelSpace.camera.focus_plane);
-        if (currentLayer) {
-          grid.cells = currentLayer.cells;
-        }
+        painter_display_projection = rebuildPainterDisplayProjection(getPainterViewState(), getPainterInteractionAnchor());
+        syncProjectedGridFromDisplay();
         
         // Update bounds
         voxelSpace.bounds.minZ = 0;
@@ -1534,12 +1998,38 @@ export function create_painter_app_state(): PainterAppState {
   let camera_control_module: Module | null = null;
 
   function create_camera_control_module(): Module {
-    return makeCameraControlModule({
+    return makePlaceCameraControlModule({
       id: 'camera_control',
       rect: camera_control_rect,
+      title: 'Painter Camera',
       getSpace: () => voxelSpace,
+      action_rows: [
+        [
+          { id: 'swing_up', label: 'S.Up' },
+          { id: 'swing_down', label: 'S.Dn' },
+        ],
+        [
+          { id: 'swing_left', label: 'S.L' },
+          { id: 'swing_right', label: 'S.R' },
+          { id: 'roll_left', label: 'R.L' },
+          { id: 'roll_right', label: 'R.R' },
+        ],
+      ],
+      onAction: (id) => {
+        switch (id) {
+          case 'swing_up':
+          case 'swing_down':
+          case 'swing_left':
+          case 'swing_right':
+          case 'roll_left':
+          case 'roll_right':
+            stepPainterViewAction(id);
+            break;
+        }
+      },
       onParallaxMoveToggle: (enabled) => {
         voxelSpace.camera.parallax_move_enabled = enabled;
+        applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
           saveCameraConfig({ parallax_move_enabled: enabled });
         }
@@ -1547,94 +2037,80 @@ export function create_painter_app_state(): PainterAppState {
       },
       onParallaxSizeToggle: (enabled) => {
         voxelSpace.camera.parallax_size_enabled = enabled;
+        applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
           saveCameraConfig({ parallax_size_enabled: enabled });
         }
         console.log('Parallax size:', enabled ? 'enabled' : 'disabled');
       },
+      occlusionLabel: 'Focus Opacity',
+      getOcclusionEnabled: () => voxelSpace.camera.use_focus_layer_opacity ?? true,
       onOcclusionToggle: (enabled) => {
-        // When occlusion is enabled, we DON'T show all layers (show_all_layers = false)
-        voxelSpace.camera.show_all_layers = !enabled;
+        voxelSpace.camera.use_focus_layer_opacity = enabled;
+        applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
-          saveCameraConfig({ show_all_layers: voxelSpace.camera.show_all_layers });
+          saveCameraConfig({ use_focus_layer_opacity: enabled });
         }
-        console.log('Voxel occlusion:', enabled ? 'enabled' : 'disabled');
+        console.log('Focus opacity:', enabled ? 'enabled' : 'disabled');
       },
-      onOrientationChange: (orientation) => {
-        voxelSpace.camera.orientation = orientation;
+      onCenterTargetToggle: (enabled) => {
+        voxelSpace.camera.center_target_in_view = enabled;
+        painter_display_projection = rebuildPainterDisplayProjection(getPainterViewState(), getPainterInteractionAnchor());
+        syncProjectedGridFromDisplay();
+        applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
-          saveCameraConfig({ orientation });
+          saveCameraConfig({ center_target_in_view: enabled });
         }
-      },
-      onEulerRotate: (axis, degrees) => {
-        if (!voxelSpace.camera.euler_rotation) {
-          voxelSpace.camera.euler_rotation = { x: 0, y: 0, z: 0 };
-        }
-        voxelSpace.camera.euler_rotation[axis] = degrees;
-        if (isAppInitialized) {
-          saveCameraConfig({ euler_rotation: voxelSpace.camera.euler_rotation });
-        }
-        console.log(`Euler rotation ${axis}: ${degrees}°`);
-        // TODO: Apply CSS transform to canvas container
-      },
-      onPanReset: () => {
-        // Reset pan offsets - handled in canvas module
-        console.log('Pan reset requested');
+        console.log('Center target:', enabled ? 'enabled' : 'disabled');
       },
       onCalibrationChange: (x, y) => {
-        if (domRenderer) {
-          domRenderer.setCalibration(x, y);
-        }
+        voxelSpace.camera.calibration = { x, y };
+        applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
-          saveCameraConfig({ calibration: { x, y } });
+          savePainterCameraCalibration({ x, y });
         }
       },
       onCalibrationReset: () => {
-        if (domRenderer && voxelSpace) {
-          domRenderer.setCalibration(0, 0);
-        }
+        voxelSpace.camera.calibration = { x: 0, y: 0 };
+        applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
-          saveCameraConfig({ calibration: { x: 0, y: 0 } });
+          savePainterCameraCalibration({ x: 0, y: 0 });
         }
       },
       onScalePerLayerChange: (value) => {
+        voxelSpace.camera.scale_per_layer = value;
+        applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
           saveCameraConfig({ scale_per_layer: value });
         }
       },
       onMovementPerLayerChange: (value) => {
+        voxelSpace.camera.movement_per_layer = value;
+        applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
           saveCameraConfig({ movement_per_layer: value });
         }
       },
-      onBaseLayerScaleChange: (value) => {
+      onMouseAngleYawDegChange: (value) => {
+        voxelSpace.camera.mouse_angle_yaw_deg = value;
+        applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
-          saveCameraConfig({ base_layer_scale: value });
+          saveCameraConfig({ mouse_angle_yaw_deg: value });
         }
       },
-      onCharSpacingXChange: (value) => {
+      onMouseAnglePitchDegChange: (value) => {
+        voxelSpace.camera.mouse_angle_pitch_deg = value;
+        applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
-          saveCameraConfig({ char_spacing_x: value });
+          saveCameraConfig({ mouse_angle_pitch_deg: value });
         }
       },
-      onCharSpacingYChange: (value) => {
+      onMouseAngleSpringChange: (value) => {
+        voxelSpace.camera.mouse_angle_spring = value;
+        applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
-          saveCameraConfig({ char_spacing_y: value });
+          saveCameraConfig({ mouse_angle_spring: value });
         }
-      },
-      onPanXChange: (value) => {
-        voxelSpace.camera.pan_x = value;
-        if (isAppInitialized) {
-          saveCameraConfig({ pan_x: value });
-        }
-        // Viewport will be updated automatically on next frame by main loop
-      },
-      onPanYChange: (value) => {
-        voxelSpace.camera.pan_y = value;
-        if (isAppInitialized) {
-          saveCameraConfig({ pan_y: value });
-        }
-        // Viewport will be updated automatically on next frame by main loop
       },
       onMove: (new_rect) => {
         if (camera_control_module) {
@@ -1693,19 +2169,9 @@ export function create_painter_app_state(): PainterAppState {
     module_registry: registry,
     update_layout,
 
-     // Screen-space parallax: centered on the canvas module, but responsive anywhere.
      on_pointer_move_global: (x: number, y: number) => {
-       if (!domRenderer) return;
-       const r = canvas_rect;
-       const cx = (r.x0 + r.x1) / 2;
-       const cy = (r.y0 + r.y1) / 2;
-       const max_dx = (r.x1 - r.x0) / 2;
-       const max_dy = (r.y1 - r.y0) / 2;
-       const clamped_x = Math.max(r.x0, Math.min(r.x1, x));
-       const clamped_y = Math.max(r.y0, Math.min(r.y1, y));
-       const ox = max_dx > 0 ? (clamped_x - cx) / max_dx : 0;
-       const oy = max_dy > 0 ? (clamped_y - cy) / max_dy : 0;
-       domRenderer.setMouseParallax(ox, oy);
+       last_pointer_x = x;
+       last_pointer_y = y;
      },
     
     export_grid: () => {
@@ -1781,23 +2247,20 @@ export function create_painter_app_state(): PainterAppState {
     new_canvas: (width: number, height: number) => {
       // Create new VoxelSpace with default single layer
       voxelSpace = createVoxelSpace(width, height, { defaultZ: 0 });
+      clear_world_selection(world_selection);
 
       // Apply persisted camera config to the new space
       const savedCam = loadCameraConfig();
       if (savedCam && Object.keys(savedCam).length > 0) {
         voxelSpace.camera = { ...voxelSpace.camera, ...savedCam };
       }
+      syncPainterCameraViewTransform();
 
       ensureValidFocusPlane();
-
+      setPainterCameraTargetWorld({ x: Math.floor(voxelSpace.bounds.width / 2), y: Math.floor(voxelSpace.bounds.height / 2), z: voxelSpace.camera.focus_plane });
+      painter_display_projection = rebuildPainterDisplayProjection(getPainterViewState(), { kind: 'viewport_center', screen: null, world: painter_camera_target_world });
+      syncProjectedGridFromDisplay();
       syncDOMRenderer();
-      // Sync grid to the new VoxelSpace
-      const currentLayer = getLayer(voxelSpace, 0);
-      if (currentLayer) {
-        grid.width = width;
-        grid.height = height;
-        grid.cells = currentLayer.cells;
-      }
       pushSnapshot(history, grid);
       current_filename = 'untitled';
       clearAutoSave();
@@ -1819,15 +2282,13 @@ export function create_painter_app_state(): PainterAppState {
         const { importVoxelSpace } = require('../ascii_painter/voxel_space.js');
         const parsed = JSON.parse(json);
         voxelSpace = importVoxelSpace(parsed);
+        clear_world_selection(world_selection);
+        syncPainterCameraViewTransform();
         ensureValidFocusPlane();
+        setPainterCameraTargetWorld({ x: Math.floor(voxelSpace.bounds.width / 2), y: Math.floor(voxelSpace.bounds.height / 2), z: voxelSpace.camera.focus_plane });
+        painter_display_projection = rebuildPainterDisplayProjection(getPainterViewState(), { kind: 'viewport_center', screen: null, world: painter_camera_target_world });
+        syncProjectedGridFromDisplay();
         syncDOMRenderer();
-        // Update grid reference to current layer
-        const currentLayer = getLayer(voxelSpace, voxelSpace.camera.focus_plane);
-        if (currentLayer) {
-          grid.width = voxelSpace.bounds.width;
-          grid.height = voxelSpace.bounds.height;
-          grid.cells = currentLayer.cells;
-        }
         pushSnapshot(history, grid);
         console.log('🎨 Imported VoxelSpace:', debugVoxelSpace(voxelSpace));
       } catch (e) {
@@ -1837,8 +2298,8 @@ export function create_painter_app_state(): PainterAppState {
     
     get_voxel_space: () => voxelSpace,
     
-    set_camera_mode: (mode: CameraMode) => {
-      voxelSpace.camera.mode = mode;
+    set_camera_mode: (_mode: CameraMode) => {
+      voxelSpace.camera.mode = 'rotated_ortho';
     },
     
     set_parallax_intensity: (intensity: number) => {
@@ -1846,64 +2307,29 @@ export function create_painter_app_state(): PainterAppState {
     },
     
     toggle_show_all_layers: () => {
-      voxelSpace.camera.show_all_layers = !voxelSpace.camera.show_all_layers;
+      voxelSpace.camera.use_focus_layer_opacity = !voxelSpace.camera.use_focus_layer_opacity;
+      applyPainterProjectedCameraTuning();
     },
     
     // Layer operations
     add_layer: () => {
-      const zs = Array.from(voxelSpace.layers.keys());
-      const maxZ = zs.length > 0 ? Math.max(...zs) : 0;
-      const newZ = maxZ + 1;
-      addLayer(voxelSpace, newZ, `Layer ${newZ}`);
-      console.log('➕ Added layer at Z=', newZ);
+      addPainterLayer();
     },
     
     delete_layer: (z: number) => {
-      try {
-        removeLayer(voxelSpace, z);
-        // If we deleted the current layer, switch to another
-        if (z === voxelSpace.camera.focus_plane) {
-          const remainingZs = Array.from(voxelSpace.layers.keys());
-          if (remainingZs.length > 0) {
-            voxelSpace.camera.focus_plane = remainingZs[0]!;
-            const layer = getLayer(voxelSpace, voxelSpace.camera.focus_plane);
-            if (layer) {
-              grid.cells = layer.cells;
-            }
-          }
-        }
-        console.log('🗑️ Deleted layer at Z=', z);
-      } catch (e) {
-        console.error('Cannot delete layer:', e);
-      }
+      deletePainterLayer(z);
     },
     
     duplicate_layer: (z: number) => {
-      const zs = Array.from(voxelSpace.layers.keys());
-      const maxZ = zs.length > 0 ? Math.max(...zs) : 0;
-      const newZ = maxZ + 1;
-      duplicateLayer(voxelSpace, z, newZ);
-      console.log('📋 Duplicated layer', z, 'to', newZ);
+      duplicatePainterLayer(z);
     },
     
     select_layer: (z: number) => {
-      voxelSpace.camera.focus_plane = z;
-      if (isAppInitialized) {
-        saveCameraConfig({ focus_plane: z });
-      }
-      const layer = getLayer(voxelSpace, z);
-      if (layer) {
-        grid.cells = layer.cells;
-        console.log('✓ Selected layer Z=', z);
-      }
+      selectPainterLayer(z);
     },
     
     toggle_layer_visibility: (z: number) => {
-      const layer = getLayer(voxelSpace, z);
-      if (layer) {
-        layer.visible = !layer.visible;
-        console.log('👁 Layer', z, 'visible:', layer.visible);
-      }
+      togglePainterLayerVisibility(z);
     },
     
     toggle_layer_lock: (z: number) => {
@@ -1921,6 +2347,35 @@ export function create_painter_app_state(): PainterAppState {
 
     render_dom_layers: () => {
       if (domRenderer) {
+        const current = getPainterViewState();
+        commitProjectedGridToWorld();
+        const resolved = resolve_place_view_transition_frame({
+          target_view: current,
+          hard_view: current,
+          transition: painter_view_transition,
+          now_ms: performance.now(),
+        });
+        const next = resolved.target_view;
+        const viewChanged = next.principal_view !== voxelSpace.camera.principal_view || next.roll_quarter_turn !== voxelSpace.camera.roll_quarter_turn;
+        voxelSpace.camera.principal_view = next.principal_view;
+        voxelSpace.camera.roll_quarter_turn = next.roll_quarter_turn;
+        syncPainterCameraViewTransform(resolved.hard_view);
+        voxelSpace.camera.transition_euler = resolved.frame.euler;
+        const interactionAnchor = getPainterInteractionAnchor();
+        painter_display_projection = rebuildPainterDisplayProjection(resolved.hard_view, interactionAnchor);
+        syncProjectedGridFromDisplay();
+        const pivotPx = getPainterAnchorPivotPx(interactionAnchor);
+        const mouseParallax = getPainterAnchorParallax(interactionAnchor, resolved.frame.active);
+        applyPainterProjectedCameraTuning({
+          transition_euler: voxelSpace.camera.transition_euler,
+          visual_pivot_px: pivotPx,
+        });
+        domRenderer.setSpace(painter_display_projection.space);
+        domRenderer.setMouseParallax(mouseParallax.x, mouseParallax.y);
+        painter_view_transition = resolved.transition;
+        if (viewChanged && isAppInitialized) {
+          saveCameraConfig({ principal_view: voxelSpace.camera.principal_view, roll_quarter_turn: voxelSpace.camera.roll_quarter_turn });
+        }
         touch_world_layers_owner('painter');
         domRenderer.render();
       }
@@ -1943,6 +2398,7 @@ export function create_painter_app_state(): PainterAppState {
       offsetX?: number;
       offsetY?: number;
     }) => {
+      dom_viewport = { ...viewport };
       if (domRenderer) {
         domRenderer.setViewport(viewport);
       }
@@ -1960,12 +2416,17 @@ export function create_painter_app_state(): PainterAppState {
     // Force save camera config
     force_save_camera: () => {
       saveCameraConfig({
-        calibration: voxelSpace.camera.calibration,
+        painter_calibration: voxelSpace.camera.calibration,
+        principal_view: voxelSpace.camera.principal_view,
+        roll_quarter_turn: voxelSpace.camera.roll_quarter_turn,
         scale_per_layer: voxelSpace.camera.scale_per_layer,
         movement_per_layer: voxelSpace.camera.movement_per_layer,
-        base_layer_scale: voxelSpace.camera.base_layer_scale,
-        char_spacing_x: voxelSpace.camera.char_spacing_x,
-        char_spacing_y: voxelSpace.camera.char_spacing_y,
+        mouse_angle_yaw_deg: voxelSpace.camera.mouse_angle_yaw_deg,
+        mouse_angle_pitch_deg: voxelSpace.camera.mouse_angle_pitch_deg,
+        mouse_angle_spring: voxelSpace.camera.mouse_angle_spring,
+        parallax_move_enabled: voxelSpace.camera.parallax_move_enabled,
+        parallax_size_enabled: voxelSpace.camera.parallax_size_enabled,
+        use_focus_layer_opacity: voxelSpace.camera.use_focus_layer_opacity,
       });
       console.log('[Camera Debug] Force saved camera config');
     },

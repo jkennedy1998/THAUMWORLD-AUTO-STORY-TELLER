@@ -10,6 +10,7 @@ export type ActorClaimEntry = {
   claimed_by_other: boolean;
   claimed_by_client_session_id: string | null;
   can_claim: boolean;
+  can_delete?: boolean;
 };
 
 export type ActorClaimModuleConfig = {
@@ -29,12 +30,13 @@ export type ActorClaimModuleConfig = {
   on_claim_selected: () => void;
   on_create_actor: () => void;
   on_release_current: () => void;
+  on_delete_selected: () => void;
   on_refresh: () => void;
   on_close: () => void;
   on_move?: (rect: Rect) => void;
 };
 
-type ButtonHit = "claim" | "create" | "release" | "refresh" | "close";
+type ButtonHit = "claim" | "create" | "release" | "delete" | "refresh" | "close";
 
 export function make_actor_claim_module(opts: ActorClaimModuleConfig): Module {
   let cursor = 0;
@@ -88,6 +90,10 @@ export function make_actor_claim_module(opts: ActorClaimModuleConfig): Module {
     }
     if (action === "create") {
       opts.on_create_actor();
+      return;
+    }
+    if (action === "delete") {
+      opts.on_delete_selected();
       return;
     }
     if (action === "refresh") {
@@ -171,6 +177,7 @@ export function make_actor_claim_module(opts: ActorClaimModuleConfig): Module {
         { action: "claim", label: submitting ? "[CLAIMING]" : "[CLAIM]", enabled: !!selected?.can_claim && !submitting && !loading },
         { action: "create", label: "[CREATE]", enabled: !submitting && !loading },
         { action: "release", label: submitting ? "[RELEASING]" : "[RELEASE]", enabled: !!current_ref && !submitting && !loading },
+        { action: "delete", label: submitting ? "[DELETING]" : "[DELETE]", enabled: !!selected?.can_delete && !submitting && !loading },
         { action: "refresh", label: loading ? "[LOADING]" : "[REFRESH]", enabled: !submitting },
         { action: "close", label: "[CLOSE]", enabled: !opts.get_is_blocking() },
       ];
@@ -240,6 +247,11 @@ export function make_actor_claim_module(opts: ActorClaimModuleConfig): Module {
       if (e.key.toLowerCase() === "f") {
         e.preventDefault();
         opts.on_refresh();
+        return;
+      }
+      if (e.key === "Delete" || e.key.toLowerCase() === "x") {
+        e.preventDefault();
+        opts.on_delete_selected();
       }
     },
   });

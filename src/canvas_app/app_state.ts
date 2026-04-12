@@ -20,6 +20,9 @@ import { make_initiative_module } from '../mono_ui/modules/initiative_module.js'
 import { make_toolbox_module } from '../mono_ui/modules/toolbox_module.js';
 import { make_tool_properties_module, type ToolPropertyRow } from '../mono_ui/modules/tool_properties_module.js';
 import { makeLayerPaletteModule } from '../ascii_painter/layer_palette_module.js';
+import { makePlaceCameraControlModule } from '../mono_ui/modules/place_camera_control_module.js';
+import { createVoxelSpace, type VoxelSpace } from '../ascii_painter/voxel_space.js';
+import { loadPlaceCameraConfig, saveCameraConfig, savePlaceCameraCalibration } from '../ascii_painter/save_system.js';
 import type { SlotType } from '../equipment/body_slot_resolver.js';
 import type { Canvas, Module, PointerEvent, Rgb, Rect } from '../mono_ui/types.js';
 import { create_module_registry, type ModuleRegistry } from '../mono_ui/module_registry.js';
@@ -59,7 +62,7 @@ import { get_character_camera_focus_tile } from '../shared/character_camera_focu
 import { get_defined_place_world_zs as get_authored_place_world_zs, get_place_tile_kind_at_world_z as get_shared_place_tile_kind_at_world_z } from '../shared/place_layers.js';
 import { get_flood_fill_points, get_line_points, get_rect_fill_points, get_rect_stroke_points, type PainterPoint } from '../shared/painter_tools.js';
 import { play_sfx } from '../mono_ui/sfx/sfx_player.js';
-import { format_interval_avg, format_interval_min, get_movement_debug_snapshot } from '../shared/movement_debug_state.js';
+import { format_interval_avg, format_interval_min, format_sample_p50, format_sample_p95, get_movement_debug_snapshot } from '../shared/movement_debug_state.js';
 import { has_resolved_tag } from '../tag_system/canonical_readers.js';
 import { get_character_id_from_ref } from '../shared/character_storage.js';
 import { compute_adjacent_place_bounds, get_place_region_bounds, region_bounds_overlap, select_place_resize_face } from '../shared/place_adjacency.js';
@@ -72,7 +75,9 @@ import {
     get_theme_font_family,
     get_theme_weight_index_to_css,
 } from '../mono_ui/runtime/render_theme.js';
-import { build_visible_plane_coordinates, get_principal_view_plane_axis, make_place_view_state, normalize_place_principal_view, normalize_place_view_roll_quarter_turn, rotate_place_view_roll, swing_place_view, type PlacePrincipalView, type PlaceViewRollQuarterTurn } from '../mono_ui/runtime/place_view_projection.js';
+import { build_visible_plane_coordinates, get_principal_view_plane_axis, get_transition_tilt_for_command, make_place_view_state, normalize_place_principal_view, normalize_place_view_roll_quarter_turn, type PlacePrincipalView, type PlaceViewRollQuarterTurn } from '../mono_ui/runtime/place_view_projection.js';
+import { start_roll_transition, start_swing_transition, type PlaceCameraTransition } from '../mono_ui/runtime/place_camera_pose.js';
+import { resolve_place_view_transition_frame } from '../mono_ui/runtime/place_view_camera_runtime.js';
 
 export const APP_CONFIG = {
     render_backend: THAUMWORLD_RENDER_THEME.backend,
@@ -500,6 +505,9 @@ export function create_app_state(): AppState {
             focus_z: 0,
             principal_view: 'top' as PlacePrincipalView,
             view_roll_quarter_turn: 0 as PlaceViewRollQuarterTurn,
+            display_principal_view: 'top' as PlacePrincipalView,
+            display_view_roll_quarter_turn: 0 as PlaceViewRollQuarterTurn,
+            view_transition: null as PlaceCameraTransition | null,
             use_focus_layer_opacity: true,
             // World-Z center for the 3-layer viewport window.
             // Interpreted as an absolute elevation value; layers represent [center-1, center, center+1].
@@ -3692,7 +3700,9 @@ export function create_app_state(): AppState {
         try {
             const raw = window.localStorage.getItem(PLACE_PRINCIPAL_VIEW_STORAGE_KEY) ?? window.localStorage.getItem(PLACE_MATRIX_VIEW_DIRECTION_STORAGE_KEY);
             if (!raw) return;
-            ui_state.place.principal_view = normalize_place_principal_view(raw === 'north' ? 'top' : raw);
+            const view = normalize_place_principal_view(raw === 'north' ? 'top' : raw);
+            ui_state.place.principal_view = view;
+            ui_state.place.display_principal_view = view;
         } catch {
             // ignore
         }
@@ -3702,7 +3712,9 @@ export function create_app_state(): AppState {
         try {
             const raw = window.localStorage.getItem(PLACE_VIEW_ROLL_STORAGE_KEY);
             if (!raw) return;
-            ui_state.place.view_roll_quarter_turn = normalize_place_view_roll_quarter_turn(raw);
+            const roll = normalize_place_view_roll_quarter_turn(raw);
+            ui_state.place.view_roll_quarter_turn = roll;
+            ui_state.place.display_view_roll_quarter_turn = roll;
         } catch {
             // ignore
         }
@@ -3743,18 +3755,27 @@ export function create_app_state(): AppState {
     }
 
     function set_place_principal_view(next: PlacePrincipalView): void {
-        ui_state.place.principal_view = normalize_place_principal_view(next);
+        const view = normalize_place_principal_view(next);
+        ui_state.place.principal_view = view;
+        ui_state.place.display_principal_view = view;
         save_place_principal_view();
     }
 
     function set_place_view_roll_quarter_turn(next: PlaceViewRollQuarterTurn): void {
-        ui_state.place.view_roll_quarter_turn = normalize_place_view_roll_quarter_turn(next);
+        const roll = normalize_place_view_roll_quarter_turn(next);
+        ui_state.place.view_roll_quarter_turn = roll;
+        ui_state.place.display_view_roll_quarter_turn = roll;
         save_place_view_roll_quarter_turn();
     }
 
     function set_place_focus_layer_opacity_enabled(enabled: boolean): void {
         ui_state.place.use_focus_layer_opacity = !!enabled;
         save_place_focus_layer_opacity();
+        try {
+            update_camera_control_spaces((space) => { space.camera.show_all_layers = !enabled; });
+        } catch {
+            // ignore during early bootstrap before camera control is initialized
+        }
     }
 
     function toggle_place_focus_layer_opacity(): boolean {
@@ -3762,20 +3783,205 @@ export function create_app_state(): AppState {
         return ui_state.place.use_focus_layer_opacity;
     }
 
+    function get_display_place_view_state() {
+        return make_place_view_state(ui_state.place.display_principal_view, ui_state.place.display_view_roll_quarter_turn);
+    }
+
+    function get_place_transition_frame() {
+        const display_view_before = get_display_place_view_state();
+        const target_view_before = make_place_view_state(ui_state.place.principal_view, ui_state.place.view_roll_quarter_turn);
+        const transition = ui_state.place.view_transition;
+        const now = performance.now();
+        const resolved = resolve_place_view_transition_frame({
+            target_view: target_view_before,
+            hard_view: display_view_before,
+            transition,
+            now_ms: now,
+        });
+        const frame = resolved.frame;
+
+        if (transition) {
+            try {
+                const anyTransition = transition as any;
+                if (!anyTransition._debug_logged_phase || anyTransition._debug_logged_phase !== transition.phase) {
+                    anyTransition._debug_logged_phase = transition.phase;
+                    console.log('[PLACE_CAMERA_DEBUG] transition phase', JSON.stringify({
+                        kind: transition.kind,
+                        direction: transition.direction,
+                        phase: transition.phase,
+                        euler: frame.euler,
+                        principal_view: ui_state.place.principal_view,
+                        roll_quarter_turn: ui_state.place.view_roll_quarter_turn,
+                        display_principal_view: ui_state.place.display_principal_view,
+                        display_roll_quarter_turn: ui_state.place.display_view_roll_quarter_turn,
+                    }));
+                }
+                const shouldLogFrame = !anyTransition._debug_last_frame_log_ms || (now - anyTransition._debug_last_frame_log_ms) >= 16 || frame.committed_this_frame || !frame.active;
+                if (shouldLogFrame) {
+                    anyTransition._debug_last_frame_log_ms = now;
+                    console.log('[PLACE_CAMERA_DEBUG] transition frame', JSON.stringify({
+                        kind: transition.kind,
+                        direction: transition.direction,
+                        phase: transition.phase,
+                        resolved_frame: frame,
+                        target_view: {
+                            principal_view: ui_state.place.principal_view,
+                            roll_quarter_turn: ui_state.place.view_roll_quarter_turn,
+                        },
+                        display_view: {
+                            principal_view: display_view_before.principal_view,
+                            roll_quarter_turn: display_view_before.roll_quarter_turn,
+                        },
+                    }));
+                }
+            } catch {
+                // ignore debug logging failures
+            }
+        }
+
+        if (frame.committed_this_frame) {
+            ui_state.place.principal_view = resolved.target_view.principal_view;
+            ui_state.place.view_roll_quarter_turn = resolved.target_view.roll_quarter_turn;
+            ui_state.place.display_principal_view = resolved.hard_view.principal_view;
+            ui_state.place.display_view_roll_quarter_turn = resolved.hard_view.roll_quarter_turn;
+            const snap_anchor = ui_state.place.camera_target.region_pose
+                ? { x: ui_state.place.camera_target.region_pose.x, y: ui_state.place.camera_target.region_pose.y, z: ui_state.place.camera_target.region_pose.z }
+                : (() => {
+                    const follow = resolve_follow_actor_camera_focus_region();
+                    if (!follow) return null;
+                    return { x: follow.region_x, y: follow.region_y, z: follow.world_z };
+                })();
+            if (snap_anchor) {
+                sync_place_focus_plane_from_anchor(snap_anchor);
+                if (typeof snap_anchor.z === 'number' && Number.isFinite(snap_anchor.z)) {
+                    ui_state.place.world_z_center = Math.floor(snap_anchor.z);
+                }
+            }
+            try {
+                console.log('[PLACE_CAMERA_DEBUG] snap commit', JSON.stringify({
+                    kind: transition?.kind,
+                    direction: transition?.direction,
+                    principal_view: ui_state.place.principal_view,
+                    roll_quarter_turn: ui_state.place.view_roll_quarter_turn,
+                    display_principal_view: ui_state.place.display_principal_view,
+                    display_roll_quarter_turn: ui_state.place.display_view_roll_quarter_turn,
+                    snap_anchor,
+                    focus_z: ui_state.place.focus_z,
+                    world_z_center: ui_state.place.world_z_center,
+                }));
+            } catch {
+                // ignore debug logging failures
+            }
+            save_place_principal_view();
+            save_place_view_roll_quarter_turn();
+        } else if (!frame.active) {
+            ui_state.place.display_principal_view = resolved.hard_view.principal_view;
+            ui_state.place.display_view_roll_quarter_turn = resolved.hard_view.roll_quarter_turn;
+        }
+
+        if (transition && frame.committed_this_frame) {
+            try {
+                console.log('[PLACE_CAMERA_DEBUG] transition handoff frame', JSON.stringify({
+                    kind: transition.kind,
+                    direction: transition.direction,
+                    committed_this_frame: frame.committed_this_frame,
+                    phase: frame.phase,
+                    display_view_before,
+                    display_view_after: resolved.hard_view,
+                    returned_euler: frame.euler,
+                }));
+                console.log('[PLACE_CAMERA_DEBUG] transition post_snap_sample', JSON.stringify({
+                    kind: transition.kind,
+                    direction: transition.direction,
+                    phase: frame.phase,
+                    post_sample: frame.euler,
+                    principal_view: ui_state.place.principal_view,
+                    roll_quarter_turn: ui_state.place.view_roll_quarter_turn,
+                    display_principal_view: ui_state.place.display_principal_view,
+                    display_roll_quarter_turn: ui_state.place.display_view_roll_quarter_turn,
+                }));
+            } catch {
+                // ignore debug logging failures
+            }
+        } else if (transition && !frame.active) {
+            try {
+                console.log('[PLACE_CAMERA_DEBUG] transition done', JSON.stringify({
+                    kind: transition.kind,
+                    direction: transition.direction,
+                    principal_view: ui_state.place.principal_view,
+                    roll_quarter_turn: ui_state.place.view_roll_quarter_turn,
+                    display_principal_view: ui_state.place.display_principal_view,
+                    display_roll_quarter_turn: ui_state.place.display_view_roll_quarter_turn,
+                }));
+            } catch {
+                // ignore debug logging failures
+            }
+        }
+
+        ui_state.place.view_transition = resolved.transition;
+        return frame;
+    }
+
+    function get_place_transition_euler(): { x: number; y: number; z: number } {
+        return get_place_transition_frame().euler;
+    }
+
+    function start_place_swing_transition(direction: 'left' | 'right' | 'up' | 'down'): void {
+        if (ui_state.place.view_transition) return;
+        const current = make_place_view_state(ui_state.place.principal_view, ui_state.place.view_roll_quarter_turn);
+        ui_state.place.view_transition = {
+            ...start_swing_transition(
+                direction,
+                performance.now(),
+                get_transition_tilt_for_command(current, 'swing', direction, 40),
+            ),
+            roll_quarter_turn: ui_state.place.view_roll_quarter_turn,
+        };
+        try {
+                console.log('[PLACE_CAMERA_DEBUG] transition start', JSON.stringify({
+                    kind: 'swing',
+                    direction,
+                    principal_view: current.principal_view,
+                    roll_quarter_turn: current.roll_quarter_turn,
+                    display_principal_view: ui_state.place.display_principal_view,
+                    display_roll_quarter_turn: ui_state.place.display_view_roll_quarter_turn,
+                    full_euler: ui_state.place.view_transition.full_euler,
+                }));
+        } catch {
+            // ignore debug logging failures
+        }
+    }
+
+    function start_place_roll_transition(direction: 'left' | 'right'): void {
+        if (ui_state.place.view_transition) return;
+        const current = make_place_view_state(ui_state.place.principal_view, ui_state.place.view_roll_quarter_turn);
+        ui_state.place.view_transition = start_roll_transition(
+            direction,
+            performance.now(),
+            ui_state.place.view_roll_quarter_turn,
+            get_transition_tilt_for_command(current, 'roll', direction, 40),
+        );
+        try {
+                console.log('[PLACE_CAMERA_DEBUG] transition start', JSON.stringify({
+                    kind: 'roll',
+                    direction,
+                    principal_view: current.principal_view,
+                    roll_quarter_turn: current.roll_quarter_turn,
+                    display_principal_view: ui_state.place.display_principal_view,
+                    display_roll_quarter_turn: ui_state.place.display_view_roll_quarter_turn,
+                    full_euler: ui_state.place.view_transition.full_euler,
+                }));
+        } catch {
+            // ignore debug logging failures
+        }
+    }
+
     function swing_place_camera(direction: 'left' | 'right' | 'up' | 'down'): void {
-        const next = swing_place_view(make_place_view_state(ui_state.place.principal_view, ui_state.place.view_roll_quarter_turn), direction);
-        ui_state.place.principal_view = next.principal_view;
-        ui_state.place.view_roll_quarter_turn = next.roll_quarter_turn;
-        save_place_principal_view();
-        save_place_view_roll_quarter_turn();
+        start_place_swing_transition(direction);
     }
 
     function roll_place_camera(direction: 'left' | 'right'): void {
-        const next = rotate_place_view_roll(make_place_view_state(ui_state.place.principal_view, ui_state.place.view_roll_quarter_turn), direction);
-        ui_state.place.principal_view = next.principal_view;
-        ui_state.place.view_roll_quarter_turn = next.roll_quarter_turn;
-        save_place_principal_view();
-        save_place_view_roll_quarter_turn();
+        start_place_roll_transition(direction);
     }
 
     let persist_timer: number | null = null;
@@ -3922,8 +4128,6 @@ export function create_app_state(): AppState {
     // Load persisted module state early so it affects initial rects/visibility.
     load_persisted_module_layout();
     load_place_focus_z();
-    load_place_principal_view();
-    load_place_view_roll_quarter_turn();
     load_place_focus_layer_opacity();
     load_place_painter_prefs();
 
@@ -5667,6 +5871,7 @@ export function create_app_state(): AppState {
                 claimed_by_other: Boolean(actor.claimed_by_other),
                 claimed_by_client_session_id: null,
                 can_claim: !actor.claimed_by_other,
+                can_delete: !actor.claimed_by_self && !actor.claimed_by_other,
             }));
             ui_state.actor_claim.current_actor_ref = typeof data.current_actor_ref === 'string' ? data.current_actor_ref : null;
             if (!ui_state.actor_claim.selected_actor_ref || !ui_state.actor_claim.actors.some((actor) => actor.actor_ref === ui_state.actor_claim.selected_actor_ref)) {
@@ -5794,7 +5999,12 @@ export function create_app_state(): AppState {
             ui_state.actor_claim.error = message;
             ui_state.actor_claim.is_visible = true;
             ui_state.actor_claim.is_blocking = !has_active_actor_claim();
-            ui_state.actor_claim.status_lines = ['claim failed', message];
+            if (message === 'controlled_actor_already_claimed' || message === 'controlled_actor_release_required') {
+                await refresh_actor_claim_state(['claim state changed', 'refreshing available actors']);
+                ui_state.actor_claim.error = message;
+            } else {
+                ui_state.actor_claim.status_lines = ['claim failed', message];
+            }
             apply_runtime_module_visibility();
         }
     }
@@ -5813,6 +6023,47 @@ export function create_app_state(): AppState {
             ui_state.actor_claim.status_lines = ['release failed', message];
             apply_runtime_module_visibility();
             throw err;
+        }
+    }
+
+    async function delete_selected_actor(): Promise<void> {
+        const actor_ref = String(ui_state.actor_claim.selected_actor_ref ?? '').trim();
+        if (!actor_ref) {
+            ui_state.actor_claim.status_lines = ['select an actor to delete'];
+            return;
+        }
+        if (ui_state.actor_claim.current_actor_ref === actor_ref) {
+            ui_state.actor_claim.status_lines = ['release your current actor first', 'current actor deletion is disabled here'];
+            return;
+        }
+        ui_state.actor_claim.is_submitting = true;
+        ui_state.actor_claim.error = null;
+        try {
+            const res = await fetch('http://localhost:8787/api/actors/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    slot: APP_CONFIG.selected_data_slot,
+                    session_token: get_session_token(),
+                    actor_ref,
+                }),
+            });
+            const data = await res.json().catch(() => null) as any;
+            if (!res.ok || !data?.ok) {
+                throw new Error(String(data?.error ?? `actor_delete_failed:${res.status}`));
+            }
+            ui_state.actor_claim.status_lines = [`deleted ${actor_ref}`, 'refreshing available actors'];
+            if (ui_state.actor_claim.selected_actor_ref === actor_ref) {
+                ui_state.actor_claim.selected_actor_ref = null;
+            }
+            await refresh_actor_claim_state(['actor deleted', 'select an actor to continue']);
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            ui_state.actor_claim.error = message;
+            ui_state.actor_claim.status_lines = ['delete failed', message];
+        } finally {
+            ui_state.actor_claim.is_submitting = false;
+            apply_runtime_module_visibility('actor_claim_module');
         }
     }
 
@@ -6024,6 +6275,17 @@ export function create_app_state(): AppState {
                     const next = !module_registry.is_visible('debug');
                     set_module_visible('debug', next);
                     flash_status([next ? 'Debug shown' : 'Debug hidden'], 900);
+                },
+            },
+            {
+                id: 'ui_toggle_camera_control',
+                label: module_registry.is_visible('camera_control') ? 'CAMERA HIDE' : 'CAMERA SHOW',
+                description: 'toggle camera control window',
+                rgb: get_color_by_name('pale_yellow').rgb,
+                on_trigger: () => {
+                    const next = !module_registry.is_visible('camera_control');
+                    set_module_visible('camera_control', next);
+                    flash_status([next ? 'Camera control shown' : 'Camera control hidden'], 900);
                 },
             },
             {
@@ -6494,16 +6756,31 @@ export function create_app_state(): AppState {
         }
     }
 
+    async function fetch_inventory_owner_view_payload(url: string): Promise<{ ok: boolean; data: any; status: number } | null> {
+        try {
+            const resp = await fetch(url);
+            const data = await resp.json().catch(() => null as any);
+            return { ok: resp.ok, data, status: resp.status };
+        } catch {
+            return null;
+        }
+    }
+
+    function extract_inventory_owner_view(payload: { ok: boolean; data: any } | null): OwnerInventoryView | null {
+        if (!payload?.ok || !payload.data?.ok || !payload.data?.view) return null;
+        return payload.data.view as OwnerInventoryView;
+    }
+
     async function load_actor_owner_inventory_view(actor_id: string): Promise<OwnerInventoryView | null> {
         if (!actor_id) return null;
         try {
-            const resp = await fetch(`http://localhost:8787/api/actor/private_state?actor_ref=${encodeURIComponent(`actor.${actor_id}`)}&slot=${APP_CONFIG.selected_data_slot}&session_token=${encodeURIComponent(get_session_token())}`);
-            const data = await resp.json();
-            if (!resp.ok || !data?.ok || !data?.view) {
-                debug_log(`[InventoryOwnerView] Failed to load actor inventory view for ${actor_id}: ${JSON.stringify(data)}`);
+            const payload = await fetch_inventory_owner_view_payload(`http://localhost:8787/api/actor/private_state?actor_ref=${encodeURIComponent(`actor.${actor_id}`)}&slot=${APP_CONFIG.selected_data_slot}&session_token=${encodeURIComponent(get_session_token())}`);
+            const view = extract_inventory_owner_view(payload);
+            if (!view) {
+                debug_log(`[InventoryOwnerView] Failed to load actor inventory view for ${actor_id}: ${JSON.stringify(payload?.data ?? null)}`);
                 return null;
             }
-            return data.view as OwnerInventoryView;
+            return view;
         } catch (err) {
             console.error('[InventoryOwnerView] Error loading actor inventory view:', err);
             return null;
@@ -6514,10 +6791,9 @@ export function create_app_state(): AppState {
         const normalized_actor_ref = String(actor_ref ?? '').trim();
         if (!normalized_actor_ref.startsWith('actor.')) return null;
         try {
-            const resp = await fetch(`http://localhost:8787/api/actor/private_state?actor_ref=${encodeURIComponent(normalized_actor_ref)}&slot=${APP_CONFIG.selected_data_slot}&session_token=${encodeURIComponent(get_session_token())}`);
-            const data = await resp.json().catch(() => null) as any;
-            if (!resp.ok || !data?.ok || !data?.actor) return null;
-            const place_id = String(data.actor?.location?.place_id ?? '').trim();
+            const payload = await fetch_inventory_owner_view_payload(`http://localhost:8787/api/actor/private_state?actor_ref=${encodeURIComponent(normalized_actor_ref)}&slot=${APP_CONFIG.selected_data_slot}&session_token=${encodeURIComponent(get_session_token())}`);
+            if (!payload?.ok || !payload.data?.ok || !payload.data?.actor) return null;
+            const place_id = String(payload.data.actor?.location?.place_id ?? '').trim();
             return place_id || null;
         } catch {
             return null;
@@ -6528,13 +6804,13 @@ export function create_app_state(): AppState {
         if (!actor_id || !item_id) return null;
         const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
         try {
-            const resp = await fetch(`${base_url}/api/inventory/actor_item_view?actor_id=${encodeURIComponent(actor_id)}&item_id=${encodeURIComponent(item_id)}`);
-            const data = await resp.json();
-            if (!resp.ok || !data?.ok || !data?.view) {
-                debug_log(`[InventoryOwnerView] Failed to load actor item inventory view for ${actor_id}.${item_id}: ${JSON.stringify(data)}`);
+            const payload = await fetch_inventory_owner_view_payload(`${base_url}/api/inventory/actor_item_view?actor_id=${encodeURIComponent(actor_id)}&item_id=${encodeURIComponent(item_id)}`);
+            const view = extract_inventory_owner_view(payload);
+            if (!view) {
+                debug_log(`[InventoryOwnerView] Failed to load actor item inventory view for ${actor_id}.${item_id}: ${JSON.stringify(payload?.data ?? null)}`);
                 return null;
             }
-            return data.view as OwnerInventoryView;
+            return view;
         } catch (err) {
             console.error('[InventoryOwnerView] Error loading actor item inventory view:', err);
             return null;
@@ -6545,10 +6821,8 @@ export function create_app_state(): AppState {
         if (!actor_id || !path) return null;
         const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
         try {
-            const resp = await fetch(`${base_url}/api/inventory/body_slot_view?actor_id=${encodeURIComponent(actor_id)}&path=${encodeURIComponent(path)}`);
-            const data = await resp.json();
-            if (!resp.ok || !data?.ok || !data?.view) return null;
-            return data.view as OwnerInventoryView;
+            const payload = await fetch_inventory_owner_view_payload(`${base_url}/api/inventory/body_slot_view?actor_id=${encodeURIComponent(actor_id)}&path=${encodeURIComponent(path)}`);
+            return extract_inventory_owner_view(payload);
         } catch {
             return null;
         }
@@ -6557,10 +6831,10 @@ export function create_app_state(): AppState {
     async function load_tile_owner_inventory_view(place_id: string, x: number, y: number, z: number): Promise<{ view: OwnerInventoryView; redirect?: any } | null> {
         const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
         try {
-            const resp = await fetch(`${base_url}/api/inventory/tile_view?place_id=${encodeURIComponent(place_id)}&x=${x}&y=${y}&z=${z}`);
-            const data = await resp.json();
-            if (!resp.ok || !data?.ok || !data?.view) return null;
-            return { view: data.view as OwnerInventoryView, redirect: data.redirect ?? undefined };
+            const payload = await fetch_inventory_owner_view_payload(`${base_url}/api/inventory/tile_view?place_id=${encodeURIComponent(place_id)}&x=${x}&y=${y}&z=${z}`);
+            const view = extract_inventory_owner_view(payload);
+            if (!view) return null;
+            return { view, redirect: payload?.data?.redirect ?? undefined };
         } catch {
             return null;
         }
@@ -6569,10 +6843,8 @@ export function create_app_state(): AppState {
     async function load_place_item_owner_inventory_view(place_id: string, item_id: string): Promise<OwnerInventoryView | null> {
         const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
         try {
-            const resp = await fetch(`${base_url}/api/inventory/place_item_view?place_id=${encodeURIComponent(place_id)}&item_id=${encodeURIComponent(item_id)}`);
-            const data = await resp.json();
-            if (!resp.ok || !data?.ok || !data?.view) return null;
-            return data.view as OwnerInventoryView;
+            const payload = await fetch_inventory_owner_view_payload(`${base_url}/api/inventory/place_item_view?place_id=${encodeURIComponent(place_id)}&item_id=${encodeURIComponent(item_id)}`);
+            return extract_inventory_owner_view(payload);
         } catch {
             return null;
         }
@@ -6581,10 +6853,8 @@ export function create_app_state(): AppState {
     async function load_pile_owner_inventory_view(place_id: string, position_key: string): Promise<OwnerInventoryView | null> {
         const base_url = APP_CONFIG.place_endpoint.replace('/api/place', '');
         try {
-            const resp = await fetch(`${base_url}/api/inventory/pile_view?place_id=${encodeURIComponent(place_id)}&position_key=${encodeURIComponent(position_key)}`);
-            const data = await resp.json();
-            if (!resp.ok || !data?.ok || !data?.view) return null;
-            return data.view as OwnerInventoryView;
+            const payload = await fetch_inventory_owner_view_payload(`${base_url}/api/inventory/pile_view?place_id=${encodeURIComponent(place_id)}&position_key=${encodeURIComponent(position_key)}`);
+            return extract_inventory_owner_view(payload);
         } catch {
             return null;
         }
@@ -7215,6 +7485,9 @@ export function create_app_state(): AppState {
             ui_state.place.current_place = actor_place;
             if (actor_place) set_command_handler_place(actor_place);
         }
+        if (ui_state.place.camera_target.mode === 'follow_actor') {
+            snap_place_camera_follow_to_actor();
+        }
     }
 
     function apply_scene_topology_meta(scene: SceneTopologyMeta, opts?: { selected_place_id?: string; mirror_to_current_place?: boolean }): void {
@@ -7231,6 +7504,9 @@ export function create_app_state(): AppState {
             ui_state.place.current_place_id = scene.actor_current_place_id;
             ui_state.place.current_place = actor_place;
             if (actor_place) set_command_handler_place(actor_place);
+        }
+        if (ui_state.place.camera_target.mode === 'follow_actor') {
+            snap_place_camera_follow_to_actor();
         }
     }
 
@@ -7438,6 +7714,10 @@ export function create_app_state(): AppState {
             dbg.push(`[pipeline] stage:${classify_movement_stage(movement_debug)} batch_age:${batch_age} actor_age:${actor_age} posts:${movement_debug.intent_posts_ok}/${movement_debug.intent_posts_failed} resend:${movement_debug.intent_post_resend_count}`);
             dbg.push(`[bridge] breath_latency:${movement_debug.last_breath_bridge_latency_ms}ms move_latency:${movement_debug.last_move_batch_bridge_latency_ms}ms move_batch:${interval_stats_string(movement_debug.move_batch_rx)}`);
             dbg.push(`[actor_updates] draw:${renderer_debug.actor_pos_change_count} applied:${movement_debug.last_move_batch_local_actor_updates} seq:${movement_debug.last_visible_step_seq ?? '-'} step_at:${movement_debug.last_visible_step_position ? `${movement_debug.last_visible_step_position.x},${movement_debug.last_visible_step_position.y},${movement_debug.last_visible_step_position.z ?? current_actor_z}` : '-'}`);
+            const trace = movement_debug.responsiveness_trace;
+            dbg.push(`[input_trace] seq:${trace.input_seq || '-'} kind:${trace.kind ?? '-'} dir:${intent_string(trace.direction)} stage:${trace.stage} next:${trace.ms_until_next_eligible_move}ms gate:${trace.gate ?? '-'} tap:${trace.tap_buffered}`);
+            dbg.push(`[input_diag] breath:${trace.accepted_breath || '-'} next_ctl:${trace.next_control_breath || '-'} bps:${trace.breaths_per_step || '-'} budget:${trace.move_budget_walk.toFixed(2)} debt:${trace.move_debt_walk}`);
+            dbg.push(`[latency] tap->visible p50:${format_sample_p50(movement_debug.input_to_visible_samples)} p95:${format_sample_p95(movement_debug.input_to_visible_samples)} accept->visible p50:${format_sample_p50(movement_debug.accept_to_visible_samples)} p95:${format_sample_p95(movement_debug.accept_to_visible_samples)} last:${trace.input_to_visible_ms || 0}/${trace.accept_to_visible_ms || 0}`);
             if (current_actor_tile) {
                 dbg.push(`[actor] ${current_actor?.actor_ref ?? '(none)'} @ ${current_actor_tile.x},${current_actor_tile.y},${current_actor_z} age:${actor_age}`);
             } else {
@@ -8534,6 +8814,50 @@ export function create_app_state(): AppState {
 
     // Create module registry for dynamic module management (Phase 7.5)
     const module_registry = create_module_registry();
+
+    const camera_control_fallback_space = createVoxelSpace(1, 1);
+    function apply_saved_camera_config_to_space(space: VoxelSpace): void {
+        const cam = loadPlaceCameraConfig();
+        if (typeof cam.scale_per_layer === 'number') space.camera.scale_per_layer = cam.scale_per_layer;
+        if (typeof cam.movement_per_layer === 'number') space.camera.movement_per_layer = cam.movement_per_layer;
+        if (typeof cam.mouse_angle_yaw_deg === 'number') space.camera.mouse_angle_yaw_deg = cam.mouse_angle_yaw_deg;
+        if (typeof cam.mouse_angle_pitch_deg === 'number') space.camera.mouse_angle_pitch_deg = cam.mouse_angle_pitch_deg;
+        if (typeof cam.mouse_angle_spring === 'number') space.camera.mouse_angle_spring = cam.mouse_angle_spring;
+        if (typeof cam.parallax_intensity === 'number') space.camera.parallax_intensity = cam.parallax_intensity;
+        if (typeof cam.parallax_move_enabled === 'boolean') space.camera.parallax_move_enabled = cam.parallax_move_enabled;
+        if (typeof cam.parallax_size_enabled === 'boolean') space.camera.parallax_size_enabled = cam.parallax_size_enabled;
+        if (cam.calibration) space.camera.calibration = { ...cam.calibration };
+    }
+    apply_saved_camera_config_to_space(camera_control_fallback_space);
+    camera_control_fallback_space.camera.parallax_move_enabled = camera_control_fallback_space.camera.parallax_move_enabled ?? true;
+    camera_control_fallback_space.camera.parallax_size_enabled = camera_control_fallback_space.camera.parallax_size_enabled ?? false;
+    camera_control_fallback_space.camera.show_all_layers = !ui_state.place.use_focus_layer_opacity;
+    camera_control_fallback_space.camera.parallax_intensity = Math.max(0, Math.min(1, camera_control_fallback_space.camera.parallax_intensity ?? 0.35));
+    camera_control_fallback_space.camera.mouse_angle_yaw_deg = Math.max(-45, Math.min(45, camera_control_fallback_space.camera.mouse_angle_yaw_deg ?? 5));
+    camera_control_fallback_space.camera.mouse_angle_pitch_deg = Math.max(-45, Math.min(45, camera_control_fallback_space.camera.mouse_angle_pitch_deg ?? 4));
+    camera_control_fallback_space.camera.mouse_angle_spring = Math.max(1, Math.min(20, camera_control_fallback_space.camera.mouse_angle_spring ?? 10));
+    camera_control_fallback_space.camera.base_layer_scale = 1.0;
+    camera_control_fallback_space.camera.scale_per_layer = typeof camera_control_fallback_space.camera.scale_per_layer === 'number' ? camera_control_fallback_space.camera.scale_per_layer : 0.06;
+    camera_control_fallback_space.camera.movement_per_layer = typeof camera_control_fallback_space.camera.movement_per_layer === 'number' ? camera_control_fallback_space.camera.movement_per_layer : 12;
+    camera_control_fallback_space.camera.char_spacing_x = 1.0;
+    camera_control_fallback_space.camera.char_spacing_y = 1.0;
+    (camera_control_fallback_space.camera as any).pan_behavior = 'uniform';
+
+    function get_live_place_camera_space(): VoxelSpace | null {
+        const place_module = module_registry.get('place') as any;
+        const live = place_module?.get_debug_dom_space?.();
+        return live && typeof live === 'object' ? live as VoxelSpace : null;
+    }
+
+    function get_camera_control_space(): VoxelSpace {
+        return get_live_place_camera_space() ?? camera_control_fallback_space;
+    }
+
+    function update_camera_control_spaces(mutator: (space: VoxelSpace) => void): void {
+        mutator(camera_control_fallback_space);
+        const live = get_live_place_camera_space();
+        if (live && live !== camera_control_fallback_space) mutator(live);
+    }
     ui_state.modules.registry = module_registry;
 
     // Apply persisted visibility defaults before modules are used.
@@ -8723,10 +9047,7 @@ export function create_app_state(): AppState {
         if (ui_state.place.camera_target.mode === 'free') return;
         const target = resolve_follow_actor_camera_focus_region();
         if (!target) return;
-        const last_ms = Math.max(0, Math.floor(Number(ui_state.place.camera_target.last_follow_update_ms) || 0));
-        const dt_ms = last_ms > 0 ? Math.max(1, now_ms - last_ms) : 16;
         ui_state.place.camera_target.last_follow_update_ms = now_ms;
-        const dt = Math.max(0.001, Math.min(0.05, dt_ms / 1000));
         const pose = ui_state.place.camera_target.region_pose;
         if (!pose) {
             ui_state.place.camera_target.region_pose = { x: target.region_x, y: target.region_y, z: target.world_z };
@@ -8734,15 +9055,11 @@ export function create_app_state(): AppState {
             ui_state.place.world_z_center = Math.floor(target.world_z);
             return;
         }
-        const follow_tau_xy = 0.10;
-        const follow_tau_z = 0.14;
-        const alpha_xy = 1 - Math.exp(-dt / follow_tau_xy);
-        const alpha_z = 1 - Math.exp(-dt / follow_tau_z);
-        pose.x += (target.region_x - pose.x) * alpha_xy;
-        pose.y += (target.region_y - pose.y) * alpha_xy;
-        pose.z += (target.world_z - pose.z) * alpha_z;
-        ui_state.place.world_z_center = Math.floor(pose.z);
-        sync_place_focus_plane_from_anchor({ x: pose.x, y: pose.y, z: pose.z });
+        pose.x = target.region_x;
+        pose.y = target.region_y;
+        pose.z = target.world_z;
+        ui_state.place.world_z_center = Math.floor(target.world_z);
+        sync_place_focus_plane_from_anchor({ x: target.region_x, y: target.region_y, z: target.world_z });
     }
 
     function get_place_camera_target_position(): { x: number; y: number } | null {
@@ -8750,19 +9067,50 @@ export function create_app_state(): AppState {
             return { ...ui_state.place.camera_target.tile };
         }
 
-        const pose = ui_state.place.camera_target.region_pose;
         const place = get_render_place();
-        const origin = get_place_region_origin(place);
+        const focus = get_place_camera_focus_target_for_render_place(place);
+        if (focus) return { x: focus.x, y: focus.y };
+
+        return null;
+    }
+
+    function get_place_camera_focus_target_for_render_place(render_place: Place | null | undefined): { x: number; y: number; z: number } | null {
+        if (!render_place) return null;
+        const origin = get_place_region_origin(render_place);
+        const pose = ui_state.place.camera_target.region_pose;
         if (pose && origin) {
             return {
-                x: pose.x - origin.x,
-                y: pose.y - origin.y,
+                x: Math.floor(pose.x - origin.x),
+                y: Math.floor(pose.y - origin.y),
+                z: Math.floor(pose.z),
             };
         }
 
-        const focus = get_entity_focus_tile_in_place(place, get_follow_camera_entity_ref());
-        if (!focus) return null;
-        return { x: focus.x, y: focus.y };
+        const target = resolve_follow_actor_camera_focus_region();
+        if (target && target.place_id === render_place.id) {
+            return {
+                x: Math.floor(target.local_x),
+                y: Math.floor(target.local_y),
+                z: Math.floor(target.world_z),
+            };
+        }
+
+        return null;
+    }
+
+    function get_active_place_focus_target_for_render_place(): { x: number; y: number; z: number } | null {
+        const render_place = get_render_place();
+        if (!render_place) return null;
+
+        if (ui_state.place.camera_target.mode === 'free' && ui_state.place.camera_target.tile) {
+            return {
+                x: Math.floor(ui_state.place.camera_target.tile.x),
+                y: Math.floor(ui_state.place.camera_target.tile.y),
+                z: get_focus_world_z_for_current_place(),
+            };
+        }
+
+        return get_place_camera_focus_target_for_render_place(render_place);
     }
 
     function set_place_camera_target_position(tile: { x: number; y: number }, mode: 'follow_actor' | 'free' = 'free'): void {
@@ -8916,8 +9264,11 @@ export function create_app_state(): AppState {
             weight_index_to_css: APP_CONFIG.weight_index_to_css,
             get_focus_z: () => ui_state.place.focus_z,
             set_focus_z: (z) => { ui_state.place.focus_z = z; save_place_focus_z(); },
-            get_principal_view: () => ui_state.place.principal_view,
-            get_view_roll_quarter_turn: () => ui_state.place.view_roll_quarter_turn,
+            get_principal_view: () => ui_state.place.display_principal_view,
+            get_view_roll_quarter_turn: () => ui_state.place.display_view_roll_quarter_turn,
+            get_view_transition_frame: () => get_place_transition_frame(),
+            get_view_transition_euler: () => get_place_transition_euler(),
+            get_view_transition_kind: () => ui_state.place.view_transition?.kind ?? null,
             get_use_focus_layer_opacity: () => ui_state.place.use_focus_layer_opacity,
             get_world_z_center: () => ui_state.place.world_z_center,
             get_mouse_parallax: () => ui_state.place.mouse_parallax,
@@ -8986,6 +9337,7 @@ export function create_app_state(): AppState {
             on_place_painter_resize_end: () => { void finish_place_resize_session(); },
             on_place_painter_resize_adjust_z: adjust_place_resize_session_z,
             get_camera_target_position: get_place_camera_target_position,
+            get_active_focus_target: get_active_place_focus_target_for_render_place,
             get_camera_target_mode: () => ui_state.place.camera_target.mode,
             set_camera_target_position: set_place_camera_target_position,
             get_display_name_for_ref: (entity_ref: string) => get_entity_display_name(entity_ref),
@@ -9912,6 +10264,56 @@ export function create_app_state(): AppState {
             on_resize: (new_rect) => persist_module_rect('debug_commander_module', new_rect),
         }),
 
+        makePlaceCameraControlModule({
+            id: 'camera_control',
+            rect: get_persisted_rect('camera_control', { x0: 126, y0: 10, x1: 158, y1: 42 }),
+            getSpace: () => get_camera_control_space(),
+            onParallaxMoveToggle: (enabled) => {
+                update_camera_control_spaces((space) => { space.camera.parallax_move_enabled = enabled; });
+                saveCameraConfig({ parallax_move_enabled: enabled });
+            },
+            onParallaxSizeToggle: (enabled) => {
+                update_camera_control_spaces((space) => { space.camera.parallax_size_enabled = enabled; });
+                saveCameraConfig({ parallax_size_enabled: enabled });
+            },
+            onOcclusionToggle: (enabled) => {
+                update_camera_control_spaces((space) => { space.camera.show_all_layers = !enabled; });
+                set_place_focus_layer_opacity_enabled(enabled);
+                saveCameraConfig({ show_all_layers: !enabled });
+            },
+            onCalibrationChange: (x, y) => {
+                update_camera_control_spaces((space) => { space.camera.calibration = { x, y }; });
+                savePlaceCameraCalibration({ x, y });
+            },
+            onCalibrationReset: () => {
+                update_camera_control_spaces((space) => { space.camera.calibration = { x: 0, y: 0 }; });
+                savePlaceCameraCalibration({ x: 0, y: 0 });
+            },
+            onScalePerLayerChange: (value) => {
+                update_camera_control_spaces((space) => { space.camera.scale_per_layer = value; });
+                saveCameraConfig({ scale_per_layer: value });
+            },
+            onMovementPerLayerChange: (value) => {
+                update_camera_control_spaces((space) => { space.camera.movement_per_layer = value; });
+                saveCameraConfig({ movement_per_layer: value });
+            },
+            onMouseAngleYawDegChange: (value) => {
+                update_camera_control_spaces((space) => { space.camera.mouse_angle_yaw_deg = value; });
+                saveCameraConfig({ mouse_angle_yaw_deg: value });
+            },
+            onMouseAnglePitchDegChange: (value) => {
+                update_camera_control_spaces((space) => { space.camera.mouse_angle_pitch_deg = value; });
+                saveCameraConfig({ mouse_angle_pitch_deg: value });
+            },
+            onMouseAngleSpringChange: (value) => {
+                update_camera_control_spaces((space) => { space.camera.mouse_angle_spring = value; });
+                saveCameraConfig({ mouse_angle_spring: value });
+            },
+            onMove: (new_rect) => persist_module_rect('camera_control', new_rect),
+            onResize: (new_rect) => persist_module_rect('camera_control', new_rect),
+            onClose: () => set_module_visible('camera_control', false),
+        }),
+
         make_roller_module({
             id: 'roller',
             rect: get_persisted_rect('roller', { x0: ROLL_X0, y0: BTN_Y0, x1: ROLL_X1, y1: BTN_Y1 }),
@@ -10688,6 +11090,7 @@ export function create_app_state(): AppState {
             on_claim_selected: () => { void claim_selected_actor(); },
             on_create_actor: () => { void open_character_creation_module(); },
             on_release_current: () => { void release_actor_claim_and_reopen(); },
+            on_delete_selected: () => { void delete_selected_actor(); },
             on_refresh: () => { void refresh_actor_claim_state(); },
             on_close: () => close_actor_claim_module(),
             on_move: (new_rect) => persist_module_rect('actor_claim_module', new_rect),
@@ -10951,6 +11354,10 @@ export function create_app_state(): AppState {
         ui_state.modules.visibility.set('debug_commander_module', true);
         module_registry.set_visibility('debug_commander_module', true);
     }
+    if (!ui_state.modules.visibility.has('camera_control')) {
+        ui_state.modules.visibility.set('camera_control', false);
+        module_registry.set_visibility('camera_control', false);
+    }
     if (!ui_state.modules.visibility.has('initiative')) {
         ui_state.modules.visibility.set('initiative', module_registry.is_visible('initiative'));
     }
@@ -11084,6 +11491,10 @@ export function create_app_state(): AppState {
         const place_id = String(payload?.place_id ?? '').trim();
         if (!place_id || !is_place_visible_in_scene(place_id)) return;
         void refresh_single_scene_place(place_id);
+    });
+    wsClient.on('ACTOR_CLAIM_STATE_CHANGED', (_payload: any) => {
+        if (!ui_state.actor_claim.is_visible || ui_state.actor_claim.is_submitting) return;
+        void refresh_actor_claim_state();
     });
     wsClient.on('ACTOR_PRIVATE_STATE_CHANGED', (payload: any) => {
         const actor_ref = String(payload?.actor_ref ?? '').trim();

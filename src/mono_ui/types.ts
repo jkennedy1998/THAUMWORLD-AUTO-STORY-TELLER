@@ -178,6 +178,7 @@ export type Module = {
     OnKeyDown?(e: KeyboardEvent): void;
     OnKeyUp?(e: KeyboardEvent): void;
     OnTextInput?(text: string): void;
+    WantsTextCapture?(): boolean;
     // optional global shortcut lane (UI calls first)
     OnGlobalKeyDown?(e: KeyboardEvent): void;
     // optional global key-up lane (UI calls even when module is not focused)

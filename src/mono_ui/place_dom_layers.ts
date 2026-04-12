@@ -2,7 +2,7 @@ import type { Rgb, Rect } from "./types.js";
 import type { GridCell } from "../ascii_painter/types.js";
 import type { VoxelSpace, VoxelLayer } from "../ascii_painter/voxel_space.js";
 import { createVoxelSpace } from "../ascii_painter/voxel_space.js";
-import { createVoxelDOMRenderer, type ViewportState, VoxelDOMRenderer } from "../ascii_painter/voxel_dom_renderer.js";
+import { createVoxelDOMRenderer, type ViewportState, type VoxelDomRendererDebugState, VoxelDOMRenderer } from "../ascii_painter/voxel_dom_renderer.js";
 
 export type PlaceDomLayersOpts = {
   render_backend: 'font' | 'atlas';
@@ -52,6 +52,14 @@ export class PlaceDomLayers {
 
   get_is_mounted(): boolean {
     return !!this.renderer;
+  }
+
+  get_space(): VoxelSpace | null {
+    return this.space;
+  }
+
+  get_debug_state(): VoxelDomRendererDebugState | null {
+    return this.renderer ? this.renderer.getDebugState() : null;
   }
 
   mount(container: HTMLElement, place_id: string): void {
@@ -126,8 +134,20 @@ export class PlaceDomLayers {
     s.bounds.minZ = minZ;
     s.bounds.maxZ = maxZ;
 
-    // Force all layers visible; focus layer alignment is controlled by focus_plane.
-    s.camera.show_all_layers = true;
+    // Place uses one grounded follow pan across all layers and starts with subtle readable defaults.
+    (s.camera as any).pan_behavior = 'uniform';
+    s.camera.show_all_layers = false;
+    s.camera.parallax_move_enabled = true;
+    s.camera.parallax_size_enabled = false;
+    s.camera.parallax_intensity = 0.35;
+    s.camera.mouse_angle_yaw_deg = 5;
+    s.camera.mouse_angle_pitch_deg = 4;
+    s.camera.mouse_angle_spring = 10;
+    s.camera.movement_per_layer = 12;
+    s.camera.scale_per_layer = 0.06;
+    s.camera.base_layer_scale = 1.0;
+    s.camera.char_spacing_x = 1.0;
+    s.camera.char_spacing_y = 1.0;
 
     this.space = s;
     this.width = w;
@@ -150,6 +170,12 @@ export class PlaceDomLayers {
       offsetY: 0,
     };
     this.renderer.setViewport(v);
+  }
+
+  set_camera_pan(pan_x: number, pan_y: number): void {
+    if (!this.space) return;
+    this.space.camera.pan_x = Number.isFinite(pan_x) ? pan_x : 0;
+    this.space.camera.pan_y = Number.isFinite(pan_y) ? pan_y : 0;
   }
 
   set_mouse_parallax(norm_x: number, norm_y: number): void {
@@ -191,27 +217,32 @@ export class PlaceDomLayers {
     parallax_size_enabled?: boolean;
     scale_per_layer?: number;
     movement_per_layer?: number;
+    mouse_angle_yaw_deg?: number;
+    mouse_angle_pitch_deg?: number;
+    mouse_angle_spring?: number;
     base_layer_scale?: number;
+    euler_rotation?: { x: number; y: number; z: number };
+    transition_euler?: { x: number; y: number; z: number };
+    visual_pivot_px?: { x: number; y: number };
   }): void {
     if (!this.space) return;
-
-    // Always enable perspective-style transforms so focus is readable via parallax.
-    this.space.camera.parallax_move_enabled = true;
+    (this.space.camera as any).pan_behavior = 'uniform';
 
     if (tuning.calibration) this.space.camera.calibration = { ...tuning.calibration };
     if (typeof tuning.char_spacing_x === 'number') this.space.camera.char_spacing_x = tuning.char_spacing_x;
     if (typeof tuning.char_spacing_y === 'number') this.space.camera.char_spacing_y = tuning.char_spacing_y;
     if (typeof tuning.parallax_intensity === 'number') this.space.camera.parallax_intensity = tuning.parallax_intensity;
+    if (typeof tuning.parallax_move_enabled === 'boolean') this.space.camera.parallax_move_enabled = tuning.parallax_move_enabled;
     if (typeof tuning.parallax_size_enabled === 'boolean') this.space.camera.parallax_size_enabled = tuning.parallax_size_enabled;
     if (typeof tuning.scale_per_layer === 'number') this.space.camera.scale_per_layer = tuning.scale_per_layer;
     if (typeof tuning.movement_per_layer === 'number') this.space.camera.movement_per_layer = tuning.movement_per_layer;
+    if (typeof tuning.mouse_angle_yaw_deg === 'number') this.space.camera.mouse_angle_yaw_deg = tuning.mouse_angle_yaw_deg;
+    if (typeof tuning.mouse_angle_pitch_deg === 'number') this.space.camera.mouse_angle_pitch_deg = tuning.mouse_angle_pitch_deg;
+    if (typeof tuning.mouse_angle_spring === 'number') this.space.camera.mouse_angle_spring = tuning.mouse_angle_spring;
     if (typeof tuning.base_layer_scale === 'number') this.space.camera.base_layer_scale = tuning.base_layer_scale;
-
-    // Even if painter saved this as false, keep move-enabled true here.
-    // (We still accept the saved intensity/movement values.)
-    if (typeof tuning.parallax_move_enabled === 'boolean') {
-      // ignore; Place forces true
-    }
+    if (tuning.euler_rotation) this.space.camera.euler_rotation = { ...tuning.euler_rotation };
+    if (tuning.transition_euler) (this.space.camera as any).transition_euler = { ...tuning.transition_euler };
+    if (tuning.visual_pivot_px) (this.space.camera as any).visual_pivot_px = { ...tuning.visual_pivot_px };
   }
 
   set_layer_cells(z: number, cells: GridCell[][], content_version?: number): void {
