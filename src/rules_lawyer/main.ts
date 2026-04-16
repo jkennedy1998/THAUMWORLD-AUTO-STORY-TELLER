@@ -17,6 +17,7 @@ import { get_configured_data_slot } from "../shared/boot_env.js";
 const data_slot_number = get_configured_data_slot();
 const POLL_MS = SERVICE_CONFIG.POLL_MS.RULES_LAWYER;
 const ITERATION_LIMIT = SERVICE_CONFIG.MAX_BROKER_ITERATIONS;
+const SERVICE_HEARTBEATS_VERBOSE = false;
 
 type PendingJob = {
     msg: MessageEnvelope;
@@ -329,7 +330,7 @@ async function tick(outbox_path: string, log_path: string): Promise<void> {
         }
         
         // Log heartbeat periodically to show we're alive
-        if (tickCount % HEARTBEAT_INTERVAL === 0) {
+        if (SERVICE_HEARTBEATS_VERBOSE && tickCount % HEARTBEAT_INTERVAL === 0) {
             const allBrokered = outbox.messages.filter(m => m.stage?.startsWith("brokered_"));
             debug_log("RulesLawyer: heartbeat", { 
                 tickCount, 

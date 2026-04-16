@@ -1,0 +1,23 @@
+{
+  "id": "painter_primary_click_draw",
+  "test_name": "paint_test_primary_click_pencil_draws_cell",
+  "clock_mode": "realtime_ms",
+  "open_ms": 6000,
+  "start_delay_ms": 1200,
+  "end_delay_ms": 1000,
+  "actions": [
+    { "at_ms": 0, "type": "capture_painter_camera_target", "slot": "camera_target_start" },
+    { "at_ms": 0, "type": "capture_painter_bounds", "slot": "bounds_start" },
+    { "at_ms": 0, "type": "capture_painter_focus_plane", "slot": "focus_plane_start" },
+    { "at_ms": 50, "type": "pointer_move", "space": "grid", "x": 60, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 100, "type": "capture_painter_interaction_anchor", "slot": "anchor_start" },
+    { "at_ms": 100, "type": "key_tap", "code": "KeyP", "key": "p", "hold_ms": 30 },
+    { "at_ms": 500, "type": "assert_painter_primary_tool", "tool": "pencil" },
+    { "at_ms": 520, "type": "assert_painter_anchor_in_bounds", "anchor_slot": "anchor_start" },
+    { "at_ms": 700, "type": "capture_painter_anchor_cell", "slot": "cell_before", "anchor_slot": "anchor_start" },
+    { "at_ms": 900, "type": "pointer_click", "space": "grid", "x": 60, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 1200, "type": "capture_painter_interaction_anchor", "slot": "anchor_after_click" },
+    { "at_ms": 1300, "type": "capture_painter_anchor_cell", "slot": "cell_after", "anchor_slot": "anchor_start" },
+    { "at_ms": 1320, "type": "assert_painter_anchor_cell_changed", "slot": "cell_before", "anchor_slot": "anchor_start" }
+  ]
+}

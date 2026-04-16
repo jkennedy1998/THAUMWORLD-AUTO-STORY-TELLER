@@ -29,11 +29,12 @@ import type { GridCell } from "../../ascii_painter/types.js";
 import { create_canvas } from "../canvas.js";
 import { touch_world_layers_owner } from "../world_layers_owner.js";
 import { compute_dom_viewport_for_rect } from "../runtime/dom_viewport.js";
+import { get_ui_cell_metrics } from "../runtime/ui_metrics.js";
 import { compute_anchor_relative_mouse_parallax } from "../runtime/camera_anchor_runtime.js";
 import { create_place_camera_controller } from "../runtime/place_camera_controller.js";
 import { build_visible_plane_coordinates, get_atlas_view_direction, get_plane_cardinal_neighbor_offsets_for_view_state, get_projected_bounds_with_roll, make_place_view_state, map_screen_move_intent_to_ground_delta, normalize_place_principal_view, normalize_place_view_roll_quarter_turn, project_world_point_with_roll, type PlacePrincipalView, type PlaceViewRollQuarterTurn, type PlaceViewState, type SceneProjectionBounds, unproject_plane_point_with_roll } from "../runtime/place_view_projection.js";
 import type { PlaceViewTransitionFrame } from "../runtime/place_view_camera_runtime.js";
-import { get_move_intent, is_jump_down, subscribe_move_intent_changes, type MoveIntent, type MoveIntentChangeMeta } from "../runtime/input_actions.js";
+import { get_move_intent, is_jump_down, subscribe_move_intent_changes, type MoveIntent } from "../runtime/input_actions.js";
 import type { GizmoState, ModuleGizmosConfig } from "../module_gizmos.js";
 import {
   clear_gizmo_hover_state,
@@ -149,6 +150,9 @@ function connector_direction_to_step(direction: string): { dx: number; dy: numbe
 const place_debug_sample_counts = new Map<string, number>();
 const PLACE_MODULE_TIMING_VERSION = '2026-03-14-visible-pulse-v1';
 const DEFAULT_FOCUS_Z = 0;
+const SEAM_SCENE_DEBUG_ENABLED = false;
+const PLACE_CAMERA_DEBUG_ENABLED = false;
+const RENDERER_MOVE_BATCH_TRACE_ENABLED = false;
 function should_sample_place_debug(prefix: string, sampleEvery: number): boolean {
   const next = (place_debug_sample_counts.get(prefix) ?? 0) + 1;
   place_debug_sample_counts.set(prefix, next);
@@ -309,6 +313,7 @@ export type PlaceModuleConfig = {
   get_scene_selected_place_id?: () => string | null;
   get_actor_current_place_id?: () => string | null;
   get_scene_connector_hops_visible?: () => number;
+  on_place_breath_tick?: (breath_index: number, meta?: { place_id: string }) => void;
   on_move?: (new_rect: Rect) => void;
   on_resize?: (new_rect: Rect) => void;
   on_move_end?: (final_rect: Rect) => void;
@@ -768,6 +773,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     weight_index_to_css: config.weight_index_to_css,
   });
   let dom_pan_px = { x: 0, y: 0, tileW: 0, tileH: 0, scale: 1 };
+  let dom_pan_event_seen = false;
+  let dom_pan_bootstrap_frames_left = 10;
   let dom_last_place_id: string | null = null;
   let dom_last_view_signature: string | null = null;
   let dom_pending_view_signature: string | null = null;
@@ -788,14 +795,57 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
   try {
     window.addEventListener('thaumworld_ui_pan', (ev: any) => {
-      dom_pan_px.x = Number(ev?.detail?.pan_x_px) || dom_pan_px.x;
-      dom_pan_px.y = Number(ev?.detail?.pan_y_px) || dom_pan_px.y;
-      dom_pan_px.tileW = Number(ev?.detail?.tile_w_px) || dom_pan_px.tileW;
-      dom_pan_px.tileH = Number(ev?.detail?.tile_h_px) || dom_pan_px.tileH;
-      dom_pan_px.scale = Number(ev?.detail?.scale) || dom_pan_px.scale;
+      const next_x = Number(ev?.detail?.pan_x_px);
+      const next_y = Number(ev?.detail?.pan_y_px);
+      const next_tile_w = Number(ev?.detail?.tile_w_px);
+      const next_tile_h = Number(ev?.detail?.tile_h_px);
+      const next_scale = Number(ev?.detail?.scale);
+      if (Number.isFinite(next_x)) dom_pan_px.x = next_x;
+      if (Number.isFinite(next_y)) dom_pan_px.y = next_y;
+      if (Number.isFinite(next_tile_w) && next_tile_w > 0) dom_pan_px.tileW = next_tile_w;
+      if (Number.isFinite(next_tile_h) && next_tile_h > 0) dom_pan_px.tileH = next_tile_h;
+      if (Number.isFinite(next_scale) && next_scale > 0) dom_pan_px.scale = next_scale;
+      dom_pan_event_seen = true;
+      dom_pan_bootstrap_frames_left = 0;
     });
   } catch {
     // ignore
+  }
+
+  function get_bootstrap_ui_scale(): number {
+    if (Number.isFinite(dom_pan_px.scale) && dom_pan_px.scale > 0) return dom_pan_px.scale;
+    try {
+      const raw = window.localStorage.getItem('thaumworld_ui_scale');
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    } catch {
+      // ignore
+    }
+    return 1;
+  }
+
+  function refresh_dom_pan_bootstrap(): void {
+    const should_refresh = !dom_pan_event_seen || dom_pan_bootstrap_frames_left > 0 || dom_pan_px.tileW <= 0 || dom_pan_px.tileH <= 0;
+    if (!should_refresh) return;
+
+    const scale = get_bootstrap_ui_scale();
+    const metrics = get_ui_cell_metrics(scale, config.base_font_size_px);
+    if (metrics.cell_w_px > 0) dom_pan_px.tileW = metrics.cell_w_px;
+    if (metrics.cell_h_px > 0) dom_pan_px.tileH = metrics.cell_h_px;
+    if (metrics.scale > 0) dom_pan_px.scale = metrics.scale;
+
+    try {
+      const canvas = document.getElementById('mono_canvas') as HTMLCanvasElement | null;
+      const rect = canvas?.getBoundingClientRect();
+      if (rect && Number.isFinite(rect.left) && Number.isFinite(rect.top)) {
+        dom_pan_px.x = rect.left;
+        dom_pan_px.y = rect.top;
+      }
+    } catch {
+      // ignore
+    }
+
+    if (dom_pan_bootstrap_frames_left > 0) dom_pan_bootstrap_frames_left -= 1;
   }
 
   try {
@@ -1326,7 +1376,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       connector_lookup,
     };
     scene_place_cache = next_cache;
-    debug_log_place(`SEAM_SCENE visible ${JSON.stringify({ selected_place_id: selected_place.id, actor_current_place_id, hops_visible, visible_place_ids: visible_places.map((p) => p.id) })}`);
+    if (SEAM_SCENE_DEBUG_ENABLED) {
+      debug_log_place(`SEAM_SCENE visible ${JSON.stringify({ selected_place_id: selected_place.id, actor_current_place_id, hops_visible, visible_place_ids: visible_places.map((p) => p.id) })}`);
+    }
     return next_cache;
   }
 
@@ -1409,6 +1461,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   }
 
   function build_place_camera_frame(selected_place: Place, inner: Rect, transition_euler: { x: number; y: number; z: number }, transition_kind: 'swing' | 'roll' | null): PlaceCameraFrame {
+    refresh_dom_pan_bootstrap();
     const configured_view = get_configured_place_view_state();
     const configured_signature = get_place_view_signature(configured_view);
     const transition_active = Math.abs(transition_euler.x) > 0.01 || Math.abs(transition_euler.y) > 0.01 || Math.abs(transition_euler.z) > 0.01;
@@ -2008,11 +2061,55 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     wasd_next_breath: 0,
     space_down_ms: null as number | null,
     self_exclusion_logged: false,
-    // Track last polled intent to detect changes
-    last_polled_intent: null as { dx: number; dy: number } | null,
+    // Track the last gameplay intent sampled and sent on a place breath.
+    last_sent_intent: null as { dx: number; dy: number } | null,
+    last_sent_actor_ref: null as string | null,
+    last_sent_place_id: null as string | null,
     // Monotonic sequence for server-side edge ordering.
     last_input_seq_sent: 0,
   };
+  const is_external_gameplay_input = (window as Window).electronAPI?.inputHostKind === 'electron_bridge';
+  let last_published_gameplay_context_key = '';
+  let latest_live_move_intent: MoveIntent = get_move_intent();
+
+  subscribe_move_intent_changes((intent) => {
+    latest_live_move_intent = intent ? { dx: intent.dx, dy: intent.dy } : null;
+    const place = config.get_place();
+    const actor = place ? get_controlled_place_actor(place) : null;
+    record_intent_observed(latest_live_move_intent, {
+      mode: place && actor ? get_move_mode() : null,
+      place_id: place?.id ?? null,
+      actor_ref: actor?.actor_ref ?? null,
+    });
+    if (!is_external_gameplay_input) {
+      const breath_index = Math.floor(Number((place as any)?.breath_index ?? 0)) || 0;
+      dispatch_sampled_intent(latest_live_move_intent, breath_index);
+    }
+  });
+
+  function publish_external_gameplay_context(): void {
+    if (!is_external_gameplay_input) return;
+    const place = config.get_place();
+    const actor = get_controlled_place_actor(place);
+    const view_state = get_place_view_state();
+    const payload = {
+      source: 'place_module',
+      session_token: config.get_session_token?.() ?? null,
+      actor_ref: actor?.actor_ref ?? null,
+      place_id: place?.id ?? null,
+      move_mode: get_move_mode(),
+      principal_view: view_state.principal_view,
+      roll_quarter_turn: view_state.roll_quarter_turn,
+    };
+    const next_key = JSON.stringify(payload);
+    if (next_key === last_published_gameplay_context_key) return;
+    last_published_gameplay_context_key = next_key;
+    try {
+      (window as Window).electronAPI?.gameplayInputPublishContext?.(payload);
+    } catch {
+      // ignore
+    }
+  }
 
   function next_input_seq(explicit_seq?: number | null): number {
     const requested = Math.max(0, Math.floor(Number(explicit_seq ?? 0)) || 0);
@@ -2036,7 +2133,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   }): Promise<void> {
     record_intent_post_started(meta);
     try {
-      const response = await fetch('http://localhost:8787/api/movement/intent', {
+      const response = await fetch('http://127.0.0.1:8787/api/movement/intent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2090,7 +2187,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     if (!actor) return;
     try {
       const actor_id = String(actor.actor_ref).replace(/^actor\./, '');
-      const response = await fetch('http://localhost:8787/api/actor/debug/ascend', {
+      const response = await fetch('http://127.0.0.1:8787/api/actor/debug/ascend', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2120,32 +2217,55 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     }
   }
 
-  function dispatch_transition_intent(intent: MoveIntent, meta: MoveIntentChangeMeta): void {
+  function sampled_intent_key(intent: { dx: number; dy: number } | null): string {
+    if (!intent) return 'none';
+    return `${intent.dx},${intent.dy}`;
+  }
+
+  function dispatch_sampled_intent(intent: MoveIntent, breath_index: number): void {
     const place = config.get_place();
     if (!place) return;
     const actor = get_controlled_place_actor(place);
     if (!actor) return;
     const mode = get_move_mode();
     const mapped_intent = map_screen_move_intent_to_ground_delta(get_place_view_state(), intent);
-    const is_release = meta.kind === 'release' || mapped_intent === null;
-    const reason = is_release ? 'release' : 'change';
     const dx = mapped_intent?.dx ?? 0;
     const dy = mapped_intent?.dy ?? 0;
-    const input_seq = next_input_seq(meta.input_seq);
-
     record_intent_observed(mapped_intent, { mode, place_id: place.id, actor_ref: actor.actor_ref });
-    input_state.last_polled_intent = mapped_intent ? { dx: mapped_intent.dx, dy: mapped_intent.dy } : null;
 
-    debug_log_place('MOVE_VEL_TEST immediate input intent dispatch', {
+    const previous_intent = input_state.last_sent_intent;
+    const previous_key = sampled_intent_key(previous_intent);
+    const next_key = sampled_intent_key(mapped_intent);
+    const actor_changed = input_state.last_sent_actor_ref !== String(actor.actor_ref);
+    const place_changed = input_state.last_sent_place_id !== String(place.id);
+    const force_refresh = actor_changed || place_changed;
+    if (!force_refresh && previous_key === next_key) return;
+    if (force_refresh && previous_key === next_key && mapped_intent === null) return;
+
+    const baseline_previous_intent = force_refresh ? null : previous_intent;
+
+    const kind: 'press' | 'release' | 'replace' = !mapped_intent
+      ? 'release'
+      : baseline_previous_intent
+        ? 'replace'
+        : 'press';
+    const reason: 'change' | 'release' = mapped_intent ? 'change' : 'release';
+    const input_seq = next_input_seq();
+
+    input_state.last_sent_intent = mapped_intent ? { dx: mapped_intent.dx, dy: mapped_intent.dy } : null;
+    input_state.last_sent_actor_ref = String(actor.actor_ref);
+    input_state.last_sent_place_id = String(place.id);
+
+    debug_log_place('MOVE_VEL_TEST sampled input intent dispatch', {
       version: PLACE_MODULE_TIMING_VERSION,
-      source: meta.source,
-      kind: meta.kind,
+      source: 'place_breath_tick',
+      breath_index,
+      kind,
       input_seq,
-      action: meta.action,
-      code: meta.code,
       actor_ref: actor.actor_ref,
       place_id: place.id,
       screen_intent: intent,
+      previous_intent: previous_intent ? { ...previous_intent } : null,
       dx,
       dy,
       mode,
@@ -2158,15 +2278,11 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       dx,
       dy,
       mode,
-      kind: meta.kind,
+      kind,
       input_seq,
       reason,
     });
   }
-
-  subscribe_move_intent_changes((intent, meta) => {
-    dispatch_transition_intent(intent, meta);
-  });
 
   function stat_to_bps(speed: number): number | null {
     const s = Math.floor(Number(speed));
@@ -2422,15 +2538,17 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const now_ms = performance.now();
       if (dom_last_view_signature === null) dom_last_view_signature = configured_view_signature;
       if (dom_last_view_signature !== configured_view_signature) {
-        try {
-          console.log('[PLACE_CAMERA_DEBUG] dom immediate swap', JSON.stringify({
-            from: dom_last_view_signature,
-            to: configured_view_signature,
-            transition_kind,
-            transition_euler: transition_euler_frame,
-          }));
-        } catch {
-          // ignore debug logging failures
+        if (PLACE_CAMERA_DEBUG_ENABLED) {
+          try {
+            console.log('[PLACE_CAMERA_DEBUG] dom immediate swap', JSON.stringify({
+              from: dom_last_view_signature,
+              to: configured_view_signature,
+              transition_kind,
+              transition_euler: transition_euler_frame,
+            }));
+          } catch {
+            // ignore debug logging failures
+          }
         }
         invalidate_scene_place_cache();
         reset_dom_render_state(transition_kind === 'roll' ? 'roll_display_view_commit' : 'immediate_swap');
@@ -2438,10 +2556,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         dom_pending_view_signature = null;
         last_dom_pending_swap_logged = null;
       }
-      invalidate_scene_place_cache();
       const inner = inner_rect();
       const camera_frame = build_place_camera_frame(place, inner, transition_euler_frame, transition_kind);
-      if (camera_frame.transition_active && (now_ms - last_transition_frame_log_ms) >= 16) {
+      if (PLACE_CAMERA_DEBUG_ENABLED && camera_frame.transition_active && (now_ms - last_transition_frame_log_ms) >= 16) {
         last_transition_frame_log_ms = now_ms;
         try {
           console.log('[PLACE_CAMERA_DEBUG] render frame', JSON.stringify({
@@ -3988,6 +4105,16 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         breath_index: Math.floor(bi),
         sent_at_ms: Number(msg?.sent_at_ms),
       });
+      try {
+        config.on_place_breath_tick?.(Math.floor(bi), { place_id: place.id });
+      } catch {
+        // ignore
+      }
+
+      publish_external_gameplay_context();
+      if (!is_external_gameplay_input) {
+        dispatch_sampled_intent(latest_live_move_intent, Math.floor(bi));
+      }
 
       place_breath_tick_applied_count++;
       const nowMs = Date.now();
@@ -4009,143 +4136,312 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     }
   });
 
-  // Server-authoritative movement updates (batched)
-  wsClient.on('ENTITY_MOVED_BATCH', (msg: any) => {
-    try {
-      invalidate_scene_place_cache();
-      const place = config.get_place();
-      if (!place) return;
-      const scene_places = Array.isArray(config.get_scene_places?.()) ? (config.get_scene_places?.() ?? []) : [];
-      const place_by_id = new Map<string, any>();
-      for (const p of scene_places) {
-        if (p && typeof p.id === 'string') place_by_id.set(String(p.id), p as any);
-      }
-      place_by_id.set(String(place.id), place as any);
-      const updates: any[] = Array.isArray(msg?.updates) ? msg.updates : [];
-      if (updates.length === 0) return;
+  function apply_authoritative_movement_updates(updates: any[], sent_at_ms: number | null | undefined, source: 'batch' | 'controlled_fastpath'): {
+    place_id: string;
+    total_updates: number;
+    controlled_actor_updates: number;
+    last_controlled_actor_step: { actor_ref: string; x: number; y: number; z: number | null; seq: number | null } | null;
+    last_controlled_actor_elevation_change: { actor_ref: string; from_z: number | null; to_z: number | null; seq: number | null } | null;
+  } | null {
+    const apply_started_at_ms = Date.now();
+    const place = config.get_place();
+    if (!place) return null;
+    const scene_places = Array.isArray(config.get_scene_places?.()) ? (config.get_scene_places?.() ?? []) : [];
+    const place_by_id = new Map<string, any>();
+    for (const p of scene_places) {
+      if (p && typeof p.id === 'string') place_by_id.set(String(p.id), p as any);
+    }
+    place_by_id.set(String(place.id), place as any);
+    const controlled_actor_ref = String(config.get_controlled_actor_ref?.() ?? '').trim();
+    const seq_map: Map<string, number> = ((mod as any).__move_seq_by_ref ??= new Map());
+    let controlledActorApplied = 0;
+    let lastControlledActorStep: { actor_ref: string; x: number; y: number; z: number | null; seq: number | null } | null = null;
+    let lastControlledActorElevationChange: { actor_ref: string; from_z: number | null; to_z: number | null; seq: number | null } | null = null;
+    let anyApplied = false;
 
-      const seq_map: Map<string, number> = ((mod as any).__move_seq_by_ref ??= new Map());
-      let localActorApplied = 0;
-      let lastLocalActorStep: { actor_ref: string; x: number; y: number; z: number | null; seq: number | null } | null = null;
-      let lastLocalActorElevationChange: { actor_ref: string; from_z: number | null; to_z: number | null; seq: number | null } | null = null;
+    for (const u of updates) {
+      const pid = String(u?.place_id ?? '');
+      if (!pid) continue;
+      const target_place: any = place_by_id.get(pid) ?? null;
+      if (!target_place) continue;
+      const ref = String(u?.entity_ref ?? '');
+      if (!ref) continue;
+      const x = Math.floor(Number(u?.x));
+      const y = Math.floor(Number(u?.y));
+      const z = (typeof u?.z === 'number' && Number.isFinite(u.z)) ? Math.floor(u.z) : undefined;
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
 
-      for (const u of updates) {
-        const pid = String(u?.place_id ?? '');
-        if (!pid) continue;
-        const target_place: any = place_by_id.get(pid) ?? null;
-        if (!target_place) continue;
-        const ref = String(u?.entity_ref ?? '');
-        if (!ref) continue;
-        const x = Math.floor(Number(u?.x));
-        const y = Math.floor(Number(u?.y));
-        const z = (typeof u?.z === 'number' && Number.isFinite(u.z)) ? Math.floor(u.z) : undefined;
-        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-
-        if (ref.startsWith('actor.')) {
-          for (const [other_place_id, other_place] of place_by_id.entries()) {
-            if (other_place_id === pid || !other_place?.contents?.actors_present) continue;
-            other_place.contents.actors_present = other_place.contents.actors_present.filter((a0: any) => a0.actor_ref !== ref);
+      if (ref.startsWith('actor.')) {
+        for (const [other_place_id, other_place] of place_by_id.entries()) {
+          if (other_place_id === pid || !other_place?.contents?.actors_present) continue;
+          other_place.contents.actors_present = other_place.contents.actors_present.filter((a0: any) => a0.actor_ref !== ref);
+        }
+        const a: any = target_place.contents.actors_present.find((a0: any) => a0.actor_ref === ref);
+        if (!a) {
+          if (ref === controlled_actor_ref) {
+            debug_log_place(`MOVE_CHURN_TRACE renderer.missing_actor_for_update ${JSON.stringify({
+              source,
+              place_id: pid,
+              actor_ref: ref,
+              x,
+              y,
+              z: typeof z === 'number' ? z : null,
+              seq: typeof u?.seq === 'number' && Number.isFinite(u.seq) ? Math.floor(u.seq) : null,
+            })}`);
           }
-          const a: any = target_place.contents.actors_present.find((a0: any) => a0.actor_ref === ref);
-          if (!a) {
-            config.request_scene_place_refresh?.(pid);
-            continue;
+          config.request_scene_place_refresh?.(pid);
+          continue;
+        }
+        const prevZ = (typeof (a as any).elevation === 'number' && Number.isFinite((a as any).elevation))
+          ? Math.floor((a as any).elevation)
+          : null;
+        const seq = (typeof u?.seq === 'number' && Number.isFinite(u.seq)) ? Math.floor(u.seq) : null;
+        const last = seq_map.get(ref) ?? 0;
+        if (seq !== null && seq <= last) {
+          if (ref === controlled_actor_ref) {
+            debug_log_place(`MOVE_CHURN_TRACE renderer.skip_stale_actor_update ${JSON.stringify({
+              source,
+              place_id: pid,
+              actor_ref: ref,
+              incoming_seq: seq,
+              last_seq: last,
+              x,
+              y,
+              z: typeof z === 'number' ? z : null,
+              sent_at_ms: Number(sent_at_ms ?? 0) || null,
+            })}`);
           }
-          const prevZ = (typeof (a as any).elevation === 'number' && Number.isFinite((a as any).elevation))
-            ? Math.floor((a as any).elevation)
-            : null;
-          const seq = (typeof u?.seq === 'number' && Number.isFinite(u.seq)) ? Math.floor(u.seq) : null;
-          const last = seq_map.get(ref) ?? 0;
-          if (seq !== null && seq < last) continue;
-          if (seq !== null) {
-            seq_map.set(ref, seq);
-            (a as any).move_seq = seq;
-          }
-          a.tile_position = { x, y };
-          if (typeof z === 'number') (a as any).elevation = z;
-          set_npc_tracked_position(ref, { x, y });
-          localActorApplied += 1;
+          continue;
+        }
+        if (ref === controlled_actor_ref) {
+          debug_log_place(`MOVE_CHURN_TRACE renderer.apply_actor_update ${JSON.stringify({
+            source,
+            place_id: pid,
+            actor_ref: ref,
+            x,
+            y,
+            z: typeof z === 'number' ? z : null,
+            seq,
+            prev_tile: a?.tile_position && Number.isFinite(Number(a.tile_position.x)) && Number.isFinite(Number(a.tile_position.y))
+              ? { x: Math.floor(Number(a.tile_position.x)), y: Math.floor(Number(a.tile_position.y)) }
+              : null,
+            prev_z: prevZ,
+            sent_at_ms: Number(sent_at_ms ?? 0) || null,
+          })}`);
+        }
+        if (seq !== null) {
+          seq_map.set(ref, seq);
+          (a as any).move_seq = seq;
+        }
+        a.tile_position = { x, y };
+        if (typeof z === 'number') (a as any).elevation = z;
+        set_npc_tracked_position(ref, { x, y });
+        anyApplied = true;
+        if (ref === controlled_actor_ref) {
+          controlledActorApplied += 1;
           const nextZ = (typeof z === 'number') ? z : prevZ;
           if (prevZ !== nextZ) {
-            lastLocalActorElevationChange = {
+            lastControlledActorElevationChange = {
               actor_ref: ref,
               from_z: prevZ,
               to_z: nextZ,
               seq,
             };
           }
-          lastLocalActorStep = {
+          lastControlledActorStep = {
             actor_ref: ref,
             x,
             y,
             z: typeof z === 'number' ? z : null,
             seq,
           };
-          continue;
         }
-
-        if (ref.startsWith('npc.')) {
-          const n: any = target_place.contents.npcs_present.find((n0: any) => n0.npc_ref === ref);
-          if (!n) continue;
-          const seq = (typeof u?.seq === 'number' && Number.isFinite(u.seq)) ? Math.floor(u.seq) : null;
-          const last = seq_map.get(ref) ?? 0;
-          if (seq !== null && seq < last) continue;
-          if (seq !== null) {
-            seq_map.set(ref, seq);
-            (n as any).move_seq = seq;
-          }
-          n.tile_position = { x, y };
-          if (typeof z === 'number') (n as any).elevation = z;
-          set_npc_tracked_position(ref, { x, y });
-          continue;
-        }
+        continue;
       }
 
+      if (ref.startsWith('npc.')) {
+        const n: any = target_place.contents.npcs_present.find((n0: any) => n0.npc_ref === ref);
+        if (!n) continue;
+        const seq = (typeof u?.seq === 'number' && Number.isFinite(u.seq)) ? Math.floor(u.seq) : null;
+        const last = seq_map.get(ref) ?? 0;
+        if (seq !== null && seq <= last) continue;
+        if (seq !== null) {
+          seq_map.set(ref, seq);
+          (n as any).move_seq = seq;
+        }
+        n.tile_position = { x, y };
+        if (typeof z === 'number') (n as any).elevation = z;
+        set_npc_tracked_position(ref, { x, y });
+        anyApplied = true;
+      }
+    }
+
+    if (!anyApplied) return null;
+    invalidate_scene_place_cache();
+
+    if (source === 'batch') {
       record_move_batch_received({
         place_id: place.id,
         total_updates: updates.length,
-        local_actor_updates: localActorApplied,
-        sent_at_ms: Number(msg?.sent_at_ms),
+        local_actor_updates: controlledActorApplied,
+        sent_at_ms: Number(sent_at_ms),
       });
+    }
 
-      if (localActorApplied > 0) {
-        if (lastLocalActorStep) {
-          record_local_actor_step_applied({
-            actor_ref: lastLocalActorStep.actor_ref,
-            place_id: place.id,
-            breath_index: Math.floor(Number((place as any)?.breath_index ?? 0)) || 0,
-            x: lastLocalActorStep.x,
-            y: lastLocalActorStep.y,
-            z: lastLocalActorStep.z,
-            seq: lastLocalActorStep.seq,
-          });
-        }
-        if (lastLocalActorElevationChange) {
-          console.log(
-            '[MOVE_UNIFY_TEST] renderer applied local actor elevation change ' +
-              JSON.stringify({
-                place_id: place.id,
-                actor_ref: lastLocalActorElevationChange.actor_ref,
-                from_z: lastLocalActorElevationChange.from_z,
-                to_z: lastLocalActorElevationChange.to_z,
-                seq: lastLocalActorElevationChange.seq,
-                breath_index: Math.floor(Number((place as any)?.breath_index ?? 0)) || 0,
-              })
-          );
-        }
-        const nowMs = Date.now();
-        // eslint-disable-next-line no-console
+    if (controlledActorApplied > 0 && lastControlledActorStep) {
+      record_local_actor_step_applied({
+        actor_ref: lastControlledActorStep.actor_ref,
+        place_id: place.id,
+        breath_index: Math.floor(Number((place as any)?.breath_index ?? 0)) || 0,
+        x: lastControlledActorStep.x,
+        y: lastControlledActorStep.y,
+        z: lastControlledActorStep.z,
+        seq: lastControlledActorStep.seq,
+      });
+      if (RENDERER_MOVE_BATCH_TRACE_ENABLED && lastControlledActorElevationChange) {
         console.log(
-          '[MOVE_VEL_TEST] renderer applied local move batch ' +
+          '[MOVE_UNIFY_TEST] renderer applied local actor elevation change ' +
+            JSON.stringify({
+              source,
+              place_id: place.id,
+              actor_ref: lastControlledActorElevationChange.actor_ref,
+              from_z: lastControlledActorElevationChange.from_z,
+              to_z: lastControlledActorElevationChange.to_z,
+              seq: lastControlledActorElevationChange.seq,
+              breath_index: Math.floor(Number((place as any)?.breath_index ?? 0)) || 0,
+            })
+        );
+      }
+      const nowMs = Date.now();
+      if (RENDERER_MOVE_BATCH_TRACE_ENABLED) {
+        console.log(
+          `[MOVE_VEL_TEST] renderer applied local move ${source} ` +
             JSON.stringify({
               place_id: place.id,
-              local_actor_updates: localActorApplied,
+              controlled_actor_updates: controlledActorApplied,
               total_updates: updates.length,
               delta_ms: last_local_move_batch_applied_ms > 0 ? Math.max(0, nowMs - last_local_move_batch_applied_ms) : 0,
             })
         );
-        last_local_move_batch_applied_ms = nowMs;
       }
+      last_local_move_batch_applied_ms = nowMs;
+      debug_log_place(`MOVE_CHURN_TRACE renderer.apply_authoritative_movement_updates_complete ${JSON.stringify({
+        source,
+        place_id: place.id,
+        controlled_actor_updates: controlledActorApplied,
+        total_updates: updates.length,
+        sent_at_ms: Number(sent_at_ms ?? 0) || null,
+        apply_started_at_ms,
+        apply_finished_at_ms: Date.now(),
+        apply_duration_ms: Math.max(0, Date.now() - apply_started_at_ms),
+        last_controlled_seq: lastControlledActorStep.seq,
+      })}`);
+    }
+
+    return {
+      place_id: place.id,
+      total_updates: updates.length,
+      controlled_actor_updates: controlledActorApplied,
+      last_controlled_actor_step: lastControlledActorStep,
+      last_controlled_actor_elevation_change: lastControlledActorElevationChange,
+    };
+  }
+
+  // Server-authoritative movement updates (batched)
+  wsClient.on('ENTITY_MOVED_BATCH', (msg: any) => {
+    try {
+      const handler_started_at_ms = Date.now();
+      const raw_updates: any[] = Array.isArray(msg?.updates) ? msg.updates : [];
+      if (raw_updates.length === 0) return;
+      const controlled_actor_ref = String(config.get_controlled_actor_ref?.() ?? '').trim();
+      const controlled_updates = controlled_actor_ref
+        ? raw_updates
+          .filter((update: any) => String(update?.entity_ref ?? '') === controlled_actor_ref)
+          .map((update: any) => ({
+            place_id: String(update?.place_id ?? ''),
+            x: Math.floor(Number(update?.x ?? 0)) || 0,
+            y: Math.floor(Number(update?.y ?? 0)) || 0,
+            z: typeof update?.z === 'number' && Number.isFinite(update.z) ? Math.floor(update.z) : null,
+            seq: typeof update?.seq === 'number' && Number.isFinite(update.seq) ? Math.floor(update.seq) : null,
+            breath_index: typeof update?.breath_index === 'number' && Number.isFinite(update.breath_index) ? Math.floor(update.breath_index) : null,
+            resolved_at_ms: Number(update?.resolved_at_ms ?? 0) || null,
+            pre_flush_ms: (Number(update?.resolved_at_ms ?? 0) > 0 && Number(msg?.sent_at_ms ?? 0) > 0)
+              ? Math.max(0, Number(msg.sent_at_ms) - Number(update.resolved_at_ms))
+              : null,
+          }))
+        : [];
+      if (controlled_actor_ref && controlled_updates.length > 0) {
+        debug_log_place(`MOVE_CHURN_TRACE renderer.entity_moved_batch_received ${JSON.stringify({
+          actor_ref: controlled_actor_ref,
+          total_updates: raw_updates.length,
+          controlled_update_count: controlled_updates.length,
+          sent_at_ms: Number(msg?.sent_at_ms ?? 0) || null,
+          received_at_ms: Date.now(),
+          bridge_latency_ms: (Number(msg?.sent_at_ms ?? 0) > 0) ? Math.max(0, Date.now() - Number(msg.sent_at_ms)) : null,
+          controlled_updates,
+          handler_started_at_ms,
+        })}`);
+      }
+      const updates = controlled_actor_ref
+        ? raw_updates.filter((update: any) => String(update?.entity_ref ?? '') !== controlled_actor_ref)
+        : raw_updates;
+      if (updates.length === 0) return;
+      apply_authoritative_movement_updates(updates, Number(msg?.sent_at_ms), 'batch');
+      debug_log_place(`MOVE_CHURN_TRACE renderer.entity_moved_batch_handler_complete ${JSON.stringify({
+        actor_ref: controlled_actor_ref || null,
+        raw_update_count: raw_updates.length,
+        filtered_update_count: updates.length,
+        sent_at_ms: Number(msg?.sent_at_ms ?? 0) || null,
+        handler_started_at_ms,
+        handler_finished_at_ms: Date.now(),
+        handler_duration_ms: Math.max(0, Date.now() - handler_started_at_ms),
+      })}`);
+    } catch {
+      // ignore
+    }
+  });
+
+  wsClient.on('CONTROLLED_ACTOR_MOVED', (msg: any) => {
+    try {
+      const handler_started_at_ms = Date.now();
+      const controlled_actor_ref = String(config.get_controlled_actor_ref?.() ?? '').trim();
+      if (!controlled_actor_ref || String(msg?.entity_ref ?? '') !== controlled_actor_ref) return;
+      debug_log_place(`MOVE_CHURN_TRACE renderer.controlled_actor_event ${JSON.stringify({
+        place_id: String(msg?.place_id ?? ''),
+        actor_ref: controlled_actor_ref,
+        x: Math.floor(Number(msg?.x ?? 0)) || 0,
+        y: Math.floor(Number(msg?.y ?? 0)) || 0,
+        z: typeof msg?.z === 'number' && Number.isFinite(msg.z) ? Math.floor(msg.z) : null,
+        seq: typeof msg?.seq === 'number' && Number.isFinite(msg.seq) ? Math.floor(msg.seq) : null,
+        breath_index: typeof msg?.breath_index === 'number' && Number.isFinite(msg.breath_index) ? Math.floor(msg.breath_index) : null,
+        sent_at_ms: Number(msg?.sent_at_ms ?? 0) || null,
+        resolved_at_ms: Number(msg?.resolved_at_ms ?? 0) || null,
+        pre_flush_ms: (Number(msg?.resolved_at_ms ?? 0) > 0 && Number(msg?.sent_at_ms ?? 0) > 0)
+          ? Math.max(0, Number(msg.sent_at_ms) - Number(msg.resolved_at_ms))
+          : null,
+        received_at_ms: Date.now(),
+        bridge_latency_ms: (Number(msg?.sent_at_ms ?? 0) > 0) ? Math.max(0, Date.now() - Number(msg.sent_at_ms)) : null,
+        handler_started_at_ms,
+      })}`);
+      const update = {
+        slot: msg?.slot,
+        place_id: msg?.place_id,
+        entity_ref: msg?.entity_ref,
+        x: msg?.x,
+        y: msg?.y,
+        z: msg?.z,
+        breath_index: msg?.breath_index,
+        seq: msg?.seq,
+      };
+      apply_authoritative_movement_updates([update], Number(msg?.sent_at_ms), 'controlled_fastpath');
+      debug_log_place(`MOVE_CHURN_TRACE renderer.controlled_actor_handler_complete ${JSON.stringify({
+        actor_ref: controlled_actor_ref,
+        seq: typeof msg?.seq === 'number' && Number.isFinite(msg.seq) ? Math.floor(msg.seq) : null,
+        sent_at_ms: Number(msg?.sent_at_ms ?? 0) || null,
+        handler_started_at_ms,
+        handler_finished_at_ms: Date.now(),
+        handler_duration_ms: Math.max(0, Date.now() - handler_started_at_ms),
+      })}`);
     } catch {
       // ignore
     }
@@ -4428,38 +4724,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         }
       }
 
-      // Poll input actions and update movement intent every frame.
-      // This removes reliance on event timing for movement.
       const screen_intent = get_move_intent();
-      const intent = map_screen_move_intent_to_ground_delta(get_place_view_state(), screen_intent);
-      const actor = get_controlled_place_actor(place);
-      if (actor && !painter_active) {
-        const mode = get_move_mode();
-        record_intent_observed(intent, { mode, place_id: place.id, actor_ref: actor.actor_ref });
-        const has_movement = intent !== null;
-        const last_intent = input_state.last_polled_intent;
-        const intent_changed = has_movement && (
-          !last_intent || 
-          intent.dx !== last_intent.dx || 
-          intent.dy !== last_intent.dy
-        );
-        if (has_movement && intent_changed) {
-          const input_seq = next_input_seq(null);
-          void post_intent_update({
-            actor_ref: actor.actor_ref,
-            place_id: place.id,
-            dx: intent.dx,
-            dy: intent.dy,
-            mode,
-            kind: 'replace',
-            input_seq,
-            reason: 'change',
-          });
-        }
-
-        // Track last intent
-        input_state.last_polled_intent = intent ? { dx: intent.dx, dy: intent.dy } : null;
-      }
 
       if (painter_active) {
         const painter_intent = screen_intent;
@@ -5160,7 +5425,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           });
 
           const mode = get_move_mode();
-          void fetch('http://localhost:8787/api/movement/move_to', {
+          void fetch('http://127.0.0.1:8787/api/movement/move_to', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -5216,7 +5481,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
             step: outward_step,
             border_pos: { x: connector_hit.border_x, y: connector_hit.border_y },
           });
-          void fetch('http://localhost:8787/api/movement/intent', {
+          void fetch('http://127.0.0.1:8787/api/movement/intent', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -5243,7 +5508,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         }
 
         const mode = get_move_mode();
-        void fetch('http://localhost:8787/api/movement/move_to', {
+        void fetch('http://127.0.0.1:8787/api/movement/move_to', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -5361,7 +5626,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
        const mode = get_move_mode();
 
        // Server-authoritative click-to-move: send goal to backend (server computes path + steps).
-       void fetch('http://localhost:8787/api/movement/move_to', {
+       void fetch('http://127.0.0.1:8787/api/movement/move_to', {
          method: 'POST',
          headers: { 'Content-Type': 'application/json' },
          body: JSON.stringify({
@@ -5576,7 +5841,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       if (e.key === ' ') {
         if (!e.repeat) {
           input_state.space_down_ms = Date.now();
-          void trigger_actor_ascend();
+          if (!is_external_gameplay_input) {
+            void trigger_actor_ascend();
+          }
         }
         return;
       }

@@ -24,6 +24,7 @@ import { get_configured_data_slot } from "../shared/boot_env.js";
 const data_slot_number = get_configured_data_slot();
 const POLL_MS = SERVICE_CONFIG.POLL_MS.DATA_BROKER;
 const ITERATION_LIMIT = SERVICE_CONFIG.MAX_BROKER_ITERATIONS;
+const SERVICE_HEARTBEATS_VERBOSE = false;
 
 // Track processed interpreted message IDs to prevent duplicate processing
 // This prevents race conditions where the same message gets processed multiple times
@@ -786,7 +787,7 @@ async function tick(outbox_path: string, inbox_path: string, log_path: string): 
         }
         
         // Log heartbeat periodically to show we're alive
-        if (tickCount % HEARTBEAT_INTERVAL === 0) {
+        if (SERVICE_HEARTBEATS_VERBOSE && tickCount % HEARTBEAT_INTERVAL === 0) {
             debug_log("DataBroker: heartbeat", { 
                 tickCount, 
                 outboxMessages: outbox.messages.length,

@@ -489,10 +489,12 @@ Priority order:
 
 ### Phase 1: Remove input-driven authority bypasses
 
-- [ ] inventory every place where input arrival can directly advance authoritative movement
-- [ ] demote `run_entity_only_visible_place_pulse(...)` from movement authority
-- [ ] remove visible-player-only authoritative movement advancement
-- [ ] make `/api/movement/intent` update state only
+- [x] inventory every place where input arrival can directly advance authoritative movement
+- [x] demote `run_entity_only_visible_place_pulse(...)` from movement authority
+- [x] remove visible-player-only authoritative movement advancement
+- [x] make `/api/movement/intent` update state only
+- [x] remove input-endpoint-triggered immediate place/entity movement pulses for `intent` and `move_to`
+- [x] remove `run_timed_event_entity_pulse(...)` from live authoritative movement flow
 
 Exit condition:
 
@@ -500,12 +502,12 @@ Exit condition:
 
 ### Phase 2: Add explicit general busy runtime
 
-- [ ] add per-entity `next_input_breath`
-- [ ] add per-entity `busy_kind`
-- [ ] define shared action-duration helpers for movement and non-movement verbs
-- [ ] introduce the first-pass general action queue shape without overbuilding authored sequencing yet
-- [ ] define action-source priority and cancellation rules in runtime terms
-- [ ] define queued-action timeout handling in breath terms (`3 turns = 18 ticks` in the current rules)
+- [x] add per-entity `next_input_breath`
+- [x] add per-entity `busy_kind`
+- [x] define shared action-duration helpers for movement and non-movement verbs for current walk cadence wiring
+- [x] introduce the first-pass general action queue shape without overbuilding authored sequencing yet
+- [x] define action-source priority and cancellation rules in runtime terms for queued non-movement vs live movement and player override of queued movement
+- [x] define queued-action timeout handling in breath terms (`3 turns = 18 ticks` in the current rules)
 - [ ] ensure the model supports `>1 breath` durations even if non-movement actions currently use `1`
 
 Exit condition:
@@ -514,12 +516,12 @@ Exit condition:
 
 ### Phase 3: Reorder canonical breath execution
 
-- [ ] make action-start eligibility happen before physics in the canonical breath path
-- [ ] check non-movement verbs before movement verbs during action selection
-- [ ] route `INSPECT` and `COMMUNICATE` through the same scheduler-owned action-start path
-- [ ] ensure live keyboard movement overrides advisory path-follow on the next legal input breath
+- [x] make action-start eligibility happen before physics in the canonical breath path
+- [x] check non-movement verbs before movement verbs during action selection
+- [x] route `INSPECT` and `COMMUNICATE` through the same scheduler-owned action-start path
+- [x] ensure live keyboard movement overrides advisory path-follow on the next legal input breath
 - [ ] ensure path-follow derives desired direction fresh each legal breath rather than owning movement execution
-- [ ] only successful action starts set busy cooldown
+- [x] only successful action starts set busy cooldown for queued non-movement actions and blocked movement rollback in the current transitional movement runtime
 - [ ] keep physics running after action start on that same breath
 
 Exit condition:
@@ -528,10 +530,10 @@ Exit condition:
 
 ### Phase 4: Separate busy from physics-needed
 
-- [ ] introduce or clarify `needs_physics` checks
-- [ ] keep physics active for busy entities that still require it
-- [ ] keep gravity on the canonical breath cadence rather than a separate visible cadence
-- [ ] ensure incline/followthrough states continue under physics without reopening input early
+- [x] introduce or clarify `needs_physics` checks
+- [x] keep physics active for busy entities that still require it
+- [x] keep gravity on the canonical breath cadence rather than a separate visible cadence
+- [x] ensure incline/followthrough states continue under physics without reopening input early in the current scheduler-owned runtime
 
 Exit condition:
 
@@ -539,12 +541,12 @@ Exit condition:
 
 ### Phase 5: Timed-event integration
 
-- [ ] map the same busy model onto initiative-controlled breaths
-- [ ] define per-turn breath exposure rules, including baseline six breaths and extra breaths for high-speed actors when applicable
-- [ ] ensure unresolved motion only advances on breaths granted by the timed-event scheduler
+- [x] map the same busy model onto initiative-controlled breaths for current movement and queued non-movement starts
+- [x] define per-turn breath exposure rules in runtime terms so active-turn canonical breaths are granted only to the active actor's place/state in the current first pass
+- [x] ensure unresolved motion only advances on breaths granted by the timed-event scheduler in the current first pass
 - [ ] ensure extra high-speed breaths are treated as physics-only breaths in first pass
-- [ ] ensure active scheduled entities can still do action-start-before-physics on their breaths
-- [ ] define the handoff from timed event back to free roam without introducing hidden extra simulation paths
+- [x] ensure active scheduled entities can still do action-start-before-physics on their breaths
+- [x] define the handoff from timed event back to free roam without introducing hidden extra simulation paths
 - [ ] verify turn-window behavior stays deterministic under pause/resume
 
 Exit condition:

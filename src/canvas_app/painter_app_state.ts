@@ -22,6 +22,7 @@ import { make_color_selector_module } from '../mono_ui/modules/color_selector_mo
 import { make_weight_selector_module } from '../mono_ui/modules/weight_selector_module.js';
 import { make_toolbox_module } from '../mono_ui/modules/toolbox_module.js';
 import { make_tool_properties_module } from '../mono_ui/modules/tool_properties_module.js';
+import { make_controls_module } from '../mono_ui/modules/controls_module.js';
 import {
   saveModulePosition,
   getModulePosition,
@@ -86,6 +87,10 @@ import { clamp_anchor_to_viewport_px, compute_anchor_relative_mouse_parallax } f
 import { resolve_place_view_transition_frame } from '../mono_ui/runtime/place_view_camera_runtime.js';
 import { apply_world_selection_mode, clear_world_selection, create_world_copy_data_from_selection, create_world_selection, decode_world_copy_data, encode_world_copy_data, get_world_selection_bounds, has_world_selection, set_world_selected, type WorldCopyData, type WorldSelection } from '../ascii_painter/world_selection.js';
 import { project_world_point_with_roll, unproject_plane_point_with_roll } from '../mono_ui/runtime/place_view_projection.js';
+import { create_painter_controls_runtime } from './controls_wiring.js';
+import { control_binding_matches_keyboard_event } from '../mono_ui/runtime/controls_binding_matcher.js';
+import { create_painter_tool_shortcut_interpreter } from './painter_tool_shortcut_interpreter.js';
+import { create_painter_tool_assisted_inputs_wiring } from './painter_tool_assisted_inputs_wiring.js';
 import {
   THAUMWORLD_RENDER_THEME,
   get_theme_base_font_size_px,
@@ -831,6 +836,25 @@ export function create_painter_app_state(): PainterAppState {
   // Tool mapping for left/right click
   let left_click_tool: ToolType = saved_tool_props.left_click_tool as ToolType || 'pencil';
   let right_click_tool: ToolType = saved_tool_props.right_click_tool as ToolType || 'eraser';
+
+  function assign_left_click_tool(tool: ToolType): void {
+    left_click_tool = tool;
+    current_tool = tool;
+    active_property_side = 'left';
+    saveToolProperties({ left_click_tool: tool, active_property_side: 'left' });
+  }
+
+  function assign_right_click_tool(tool: ToolType): void {
+    right_click_tool = tool;
+    current_tool = tool;
+    active_property_side = 'right';
+    saveToolProperties({ right_click_tool: tool, active_property_side: 'right' });
+  }
+
+  const painter_tool_shortcut_interpreter = create_painter_tool_shortcut_interpreter({
+    on_assign_primary: assign_left_click_tool,
+    on_assign_secondary: assign_right_click_tool,
+  });
   
   let active_property_side: 'left' | 'right' = saved_tool_props.active_property_side === 'right' ? 'right' : 'left';
 
@@ -1204,7 +1228,11 @@ export function create_painter_app_state(): PainterAppState {
       current_tool = tool;
       // Update the toolbar module's tool reference
       // The module will re-render with the new selection
-    }
+    },
+    matches_tool_shortcut: (tool, e) => painter_controls.matches_tool_shortcut(tool, e),
+    on_tool_shortcut: (tool) => {
+      painter_tool_shortcut_interpreter.trigger(tool);
+    },
   });
   
   // Create canvas module
@@ -1358,6 +1386,7 @@ export function create_painter_app_state(): PainterAppState {
   let weight_selector_open = getInitialModuleVisibility('weight_selector', true);
   let toolbox_open = getInitialModuleVisibility('toolbox', true);
   let tool_properties_open = getInitialModuleVisibility('tool_properties', true);
+  let controls_open = getInitialModuleVisibility('controls_panel', false);
 
   function setModuleOpen(moduleId: string, visible: boolean, setOpen: (v: boolean) => void): void {
     setOpen(visible);
@@ -1386,6 +1415,25 @@ export function create_painter_app_state(): PainterAppState {
   let weight_selector_module: Module | null = null;
   let toolbox_module: Module | null = null;
   let tool_properties_module: Module | null = null;
+  let controls_module: Module | null = null;
+
+  const painter_controls = create_painter_controls_runtime(1);
+  void painter_controls.load();
+  const painter_tai = create_painter_tool_assisted_inputs_wiring({
+    data_slot: 1,
+    get_tool_state: () => ({ current_tool, left_click_tool, right_click_tool }),
+    get_focus_plane: () => painter_display_projection?.focus_world_plane ?? voxelSpace.camera.focus_plane,
+    get_camera_target: () => getPainterFallbackTargetWorld(),
+    get_bounds: () => voxelSpace.bounds,
+    get_interaction_anchor: () => getPainterInteractionAnchor(),
+    get_cell: (x, y, z) => {
+      const plane = typeof z === 'number' ? z : (painter_display_projection?.focus_world_plane ?? voxelSpace.camera.focus_plane);
+      return getVoxel(voxelSpace, x, y, plane);
+    },
+  });
+  window.setTimeout(() => {
+    void painter_tai.runtime.start_configured();
+  }, 0);
   
   // Define rects for floating modules (with saved position fallback)
   function getModuleRectWithSave(id: string, defaultRect: Rect): Rect {
@@ -1754,6 +1802,23 @@ export function create_painter_app_state(): PainterAppState {
     });
   }
 
+  function create_controls_panel_module(): Module {
+    return make_controls_module({
+      id: 'controls_panel',
+      rect: getModuleRectWithSave('controls_panel', { x0: 138, y0: 8, x1: 198, y1: 38 }),
+      get_is_visible: () => controls_open,
+      get_definitions: () => painter_controls.runtime.get_definitions('painter'),
+      get_binding_label: (action_id) => painter_controls.runtime.get_binding_label(action_id),
+      get_conflicts: (action_id) => painter_controls.runtime.get_conflicts(action_id),
+      set_binding: (action_id, binding) => painter_controls.runtime.set_binding(action_id, binding),
+      on_close: () => setModuleOpen('controls_panel', false, (v) => { controls_open = v; }),
+      on_move: (new_rect) => {
+        if (controls_module) controls_module.rect = new_rect;
+        saveModulePosition('controls_panel', new_rect);
+      },
+    });
+  }
+
   // Create file menu module
   const file_menu = make_file_menu_module({
     id: 'painter_file_menu',
@@ -1880,6 +1945,14 @@ export function create_painter_app_state(): PainterAppState {
         'camera_control',
         create_camera_control_module
       );
+    },
+    on_toggle_controls: () => {
+      toggleModule(
+        controls_open,
+        (v) => { controls_open = v; },
+        'controls_panel',
+        create_controls_panel_module
+      );
     }
   });
 
@@ -1987,6 +2060,7 @@ export function create_painter_app_state(): PainterAppState {
   
   // Register initial modules
   registry.register(file_menu);
+  registry.register(toolbar_module);
   registry.register(canvas_module);
   
   // Register Layer Palette (3D layers)
@@ -2138,6 +2212,7 @@ export function create_painter_app_state(): PainterAppState {
   toolbox_module = create_toolbox_module();
   tool_properties_module = create_tool_properties_module();
   camera_control_module = create_camera_control_module();
+  controls_module = create_controls_panel_module();
   registry.register(char_selector_module);
   registry.register(brush_preview_module);
   registry.register(color_selector_module);
@@ -2145,6 +2220,7 @@ export function create_painter_app_state(): PainterAppState {
   registry.register(toolbox_module);
   registry.register(tool_properties_module);
   registry.register(camera_control_module);
+  registry.register(controls_module);
 
   registry.set_visibility('char_selector', char_selector_open);
   registry.set_visibility('brush_preview', brush_preview_open);
@@ -2154,6 +2230,32 @@ export function create_painter_app_state(): PainterAppState {
   registry.set_visibility('tool_properties', tool_properties_open);
   registry.set_visibility('layer_palette', layer_palette_open);
   registry.set_visibility('camera_control', camera_control_open);
+  registry.set_visibility('controls_panel', controls_open);
+
+  window.addEventListener('keydown', (e) => {
+    if (control_binding_matches_keyboard_event(painter_controls.runtime.get_binding('global.open_controls'), e)) {
+      e.preventDefault();
+      toggleModule(controls_open, (v) => { controls_open = v; }, 'controls_panel', create_controls_panel_module);
+    }
+  });
+
+  (window as any).CONTROLS = {
+    open: () => setModuleOpen('controls_panel', true, (v) => { controls_open = v; }),
+    close: () => setModuleOpen('controls_panel', false, (v) => { controls_open = v; }),
+    toggle: () => toggleModule(controls_open, (v) => { controls_open = v; }, 'controls_panel', create_controls_panel_module),
+    runtime: painter_controls.runtime,
+  };
+  (window as any).TOOL_ASSISTED_INPUTS = {
+    start: (next_script_ref: string) => {
+      const script_ref = String(next_script_ref ?? '').trim();
+      if (!script_ref) return;
+      void painter_tai.runtime.start(script_ref);
+    },
+    stop: () => {
+      void painter_tai.runtime.stop();
+    },
+    get_status: () => painter_tai.runtime.get_status(),
+  };
 
   function update_layout(grid_width: number, grid_height: number): void {
     GRID_WIDTH = Math.max(1, Math.floor(Number(grid_width) || GRID_WIDTH));

@@ -21,11 +21,29 @@ export class WebSocketClient {
   private heartbeatInterval: number = 10000;
   private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatAckTimer: ReturnType<typeof setTimeout> | null = null;
+  private mainThreadMonitorTimer: ReturnType<typeof setInterval> | null = null;
+  private lastMainThreadMonitorAt: number = 0;
   private connectionId: string | null = null;
   private eventHandlers: Map<string, ((event: any) => void)[]> = new Map();
 
+  private isMovementType(type: string): boolean {
+    return type === 'CONTROLLED_ACTOR_MOVED' || type === 'ENTITY_MOVED_BATCH';
+  }
+
+  private logMovementStage(label: string, type: string, payload: any, extra: Record<string, unknown> = {}): void {
+    console.log('[WebSocketClient] movement stage ' + JSON.stringify({
+      label,
+      type,
+      sent_at_ms: Number(payload?.sent_at_ms ?? 0) || null,
+      bridge_ws_sent_at_ms: Number(payload?.bridge_ws_sent_at_ms ?? 0) || null,
+      seq: Number(payload?.seq ?? 0) || null,
+      update_count: Array.isArray(payload?.updates) ? payload.updates.length : null,
+      ...extra,
+    }));
+  }
+
   constructor(port: number = 8789) {
-    this.url = `ws://localhost:${port}`;
+    this.url = `ws://127.0.0.1:${port}`;
   }
 
   private buildUrl(): string | null {
@@ -64,6 +82,7 @@ export class WebSocketClient {
 
       this.ws.onopen = () => {
         console.log('[WebSocketClient] Connected successfully');
+        this.startMainThreadMonitor();
         // Clear any pending reconnect timer
         if (this.reconnectTimer) {
           clearTimeout(this.reconnectTimer);
@@ -74,7 +93,40 @@ export class WebSocketClient {
       this.ws.onmessage = (message: MessageEvent) => {
         try {
           const data = JSON.parse(message.data);
+          const received_at_ms = Date.now();
+          const type = String(data?.type ?? '');
+          const payload = data?.data ?? {};
+          if (this.isMovementType(type)) {
+            console.log('[WebSocketClient] movement message received ' + JSON.stringify({
+              type,
+              received_at_ms,
+              sent_at_ms: Number(payload?.sent_at_ms ?? 0) || null,
+              bridge_http_received_at_ms: Number(payload?.bridge_http_received_at_ms ?? 0) || null,
+              bridge_ws_sent_at_ms: Number(payload?.bridge_ws_sent_at_ms ?? 0) || null,
+              http_to_bridge_ms: (Number(payload?.sent_at_ms ?? 0) > 0 && Number(payload?.bridge_http_received_at_ms ?? 0) > 0)
+                ? Math.max(0, Number(payload.bridge_http_received_at_ms) - Number(payload.sent_at_ms))
+                : null,
+              bridge_queue_ms: (Number(payload?.bridge_http_received_at_ms ?? 0) > 0 && Number(payload?.bridge_ws_sent_at_ms ?? 0) > 0)
+                ? Math.max(0, Number(payload.bridge_ws_sent_at_ms) - Number(payload.bridge_http_received_at_ms))
+                : null,
+              ws_to_client_ms: (Number(payload?.bridge_ws_sent_at_ms ?? 0) > 0)
+                ? Math.max(0, received_at_ms - Number(payload.bridge_ws_sent_at_ms))
+                : null,
+              seq: Number(payload?.seq ?? 0) || null,
+              update_count: Array.isArray(payload?.updates) ? payload.updates.length : null,
+            }));
+            this.logMovementStage('onmessage_before_handle', type, payload, { received_at_ms });
+          }
+          const handle_started_at_ms = Date.now();
           this.handleMessage(data);
+          if (this.isMovementType(type)) {
+            this.logMovementStage('onmessage_after_handle', type, payload, {
+              received_at_ms,
+              handle_started_at_ms,
+              handle_finished_at_ms: Date.now(),
+              onmessage_handle_ms: Math.max(0, Date.now() - handle_started_at_ms),
+            });
+          }
         } catch (err) {
           console.error('[WebSocketClient] Failed to parse message:', err);
         }
@@ -82,6 +134,7 @@ export class WebSocketClient {
 
       this.ws.onclose = () => {
         this.clearHeartbeatTimers();
+        this.stopMainThreadMonitor();
         console.log('[WebSocketClient] Connection closed, reconnecting in', this.reconnectInterval, 'ms');
         this.scheduleReconnect();
       };
@@ -102,6 +155,8 @@ export class WebSocketClient {
   private handleMessage(data: any): void {
     const t = String(data?.type ?? '');
     if (!t) return;
+    const payload = (data as any)?.data;
+    const handle_started_at_ms = Date.now();
 
     if (t === 'CONNECTED') {
       console.log('[WebSocketClient] Server says:', data.message);
@@ -122,6 +177,13 @@ export class WebSocketClient {
 
     // Standard bridge payload shape: { type, data }
     this.emit(t, (data as any)?.data);
+    if (this.isMovementType(t)) {
+      this.logMovementStage('handleMessage_after_emit', t, payload, {
+        handle_started_at_ms,
+        handle_finished_at_ms: Date.now(),
+        handle_message_ms: Math.max(0, Date.now() - handle_started_at_ms),
+      });
+    }
   }
 
   /**
@@ -130,6 +192,7 @@ export class WebSocketClient {
   private emit(eventType: string, event: TagChangeEvent): void {
     const handlers = this.eventHandlers.get(eventType);
     if (handlers) {
+      const emit_started_at_ms = Date.now();
       handlers.forEach((handler) => {
         try {
           handler(event);
@@ -137,6 +200,14 @@ export class WebSocketClient {
           console.error('[WebSocketClient] Handler error:', err);
         }
       });
+      if (this.isMovementType(eventType)) {
+        this.logMovementStage('emit_handlers_complete', eventType, event, {
+          handler_count: handlers.length,
+          emit_started_at_ms,
+          emit_finished_at_ms: Date.now(),
+          emit_handler_ms: Math.max(0, Date.now() - emit_started_at_ms),
+        });
+      }
     }
   }
 
@@ -170,6 +241,30 @@ export class WebSocketClient {
       this.heartbeatTimer = null;
     }
     this.clearHeartbeatAckTimer();
+  }
+
+  private startMainThreadMonitor(): void {
+    this.stopMainThreadMonitor();
+    this.lastMainThreadMonitorAt = Date.now();
+    this.mainThreadMonitorTimer = setInterval(() => {
+      const now = Date.now();
+      const delta_ms = Math.max(0, now - this.lastMainThreadMonitorAt);
+      this.lastMainThreadMonitorAt = now;
+      if (delta_ms >= 250) {
+        console.log('[WebSocketClient] main thread stall ' + JSON.stringify({
+          observed_at_ms: now,
+          delta_ms,
+        }));
+      }
+    }, 50);
+  }
+
+  private stopMainThreadMonitor(): void {
+    if (this.mainThreadMonitorTimer) {
+      clearInterval(this.mainThreadMonitorTimer);
+      this.mainThreadMonitorTimer = null;
+    }
+    this.lastMainThreadMonitorAt = 0;
   }
 
   private scheduleHeartbeat(): void {
@@ -228,6 +323,7 @@ export class WebSocketClient {
    */
   disconnect(): void {
     this.clearHeartbeatTimers();
+    this.stopMainThreadMonitor();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;

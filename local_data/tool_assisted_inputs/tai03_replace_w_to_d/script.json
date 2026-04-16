@@ -1,0 +1,22 @@
+{
+  "id": "movement_replace_w_to_d",
+  "test_name": "walk_test_replace_w_to_d",
+  "clock_mode": "breath",
+  "open_ms": 20000,
+  "description": "Hold W, replace with D, then release.",
+  "start_delay_ms": 2500,
+  "end_delay_ms": 3000,
+  "boot": {
+    "auto_connect": true,
+    "auto_claim": true,
+    "actor_ref": "actor.ent_ZPHB7TZ3AV"
+  },
+  "actions": [
+    { "at_breath": 0, "type": "assert_context_ready" },
+    { "at_breath": 5, "type": "key_down", "code": "KeyW", "key": "w" },
+    { "at_breath": 12, "type": "key_down", "code": "KeyD", "key": "d" },
+    { "at_breath": 13, "type": "key_up", "code": "KeyW", "key": "w" },
+    { "at_breath": 24, "type": "key_up", "code": "KeyD", "key": "d" },
+    { "at_breath": 25, "type": "marker", "label": "replace_complete" }
+  ]
+}

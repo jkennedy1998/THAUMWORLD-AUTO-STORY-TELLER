@@ -1,0 +1,29 @@
+{
+  "01": {
+    "path": "tai01_hold_w/script.json"
+  },
+  "02": {
+    "path": "tai02_tap_w/script.json"
+  },
+  "03": {
+    "path": "tai03_replace_w_to_d/script.json"
+  },
+  "04": {
+    "path": "tai04_jump_while_w/script.json"
+  },
+  "05": {
+    "path": "tai05_hold_alternating_ws/script.json"
+  },
+  "06": {
+    "path": "tai06_painter_assign_tools/script.json"
+  },
+  "07": {
+    "path": "tai07_painter_primary_click_draw/script.json"
+  },
+  "08": {
+    "path": "tai08_painter_secondary_click_erase/script.json"
+  },
+  "09": {
+    "path": "tai09_painter_primary_drag_draw/script.json"
+  }
+}

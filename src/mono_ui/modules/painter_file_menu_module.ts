@@ -27,6 +27,7 @@ export type FileMenuOptions = {
   on_toggle_tool_properties?: () => void;
   on_toggle_layer_palette?: () => void;
   on_toggle_camera?: () => void;
+  on_toggle_controls?: () => void;
   get_status_text?: () => string;
   get_screen_size?: () => { width: number; height: number };
   get_insets?: () => { left?: number; right?: number; top?: number; bottom?: number };
@@ -49,6 +50,7 @@ export function make_file_menu_module(opts: FileMenuOptions): Module {
   if (opts.on_toggle_tool_properties) module_items.push({ id: 'props', label: 'PROPS', onPress: opts.on_toggle_tool_properties, width: 7 });
   if (opts.on_toggle_layer_palette) module_items.push({ id: 'layers', label: 'LAYERS', onPress: opts.on_toggle_layer_palette, width: 8 });
   if (opts.on_toggle_camera) module_items.push({ id: 'camera', label: 'CAMERA', onPress: opts.on_toggle_camera, width: 8 });
+  if (opts.on_toggle_controls) module_items.push({ id: 'controls', label: 'CONTROLS', onPress: opts.on_toggle_controls, width: 10 });
 
   const system_items: Array<{ id: string; label: string; onPress: () => void; width: number }> = [];
   if (opts.on_reset_positions) system_items.push({ id: 'reset', label: 'RESET', onPress: opts.on_reset_positions, width: 7 });

@@ -1,0 +1,27 @@
+{
+  "id": "painter_primary_drag_draw",
+  "test_name": "paint_test_primary_drag_draws_line",
+  "clock_mode": "realtime_ms",
+  "open_ms": 8000,
+  "start_delay_ms": 1200,
+  "end_delay_ms": 1000,
+  "actions": [
+    { "at_ms": 0, "type": "capture_painter_camera_target", "slot": "camera_target_start" },
+    { "at_ms": 0, "type": "capture_painter_bounds", "slot": "bounds_start" },
+    { "at_ms": 50, "type": "pointer_move", "space": "grid", "x": 60, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 90, "type": "capture_painter_interaction_anchor", "slot": "anchor_start" },
+    { "at_ms": 110, "type": "assert_painter_anchor_in_bounds", "anchor_slot": "anchor_start" },
+    { "at_ms": 150, "type": "pointer_move", "space": "grid", "x": 66, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 190, "type": "capture_painter_interaction_anchor", "slot": "anchor_end" },
+    { "at_ms": 210, "type": "assert_painter_anchor_in_bounds", "anchor_slot": "anchor_end" },
+    { "at_ms": 260, "type": "key_tap", "code": "KeyP", "key": "p", "hold_ms": 30 },
+    { "at_ms": 650, "type": "assert_painter_primary_tool", "tool": "pencil" },
+    { "at_ms": 800, "type": "capture_painter_anchor_cell", "slot": "cell_before_start", "anchor_slot": "anchor_start" },
+    { "at_ms": 820, "type": "capture_painter_anchor_cell", "slot": "cell_before_end", "anchor_slot": "anchor_end" },
+    { "at_ms": 1000, "type": "pointer_drag", "space": "grid", "from_x": 60, "from_y": 24, "to_x": 66, "to_y": 24, "steps": 6, "pointer_action": "primary" },
+    { "at_ms": 1400, "type": "capture_painter_anchor_cell", "slot": "cell_after_start", "anchor_slot": "anchor_start" },
+    { "at_ms": 1420, "type": "capture_painter_anchor_cell", "slot": "cell_after_end", "anchor_slot": "anchor_end" },
+    { "at_ms": 1440, "type": "assert_painter_anchor_cell_changed", "slot": "cell_before_start", "anchor_slot": "anchor_start" },
+    { "at_ms": 1460, "type": "assert_painter_anchor_cell_changed", "slot": "cell_before_end", "anchor_slot": "anchor_end" }
+  ]
+}

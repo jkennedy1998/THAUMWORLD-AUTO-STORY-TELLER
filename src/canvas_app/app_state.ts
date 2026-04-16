@@ -19,6 +19,7 @@ import { discover_joinable_worlds, fetch_local_host_status } from './world_disco
 import { make_initiative_module } from '../mono_ui/modules/initiative_module.js';
 import { make_toolbox_module } from '../mono_ui/modules/toolbox_module.js';
 import { make_tool_properties_module, type ToolPropertyRow } from '../mono_ui/modules/tool_properties_module.js';
+import { make_controls_module } from '../mono_ui/modules/controls_module.js';
 import { makeLayerPaletteModule } from '../ascii_painter/layer_palette_module.js';
 import { makePlaceCameraControlModule } from '../mono_ui/modules/place_camera_control_module.js';
 import { createVoxelSpace, type VoxelSpace } from '../ascii_painter/voxel_space.js';
@@ -78,6 +79,9 @@ import {
 import { build_visible_plane_coordinates, get_principal_view_plane_axis, get_transition_tilt_for_command, make_place_view_state, normalize_place_principal_view, normalize_place_view_roll_quarter_turn, type PlacePrincipalView, type PlaceViewRollQuarterTurn } from '../mono_ui/runtime/place_view_projection.js';
 import { start_roll_transition, start_swing_transition, type PlaceCameraTransition } from '../mono_ui/runtime/place_camera_pose.js';
 import { resolve_place_view_transition_frame } from '../mono_ui/runtime/place_view_camera_runtime.js';
+import { create_tool_assisted_inputs_wiring } from './tool_assisted_inputs_wiring.js';
+import { create_game_controls_runtime } from './controls_wiring.js';
+import { control_binding_matches_keyboard_event } from '../mono_ui/runtime/controls_binding_matcher.js';
 
 export const APP_CONFIG = {
     render_backend: THAUMWORLD_RENDER_THEME.backend,
@@ -197,6 +201,15 @@ function has_tag(tags: any[] | undefined | null, want: string): boolean {
 }
 
 export function create_app_state(): AppState {
+    const game_controls = create_game_controls_runtime(APP_CONFIG.selected_data_slot);
+    void game_controls.load();
+    const configured_boot_mode = String((window as Window).electronAPI?.startupBootMode ?? '').trim().toLowerCase();
+    const boot_mode: 'manual_shell' | 'direct_runtime' | 'tas_runtime' = Boolean((window as Window).electronAPI?.toolAssistedInputsBootConfig?.enabled)
+        ? 'tas_runtime'
+        : configured_boot_mode === 'direct_runtime'
+            ? 'direct_runtime'
+            : 'manual_shell';
+    const tool_assisted_inputs_boot_enabled = boot_mode === 'tas_runtime';
     const reconnect_token_storage_key = 'thaumworld_reconnect_token';
     const controlled_actor_storage_key = 'thaumworld_controlled_actor_ref';
     let multiplayer_session_bootstrap_promise: Promise<void> | null = null;
@@ -293,6 +306,22 @@ export function create_app_state(): AppState {
         ui_state.character_creation.is_visible = false;
         apply_runtime_module_visibility();
         void refresh_world_entry_status();
+    }
+
+    function close_world_shell_modules(): void {
+        ui_state.world_entry.is_visible = false;
+        ui_state.world_join.is_visible = false;
+        ui_state.character_creation.is_visible = false;
+        ui_state.actor_claim.is_visible = false;
+        ui_state.actor_claim.is_blocking = false;
+        apply_runtime_module_visibility();
+    }
+
+    function hide_actor_claim_ui(): void {
+        ui_state.actor_claim.is_visible = false;
+        ui_state.actor_claim.is_blocking = false;
+        ui_state.actor_claim.open_reason = null;
+        apply_runtime_module_visibility('actor_claim_module');
     }
 
     async function refresh_world_entry_status(): Promise<void> {
@@ -788,6 +817,16 @@ export function create_app_state(): AppState {
         },
         entity_tags_by_ref: new Map<string, TagInstance[]>(),
     };
+    ui_state.modules.visibility.set('controls_panel', false);
+
+    function set_controls_panel_visible(visible: boolean): void {
+        ui_state.modules.visibility.set('controls_panel', visible);
+        apply_runtime_module_visibility('controls_panel');
+    }
+
+    function toggle_controls_panel(): void {
+        set_controls_panel_visible(!Boolean(ui_state.modules.visibility.get('controls_panel')));
+    }
 
     // Keep the current place "active" on the server so breath continues to tick
     // even when the UI is not polling /api/place.
@@ -2227,16 +2266,18 @@ export function create_app_state(): AppState {
         };
     }
 
+    const TIMED_EVENT_DEBUG_UI_LOGS_ENABLED = false;
+
     async function start_debug_timed_event(place_id: string, event_type: 'combat' | 'conversation' = 'combat'): Promise<{ ok: boolean; error?: string; participants?: string[] }> {
         try {
-            debug_log('[TIMED_EVENT_DEBUG_UI] start request', { place_id, event_type, slot: APP_CONFIG.selected_data_slot });
+            if (TIMED_EVENT_DEBUG_UI_LOGS_ENABLED) debug_log('[TIMED_EVENT_DEBUG_UI] start request', { place_id, event_type, slot: APP_CONFIG.selected_data_slot });
             const res = await fetch(`http://localhost:8787/api/timed_event/debug/start?slot=${APP_CONFIG.selected_data_slot}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ place_id, event_type }),
             });
             const data = await res.json().catch(() => null as any);
-            debug_log('[TIMED_EVENT_DEBUG_UI] start response', { status: res.status, ok: res.ok, data });
+            if (TIMED_EVENT_DEBUG_UI_LOGS_ENABLED) debug_log('[TIMED_EVENT_DEBUG_UI] start response', { status: res.status, ok: res.ok, data });
             if (!res.ok || !data?.ok) {
                 return { ok: false, error: String(data?.error ?? `HTTP ${res.status}`) };
             }
@@ -2251,7 +2292,7 @@ export function create_app_state(): AppState {
             const res = await fetch(`http://localhost:8787/api/timed_event/state?slot=${APP_CONFIG.selected_data_slot}`);
             if (!res.ok) return null;
             const data = await res.json().catch(() => null as any);
-            debug_log('[TIMED_EVENT_DEBUG_UI] state fetch', { status: res.status, ok: res.ok, data });
+            if (TIMED_EVENT_DEBUG_UI_LOGS_ENABLED) debug_log('[TIMED_EVENT_DEBUG_UI] state fetch', { status: res.status, ok: res.ok, data });
             return data?.ok ? data : null;
         } catch {
             return null;
@@ -2306,13 +2347,13 @@ export function create_app_state(): AppState {
 
     async function debug_end_timed_event(): Promise<{ ok: boolean; error?: string }> {
         try {
-            debug_log('[TIMED_EVENT_DEBUG_UI] end request', { slot: APP_CONFIG.selected_data_slot });
+            if (TIMED_EVENT_DEBUG_UI_LOGS_ENABLED) debug_log('[TIMED_EVENT_DEBUG_UI] end request', { slot: APP_CONFIG.selected_data_slot });
             const res = await fetch(`http://localhost:8787/api/timed_event/debug/end?slot=${APP_CONFIG.selected_data_slot}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
             });
             const data = await res.json().catch(() => null as any);
-            debug_log('[TIMED_EVENT_DEBUG_UI] end response', { status: res.status, ok: res.ok, data });
+            if (TIMED_EVENT_DEBUG_UI_LOGS_ENABLED) debug_log('[TIMED_EVENT_DEBUG_UI] end response', { status: res.status, ok: res.ok, data });
             if (!res.ok || !data?.ok) {
                 return { ok: false, error: String(data?.error ?? `HTTP ${res.status}`) };
             }
@@ -2370,7 +2411,7 @@ export function create_app_state(): AppState {
                 status: String(entry?.status ?? 'unknown'),
             }))
             : [];
-        debug_log('[TIMED_EVENT_DEBUG_UI] state applied', {
+        if (TIMED_EVENT_DEBUG_UI_LOGS_ENABLED) debug_log('[TIMED_EVENT_DEBUG_UI] state applied', {
             active: ui_state.timed_event_debug.active,
             type: ui_state.timed_event_debug.type,
             phase: ui_state.timed_event_debug.phase,
@@ -5982,6 +6023,64 @@ export function create_app_state(): AppState {
         ui_state.actor_claim.selected_actor_ref = actor_ref;
     }
 
+    type ControlledActorBindingResolution = {
+        kind: 'bound' | 'unbound' | 'binding_required';
+        error?: string | null;
+    };
+
+    async function resolve_controlled_actor_binding(force: boolean = false): Promise<ControlledActorBindingResolution> {
+        const current_actor_id = get_controlled_actor_id();
+        if (!force && current_actor_id) {
+            return { kind: 'bound' };
+        }
+        await ensure_multiplayer_session_bootstrap();
+        const session_token = get_session_token();
+        const query = [`slot=${encodeURIComponent(String(APP_CONFIG.selected_data_slot))}`, `session_token=${encodeURIComponent(session_token)}`];
+        const res = await fetch(`http://localhost:8787/api/session/control?${query.join('&')}`);
+        const data = await res.json().catch(() => null) as any;
+        if (res.ok && String(data?.binding_state ?? '') === 'unbound') {
+            clear_controlled_actor_runtime_state();
+            return { kind: 'unbound' };
+        }
+        if (!res.ok) {
+            const error = String(data?.error ?? `session_control_fetch_failed:${res.status}`);
+            if (error === 'controlled_actor_release_required') {
+                clear_controlled_actor_runtime_state();
+                return await resolve_controlled_actor_binding(force);
+            }
+            if (error === 'controlled_actor_binding_required' || error === 'controlled_actor_already_claimed') {
+                clear_controlled_actor_runtime_state();
+                return { kind: 'binding_required', error };
+            }
+            throw new Error(error);
+        }
+        if (!data?.ok || typeof data?.controlled_actor_ref !== 'string') {
+            throw new Error(String(data?.error ?? 'session_control_invalid'));
+        }
+        const actor_ref = String(data.controlled_actor_ref).trim();
+        const actor_id = get_character_id_from_ref(actor_ref);
+        if (!actor_id) throw new Error('session_control_missing_actor_id');
+        const changed = actor_id !== current_actor_id;
+        (APP_CONFIG as any).input_actor_id = actor_id;
+        persist_controlled_actor_ref(actor_ref);
+        set_current_actor_ref(actor_ref);
+        ui_state.actor_claim.current_actor_ref = actor_ref;
+        ui_state.actor_claim.selected_actor_ref = actor_ref;
+        ui_state.actor_claim.is_visible = false;
+        ui_state.actor_claim.is_blocking = false;
+        ui_state.actor_claim.game_ready = false;
+        ui_state.character.display_name = typeof data?.controlled_actor_name === 'string' && data.controlled_actor_name.trim().length > 0
+            ? data.controlled_actor_name.trim()
+            : ui_state.character.display_name;
+        apply_runtime_module_visibility();
+        if (changed) {
+            void load_claimed_actor_runtime(actor_id, actor_ref, 'session_control_binding');
+        } else if (!ui_state.place.current_place_id) {
+            void load_claimed_actor_runtime(actor_id, actor_ref, 'session_control_resume');
+        }
+        return { kind: 'bound' };
+    }
+
     async function claim_selected_actor(): Promise<void> {
         const actor_ref = String(ui_state.actor_claim.selected_actor_ref ?? '').trim();
         if (!actor_ref) {
@@ -7183,6 +7282,24 @@ export function create_app_state(): AppState {
         return ui_state.place.current_place;
     }
 
+    const tool_assisted_inputs_wiring = create_tool_assisted_inputs_wiring({
+        data_slot: APP_CONFIG.selected_data_slot,
+        ensure_multiplayer_session_bootstrap,
+        resolve_controlled_actor_binding,
+        refresh_actor_claim_state,
+        claim_actor,
+        get_actor_claim_entries: () => ui_state.actor_claim.actors,
+        get_session_token,
+        get_current_actor_ref: () => ui_state.actor_claim.current_actor_ref,
+        get_current_place,
+        get_current_actor_tile: () => {
+            const tile = get_entity_focus_tile_in_place(get_current_place(), get_input_actor_ref());
+            return tile ? { x: tile.x, y: tile.y, z: tile.z } : null;
+        },
+    });
+    const tool_assisted_inputs_runtime = tool_assisted_inputs_wiring.runtime;
+    const tool_assisted_inputs_clock = tool_assisted_inputs_wiring.clock;
+
     function get_render_place(): Place | null {
         return get_scene_place(ui_state.place.scene_selected_place_id)
             ?? ui_state.place.current_place;
@@ -7193,7 +7310,67 @@ export function create_app_state(): AppState {
         return ui_state.place.scene_places.find((p) => p.id === place_id) ?? null;
     }
 
+    function get_place_actor_summary(place: Place | null, actor_ref: string | null): {
+        actor_ref: string | null;
+        place_id: string | null;
+        tile: { x: number; y: number } | null;
+        elevation: number | null;
+        move_seq: number | null;
+        breath_index: number | null;
+        status: string | null;
+    } {
+        const normalized_actor_ref = String(actor_ref ?? '').trim();
+        if (!place || !normalized_actor_ref) {
+            return {
+                actor_ref: normalized_actor_ref || null,
+                place_id: place?.id ?? null,
+                tile: null,
+                elevation: null,
+                move_seq: null,
+                breath_index: null,
+                status: null,
+            };
+        }
+        const actor: any = Array.isArray(place.contents?.actors_present)
+            ? place.contents.actors_present.find((entry: any) => String(entry?.actor_ref ?? '') === normalized_actor_ref) ?? null
+            : null;
+        return {
+            actor_ref: normalized_actor_ref,
+            place_id: place.id,
+            tile: actor?.tile_position && Number.isFinite(Number(actor.tile_position.x)) && Number.isFinite(Number(actor.tile_position.y))
+                ? { x: Math.floor(Number(actor.tile_position.x)), y: Math.floor(Number(actor.tile_position.y)) }
+                : null,
+            elevation: typeof actor?.elevation === 'number' && Number.isFinite(actor.elevation)
+                ? Math.floor(actor.elevation)
+                : null,
+            move_seq: typeof actor?.move_seq === 'number' && Number.isFinite(actor.move_seq)
+                ? Math.floor(actor.move_seq)
+                : null,
+            breath_index: typeof actor?.breath_index === 'number' && Number.isFinite(actor.breath_index)
+                ? Math.floor(actor.breath_index)
+                : null,
+            status: typeof actor?.status === 'string' ? String(actor.status) : null,
+        };
+    }
+
+    function log_controlled_actor_scene_state(label: string, place: Place | null, extra: Record<string, unknown> = {}): void {
+        const actor_ref = get_input_actor_ref() || null;
+        debug_log('MOVE_CHURN_TRACE', `${label} ${JSON.stringify({
+            ...extra,
+            ...get_place_actor_summary(place, actor_ref),
+        })}`);
+    }
+
     function merge_place_into_scene(place: Place): void {
+        const controlled_actor_ref = get_input_actor_ref() || null;
+        const before_scene_place = get_scene_place(place.id);
+        if (controlled_actor_ref) {
+            debug_log('MOVE_CHURN_TRACE', `merge_place_into_scene.before ${JSON.stringify({
+                incoming: get_place_actor_summary(place, controlled_actor_ref),
+                existing: get_place_actor_summary(before_scene_place, controlled_actor_ref),
+                current_place: get_place_actor_summary(ui_state.place.current_place, controlled_actor_ref),
+            })}`);
+        }
         const idx = ui_state.place.scene_places.findIndex((p) => p.id === place.id);
         if (idx >= 0) {
             ui_state.place.scene_places = [
@@ -7208,6 +7385,12 @@ export function create_app_state(): AppState {
             ui_state.place.current_place = place;
             ui_state.place.current_place_id = place.id;
             set_command_handler_place(place);
+        }
+        if (controlled_actor_ref) {
+            debug_log('MOVE_CHURN_TRACE', `merge_place_into_scene.after ${JSON.stringify({
+                merged: get_place_actor_summary(get_scene_place(place.id), controlled_actor_ref),
+                current_place: get_place_actor_summary(ui_state.place.current_place, controlled_actor_ref),
+            })}`);
         }
     }
 
@@ -7244,10 +7427,12 @@ export function create_app_state(): AppState {
     }
 
     async function refresh_single_scene_place(place_id: string): Promise<Place | null> {
+        log_controlled_actor_scene_state('refresh_single_scene_place.begin', get_scene_place(place_id) ?? (ui_state.place.current_place_id === place_id ? ui_state.place.current_place : null), { place_id });
         const refreshed = await fetch_place_snapshot(place_id);
         if (!refreshed) return null;
         merge_place_into_scene(refreshed);
         await refresh_ground_item_cache_for_place(place_id);
+        log_controlled_actor_scene_state('refresh_single_scene_place.end', get_scene_place(place_id) ?? (ui_state.place.current_place_id === place_id ? ui_state.place.current_place : null), { place_id });
         debug_log(`[PLACE_SCENE] single place refresh ${JSON.stringify({ place_id, scene_places: ui_state.place.scene_places.map((p) => p.id) })}`);
         return refreshed;
     }
@@ -7440,11 +7625,17 @@ export function create_app_state(): AppState {
     async function fetch_place_snapshot(place_id: string): Promise<Place | null> {
         try {
             const url = `${APP_CONFIG.place_endpoint}?slot=${APP_CONFIG.selected_data_slot}&place_id=${encodeURIComponent(place_id)}`;
+            const started_ms = Date.now();
             const res = await fetch(url);
             if (!res.ok) return null;
             const data = await res.json().catch(() => null);
             if (!data?.ok || !data?.place) return null;
-            return data.place as Place;
+            const place = data.place as Place;
+            log_controlled_actor_scene_state('fetch_place_snapshot.received', place, {
+                place_id,
+                elapsed_ms: Math.max(0, Date.now() - started_ms),
+            });
+            return place;
         } catch {
             return null;
         }
@@ -7847,7 +8038,7 @@ export function create_app_state(): AppState {
             renderer_debug.place_fetch_count += 1;
             renderer_debug.last_place_fetch_completed_ms = Date.now();
             renderer_debug.last_place_fetch_elapsed_ms = fetch_elapsed_ms;
-            if (fetch_elapsed_ms > 150) {
+            if (false && fetch_elapsed_ms > 150) {
                 debug_log(`[MOVE_VEL_TEST] current place fetch slow ${JSON.stringify({ place_id, fetch_elapsed_ms })}`);
             }
             if (data.ok && data.place) {
@@ -8079,64 +8270,20 @@ export function create_app_state(): AppState {
         window_feeds.push(feed);
     }
 
-    async function refresh_controlled_actor_binding(force: boolean = false): Promise<void> {
+    async function refresh_controlled_actor_binding(force: boolean = false, allow_ui_fallback: boolean = !tool_assisted_inputs_boot_enabled): Promise<void> {
         if (ui_state.world_entry.is_visible || ui_state.world_join.is_visible) return;
-        const current_actor_id = get_controlled_actor_id();
-        if (!force && current_actor_id) return;
-        await ensure_multiplayer_session_bootstrap();
-        const session_token = get_session_token();
-        const query = [`slot=${encodeURIComponent(String(APP_CONFIG.selected_data_slot))}`, `session_token=${encodeURIComponent(session_token)}`];
-        const res = await fetch(`http://localhost:8787/api/session/control?${query.join('&')}`);
-        const data = await res.json().catch(() => null) as any;
-        if (res.ok && String(data?.binding_state ?? '') === 'unbound') {
-            clear_controlled_actor_runtime_state();
-            if (ui_state.actor_claim.is_visible) {
-                apply_runtime_module_visibility('actor_claim_module');
-                return;
-            }
-            await open_actor_claim_module('startup_required', ['select an actor to begin', 'one actor claimed at a time']);
+        const resolution = await resolve_controlled_actor_binding(force);
+        if (resolution.kind === 'bound') return;
+        if (!allow_ui_fallback) return;
+        if (ui_state.actor_claim.is_visible) {
+            apply_runtime_module_visibility('actor_claim_module');
             return;
         }
-        if (!res.ok) {
-            const error = String(data?.error ?? `session_control_fetch_failed:${res.status}`);
-            if (error === 'controlled_actor_release_required') {
-                clear_controlled_actor_runtime_state();
-                await refresh_controlled_actor_binding(force);
-                return;
-            }
-            if (error === 'controlled_actor_binding_required' || error === 'controlled_actor_already_claimed') {
-                clear_controlled_actor_runtime_state();
-                await open_actor_claim_module(error === 'controlled_actor_already_claimed' ? 'saved_actor_claimed' : 'startup_required', error === 'controlled_actor_already_claimed'
-                    ? ['saved actor is already claimed', 'pick another actor to continue']
-                    : ['select an actor to begin', 'one actor claimed at a time']);
-                return;
-            }
-            throw new Error(error);
+        if (resolution.kind === 'binding_required' && resolution.error === 'controlled_actor_already_claimed') {
+            await open_actor_claim_module('saved_actor_claimed', ['saved actor is already claimed', 'pick another actor to continue']);
+            return;
         }
-        if (!data?.ok || typeof data?.controlled_actor_ref !== 'string') {
-            throw new Error(String(data?.error ?? 'session_control_invalid'));
-        }
-        const actor_ref = String(data.controlled_actor_ref).trim();
-        const actor_id = get_character_id_from_ref(actor_ref);
-        if (!actor_id) throw new Error('session_control_missing_actor_id');
-        const changed = actor_id !== current_actor_id;
-        (APP_CONFIG as any).input_actor_id = actor_id;
-        persist_controlled_actor_ref(actor_ref);
-        set_current_actor_ref(actor_ref);
-        ui_state.actor_claim.current_actor_ref = actor_ref;
-        ui_state.actor_claim.selected_actor_ref = actor_ref;
-        ui_state.actor_claim.is_visible = false;
-        ui_state.actor_claim.is_blocking = false;
-        ui_state.actor_claim.game_ready = false;
-        apply_runtime_module_visibility();
-        if (changed) {
-            ui_state.character.display_name = typeof data?.controlled_actor_name === 'string' && data.controlled_actor_name.trim().length > 0
-                ? data.controlled_actor_name.trim()
-                : ui_state.character.display_name;
-            void load_claimed_actor_runtime(actor_id, actor_ref, 'session_control_binding');
-        } else if (!ui_state.place.current_place_id) {
-            void load_claimed_actor_runtime(actor_id, actor_ref, 'session_control_resume');
-        }
+        await open_actor_claim_module('startup_required', ['select an actor to begin', 'one actor claimed at a time']);
     }
 
     async function poll_window_feeds(): Promise<void> {
@@ -8774,6 +8921,49 @@ export function create_app_state(): AppState {
         set_text_window_messages,
         append_text_window_message,
     };
+    (window as any).TOOL_ASSISTED_INPUTS = {
+        start: (next_script_ref: string) => {
+            const script_ref = String(next_script_ref ?? '').trim();
+            if (!script_ref) return;
+            window.localStorage.setItem('tool_assisted_inputs_enabled', 'true');
+            window.localStorage.setItem('tool_assisted_inputs_script_path', script_ref);
+            void tool_assisted_inputs_runtime.start(script_ref);
+        },
+        stop: () => {
+            void tool_assisted_inputs_runtime.stop();
+        },
+        enable: (next_script_ref?: string) => {
+            window.localStorage.setItem('tool_assisted_inputs_enabled', 'true');
+            if (typeof next_script_ref === 'string' && next_script_ref.trim().length > 0) {
+                window.localStorage.setItem('tool_assisted_inputs_script_path', next_script_ref.trim());
+            }
+        },
+        disable: () => {
+            window.localStorage.setItem('tool_assisted_inputs_enabled', 'false');
+        },
+        get_status: () => tool_assisted_inputs_runtime.get_status(),
+    };
+    (window as any).CONTROLS = {
+        open: () => set_controls_panel_visible(true),
+        close: () => set_controls_panel_visible(false),
+        toggle: () => toggle_controls_panel(),
+        runtime: game_controls.runtime,
+    };
+    window.addEventListener('keydown', (e) => {
+        if (control_binding_matches_keyboard_event(game_controls.runtime.get_binding('global.open_controls'), e)) {
+            e.preventDefault();
+            toggle_controls_panel();
+        }
+    });
+    window.setTimeout(() => {
+        if (boot_mode !== 'manual_shell') {
+            close_world_shell_modules();
+        }
+        if (boot_mode === 'direct_runtime') {
+            void refresh_controlled_actor_binding(true, true);
+        }
+        void tool_assisted_inputs_runtime.start_configured();
+    }, 0);
 
     // Layout (grid: 0..grid_width-1, 0..grid_height-1). y grows upward.
     // This roughly matches the UI mock:
@@ -9243,6 +9433,21 @@ export function create_app_state(): AppState {
             style: 'regular',
         }),
 
+        make_controls_module({
+            id: 'controls_panel',
+            rect: { x0: 138, y0: 8, x1: 198, y1: 38 },
+            get_is_visible: () => Boolean(ui_state.modules.visibility.get('controls_panel')),
+            get_definitions: () => game_controls.runtime.get_definitions('game'),
+            get_binding_label: (action_id) => game_controls.runtime.get_binding_label(action_id),
+            get_conflicts: (action_id) => game_controls.runtime.get_conflicts(action_id),
+            set_binding: (action_id, binding) => game_controls.runtime.set_binding(action_id, binding),
+            on_close: () => set_controls_panel_visible(false),
+            on_move: (new_rect) => {
+                const panel = module_registry.get('controls_panel');
+                if (panel) panel.rect = new_rect;
+            },
+        }),
+
         make_place_module({
             id: 'place',
             rect: get_persisted_rect('place', { x0: L_X0, y0: Y_PLACE0, x1: L_X1, y1: Y_PLACE1 }),
@@ -9255,6 +9460,9 @@ export function create_app_state(): AppState {
             get_scene_selected_place_id: () => ui_state.place.scene_selected_place_id,
             get_actor_current_place_id: () => ui_state.place.actor_current_place_id,
             get_scene_connector_hops_visible: () => ui_state.place.scene_connector_hops_visible,
+            on_place_breath_tick: (breath_index, meta) => {
+                tool_assisted_inputs_clock.notify_tick(breath_index, meta);
+            },
             grid_height: APP_CONFIG.grid_height,
             get_grid_height: () => APP_CONFIG.grid_height,
             render_backend: APP_CONFIG.render_backend,
@@ -11402,7 +11610,11 @@ export function create_app_state(): AppState {
     ui_state.place.npc_movement_active = false;
 
     const wsClient = initWebSocketClient();
-    open_world_entry_module();
+    if (boot_mode !== 'manual_shell') {
+        close_world_shell_modules();
+    } else {
+        open_world_entry_module();
+    }
     wsClient.on('ENTITY_PLACE_TRANSITION', (payload: any) => {
         try {
             const entity_ref = String(payload?.entity_ref ?? '');
@@ -12328,6 +12540,7 @@ export function create_app_state(): AppState {
     (window as any).test_dynamic_modules = test_dynamic_modules;
 
     window.addEventListener('beforeunload', () => {
+        void tool_assisted_inputs_runtime.stop();
         release_actor_claim_on_exit();
     });
 

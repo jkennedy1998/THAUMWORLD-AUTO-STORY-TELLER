@@ -18,6 +18,7 @@ import {
 } from "../src/launcher/log_utils.js";
 import { acquireHostLaunchLock, detectLocalHost, detectVite, readHostLaunchLock, recoverHostLaunchLock, releaseHostLaunchLock, waitForLocalHost, writeHostSessionFile as writeHostSessionManifest } from "./launcher_common.mjs";
 import { syncAtlasAssets } from "./atlas_sync.mjs";
+import { resolveToolAssistedInputsEntry } from "./tool_assisted_inputs_registry.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,11 +28,27 @@ const slot_arg = args.find((arg) => arg.startsWith("--slot="));
 const data_slot = slot_arg ? parseInt(slot_arg.split("=")[1] ?? "1", 10) : 1;
 const mode_arg = args.find((arg) => arg.startsWith("--mode="));
 const launch_mode = (mode_arg ? String(mode_arg.split("=")[1] ?? "smart") : "smart").trim().toLowerCase();
+const boot_mode_arg = args.find((arg) => arg.startsWith("--boot-mode="));
+const startup_boot_mode = (boot_mode_arg ? String(boot_mode_arg.split("=")[1] ?? "manual_shell") : "manual_shell").trim().toLowerCase() === 'direct_runtime'
+  ? 'direct_runtime'
+  : 'manual_shell';
+const tai_id_arg = args.find((arg) => arg.startsWith("--tai-id="));
+const tai_id = tai_id_arg ? String(tai_id_arg.split("=")[1] ?? "").trim() : "";
+const baseDir = path.join(__dirname, "..");
+const tai_entry = tai_id ? resolveToolAssistedInputsEntry(baseDir, tai_id) : null;
 
 console.log("Starting THAUMWORLD DEV mode with log capture...");
 console.log("Code changes will be reflected immediately (no rebuild needed)");
 console.log(`Data slot: ${data_slot}`);
 console.log(`Launch mode: ${launch_mode}`);
+console.log(`Startup boot mode: ${tai_entry ? 'tas_runtime' : startup_boot_mode}`);
+if (tai_entry) {
+  console.log(`Tool Assisted Inputs: tai${tai_entry.id}`);
+  console.log(`TAS test: ${tai_entry.testName}`);
+  console.log(`TAS open ms: ${tai_entry.openMs}`);
+  console.log(`TAS end delay ms: ${tai_entry.endDelayMs}`);
+  console.log(`TAS script: ${tai_entry.scriptPath}`);
+}
 console.log("");
 
 const atlasSync = syncAtlasAssets();
@@ -84,6 +101,18 @@ function appendToLog(entry: string): void {
     console.error("Failed to write to log:", err);
   }
 }
+
+appendToLog(formatLogEntry("LAUNCHER", "INFO", `dev_with_logs session ${JSON.stringify({
+  session_id: sessionId,
+  data_slot,
+  launch_mode,
+  tai_id: tai_entry?.id ?? null,
+  tai_test_name: tai_entry?.testName ?? null,
+  tai_open_ms: tai_entry?.openMs ?? null,
+  tai_end_delay_ms: tai_entry?.endDelayMs ?? null,
+  tai_script_path: tai_entry?.scriptPath ?? null,
+  tai_registry_path: tai_entry?.registryPath ?? null,
+})}`));
 
 function shouldPrintToConsole(_processName: string, level: string, line: string): boolean {
   if (level !== "INFO") return true;
@@ -164,6 +193,20 @@ function spawnWithLogging(name: string, command: string, args: string[], options
   return child;
 }
 
+function getClientEnv(): Record<string, string> {
+  return {
+    THAUM_STARTUP_BOOT_MODE: tai_entry ? 'tas_runtime' : startup_boot_mode,
+    ...(tai_entry ? {
+      THAUM_TAI_ENABLED: 'true',
+      THAUM_TAI_ID: tai_entry.id,
+      THAUM_TAI_TEST_NAME: tai_entry.testName,
+      THAUM_TAI_OPEN_MS: String(tai_entry.openMs),
+      THAUM_TAI_END_DELAY_MS: String(tai_entry.endDelayMs),
+      THAUM_TAI_SCRIPT_PATH: tai_entry.scriptPath,
+    } : {}),
+  };
+}
+
 function startHostProcesses(): void {
   const processes = [
     { name: "event_bridge", cmd: "tsx", args: ["src/event_bridge/main.ts"] },
@@ -182,12 +225,12 @@ function startHostProcesses(): void {
 }
 
 function startViteIfNeeded(start: boolean): void {
-  if (start) spawnWithLogging("vite", "npx", ["vite"], { env: { THAUM_BOOT_ROLE: 'client' } });
+  if (start) spawnWithLogging("vite", "npx", ["vite"], { env: { THAUM_BOOT_ROLE: 'client', ...getClientEnv() } });
 }
 
 function startElectronDelayed(delayMs: number): void {
   setTimeout(() => {
-    spawnWithLogging("electron", "npx", ["electron", "."], { env: { THAUM_BOOT_ROLE: 'client' } });
+    spawnWithLogging("electron", "npx", ["electron", "."], { env: { THAUM_BOOT_ROLE: 'client', ...getClientEnv() } });
   }, delayMs);
 }
 
@@ -195,7 +238,6 @@ async function startDev(): Promise<void> {
   console.log("Starting processes...");
   let hostExists = await detectLocalHost(data_slot);
   const viteExists = await detectVite();
-  const baseDir = path.join(__dirname, '..');
   const existingLock = readHostLaunchLock(baseDir, data_slot);
   if (existingLock) {
     console.log(`Host launch lock detected: pid=${existingLock.pid || 'unknown'} created_at=${existingLock.created_at || 'unknown'}`);

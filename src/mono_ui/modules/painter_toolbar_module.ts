@@ -18,6 +18,8 @@ export type PainterToolbarOptions = {
   
   // Callback when tool is selected
   on_tool_select: (tool: ToolType) => void;
+  matches_tool_shortcut?: (tool: ToolType, e: KeyboardEvent) => boolean;
+  on_tool_shortcut?: (tool: ToolType) => void;
 };
 
 type ToolButton = {
@@ -131,15 +133,24 @@ export function make_painter_toolbar_module(opts: PainterToolbarOptions): Module
       }
     },
     
-    OnKeyDown(e: KeyboardEvent): void {
-      const key = e.key.toUpperCase();
-      
+    OnGlobalKeyDown(e: KeyboardEvent): void {
       for (const btn of buttons) {
-        if (btn.shortcut === key) {
+        const matched = opts.matches_tool_shortcut
+          ? opts.matches_tool_shortcut(btn.tool, e)
+          : btn.shortcut === e.key.toUpperCase();
+        if (!matched) continue;
+        if (opts.on_tool_shortcut) {
+          opts.on_tool_shortcut(btn.tool);
+        } else {
           opts.on_tool_select(btn.tool);
-          return;
         }
+        e.preventDefault();
+        return;
       }
+    },
+
+    OnKeyDown(e: KeyboardEvent): void {
+      this.OnGlobalKeyDown?.(e);
     }
   };
 }

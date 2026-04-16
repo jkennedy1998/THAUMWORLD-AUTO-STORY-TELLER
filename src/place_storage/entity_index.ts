@@ -133,7 +133,6 @@ export function get_entities_in_place(slot: number, place_id: string): { npcs: s
   const entry = index.places[place_id];
   
   if (!entry) {
-    debug_log("PlaceEntityIndex", `No entities found in place ${place_id}`, { slot });
     return { npcs: [], actors: [] };
   }
   

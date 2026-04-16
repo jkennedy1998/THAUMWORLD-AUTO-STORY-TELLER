@@ -50,6 +50,9 @@ These two plans work together. The Inventory Movement Plan is the **primary impl
   - **DEPRECATED:** Phase 6/7 UI modules (replaced by Phase 8-9 above)
 
 ### Other Active Plans
+- `docs/plans/2026_04_15_shared_controls_module_plan.md` - Shared persistent rebinding system for game and painter controls
+- `docs/plans/2026_04_15_auto_input_debugging_plan.md` - Breath-relative scripted auto-input harness for repeatable gameplay debugging
+- `docs/plans/2026_04_12_input_host_runtime_plan.md` - Platform input host + shared multiplayer-ready input runtime
 - `docs/plans/2026_04_12_breath_scheduler_action_busy_plan.md` - Canonical breath scheduler, general busy cooldowns, input-before-physics timing
 - `docs/plans/2026_03_23_action_pipeline_refinement_plan.md` - Breath-driven action economy + timed-event movement integration for current verbs
 - `docs/plans/2026_02_13_advanced_npc_interactions_scheduler.md` - Breath/turn-driven NPC communication scheduling and reply ownership

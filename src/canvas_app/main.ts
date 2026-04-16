@@ -95,6 +95,33 @@ const runtime = new CanvasRuntime({
     on_after_compose,
 });
 
+(window as any).TOOL_ASSISTED_INPUTS_RUNTIME = {
+    inject_gameplay_key: (type: 'keydown' | 'keyup', payload: { code: string; key?: string; repeat?: boolean }) => {
+        runtime.inject_tool_assisted_gameplay_key(type, payload);
+    },
+    inject_pointer_move: (payload: any) => {
+        runtime.inject_tool_assisted_pointer_move(payload);
+    },
+    inject_pointer_down: (payload: any) => {
+        runtime.inject_tool_assisted_pointer_down(payload);
+    },
+    inject_pointer_up: (payload: any) => {
+        runtime.inject_tool_assisted_pointer_up(payload);
+    },
+    inject_pointer_click: (payload: any, click_count: 1 | 2) => {
+        runtime.inject_tool_assisted_pointer_click(payload, click_count);
+    },
+    inject_context_menu: (payload: any) => {
+        runtime.inject_tool_assisted_context_menu(payload);
+    },
+    inject_pointer_drag: (payload: any) => {
+        runtime.inject_tool_assisted_pointer_drag(payload);
+    },
+    inject_wheel: (payload: any) => {
+        runtime.inject_tool_assisted_wheel(payload);
+    },
+};
+
 function apply_responsive_layout(scale: number): void {
     const next = compute_responsive_grid(scale);
     if (!next) return;

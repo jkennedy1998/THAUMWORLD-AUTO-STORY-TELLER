@@ -24,6 +24,8 @@ type DrawCellOpts = {
   weight_index_to_css: readonly number[];
 };
 
+type AtlasDrawResult = 'drawn' | 'pending' | 'not_applicable';
+
 export type CanvasCellRenderer = {
   backend: RenderBackendKind;
   effective_backend: RenderBackendKind;
@@ -43,9 +45,9 @@ function draw_font_cell(opts: DrawCellOpts): void {
   opts.ctx.fillText(opts.cell.char, opts.center_x_px, opts.center_y_px);
 }
 
-function draw_atlas_cell(opts: DrawCellOpts): boolean {
+function draw_atlas_cell(opts: DrawCellOpts): AtlasDrawResult {
   const graphic = opts.cell.graphic;
-  if (!graphic || graphic.graphic_id.startsWith('text_')) return false;
+  if (!graphic || graphic.graphic_id.startsWith('text_')) return 'not_applicable';
   if (!loggedAtlasGraphics.has(graphic.graphic_id)) {
     loggedAtlasGraphics.add(graphic.graphic_id);
     console.log('[atlas debug] draw_atlas_cell attempt', {
@@ -66,7 +68,7 @@ function draw_atlas_cell(opts: DrawCellOpts): boolean {
       opts.cell_w_px,
       opts.cell_h_px,
     );
-    return true;
+    return 'drawn';
   }
   const key = JSON.stringify([graphic.graphic_id, graphic.weight_index, graphic.view_direction, graphic.facing, materials, opts.cell.light_mag ?? null]);
   if (!pending_atlas_loads.has(key)) {
@@ -85,7 +87,7 @@ function draw_atlas_cell(opts: DrawCellOpts): boolean {
       }
     });
   }
-  return false;
+  return 'pending';
 }
 
 export function create_canvas_cell_renderer(opts: {
@@ -115,7 +117,14 @@ export function create_canvas_cell_renderer(opts: {
       }
       switch (resolved.effective_backend) {
         case 'atlas':
-          if (draw_atlas_cell(opts2)) return;
+          {
+            const atlas_result = draw_atlas_cell(opts2);
+            if (atlas_result === 'drawn') return;
+            // Atlas-addressable cells should have a single source of truth.
+            // If the atlas frame is still loading, leave the cell blank instead of
+            // flashing an ASCII fallback that will be replaced a frame later.
+            if (atlas_result === 'pending') return;
+          }
           draw_font_cell(opts2);
           return;
         case 'font':

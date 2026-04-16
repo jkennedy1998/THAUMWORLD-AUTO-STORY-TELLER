@@ -68,6 +68,7 @@ const NPC_MEMORY_NUM_CTX = Number.isFinite(NPC_MEMORY_NUM_CTX_RAW) && NPC_MEMORY
     : 8_192;
 const NPC_AI_KEEP_ALIVE = "30m";
 const NPC_AI_TEMPERATURE = 0.8;
+const NPC_AI_TICK_TRACE_ENABLED = false;
 
 // Track which NPCs have responded in current conversation round to avoid duplicates
 // Track which NPC journals have been consolidated for a given timed event
@@ -1975,7 +1976,9 @@ async function tick(outbox_path: string, inbox_path: string, log_path: string): 
         const outbox = read_outbox(outbox_path);
         const messages = outbox.messages;
         
-        debug_log("NPC_AI", `Tick started - checking ${messages.length} messages`);
+        if (NPC_AI_TICK_TRACE_ENABLED) {
+            debug_log("NPC_AI", `Tick started - checking ${messages.length} messages`);
+        }
         
         // Process non-communication actions first (triggers idle timers)
         for (const msg of messages) {

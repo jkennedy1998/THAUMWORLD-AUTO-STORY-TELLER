@@ -1,0 +1,18 @@
+{
+  "id": "painter_assign_tools",
+  "test_name": "paint_test_assign_primary_pencil_secondary_eraser",
+  "clock_mode": "realtime_ms",
+  "open_ms": 5000,
+  "start_delay_ms": 1200,
+  "end_delay_ms": 800,
+  "actions": [
+    { "at_ms": 0, "type": "capture_painter_tool_state", "slot": "start_tools" },
+    { "at_ms": 100, "type": "key_tap", "code": "KeyP", "key": "p", "hold_ms": 30 },
+    { "at_ms": 500, "type": "capture_painter_tool_state", "slot": "after_primary_p" },
+    { "at_ms": 520, "type": "assert_painter_primary_tool", "tool": "pencil" },
+    { "at_ms": 800, "type": "key_tap", "code": "KeyE", "key": "e", "hold_ms": 30 },
+    { "at_ms": 940, "type": "key_tap", "code": "KeyE", "key": "e", "hold_ms": 30 },
+    { "at_ms": 1300, "type": "capture_painter_tool_state", "slot": "after_secondary_e" },
+    { "at_ms": 1320, "type": "assert_painter_secondary_tool", "tool": "eraser" }
+  ]
+}

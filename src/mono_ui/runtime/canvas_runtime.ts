@@ -5,11 +5,19 @@ import { rect_contains } from '../types.js';
 import { debug_warn, debug_log, DEBUG_LEVEL } from '../../shared/debug.js';
 // NOTE: debug overlays are toggled from UI buttons (not hotkeys).
 import { unlock_sfx } from '../sfx/sfx_player.js';
-import { handle_keydown, handle_keyup, reset_all } from './input_actions.js';
+import { get_action_for_code, handle_keydown, handle_keyup } from './input_actions.js';
+import { is_tool_assisted_inputs_active } from './automation_runtime.js';
 import { clamp_ui_scale, get_ui_cell_metrics, screen_px_to_grid_cell } from './ui_metrics.js';
+import type { ToolAssistedInputsPointerActionName } from './automation_interfaces.js';
 import type { RenderBackendKind } from './render_theme.js';
 import { create_canvas_cell_renderer, type CanvasCellRenderer } from './cell_renderer.js';
 import { clamp_weight_index, DEFAULT_WEIGHT_INDEX_TO_CSS } from '../weight_system.js';
+import { create_electron_input_host, type ElectronInputHost } from './electron_input_host.js';
+import { reset_all } from './input_actions.js';
+
+function is_directional_action(action: string | null): action is 'move_up' | 'move_down' | 'move_left' | 'move_right' {
+    return action === 'move_up' || action === 'move_down' || action === 'move_left' || action === 'move_right';
+}
 
 export type CanvasRuntimeOptions = {
     canvas: HTMLCanvasElement;
@@ -108,6 +116,33 @@ export class CanvasRuntime {
     private last_pan_client_x = 0;
     private last_pan_client_y = 0;
     private space_down = false;
+    private last_published_ui_context_key = '';
+    private gameplay_bridge_down_codes = new Set<string>();
+
+    public inject_tool_assisted_gameplay_key(type: 'keydown' | 'keyup', payload: { code: string; key?: string; repeat?: boolean }): void {
+        if (this.input_host.source_kind !== 'electron_bridge') return;
+        const code = String(payload.code ?? '').trim();
+        if (!code) return;
+        const key = String(payload.key ?? '').trim();
+        const action = get_action_for_code(code);
+        if (!this.is_bridge_owned_gameplay_action(action)) return;
+        const typing = this.focused_owner_wants_text_capture();
+        this.publish_gameplay_input_context(typing);
+        if (code === 'Space') {
+            this.space_down = type === 'keydown';
+        }
+        if (type === 'keydown') {
+            if (!payload.repeat && !this.gameplay_bridge_down_codes.has(code)) {
+                this.gameplay_bridge_down_codes.add(code);
+                this.forward_bridge_gameplay_event({ code, key, repeat: Boolean(payload.repeat) } as KeyboardEvent, 'keydown');
+            }
+            return;
+        }
+        if (this.gameplay_bridge_down_codes.has(code)) {
+            this.gameplay_bridge_down_codes.delete(code);
+            this.forward_bridge_gameplay_event({ code, key, repeat: Boolean(payload.repeat) } as KeyboardEvent, 'keyup');
+        }
+    }
 
     // Allow panning beyond strict canvas bounds (gives breathing room / "free space").
     private readonly PAN_MARGIN_TILES = 10;
@@ -115,6 +150,8 @@ export class CanvasRuntime {
     // Base translate (centered/snap-to-grid) computed from viewport + canvas size.
     private base_pan_px_x = 0;
     private base_pan_px_y = 0;
+    private readonly runtime_instance_id = `canvas_runtime_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    private readonly input_host: ElectronInputHost;
 
     constructor(opts: CanvasRuntimeOptions) {
         this.canvas_el = opts.canvas;
@@ -142,6 +179,28 @@ export class CanvasRuntime {
 
         this.engine_canvas = create_canvas(this.grid_width, this.grid_height);
         this.key_sink = opts.key_sink ?? this.ensure_key_sink();
+        this.input_host = create_electron_input_host({
+            on_keydown: this.handle_runtime_keydown,
+            on_keyup: this.handle_runtime_keyup,
+            on_window_focus: () => {
+                this.publish_gameplay_input_context(this.focused_owner_wants_text_capture());
+                this.log_input_debug('window focus observed', {
+                    runtime_instance_id: this.runtime_instance_id,
+                    active_element_id: (document.activeElement as HTMLElement | null)?.id ?? null,
+                    focused_owner_id: this.focused_owner?.id ?? null,
+                });
+            },
+            on_window_blur: () => {
+                this.gameplay_bridge_down_codes.clear();
+                this.publish_gameplay_input_context(this.focused_owner_wants_text_capture());
+                this.log_input_debug('window blur observed', {
+                    runtime_instance_id: this.runtime_instance_id,
+                    active_element_id: (document.activeElement as HTMLElement | null)?.id ?? null,
+                    focused_owner_id: this.focused_owner?.id ?? null,
+                });
+                reset_all();
+            },
+        });
 
         this.attach_events();
     }
@@ -265,17 +324,45 @@ export class CanvasRuntime {
 
     private focus_key_sink(): void {
         this.key_sink.focus({ preventScroll: true });
+        this.log_input_debug('focus_key_sink called', {
+            runtime_instance_id: this.runtime_instance_id,
+            active_element_id: (document.activeElement as HTMLElement | null)?.id ?? null,
+            focused_owner_id: this.focused_owner?.id ?? null,
+        });
     }
 
     private focused_owner_wants_text_capture(): boolean {
         return this.focused_owner?.WantsTextCapture?.() === true;
     }
 
+    private sync_text_input_focus_for_owner(): void {
+        if (this.focused_owner_wants_text_capture()) {
+            this.focus_key_sink();
+            return;
+        }
+
+        if (document.activeElement === this.key_sink) {
+            try {
+                this.key_sink.blur();
+            } catch {
+                // ignore
+            }
+        }
+    }
+
     private update_focused_owner(next_owner: Module | null): void {
         if (next_owner === this.focused_owner) return;
+        this.log_input_debug('focused owner changed', {
+            runtime_instance_id: this.runtime_instance_id,
+            previous_owner_id: this.focused_owner?.id ?? null,
+            next_owner_id: next_owner?.id ?? null,
+            next_owner_wants_text_capture: next_owner?.WantsTextCapture?.() === true,
+            active_element_id: (document.activeElement as HTMLElement | null)?.id ?? null,
+        });
         this.focused_owner?.OnBlur?.();
         this.focused_owner = next_owner;
         this.focused_owner?.OnFocus?.();
+        this.sync_text_input_focus_for_owner();
     }
 
     private make_pointer_event(
@@ -350,6 +437,171 @@ export class CanvasRuntime {
 
         if (cell !== undefined) e.cell = cell;
         return e;
+    }
+
+    private resolve_tool_assisted_pointer_button(pointer_action?: ToolAssistedInputsPointerActionName, button?: number): { button: number; buttons: number } {
+        if (Number.isFinite(button)) {
+            const resolved = Math.max(0, Math.floor(Number(button)));
+            return { button: resolved, buttons: resolved === 2 ? 2 : resolved === 1 ? 4 : 1 };
+        }
+        if (pointer_action === 'secondary') return { button: 2, buttons: 2 };
+        if (pointer_action === 'auxiliary') return { button: 1, buttons: 4 };
+        return { button: 0, buttons: 1 };
+    }
+
+    private make_tool_assisted_pointer_like(kind: string, action: { x: number; y: number; pointer_action?: ToolAssistedInputsPointerActionName; button?: number; pointer_type?: string; pressure?: number; shift?: boolean; ctrl?: boolean; alt?: boolean; meta?: boolean; buttons?: number }): any {
+        const resolved = this.resolve_tool_assisted_pointer_button(action.pointer_action, action.button);
+        return {
+            type: kind,
+            clientX: action.x,
+            clientY: action.y,
+            pointerId: 0,
+            pointerType: action.pointer_type ?? 'mouse',
+            pressure: typeof action.pressure === 'number' ? action.pressure : ((action.pointer_type ?? 'mouse') === 'mouse' ? 0.5 : 0.5),
+            button: resolved.button,
+            buttons: typeof action.buttons === 'number' ? action.buttons : resolved.buttons,
+            shiftKey: Boolean(action.shift),
+            ctrlKey: Boolean(action.ctrl),
+            altKey: Boolean(action.alt),
+            metaKey: Boolean(action.meta),
+            preventDefault() { /* noop */ },
+        };
+    }
+
+    private route_tool_assisted_pointer_move(ev: any): void {
+        const t = { x: Math.floor(ev.clientX), y: Math.floor(ev.clientY) };
+        const top = this.route_to_top_module(t.x, t.y) ?? null;
+        const base: any = this.make_pointer_event('move', t.x, t.y, ev, this.engine_canvas.get(t.x, t.y));
+        if (typeof ev?.pointerType === 'string') base.pointer_type = ev.pointerType;
+        if (typeof ev?.pressure === 'number') base.pressure = ev.pressure;
+        if (this.on_pointer_move_global) {
+            try { this.on_pointer_move_global(base.x, base.y, base as PointerEvent); } catch { /* ignore */ }
+        }
+        if (this.capture_owner) {
+            this.capture_owner.OnPointerMove?.(base);
+            if (this.down_tile) {
+                const dist = this.drag_distance_tiles(t.x, t.y);
+                if (!this.dragging && dist >= this.DRAG_THRESHOLD_TILES) {
+                    this.dragging = true;
+                    const de: any = this.make_drag_event('drag_start', t.x, t.y, ev.buttons, this.engine_canvas.get(t.x, t.y));
+                    de.pointer_type = ev.pointerType;
+                    de.pressure = ev.pressure;
+                    this.capture_owner.OnDragStart?.(de);
+                }
+                if (this.dragging) {
+                    const de: any = this.make_drag_event('drag_move', t.x, t.y, ev.buttons, this.engine_canvas.get(t.x, t.y));
+                    de.pointer_type = ev.pointerType;
+                    de.pressure = ev.pressure;
+                    this.capture_owner.OnDragMove?.(de);
+                }
+            }
+            this.last_tile = t;
+            return;
+        }
+        if (top !== this.hover_owner) {
+            this.hover_owner?.OnPointerLeave?.({ ...base, kind: 'leave' });
+            top?.OnPointerEnter?.({ ...base, kind: 'enter' });
+            this.hover_owner = top;
+        }
+        top?.OnPointerMove?.(base);
+        this.last_tile = t;
+    }
+
+    public inject_tool_assisted_pointer_move(action: { x: number; y: number; pointer_action?: ToolAssistedInputsPointerActionName; button?: number; pointer_type?: string; pressure?: number; shift?: boolean; ctrl?: boolean; alt?: boolean; meta?: boolean }): void {
+        this.route_tool_assisted_pointer_move(this.make_tool_assisted_pointer_like('pointermove', action));
+    }
+
+    public inject_tool_assisted_pointer_down(action: { x: number; y: number; pointer_action?: ToolAssistedInputsPointerActionName; button?: number; pointer_type?: string; pressure?: number; shift?: boolean; ctrl?: boolean; alt?: boolean; meta?: boolean }): void {
+        const ev = this.make_tool_assisted_pointer_like('pointerdown', action);
+        const t = { x: Math.floor(action.x), y: Math.floor(action.y) };
+        let top = this.route_to_top_module(t.x, t.y) ?? null;
+        this.down_owner = top;
+        this.down_tile = t;
+        this.dragging = false;
+        this.capture_owner = top;
+        if (top?.Focusable) this.update_focused_owner(top);
+        else if (this.focused_owner?.id === 'painter_canvas') this.update_focused_owner(null);
+        const pe: any = this.make_pointer_event('down', t.x, t.y, ev, this.engine_canvas.get(t.x, t.y));
+        pe.pointer_type = ev.pointerType;
+        pe.pressure = ev.pressure;
+        for (const m of this.modules) {
+            try { m?.OnGlobalPointerDown?.(pe as PointerEvent); } catch { /* ignore */ }
+        }
+        top?.OnPointerDown?.(pe);
+        this.last_tile = t;
+    }
+
+    public inject_tool_assisted_pointer_up(action: { x: number; y: number; pointer_action?: ToolAssistedInputsPointerActionName; button?: number; pointer_type?: string; pressure?: number; shift?: boolean; ctrl?: boolean; alt?: boolean; meta?: boolean }, click_count?: 1 | 2): void {
+        const ev = this.make_tool_assisted_pointer_like('pointerup', action, );
+        const t = { x: Math.floor(action.x), y: Math.floor(action.y) };
+        const top = this.route_to_top_module(t.x, t.y) ?? null;
+        const target = this.capture_owner ?? top;
+        const pe: any = this.make_pointer_event('up', t.x, t.y, ev, this.engine_canvas.get(t.x, t.y));
+        pe.pointer_type = ev.pointerType;
+        pe.pressure = ev.pressure;
+        target?.OnPointerUp?.(pe);
+        if (this.dragging && top) {
+            const de: any = this.make_drag_event('drag_end', t.x, t.y, ev.buttons, this.engine_canvas.get(t.x, t.y));
+            de.pointer_type = ev.pointerType;
+            de.pressure = ev.pressure;
+            top.OnDragEnd?.(de);
+        }
+        if (!this.dragging && this.down_owner && target && this.down_owner === target && rect_contains(target.rect, t.x, t.y)) {
+            target.OnClick?.(this.make_pointer_event('click', t.x, t.y, ev, this.engine_canvas.get(t.x, t.y), click_count ?? 1));
+        }
+        this.capture_owner = null;
+        this.down_owner = null;
+        this.down_tile = null;
+        this.dragging = false;
+        this.last_tile = t;
+    }
+
+    public inject_tool_assisted_pointer_click(action: { x: number; y: number; pointer_action?: ToolAssistedInputsPointerActionName; button?: number; pointer_type?: string; pressure?: number; shift?: boolean; ctrl?: boolean; alt?: boolean; meta?: boolean }, click_count: 1 | 2): void {
+        this.inject_tool_assisted_pointer_move(action);
+        this.inject_tool_assisted_pointer_down(action);
+        this.inject_tool_assisted_pointer_up(action, click_count);
+    }
+
+    public inject_tool_assisted_context_menu(action: { x: number; y: number; pointer_action?: ToolAssistedInputsPointerActionName; button?: number; pointer_type?: string; pressure?: number; shift?: boolean; ctrl?: boolean; alt?: boolean; meta?: boolean }): void {
+        const ev = this.make_tool_assisted_pointer_like('contextmenu', { ...action, pointer_action: action.pointer_action ?? 'secondary', button: action.button ?? 2 });
+        const t = { x: Math.floor(action.x), y: Math.floor(action.y) };
+        const top = this.route_to_top_module(t.x, t.y) ?? null;
+        if (top) {
+            const pe: any = this.make_pointer_event('click', t.x, t.y, ev, this.engine_canvas.get(t.x, t.y), 1);
+            pe.pointer_type = ev.pointerType;
+            pe.pressure = ev.pressure;
+            top.OnContextMenu?.(pe);
+        }
+        this.last_tile = t;
+    }
+
+    public inject_tool_assisted_pointer_drag(action: { from_x: number; from_y: number; to_x: number; to_y: number; steps?: number; pointer_action?: ToolAssistedInputsPointerActionName; button?: number; pointer_type?: string; pressure?: number; shift?: boolean; ctrl?: boolean; alt?: boolean; meta?: boolean }): void {
+        const steps = Math.max(1, Math.floor(Number(action.steps) || 1));
+        this.inject_tool_assisted_pointer_move({ ...action, x: action.from_x, y: action.from_y });
+        this.inject_tool_assisted_pointer_down({ ...action, x: action.from_x, y: action.from_y });
+        for (let i = 1; i <= steps; i += 1) {
+            const x = action.from_x + ((action.to_x - action.from_x) * i) / steps;
+            const y = action.from_y + ((action.to_y - action.from_y) * i) / steps;
+            this.inject_tool_assisted_pointer_move({ ...action, x, y });
+        }
+        this.inject_tool_assisted_pointer_up({ ...action, x: action.to_x, y: action.to_y });
+    }
+
+    public inject_tool_assisted_wheel(action: { x: number; y: number; delta_x: number; delta_y: number; shift?: boolean; ctrl?: boolean; alt?: boolean; meta?: boolean }): void {
+        const t = { x: Math.floor(action.x), y: Math.floor(action.y) };
+        const top = this.route_to_top_module(t.x, t.y);
+        top?.OnWheel?.({
+            x: t.x,
+            y: t.y,
+            delta_x: action.delta_x,
+            delta_y: action.delta_y,
+            delta_mode: 0,
+            shift: Boolean(action.shift),
+            ctrl: Boolean(action.ctrl),
+            alt: Boolean(action.alt),
+            meta: Boolean(action.meta),
+        });
+        this.last_tile = t;
     }
 
     private drag_distance_tiles(x: number, y: number): number {
@@ -573,10 +825,224 @@ export class CanvasRuntime {
         if (ev.key === 'Escape') {
             this.focused_owner?.OnBlur?.();
             this.focused_owner = null;
+            ev.preventDefault();
             return true;
         }
         return false;
     }
+
+    private build_input_context(typing: boolean) {
+        return {
+            typing,
+            window_focused: document.hasFocus(),
+            active_element_id: (document.activeElement as HTMLElement | null)?.id ?? null,
+            focused_owner_id: this.focused_owner?.id ?? null,
+        };
+    }
+
+    private log_input_debug(message: string, payload: Record<string, unknown>): void {
+        if (this.input_host.source_kind === 'electron_bridge') return;
+        try {
+            debug_log('INPUT_DEBUG', `${message} ${JSON.stringify(payload)}`);
+        } catch {
+            // ignore
+        }
+    }
+
+    private publish_gameplay_input_context(typing: boolean): void {
+        try {
+            const payload = {
+                source: 'ui_runtime',
+                typing,
+                window_focused: document.hasFocus(),
+                active_element_id: (document.activeElement as HTMLElement | null)?.id ?? null,
+                focused_owner_id: this.focused_owner?.id ?? null,
+            };
+            const next_key = JSON.stringify(payload);
+            if (next_key === this.last_published_ui_context_key) return;
+            this.last_published_ui_context_key = next_key;
+            (window as Window).electronAPI?.gameplayInputPublishContext?.(payload);
+        } catch {
+            // ignore
+        }
+    }
+
+    private is_bridge_owned_gameplay_action(action: string | null): action is 'move_up' | 'move_down' | 'move_left' | 'move_right' | 'jump' {
+        return action === 'jump' || is_directional_action(action);
+    }
+
+    private forward_bridge_gameplay_event(ev: KeyboardEvent, type: 'keydown' | 'keyup'): void {
+        try {
+            (window as Window).electronAPI?.gameplayInputSendEvent?.({
+                source: 'ui_runtime',
+                type,
+                code: ev.code,
+                key: ev.key,
+                repeat: ev.repeat,
+            });
+        } catch {
+            // ignore
+        }
+    }
+
+    private handle_gameplay_capture_keydown = (ev: KeyboardEvent): void => {
+        if (this.input_host.source_kind !== 'electron_bridge') return;
+        const typing = this.focused_owner_wants_text_capture();
+        const action = get_action_for_code(ev.code);
+        if (is_tool_assisted_inputs_active() && ev.isTrusted && this.is_bridge_owned_gameplay_action(action)) {
+            ev.preventDefault();
+            ev.stopImmediatePropagation();
+            return;
+        }
+        if (!this.is_bridge_owned_gameplay_action(action) || typing) return;
+        this.publish_gameplay_input_context(typing);
+        if (ev.code === 'Space') {
+            this.space_down = true;
+        }
+        if (!ev.repeat && !this.gameplay_bridge_down_codes.has(ev.code)) {
+            this.gameplay_bridge_down_codes.add(ev.code);
+            this.forward_bridge_gameplay_event(ev, 'keydown');
+        }
+        ev.preventDefault();
+        ev.stopImmediatePropagation();
+    };
+
+    private handle_gameplay_capture_keyup = (ev: KeyboardEvent): void => {
+        if (this.input_host.source_kind !== 'electron_bridge') return;
+        const typing = this.focused_owner_wants_text_capture();
+        const action = get_action_for_code(ev.code);
+        if (is_tool_assisted_inputs_active() && ev.isTrusted && this.is_bridge_owned_gameplay_action(action)) {
+            ev.preventDefault();
+            ev.stopImmediatePropagation();
+            return;
+        }
+        if (!this.is_bridge_owned_gameplay_action(action) || typing) return;
+        this.publish_gameplay_input_context(typing);
+        if (ev.code === 'Space') {
+            this.space_down = false;
+        }
+        if (this.gameplay_bridge_down_codes.has(ev.code)) {
+            this.gameplay_bridge_down_codes.delete(ev.code);
+            this.forward_bridge_gameplay_event(ev, 'keyup');
+        }
+        ev.preventDefault();
+        ev.stopImmediatePropagation();
+    };
+
+    private handle_runtime_keydown = (ev: KeyboardEvent): void => {
+        const typing = this.focused_owner_wants_text_capture();
+        const action = get_action_for_code(ev.code);
+        if (is_tool_assisted_inputs_active() && ev.isTrusted && !typing && this.is_bridge_owned_gameplay_action(action)) {
+            ev.preventDefault();
+            ev.stopImmediatePropagation();
+            return;
+        }
+        this.publish_gameplay_input_context(typing);
+        if (this.input_host.source_kind !== 'electron_bridge' && ev.code === 'Space' && !typing) {
+            this.space_down = true;
+        }
+        if (ev.repeat && is_directional_action(action)) {
+            if (!typing) {
+                ev.preventDefault();
+            }
+            return;
+        }
+        unlock_sfx();
+        const input_context = this.build_input_context(typing);
+        if (!(this.input_host.source_kind === 'electron_bridge' && ev.repeat && action === 'jump')) {
+        this.log_input_debug('window keydown received', {
+            runtime_instance_id: this.runtime_instance_id,
+            code: ev.code,
+            key: ev.key,
+            repeat: ev.repeat,
+            is_trusted: ev.isTrusted,
+            target_tag: (ev.target as HTMLElement | null)?.tagName ?? null,
+            target_id: (ev.target as HTMLElement | null)?.id ?? null,
+            active_element_id: input_context.active_element_id,
+            focused_owner_id: input_context.focused_owner_id,
+            typing,
+            action,
+            default_prevented_before: ev.defaultPrevented,
+        });
+        }
+
+        if (ev.key === 'Escape') {
+            this.focused_owner?.OnKeyDown?.(ev);
+            if (ev.defaultPrevented) return;
+            if (action) {
+                handle_keydown(ev, input_context);
+            }
+            if (this.dispatch_global_keydown(ev)) return;
+            return;
+        }
+
+        if (action) {
+            handle_keydown(ev, input_context);
+            if (!typing || action === 'cancel') {
+                ev.preventDefault();
+            }
+        }
+
+        if (!typing) {
+            for (let i = this.modules.length - 1; i >= 0; i--) {
+                const m = this.modules[i];
+                if (!m) continue;
+                if (m.OnGlobalKeyDown) {
+                    m.OnGlobalKeyDown(ev);
+                    if (ev.defaultPrevented) return;
+                }
+            }
+        }
+
+        if (!typing && this.dispatch_global_keydown(ev)) return;
+        this.focused_owner?.OnKeyDown?.(ev);
+    };
+
+    private handle_runtime_keyup = (ev: KeyboardEvent): void => {
+        const typing = this.focused_owner_wants_text_capture();
+        const action = get_action_for_code(ev.code);
+        if (is_tool_assisted_inputs_active() && ev.isTrusted && !typing && this.is_bridge_owned_gameplay_action(action)) {
+            ev.preventDefault();
+            ev.stopImmediatePropagation();
+            return;
+        }
+        this.publish_gameplay_input_context(typing);
+        if (this.input_host.source_kind !== 'electron_bridge' && ev.code === 'Space') {
+            this.space_down = false;
+        }
+        const input_context = this.build_input_context(typing);
+        this.log_input_debug('window keyup received', {
+            runtime_instance_id: this.runtime_instance_id,
+            code: ev.code,
+            key: ev.key,
+            repeat: ev.repeat,
+            is_trusted: ev.isTrusted,
+            target_tag: (ev.target as HTMLElement | null)?.tagName ?? null,
+            target_id: (ev.target as HTMLElement | null)?.id ?? null,
+            active_element_id: input_context.active_element_id,
+            focused_owner_id: input_context.focused_owner_id,
+            typing,
+            action,
+            default_prevented_before: ev.defaultPrevented,
+        });
+        if (action) {
+            handle_keyup(ev, input_context);
+            if (!typing || action === 'cancel') {
+                ev.preventDefault();
+            }
+        }
+
+        for (let i = this.modules.length - 1; i >= 0; i--) {
+            const m = this.modules[i];
+            if (!m) continue;
+            try {
+                m.OnGlobalKeyUp?.(ev);
+            } catch {
+                // ignore
+            }
+        }
+        this.focused_owner?.OnKeyUp?.(ev);
+    };
 
     private grid_to_ascii(): string {
         // NOTE: y=0 is bottom in our grid space, so we print from top -> bottom.
@@ -645,6 +1111,22 @@ export class CanvasRuntime {
     }
 
     private attach_events(): void {
+        this.log_input_debug('attaching canvas runtime input listeners', {
+            runtime_instance_id: this.runtime_instance_id,
+        });
+        document.addEventListener('keydown', this.handle_gameplay_capture_keydown, true);
+        document.addEventListener('keyup', this.handle_gameplay_capture_keyup, true);
+        this.input_host.attach();
+        document.addEventListener('visibilitychange', () => {
+            this.log_input_debug('document visibilitychange observed', {
+                runtime_instance_id: this.runtime_instance_id,
+                visibility_state: document.visibilityState,
+            });
+            if (document.visibilityState === 'hidden') {
+                reset_all();
+            }
+        });
+
         // Help pen/touch input behave consistently.
         // (Prevents browser gesture handling from stealing pointer events.)
         try {
@@ -840,7 +1322,6 @@ export class CanvasRuntime {
 
         const route_down = (ev: any) => {
             ev.preventDefault?.();
-            this.focus_key_sink();
 
             const t = this.mouse_to_tile(ev);
             if (!t) return;
@@ -1174,7 +1655,6 @@ export class CanvasRuntime {
                 if (ev.button === 0) return;
             }
             ev.preventDefault();
-            this.focus_key_sink();
 
             const t = this.mouse_to_tile(ev);
             if (!t) return;
@@ -1359,62 +1839,6 @@ export class CanvasRuntime {
             this.dragging = false;
         });
 
-        this.key_sink.addEventListener('keydown', (ev) => {
-            unlock_sfx();
-            const typing = this.focused_owner_wants_text_capture();
-
-            // Update authoritative action state (so movement can poll it)
-            handle_keydown(ev, { typing });
-
-            if (ev.code === 'Space') {
-                // Space is reserved for global UI pan gesture when not typing into input.
-                if (DEBUG_LEVEL >= 4 && !ev.repeat) {
-                    debug_log('[RUNTIME-DEBUG] Space keydown - typing:', typing, 'focused_owner:', this.focused_owner?.id);
-                }
-                if (!typing) {
-                    this.space_down = true;
-                    ev.preventDefault();
-                }
-            }
-            if (!typing) {
-                for (let i = this.modules.length - 1; i >= 0; i--) {
-                    const m = this.modules[i];
-                    if (!m) continue;
-                    if (m.OnGlobalKeyDown) {
-                        m.OnGlobalKeyDown(ev);
-                        break;
-                    }
-                }
-            }
-
-            if (!typing && this.dispatch_global_keydown(ev)) return;
-            if (DEBUG_LEVEL >= 4 && !ev.repeat) {
-                debug_log('[RUNTIME-DEBUG] Calling OnKeyDown on focused_owner:', this.focused_owner?.id, 'key:', ev.code);
-            }
-            this.focused_owner?.OnKeyDown?.(ev);
-        });
-
-        this.key_sink.addEventListener('keyup', (ev) => {
-            // Update authoritative action state (clears action on keyup)
-            handle_keyup(ev, { typing: this.focused_owner_wants_text_capture() });
-
-            if (ev.code === 'Space') {
-                this.space_down = false;
-            }
-            // Key-up is broadcast as a global lane so held-input systems (eg movement)
-            // can release even if focus changes mid-press.
-            for (let i = this.modules.length - 1; i >= 0; i--) {
-                const m = this.modules[i];
-                if (!m) continue;
-                try {
-                    m.OnGlobalKeyUp?.(ev);
-                } catch {
-                    // ignore
-                }
-            }
-            this.focused_owner?.OnKeyUp?.(ev);
-        });
-
         this.key_sink.addEventListener('beforeinput', (ev: InputEvent) => {
             if (!this.focused_owner?.OnTextInput) return;
 
@@ -1424,6 +1848,20 @@ export class CanvasRuntime {
             if (typeof data === 'string' && data.length > 0) {
                 this.focused_owner.OnTextInput(data);
             }
+        });
+        this.key_sink.addEventListener('focus', () => {
+            this.log_input_debug('key_sink focus observed', {
+                runtime_instance_id: this.runtime_instance_id,
+                active_element_id: (document.activeElement as HTMLElement | null)?.id ?? null,
+                focused_owner_id: this.focused_owner?.id ?? null,
+            });
+        });
+        this.key_sink.addEventListener('blur', () => {
+            this.log_input_debug('key_sink blur observed', {
+                runtime_instance_id: this.runtime_instance_id,
+                active_element_id: (document.activeElement as HTMLElement | null)?.id ?? null,
+                focused_owner_id: this.focused_owner?.id ?? null,
+            });
         });
 
     }
