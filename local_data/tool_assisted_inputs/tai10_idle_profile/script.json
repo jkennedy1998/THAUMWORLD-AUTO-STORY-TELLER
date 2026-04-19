@@ -1,0 +1,26 @@
+{
+  "id": "movement_idle_profile_22ms",
+  "test_name": "walk_test_idle_profile_22ms",
+  "clock_mode": "breath",
+  "open_ms": 14000,
+  "description": "Idle-only 22ms stress profile. Boot, claim the actor, remain stationary for several hundred breaths, and assert the actor tile never changes so renderer churn can be compared against hold movement.",
+  "start_delay_ms": 2500,
+  "end_delay_ms": 3000,
+  "boot": {
+    "auto_connect": true,
+    "auto_claim": true,
+    "actor_ref": "actor.ent_ZPHB7TZ3AV"
+  },
+  "actions": [
+    { "at_breath": 0, "type": "assert_context_ready" },
+    { "at_breath": 1, "type": "capture_actor_tile", "slot": "idle_start_tile" },
+    { "at_breath": 2, "type": "marker", "label": "idle_profile_start" },
+    { "at_breath": 120, "type": "capture_actor_tile", "slot": "idle_mid_tile" },
+    { "at_breath": 120, "type": "assert_actor_tile_equals", "slot": "idle_start_tile" },
+    { "at_breath": 240, "type": "capture_actor_tile", "slot": "idle_late_tile" },
+    { "at_breath": 240, "type": "assert_actor_tile_equals", "slot": "idle_start_tile" },
+    { "at_breath": 300, "type": "capture_actor_tile", "slot": "idle_end_tile" },
+    { "at_breath": 300, "type": "assert_actor_tile_equals", "slot": "idle_start_tile" },
+    { "at_breath": 301, "type": "marker", "label": "idle_profile_complete" }
+  ]
+}

@@ -237,6 +237,9 @@ export function make_tag_picker_module(opts: TagPickerModuleConfig): Module {
       drag_enabled = false;
       opts.on_drag_apply(e.x, e.y);
     },
+    wants_text_capture(): boolean {
+      return opts.get_selected_field() === "meta";
+    },
     on_key_down(e: KeyboardEvent): void {
       const tag = opts.get_tag();
       const definition = opts.get_definition();

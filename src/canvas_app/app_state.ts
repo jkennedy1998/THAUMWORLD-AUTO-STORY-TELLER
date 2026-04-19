@@ -30,6 +30,7 @@ import { create_module_registry, type ModuleRegistry } from '../mono_ui/module_r
 import { handleEntityClick, set_current_actor_ref, set_session_token } from '../interface_program/frontend_api.js';
 import type { Place, TilePosition } from '../types/place.js';
 import { debug_warn, debug_log } from '../shared/debug.js';
+import { diagnostic_enabled, diag_log } from '../shared/diagnostics.js';
 import { resolve_char } from '../render_shaders/resolver.js';
 import { can_place_volume } from '../place_storage/movement_legality.js';
 import { set_command_handler_place } from '../mono_ui/modules/movement_command_handler.js';
@@ -794,6 +795,7 @@ export function create_app_state(): AppState {
             is_blocking: false,
             is_loading: false,
             is_submitting: false,
+            binding_refresh_in_flight: false,
             game_ready: false,
             title: 'CLAIM ACTOR',
             selected_actor_ref: null as string | null,
@@ -4150,6 +4152,7 @@ export function create_app_state(): AppState {
         if (SHELL_MODULE_IDS.has(module_id)) return true;
         const desired = ui_state.modules.visibility.has(module_id) ? Boolean(ui_state.modules.visibility.get(module_id)) : true;
         if (!has_active_actor_claim()) return false;
+        if (ui_state.actor_claim.binding_refresh_in_flight) return desired;
         if (!ui_state.actor_claim.game_ready) return false;
         return desired;
     }
@@ -5904,17 +5907,25 @@ export function create_app_state(): AppState {
             if (!res.ok || !data?.ok || !Array.isArray(data?.actors)) {
                 throw new Error(String(data?.error ?? `claimable_fetch_failed:${res.status}`));
             }
-            ui_state.actor_claim.actors = data.actors.map((actor) => ({
-                actor_ref: String(actor.actor_ref ?? '').trim(),
-                actor_id: String(actor.actor_id ?? '').trim(),
-                actor_name: String(actor.actor_name ?? actor.actor_id ?? actor.actor_ref ?? '').trim(),
-                claimed_by_self: Boolean(actor.claimed_by_self),
-                claimed_by_other: Boolean(actor.claimed_by_other),
-                claimed_by_client_session_id: null,
-                can_claim: !actor.claimed_by_other,
-                can_delete: !actor.claimed_by_self && !actor.claimed_by_other,
-            }));
-            ui_state.actor_claim.current_actor_ref = typeof data.current_actor_ref === 'string' ? data.current_actor_ref : null;
+            const current_actor_ref = typeof data.current_actor_ref === 'string' ? data.current_actor_ref : null;
+            ui_state.actor_claim.actors = data.actors.map((actor) => {
+                const actor_ref = String(actor.actor_ref ?? '').trim();
+                const claimed_by_self = Boolean(actor.claimed_by_self);
+                const claimed_by_other = Boolean(actor.claimed_by_other);
+                const blocked_by_current_claim = !!current_actor_ref && current_actor_ref !== actor_ref && !claimed_by_self && !claimed_by_other;
+                return {
+                    actor_ref,
+                    actor_id: String(actor.actor_id ?? '').trim(),
+                    actor_name: String(actor.actor_name ?? actor.actor_id ?? actor.actor_ref ?? '').trim(),
+                    claimed_by_self,
+                    claimed_by_other,
+                    claimed_by_client_session_id: null,
+                    blocked_by_current_claim,
+                    can_claim: !claimed_by_other && !blocked_by_current_claim,
+                    can_delete: !claimed_by_self && !claimed_by_other,
+                };
+            });
+            ui_state.actor_claim.current_actor_ref = current_actor_ref;
             if (!ui_state.actor_claim.selected_actor_ref || !ui_state.actor_claim.actors.some((actor) => actor.actor_ref === ui_state.actor_claim.selected_actor_ref)) {
                 const preferred = ui_state.actor_claim.current_actor_ref
                     ?? ui_state.actor_claim.actors.find((actor) => actor.can_claim)?.actor_ref
@@ -7296,6 +7307,39 @@ export function create_app_state(): AppState {
             const tile = get_entity_focus_tile_in_place(get_current_place(), get_input_actor_ref());
             return tile ? { x: tile.x, y: tile.y, z: tile.z } : null;
         },
+        get_text_value: (source, field) => {
+            if (source === 'communication_input') {
+                return String(ui_state.controls.draft ?? '');
+            }
+            if (source === 'character_creation') {
+                const key = String(field ?? '').trim();
+                if (!key) return null;
+                const value = (ui_state.character_creation.draft as any)?.[key];
+                return typeof value === 'string' ? value : value == null ? '' : String(value);
+            }
+            return null;
+        },
+        invoke_helper: async (helper, payload) => {
+            if (helper === 'open_character_creation') {
+                await open_character_creation_module();
+                return true;
+            }
+            if (helper === 'close_character_creation') {
+                close_character_creation_module();
+                return true;
+            }
+            if (helper === 'set_module_visible') {
+                const module_id = String((payload as any)?.module_id ?? '').trim();
+                if (!module_id) return false;
+                set_module_visible(module_id, Boolean((payload as any)?.visible));
+                return true;
+            }
+            if (helper === 'set_communication_input_draft') {
+                ui_state.controls.draft = typeof (payload as any)?.value === 'string' ? (payload as any).value : '';
+                return true;
+            }
+            return false;
+        },
     });
     const tool_assisted_inputs_runtime = tool_assisted_inputs_wiring.runtime;
     const tool_assisted_inputs_clock = tool_assisted_inputs_wiring.clock;
@@ -8272,18 +8316,25 @@ export function create_app_state(): AppState {
 
     async function refresh_controlled_actor_binding(force: boolean = false, allow_ui_fallback: boolean = !tool_assisted_inputs_boot_enabled): Promise<void> {
         if (ui_state.world_entry.is_visible || ui_state.world_join.is_visible) return;
-        const resolution = await resolve_controlled_actor_binding(force);
-        if (resolution.kind === 'bound') return;
-        if (!allow_ui_fallback) return;
-        if (ui_state.actor_claim.is_visible) {
-            apply_runtime_module_visibility('actor_claim_module');
-            return;
+        ui_state.actor_claim.binding_refresh_in_flight = true;
+        apply_runtime_module_visibility();
+        try {
+            const resolution = await resolve_controlled_actor_binding(force);
+            if (resolution.kind === 'bound') return;
+            if (!allow_ui_fallback) return;
+            if (ui_state.actor_claim.is_visible) {
+                apply_runtime_module_visibility('actor_claim_module');
+                return;
+            }
+            if (resolution.kind === 'binding_required' && resolution.error === 'controlled_actor_already_claimed') {
+                await open_actor_claim_module('saved_actor_claimed', ['saved actor is already claimed', 'pick another actor to continue']);
+                return;
+            }
+            await open_actor_claim_module('startup_required', ['select an actor to begin', 'one actor claimed at a time']);
+        } finally {
+            ui_state.actor_claim.binding_refresh_in_flight = false;
+            apply_runtime_module_visibility();
         }
-        if (resolution.kind === 'binding_required' && resolution.error === 'controlled_actor_already_claimed') {
-            await open_actor_claim_module('saved_actor_claimed', ['saved actor is already claimed', 'pick another actor to continue']);
-            return;
-        }
-        await open_actor_claim_module('startup_required', ['select an actor to begin', 'one actor claimed at a time']);
     }
 
     async function poll_window_feeds(): Promise<void> {
@@ -9218,9 +9269,16 @@ export function create_app_state(): AppState {
         return null;
     }
 
+    function log_place_camera_follow_diag(reason: string, payload: Record<string, unknown>): void {
+        diag_log('camera', 'trace', 'PLACE_CAMERA_FOLLOW', reason, payload);
+    }
+
     function snap_place_camera_follow_to_actor(): void {
         ui_state.place.camera_target.mode = 'follow_actor';
         ui_state.place.camera_target.tile = null;
+        const previous_pose = ui_state.place.camera_target.region_pose
+            ? { ...ui_state.place.camera_target.region_pose }
+            : null;
         const target = resolve_follow_actor_camera_focus_region();
         if (!target) return;
         ui_state.place.camera_target.region_pose = {
@@ -9231,6 +9289,14 @@ export function create_app_state(): AppState {
         ui_state.place.camera_target.last_follow_update_ms = Date.now();
         sync_place_focus_plane_from_anchor({ x: target.region_x, y: target.region_y, z: target.world_z });
         ui_state.place.world_z_center = Math.floor(target.world_z);
+        log_place_camera_follow_diag('snap_follow_to_actor', {
+            actor_ref: get_follow_camera_entity_ref(),
+            render_place_id: get_render_place()?.id ?? null,
+            previous_pose,
+            next_pose: ui_state.place.camera_target.region_pose,
+            target,
+            mode: ui_state.place.camera_target.mode,
+        });
     }
 
     function update_place_camera_follow(now_ms: number): void {
@@ -9243,13 +9309,34 @@ export function create_app_state(): AppState {
             ui_state.place.camera_target.region_pose = { x: target.region_x, y: target.region_y, z: target.world_z };
             sync_place_focus_plane_from_anchor({ x: target.region_x, y: target.region_y, z: target.world_z });
             ui_state.place.world_z_center = Math.floor(target.world_z);
+            log_place_camera_follow_diag('update_follow_init_pose', {
+                actor_ref: get_follow_camera_entity_ref(),
+                render_place_id: get_render_place()?.id ?? null,
+                previous_pose: null,
+                next_pose: ui_state.place.camera_target.region_pose,
+                target,
+                now_ms,
+                mode: ui_state.place.camera_target.mode,
+            });
             return;
         }
+        const previous_pose = { x: pose.x, y: pose.y, z: pose.z };
         pose.x = target.region_x;
         pose.y = target.region_y;
         pose.z = target.world_z;
         ui_state.place.world_z_center = Math.floor(target.world_z);
         sync_place_focus_plane_from_anchor({ x: target.region_x, y: target.region_y, z: target.world_z });
+        if (previous_pose.x !== pose.x || previous_pose.y !== pose.y || previous_pose.z !== pose.z) {
+            log_place_camera_follow_diag('update_follow_pose', {
+                actor_ref: get_follow_camera_entity_ref(),
+                render_place_id: get_render_place()?.id ?? null,
+                previous_pose,
+                next_pose: { x: pose.x, y: pose.y, z: pose.z },
+                target,
+                now_ms,
+                mode: ui_state.place.camera_target.mode,
+            });
+        }
     }
 
     function get_place_camera_target_position(): { x: number; y: number } | null {

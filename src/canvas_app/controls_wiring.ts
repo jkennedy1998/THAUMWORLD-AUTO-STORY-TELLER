@@ -58,8 +58,6 @@ const PAINTER_TOOL_ACTIONS: Record<ToolType, string> = {
   rect_stroke: 'painter.tool_assign.rect_stroke',
   rect_fill: 'painter.tool_assign.rect_fill',
   text: 'painter.tool_assign.text',
-  weighter: 'painter.tool_assign.weighter',
-  colorer: 'painter.tool_assign.colorer',
   selectangle: 'painter.tool_assign.selectangle',
   lassoselect: 'painter.tool_assign.lassoselect',
   copy: 'painter.tool_assign.copy',

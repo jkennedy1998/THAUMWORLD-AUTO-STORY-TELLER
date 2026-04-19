@@ -3,6 +3,8 @@ import * as http from "node:http";
 import * as fs from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { debug_log, debug_warn, debug_error } from "../shared/debug.js";
+import { diagnostic_enabled, diag_log } from "../shared/diagnostics.js";
+import { BREATH_MS } from "../shared/breath_timing.js";
 import { ollama_chat } from "../shared/ollama_client.js";
 import { isCurrentSession, getSessionMeta, SESSION_ID } from "../shared/session.js";
 import { SERVICE_CONFIG } from "../shared/constants.js";
@@ -89,6 +91,7 @@ import { apply_character_patch, load_character_by_ref, save_character_by_ref } f
 import { remove_character_tag, remove_character_tag_by_selector, upsert_character_tag, upsert_character_tag_by_selector } from "../shared/character_tags.js";
 import { get_character_id_from_ref, get_character_role_from_ref } from "../shared/character_storage.js";
 import { assign_controlled_actor_ref_for_client_session, get_claiming_client_session_id_for_actor_ref, get_controlled_actor_ref_for_client_session, list_controlled_actor_claims, release_controlled_actor_claim_by_actor_ref, release_controlled_actor_ref_for_client_session, set_controlled_actor_ref_for_client_session, touch_controlled_actor_ref_for_client_session } from "../shared/session_control.js";
+import { apply_painter_cell_changes, get_or_create_painter_document_snapshot } from "../shared/painter_document_store.js";
 import { normalize_place_actor_presence, normalize_place_npc_presence, project_public_place_actor_presence, project_public_place_npc_presence } from "../shared/place_character_presence.js";
 import { build_actor_owner_inventory_view, build_npc_owner_inventory_view } from "../inventory_surfaces/actor_owner_view.js";
 import { build_container_owner_inventory_view } from "../inventory_surfaces/container_owner_view.js";
@@ -160,7 +163,6 @@ type MovementPulseOptions = {
     skip_legality_refresh?: boolean;
 };
 
-const BREATH_MS = 33; // Fast fixed tick; most entities won't step every breath.
 const ACTIVE_PLACE_TIMEOUT_MS = 10_000;
 const PLACE_PERSIST_COOLDOWN_MS = 5_000;
 const CATCHUP_MAX_BREATHS = 300;
@@ -171,6 +173,13 @@ const MOVE_PLACE_HOT_THRESHOLD_MS = 12;
 const MOVE_PHASE_HOT_THRESHOLD_MS = 6;
 const MOVE_PROFILE_PLACE_ID = 'eden_crossroads_tavern';
 const MOVE_TIMING_SPAM_ENABLED = false;
+const MOVE_PHYSICS_DIAGNOSTICS_ENABLED = String(process.env.THAUM_MOVE_PHYSICS_DIAG ?? '').trim() === '1';
+const MOVE_PHYSICS_DIAGNOSTICS_SAMPLE_LIMIT = 12;
+
+function log_move_physics_diag(message: string, data: Record<string, unknown>): void {
+    if (!MOVE_PHYSICS_DIAGNOSTICS_ENABLED && !diagnostic_enabled('physics', 'trace')) return;
+    diag_log('physics', 'trace', 'MOVE_PHYSICS_DIAG', message, data);
+}
 const WALK_MOVE_BUDGET_CAP = 2;
 const WALK_MOVE_SPEND_CAP_PER_BREATH = 2;
 
@@ -2855,7 +2864,39 @@ function flush_place_breath_outputs(now: number, breath_ticks: Array<{ slot: num
             coalesced_update_count: coalesced_updates.length,
             visible_place_keys: Array.from(visible_place_keys.values()),
             controlled_actor_updates,
+            sample_updates: movement_updates.slice(0, 3).map((update) => ({
+                entity_ref: String(update?.entity_ref ?? ''),
+                place_id: String(update?.place_id ?? ''),
+                x: Math.floor(Number(update?.x ?? 0)) || 0,
+                y: Math.floor(Number(update?.y ?? 0)) || 0,
+                z: typeof update?.z === 'number' && Number.isFinite(update.z) ? Math.floor(update.z) : null,
+                seq: typeof update?.seq === 'number' && Number.isFinite(update.seq) ? Math.floor(update.seq) : null,
+                breath_index: typeof update?.breath_index === 'number' && Number.isFinite(update.breath_index) ? Math.floor(update.breath_index) : null,
+            })),
+            sample_coalesced_updates: coalesced_updates.slice(0, 3).map((update) => ({
+                entity_ref: String(update?.entity_ref ?? ''),
+                place_id: String(update?.place_id ?? ''),
+                x: Math.floor(Number(update?.x ?? 0)) || 0,
+                y: Math.floor(Number(update?.y ?? 0)) || 0,
+                z: typeof update?.z === 'number' && Number.isFinite(update.z) ? Math.floor(update.z) : null,
+                seq: typeof update?.seq === 'number' && Number.isFinite(update.seq) ? Math.floor(update.seq) : null,
+                breath_index: typeof update?.breath_index === 'number' && Number.isFinite(update.breath_index) ? Math.floor(update.breath_index) : null,
+            })),
         })}`);
+        log_move_physics_diag('movement batch flush', {
+            sent_at_ms: now,
+            movement_update_count: movement_updates.length,
+            coalesced_update_count: coalesced_updates.length,
+            visible_place_keys: Array.from(visible_place_keys.values()),
+            sample_updates: movement_updates.slice(0, MOVE_PHYSICS_DIAGNOSTICS_SAMPLE_LIMIT).map((update) => ({
+                entity_ref: String(update?.entity_ref ?? ''),
+                place_id: String(update?.place_id ?? ''),
+                x: Math.floor(Number(update?.x ?? 0)) || 0,
+                y: Math.floor(Number(update?.y ?? 0)) || 0,
+                z: Math.floor(Number(update?.z ?? 0)) || 0,
+                seq: Math.floor(Number(update?.seq ?? 0)) || 0,
+            })),
+        });
         void emitBridgeMessage('ENTITY_MOVED_BATCH', {
             sent_at_ms: now,
             updates: coalesced_updates,
@@ -3945,6 +3986,12 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
     const profile = make_empty_movement_breath_profile();
     const place_any: any = state.place_base;
     if (!place_any) return profile;
+    const movement_updates_start_len = movement_updates.length;
+    const diag_reason_counts: Record<string, number> = {};
+    const diag_type_activation_counts: Record<'actor' | 'npc', number> = { actor: 0, npc: 0 };
+    const diag_type_resolved_counts: Record<'actor' | 'npc', number> = { actor: 0, npc: 0 };
+    const diag_activation_samples: Array<Record<string, unknown>> = [];
+    const diag_resolved_samples: Array<Record<string, unknown>> = [];
 
     const expanded_for_walk = false;
     if (expanded_for_walk) {
@@ -3996,6 +4043,26 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
         const physics_need = entity_needs_physics_processing(ctl, runtime, place_bi, unsupported, pending_followthrough, debug_vertical_impulse);
         const { intent_active, has_path, has_goal, vertical_motion_active } = physics_need;
         if (!physics_need.needed) return;
+        diag_type_activation_counts[entity_type] += 1;
+        for (const reason of physics_need.reasons) {
+            diag_reason_counts[reason] = (diag_reason_counts[reason] ?? 0) + 1;
+        }
+        if (diag_activation_samples.length < MOVE_PHYSICS_DIAGNOSTICS_SAMPLE_LIMIT) {
+            diag_activation_samples.push({
+                entity_ref,
+                entity_type,
+                reasons: physics_need.reasons,
+                at: { x: cur_x, y: cur_y, z: cur_z },
+                velocity: { ...runtime.velocity },
+                busy_kind: runtime.busy_kind,
+                unsupported,
+                transient_selection: runtime.transient_selection?.movement_subtype ?? null,
+                has_goal,
+                has_path,
+                intent_active,
+                vertical_motion_active,
+            });
+        }
         if (!intent_active && !has_path && !has_goal && unsupported) {
             debug_log('MOVE_UNIFY_TEST', 'PASS unsupported actor continues falling without input', {
                 entity_ref,
@@ -4527,6 +4594,21 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
         profile.persist_ms += Math.max(0, Date.now() - persist_started_ms);
         move_ctl.set(key, ctl);
         profile.stepped_count += 1;
+        diag_type_resolved_counts[entity_type] += 1;
+        if (diag_resolved_samples.length < MOVE_PHYSICS_DIAGNOSTICS_SAMPLE_LIMIT) {
+            diag_resolved_samples.push({
+                entity_ref,
+                entity_type,
+                from: { x: cur_x, y: cur_y, z: cur_z },
+                to: { x: target.x, y: target.y, z: target.z },
+                axis: target.axis,
+                velocity: { ...runtime.velocity },
+                reasons: physics_need.reasons,
+                unsupported,
+                busy_kind: runtime.busy_kind,
+                transient_selection: resolved_transient_subtype,
+            });
+        }
 
         const perception_total_steps = intent_active
             ? 1
@@ -4632,6 +4714,21 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
         }
     }
     profile.entity_loop_ms += Math.max(0, Date.now() - entity_loop_started_ms);
+    log_move_physics_diag('movement breath summary', {
+        slot: state.slot,
+        place_id: state.place_id,
+        breath_index: place_bi,
+        entity_filter_ref,
+        actors_present: actors.length,
+        npcs_present: npcs.length,
+        activation_counts: diag_type_activation_counts,
+        resolved_counts: diag_type_resolved_counts,
+        activation_reason_counts: diag_reason_counts,
+        stepped_count: profile.stepped_count,
+        movement_updates_added: Math.max(0, movement_updates.length - movement_updates_start_len),
+        activation_samples: diag_activation_samples,
+        resolved_samples: diag_resolved_samples,
+    });
     return profile;
 }
 
@@ -12769,7 +12866,7 @@ function start_http_server(log_path: string): void {
                 const next_input_breath = diagnostics_runtime ? (Math.floor(Number(diagnostics_runtime.next_input_breath ?? place_bi)) || 0) : place_bi;
                 const next_control_breath = diagnostics_runtime ? (Math.floor(Number(diagnostics_runtime.next_control_breath.walk ?? next_input_breath)) || 0) : next_input_breath;
                 const breaths_until_next = Math.max(0, next_control_breath - place_bi);
-                const ms_until_next_eligible_move = breaths_until_next * 33;
+                const ms_until_next_eligible_move = breaths_until_next * BREATH_MS;
                 const gate_label = movement_gate.active ? (movement_gate.allowed ? 'ok' : String(movement_gate.reason ?? 'blocked')) : 'ok';
                 debug_log('MOVE_RESP_TRACE', 'movement input accepted', {
                     slot,
@@ -13663,6 +13760,100 @@ function start_http_server(log_path: string): void {
                 } catch (err: any) {
                     res.writeHead(500, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: err?.message ?? "connect_failed" }));
+                }
+            });
+            return;
+        }
+
+        if (url.pathname === "/api/painter/document/bootstrap") {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+            try {
+                const slot_raw = url.searchParams.get("slot");
+                const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+                require_request_client_session_id(slot, {
+                    session_token: url.searchParams.get("session_token"),
+                });
+                const snapshot = get_or_create_painter_document_snapshot(slot, url.searchParams.get("document_id") ?? undefined);
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({
+                    ok: true,
+                    document_id: snapshot.document_id,
+                    revision: snapshot.revision,
+                    updated_at: snapshot.updated_at,
+                    snapshot: snapshot.snapshot,
+                }));
+            } catch (err: any) {
+                const error = err?.message ?? "painter_document_bootstrap_failed";
+                const status = error === "invalid_session_token" ? 401 : 500;
+                res.writeHead(status, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error }));
+            }
+            return;
+        }
+
+        if (url.pathname === "/api/painter/command") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+            let body = "";
+            req.on("data", (chunk) => { body += chunk; });
+            req.on("end", () => {
+                try {
+                    const data = JSON.parse(body || "{}");
+                    const slot = Number.isFinite(Number(data?.slot)) ? Number(data.slot) : data_slot_number;
+                    require_request_client_session_id(slot, { session_token: data?.session_token });
+                    const command = data?.command ?? {};
+                    const kind = String(command?.kind ?? "").trim();
+                    if (kind !== "apply_cells") {
+                        throw new Error("painter_command_not_supported");
+                    }
+                    const snapshot = apply_painter_cell_changes(
+                        slot,
+                        String(command?.document_id ?? "default_canvas").trim() || "default_canvas",
+                        Array.isArray(command?.cells)
+                            ? command.cells.map((cell: any) => ({
+                                x: Math.floor(Number(cell?.x ?? 0)),
+                                y: Math.floor(Number(cell?.y ?? 0)),
+                                z: Math.floor(Number(cell?.z ?? 0)),
+                                cell: {
+                                    char: typeof cell?.char === "string" && cell.char.length > 0 ? cell.char[0]! : " ",
+                                    rgb: {
+                                        r: Math.max(0, Math.min(255, Math.floor(Number(cell?.rgb?.r ?? 0)) || 0)),
+                                        g: Math.max(0, Math.min(255, Math.floor(Number(cell?.rgb?.g ?? 0)) || 0)),
+                                        b: Math.max(0, Math.min(255, Math.floor(Number(cell?.rgb?.b ?? 0)) || 0)),
+                                    },
+                                    weight_index: Math.max(0, Math.min(3, Math.floor(Number(cell?.weight_index ?? 0)) || 0)),
+                                    render_index: Number.isFinite(Number(cell?.render_index)) ? Math.floor(Number(cell.render_index)) : undefined,
+                                },
+                            }))
+                            : []
+                    );
+                    void emitBridgeMessage('PAINTER_DOCUMENT_PATCHED', {
+                        document_id: snapshot.document_id,
+                        revision: snapshot.revision,
+                        updated_at: snapshot.updated_at,
+                        snapshot: snapshot.snapshot,
+                        sent_at_ms: Date.now(),
+                    });
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({
+                        ok: true,
+                        document_id: snapshot.document_id,
+                        revision: snapshot.revision,
+                        updated_at: snapshot.updated_at,
+                        snapshot: snapshot.snapshot,
+                    }));
+                } catch (err: any) {
+                    const error = err?.message ?? "painter_command_failed";
+                    const status = error === "invalid_session_token" ? 401 : error === "painter_command_not_supported" ? 400 : 500;
+                    res.writeHead(status, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error }));
                 }
             });
             return;

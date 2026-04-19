@@ -15,6 +15,8 @@ type PainterToolAssistedInputsWiringOptions = {
   get_bounds: () => { width: number; height: number; minZ: number; maxZ: number };
   get_interaction_anchor: () => any;
   get_cell: (x: number, y: number, z?: number | null) => { char: string; rgb: { r: number; g: number; b: number }; weight_index: number; render_index?: number } | null;
+  get_text_value?: (source: string, field?: string | null) => string | null;
+  invoke_helper?: (helper: string, payload?: Record<string, unknown>) => Promise<unknown> | unknown;
 };
 
 export function create_painter_tool_assisted_inputs_wiring(options: PainterToolAssistedInputsWiringOptions): {
@@ -84,6 +86,8 @@ export function create_painter_tool_assisted_inputs_wiring(options: PainterToolA
           render_index: cell.render_index,
         };
       },
+      get_text_value: (source, field) => options.get_text_value?.(source, field) ?? null,
+      invoke_helper: (helper, payload) => options.invoke_helper?.(helper, payload),
     },
     trace_sink: create_tool_assisted_inputs_trace_sink(),
   });

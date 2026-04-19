@@ -12,7 +12,9 @@ import {
   initLogSession,
   parseLatestLog,
   updateLatestPointer,
+  updateLatestSessionState,
 } from "../src/launcher/log_utils.js";
+import { acquireHostLaunchLock, detectLocalHost, readHostLaunchLock, recoverHostLaunchLock, releaseHostLaunchLock, waitForLocalHost } from "./launcher_common.mjs";
 import { resolveToolAssistedInputsEntry } from "./tool_assisted_inputs_registry.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -23,11 +25,16 @@ const slot_arg = args.find((arg) => arg.startsWith("--slot="));
 const data_slot = slot_arg ? parseInt(slot_arg.split("=")[1] ?? "1", 10) : 1;
 const tai_id_arg = args.find((arg) => arg.startsWith("--tai-id="));
 const tai_id = tai_id_arg ? String(tai_id_arg.split("=")[1] ?? "").trim() : "";
+const diag_profile_arg = args.find((arg) => arg.startsWith("--diag-profile="));
+const diag_profile = (diag_profile_arg ? String(diag_profile_arg.split("=")[1] ?? "quiet") : (tai_id ? 'logs' : 'quiet')).trim().toLowerCase() === 'logs'
+  ? 'logs'
+  : 'quiet';
 const baseDir = path.join(__dirname, "..");
 const tai_entry = tai_id ? resolveToolAssistedInputsEntry(baseDir, tai_id) : null;
 
 console.log("Starting THAUMWORLD ASCII Painter...");
 console.log(`Data slot: ${data_slot}`);
+console.log(`Diagnostics profile: ${diag_profile}`);
 if (tai_entry) {
   console.log(`Tool Assisted Inputs: tai${tai_entry.id}`);
   console.log(`TAS test: ${tai_entry.testName}`);
@@ -35,7 +42,13 @@ if (tai_entry) {
 }
 console.log("");
 
-const session = initLogSession(data_slot, "painter");
+const session = initLogSession(data_slot, "painter", {
+  launcher: 'dev_ascii',
+  pid: process.pid,
+  status: 'running',
+  taiId: tai_entry?.id ?? null,
+  testName: tai_entry?.testName ?? null,
+});
 const { sessionId, logDir, mainLog } = session;
 const bootTime = new Date();
 
@@ -46,6 +59,17 @@ function verifyLatestPointer(): void {
   updateLatestPointer(logDir, mainLog);
   const repaired = parseLatestLog(latestPath);
   if (repaired?.currentLog === mainLog) {
+    updateLatestSessionState(logDir, {
+      sessionId,
+      currentLog: mainLog,
+      mode: 'painter',
+      dataSlot: data_slot,
+      launcher: 'dev_ascii',
+      pid: process.pid,
+      status: 'running',
+      taiId: tai_entry?.id ?? null,
+      testName: tai_entry?.testName ?? null,
+    });
     console.warn(`[launcher] repaired latest.log -> ${path.basename(mainLog)}`);
     return;
   }
@@ -77,6 +101,15 @@ console.log("");
 
 const childProcesses: ChildProcess[] = [];
 
+async function detectPainterVite(): Promise<boolean> {
+  try {
+    const res = await fetch('http://localhost:5174');
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 function formatLogEntry(process: string, level: string, message: string): string {
   const ts = new Date().toISOString();
   return `[${ts}] [${process}] [${level}] ${message}`;
@@ -98,6 +131,17 @@ appendToLog(formatLogEntry("LAUNCHER", "INFO", `dev_ascii session ${JSON.stringi
   tai_open_ms: tai_entry?.openMs ?? null,
   tai_script_path: tai_entry?.scriptPath ?? null,
 })}`));
+updateLatestSessionState(logDir, {
+  sessionId,
+  currentLog: mainLog,
+  mode: 'painter',
+  dataSlot: data_slot,
+  launcher: 'dev_ascii',
+  pid: process.pid,
+  status: 'running',
+  taiId: tai_entry?.id ?? null,
+  testName: tai_entry?.testName ?? null,
+});
 
 function spawnWithLogging(name: string, command: string, args: string[], options: Record<string, unknown> = {}): ChildProcess {
   const isWindows = process.platform === "win32";
@@ -111,6 +155,8 @@ function spawnWithLogging(name: string, command: string, args: string[], options
       DATA_SLOT: data_slot.toString(),
       NODE_ENV: "development",
       THAUM_APP_MODE: "ascii_painter",
+      THAUM_DIAG_PROFILE: diag_profile,
+      DEBUG_LEVEL: diag_profile === 'logs' ? '3' : '2',
       THAUM_STARTUP_BOOT_MODE: tai_entry ? 'tas_runtime' : 'manual_shell',
       ...(tai_entry ? {
         THAUM_TAI_ENABLED: 'true',
@@ -158,13 +204,53 @@ function spawnWithLogging(name: string, command: string, args: string[], options
   return child;
 }
 
-function startPainter(): void {
-  console.log("Starting painter...");
-  spawnWithLogging("vite", "npx", ["vite", "--config", "vite.painter.config.ts"]);
+function startPainterHostProcesses(): void {
+  const processes = [
+    { name: "event_bridge", cmd: "tsx", args: ["src/event_bridge/main.ts"] },
+    { name: "interface", cmd: "tsx", args: ["src/interface_program/main.ts"] },
+  ];
+  for (const proc of processes) {
+    spawnWithLogging(proc.name, proc.cmd, proc.args, { env: { THAUM_BOOT_ROLE: 'host' } });
+  }
+}
+
+function startPainterClientProcesses(viteExists: boolean): void {
+  if (!viteExists) {
+    spawnWithLogging("vite", "npx", ["vite", "--config", "vite.painter.config.ts"], { env: { THAUM_BOOT_ROLE: 'client' } });
+  }
   setTimeout(() => {
-    spawnWithLogging("electron", "npx", ["electron", "."]);
-  }, 5000);
-  console.log("Painter processes started");
+    spawnWithLogging("electron", "npx", ["electron", "."], { env: { THAUM_BOOT_ROLE: 'client' } });
+  }, viteExists ? 1000 : 5000);
+}
+
+async function startPainter(): Promise<void> {
+  console.log("Starting painter...");
+  let hostExists = await detectLocalHost(data_slot);
+  const viteExists = await detectPainterVite();
+  const existingLock = readHostLaunchLock(baseDir, data_slot);
+  if (!hostExists && existingLock) {
+    const recovered = await recoverHostLaunchLock(baseDir, data_slot, { timeoutMs: 5000, probeFirst: true });
+    console.log(`Host lock recovery: ${recovered.reason}${recovered.cleared ? ' (cleared stale lock)' : ''}`);
+    hostExists = await detectLocalHost(data_slot);
+  }
+  if (!hostExists) {
+    const lock = acquireHostLaunchLock(baseDir, data_slot);
+    if (lock.ok) {
+      console.log(`Host lock acquired at ${lock.lockPath}`);
+      startPainterHostProcesses();
+      setTimeout(() => releaseHostLaunchLock(lock.lockPath), 20000);
+      hostExists = await waitForLocalHost(data_slot, 20000);
+      console.log(`Host wait result after start: ${hostExists ? 'ready' : 'not_reachable'}`);
+    } else {
+      console.log('Another launcher is starting the local host; waiting to attach...');
+      hostExists = await waitForLocalHost(data_slot, 20000);
+      console.log(`Host wait result while attaching: ${hostExists ? 'ready' : 'not_reachable'}`);
+    }
+  } else {
+    console.log('Local host detected; attaching painter client only');
+  }
+  startPainterClientProcesses(viteExists);
+  console.log(hostExists ? 'Painter multiplayer compatibility boot ready' : 'Painter host unavailable; client will fall back locally');
   console.log("Press Ctrl+C to stop");
 }
 
@@ -195,7 +281,7 @@ process.on("unhandledRejection", (reason) => {
 });
 
 try {
-  startPainter();
+  void startPainter();
 } catch (err) {
   console.error("Failed to start painter:", err);
   process.exit(1);

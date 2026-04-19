@@ -39,8 +39,6 @@ const TOOLS: ToolboxToolDef<ToolType>[] = [
   { tool: 'rect_stroke', label: 'Rect', icon: '□', shortcut: 'R' },
   { tool: 'rect_fill', label: 'Fill', icon: '■', shortcut: 'S' },
   { tool: 'text', label: 'Text', icon: 'T', shortcut: 'T' },
-  { tool: 'weighter', label: 'Weight', icon: '▪', shortcut: 'W' },
-  { tool: 'colorer', label: 'Color', icon: '◐', shortcut: 'O' },
   { tool: 'selectangle', label: 'RectSel', icon: '▣', shortcut: 'M' },
   { tool: 'lassoselect', label: 'Lasso', icon: '◎', shortcut: 'N' },
   { tool: 'copy', label: 'Copy', icon: '⎘', shortcut: 'C' },

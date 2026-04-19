@@ -6,6 +6,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 // Determine which mode we're in based on environment variable
 const appMode = process.env.THAUM_APP_MODE || 'game';
 const startupBootMode = process.env.THAUM_STARTUP_BOOT_MODE || 'manual_shell';
+const dataSlot = Number(process.env.DATA_SLOT || 1) || 1;
 const toolAssistedInputsBootConfig = {
   enabled: process.env.THAUM_TAI_ENABLED === 'true',
   taiId: process.env.THAUM_TAI_ID || '',
@@ -40,6 +41,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // App mode (game or ascii_painter) - set before page loads
   appMode: appMode,
+  dataSlot,
   startupBootMode,
   toolAssistedInputsBootConfig,
 

@@ -2,6 +2,7 @@ import { THAUMWORLD_RENDER_THEME, resolve_render_backend, type RenderBackendKind
 import { clamp_weight_index } from '../weight_system.js';
 import { get_cached_resolved_atlas_frame, load_resolved_atlas_frame } from './atlas_runtime.js';
 import type { InlineMaterialAssignments, RenderGraphicRef } from '../../render_shaders/graphics_contract.js';
+import { diag_log } from '../../shared/diagnostics.js';
 
 type RenderableCell = {
   char: string;
@@ -26,6 +27,12 @@ type DrawCellOpts = {
 
 type AtlasDrawResult = 'drawn' | 'pending' | 'not_applicable';
 
+type FontDrawStateCache = {
+  ctx: CanvasRenderingContext2D | null;
+  font: string;
+  fill_style: string;
+};
+
 export type CanvasCellRenderer = {
   backend: RenderBackendKind;
   effective_backend: RenderBackendKind;
@@ -37,11 +44,29 @@ const pending_atlas_loads = new Set<string>();
 let loggedAtlasBackend = false;
 const loggedAtlasGraphics = new Set<string>();
 
-function draw_font_cell(opts: DrawCellOpts): void {
+function draw_font_cell(opts: DrawCellOpts, cache?: FontDrawStateCache): void {
   const weight_index = clamp_weight_index(opts.cell.weight_index);
   const css_weight = opts.weight_index_to_css[weight_index] ?? 400;
-  opts.ctx.font = `${css_weight} ${opts.font_size_px}px ${opts.font_family}`;
-  opts.ctx.fillStyle = `rgb(${opts.cell.rgb.r},${opts.cell.rgb.g},${opts.cell.rgb.b})`;
+  const next_font = `${css_weight} ${opts.font_size_px}px ${opts.font_family}`;
+  const next_fill_style = `rgb(${opts.cell.rgb.r},${opts.cell.rgb.g},${opts.cell.rgb.b})`;
+  if (!cache || cache.ctx !== opts.ctx) {
+    opts.ctx.font = next_font;
+    opts.ctx.fillStyle = next_fill_style;
+    if (cache) {
+      cache.ctx = opts.ctx;
+      cache.font = next_font;
+      cache.fill_style = next_fill_style;
+    }
+  } else {
+    if (cache.font !== next_font) {
+      opts.ctx.font = next_font;
+      cache.font = next_font;
+    }
+    if (cache.fill_style !== next_fill_style) {
+      opts.ctx.fillStyle = next_fill_style;
+      cache.fill_style = next_fill_style;
+    }
+  }
   opts.ctx.fillText(opts.cell.char, opts.center_x_px, opts.center_y_px);
 }
 
@@ -50,7 +75,7 @@ function draw_atlas_cell(opts: DrawCellOpts): AtlasDrawResult {
   if (!graphic || graphic.graphic_id.startsWith('text_')) return 'not_applicable';
   if (!loggedAtlasGraphics.has(graphic.graphic_id)) {
     loggedAtlasGraphics.add(graphic.graphic_id);
-    console.log('[atlas debug] draw_atlas_cell attempt', {
+    diag_log('renderer', 'trace', 'ATLAS_DEBUG', 'draw atlas cell attempt', {
       graphic_id: graphic.graphic_id,
       view_direction: graphic.view_direction,
       weight_index: graphic.weight_index,
@@ -95,6 +120,11 @@ export function create_canvas_cell_renderer(opts: {
   theme_id: string;
 }): CanvasCellRenderer {
   const resolved = resolve_render_backend(THAUMWORLD_RENDER_THEME, opts.backend);
+  const font_draw_state_cache: FontDrawStateCache = {
+    ctx: null,
+    font: '',
+    fill_style: '',
+  };
   if (resolved.fallback_reason) {
     const key = `${opts.theme_id}:${opts.backend}:${resolved.effective_backend}`;
     if (!warned_fallbacks.has(key)) {
@@ -109,7 +139,7 @@ export function create_canvas_cell_renderer(opts: {
     draw_cell(opts2: DrawCellOpts): void {
       if (!loggedAtlasBackend) {
         loggedAtlasBackend = true;
-        console.log('[atlas debug] cell renderer backend', {
+        diag_log('renderer', 'important', 'ATLAS_DEBUG', 'cell renderer backend', {
           requested_backend: opts.backend,
           effective_backend: resolved.effective_backend,
           theme_id: opts.theme_id,
@@ -125,11 +155,11 @@ export function create_canvas_cell_renderer(opts: {
             // flashing an ASCII fallback that will be replaced a frame later.
             if (atlas_result === 'pending') return;
           }
-          draw_font_cell(opts2);
+          draw_font_cell(opts2, font_draw_state_cache);
           return;
         case 'font':
         default:
-          draw_font_cell(opts2);
+          draw_font_cell(opts2, font_draw_state_cache);
       }
     },
   };

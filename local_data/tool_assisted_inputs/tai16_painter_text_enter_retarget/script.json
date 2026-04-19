@@ -1,0 +1,30 @@
+{
+  "id": "painter_text_enter_retarget",
+  "test_name": "paint_test_text_tool_enter_retargets_after_click",
+  "clock_mode": "realtime_ms",
+  "open_ms": 9000,
+  "description": "Verify Enter after a second click uses the new text anchor instead of the original one.",
+  "start_delay_ms": 2200,
+  "end_delay_ms": 1000,
+  "actions": [
+    { "at_ms": 40, "type": "pointer_move", "space": "grid", "x": 60, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 70, "type": "capture_painter_interaction_anchor", "slot": "anchor_first_start" },
+    { "at_ms": 110, "type": "pointer_move", "space": "grid", "x": 60, "y": 25, "pointer_action": "primary" },
+    { "at_ms": 140, "type": "capture_painter_interaction_anchor", "slot": "anchor_first_next" },
+    { "at_ms": 180, "type": "pointer_move", "space": "grid", "x": 66, "y": 20, "pointer_action": "primary" },
+    { "at_ms": 210, "type": "capture_painter_interaction_anchor", "slot": "anchor_second_start" },
+    { "at_ms": 250, "type": "pointer_move", "space": "grid", "x": 66, "y": 21, "pointer_action": "primary" },
+    { "at_ms": 280, "type": "capture_painter_interaction_anchor", "slot": "anchor_second_next" },
+    { "at_ms": 500, "type": "key_tap", "code": "KeyT", "key": "t", "hold_ms": 30 },
+    { "at_ms": 900, "type": "pointer_click", "space": "grid", "x": 60, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 1250, "type": "capture_painter_anchor_cell", "slot": "first_next_before", "anchor_slot": "anchor_first_next" },
+    { "at_ms": 1290, "type": "capture_painter_anchor_cell", "slot": "second_next_before", "anchor_slot": "anchor_second_next" },
+    { "at_ms": 1600, "type": "key_tap", "code": "Enter", "key": "Enter", "hold_ms": 30 },
+    { "at_ms": 2150, "type": "pointer_click", "space": "grid", "x": 66, "y": 20, "pointer_action": "primary" },
+    { "at_ms": 2650, "type": "key_tap", "code": "Enter", "key": "Enter", "hold_ms": 30 },
+    { "at_ms": 3200, "type": "text_input", "text": "X" },
+    { "at_ms": 3700, "type": "key_tap", "code": "Escape", "key": "Escape", "hold_ms": 30 },
+    { "at_ms": 4300, "type": "assert_painter_anchor_cell_equals", "slot": "first_next_before", "anchor_slot": "anchor_first_next" },
+    { "at_ms": 4340, "type": "assert_painter_anchor_cell_changed", "slot": "second_next_before", "anchor_slot": "anchor_second_next" }
+  ]
+}

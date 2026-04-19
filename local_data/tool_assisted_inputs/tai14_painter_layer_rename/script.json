@@ -1,0 +1,16 @@
+{
+  "id": "painter_layer_rename",
+  "test_name": "paint_test_layer_palette_rename_uses_standard_text_input",
+  "clock_mode": "realtime_ms",
+  "open_ms": 7000,
+  "description": "Enter layer rename mode from the layer palette and verify the persisted layer name changes after text input and Enter.",
+  "start_delay_ms": 1200,
+  "end_delay_ms": 1000,
+  "actions": [
+    { "at_ms": 0, "type": "capture_text_value", "slot": "layer0_before", "source": "layer_name", "field": "0" },
+    { "at_ms": 150, "type": "invoke_helper", "helper": "start_layer_rename", "payload": { "z": 0 } },
+    { "at_ms": 450, "type": "text_input", "text": "_TAI" },
+    { "at_ms": 750, "type": "key_tap", "code": "Enter", "key": "Enter", "hold_ms": 30 },
+    { "at_ms": 1100, "type": "assert_text_value_changed", "slot": "layer0_before", "source": "layer_name", "field": "0" }
+  ]
+}

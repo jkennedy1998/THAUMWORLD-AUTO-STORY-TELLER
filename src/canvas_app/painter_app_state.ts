@@ -9,19 +9,18 @@ import type { Module, Rect, Rgb } from '../mono_ui/types.js';
 import { create_module_registry, type ModuleRegistry } from '../mono_ui/module_registry.js';
 import type { Grid, Brush, ToolType } from '../ascii_painter/types.js';
 import { createGrid, exportGrid, importGrid } from '../ascii_painter/types.js';
-import { createHistoryManager, logLayerAction, pushSnapshot, canUndo, canRedo, getHistoryState } from '../ascii_painter/history.js';
+import { createHistoryManager, logLayerAction, pushSnapshot, canUndo, canRedo, getHistoryState, undo } from '../ascii_painter/history.js';
 import { get_color_by_name } from '../mono_ui/colors.js';
 import type { SelectionMode } from '../ascii_painter/selection.js';
 import { clearSelection, createSelectionBitmap, invertSelection, isSelected, selectAll, setSelected, type SelectionBitmap } from '../ascii_painter/selection.js';
 import { make_painter_canvas_module, type PainterInteractionAnchor } from '../mono_ui/modules/painter_canvas_module.js';
-import { make_painter_toolbar_module } from '../mono_ui/modules/painter_toolbar_module.js';
 import { make_file_menu_module } from '../mono_ui/modules/painter_file_menu_module.js';
 import { make_character_selector_module } from '../mono_ui/modules/character_selector_module.js';
 import { make_brush_preview_module } from '../mono_ui/modules/brush_preview_module.js';
 import { make_color_selector_module } from '../mono_ui/modules/color_selector_module.js';
 import { make_weight_selector_module } from '../mono_ui/modules/weight_selector_module.js';
 import { make_toolbox_module } from '../mono_ui/modules/toolbox_module.js';
-import { make_tool_properties_module } from '../mono_ui/modules/tool_properties_module.js';
+import { make_tool_properties_module, type ToolPropertyRow } from '../mono_ui/modules/tool_properties_module.js';
 import { make_controls_module } from '../mono_ui/modules/controls_module.js';
 import {
   saveModulePosition,
@@ -60,7 +59,7 @@ import {
   type ToolProperties,
 } from '../ascii_painter/save_system.js';
 // 3D VoxelSpace imports
-import type { VoxelSpace, VoxelLayer, CameraConfig, CameraMode } from '../ascii_painter/voxel_space.js';
+import type { VoxelSpace, VoxelLayer, CameraConfig, CameraMode, VoxelSpaceExport } from '../ascii_painter/voxel_space.js';
 import { 
   createVoxelSpace, 
   getLayer, 
@@ -69,6 +68,8 @@ import {
   removeLayer, 
   duplicateLayer,
   getVoxel,
+  setVoxel,
+  importVoxelSpace,
   getVisibleLayers,
   voxelSpaceToGrid,
   gridToVoxelSpace,
@@ -77,6 +78,12 @@ import {
 } from '../ascii_painter/voxel_space.js';
 import { makeLayerRendererModule } from '../ascii_painter/layer_renderer_module.js';
 import { makeLayerPaletteModule } from '../ascii_painter/layer_palette_module.js';
+import { resolve_edit_channels_with_modifiers, type EditChannels } from '../ascii_painter/edit_mask.js';
+import { diag_log } from '../shared/diagnostics.js';
+
+function normalize_painter_tool(tool: ToolType): ToolType {
+  return tool;
+}
 import { makePlaceCameraControlModule } from '../mono_ui/modules/place_camera_control_module.js';
 import { VoxelDOMRenderer, createVoxelDOMRenderer } from '../ascii_painter/voxel_dom_renderer.js';
 import { commit_grid_to_painter_world, get_painter_focus_slot_for_anchor, get_painter_projection_focus_content_bounds, get_painter_world_content_bounds_center, painter_projection_grid_point_to_world, painter_projection_world_to_grid_point, project_painter_display_space, sync_grid_to_painter_projection, type PainterDisplayProjection } from '../ascii_painter/painter_view_projection_adapter.js';
@@ -90,26 +97,28 @@ import { project_world_point_with_roll, unproject_plane_point_with_roll } from '
 import { create_painter_controls_runtime } from './controls_wiring.js';
 import { control_binding_matches_keyboard_event } from '../mono_ui/runtime/controls_binding_matcher.js';
 import { create_painter_tool_shortcut_interpreter } from './painter_tool_shortcut_interpreter.js';
+import { create_painter_sync_client } from './painter_sync_client.js';
+import { PAINTER_APP_CONFIG } from './painter_runtime_config.js';
+
+function painterDiag(message: string, payload?: Record<string, unknown>): void {
+  diag_log('painter', 'verbose', 'PAINTER', message, payload);
+}
+
+function painterImportant(message: string, payload?: Record<string, unknown>): void {
+  diag_log('painter', 'important', 'PAINTER', message, payload);
+}
+
+function painterPerf(message: string, payload?: Record<string, unknown>): void {
+  diag_log('performance_metrics', 'important', 'PAINTER', message, payload);
+}
+
+function painterCameraDiag(message: string, payload?: Record<string, unknown>): void {
+  diag_log('camera', 'verbose', 'PAINTER_CAMERA', message, payload);
+}
 import { create_painter_tool_assisted_inputs_wiring } from './painter_tool_assisted_inputs_wiring.js';
-import {
-  THAUMWORLD_RENDER_THEME,
-  get_theme_base_font_size_px,
-  get_theme_font_family,
-  get_theme_weight_index_to_css,
-} from '../mono_ui/runtime/render_theme.js';
 
 // Configuration matching the game but with relaxed letter spacing
-export const PAINTER_CONFIG = {
-  render_backend: THAUMWORLD_RENDER_THEME.backend,
-  render_theme_id: THAUMWORLD_RENDER_THEME.id,
-  font_family: get_theme_font_family(THAUMWORLD_RENDER_THEME),
-  base_font_size_px: get_theme_base_font_size_px(THAUMWORLD_RENDER_THEME),
-  base_line_height_mult: 1,
-  base_letter_spacing_mult: 0,
-  weight_index_to_css: get_theme_weight_index_to_css(THAUMWORLD_RENDER_THEME),
-  grid_width: 200,
-  grid_height: 50,
-} as const;
+export const PAINTER_CONFIG = PAINTER_APP_CONFIG;
 
 // Canvas dimensions (separate from grid dimensions)
 const CANVAS_WIDTH = 80;
@@ -170,6 +179,7 @@ export type PainterAppState = {
   export_as_text: () => string;
   new_canvas: (width: number, height: number) => void;
   current_filename: string;
+  multiplayer_sync: ReturnType<typeof create_painter_sync_client>;
 };
 
 type PainterDomViewport = {
@@ -185,6 +195,20 @@ type PainterDomViewport = {
 };
 
 export function create_painter_app_state(): PainterAppState {
+  const painter_sync = create_painter_sync_client({
+    slot: PAINTER_APP_CONFIG.selected_data_slot,
+    api_base_url: PAINTER_APP_CONFIG.api_base_url,
+    websocket_port: PAINTER_APP_CONFIG.websocket_port,
+    reconnect_token_storage_key: PAINTER_APP_CONFIG.reconnect_token_storage_key,
+  });
+  void painter_sync.bootstrap().then((sync_state) => {
+    painterImportant('painter authority ready', {
+      authority_mode: sync_state.authority_mode,
+      lifecycle: sync_state.lifecycle,
+      slot: PAINTER_APP_CONFIG.selected_data_slot,
+    });
+  });
+
   // Create the drawing grid (legacy 2D)
   const grid = createGrid(CANVAS_WIDTH, CANVAS_HEIGHT);
   
@@ -241,13 +265,6 @@ export function create_painter_app_state(): PainterAppState {
     y0: 0,
     x1: GRID_WIDTH - 1,
     y1: 2
-  };
-
-  const toolbar_rect: Rect = {
-    x0: 0,
-    y0: GRID_HEIGHT - 3,
-    x1: GRID_WIDTH - 1,
-    y1: GRID_HEIGHT - 1
   };
 
   let canvas_rect: Rect = get_default_canvas_rect();
@@ -503,7 +520,7 @@ export function create_painter_app_state(): PainterAppState {
     refreshPainterProjectionFromWorld();
     pushSnapshot(history, grid);
     schedule_auto_save();
-    console.log('➕ Added layer at Z=', newZ);
+    painterImportant('layer added', { z: newZ });
   }
 
   function deletePainterLayer(z: number): void {
@@ -522,9 +539,9 @@ export function create_painter_app_state(): PainterAppState {
         }
       }
       refreshPainterProjectionFromWorld();
-      console.log('🗑️ Deleted layer at Z=', z);
+      painterImportant('layer deleted', { z });
     } catch (e) {
-      console.error('Cannot delete layer:', e);
+      diag_log('painter', 'important', 'PAINTER', 'cannot delete layer', { z, error: e instanceof Error ? e.message : String(e) }, { sink: 'error' });
     }
   }
 
@@ -541,7 +558,7 @@ export function create_painter_app_state(): PainterAppState {
     }
     voxelSpace.camera.focus_plane = newZ;
     refreshPainterProjectionFromWorld();
-    console.log('📋 Duplicated layer', z, 'to', newZ);
+    painterImportant('layer duplicated', { from_z: z, to_z: newZ });
   }
 
   function selectPainterLayer(z: number): void {
@@ -552,7 +569,7 @@ export function create_painter_app_state(): PainterAppState {
       saveCameraConfig({ focus_plane: z });
     }
     refreshPainterProjectionFromWorld();
-    console.log('✓ Selected layer/plane=', z);
+    painterDiag('layer selected', { z });
   }
 
   function togglePainterLayerVisibility(z: number): void {
@@ -562,7 +579,7 @@ export function create_painter_app_state(): PainterAppState {
     if (layer) {
       layer.visible = !layer.visible;
       refreshPainterProjectionFromWorld();
-      console.log('👁 Layer', z, 'visible:', layer.visible);
+      painterDiag('layer visibility toggled', { z, visible: layer.visible });
     }
   }
 
@@ -722,7 +739,7 @@ export function create_painter_app_state(): PainterAppState {
 
     const container = document.getElementById('voxel_layers_container');
     if (!container) {
-      console.warn('[Painter] Voxel layers container not found, DOM renderer not initialized');
+      diag_log('renderer', 'important', 'PAINTER', 'voxel layers container not found; DOM renderer not initialized', {}, { sink: 'warn' });
       return;
     }
 
@@ -762,7 +779,7 @@ export function create_painter_app_state(): PainterAppState {
     );
     applyPainterProjectedCameraTuning();
     domRenderer.setSpace(painter_display_projection.space);
-    console.log('[Painter] DOM renderer initialized');
+    painterImportant('dom renderer initialized');
   }
 
   // Sync DOM renderer with current voxelSpace
@@ -790,7 +807,7 @@ export function create_painter_app_state(): PainterAppState {
   // Try to load auto-save on startup (try VoxelSpace first, then fallback to Grid)
   const saved_voxel_space = loadAutoSaveVoxelSpace();
   if (saved_voxel_space) {
-    console.log('[Painter bootstrap] restoring autosaved VoxelSpace');
+    painterDiag('restoring autosaved voxel space');
     voxelSpace = saved_voxel_space;
     // Re-apply saved camera config after loading auto-save (camera settings are global, not per-artwork)
     const savedCameraConfig = loadCameraConfig();
@@ -801,12 +818,12 @@ export function create_painter_app_state(): PainterAppState {
     painter_display_projection = rebuildPainterDisplayProjection(getPainterViewState(), { kind: 'viewport_center', screen: null, world: painter_camera_target_world });
     syncProjectedGridFromDisplay();
     syncDOMRenderer();
-    console.log('🎨 Loaded auto-saved VoxelSpace artwork');
+    painterImportant('loaded autosaved voxel space artwork');
   } else {
     // Fallback to legacy grid auto-save
     const saved_grid = loadAutoSave();
     if (saved_grid) {
-      console.log('[Painter bootstrap] restoring legacy autosaved grid');
+      painterDiag('restoring legacy autosaved grid');
       grid.width = saved_grid.width;
       grid.height = saved_grid.height;
       grid.cells = saved_grid.cells;
@@ -821,7 +838,7 @@ export function create_painter_app_state(): PainterAppState {
       painter_display_projection = rebuildPainterDisplayProjection(getPainterViewState(), { kind: 'viewport_center', screen: null, world: painter_camera_target_world });
       syncProjectedGridFromDisplay();
       syncDOMRenderer();
-      console.log('🎨 Loaded auto-saved artwork (legacy format)');
+      painterImportant('loaded autosaved artwork legacy format');
     }
   }
 
@@ -834,10 +851,11 @@ export function create_painter_app_state(): PainterAppState {
   let current_tool: ToolType = 'pencil';
   
   // Tool mapping for left/right click
-  let left_click_tool: ToolType = saved_tool_props.left_click_tool as ToolType || 'pencil';
-  let right_click_tool: ToolType = saved_tool_props.right_click_tool as ToolType || 'eraser';
+  let left_click_tool: ToolType = normalize_painter_tool(saved_tool_props.left_click_tool as ToolType || 'pencil');
+  let right_click_tool: ToolType = normalize_painter_tool(saved_tool_props.right_click_tool as ToolType || 'eraser');
 
   function assign_left_click_tool(tool: ToolType): void {
+    tool = normalize_painter_tool(tool);
     left_click_tool = tool;
     current_tool = tool;
     active_property_side = 'left';
@@ -845,6 +863,7 @@ export function create_painter_app_state(): PainterAppState {
   }
 
   function assign_right_click_tool(tool: ToolType): void {
+    tool = normalize_painter_tool(tool);
     right_click_tool = tool;
     current_tool = tool;
     active_property_side = 'right';
@@ -871,6 +890,11 @@ export function create_painter_app_state(): PainterAppState {
 
   let left_brush_size = saved_tool_props.left_brush_size ?? saved_tool_props.brush_size ?? 1;
   let right_brush_size = saved_tool_props.right_brush_size ?? saved_tool_props.brush_size ?? 1;
+  let left_brush_edit_channels: EditChannels = { ...saved_tool_props.left_brush_edit_channels };
+  let right_brush_edit_channels: EditChannels = { ...saved_tool_props.right_brush_edit_channels };
+  let left_picker_edit_channels: EditChannels = { ...saved_tool_props.left_picker_edit_channels };
+  let right_picker_edit_channels: EditChannels = { ...saved_tool_props.right_picker_edit_channels };
+  let picker_pick_for_opposite_hand = saved_tool_props.picker_pick_for_opposite_hand ?? false;
 
   function getBrushForSide(side: 'left' | 'right'): Brush {
     return side === 'right' ? right_brush : left_brush;
@@ -882,6 +906,14 @@ export function create_painter_app_state(): PainterAppState {
 
   function getBrushSizeForSide(side: 'left' | 'right'): number {
     return side === 'right' ? right_brush_size : left_brush_size;
+  }
+
+  function getBrushEditChannelsForSide(side: 'left' | 'right'): EditChannels {
+    return side === 'right' ? right_brush_edit_channels : left_brush_edit_channels;
+  }
+
+  function getPickerEditChannelsForSide(side: 'left' | 'right'): EditChannels {
+    return side === 'right' ? right_picker_edit_channels : left_picker_edit_channels;
   }
 
   function getBrushSizeForButton(button: number): number {
@@ -952,8 +984,8 @@ export function create_painter_app_state(): PainterAppState {
   
   // Gradiator state for image/text conversion - load from storage or create default
   const gradiator_state = loadGradiatorState();
-  console.log('[Painter bootstrap] tool properties loaded');
-  console.log('[Painter bootstrap] gradiator state loaded', {
+  painterDiag('tool properties loaded');
+  painterDiag('gradiator state loaded', {
     activeSlot: gradiator_state.activeSlot,
     slotLengths: gradiator_state.slots.map((slot) => typeof slot === 'string' ? slot.length : -1),
   });
@@ -970,6 +1002,7 @@ export function create_painter_app_state(): PainterAppState {
   // Current filename for save operations
   let current_filename = 'untitled';
   let current_file_path: string | null = null;
+  let authoritative_revision_applied = 0;
   const world_selection: WorldSelection = create_world_selection();
   let world_clipboard_data: WorldCopyData | null = null;
   const LAST_FILE_PATH_KEY = 'thaumworld_ascii_painter_last_file_path';
@@ -995,6 +1028,31 @@ export function create_painter_app_state(): PainterAppState {
     const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
     return `drawing_${stamp}.json`;
   }
+
+  function apply_authoritative_painter_bootstrap(bootstrap: { document_id: string; revision: number; snapshot: VoxelSpaceExport | null }): void {
+    if (!bootstrap.snapshot || bootstrap.revision <= authoritative_revision_applied) return;
+    voxelSpace = importVoxelSpace(bootstrap.snapshot);
+    authoritative_revision_applied = bootstrap.revision;
+    current_filename = String(bootstrap.document_id ?? '').trim() || current_filename;
+    current_file_path = null;
+    clear_world_selection(world_selection);
+    syncPainterCameraViewTransform();
+    ensureValidFocusPlane();
+    setPainterCameraTargetWorld({ x: Math.floor(voxelSpace.bounds.width / 2), y: Math.floor(voxelSpace.bounds.height / 2), z: voxelSpace.camera.focus_plane });
+    painter_display_projection = rebuildPainterDisplayProjection(getPainterViewState(), { kind: 'viewport_center', screen: null, world: painter_camera_target_world });
+    syncProjectedGridFromDisplay();
+    syncDOMRenderer();
+    pushSnapshot(history, grid);
+    painterImportant('applied authoritative painter bootstrap', {
+      document_id: bootstrap.document_id,
+      revision: bootstrap.revision,
+    });
+  }
+
+  painter_sync.subscribe((sync_state) => {
+    if (sync_state.authority_mode !== 'authoritative_host' || !sync_state.bootstrap?.snapshot) return;
+    apply_authoritative_painter_bootstrap(sync_state.bootstrap);
+  });
 
   async function writeArtworkToFileAtomic(filePath: string): Promise<void> {
     const data = exportVoxelSpaceArtworkToJSON(voxelSpace);
@@ -1034,9 +1092,9 @@ export function create_painter_app_state(): PainterAppState {
     }
     auto_save_timer = setTimeout(() => {
       void flush_auto_save().then(() => {
-        console.log('💾 Auto-saved artwork');
+        painterDiag('auto-saved artwork');
       }).catch((e) => {
-        console.warn('Auto-save failed:', e);
+        diag_log('painter', 'important', 'PAINTER', 'auto-save failed', { error: e instanceof Error ? e.message : String(e) }, { sink: 'warn' });
       });
     }, 2000); // Auto-save shortly after last change
   }
@@ -1051,7 +1109,7 @@ export function create_painter_app_state(): PainterAppState {
   });
 
   async function loadArtworkFromContent(content: string, loadedPath?: string): Promise<void> {
-    console.log('[Painter bootstrap] loading artwork content', { loadedPath: loadedPath ?? null, size: content.length });
+    painterDiag('loading artwork content', { loadedPath: loadedPath ?? null, size: content.length });
     voxelSpace = importVoxelSpaceFromJSON(content);
     clear_world_selection(world_selection);
 
@@ -1219,22 +1277,6 @@ export function create_painter_app_state(): PainterAppState {
   // Keyboard shortcuts for layer navigation
   // NOTE: Page Up/Down and Tab removed - use Layer Palette UI buttons instead
   
-  // Create toolbar module
-  const toolbar_module = make_painter_toolbar_module({
-    id: 'painter_toolbar',
-    rect: toolbar_rect,
-    get_current_tool: () => current_tool,
-    on_tool_select: (tool) => {
-      current_tool = tool;
-      // Update the toolbar module's tool reference
-      // The module will re-render with the new selection
-    },
-    matches_tool_shortcut: (tool, e) => painter_controls.matches_tool_shortcut(tool, e),
-    on_tool_shortcut: (tool) => {
-      painter_tool_shortcut_interpreter.trigger(tool);
-    },
-  });
-  
   // Create canvas module
   const canvas_module = make_painter_canvas_module({
     id: 'painter_canvas',
@@ -1245,6 +1287,7 @@ export function create_painter_app_state(): PainterAppState {
     get_current_tool: () => current_tool,
     get_preview_brush: () => getPreviewBrush(),
     get_brush_for_button: (button) => getBrushForButton(button),
+    get_brush_edit_channels_for_button: (button) => getBrushEditChannelsForSide(button === 2 ? 'right' : 'left'),
     get_brush_size: () => getBrushSizeForSide(active_property_side),
     get_brush_size_for_button: (button) => getBrushSizeForButton(button),
     get_space_replace: () => space_replace,
@@ -1294,13 +1337,39 @@ export function create_painter_app_state(): PainterAppState {
       pushSnapshot(history, grid);
       schedule_auto_save();
     },
-    on_sample_cell: (cell, button) => {
-      active_property_side = button === 2 ? 'right' : 'left';
-      const brush = getBrushForButton(button);
-      brush.char = cell.char;
-      brush.rgb = { ...cell.rgb };
-      brush.weight_index = cell.weight_index;
-      saveBrushState(active_property_side);
+    on_commit_cell_changes: ({ changes }) => {
+      const authority_mode = painter_sync.get_state().authority_mode;
+      if (authority_mode !== 'authoritative_host') return;
+      void painter_sync.submit_cell_changes(changes.map((change) => ({
+        x: change.worldX,
+        y: change.worldY,
+        z: change.worldZ,
+        cell: {
+          char: change.newCell.char,
+          rgb: { ...change.newCell.rgb },
+          weight_index: change.newCell.weight_index,
+        },
+      }))).catch((error) => {
+        diag_log('painter', 'important', 'PAINTER', 'failed to submit painter cell changes', {
+          error: error instanceof Error ? error.message : String(error),
+          change_count: changes.length,
+        }, { sink: 'warn' });
+      });
+    },
+    on_sample_cell: (cell, sample) => {
+      const clicked_side: 'left' | 'right' = sample.button === 2 ? 'right' : 'left';
+      const target_side: 'left' | 'right' = picker_pick_for_opposite_hand
+        ? (clicked_side === 'left' ? 'right' : 'left')
+        : clicked_side;
+      active_property_side = target_side;
+      const brush = getBrushForSide(target_side);
+
+      const channels = resolve_edit_channels_with_modifiers(getPickerEditChannelsForSide(clicked_side), sample);
+      if (channels.char) brush.char = cell.char;
+      if (channels.color) brush.rgb = { ...cell.rgb };
+      if (channels.weight) brush.weight_index = cell.weight_index;
+
+      saveBrushState(target_side);
     },
     on_selection_change: (args) => {
       updateWorldSelectionFromProjectedBitmap(selection_mode, args);
@@ -1324,7 +1393,7 @@ export function create_painter_app_state(): PainterAppState {
           await window.electronAPI.clipboardWriteText(data);
         }
       } catch (e) {
-        console.warn('Failed to write to system clipboard:', e);
+        diag_log('input', 'important', 'PAINTER', 'failed to write to system clipboard', { error: e instanceof Error ? e.message : String(e) }, { sink: 'warn' });
       }
     },
     get_clipboard_data: async () => {
@@ -1337,7 +1406,7 @@ export function create_painter_app_state(): PainterAppState {
           }
         }
       } catch (e) {
-        console.warn('Failed to read from system clipboard:', e);
+        diag_log('input', 'important', 'PAINTER', 'failed to read from system clipboard', { error: e instanceof Error ? e.message : String(e) }, { sink: 'warn' });
       }
       // Fall back to internal clipboard
       return world_clipboard_data ? encode_world_copy_data(world_clipboard_data) : clipboard_data;
@@ -1347,21 +1416,21 @@ export function create_painter_app_state(): PainterAppState {
       canvas_rect = new_rect;
       painter_display_projection = rebuildPainterDisplayProjection(getPainterViewState(), getPainterInteractionAnchor());
       syncProjectedGridFromDisplay();
-      console.log('Canvas moved:', new_rect);
+      painterDiag('canvas moved', { rect: new_rect });
     },
     on_resize: (new_rect) => {
       // Update canvas_rect
       canvas_rect = new_rect;
       painter_display_projection = rebuildPainterDisplayProjection(getPainterViewState(), getPainterInteractionAnchor());
       syncProjectedGridFromDisplay();
-      console.log('Canvas resized:', new_rect);
+      painterDiag('canvas resized', { rect: new_rect });
     },
     on_close: () => {
       // Reset canvas to default position
       canvas_rect = get_default_canvas_rect();
       painter_display_projection = rebuildPainterDisplayProjection(getPainterViewState(), getPainterInteractionAnchor());
       syncProjectedGridFromDisplay();
-      console.log('Canvas reset to default position');
+      painterDiag('canvas reset to default position');
     },
     on_viewport_change: (viewport) => {
       // Viewport is driven by the main render loop (src/canvas_app/main.ts) using runtime tile metrics.
@@ -1417,10 +1486,10 @@ export function create_painter_app_state(): PainterAppState {
   let tool_properties_module: Module | null = null;
   let controls_module: Module | null = null;
 
-  const painter_controls = create_painter_controls_runtime(1);
+  const painter_controls = create_painter_controls_runtime(PAINTER_APP_CONFIG.selected_data_slot);
   void painter_controls.load();
   const painter_tai = create_painter_tool_assisted_inputs_wiring({
-    data_slot: 1,
+    data_slot: PAINTER_APP_CONFIG.selected_data_slot,
     get_tool_state: () => ({ current_tool, left_click_tool, right_click_tool }),
     get_focus_plane: () => painter_display_projection?.focus_world_plane ?? voxelSpace.camera.focus_plane,
     get_camera_target: () => getPainterFallbackTargetWorld(),
@@ -1429,6 +1498,49 @@ export function create_painter_app_state(): PainterAppState {
     get_cell: (x, y, z) => {
       const plane = typeof z === 'number' ? z : (painter_display_projection?.focus_world_plane ?? voxelSpace.camera.focus_plane);
       return getVoxel(voxelSpace, x, y, plane);
+    },
+    get_text_value: (source, field) => {
+      if (source === 'layer_name') {
+        const z = Number(field ?? '');
+        if (!Number.isFinite(z)) return null;
+        return getLayer(voxelSpace, Math.floor(z))?.name ?? null;
+      }
+      return null;
+    },
+    invoke_helper: (helper, payload) => {
+      if (helper === 'start_layer_rename') {
+        const z = Number((payload as any)?.z ?? 0);
+        const layerPalette = layer_palette_module as any;
+        if (!Number.isFinite(z) || typeof layerPalette?.beginRenameLayer !== 'function') return false;
+        const started = Boolean(layerPalette.beginRenameLayer(Math.floor(z)));
+        if (!started) return false;
+        try {
+          return Boolean((window as any).TOOL_ASSISTED_INPUTS_RUNTIME?.focus_module?.('layer_palette'));
+        } catch {
+          return started;
+        }
+      }
+      if (helper === 'undo_painter') {
+        const description = undo(history, voxelSpace);
+        if (description) {
+          refreshPainterProjectionFromWorld();
+          return true;
+        }
+        return false;
+      }
+      if (helper === 'clear_painter_cells') {
+        const cells = Array.isArray((payload as any)?.cells) ? (payload as any).cells : [];
+        for (const cell of cells) {
+          const x = Math.floor(Number(cell?.x));
+          const y = Math.floor(Number(cell?.y));
+          const z = Math.floor(Number(cell?.z));
+          if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+          setVoxel(voxelSpace, x, y, z, { char: ' ', rgb: { r: 0, g: 0, b: 0 }, weight_index: 0, render_index: 0 });
+        }
+        refreshPainterProjectionFromWorld();
+        return true;
+      }
+      return false;
     },
   });
   window.setTimeout(() => {
@@ -1501,26 +1613,30 @@ export function create_painter_app_state(): PainterAppState {
 
   // Factory functions for creating modules
   function create_char_selector_module(): Module {
-    console.log('Creating char selector module at rect:', char_selector_rect);
+    painterDiag('creating char selector module', { rect: char_selector_rect });
     return make_character_selector_module({
       id: 'char_selector',
       rect: char_selector_rect,
       get_selected_char: () => getPreviewBrush().char,
       get_left_selected_char: () => left_brush.char,
       get_right_selected_char: () => right_brush.char,
+      get_left_rgb: () => left_brush.rgb,
+      get_right_rgb: () => right_brush.rgb,
+      get_left_weight_index: () => left_brush.weight_index,
+      get_right_weight_index: () => right_brush.weight_index,
       on_char_select: (char, button) => {
         // Check if we're editing a gradiator
         if (gradiator_state.isEditing && gradiator_state.editSlot !== null) {
           // Set the character in the gradiator at the selected position
           setGradiatorChar(gradiator_state, gradiator_state.editSlot, gradiator_state.editCursorX, char);
           saveGradiatorState(gradiator_state);
-          console.log('Set gradiator character:', char, 'at position', gradiator_state.editCursorX);
+          painterDiag('set gradiator character', { char, position: gradiator_state.editCursorX });
         } else {
           // Normal brush character selection
           active_property_side = button === 2 ? 'right' : 'left';
           getBrushForButton(button).char = char;
           saveBrushState(active_property_side);
-          console.log('Selected character:', char);
+          painterDiag('selected character', { char });
         }
       },
       on_move: (new_rect) => {
@@ -1569,12 +1685,12 @@ export function create_painter_app_state(): PainterAppState {
           paste_ignore_color_rgb = rgb;
           saveToolProperties({ paste_ignore_color_rgb: rgb });
           (globalThis as any).__selecting_ignore_color = false;
-          console.log('Set ignore color:', rgb);
+          painterDiag('set ignore color', { rgb });
         } else {
           active_property_side = button === 2 ? 'right' : 'left';
           getBrushForButton(button).rgb = { ...rgb };
           saveBrushState(active_property_side);
-          console.log('Selected color:', rgb);
+          painterDiag('selected color', { rgb });
         }
       },
       on_move: (new_rect) => {
@@ -1600,7 +1716,7 @@ export function create_painter_app_state(): PainterAppState {
         active_property_side = button === 2 ? 'right' : 'left';
         getBrushForButton(button).weight_index = weight_index;
         saveBrushState(active_property_side);
-        console.log('Selected weight:', weight_index);
+        painterDiag('selected weight', { weight_index });
       },
       on_move: (new_rect) => {
         if (weight_selector_module) {
@@ -1622,20 +1738,23 @@ export function create_painter_app_state(): PainterAppState {
       get_left_click_tool: () => left_click_tool,
       get_right_click_tool: () => right_click_tool,
       on_tool_select: (tool) => {
-        current_tool = tool;
-        console.log('Selected tool:', tool);
+        current_tool = normalize_painter_tool(tool);
+        painterDiag('selected tool', { tool });
       },
       on_left_click_tool_change: (tool) => {
+        tool = normalize_painter_tool(tool);
         active_property_side = 'left';
         left_click_tool = tool;
         saveToolProperties({ left_click_tool: tool, active_property_side: 'left' });
-        console.log('Left-click tool:', tool);
+        painterDiag('left-click tool changed', { tool });
       },
       on_right_click_tool_change: (tool) => {
+        tool = normalize_painter_tool(tool);
+        current_tool = tool;
         active_property_side = 'right';
         right_click_tool = tool;
         saveToolProperties({ right_click_tool: tool, active_property_side: 'right' });
-        console.log('Right-click tool:', tool);
+        painterDiag('right-click tool changed', { tool });
       },
       on_move: (new_rect) => {
         if (toolbox_module) {
@@ -1655,6 +1774,250 @@ export function create_painter_app_state(): PainterAppState {
   }
   
   function create_tool_properties_module(): Module {
+    function get_tool_label(tool: ToolType): string {
+      switch (tool) {
+        case 'pencil': return 'PENCIL';
+        case 'eraser': return 'ERASER';
+        case 'bucket': return 'BUCKET';
+        case 'eyedropper': return 'DROPPER';
+        case 'line': return 'LINE';
+        case 'rect_stroke': return 'RECT';
+        case 'rect_fill': return 'FILL';
+        case 'text': return 'TEXT';
+        case 'selectangle': return 'RECTSEL';
+        case 'lassoselect': return 'LASSO';
+        case 'copy': return 'COPY';
+        case 'paste': return 'PASTE';
+        default: return String(tool).toUpperCase();
+      }
+    }
+
+    function is_brush_size_tool(tool: ToolType): boolean {
+      return tool === 'pencil' || tool === 'eraser';
+    }
+
+    function append_side_tool_rows(rows: ToolPropertyRow[], side: 'left' | 'right', tool: ToolType): void {
+      const prefix = side === 'left' ? '[L]' : '[R]';
+      const header_rgb = side === 'left' ? get_color_by_name('vivid_blue').rgb : get_color_by_name('vivid_red').rgb;
+      rows.push({ type: 'info', id: `${side}_tool_header`, text: `${prefix} ${get_tool_label(tool)}`, rgb: header_rgb });
+
+      if (is_brush_size_tool(tool)) {
+        rows.push({ type: 'info', id: `${side}_tool_shared_brush`, text: 'size above' });
+        return;
+      }
+      if (tool === 'text') {
+        rows.push({ type: 'info', id: `${side}_tool_shared_text`, text: 'text above' });
+        return;
+      }
+      if (tool === 'eyedropper') {
+        rows.push({ type: 'info', id: `${side}_tool_shared_picker`, text: 'picker above' });
+        return;
+      }
+      rows.push({ type: 'info', id: `${side}_tool_none`, text: 'no options' });
+    }
+
+    function append_edit_channel_rows(
+      rows: ToolPropertyRow[],
+      prefix: string,
+      left_tool_enabled: boolean,
+      right_tool_enabled: boolean,
+      left_channels: EditChannels,
+      right_channels: EditChannels,
+      on_toggle: (side: 'left' | 'right' | 'both', channel: keyof EditChannels) => void,
+    ): void {
+      const specs: Array<{ channel: keyof EditChannels; id: string; label: string; shortcut: string }> = [
+        { channel: 'char', id: 'char', label: 'CHA', shortcut: 'CTR' },
+        { channel: 'color', id: 'color', label: 'COL', shortcut: 'SHF' },
+        { channel: 'weight', id: 'weight', label: 'WGT', shortcut: 'ALT' },
+      ];
+      rows.push({
+        type: 'edit_channel_matrix',
+        id: `${prefix}_matrix`,
+        columns: specs.map((spec) => ({
+          id: spec.id,
+          label: spec.label,
+          shortcut: spec.shortcut,
+          left_value: left_channels[spec.channel],
+          right_value: right_channels[spec.channel],
+          left_enabled: left_tool_enabled,
+          right_enabled: right_tool_enabled,
+        })),
+        on_toggle: (side, column_id) => {
+          on_toggle(side, column_id as keyof EditChannels);
+        },
+      });
+    }
+
+    function build_stacked_property_rows(): ToolPropertyRow[] {
+      const rows: ToolPropertyRow[] = [];
+      const left_tool = left_click_tool;
+      const right_tool = right_click_tool;
+
+      if (is_brush_size_tool(left_tool) || is_brush_size_tool(right_tool)) {
+        rows.push({ type: 'info', id: 'shared_brush_header', text: '[BRUSH]', rgb: get_color_by_name('vivid_yellow').rgb });
+        rows.push({
+          type: 'dual_slider',
+          id: 'shared_brush_size',
+          label: 'SIZE',
+          min: 1,
+          max: 5,
+          left_value: left_brush_size,
+          right_value: right_brush_size,
+          format_value: (value) => `${value}x${value}`,
+          on_change: (value, side) => {
+            active_property_side = side;
+            if (side === 'right') right_brush_size = value;
+            else left_brush_size = value;
+            saveBrushState(side);
+          },
+        });
+        append_edit_channel_rows(
+          rows,
+          'brush',
+          left_tool === 'pencil',
+          right_tool === 'pencil',
+          left_brush_edit_channels,
+          right_brush_edit_channels,
+          (side, channel) => {
+            if (side === 'both') {
+              const next_value = !(left_brush_edit_channels[channel] && right_brush_edit_channels[channel]);
+              left_brush_edit_channels = { ...left_brush_edit_channels, [channel]: next_value };
+              right_brush_edit_channels = { ...right_brush_edit_channels, [channel]: next_value };
+              saveToolProperties({ left_brush_edit_channels, right_brush_edit_channels });
+              return;
+            }
+            active_property_side = side;
+            const next = { ...(side === 'right' ? right_brush_edit_channels : left_brush_edit_channels) };
+            next[channel] = !next[channel];
+            if (side === 'right') {
+              right_brush_edit_channels = next;
+              saveToolProperties({ right_brush_edit_channels: next });
+            } else {
+              left_brush_edit_channels = next;
+              saveToolProperties({ left_brush_edit_channels: next });
+            }
+          },
+        );
+      }
+
+      if (left_tool === 'text' || right_tool === 'text') {
+        rows.push({ type: 'info', id: 'shared_text_header', text: '[TEXT]', rgb: get_color_by_name('vivid_yellow').rgb });
+        rows.push({
+          type: 'single_toggle',
+          id: 'text_space_replace',
+          label: 'SPACE',
+          value: space_replace,
+          on_toggle: () => {
+            space_replace = !space_replace;
+          },
+        });
+        rows.push({
+          type: 'single_stepper',
+          id: 'text_spacing',
+          label: 'SPACEX',
+          value: `${text_spacing > 0 ? '+' : ''}${text_spacing}`,
+          on_decrement: () => {
+            text_spacing = Math.max(-16, text_spacing - 1);
+            saveToolProperties({ text_spacing });
+          },
+          on_increment: () => {
+            text_spacing = Math.min(16, text_spacing + 1);
+            saveToolProperties({ text_spacing });
+          },
+        });
+        rows.push({
+          type: 'single_stepper',
+          id: 'text_charlead',
+          label: 'CHARY',
+          value: `${text_charlead > 0 ? '+' : ''}${text_charlead}`,
+          on_decrement: () => {
+            text_charlead = Math.max(-16, text_charlead - 1);
+            saveToolProperties({ text_charlead });
+          },
+          on_increment: () => {
+            text_charlead = Math.min(16, text_charlead + 1);
+            saveToolProperties({ text_charlead });
+          },
+        });
+        rows.push({
+          type: 'single_stepper',
+          id: 'text_enterlead',
+          label: 'ENTY',
+          value: `${text_enterlead > 0 ? '+' : ''}${text_enterlead}`,
+          on_decrement: () => {
+            text_enterlead = Math.max(-16, text_enterlead - 1);
+            saveToolProperties({ text_enterlead });
+          },
+          on_increment: () => {
+            text_enterlead = Math.min(16, text_enterlead + 1);
+            saveToolProperties({ text_enterlead });
+          },
+        });
+        rows.push({
+          type: 'single_stepper',
+          id: 'text_enterspace',
+          label: 'ENTX',
+          value: `${text_enterspace > 0 ? '+' : ''}${text_enterspace}`,
+          on_decrement: () => {
+            text_enterspace = Math.max(-16, text_enterspace - 1);
+            saveToolProperties({ text_enterspace });
+          },
+          on_increment: () => {
+            text_enterspace = Math.min(16, text_enterspace + 1);
+            saveToolProperties({ text_enterspace });
+          },
+        });
+      }
+
+      if (left_tool === 'eyedropper' || right_tool === 'eyedropper') {
+        rows.push({ type: 'info', id: 'shared_picker_header', text: '[PICKER]', rgb: get_color_by_name('vivid_yellow').rgb });
+        rows.push({
+          type: 'single_cycle',
+          id: 'picker_target',
+          label: 'PICK',
+          value: picker_pick_for_opposite_hand ? 'OPP' : 'SELF',
+          options: ['SELF', 'OPP'],
+          on_cycle: () => {
+            picker_pick_for_opposite_hand = !picker_pick_for_opposite_hand;
+            saveToolProperties({ picker_pick_for_opposite_hand });
+          },
+        });
+        append_edit_channel_rows(
+          rows,
+          'picker',
+          left_tool === 'eyedropper',
+          right_tool === 'eyedropper',
+          left_picker_edit_channels,
+          right_picker_edit_channels,
+          (side, channel) => {
+            if (side === 'both') {
+              const next_value = !(left_picker_edit_channels[channel] && right_picker_edit_channels[channel]);
+              left_picker_edit_channels = { ...left_picker_edit_channels, [channel]: next_value };
+              right_picker_edit_channels = { ...right_picker_edit_channels, [channel]: next_value };
+              saveToolProperties({ left_picker_edit_channels, right_picker_edit_channels });
+              return;
+            }
+            active_property_side = side;
+            const next = { ...(side === 'right' ? right_picker_edit_channels : left_picker_edit_channels) };
+            next[channel] = !next[channel];
+            if (side === 'right') {
+              right_picker_edit_channels = next;
+              saveToolProperties({ right_picker_edit_channels: next });
+            } else {
+              left_picker_edit_channels = next;
+              saveToolProperties({ left_picker_edit_channels: next });
+            }
+          },
+        );
+      }
+
+      rows.push({ type: 'info', id: 'left_spacer', text: '' });
+      append_side_tool_rows(rows, 'left', left_tool);
+      rows.push({ type: 'info', id: 'mid_spacer', text: '' });
+      append_side_tool_rows(rows, 'right', right_tool);
+      return rows;
+    }
+
     return make_tool_properties_module({
       id: 'tool_properties',
       rect: tool_properties_rect,
@@ -1663,127 +2026,128 @@ export function create_painter_app_state(): PainterAppState {
       get_left_brush_size: () => left_brush_size,
       get_right_brush_size: () => right_brush_size,
       get_active_side: () => active_property_side,
+      property_rows: () => build_stacked_property_rows(),
       on_brush_size_change: (size, side) => {
         active_property_side = side;
         if (side === 'right') right_brush_size = size;
         else left_brush_size = size;
         saveBrushState(side);
-        console.log('Selected brush size:', size);
+        painterDiag('selected brush size', { size, side });
       },
       get_space_replace: () => space_replace,
       on_space_replace_change: (replace) => {
         space_replace = replace;
-        console.log('Space replace:', replace);
+        painterDiag('space replace toggled', { replace });
       },
       get_text_spacing: () => text_spacing,
       on_text_spacing_change: (spacing) => {
         text_spacing = spacing;
         saveToolProperties({ text_spacing: spacing });
-        console.log('Text spacing:', spacing);
+        painterDiag('text spacing changed', { spacing });
       },
       get_text_charlead: () => text_charlead,
       on_text_charlead_change: (charlead) => {
         text_charlead = charlead;
         saveToolProperties({ text_charlead: charlead });
-        console.log('Text charlead:', charlead);
+        painterDiag('text charlead changed', { charlead });
       },
       get_text_enterlead: () => text_enterlead,
       on_text_enterlead_change: (enterlead) => {
         text_enterlead = enterlead;
         saveToolProperties({ text_enterlead: enterlead });
-        console.log('Text enterlead:', enterlead);
+        painterDiag('text enterlead changed', { enterlead });
       },
       get_text_enterspace: () => text_enterspace,
       on_text_enterspace_change: (enterspace) => {
         text_enterspace = enterspace;
         saveToolProperties({ text_enterspace: enterspace });
-        console.log('Text enterspace:', enterspace);
+        painterDiag('text enterspace changed', { enterspace });
       },
       get_selection_mode: () => selection_mode,
       on_selection_mode_change: (mode) => {
         selection_mode = mode;
-        console.log('Selection mode:', mode);
+        painterDiag('selection mode changed', { mode });
       },
       get_paste_space_replace: () => paste_space_replace,
       on_paste_space_replace_change: (replace) => {
         paste_space_replace = replace;
         saveToolProperties({ paste_space_replace: replace });
-        console.log('Paste space replace:', replace);
+        painterDiag('paste space replace changed', { replace });
       },
       get_paste_scale: () => paste_scale,
       on_paste_scale_change: (scale) => {
         paste_scale = Math.max(0.1, Math.min(3.0, scale));
         saveToolProperties({ paste_scale });
-        console.log('Paste scale:', paste_scale);
+        painterDiag('paste scale changed', { scale: paste_scale });
       },
       get_paste_ignore_space: () => paste_ignore_space,
       on_paste_ignore_space_change: (ignore) => {
         paste_ignore_space = ignore;
         saveToolProperties({ paste_ignore_space: ignore });
-        console.log('Paste ignore space:', ignore);
+        painterDiag('paste ignore space changed', { ignore });
       },
       get_paste_ignore_black: () => paste_ignore_black,
       on_paste_ignore_black_change: (ignore) => {
         paste_ignore_black = ignore;
         saveToolProperties({ paste_ignore_black: ignore });
-        console.log('Paste ignore black:', ignore);
+        painterDiag('paste ignore black changed', { ignore });
       },
       get_paste_ignore_white: () => paste_ignore_white,
       on_paste_ignore_white_change: (ignore) => {
         paste_ignore_white = ignore;
         saveToolProperties({ paste_ignore_white: ignore });
-        console.log('Paste ignore white:', ignore);
+        painterDiag('paste ignore white changed', { ignore });
       },
       get_paste_ignore_color: () => paste_ignore_color,
       on_paste_ignore_color_change: (ignore) => {
         paste_ignore_color = ignore;
         saveToolProperties({ paste_ignore_color: ignore });
-        console.log('Paste ignore color:', ignore);
+        painterDiag('paste ignore color changed', { ignore });
       },
       get_paste_ignore_color_rgb: () => paste_ignore_color_rgb,
       on_paste_ignore_color_select: () => {
         // Enter "color select mode" for ignore color
         // We'll set a flag that the color selector will check
         (globalThis as any).__selecting_ignore_color = true;
-        console.log('Select a color from the color selector to ignore');
+        painterImportant('select a color from the color selector to ignore');
       },
       get_gradiator_state: () => gradiator_state,
       on_gradiator_slot_select: (slot) => {
         setActiveGradiatorSlot(gradiator_state, slot);
         saveGradiatorState(gradiator_state);
-        console.log('Selected gradiator slot:', slot);
+        painterDiag('selected gradiator slot', { slot });
       },
       on_gradiator_char_select: (slot, x) => {
         selectGradiatorChar(gradiator_state, slot, x);
         // Don't save on selection, only on actual changes
-        console.log('Selected gradiator char position:', slot, x);
+        painterDiag('selected gradiator char position', { slot, x });
       },
       on_gradiator_add_char: (slot) => {
         addGradiatorChar(gradiator_state, slot);
         saveGradiatorState(gradiator_state);
-        console.log('Added char to gradiator:', slot);
+        painterDiag('added gradiator char', { slot });
       },
       on_gradiator_remove_char: (slot) => {
         removeGradiatorChar(gradiator_state, slot);
         saveGradiatorState(gradiator_state);
-        console.log('Removed char from gradiator:', slot);
+        painterDiag('removed gradiator char', { slot });
       },
       on_gradiator_char_set: (slot, x, char) => {
         setGradiatorChar(gradiator_state, slot, x, char);
         saveGradiatorState(gradiator_state);
-        console.log('Set gradiator char:', slot, x, char);
+        painterDiag('set gradiator char', { slot, x, char });
       },
       on_selection_clear: () => {
         (canvas_module as any).clearSelection?.();
-        console.log('Selection cleared');
+        painterDiag('selection cleared');
       },
       on_selection_invert: () => {
         (canvas_module as any).invertSelection?.();
-        console.log('Selection inverted');
+        painterDiag('selection inverted');
       },
       on_selection_all: () => {
         (canvas_module as any).selectAll?.();
-        console.log('Select all');
+        painterDiag('select all');
       },
       on_move: (new_rect) => {
         if (tool_properties_module) {
@@ -1830,20 +2194,20 @@ export function create_painter_app_state(): PainterAppState {
     },
     on_save: () => {
       void save_file().catch((e) => {
-        console.error('Save failed:', e);
+        diag_log('painter', 'important', 'PAINTER', 'save failed', { error: e instanceof Error ? e.message : String(e) }, { sink: 'error' });
         alert('Save failed: ' + (e as Error).message);
       });
     },
     on_load: () => {
       void load_file().catch((e) => {
-        console.error('Load failed:', e);
+        diag_log('painter', 'important', 'PAINTER', 'load failed', { error: e instanceof Error ? e.message : String(e) }, { sink: 'error' });
         alert('Load failed: ' + (e as Error).message);
       });
     },
     on_new: () => {
       if (!confirm('Create new file? Unsaved changes will be lost.')) return;
       void new_file().catch((e) => {
-        console.error('New file failed:', e);
+        diag_log('painter', 'important', 'PAINTER', 'new file failed', { error: e instanceof Error ? e.message : String(e) }, { sink: 'error' });
         alert('New file failed: ' + (e as Error).message);
       });
     },
@@ -1861,7 +2225,7 @@ export function create_painter_app_state(): PainterAppState {
           };
         }
       }
-      console.log('🗑️ Layer cleared (use Ctrl+Z to undo)');
+      painterImportant('layer cleared', { undo_available: true });
       schedule_auto_save();
     },
     on_reset_positions: () => {
@@ -1976,7 +2340,7 @@ export function create_painter_app_state(): PainterAppState {
         const layer = getLayer(voxelSpace, z);
         if (layer) {
           layer.locked = !layer.locked;
-          console.log('Layer', z, 'locked:', layer.locked);
+          painterDiag('layer lock toggled', { z, locked: layer.locked });
         }
       },
       onLayerRename: (z, newName) => {
@@ -1984,7 +2348,7 @@ export function create_painter_app_state(): PainterAppState {
         if (layer) {
           const oldName = layer.name;
           layer.name = newName;
-          console.log(`Renamed layer ${z}: "${oldName}" → "${newName}"`);
+          painterImportant('layer renamed', { z, old_name: oldName, new_name: newName });
         }
       },
       onAddLayer: () => {
@@ -1999,7 +2363,7 @@ export function create_painter_app_state(): PainterAppState {
       onMergeDown: (z) => {
         const { mergeLayerDown } = require('../ascii_painter/voxel_space.js');
         mergeLayerDown(voxelSpace, z);
-        console.log('Merged layer', z, 'down');
+        painterImportant('merged layer down', { z });
       },
       onReorderLayers: (newZOrder) => {
         // Reorder layers based on the new Z order array
@@ -2039,7 +2403,7 @@ export function create_painter_app_state(): PainterAppState {
         voxelSpace.bounds.maxZ = maxZ;
         voxelSpace.bounds.depth = newZOrder.length;
         
-        console.log('Reordered layers:', newZOrder, '→ Z values:', newZOrder.map((_, i) => maxZ - i));
+        painterDiag('reordered layers', { old_order: newZOrder, new_z_values: newZOrder.map((_, i) => maxZ - i) });
       },
       onMove: (new_rect) => {
         if (layer_palette_module) {
@@ -2060,7 +2424,6 @@ export function create_painter_app_state(): PainterAppState {
   
   // Register initial modules
   registry.register(file_menu);
-  registry.register(toolbar_module);
   registry.register(canvas_module);
   
   // Register Layer Palette (3D layers)
@@ -2107,7 +2470,7 @@ export function create_painter_app_state(): PainterAppState {
         if (isAppInitialized) {
           saveCameraConfig({ parallax_move_enabled: enabled });
         }
-        console.log('Parallax move:', enabled ? 'enabled' : 'disabled');
+        painterCameraDiag('parallax move toggled', { enabled });
       },
       onParallaxSizeToggle: (enabled) => {
         voxelSpace.camera.parallax_size_enabled = enabled;
@@ -2115,7 +2478,7 @@ export function create_painter_app_state(): PainterAppState {
         if (isAppInitialized) {
           saveCameraConfig({ parallax_size_enabled: enabled });
         }
-        console.log('Parallax size:', enabled ? 'enabled' : 'disabled');
+        painterCameraDiag('parallax size toggled', { enabled });
       },
       occlusionLabel: 'Focus Opacity',
       getOcclusionEnabled: () => voxelSpace.camera.use_focus_layer_opacity ?? true,
@@ -2125,7 +2488,7 @@ export function create_painter_app_state(): PainterAppState {
         if (isAppInitialized) {
           saveCameraConfig({ use_focus_layer_opacity: enabled });
         }
-        console.log('Focus opacity:', enabled ? 'enabled' : 'disabled');
+        painterCameraDiag('focus opacity toggled', { enabled });
       },
       onCenterTargetToggle: (enabled) => {
         voxelSpace.camera.center_target_in_view = enabled;
@@ -2135,7 +2498,7 @@ export function create_painter_app_state(): PainterAppState {
         if (isAppInitialized) {
           saveCameraConfig({ center_target_in_view: enabled });
         }
-        console.log('Center target:', enabled ? 'enabled' : 'disabled');
+        painterCameraDiag('center target toggled', { enabled });
       },
       onCalibrationChange: (x, y) => {
         voxelSpace.camera.calibration = { x, y };
@@ -2269,6 +2632,7 @@ export function create_painter_app_state(): PainterAppState {
   return {
     modules: registry.get_all(),
     module_registry: registry,
+    multiplayer_sync: painter_sync,
     update_layout,
 
      on_pointer_move_global: (x: number, y: number) => {
@@ -2291,7 +2655,7 @@ export function create_painter_app_state(): PainterAppState {
         grid.cells = new_grid.cells;
         pushSnapshot(history, grid);
       } catch (e) {
-        console.error('Failed to import grid:', e);
+        diag_log('painter', 'important', 'PAINTER', 'failed to import grid', { error: e instanceof Error ? e.message : String(e) }, { sink: 'error' });
       }
     },
     
@@ -2323,7 +2687,7 @@ export function create_painter_app_state(): PainterAppState {
         }
         await save_file();
       })().catch((e) => {
-        console.error('Save failed:', e);
+        diag_log('painter', 'important', 'PAINTER', 'save failed', { error: e instanceof Error ? e.message : String(e) }, { sink: 'error' });
       });
     },
 
@@ -2333,11 +2697,11 @@ export function create_painter_app_state(): PainterAppState {
         await loadArtworkFromContent(content);
         current_filename = file.name.replace(/\.json$/i, '');
         current_file_path = null;
-        console.log('📂 Loaded file:', current_filename);
-        console.log(debugVoxelSpace(voxelSpace));
+        painterImportant('loaded file', { filename: current_filename });
+        painterDiag('loaded voxel space', { summary: debugVoxelSpace(voxelSpace) });
         schedule_auto_save();
       } catch (e) {
-        console.error('Failed to load file:', e);
+        diag_log('painter', 'important', 'PAINTER', 'failed to load file', { error: e instanceof Error ? e.message : String(e) }, { sink: 'error' });
         alert('Failed to load file: ' + (e as Error).message);
       }
     },
@@ -2366,8 +2730,8 @@ export function create_painter_app_state(): PainterAppState {
       pushSnapshot(history, grid);
       current_filename = 'untitled';
       clearAutoSave();
-      console.log('🆕 New canvas created:', width, 'x', height);
-      console.log(debugVoxelSpace(voxelSpace));
+      painterImportant('new canvas created', { width, height });
+      painterDiag('new canvas voxel space', { summary: debugVoxelSpace(voxelSpace) });
     },
 
     current_filename,
@@ -2392,9 +2756,10 @@ export function create_painter_app_state(): PainterAppState {
         syncProjectedGridFromDisplay();
         syncDOMRenderer();
         pushSnapshot(history, grid);
-        console.log('🎨 Imported VoxelSpace:', debugVoxelSpace(voxelSpace));
+        painterImportant('imported voxel space');
+        painterDiag('imported voxel space summary', { summary: debugVoxelSpace(voxelSpace) });
       } catch (e) {
-        console.error('Failed to import VoxelSpace:', e);
+        diag_log('painter', 'important', 'PAINTER', 'failed to import voxel space', { error: e instanceof Error ? e.message : String(e) }, { sink: 'error' });
       }
     },
     
@@ -2438,7 +2803,7 @@ export function create_painter_app_state(): PainterAppState {
       const layer = getLayer(voxelSpace, z);
       if (layer) {
         layer.locked = !layer.locked;
-        console.log('🔒 Layer', z, 'locked:', layer.locked);
+        painterDiag('layer lock toggled', { z, locked: layer.locked });
       }
     },
 
@@ -2509,9 +2874,7 @@ export function create_painter_app_state(): PainterAppState {
     // Debug function to check camera persistence
     debug_camera_config: () => {
       const config = loadCameraConfig();
-      console.log('[Camera Debug] Current saved config:', config);
-      console.log('[Camera Debug] Current voxelSpace camera:', voxelSpace.camera);
-      console.log('[Camera Debug] isAppInitialized:', isAppInitialized);
+      painterCameraDiag('debug camera config', { config, voxel_camera: voxelSpace.camera, isAppInitialized });
       return config;
     },
 
@@ -2530,7 +2893,7 @@ export function create_painter_app_state(): PainterAppState {
         parallax_size_enabled: voxelSpace.camera.parallax_size_enabled,
         use_focus_layer_opacity: voxelSpace.camera.use_focus_layer_opacity,
       });
-      console.log('[Camera Debug] Force saved camera config');
+      painterCameraDiag('force saved camera config');
     },
   };
 }

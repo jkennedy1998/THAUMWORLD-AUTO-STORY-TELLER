@@ -110,16 +110,19 @@ export type ToolAssistedInputsPointerBase = {
 };
 
 export type ToolAssistedInputsKeyboardAction =
-  | { at_breath: number; type: 'key_down'; code: string; key?: string }
-  | { at_breath: number; type: 'key_up'; code: string; key?: string }
-  | { at_breath: number; type: 'key_tap'; code: string; key?: string; hold_ms?: number };
+  | { at_breath: number; type: 'key_down'; code: string; key?: string; shift?: boolean; ctrl?: boolean; alt?: boolean; meta?: boolean }
+  | { at_breath: number; type: 'key_up'; code: string; key?: string; shift?: boolean; ctrl?: boolean; alt?: boolean; meta?: boolean }
+  | { at_breath: number; type: 'key_tap'; code: string; key?: string; hold_ms?: number; shift?: boolean; ctrl?: boolean; alt?: boolean; meta?: boolean }
+  | { at_breath: number; type: 'text_input'; text: string };
 
 export type ToolAssistedInputsScriptAction =
   | { at_breath: number; type: 'assert_context_ready' }
   | { at_breath: number; type: 'marker'; label: string }
+  | { at_breath: number; type: 'invoke_helper'; helper: string; payload?: Record<string, unknown> }
   | { at_breath: number; type: 'capture_actor_tile'; slot: string }
   | { at_breath: number; type: 'capture_movement_trace'; slot: string }
   | { at_breath: number; type: 'capture_visible_step'; slot: string }
+  | { at_breath: number; type: 'capture_text_value'; slot: string; source: string; field?: string }
   | { at_breath: number; type: 'capture_painter_tool_state'; slot: string }
   | { at_breath: number; type: 'capture_painter_focus_plane'; slot: string }
   | { at_breath: number; type: 'capture_painter_camera_target'; slot: string }
@@ -130,6 +133,9 @@ export type ToolAssistedInputsScriptAction =
   | { at_breath: number; type: 'assert_movement_trace_ready'; min_input_seq?: number; require_stage?: 'posted' | 'eligible_now' | 'waiting_for_cadence' | 'moved'; require_direction?: boolean; require_gate?: string; max_input_to_visible_ms?: number; max_accept_to_visible_ms?: number }
   | { at_breath: number; type: 'assert_actor_tile_equals'; slot: string }
   | { at_breath: number; type: 'assert_actor_tile_changed'; slot: string }
+  | { at_breath: number; type: 'assert_text_value_equals'; slot: string; source: string; field?: string }
+  | { at_breath: number; type: 'assert_text_value_changed'; slot: string; source: string; field?: string }
+  | { at_breath: number; type: 'assert_text_value_literal'; source: string; field?: string; value: string }
   | { at_breath: number; type: 'assert_painter_primary_tool'; tool: string }
   | { at_breath: number; type: 'assert_painter_secondary_tool'; tool: string }
   | { at_breath: number; type: 'assert_painter_focus_plane'; z: number }
@@ -174,8 +180,9 @@ export interface WorldSessionBootstrap {
 
 export interface AutomationInputDriver {
   readonly backend_kind: string;
-  send_keydown(action: { code: string; key?: string }): Promise<void> | void;
-  send_keyup(action: { code: string; key?: string }): Promise<void> | void;
+  send_keydown(action: { code: string; key?: string; shift?: boolean; ctrl?: boolean; alt?: boolean; meta?: boolean }): Promise<void> | void;
+  send_keyup(action: { code: string; key?: string; shift?: boolean; ctrl?: boolean; alt?: boolean; meta?: boolean }): Promise<void> | void;
+  send_text(action: { text: string }): Promise<void> | void;
   reset(): Promise<void> | void;
 }
 
@@ -193,6 +200,8 @@ export interface AutomationRuntimeProbe {
   get_current_actor_tile(): ToolAssistedInputsTile | null;
   get_movement_trace(): ToolAssistedInputsMovementTrace | null;
   get_visible_step(): ToolAssistedInputsVisibleStep | null;
+  get_text_value?: (source: string, field?: string | null) => string | null;
+  invoke_helper?: (helper: string, payload?: Record<string, unknown>) => Promise<unknown> | unknown;
   get_painter_tool_state?: () => ToolAssistedInputsPainterToolState | null;
   get_painter_focus_plane?: () => number | null;
   get_painter_camera_target?: () => ToolAssistedInputsTile | null;

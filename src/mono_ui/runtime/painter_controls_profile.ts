@@ -9,8 +9,6 @@ export const PAINTER_CONTROLS_PROFILE: ControlActionDefinition[] = [
   { id: 'painter.tool_assign.rect_stroke', label: 'Assign Rect Stroke Tool', category: 'Tools', system: 'painter', default_binding: { kind: 'keyboard', code: 'KeyR' } },
   { id: 'painter.tool_assign.rect_fill', label: 'Assign Rect Fill Tool', category: 'Tools', system: 'painter', default_binding: { kind: 'keyboard', code: 'KeyS' } },
   { id: 'painter.tool_assign.text', label: 'Assign Text Tool', category: 'Tools', system: 'painter', default_binding: { kind: 'keyboard', code: 'KeyT' } },
-  { id: 'painter.tool_assign.weighter', label: 'Assign Weight Tool', category: 'Tools', system: 'painter', default_binding: { kind: 'keyboard', code: 'KeyW' } },
-  { id: 'painter.tool_assign.colorer', label: 'Assign Color Tool', category: 'Tools', system: 'painter', default_binding: { kind: 'keyboard', code: 'KeyO' } },
   { id: 'painter.tool_assign.selectangle', label: 'Assign Rect Selection Tool', category: 'Tools', system: 'painter', default_binding: { kind: 'keyboard', code: 'KeyM' } },
   { id: 'painter.tool_assign.lassoselect', label: 'Assign Lasso Selection Tool', category: 'Tools', system: 'painter', default_binding: { kind: 'keyboard', code: 'KeyN' } },
   { id: 'painter.tool_assign.copy', label: 'Assign Copy Tool', category: 'Tools', system: 'painter', default_binding: { kind: 'keyboard', code: 'KeyC' } },

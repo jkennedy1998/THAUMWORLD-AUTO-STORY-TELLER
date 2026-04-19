@@ -143,7 +143,18 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
     return index + 1;
   }
   
-  return make_floating_panel_module({
+  function beginRenameLayer(z: number): boolean {
+    const layer = getSpace().layers.get(z);
+    if (!layer) return false;
+    opts.onLayerSelect(z);
+    renameState.isRenaming = true;
+    renameState.layerZ = layer.z;
+    renameState.editText = layer.name;
+    renameState.cursorPosition = layer.name.length;
+    return true;
+  }
+
+  const module = make_floating_panel_module({
     id: opts.id,
     rect: opts.rect,
     title: 'LAYERS',
@@ -481,21 +492,18 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
       } else if (localX >= COL_NAME_START && localX < rect.x1 - rect.x0 - 2) {
         // Name clicked - select layer AND start rename
         // First select the layer
-        opts.onLayerSelect(layer.z);
-        
-        // Then enter rename mode
-        if (renameState.isRenaming && renameState.layerZ !== layer.z) {
-          // Confirm any existing rename first
-          if (renameState.layerZ !== null) {
-            opts.onLayerRename(renameState.layerZ, renameState.editText);
+          opts.onLayerSelect(layer.z);
+
+          // Then enter rename mode
+          if (renameState.isRenaming && renameState.layerZ !== layer.z) {
+            // Confirm any existing rename first
+            if (renameState.layerZ !== null) {
+              opts.onLayerRename(renameState.layerZ, renameState.editText);
+            }
           }
+
+          beginRenameLayer(layer.z);
         }
-        
-        renameState.isRenaming = true;
-        renameState.layerZ = layer.z;
-        renameState.editText = layer.name;
-        renameState.cursorPosition = layer.name.length;
-      }
     },
     on_drag_move_content(e: DragEvent): void {
       // Layer dragging - update position
@@ -650,5 +658,9 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
         scrollOffset = Math.max(scrollOffset - 1, 0);
       }
     },
+  });
+
+  return Object.assign(module, {
+    beginRenameLayer,
   });
 }

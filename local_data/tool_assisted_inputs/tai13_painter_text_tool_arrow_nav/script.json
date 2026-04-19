@@ -1,0 +1,29 @@
+{
+  "id": "painter_text_tool_arrow_nav",
+  "test_name": "paint_test_text_tool_types_and_navigates_with_arrows",
+  "clock_mode": "realtime_ms",
+  "open_ms": 9000,
+  "description": "Enter painter text mode, type one character, move with arrow keys, and verify the second character lands at the moved cursor position.",
+  "start_delay_ms": 1200,
+  "end_delay_ms": 1000,
+  "actions": [
+    { "at_ms": 50, "type": "pointer_move", "space": "grid", "x": 60, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 80, "type": "capture_painter_interaction_anchor", "slot": "anchor_start" },
+    { "at_ms": 120, "type": "pointer_move", "space": "grid", "x": 61, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 150, "type": "capture_painter_interaction_anchor", "slot": "anchor_mid" },
+    { "at_ms": 190, "type": "pointer_move", "space": "grid", "x": 62, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 220, "type": "capture_painter_interaction_anchor", "slot": "anchor_far" },
+    { "at_ms": 320, "type": "key_tap", "code": "KeyT", "key": "t", "hold_ms": 30 },
+    { "at_ms": 520, "type": "pointer_click", "space": "grid", "x": 60, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 700, "type": "capture_painter_anchor_cell", "slot": "start_before", "anchor_slot": "anchor_start" },
+    { "at_ms": 720, "type": "capture_painter_anchor_cell", "slot": "mid_before", "anchor_slot": "anchor_mid" },
+    { "at_ms": 740, "type": "capture_painter_anchor_cell", "slot": "far_before", "anchor_slot": "anchor_far" },
+    { "at_ms": 900, "type": "text_input", "text": "A" },
+    { "at_ms": 1150, "type": "key_tap", "code": "ArrowRight", "key": "ArrowRight", "hold_ms": 30 },
+    { "at_ms": 1350, "type": "text_input", "text": "B" },
+    { "at_ms": 1550, "type": "key_tap", "code": "Escape", "key": "Escape", "hold_ms": 30 },
+    { "at_ms": 1800, "type": "assert_painter_anchor_cell_changed", "slot": "start_before", "anchor_slot": "anchor_start" },
+    { "at_ms": 1820, "type": "assert_painter_anchor_cell_equals", "slot": "mid_before", "anchor_slot": "anchor_mid" },
+    { "at_ms": 1840, "type": "assert_painter_anchor_cell_changed", "slot": "far_before", "anchor_slot": "anchor_far" }
+  ]
+}

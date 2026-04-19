@@ -18,6 +18,9 @@ export function create_tool_assisted_inputs_capture_store(): {
   set_visible_step: (slot: string, step: ToolAssistedInputsVisibleStep) => void;
   get_visible_step: (slot: string) => ToolAssistedInputsVisibleStep | null;
   list_visible_step_slots: () => string[];
+  set_text_value: (slot: string, value: string | null) => void;
+  get_text_value: (slot: string) => string | null;
+  list_text_value_slots: () => string[];
   set_painter_tool_state: (slot: string, state: ToolAssistedInputsPainterToolState) => void;
   get_painter_tool_state: (slot: string) => ToolAssistedInputsPainterToolState | null;
   list_painter_tool_state_slots: () => string[];
@@ -31,6 +34,7 @@ export function create_tool_assisted_inputs_capture_store(): {
   let tiles: Record<string, ToolAssistedInputsTile> = {};
   let movement_traces: Record<string, ToolAssistedInputsMovementTrace> = {};
   let visible_steps: Record<string, ToolAssistedInputsVisibleStep> = {};
+  let text_values: Record<string, string | null> = {};
   let painter_tool_states: Record<string, ToolAssistedInputsPainterToolState> = {};
   let painter_anchors: Record<string, ToolAssistedInputsPainterInteractionAnchor> = {};
   let painter_cells: Record<string, ToolAssistedInputsPainterCell | null> = {};
@@ -39,6 +43,7 @@ export function create_tool_assisted_inputs_capture_store(): {
       tiles = {};
       movement_traces = {};
       visible_steps = {};
+      text_values = {};
       painter_tool_states = {};
       painter_anchors = {};
       painter_cells = {};
@@ -52,6 +57,9 @@ export function create_tool_assisted_inputs_capture_store(): {
     set_visible_step(slot, step): void { visible_steps[slot] = step; },
     get_visible_step(slot): ToolAssistedInputsVisibleStep | null { return visible_steps[slot] ?? null; },
     list_visible_step_slots(): string[] { return Object.keys(visible_steps); },
+    set_text_value(slot, value): void { text_values[slot] = value; },
+    get_text_value(slot): string | null { return text_values[slot] ?? null; },
+    list_text_value_slots(): string[] { return Object.keys(text_values); },
     set_painter_tool_state(slot, state): void { painter_tool_states[slot] = state; },
     get_painter_tool_state(slot): ToolAssistedInputsPainterToolState | null { return painter_tool_states[slot] ?? null; },
     list_painter_tool_state_slots(): string[] { return Object.keys(painter_tool_states); },

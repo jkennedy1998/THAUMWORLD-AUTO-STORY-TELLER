@@ -119,6 +119,18 @@ export class VoxelDOMRenderer {
     },
     layer_events: [],
   };
+  private perfRenderIndex = 0;
+  private perfSummary = {
+    frames: 0,
+    slow_frames: 0,
+    max_total_ms: 0,
+    summed_total_ms: 0,
+    summed_create_layers_ms: 0,
+    summed_raster_ms: 0,
+    summed_transform_ms: 0,
+    summed_reraster_layer_count: 0,
+    summed_resize_count: 0,
+  };
 
   constructor(
     container: HTMLElement,
@@ -189,6 +201,45 @@ export class VoxelDOMRenderer {
 
   getDebugState(): VoxelDomRendererDebugState {
     return JSON.parse(JSON.stringify(this.debugState)) as VoxelDomRendererDebugState;
+  }
+
+  private isPerfEnabled(): boolean {
+    try {
+      const raw = window.localStorage.getItem('voxel_dom_renderer_perf_enabled');
+      if (raw === null) return true;
+      return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+    } catch {
+      return true;
+    }
+  }
+
+  private readPerfNumber(key: string, fallback: number): number {
+    try {
+      const raw = window.localStorage.getItem(key);
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    } catch {
+      // ignore
+    }
+    return fallback;
+  }
+
+  private roundPerfMs(value: number): number {
+    return Math.round(value * 100) / 100;
+  }
+
+  private resetPerfSummary(): void {
+    this.perfSummary = {
+      frames: 0,
+      slow_frames: 0,
+      max_total_ms: 0,
+      summed_total_ms: 0,
+      summed_create_layers_ms: 0,
+      summed_raster_ms: 0,
+      summed_transform_ms: 0,
+      summed_reraster_layer_count: 0,
+      summed_resize_count: 0,
+    };
   }
 
   /**
@@ -302,7 +353,7 @@ export class VoxelDOMRenderer {
   /**
    * Create or update canvas elements for each layer
    */
-  private createOrUpdateLayers(): void {
+  private createOrUpdateLayers(perf?: { resize_count: number; create_count: number }): void {
     if (!this.space) return;
 
     // Check for duplicates before making changes
@@ -321,7 +372,7 @@ export class VoxelDOMRenderer {
 
     // Create/update canvases for all layers
     for (const z of zValues) {
-      this.getOrCreateCanvas(z);
+      this.getOrCreateCanvas(z, perf);
     }
   }
 
@@ -330,7 +381,7 @@ export class VoxelDOMRenderer {
    * Selected layer canvas is sized to exactly match the grid
    * Other layers are larger to accommodate scaling
    */
-  private getOrCreateCanvas(z: number): HTMLCanvasElement {
+  private getOrCreateCanvas(z: number, perf?: { resize_count: number; create_count: number }): HTMLCanvasElement {
     let canvas = this.layerCanvases.get(z);
 
     if (!canvas) {
@@ -351,6 +402,7 @@ export class VoxelDOMRenderer {
       this.layerCanvases.set(z, canvas);
       this.layerContexts.set(z, ctx);
       this.clipContainer.appendChild(canvas);
+      if (perf) perf.create_count += 1;
       this.debugState.layer_events.push({ kind: 'create_canvas', z, width: canvas.width, height: canvas.height, selected: false });
       this.debugState.layer_events = this.debugState.layer_events.slice(-12);
     }
@@ -376,6 +428,7 @@ export class VoxelDOMRenderer {
       if (prevW !== nextW) canvas.width = nextW;
       if (prevH !== nextH) canvas.height = nextH;
       if (prevW !== nextW || prevH !== nextH) {
+        if (perf) perf.resize_count += 1;
         this.debugState.layer_events.push({ kind: 'resize_canvas', z, width: nextW, height: nextH, selected: isSelected });
         this.debugState.layer_events = this.debugState.layer_events.slice(-12);
       }
@@ -609,11 +662,20 @@ export class VoxelDOMRenderer {
    */
   render(): void {
     if (!this.space) return;
+    const perf_enabled = this.isPerfEnabled();
+    const render_started_at_ms = perf_enabled ? performance.now() : 0;
+    let create_layers_ms = 0;
+    let raster_ms = 0;
+    let transform_ms = 0;
+    const perf_counts = { resize_count: 0, create_count: 0 };
+    let reraster_layer_count = 0;
     this.updateSpringCenteredViewAngles(performance.now());
 
     // Layers can be added/removed at runtime (e.g. via the layer palette).
     // Keep the backing canvas set in sync so newly-created layers render immediately.
-    this.createOrUpdateLayers();
+    const create_layers_started_at_ms = perf_enabled ? performance.now() : 0;
+    this.createOrUpdateLayers(perf_counts);
+    if (perf_enabled) create_layers_ms = Math.max(0, performance.now() - create_layers_started_at_ms);
 
     const selectedZ = this.space.camera.focus_plane;
     const visibleLayers = Array.from(this.space.layers.values())
@@ -625,7 +687,7 @@ export class VoxelDOMRenderer {
 
     for (const layer of visibleLayers) {
       // Ensure canvas/context exist (layer may have been added since last frame)
-      const canvas = this.getOrCreateCanvas(layer.z);
+      const canvas = this.getOrCreateCanvas(layer.z, perf_counts);
       const ctx = this.layerContexts.get(layer.z);
       if (!ctx) continue;
 
@@ -633,22 +695,34 @@ export class VoxelDOMRenderer {
       // Default behavior: rerender every frame (painter correctness).
       // Optimized behavior: if caller supplies per-layer content versions, rerender only when changed.
       if (!this.layerContentVersion.has(layer.z)) {
+        const raster_started_at_ms = perf_enabled ? performance.now() : 0;
         this.renderLayer(layer, ctx);
+        if (perf_enabled) {
+          raster_ms += Math.max(0, performance.now() - raster_started_at_ms);
+          reraster_layer_count += 1;
+        }
       } else {
         const version = this.layerContentVersion.get(layer.z) ?? 0;
         const renderedVersion = this.layerRenderedVersion.get(layer.z);
         if (renderedVersion !== version) {
+          const raster_started_at_ms = perf_enabled ? performance.now() : 0;
           this.renderLayer(layer, ctx);
           this.layerRenderedVersion.set(layer.z, version);
+          if (perf_enabled) {
+            raster_ms += Math.max(0, performance.now() - raster_started_at_ms);
+            reraster_layer_count += 1;
+          }
         }
       }
 
       // Apply transform
+      const transform_started_at_ms = perf_enabled ? performance.now() : 0;
       const placement = this.calculateTransform(layer, selectedZ);
       canvas.style.transform = placement.transform;
       canvas.style.transformOrigin = placement.origin;
       canvas.style.opacity = (layer.opacity ?? 1).toString();
       canvas.style.display = 'block';
+      if (perf_enabled) transform_ms += Math.max(0, performance.now() - transform_started_at_ms);
     }
 
     // Hide invisible layers
@@ -657,6 +731,53 @@ export class VoxelDOMRenderer {
       if (!layer || !layer.visible) {
         canvas.style.display = 'none';
       }
+    }
+
+    if (!perf_enabled) return;
+    this.perfRenderIndex += 1;
+    const total_ms = Math.max(0, performance.now() - render_started_at_ms);
+    const slow_frame_ms = this.readPerfNumber('voxel_dom_renderer_perf_slow_frame_ms', 8);
+    const sample_every = Math.max(1, Math.floor(this.readPerfNumber('voxel_dom_renderer_perf_sample_every', 30)));
+    const summary_every = Math.max(1, Math.floor(this.readPerfNumber('voxel_dom_renderer_perf_summary_every', 120)));
+    this.perfSummary.frames += 1;
+    this.perfSummary.summed_total_ms += total_ms;
+    this.perfSummary.summed_create_layers_ms += create_layers_ms;
+    this.perfSummary.summed_raster_ms += raster_ms;
+    this.perfSummary.summed_transform_ms += transform_ms;
+    this.perfSummary.summed_reraster_layer_count += reraster_layer_count;
+    this.perfSummary.summed_resize_count += perf_counts.resize_count;
+    this.perfSummary.max_total_ms = Math.max(this.perfSummary.max_total_ms, total_ms);
+    if (total_ms >= slow_frame_ms) this.perfSummary.slow_frames += 1;
+
+    if (total_ms >= slow_frame_ms || this.perfRenderIndex % sample_every === 0) {
+      console.log('[VOXEL_DOM_RENDERER_PERF] frame ' + JSON.stringify({
+        render_index: this.perfRenderIndex,
+        total_ms: this.roundPerfMs(total_ms),
+        create_layers_ms: this.roundPerfMs(create_layers_ms),
+        raster_ms: this.roundPerfMs(raster_ms),
+        transform_ms: this.roundPerfMs(transform_ms),
+        visible_layer_count: visibleLayers.length,
+        reraster_layer_count,
+        resize_count: perf_counts.resize_count,
+        create_count: perf_counts.create_count,
+      }));
+    }
+
+    if (this.perfRenderIndex % summary_every === 0) {
+      const frames = Math.max(1, this.perfSummary.frames);
+      console.log('[VOXEL_DOM_RENDERER_PERF] summary ' + JSON.stringify({
+        render_index: this.perfRenderIndex,
+        frames: this.perfSummary.frames,
+        slow_frames: this.perfSummary.slow_frames,
+        avg_total_ms: this.roundPerfMs(this.perfSummary.summed_total_ms / frames),
+        avg_create_layers_ms: this.roundPerfMs(this.perfSummary.summed_create_layers_ms / frames),
+        avg_raster_ms: this.roundPerfMs(this.perfSummary.summed_raster_ms / frames),
+        avg_transform_ms: this.roundPerfMs(this.perfSummary.summed_transform_ms / frames),
+        avg_reraster_layer_count: this.roundPerfMs(this.perfSummary.summed_reraster_layer_count / frames),
+        avg_resize_count: this.roundPerfMs(this.perfSummary.summed_resize_count / frames),
+        max_total_ms: this.roundPerfMs(this.perfSummary.max_total_ms),
+      }));
+      this.resetPerfSummary();
     }
   }
 

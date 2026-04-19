@@ -11,8 +11,9 @@ import type { VoxelSpace, VoxelSpaceExport } from './voxel_space.js';
 import { exportVoxelSpace, importVoxelSpace, gridToVoxelSpace, voxelSpaceToGrid } from './voxel_space.js';
 import type { ToolType } from './types.js';
 import { clamp_weight_index } from '../mono_ui/weight_system.js';
+import { ALL_EDIT_CHANNELS, sanitize_edit_channels, type EditChannels } from './edit_mask.js';
 
-const VALID_TOOL_TYPES: readonly ToolType[] = ['pencil', 'eraser', 'line', 'rect_stroke', 'rect_fill', 'bucket', 'eyedropper', 'text', 'weighter', 'colorer', 'selectangle', 'lassoselect', 'copy', 'paste'] as const;
+const VALID_TOOL_TYPES: readonly ToolType[] = ['pencil', 'eraser', 'line', 'rect_stroke', 'rect_fill', 'bucket', 'eyedropper', 'text', 'selectangle', 'lassoselect', 'copy', 'paste'] as const;
 
 function clamp_integer(value: unknown, fallback: number, min: number, max: number): number {
   const n = typeof value === 'number' ? Math.trunc(value) : fallback;
@@ -40,6 +41,7 @@ function sanitize_rgb(value: unknown, fallback: { r: number; g: number; b: numbe
 }
 
 function sanitize_tool_type(value: unknown, fallback: ToolType): ToolType {
+  if (value === 'weighter' || value === 'colorer') return 'pencil';
   return typeof value === 'string' && (VALID_TOOL_TYPES as readonly string[]).includes(value) ? value as ToolType : fallback;
 }
 
@@ -306,6 +308,10 @@ export interface ToolProperties {
   right_brush_rgb: { r: number; g: number; b: number };
   left_brush_weight_index: number;
   right_brush_weight_index: number;
+  left_brush_edit_channels: EditChannels;
+  right_brush_edit_channels: EditChannels;
+  left_picker_edit_channels: EditChannels;
+  right_picker_edit_channels: EditChannels;
   
   // Text tool settings
   text_spacing: number;
@@ -325,6 +331,7 @@ export interface ToolProperties {
   // Tool assignments
   left_click_tool: string;
   right_click_tool: string;
+  picker_pick_for_opposite_hand: boolean;
   active_property_side: 'left' | 'right';
 }
 
@@ -341,6 +348,10 @@ const DEFAULT_TOOL_PROPERTIES: ToolProperties = {
   right_brush_rgb: { r: 255, g: 255, b: 255 },
   left_brush_weight_index: 1,
   right_brush_weight_index: 1,
+  left_brush_edit_channels: { ...ALL_EDIT_CHANNELS },
+  right_brush_edit_channels: { ...ALL_EDIT_CHANNELS },
+  left_picker_edit_channels: { ...ALL_EDIT_CHANNELS },
+  right_picker_edit_channels: { ...ALL_EDIT_CHANNELS },
   text_spacing: 1,
   text_charlead: 0,
   text_enterlead: 1,
@@ -354,6 +365,7 @@ const DEFAULT_TOOL_PROPERTIES: ToolProperties = {
   paste_ignore_white: false,
   left_click_tool: 'pencil',
   right_click_tool: 'eraser',
+  picker_pick_for_opposite_hand: false,
   active_property_side: 'left',
 };
 
@@ -389,6 +401,10 @@ export function loadToolProperties(): ToolProperties {
       right_brush_rgb: sanitize_rgb(parsed.right_brush_rgb, DEFAULT_TOOL_PROPERTIES.right_brush_rgb),
       left_brush_weight_index: clamp_weight_index(parsed.left_brush_weight_index),
       right_brush_weight_index: clamp_weight_index(parsed.right_brush_weight_index),
+      left_brush_edit_channels: sanitize_edit_channels(parsed.left_brush_edit_channels, DEFAULT_TOOL_PROPERTIES.left_brush_edit_channels),
+      right_brush_edit_channels: sanitize_edit_channels(parsed.right_brush_edit_channels, DEFAULT_TOOL_PROPERTIES.right_brush_edit_channels),
+      left_picker_edit_channels: sanitize_edit_channels(parsed.left_picker_edit_channels, DEFAULT_TOOL_PROPERTIES.left_picker_edit_channels),
+      right_picker_edit_channels: sanitize_edit_channels(parsed.right_picker_edit_channels, DEFAULT_TOOL_PROPERTIES.right_picker_edit_channels),
       text_spacing: clamp_integer(parsed.text_spacing, DEFAULT_TOOL_PROPERTIES.text_spacing, -16, 16),
       text_charlead: clamp_integer(parsed.text_charlead, DEFAULT_TOOL_PROPERTIES.text_charlead, -16, 16),
       text_enterlead: clamp_integer(parsed.text_enterlead, DEFAULT_TOOL_PROPERTIES.text_enterlead, -16, 16),
@@ -402,6 +418,7 @@ export function loadToolProperties(): ToolProperties {
       paste_ignore_white: sanitize_boolean(parsed.paste_ignore_white, DEFAULT_TOOL_PROPERTIES.paste_ignore_white),
       left_click_tool: sanitize_tool_type(parsed.left_click_tool, DEFAULT_TOOL_PROPERTIES.left_click_tool as ToolType),
       right_click_tool: sanitize_tool_type(parsed.right_click_tool, DEFAULT_TOOL_PROPERTIES.right_click_tool as ToolType),
+      picker_pick_for_opposite_hand: sanitize_boolean(parsed.picker_pick_for_opposite_hand, DEFAULT_TOOL_PROPERTIES.picker_pick_for_opposite_hand),
       active_property_side: parsed.active_property_side === 'right' ? 'right' : 'left',
     };
     if (JSON.stringify(parsed) !== JSON.stringify(sanitized)) {

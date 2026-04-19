@@ -15,6 +15,7 @@ import {
   initLogSession,
   parseLatestLog,
   updateLatestPointer,
+  updateLatestSessionState,
 } from "../src/launcher/log_utils.js";
 import { acquireHostLaunchLock, detectLocalHost, detectVite, readHostLaunchLock, recoverHostLaunchLock, releaseHostLaunchLock, waitForLocalHost, writeHostSessionFile as writeHostSessionManifest } from "./launcher_common.mjs";
 import { syncAtlasAssets } from "./atlas_sync.mjs";
@@ -34,6 +35,10 @@ const startup_boot_mode = (boot_mode_arg ? String(boot_mode_arg.split("=")[1] ??
   : 'manual_shell';
 const tai_id_arg = args.find((arg) => arg.startsWith("--tai-id="));
 const tai_id = tai_id_arg ? String(tai_id_arg.split("=")[1] ?? "").trim() : "";
+const diag_profile_arg = args.find((arg) => arg.startsWith("--diag-profile="));
+const diag_profile = (diag_profile_arg ? String(diag_profile_arg.split("=")[1] ?? "quiet") : (tai_id ? 'logs' : 'quiet')).trim().toLowerCase() === 'logs'
+  ? 'logs'
+  : 'quiet';
 const baseDir = path.join(__dirname, "..");
 const tai_entry = tai_id ? resolveToolAssistedInputsEntry(baseDir, tai_id) : null;
 
@@ -41,6 +46,7 @@ console.log("Starting THAUMWORLD DEV mode with log capture...");
 console.log("Code changes will be reflected immediately (no rebuild needed)");
 console.log(`Data slot: ${data_slot}`);
 console.log(`Launch mode: ${launch_mode}`);
+console.log(`Diagnostics profile: ${diag_profile}`);
 console.log(`Startup boot mode: ${tai_entry ? 'tas_runtime' : startup_boot_mode}`);
 if (tai_entry) {
   console.log(`Tool Assisted Inputs: tai${tai_entry.id}`);
@@ -59,7 +65,13 @@ if (atlasSync.missingSource) {
   console.log(`[atlas sync] ${copiedSummary}`);
 }
 
-const session = initLogSession(data_slot, "game");
+const session = initLogSession(data_slot, "game", {
+  launcher: 'dev_with_logs',
+  pid: process.pid,
+  status: 'running',
+  taiId: tai_entry?.id ?? null,
+  testName: tai_entry?.testName ?? null,
+});
 const { sessionId, logDir, mainLog } = session;
 const bootTime = new Date();
 
@@ -70,6 +82,17 @@ function verifyLatestPointer(): void {
   updateLatestPointer(logDir, mainLog);
   const repaired = parseLatestLog(latestPath);
   if (repaired?.currentLog === mainLog) {
+    updateLatestSessionState(logDir, {
+      sessionId,
+      currentLog: mainLog,
+      mode: 'game',
+      dataSlot: data_slot,
+      launcher: 'dev_with_logs',
+      pid: process.pid,
+      status: 'running',
+      taiId: tai_entry?.id ?? null,
+      testName: tai_entry?.testName ?? null,
+    });
     console.warn(`[launcher] repaired latest.log -> ${path.basename(mainLog)}`);
     return;
   }
@@ -113,6 +136,17 @@ appendToLog(formatLogEntry("LAUNCHER", "INFO", `dev_with_logs session ${JSON.str
   tai_script_path: tai_entry?.scriptPath ?? null,
   tai_registry_path: tai_entry?.registryPath ?? null,
 })}`));
+updateLatestSessionState(logDir, {
+  sessionId,
+  currentLog: mainLog,
+  mode: 'game',
+  dataSlot: data_slot,
+  launcher: 'dev_with_logs',
+  pid: process.pid,
+  status: 'running',
+  taiId: tai_entry?.id ?? null,
+  testName: tai_entry?.testName ?? null,
+});
 
 function shouldPrintToConsole(_processName: string, level: string, line: string): boolean {
   if (level !== "INFO") return true;
@@ -154,6 +188,9 @@ function spawnWithLogging(name: string, command: string, args: string[], options
       ...process.env,
       DATA_SLOT: data_slot.toString(),
       NODE_ENV: "development",
+      THAUM_APP_MODE: 'game',
+      THAUM_DIAG_PROFILE: diag_profile,
+      DEBUG_LEVEL: diag_profile === 'logs' ? '3' : '2',
       ...extraEnv,
     },
   });

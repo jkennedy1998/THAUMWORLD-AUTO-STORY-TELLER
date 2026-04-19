@@ -128,6 +128,11 @@ export function make_character_creation_module(opts: CharacterCreationModuleConf
       const action = relative_x >= 22 ? "close" : relative_x >= 12 ? "reset" : "create";
       void trigger_button(action);
     },
+    wants_text_capture(): boolean {
+      if (!active_field_key) return false;
+      const current = opts.get_fields().find((field) => field.key === active_field_key);
+      return current?.editable !== false;
+    },
     on_key_down(e: KeyboardEvent): void {
       const fields = opts.get_fields().filter((field) => field.editable !== false);
       if (e.key === "Escape") {

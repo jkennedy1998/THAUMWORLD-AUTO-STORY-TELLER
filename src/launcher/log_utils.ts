@@ -11,6 +11,22 @@ import { generateSessionId } from "../shared/session_ids.js";
 
 export { generateSessionId };
 
+export type LatestSessionStatus = 'starting' | 'running' | 'stale' | 'exited';
+
+export type LatestSessionManifest = {
+  version: 1;
+  sessionId: string;
+  currentLog: string;
+  mode: 'game' | 'painter';
+  dataSlot: number;
+  createdAt: string;
+  launcher?: string;
+  pid?: number | null;
+  status: LatestSessionStatus;
+  taiId?: string | null;
+  testName?: string | null;
+};
+
 /**
  * Format date as YYYY-MM-DD using local timezone
  * (Not UTC - this fixes the midnight boundary issue)
@@ -80,6 +96,39 @@ export function parseLatestLog(latestPath: string): {
   }
 }
 
+export function getLatestSessionManifestPath(logDir: string): string {
+  return path.join(logDir, 'latest_session.json');
+}
+
+export function parseLatestSessionManifest(manifestPath: string): LatestSessionManifest | null {
+  try {
+    if (!fs.existsSync(manifestPath)) return null;
+    const raw = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as Partial<LatestSessionManifest>;
+    if (raw.version !== 1) return null;
+    if (typeof raw.currentLog !== 'string' || raw.currentLog.trim().length < 1) return null;
+    if (typeof raw.sessionId !== 'string' || raw.sessionId.trim().length < 1) return null;
+    if (raw.mode !== 'game' && raw.mode !== 'painter') return null;
+    const status: LatestSessionStatus = raw.status === 'starting' || raw.status === 'running' || raw.status === 'stale' || raw.status === 'exited'
+      ? raw.status
+      : 'running';
+    return {
+      version: 1,
+      sessionId: raw.sessionId.trim(),
+      currentLog: raw.currentLog.trim(),
+      mode: raw.mode,
+      dataSlot: Number.isFinite(Number(raw.dataSlot)) ? Math.floor(Number(raw.dataSlot)) : 1,
+      createdAt: typeof raw.createdAt === 'string' && raw.createdAt.trim().length > 0 ? raw.createdAt.trim() : new Date(0).toISOString(),
+      launcher: typeof raw.launcher === 'string' ? raw.launcher : undefined,
+      pid: Number.isFinite(Number(raw.pid)) ? Math.floor(Number(raw.pid)) : null,
+      status,
+      taiId: typeof raw.taiId === 'string' ? raw.taiId : null,
+      testName: typeof raw.testName === 'string' ? raw.testName : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Find the most recent session log file in a directory
  * Returns null if no session files found
@@ -120,6 +169,10 @@ export function getLatestLogPath(
   for (const logDir of dirsToCheck) {
     if (!logDir || seen.has(logDir)) continue;
     seen.add(logDir);
+    const manifest = parseLatestSessionManifest(getLatestSessionManifestPath(logDir));
+    if (manifest && fs.existsSync(manifest.currentLog)) {
+      return manifest.currentLog;
+    }
     const latestPath = path.join(logDir, "latest.log");
     const latest = parseLatestLog(latestPath);
     if (latest && fs.existsSync(latest.currentLog)) {
@@ -176,6 +229,37 @@ VALID=true
   }
 }
 
+export function writeLatestSessionManifest(logDir: string, manifest: LatestSessionManifest): void {
+  const manifestPath = getLatestSessionManifestPath(logDir);
+  try {
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+  } catch (err) {
+    console.error(`[LogUtils] Warning: Could not update latest_session.json: ${err}`);
+  }
+}
+
+export function updateLatestSessionState(
+  logDir: string,
+  fields: Partial<LatestSessionManifest> & Pick<LatestSessionManifest, 'sessionId' | 'currentLog' | 'mode' | 'dataSlot'>
+): LatestSessionManifest {
+  const existing = parseLatestSessionManifest(getLatestSessionManifestPath(logDir));
+  const manifest: LatestSessionManifest = {
+    version: 1,
+    sessionId: fields.sessionId,
+    currentLog: fields.currentLog,
+    mode: fields.mode,
+    dataSlot: fields.dataSlot,
+    createdAt: typeof fields.createdAt === 'string' ? fields.createdAt : existing?.createdAt ?? new Date().toISOString(),
+    launcher: typeof fields.launcher === 'string' ? fields.launcher : existing?.launcher,
+    pid: Number.isFinite(Number(fields.pid)) ? Math.floor(Number(fields.pid)) : existing?.pid ?? null,
+    status: fields.status ?? existing?.status ?? 'running',
+    taiId: typeof fields.taiId === 'string' ? fields.taiId : existing?.taiId ?? null,
+    testName: typeof fields.testName === 'string' ? fields.testName : existing?.testName ?? null,
+  };
+  writeLatestSessionManifest(logDir, manifest);
+  return manifest;
+}
+
 /**
  * Validate and optionally repair a stale latest.log reference
  * Returns the valid log path (repaired or fallback)
@@ -184,6 +268,10 @@ export function validateAndRepairLatest(
   logDir: string,
   repair: boolean = false
 ): { valid: boolean; logPath: string | null; repaired: boolean } {
+  const manifest = parseLatestSessionManifest(getLatestSessionManifestPath(logDir));
+  if (manifest && fs.existsSync(manifest.currentLog)) {
+    return { valid: true, logPath: manifest.currentLog, repaired: false };
+  }
   const latestPath = path.join(logDir, "latest.log");
   const latest = parseLatestLog(latestPath);
 
@@ -202,6 +290,17 @@ export function validateAndRepairLatest(
   // Repair if requested
   if (repair && fallback) {
     updateLatestPointer(logDir, fallback);
+    const sessionId = path.basename(fallback, '.log');
+    const mode = logDir.includes('logs_ascii_painter') ? 'painter' : 'game';
+    const slotMatch = logDir.match(/data_slot_(\d+)/i);
+    updateLatestSessionState(logDir, {
+      sessionId,
+      currentLog: fallback,
+      mode,
+      dataSlot: slotMatch ? parseInt(slotMatch[1] ?? '1', 10) : 1,
+      status: 'running',
+      launcher: 'repair',
+    });
     console.log(`[LogUtils] Repaired latest.log → ${path.basename(fallback)}`);
     return { valid: true, logPath: fallback, repaired: true };
   }
@@ -245,7 +344,14 @@ Log Directory: ${path.dirname(logPath)}
  */
 export function initLogSession(
   slot: number,
-  mode: "game" | "painter"
+  mode: "game" | "painter",
+  metadata?: {
+    launcher?: string;
+    pid?: number | null;
+    status?: LatestSessionStatus;
+    taiId?: string | null;
+    testName?: string | null;
+  }
 ): {
   sessionId: string;
   logDir: string;
@@ -262,6 +368,18 @@ export function initLogSession(
 
   writeLogHeader(mainLog, sessionId, startTime);
   updateLatestPointer(logDir, mainLog);
+  updateLatestSessionState(logDir, {
+    sessionId,
+    currentLog: mainLog,
+    mode,
+    dataSlot: slot,
+    createdAt: startTime.toISOString(),
+    launcher: metadata?.launcher,
+    pid: metadata?.pid ?? null,
+    status: metadata?.status ?? 'running',
+    taiId: metadata?.taiId ?? null,
+    testName: metadata?.testName ?? null,
+  });
 
   return {
     sessionId,

@@ -21,6 +21,8 @@ type ToolAssistedInputsWiringOptions = {
   get_current_actor_ref: () => string | null;
   get_current_place: () => Place | null;
   get_current_actor_tile: () => { x: number; y: number; z: number } | null;
+  get_text_value: (source: string, field?: string | null) => string | null;
+  invoke_helper: (helper: string, payload?: Record<string, unknown>) => Promise<unknown> | unknown;
 };
 
 export function create_tool_assisted_inputs_wiring(options: ToolAssistedInputsWiringOptions): {
@@ -84,9 +86,11 @@ export function create_tool_assisted_inputs_wiring(options: ToolAssistedInputsWi
               y: snapshot.last_visible_step_position.y,
               z: snapshot.last_visible_step_position.z ?? 0,
             }
-            : null,
+          : null,
         };
       },
+      get_text_value: (source, field) => options.get_text_value(source, field),
+      invoke_helper: (helper, payload) => options.invoke_helper(helper, payload),
     },
     trace_sink: create_tool_assisted_inputs_trace_sink(),
   });

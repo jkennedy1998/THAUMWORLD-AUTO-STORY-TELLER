@@ -13,6 +13,7 @@ import type { Canvas, Module, Rect, Rgb, PointerEvent, DragEvent, WheelEvent, Ce
 import type { Grid, Brush, ToolType, GridCell } from '../../ascii_painter/types.js';
 import { createGrid, getCell, setCell } from '../../ascii_painter/types.js';
 import { drawCell, drawLine, eraseCell, applyTool, sampleCell, previewLine, previewRectStroke, previewRectFill } from '../../ascii_painter/tools.js';
+import { has_any_edit_channel, resolve_edit_channels_with_modifiers, type EditChannels } from '../../ascii_painter/edit_mask.js';
 import { logCellAction, logSelectionAction, startBatch, endBatch, addToBatch, cancelBatch, undo, redo, getHistoryState, type HistoryManager, type CellChange } from '../../ascii_painter/history.js';
 import { get_brightest_indexed_rgb, get_color_by_name, get_darkest_indexed_rgb } from '../colors.js';
 import { draw_module_border, PANEL_BORDER_PRESETS } from '../module_borders.js';
@@ -30,6 +31,15 @@ import type { VoxelSpace } from '../../ascii_painter/voxel_space.js';
 import { getOrCreateLayer, getVisibleLayers, getVoxel, setVoxel } from '../../ascii_painter/voxel_space.js';
 import type { CameraAnchor } from '../runtime/camera_anchor_runtime.js';
 import { make_place_view_state, map_screen_direction_to_world_delta, type PlaceViewState } from '../runtime/place_view_projection.js';
+import { diag_log } from '../../shared/diagnostics.js';
+
+function painterCanvasDiag(message: string, payload?: Record<string, unknown>): void {
+  diag_log('painter', 'verbose', 'PAINTER_CANVAS', message, payload);
+}
+
+function painterCanvasImportant(message: string, payload?: Record<string, unknown>): void {
+  diag_log('painter', 'important', 'PAINTER_CANVAS', message, payload);
+}
 
 export interface CanvasViewport {
   x: number;      // Screen X position in pixels
@@ -51,6 +61,7 @@ export type PainterCanvasOptions = {
   get_current_tool: () => ToolType;
   get_preview_brush?: () => Brush;
   get_brush_for_button?: (button: number) => Brush;
+  get_brush_edit_channels_for_button?: (button: number) => EditChannels;
   get_brush_size: () => number;
   get_brush_size_for_button?: (button: number) => number;
   get_space_replace: () => boolean;
@@ -63,7 +74,7 @@ export type PainterCanvasOptions = {
   get_text_enterspace: () => number; // -16 to 16, horizontal offset on Enter key
   preview_points: { x: number; y: number }[];
   on_push_snapshot: () => void;
-  on_sample_cell: (cell: { char: string; rgb: Rgb; weight_index: number }, button: number) => void;
+  on_sample_cell: (cell: { char: string; rgb: Rgb; weight_index: number }, sample: { button: number; shift: boolean; ctrl: boolean; alt: boolean; meta: boolean }) => void;
   get_left_click_tool: () => ToolType;
   get_right_click_tool: () => ToolType;
   get_focus_layer_z?: () => number;
@@ -101,6 +112,12 @@ export type PainterCanvasOptions = {
   get_selection_overlay_cells?: () => Array<{ x: number; y: number; char: string; weight_index: number }>;
   get_selection_status?: () => string | null;
   on_history_applied?: () => void;
+  on_commit_cell_changes?: (args: {
+    action_type: 'draw_cells' | 'erase_cells' | 'fill' | 'paste' | 'clear_canvas';
+    description: string;
+    z: number;
+    changes: CellChange[];
+  }) => void;
 };
 
 export type PainterInteractionAnchor = CameraAnchor;
@@ -296,8 +313,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   let is_panning = false;
   let is_drawing = false;
   let is_erasing = false;
-  let is_weighing = false;  // For weighter tool
-  let is_coloring = false;  // For colorer tool
+  let active_draw_channels: EditChannels = { char: true, color: true, weight: true };
   let drag_start: { x: number; y: number } | null = null;
   let last_draw_pos: { x: number; y: number } | null = null;
   let pan_start: { x: number; y: number } | null = null;
@@ -338,11 +354,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
   function exitTextMode(commitPending: boolean): void {
     if (!text_mode_active) return;
-    if (commitPending && pending_changes.length > 0) {
-      logCellAction(opts.history, 'draw_cells', 'Type Text', opts.get_selected_z(), pending_changes);
-      pending_changes = [];
-      opts.on_push_snapshot();
-    }
+    if (commitPending) commitPendingTextChanges('Type Text');
     text_mode_active = false;
     text_cursor_world = null;
     text_start_world = null;
@@ -432,6 +444,39 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     text_line_start_worlds[text_current_line] = { ...next };
     text_line_end_worlds[text_current_line] = { ...next };
     return tryMoveTextCursorToWorld(next);
+  }
+
+  function resetTextEntryAnchorAtCurrentCursor(): void {
+    syncTextCursorGridFromWorld();
+    text_start_x = text_cursor_x;
+    text_start_world = cloneWorldPoint(getTextCurrentWorld());
+    text_current_line = 0;
+    const start = cloneWorldPoint(text_start_world) ?? getTextCurrentWorld();
+    text_line_start_worlds = [{ ...start }];
+    text_line_end_worlds = [{ ...start }];
+  }
+
+  function commitPendingTextChanges(description: string = 'Type Text'): void {
+    if (pending_changes.length < 1) return;
+    const committed_changes = pending_changes.map((change) => ({ ...change, oldCell: { ...change.oldCell }, newCell: { ...change.newCell } }));
+    logCellAction(opts.history, 'draw_cells', description, opts.get_selected_z(), pending_changes);
+    opts.on_commit_cell_changes?.({
+      action_type: 'draw_cells',
+      description,
+      z: opts.get_selected_z(),
+      changes: committed_changes,
+    });
+    pending_changes = [];
+    opts.on_push_snapshot();
+  }
+
+  function commitLoggedCellChanges(action_type: 'draw_cells' | 'erase_cells' | 'fill' | 'paste' | 'clear_canvas', description: string, z: number): void {
+    if (pending_changes.length < 1) return;
+    const committed_changes = pending_changes.map((change) => ({ ...change, oldCell: { ...change.oldCell }, newCell: { ...change.newCell } }));
+    logCellAction(opts.history, action_type, description, z, pending_changes);
+    opts.on_commit_cell_changes?.({ action_type, description, z, changes: committed_changes });
+    pending_changes = [];
+    opts.on_push_snapshot();
   }
 
   // Function to emit viewport updates for DOM renderer
@@ -589,32 +634,31 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   }
 
   function finalizePendingChanges(): void {
-    if ((is_drawing || is_erasing || is_weighing || is_coloring) && pending_changes.length > 0) {
+    if ((is_drawing || is_erasing) && pending_changes.length > 0) {
       const selected_z = opts.get_selected_z();
       let tool_name = 'Draw';
       let action_type: 'draw_cells' | 'erase_cells' = 'draw_cells';
       if (is_erasing) {
         tool_name = 'Erase';
         action_type = 'erase_cells';
-      } else if (is_weighing) {
+      } else if (active_draw_channels.char && !active_draw_channels.color && !active_draw_channels.weight) {
+        tool_name = 'Apply Char';
+      } else if (!active_draw_channels.char && !active_draw_channels.color && active_draw_channels.weight) {
         tool_name = 'Apply Weight';
-      } else if (is_coloring) {
+      } else if (!active_draw_channels.char && active_draw_channels.color && !active_draw_channels.weight) {
         tool_name = 'Apply Color';
+      } else if (active_draw_channels.char && active_draw_channels.color && !active_draw_channels.weight) {
+        tool_name = 'Apply Char+Color';
       }
-      logCellAction(opts.history, action_type, tool_name, selected_z, pending_changes);
-      pending_changes = [];
-      opts.on_push_snapshot();
+      commitLoggedCellChanges(action_type, tool_name, selected_z);
     }
     if (text_mode_active && pending_changes.length > 0) {
       const selected_z = opts.get_selected_z();
-      logCellAction(opts.history, 'draw_cells', `Type Text`, selected_z, pending_changes);
-      pending_changes = [];
-      opts.on_push_snapshot();
+      commitLoggedCellChanges('draw_cells', 'Type Text', selected_z);
     }
     is_drawing = false;
     is_erasing = false;
-    is_weighing = false;
-    is_coloring = false;
+    active_draw_channels = { char: true, color: true, weight: true };
     drag_start = null;
     last_draw_pos = null;
     opts.preview_points.length = 0;
@@ -767,6 +811,104 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     
     // Note: Line tool logs immediately after each stroke
     // The pending_changes will be logged in OnPointerUp for continuous drawing
+  }
+
+  function applyCharWithBrushSize(x: number, y: number, char: string, size: number): void {
+    const offset = Math.floor(size / 2);
+    for (let dy = 0; dy < size; dy++) {
+      for (let dx = 0; dx < size; dx++) {
+        const draw_x = x - offset + dx;
+        const draw_y = y - offset + dy;
+        if (draw_x >= 0 && draw_x < opts.grid.width && draw_y >= 0 && draw_y < opts.grid.height && canEditCell(draw_x, draw_y)) {
+          const oldCell = getGridCell(draw_x, draw_y);
+          const cell = getCell(opts.grid, draw_x, draw_y);
+          if (cell && cell.char !== ' ' && oldCell) {
+            cell.char = char;
+            const newCell = getGridCell(draw_x, draw_y);
+            if (newCell) trackChange(draw_x, draw_y, oldCell, newCell);
+          }
+        }
+      }
+    }
+  }
+
+  function applyCharAndColorWithBrushSize(x: number, y: number, brush: Brush, size: number): void {
+    const offset = Math.floor(size / 2);
+    for (let dy = 0; dy < size; dy++) {
+      for (let dx = 0; dx < size; dx++) {
+        const draw_x = x - offset + dx;
+        const draw_y = y - offset + dy;
+        if (draw_x >= 0 && draw_x < opts.grid.width && draw_y >= 0 && draw_y < opts.grid.height && canEditCell(draw_x, draw_y)) {
+          const oldCell = getGridCell(draw_x, draw_y);
+          const cell = getCell(opts.grid, draw_x, draw_y);
+          if (cell && cell.char !== ' ' && oldCell) {
+            cell.char = brush.char;
+            cell.rgb = { ...brush.rgb };
+            const newCell = getGridCell(draw_x, draw_y);
+            if (newCell) trackChange(draw_x, draw_y, oldCell, newCell);
+          }
+        }
+      }
+    }
+  }
+
+  function applyBrushEditWithBrushSize(x: number, y: number, brush: Brush, size: number, channels: EditChannels): void {
+    if (!has_any_edit_channel(channels)) return;
+    if (channels.char && channels.color && channels.weight) {
+      drawWithBrushSize(x, y, false, brush, size);
+      return;
+    }
+    if (channels.char && channels.color && !channels.weight) {
+      applyCharAndColorWithBrushSize(x, y, brush, size);
+      return;
+    }
+    if (channels.char && !channels.color && !channels.weight) {
+      applyCharWithBrushSize(x, y, brush.char, size);
+      return;
+    }
+    if (!channels.char && channels.color && !channels.weight) {
+      applyColorWithBrushSize(x, y, brush.rgb, size);
+      return;
+    }
+    if (!channels.char && !channels.color && channels.weight) {
+      applyWeightWithBrushSize(x, y, brush.weight_index, size);
+      return;
+    }
+
+    const offset = Math.floor(size / 2);
+    for (let dy = 0; dy < size; dy++) {
+      for (let dx = 0; dx < size; dx++) {
+        const draw_x = x - offset + dx;
+        const draw_y = y - offset + dy;
+        if (draw_x < 0 || draw_x >= opts.grid.width || draw_y < 0 || draw_y >= opts.grid.height || !canEditCell(draw_x, draw_y)) continue;
+        const oldCell = getGridCell(draw_x, draw_y);
+        const cell = getCell(opts.grid, draw_x, draw_y);
+        if (!cell || !oldCell || cell.char === ' ') continue;
+        if (channels.char) cell.char = brush.char;
+        if (channels.color) cell.rgb = { ...brush.rgb };
+        if (channels.weight) cell.weight_index = brush.weight_index;
+        const newCell = getGridCell(draw_x, draw_y);
+        if (newCell) trackChange(draw_x, draw_y, oldCell, newCell);
+      }
+    }
+  }
+
+  function drawLineWithBrushEditChannels(x0: number, y0: number, x1: number, y1: number, brush: Brush, size: number, channels: EditChannels): void {
+    const dx = Math.abs(x1 - x0);
+    const dy = Math.abs(y1 - y0);
+    const sx = x0 < x1 ? 1 : -1;
+    const sy = y0 < y1 ? 1 : -1;
+    let err = dx - dy;
+    let curr_x = x0;
+    let curr_y = y0;
+
+    while (true) {
+      applyBrushEditWithBrushSize(curr_x, curr_y, brush, size, channels);
+      if (curr_x === x1 && curr_y === y1) break;
+      const e2 = 2 * err;
+      if (e2 > -dy) { err -= dy; curr_x += sx; }
+      if (e2 < dx) { err += dx; curr_y += sy; }
+    }
   }
 
   // Apply weight to cells with brush size
@@ -1444,12 +1586,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       if (text_mode_active) {
         if (tool_for_button === 'text') {
           moveTextCursorTo(grid_x, grid_y);
-          if (text_current_line === 0) {
-            text_start_x = text_cursor_x;
-            text_start_world = text_cursor_world ? { ...text_cursor_world } : null;
-            text_line_start_worlds[0] = cloneWorldPoint(text_start_world) ?? getTextCurrentWorld();
-            text_line_end_worlds[0] = cloneWorldPoint(text_start_world) ?? getTextCurrentWorld();
-          }
+          resetTextEntryAnchorAtCurrentCursor();
           return;
         }
         exitTextMode(true);
@@ -1468,7 +1605,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         pasteImageFromClipboard(targetWidth, freshGradiatorState, pixelPerfect).then(imageData => {
           if (imageData) {
             // Image found in clipboard - scale it if needed
-            console.log('Image pasted from clipboard:', imageData.width, 'x', imageData.height);
+            painterCanvasDiag('image pasted from clipboard', { width: imageData.width, height: imageData.height });
             const scaledData = scale !== 1.0 ? scaleCopyData(imageData, scale) : imageData;
             paste_preview_data = scaledData;
             paste_preview_world_data = null;
@@ -1482,7 +1619,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           } else {
             // No image, try text clipboard
             Promise.resolve(opts.get_clipboard_data?.()).then(clipboard => {
-              console.log('Paste tool clicked, clipboard data:', clipboard ? 'exists' : 'empty');
+              painterCanvasDiag('paste tool clicked', { clipboard: clipboard ? 'exists' : 'empty' });
               if (clipboard) {
                 const worldData = decode_world_copy_data(clipboard);
                 if (worldData) {
@@ -1493,17 +1630,17 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
                   return;
                 }
                 // Try to decode special format first
-                console.log('Decoding clipboard data, first 200 chars:', clipboard.substring(0, 200));
+                painterCanvasDiag('decoding clipboard data', { preview: clipboard.substring(0, 200) });
                 const specialData = decodeFromSpecialFormat(clipboard);
                 if (specialData) {
                   // Special format with colors/weights - apply scaling
-                  console.log(`Decoded special format: ${specialData.width}x${specialData.height}`);
+                  painterCanvasDiag('decoded special format', { width: specialData.width, height: specialData.height });
                   // Debug: Show first few cells
                   for (let y = 0; y < Math.min(3, specialData.height); y++) {
                     for (let x = 0; x < Math.min(5, specialData.width); x++) {
                       const cell = specialData.cells[y]?.[x];
                       if (cell) {
-                        console.log(`  Cell[${y}][${x}]: char='${cell.char}', rgb=(${cell.rgb.r},${cell.rgb.g},${cell.rgb.b}), weight=${cell.weight_index}`);
+                        painterCanvasDiag('decoded special format sample cell', { y, x, char: cell.char, rgb: cell.rgb, weight_index: cell.weight_index });
                       }
                     }
                   }
@@ -1534,12 +1671,12 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
                 showStatus('Clipboard empty! Copy something first.');
               }
             }).catch(err => {
-              console.error('Failed to read clipboard:', err);
+              diag_log('input', 'important', 'PAINTER_CANVAS', 'failed to read clipboard', { error: err instanceof Error ? err.message : String(err) }, { sink: 'error' });
               showStatus('Failed to read clipboard!');
             });
           }
         }).catch(err => {
-          console.error('Failed to paste image:', err);
+          diag_log('painter', 'important', 'PAINTER_CANVAS', 'failed to paste image', { error: err instanceof Error ? err.message : String(err) }, { sink: 'error' });
           showStatus('Failed to read image from clipboard!');
         });
         return;
@@ -1551,7 +1688,13 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (tool_for_button === 'eyedropper') {
           const cell = sampleCell(opts.grid, grid_x, grid_y);
           if (cell) {
-            opts.on_sample_cell(cell, e.button);
+            opts.on_sample_cell(cell, {
+              button: e.button,
+              shift: e.shift,
+              ctrl: e.ctrl,
+              alt: e.alt,
+              meta: e.meta,
+            });
           }
           return;
         }
@@ -1570,9 +1713,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             // Log the action
             if (pending_changes.length > 0) {
               const selected_z = opts.get_selected_z();
-              logCellAction(opts.history, 'draw_cells', `Fill`, selected_z, pending_changes);
-              pending_changes = [];
-              opts.on_push_snapshot();
+              commitLoggedCellChanges('draw_cells', 'Fill', selected_z);
             }
           }
           return;
@@ -1582,18 +1723,16 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           text_mode_active = false;
           text_mode_active = true;
           moveTextCursorTo(grid_x, grid_y);
-          text_start_x = text_cursor_x;
-          text_start_world = text_cursor_world ? { ...text_cursor_world } : null;
-          text_current_line = 0;
-          text_line_start_worlds = [cloneWorldPoint(text_start_world) ?? getTextCurrentWorld()].filter((value): value is { x: number; y: number; z: number } => value !== null);
-          text_line_end_worlds = [cloneWorldPoint(text_start_world) ?? getTextCurrentWorld()].filter((value): value is { x: number; y: number; z: number } => value !== null);
+          resetTextEntryAnchorAtCurrentCursor();
           return;
         }
 
         if (tool_for_button === 'pencil') {
+          const base_channels = opts.get_brush_edit_channels_for_button?.(e.button) ?? { char: true, color: true, weight: true };
+          active_draw_channels = resolve_edit_channels_with_modifiers(base_channels, e);
           is_drawing = true;
           last_draw_pos = { x: grid_x, y: grid_y };
-          drawWithBrushSize(grid_x, grid_y, false, getBrushForButton(e.button), getBrushSizeForButton(e.button));
+          applyBrushEditWithBrushSize(grid_x, grid_y, getBrushForButton(e.button), getBrushSizeForButton(e.button), active_draw_channels);
           return;
         }
 
@@ -1601,24 +1740,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           is_erasing = true;
           last_draw_pos = { x: grid_x, y: grid_y };
           drawWithBrushSize(grid_x, grid_y, true, getBrushForButton(e.button), getBrushSizeForButton(e.button));
-          return;
-        }
-
-        // Weighter tool - changes only the weight of existing characters
-        if (tool_for_button === 'weighter') {
-          is_weighing = true;
-          last_draw_pos = { x: grid_x, y: grid_y };
-          const brush = getBrushForButton(e.button);
-          applyWeightWithBrushSize(grid_x, grid_y, brush.weight_index, getBrushSizeForButton(e.button));
-          return;
-        }
-
-        // Colorer tool - changes only the color of existing characters
-        if (tool_for_button === 'colorer') {
-          is_coloring = true;
-          last_draw_pos = { x: grid_x, y: grid_y };
-          const brush = getBrushForButton(e.button);
-          applyColorWithBrushSize(grid_x, grid_y, brush.rgb, getBrushSizeForButton(e.button));
           return;
         }
 
@@ -1724,35 +1845,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const grid_y = grid_coords.y;
         if (grid_x < 0 || grid_x >= opts.grid.width || grid_y < 0 || grid_y >= opts.grid.height) return;
         if (grid_x !== last_draw_pos.x || grid_y !== last_draw_pos.y) {
-          drawLineWithBrushSize(last_draw_pos.x, last_draw_pos.y, grid_x, grid_y, false, getBrushForButton(getDragButton()), getBrushSizeForButton(getDragButton()));
-          last_draw_pos = { x: grid_x, y: grid_y };
-        }
-        return;
-      }
-
-      // Weighter tool - drag to apply weight with brush size
-      if (is_weighing && last_draw_pos) {
-        const grid_coords = localToGrid(local_x, local_y);
-        const grid_x = grid_coords.x;
-        const grid_y = grid_coords.y;
-        if (grid_x < 0 || grid_x >= opts.grid.width || grid_y < 0 || grid_y >= opts.grid.height) return;
-        if (grid_x !== last_draw_pos.x || grid_y !== last_draw_pos.y) {
-          const brush = getBrushForButton(getDragButton());
-          applyWeightWithBrushSize(grid_x, grid_y, brush.weight_index, getBrushSizeForButton(getDragButton()));
-          last_draw_pos = { x: grid_x, y: grid_y };
-        }
-        return;
-      }
-
-      // Colorer tool - drag to apply color with brush size
-      if (is_coloring && last_draw_pos) {
-        const grid_coords = localToGrid(local_x, local_y);
-        const grid_x = grid_coords.x;
-        const grid_y = grid_coords.y;
-        if (grid_x < 0 || grid_x >= opts.grid.width || grid_y < 0 || grid_y >= opts.grid.height) return;
-        if (grid_x !== last_draw_pos.x || grid_y !== last_draw_pos.y) {
-          const brush = getBrushForButton(getDragButton());
-          applyColorWithBrushSize(grid_x, grid_y, brush.rgb, getBrushSizeForButton(getDragButton()));
+          drawLineWithBrushEditChannels(last_draw_pos.x, last_draw_pos.y, grid_x, grid_y, getBrushForButton(getDragButton()), getBrushSizeForButton(getDragButton()), active_draw_channels);
           last_draw_pos = { x: grid_x, y: grid_y };
         }
         return;
@@ -1854,7 +1947,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         
         const range = getSelectionPlaneRange();
         showStatus(formatSelectionVolumeLabel(width, height, range?.depthMin, range?.depthMax).replace('Selecting:', 'Selected'));
-        console.log(`[PainterSelection] rect commit ${width}x${height} Z:${range?.depthMin ?? 0}->${range?.depthMax ?? range?.depthMin ?? 0} mode=${opts.get_selection_mode()}`);
+        painterCanvasDiag('selection rect commit', { width, height, depth_min: range?.depthMin ?? 0, depth_max: range?.depthMax ?? range?.depthMin ?? 0, mode: opts.get_selection_mode() });
         
         is_selecting = false;
         selection_drag_start = null;
@@ -1868,7 +1961,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
       // Lasso selection finalization
       if (is_lasso_selecting && lasso_points.length >= 3) {
-        console.log('Lasso drag end, points:', lasso_points.length);
+        painterCanvasDiag('lasso drag end', { points: lasso_points.length });
         
         // Create temporary selection bitmap for the lasso polygon
         const temp_bitmap = createSelectionBitmap(opts.grid.width, opts.grid.height);
@@ -1928,16 +2021,13 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           const toolName = tool_for_end === 'line' ? 'Draw Line' : 
                           tool_for_end === 'rect_stroke' ? 'Draw Rectangle (stroke)' : 
                           'Draw Rectangle (fill)';
-          logCellAction(opts.history, 'draw_cells', toolName, selected_z, pending_changes);
-          pending_changes = [];
-          opts.on_push_snapshot();
+          commitLoggedCellChanges('draw_cells', toolName, selected_z);
         }
       }
 
       is_drawing = false;
       is_erasing = false;
-      is_weighing = false;
-      is_coloring = false;
+      active_draw_channels = { char: true, color: true, weight: true };
       drag_start = null;
       last_draw_pos = null;
       opts.preview_points = [];
@@ -1993,9 +2083,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         }
         if (pending_changes.length > 0) {
           const selected_z = opts.get_selected_z();
-          logCellAction(opts.history, 'draw_cells', `Paste`, selected_z, pending_changes);
-          pending_changes = [];
-          opts.on_push_snapshot();
+          commitLoggedCellChanges('draw_cells', 'Paste', selected_z);
         }
         const zLabel = Number.isFinite(minPasteZ) && Number.isFinite(maxPasteZ) ? ` Z:${minPasteZ}->${maxPasteZ}` : '';
         showStatus(`Pasted 3D (${placed} placed, ${skippedIgnored} ignored, ${preserved} preserved, ${cleared} cleared, ${createdLayers.size} layers created${zLabel})`);
@@ -2021,7 +2109,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const ignoreColor = opts.get_paste_ignore_color();
         const ignoreColorRgb = opts.get_paste_ignore_color_rgb();
         
-        console.log('Paste: spaceReplace =', spaceReplace, 'ignoreSpace =', ignoreSpace, 'ignoreBlack =', ignoreBlack, 'ignoreWhite =', ignoreWhite, 'ignoreColor =', ignoreColor);
+        painterCanvasDiag('paste settings', { spaceReplace, ignoreSpace, ignoreBlack, ignoreWhite, ignoreColor });
         
         // Build ignore status message
         const ignoredParts: string[] = [];
@@ -2038,14 +2126,14 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         let skippedIgnored = 0;
         
         // Debug: Log first few cells of paste data
-        console.log('Paste data sample (first 3 rows):');
+        painterCanvasDiag('paste data sample begin');
         for (let y = 0; y < Math.min(3, paste_preview_data.height); y++) {
           let row = '';
           for (let x = 0; x < Math.min(10, paste_preview_data.width); x++) {
             const cell = paste_preview_data.cells[y]?.[x];
             row += cell ? cell.char : '?';
           }
-          console.log(`  Row ${y}: "${row}"`);
+          painterCanvasDiag('paste data sample row', { row_index: y, row });
         }
         
         for (let y = 0; y < paste_preview_data.height; y++) {
@@ -2056,7 +2144,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             
             // Debug first cell
             if (y === 0 && x === 0 && cell) {
-              console.log(`First cell being pasted: char='${cell.char}', rgb=(${cell.rgb.r},${cell.rgb.g},${cell.rgb.b}), weight=${cell.weight_index}`);
+              painterCanvasDiag('first pasted cell', { char: cell.char, rgb: cell.rgb, weight_index: cell.weight_index });
             }
             
             // Check bounds
@@ -2137,12 +2225,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         // Log the paste action
         if (pending_changes.length > 0) {
           const selected_z = opts.get_selected_z();
-          logCellAction(opts.history, 'draw_cells', `Paste`, selected_z, pending_changes);
-          pending_changes = [];
-          opts.on_push_snapshot();
+          commitLoggedCellChanges('draw_cells', 'Paste', selected_z);
         }
         
-        console.log(`Paste complete: ${placed} placed, ${skippedIgnored} ignored (preserved), ${cleared} cleared, ${preserved} preserved`);
+        painterCanvasImportant('paste complete', { placed, ignored_preserved: skippedIgnored, cleared, preserved });
         showStatus(`Pasted ${paste_preview_data.width}x${paste_preview_data.height} (placed:${placed}, ignored:${skippedIgnored}, preserved:${preserved}, cleared:${cleared})`);
         paste_preview_data = null;
         paste_preview_pos = null;
@@ -2178,9 +2264,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           const toolName = tool_for_up === 'line' ? 'Draw Line' : 
                           tool_for_up === 'rect_stroke' ? 'Draw Rectangle (stroke)' : 
                           'Draw Rectangle (fill)';
-          logCellAction(opts.history, 'draw_cells', toolName, selected_z, pending_changes);
-          pending_changes = [];
-          opts.on_push_snapshot();
+          commitLoggedCellChanges('draw_cells', toolName, selected_z);
         }
       }
       
@@ -2205,7 +2289,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const height = Math.abs(end_y - start_y) + 1;
         const range = getSelectionPlaneRange();
         showStatus(formatSelectionVolumeLabel(width, height, range?.depthMin, range?.depthMax).replace('Selecting:', 'Selected'));
-        console.log(`[PainterSelection] rect fallback commit ${width}x${height} Z:${range?.depthMin ?? 0}->${range?.depthMax ?? range?.depthMin ?? 0} mode=${opts.get_selection_mode()}`);
+        painterCanvasDiag('selection rect fallback commit', { width, height, depth_min: range?.depthMin ?? 0, depth_max: range?.depthMax ?? range?.depthMin ?? 0, mode: opts.get_selection_mode() });
         
         is_selecting = false;
         selection_drag_start = null;
@@ -2217,7 +2301,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       
       // Handle lasso selection in OnPointerUp as fallback
       if (is_lasso_selecting && lasso_points.length >= 3) {
-        console.log('Lasso in OnPointerUp, points:', lasso_points.length);
+        painterCanvasDiag('lasso in pointer up', { points: lasso_points.length });
         
         // Create temporary selection bitmap for the lasso polygon
         const temp_bitmap = createSelectionBitmap(opts.grid.width, opts.grid.height);
@@ -2263,7 +2347,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       }
       
       // Log pending changes to history when drawing ends
-      if ((is_drawing || is_erasing || is_weighing || is_coloring) && pending_changes.length > 0) {
+      if ((is_drawing || is_erasing) && pending_changes.length > 0) {
         const selected_z = opts.get_selected_z();
         let tool_name = 'Draw';
         let action_type: 'draw_cells' | 'erase_cells' = 'draw_cells';
@@ -2271,29 +2355,28 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (is_erasing) {
           tool_name = 'Erase';
           action_type = 'erase_cells';
-        } else if (is_weighing) {
+        } else if (active_draw_channels.char && !active_draw_channels.color && !active_draw_channels.weight) {
+          tool_name = 'Apply Char';
+        } else if (!active_draw_channels.char && !active_draw_channels.color && active_draw_channels.weight) {
           tool_name = 'Apply Weight';
-        } else if (is_coloring) {
+        } else if (!active_draw_channels.char && active_draw_channels.color && !active_draw_channels.weight) {
           tool_name = 'Apply Color';
+        } else if (active_draw_channels.char && active_draw_channels.color && !active_draw_channels.weight) {
+          tool_name = 'Apply Char+Color';
         }
         
-        logCellAction(opts.history, action_type, tool_name, selected_z, pending_changes);
-        pending_changes = [];
-        opts.on_push_snapshot();
+        commitLoggedCellChanges(action_type, tool_name, selected_z);
       }
       
       // Log text changes when exiting text mode via click
       if (text_mode_active && pending_changes.length > 0) {
         const selected_z = opts.get_selected_z();
-        logCellAction(opts.history, 'draw_cells', `Type Text`, selected_z, pending_changes);
-        pending_changes = [];
-        opts.on_push_snapshot();
+        commitLoggedCellChanges('draw_cells', 'Type Text', selected_z);
       }
       
       is_drawing = false;
       is_erasing = false;
-      is_weighing = false;
-      is_coloring = false;
+      active_draw_channels = { char: true, color: true, weight: true };
       is_selecting = false;
       is_lasso_selecting = false;
       selection_drag_start = null;
@@ -2407,7 +2490,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
       // Copy - Ctrl+C
       if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
-        console.log('Copy shortcut detected, hasSelection:', hasSelection(selection_bitmap));
+        painterCanvasDiag('copy shortcut detected', { has_selection: hasSelection(selection_bitmap) });
         copyCurrentSelection();
         e.preventDefault();
         return;
@@ -2427,12 +2510,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         }
         
         if (e.key === 'Enter') {
-          // Log text action before starting new line
-          if (pending_changes.length > 0) {
-            logCellAction(opts.history, 'draw_cells', `Type Text`, selected_z, pending_changes);
-            pending_changes = [];
-            opts.on_push_snapshot();
-          }
+          commitPendingTextChanges('Type Text');
           // Enter: New line using enterlead and enterspace
           moveTextCursorToNextLine();
           e.preventDefault();
@@ -2524,12 +2602,17 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           if (text_cursor_x >= 0 && text_cursor_x < opts.grid.width &&
               text_cursor_y >= 0 && text_cursor_y < opts.grid.height) {
             const text_brush = getPreviewBrush();
+            const oldCell = getGridCell(text_cursor_x, text_cursor_y);
             if (opts.get_space_replace()) {
               opts.grid.cells[text_cursor_y]![text_cursor_x] = {
                 char: ' ',
                 rgb: { ...text_brush.rgb },
                 weight_index: text_brush.weight_index
               };
+              const newCell = getGridCell(text_cursor_x, text_cursor_y);
+              if (oldCell && newCell) {
+                trackChange(text_cursor_x, text_cursor_y, oldCell, newCell);
+              }
             }
             // Move cursor by spacing and charlead
             moveTextCursorByScreenDelta(opts.get_text_spacing(), opts.get_text_charlead());
@@ -2601,8 +2684,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       is_panning = false;
       is_drawing = false;
       is_erasing = false;
-      is_weighing = false;
-      is_coloring = false;
+      active_draw_channels = { char: true, color: true, weight: true };
       is_selecting = false;
       is_lasso_selecting = false;
       pan_start = null;
@@ -2627,16 +2709,16 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         return;
       }
       
+      const isChunkInput = text.length > 1;
+      const commitDescription = isChunkInput ? 'Paste Text' : 'Type Text';
+
       for (const char of text) {
         // Handle newline characters (from paste operations) like Enter key
         if (char === '\n' || char === '\r') {
-          // Log text action before starting new line
-          if (pending_changes.length > 0) {
-            logCellAction(opts.history, 'draw_cells', `Type Text`, selected_z, pending_changes);
-            pending_changes = [];
-            opts.on_push_snapshot();
+          if (!isChunkInput) {
+            commitPendingTextChanges('Type Text');
           }
-          
+
           // New line using enterlead and enterspace (same as Enter key)
           moveTextCursorToNextLine();
           
@@ -2689,16 +2771,15 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           // Check bounds
           if (text_cursor_x < 0 || text_cursor_x >= opts.grid.width ||
               text_cursor_y < 0 || text_cursor_y >= opts.grid.height) {
-            // Log remaining text before exiting
-            if (pending_changes.length > 0) {
-              logCellAction(opts.history, 'draw_cells', `Type Text`, selected_z, pending_changes);
-              pending_changes = [];
-              opts.on_push_snapshot();
-            }
+            commitPendingTextChanges(commitDescription);
             text_mode_active = false;
             break;
           }
         }
+      }
+
+      if (text_mode_active && isChunkInput) {
+        commitPendingTextChanges(commitDescription);
       }
     },
 

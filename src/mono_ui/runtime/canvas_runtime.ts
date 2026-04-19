@@ -2,7 +2,8 @@ import { create_canvas } from '../canvas.js';
 import { compose_modules } from '../compose.js';
 import type { Canvas, Cell, Module, PointerEvent, DragEvent, WheelEvent } from '../types.js';
 import { rect_contains } from '../types.js';
-import { debug_warn, debug_log, DEBUG_LEVEL } from '../../shared/debug.js';
+import { debug_warn, DEBUG_LEVEL } from '../../shared/debug.js';
+import { diag_log } from '../../shared/diagnostics.js';
 // NOTE: debug overlays are toggled from UI buttons (not hotkeys).
 import { unlock_sfx } from '../sfx/sfx_player.js';
 import { get_action_for_code, handle_keydown, handle_keyup } from './input_actions.js';
@@ -67,6 +68,32 @@ export class CanvasRuntime {
 
     private scale = 1.0;
     private raf_id: number | null = null;
+    private frame_perf_index = 0;
+    private frame_perf_previous_raf_start_ms = 0;
+    private frame_perf_previous_tick_end_ms = 0;
+    private frame_perf_summary = {
+        frames: 0,
+        slow_frames: 0,
+        very_slow_frames: 0,
+        max_tick_total_js_ms: 0,
+        max_post_js_to_next_raf_ms: 0,
+        summed_tick_total_js_ms: 0,
+        summed_compose_ms: 0,
+        summed_draw_canvas_ms: 0,
+        summed_draw_canvas_clear_ms: 0,
+        summed_draw_canvas_scan_ms: 0,
+        summed_draw_canvas_draw_cell_ms: 0,
+        summed_draw_canvas_cells_scanned: 0,
+        summed_draw_canvas_non_empty_cells: 0,
+        summed_draw_canvas_graphic_cells: 0,
+        summed_post_js_to_next_raf_ms: 0,
+        summed_raf_delta_ms: 0,
+    };
+    private frame_perf_module_summary = new Map<string, { summed_ms: number; max_ms: number }>();
+    private long_task_observer: PerformanceObserver | null = null;
+    private long_task_total_count = 0;
+    private long_task_window_count = 0;
+    private long_task_window_max_ms = 0;
 
     private last_tile: { x: number; y: number } | null = null;
     private focused_owner: Module | null = null;
@@ -116,8 +143,32 @@ export class CanvasRuntime {
     private last_pan_client_x = 0;
     private last_pan_client_y = 0;
     private space_down = false;
+    private shift_down = false;
+    private ctrl_down = false;
+    private alt_down = false;
+    private meta_down = false;
     private last_published_ui_context_key = '';
     private gameplay_bridge_down_codes = new Set<string>();
+
+    private sync_modifier_state(ev: Pick<KeyboardEvent, 'shiftKey' | 'ctrlKey' | 'altKey' | 'metaKey'>): void {
+        this.shift_down = Boolean(ev.shiftKey);
+        this.ctrl_down = Boolean(ev.ctrlKey);
+        this.alt_down = Boolean(ev.altKey);
+        this.meta_down = Boolean(ev.metaKey);
+    }
+
+    private clear_modifier_state(): void {
+        this.shift_down = false;
+        this.ctrl_down = false;
+        this.alt_down = false;
+        this.meta_down = false;
+    }
+
+    private clear_transient_input_state(): void {
+        this.gameplay_bridge_down_codes.clear();
+        this.space_down = false;
+        this.clear_modifier_state();
+    }
 
     public inject_tool_assisted_gameplay_key(type: 'keydown' | 'keyup', payload: { code: string; key?: string; repeat?: boolean }): void {
         if (this.input_host.source_kind !== 'electron_bridge') return;
@@ -142,6 +193,54 @@ export class CanvasRuntime {
             this.gameplay_bridge_down_codes.delete(code);
             this.forward_bridge_gameplay_event({ code, key, repeat: Boolean(payload.repeat) } as KeyboardEvent, 'keyup');
         }
+    }
+
+    public inject_tool_assisted_ui_key(type: 'keydown' | 'keyup', payload: { code: string; key?: string; repeat?: boolean; shift?: boolean; ctrl?: boolean; alt?: boolean; meta?: boolean }): void {
+        const code = String(payload.code ?? '').trim();
+        if (!code) return;
+        const key = String(payload.key ?? '').trim() || code;
+        const ev = new KeyboardEvent(type, {
+            code,
+            key,
+            repeat: Boolean(payload.repeat),
+            shiftKey: Boolean(payload.shift),
+            ctrlKey: Boolean(payload.ctrl),
+            altKey: Boolean(payload.alt),
+            metaKey: Boolean(payload.meta),
+            bubbles: false,
+            cancelable: true,
+        });
+        for (const [name, value] of Object.entries({
+            ctrlKey: Boolean(payload.ctrl),
+            shiftKey: Boolean(payload.shift),
+            altKey: Boolean(payload.alt),
+            metaKey: Boolean(payload.meta),
+        })) {
+            try {
+                Object.defineProperty(ev, name, { configurable: true, get: () => value });
+            } catch {
+                // ignore readonly override failures
+            }
+        }
+        if (type === 'keydown') {
+            this.handle_runtime_keydown(ev);
+            return;
+        }
+        this.handle_runtime_keyup(ev);
+    }
+
+    public inject_tool_assisted_text_input(payload: { text: string }): void {
+        const text = typeof payload?.text === 'string' ? payload.text : '';
+        if (!text || !this.focused_owner?.OnTextInput || !this.focused_owner_wants_text_capture()) return;
+        this.sync_text_input_focus_for_owner();
+        this.focused_owner.OnTextInput(text);
+    }
+
+    public focus_module_by_id(module_id: string): boolean {
+        const target = this.modules.find((module) => module?.id === module_id) ?? null;
+        if (!target?.Focusable) return false;
+        this.update_focused_owner(target);
+        return true;
     }
 
     // Allow panning beyond strict canvas bounds (gives breathing room / "free space").
@@ -191,14 +290,13 @@ export class CanvasRuntime {
                 });
             },
             on_window_blur: () => {
-                this.gameplay_bridge_down_codes.clear();
+                this.clear_transient_input_state();
                 this.publish_gameplay_input_context(this.focused_owner_wants_text_capture());
                 this.log_input_debug('window blur observed', {
                     runtime_instance_id: this.runtime_instance_id,
                     active_element_id: (document.activeElement as HTMLElement | null)?.id ?? null,
                     focused_owner_id: this.focused_owner?.id ?? null,
                 });
-                reset_all();
             },
         });
 
@@ -219,6 +317,13 @@ export class CanvasRuntime {
 
     get_scale(): number {
         return this.scale;
+    }
+
+    reset_keyboard_state(): void {
+        reset_all();
+        this.space_down = false;
+        this.clear_modifier_state();
+        this.gameplay_bridge_down_codes.clear();
     }
 
     set_grid_size(grid_width: number, grid_height: number): void {
@@ -286,14 +391,104 @@ export class CanvasRuntime {
         };
     }
 
+    private is_frame_perf_enabled(): boolean {
+        try {
+            const raw = window.localStorage.getItem('canvas_frame_perf_enabled');
+            if (raw === null) return true;
+            return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+        } catch {
+            return true;
+        }
+    }
+
+    private read_frame_perf_number(key: string, fallback: number): number {
+        try {
+            const raw = window.localStorage.getItem(key);
+            const parsed = Number(raw);
+            if (Number.isFinite(parsed) && parsed > 0) return parsed;
+        } catch {
+            // ignore
+        }
+        return fallback;
+    }
+
+    private round_perf_ms(value: number): number {
+        return Math.round(value * 100) / 100;
+    }
+
+    private record_frame_perf_module(module_id: string, duration_ms: number): void {
+        const current = this.frame_perf_module_summary.get(module_id) ?? { summed_ms: 0, max_ms: 0 };
+        current.summed_ms += duration_ms;
+        current.max_ms = Math.max(current.max_ms, duration_ms);
+        this.frame_perf_module_summary.set(module_id, current);
+    }
+
+    private reset_frame_perf_summary(): void {
+        this.frame_perf_summary = {
+            frames: 0,
+            slow_frames: 0,
+            very_slow_frames: 0,
+            max_tick_total_js_ms: 0,
+            max_post_js_to_next_raf_ms: 0,
+            summed_tick_total_js_ms: 0,
+            summed_compose_ms: 0,
+            summed_draw_canvas_ms: 0,
+            summed_draw_canvas_clear_ms: 0,
+            summed_draw_canvas_scan_ms: 0,
+            summed_draw_canvas_draw_cell_ms: 0,
+            summed_draw_canvas_cells_scanned: 0,
+            summed_draw_canvas_non_empty_cells: 0,
+            summed_draw_canvas_graphic_cells: 0,
+            summed_post_js_to_next_raf_ms: 0,
+            summed_raf_delta_ms: 0,
+        };
+        this.frame_perf_module_summary.clear();
+    }
+
+    private start_long_task_observer(): void {
+        if (!this.is_frame_perf_enabled() || this.long_task_observer || typeof PerformanceObserver === 'undefined') return;
+        try {
+            const observer = new PerformanceObserver((list) => {
+                for (const entry of list.getEntries()) {
+                    const duration_ms = Number(entry.duration) || 0;
+                    this.long_task_total_count += 1;
+                    this.long_task_window_count += 1;
+                    this.long_task_window_max_ms = Math.max(this.long_task_window_max_ms, duration_ms);
+                    if (duration_ms >= 100) {
+                        diag_log('performance_metrics', 'important', 'CANVAS_FRAME_PERF', 'longtask', {
+                            frame_index: this.frame_perf_index,
+                            start_time_ms: this.round_perf_ms(entry.startTime),
+                            duration_ms: this.round_perf_ms(duration_ms),
+                        });
+                    }
+                }
+            });
+            observer.observe({ entryTypes: ['longtask'] });
+            this.long_task_observer = observer;
+        } catch {
+            this.long_task_observer = null;
+        }
+    }
+
+    private stop_long_task_observer(): void {
+        try {
+            this.long_task_observer?.disconnect();
+        } catch {
+            // ignore
+        }
+        this.long_task_observer = null;
+    }
+
     start(): void {
         this.resize_to_grid();
+        this.start_long_task_observer();
         this.tick();
     }
 
     stop(): void {
         if (this.raf_id !== null) cancelAnimationFrame(this.raf_id);
         this.raf_id = null;
+        this.stop_long_task_observer();
     }
 
     private ensure_key_sink(): HTMLTextAreaElement {
@@ -382,10 +577,10 @@ export class CanvasRuntime {
             buttons: typeof ev?.buttons === 'number' ? ev.buttons : 0,
             button: typeof ev?.button === 'number' ? ev.button : 0,
 
-            shift: ev.shiftKey,
-            ctrl: ev.ctrlKey,
-            alt: ev.altKey,
-            meta: ev.metaKey,
+            shift: Boolean(ev?.shiftKey) || this.shift_down,
+            ctrl: Boolean(ev?.ctrlKey) || this.ctrl_down,
+            alt: Boolean(ev?.altKey) || this.alt_down,
+            meta: Boolean(ev?.metaKey) || this.meta_down,
         };
 
         // Capture keyboard state for gesture routing.
@@ -528,6 +723,7 @@ export class CanvasRuntime {
             try { m?.OnGlobalPointerDown?.(pe as PointerEvent); } catch { /* ignore */ }
         }
         top?.OnPointerDown?.(pe);
+        this.sync_text_input_focus_for_owner();
         this.last_tile = t;
     }
 
@@ -548,6 +744,7 @@ export class CanvasRuntime {
         }
         if (!this.dragging && this.down_owner && target && this.down_owner === target && rect_contains(target.rect, t.x, t.y)) {
             target.OnClick?.(this.make_pointer_event('click', t.x, t.y, ev, this.engine_canvas.get(t.x, t.y), click_count ?? 1));
+            this.sync_text_input_focus_for_owner();
         }
         this.capture_owner = null;
         this.down_owner = null;
@@ -738,27 +935,48 @@ export class CanvasRuntime {
         }
     }
 
-    private draw_canvas(c: Canvas): void {
+    private draw_canvas(c: Canvas): {
+        clear_ms: number;
+        scan_ms: number;
+        draw_cell_ms: number;
+        cells_scanned: number;
+        non_empty_cells: number;
+        graphic_cells: number;
+    } {
         const { font_size_px, tile_w, tile_h } = this.get_metrics();
+        const clear_started_at_ms = performance.now();
 
         this.ctx.clearRect(0, 0, this.canvas_el.width, this.canvas_el.height);
+        const clear_ms = Math.max(0, performance.now() - clear_started_at_ms);
 
         this.ctx.textAlign = 'center';
         this.ctx.textBaseline = 'middle';
 
+        const scan_started_at_ms = performance.now();
+        let draw_cell_ms = 0;
+        let cells_scanned = 0;
+        let non_empty_cells = 0;
+        let graphic_cells = 0;
+
         for (let y = 0; y < c.height; y++) {
             for (let x = 0; x < c.width; x++) {
+                cells_scanned += 1;
                 const cell = c.get(x, y);
                 if (!cell) continue;
+                if (cell.char === ' ') continue;
+                non_empty_cells += 1;
+                if ((cell as any).graphic) graphic_cells += 1;
 
                 const canvas_y = (c.height - 1 - y) * tile_h;
 
-                const wi = clamp_weight_index((cell as any).weight_index);
+                const original_weight_index = (cell as any).weight_index;
+                const wi = clamp_weight_index(original_weight_index);
                 const cx = x * tile_w + tile_w / 2;
                 const cy = canvas_y + tile_h / 2;
+                const draw_cell_started_at_ms = performance.now();
                 this.cell_renderer.draw_cell({
                     ctx: this.ctx,
-                    cell: { ...cell, weight_index: wi },
+                    cell: original_weight_index === wi ? cell : { ...cell, weight_index: wi },
                     center_x_px: cx,
                     center_y_px: cy,
                     cell_w_px: tile_w,
@@ -767,8 +985,18 @@ export class CanvasRuntime {
                     font_size_px,
                     weight_index_to_css: this.weight_index_to_css,
                 });
+                draw_cell_ms += Math.max(0, performance.now() - draw_cell_started_at_ms);
             }
         }
+
+        return {
+            clear_ms,
+            scan_ms: Math.max(0, performance.now() - scan_started_at_ms),
+            draw_cell_ms,
+            cells_scanned,
+            non_empty_cells,
+            graphic_cells,
+        };
     }
 
     private mouse_to_tile(ev: MouseEvent): { x: number; y: number } | null {
@@ -843,7 +1071,7 @@ export class CanvasRuntime {
     private log_input_debug(message: string, payload: Record<string, unknown>): void {
         if (this.input_host.source_kind === 'electron_bridge') return;
         try {
-            debug_log('INPUT_DEBUG', `${message} ${JSON.stringify(payload)}`);
+            diag_log('input', 'verbose', 'INPUT_DEBUG', message, payload);
         } catch {
             // ignore
         }
@@ -899,6 +1127,7 @@ export class CanvasRuntime {
         if (ev.code === 'Space') {
             this.space_down = true;
         }
+        this.sync_modifier_state(ev);
         if (!ev.repeat && !this.gameplay_bridge_down_codes.has(ev.code)) {
             this.gameplay_bridge_down_codes.add(ev.code);
             this.forward_bridge_gameplay_event(ev, 'keydown');
@@ -921,6 +1150,7 @@ export class CanvasRuntime {
         if (ev.code === 'Space') {
             this.space_down = false;
         }
+        this.sync_modifier_state(ev);
         if (this.gameplay_bridge_down_codes.has(ev.code)) {
             this.gameplay_bridge_down_codes.delete(ev.code);
             this.forward_bridge_gameplay_event(ev, 'keyup');
@@ -941,6 +1171,7 @@ export class CanvasRuntime {
         if (this.input_host.source_kind !== 'electron_bridge' && ev.code === 'Space' && !typing) {
             this.space_down = true;
         }
+        this.sync_modifier_state(ev);
         if (ev.repeat && is_directional_action(action)) {
             if (!typing) {
                 ev.preventDefault();
@@ -954,6 +1185,10 @@ export class CanvasRuntime {
             runtime_instance_id: this.runtime_instance_id,
             code: ev.code,
             key: ev.key,
+            ctrl: ev.ctrlKey,
+            shift: ev.shiftKey,
+            alt: ev.altKey,
+            meta: ev.metaKey,
             repeat: ev.repeat,
             is_trusted: ev.isTrusted,
             target_tag: (ev.target as HTMLElement | null)?.tagName ?? null,
@@ -1010,11 +1245,16 @@ export class CanvasRuntime {
         if (this.input_host.source_kind !== 'electron_bridge' && ev.code === 'Space') {
             this.space_down = false;
         }
+        this.sync_modifier_state(ev);
         const input_context = this.build_input_context(typing);
         this.log_input_debug('window keyup received', {
             runtime_instance_id: this.runtime_instance_id,
             code: ev.code,
             key: ev.key,
+            ctrl: ev.ctrlKey,
+            shift: ev.shiftKey,
+            alt: ev.altKey,
+            meta: ev.metaKey,
             repeat: ev.repeat,
             is_trusted: ev.isTrusted,
             target_tag: (ev.target as HTMLElement | null)?.tagName ?? null,
@@ -1123,7 +1363,7 @@ export class CanvasRuntime {
                 visibility_state: document.visibilityState,
             });
             if (document.visibilityState === 'hidden') {
-                reset_all();
+                this.clear_transient_input_state();
             }
         });
 
@@ -1396,6 +1636,7 @@ export class CanvasRuntime {
                 }
             }
             top?.OnPointerDown?.(pe);
+            this.sync_text_input_focus_for_owner();
         };
 
         const route_up = (ev: any) => {
@@ -1450,6 +1691,7 @@ export class CanvasRuntime {
                         const ce: any = this.make_pointer_event('click', t.x, t.y, { ...ev, buttons: nb.buttons, button: nb.button }, this.engine_canvas.get(t.x, t.y), 2);
                         attach_pointer_meta(ce, ev);
                         target.OnClick?.(ce);
+                        this.sync_text_input_focus_for_owner();
                     } else {
                         this.pending_single_click = {
                             run_at_ms: now + this.DBLCLICK_MS,
@@ -1730,6 +1972,7 @@ export class CanvasRuntime {
             top?.OnPointerDown?.(
                 this.make_pointer_event('down', t.x, t.y, ev, this.engine_canvas.get(t.x, t.y)),
             );
+            this.sync_text_input_focus_for_owner();
         });
 
         this.canvas_el.addEventListener('wheel', (ev) => {
@@ -1820,6 +2063,7 @@ export class CanvasRuntime {
                         target.OnClick?.(
                             this.make_pointer_event('click', t.x, t.y, ev, this.engine_canvas.get(t.x, t.y), 2),
                         );
+                        this.sync_text_input_focus_for_owner();
                     } else {
                         this.pending_single_click = {
                             run_at_ms: now + this.DBLCLICK_MS,
@@ -1849,6 +2093,15 @@ export class CanvasRuntime {
                 this.focused_owner.OnTextInput(data);
             }
         });
+        this.key_sink.addEventListener('paste', (ev: ClipboardEvent) => {
+            if (!this.focused_owner?.OnTextInput) return;
+
+            ev.preventDefault();
+            const text = ev.clipboardData?.getData('text/plain') ?? '';
+            if (text.length > 0) {
+                this.focused_owner.OnTextInput(text);
+            }
+        });
         this.key_sink.addEventListener('focus', () => {
             this.log_input_debug('key_sink focus observed', {
                 runtime_instance_id: this.runtime_instance_id,
@@ -1862,12 +2115,18 @@ export class CanvasRuntime {
                 active_element_id: (document.activeElement as HTMLElement | null)?.id ?? null,
                 focused_owner_id: this.focused_owner?.id ?? null,
             });
+            this.clear_transient_input_state();
         });
 
     }
 
     private tick(): void {
-        const now = performance.now();
+        const frame_started_at_ms = performance.now();
+        const now = frame_started_at_ms;
+        const raf_delta_ms = this.frame_perf_previous_raf_start_ms > 0 ? Math.max(0, frame_started_at_ms - this.frame_perf_previous_raf_start_ms) : 0;
+        const post_js_to_next_raf_ms = this.frame_perf_previous_tick_end_ms > 0 ? Math.max(0, frame_started_at_ms - this.frame_perf_previous_tick_end_ms) : 0;
+        this.frame_perf_previous_raf_start_ms = frame_started_at_ms;
+        const module_draws: Array<{ module_id: string; draw_ms: number }> = [];
         if (this.pending_single_click && now >= this.pending_single_click.run_at_ms) {
             const p = this.pending_single_click;
             this.pending_single_click = null;
@@ -1875,9 +2134,16 @@ export class CanvasRuntime {
             p.target.OnClick?.(
                 this.make_pointer_event('click', p.x, p.y, p.ev, this.engine_canvas.get(p.x, p.y), 1),
             );
+            this.sync_text_input_focus_for_owner();
         }
 
-        compose_modules(this.engine_canvas, this.modules);
+        const compose_started_at_ms = performance.now();
+        compose_modules(this.engine_canvas, this.modules, (module, duration_ms) => {
+            const module_id = String(module?.id ?? 'unknown');
+            module_draws.push({ module_id, draw_ms: duration_ms });
+            this.record_frame_perf_module(module_id, duration_ms);
+        });
+        const compose_ms = Math.max(0, performance.now() - compose_started_at_ms);
 
         if (this.on_after_compose) {
             try {
@@ -1903,7 +2169,90 @@ export class CanvasRuntime {
             this.wheel_pending = null;
         }
 
-        this.draw_canvas(this.engine_canvas);
+        const draw_canvas_started_at_ms = performance.now();
+        const draw_canvas_stats = this.draw_canvas(this.engine_canvas);
+        const draw_canvas_ms = Math.max(0, performance.now() - draw_canvas_started_at_ms);
+        const tick_total_js_ms = Math.max(0, performance.now() - frame_started_at_ms);
+        this.frame_perf_previous_tick_end_ms = performance.now();
+
+        if (this.is_frame_perf_enabled()) {
+            this.frame_perf_index += 1;
+            const slow_frame_ms = this.read_frame_perf_number('canvas_frame_perf_slow_frame_ms', 16.7);
+            const very_slow_frame_ms = this.read_frame_perf_number('canvas_frame_perf_very_slow_frame_ms', 33.3);
+            const sample_every = Math.max(1, Math.floor(this.read_frame_perf_number('canvas_frame_perf_sample_every', 30)));
+            const summary_every = Math.max(1, Math.floor(this.read_frame_perf_number('canvas_frame_perf_summary_every', 120)));
+            this.frame_perf_summary.frames += 1;
+            this.frame_perf_summary.summed_tick_total_js_ms += tick_total_js_ms;
+            this.frame_perf_summary.summed_compose_ms += compose_ms;
+            this.frame_perf_summary.summed_draw_canvas_ms += draw_canvas_ms;
+            this.frame_perf_summary.summed_draw_canvas_clear_ms += draw_canvas_stats.clear_ms;
+            this.frame_perf_summary.summed_draw_canvas_scan_ms += draw_canvas_stats.scan_ms;
+            this.frame_perf_summary.summed_draw_canvas_draw_cell_ms += draw_canvas_stats.draw_cell_ms;
+            this.frame_perf_summary.summed_draw_canvas_cells_scanned += draw_canvas_stats.cells_scanned;
+            this.frame_perf_summary.summed_draw_canvas_non_empty_cells += draw_canvas_stats.non_empty_cells;
+            this.frame_perf_summary.summed_draw_canvas_graphic_cells += draw_canvas_stats.graphic_cells;
+            this.frame_perf_summary.summed_post_js_to_next_raf_ms += post_js_to_next_raf_ms;
+            this.frame_perf_summary.summed_raf_delta_ms += raf_delta_ms;
+            this.frame_perf_summary.max_tick_total_js_ms = Math.max(this.frame_perf_summary.max_tick_total_js_ms, tick_total_js_ms);
+            this.frame_perf_summary.max_post_js_to_next_raf_ms = Math.max(this.frame_perf_summary.max_post_js_to_next_raf_ms, post_js_to_next_raf_ms);
+            if (tick_total_js_ms >= slow_frame_ms) this.frame_perf_summary.slow_frames += 1;
+            if (tick_total_js_ms >= very_slow_frame_ms) this.frame_perf_summary.very_slow_frames += 1;
+
+            const should_log_frame = tick_total_js_ms >= slow_frame_ms
+                || post_js_to_next_raf_ms >= slow_frame_ms
+                || this.long_task_window_count > 0
+                || this.frame_perf_index % sample_every === 0;
+            if (should_log_frame) {
+                diag_log('performance_metrics', 'important', 'CANVAS_FRAME_PERF', 'frame', {
+                    frame_index: this.frame_perf_index,
+                    raf_delta_ms: this.round_perf_ms(raf_delta_ms),
+                    compose_ms: this.round_perf_ms(compose_ms),
+                    draw_canvas_ms: this.round_perf_ms(draw_canvas_ms),
+                    draw_canvas_clear_ms: this.round_perf_ms(draw_canvas_stats.clear_ms),
+                    draw_canvas_scan_ms: this.round_perf_ms(draw_canvas_stats.scan_ms),
+                    draw_canvas_draw_cell_ms: this.round_perf_ms(draw_canvas_stats.draw_cell_ms),
+                    draw_canvas_cells_scanned: draw_canvas_stats.cells_scanned,
+                    draw_canvas_non_empty_cells: draw_canvas_stats.non_empty_cells,
+                    draw_canvas_graphic_cells: draw_canvas_stats.graphic_cells,
+                    tick_total_js_ms: this.round_perf_ms(tick_total_js_ms),
+                    post_js_to_next_raf_ms: this.round_perf_ms(post_js_to_next_raf_ms),
+                    longtask_count: this.long_task_window_count,
+                    longtask_max_ms: this.round_perf_ms(this.long_task_window_max_ms),
+                    module_draws: module_draws.map((entry) => ({ module_id: entry.module_id, draw_ms: this.round_perf_ms(entry.draw_ms) })),
+                });
+            }
+
+            if (this.frame_perf_index % summary_every === 0) {
+                const frames = Math.max(1, this.frame_perf_summary.frames);
+                diag_log('performance_metrics', 'verbose', 'CANVAS_FRAME_PERF', 'summary', {
+                    frame_index: this.frame_perf_index,
+                    frames: this.frame_perf_summary.frames,
+                    slow_frames: this.frame_perf_summary.slow_frames,
+                    very_slow_frames: this.frame_perf_summary.very_slow_frames,
+                    avg_tick_total_js_ms: this.round_perf_ms(this.frame_perf_summary.summed_tick_total_js_ms / frames),
+                    avg_compose_ms: this.round_perf_ms(this.frame_perf_summary.summed_compose_ms / frames),
+                    avg_draw_canvas_ms: this.round_perf_ms(this.frame_perf_summary.summed_draw_canvas_ms / frames),
+                    avg_draw_canvas_clear_ms: this.round_perf_ms(this.frame_perf_summary.summed_draw_canvas_clear_ms / frames),
+                    avg_draw_canvas_scan_ms: this.round_perf_ms(this.frame_perf_summary.summed_draw_canvas_scan_ms / frames),
+                    avg_draw_canvas_draw_cell_ms: this.round_perf_ms(this.frame_perf_summary.summed_draw_canvas_draw_cell_ms / frames),
+                    avg_draw_canvas_cells_scanned: this.round_perf_ms(this.frame_perf_summary.summed_draw_canvas_cells_scanned / frames),
+                    avg_draw_canvas_non_empty_cells: this.round_perf_ms(this.frame_perf_summary.summed_draw_canvas_non_empty_cells / frames),
+                    avg_draw_canvas_graphic_cells: this.round_perf_ms(this.frame_perf_summary.summed_draw_canvas_graphic_cells / frames),
+                    avg_post_js_to_next_raf_ms: this.round_perf_ms(this.frame_perf_summary.summed_post_js_to_next_raf_ms / frames),
+                    avg_raf_delta_ms: this.round_perf_ms(this.frame_perf_summary.summed_raf_delta_ms / frames),
+                    max_tick_total_js_ms: this.round_perf_ms(this.frame_perf_summary.max_tick_total_js_ms),
+                    max_post_js_to_next_raf_ms: this.round_perf_ms(this.frame_perf_summary.max_post_js_to_next_raf_ms),
+                    longtask_total_count: this.long_task_total_count,
+                    longtask_window_count: this.long_task_window_count,
+                    longtask_window_max_ms: this.round_perf_ms(this.long_task_window_max_ms),
+                    module_avg_ms: Object.fromEntries(Array.from(this.frame_perf_module_summary.entries()).map(([module_id, summary]) => [module_id, this.round_perf_ms(summary.summed_ms / frames)])),
+                    module_max_ms: Object.fromEntries(Array.from(this.frame_perf_module_summary.entries()).map(([module_id, summary]) => [module_id, this.round_perf_ms(summary.max_ms)])),
+                });
+                this.reset_frame_perf_summary();
+            }
+            this.long_task_window_count = 0;
+            this.long_task_window_max_ms = 0;
+        }
         this.raf_id = requestAnimationFrame(() => this.tick());
     }
 }

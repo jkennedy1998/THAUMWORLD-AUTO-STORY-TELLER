@@ -19,7 +19,7 @@ import {
   formatFileSize,
   parseLatestLog,
   findMostRecentSession,
-} from "../dist/launcher/log_utils.js";
+} from "../src/launcher/log_utils.ts";
 
 // Get __dirname in ES modules
 const __filename = fileURLToPath(import.meta.url);

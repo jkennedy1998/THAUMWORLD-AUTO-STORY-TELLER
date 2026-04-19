@@ -27,6 +27,8 @@ export async function execute_tool_assisted_inputs_action(options: ActionExecuto
     if (action.type === 'assert_context_ready') {
       const ready = Boolean(context.session_token && context.actor_ref && context.place_id);
       if (!ready) throw new Error('tool_assisted_inputs_context_not_ready');
+    } else if (action.type === 'invoke_helper') {
+      await Promise.resolve(runtime_probe.invoke_helper?.(action.helper, action.payload));
     } else if (action.type === 'marker') {
       // trace only
     } else if (action.type === 'capture_actor_tile') {
@@ -60,6 +62,12 @@ export async function execute_tool_assisted_inputs_action(options: ActionExecuto
       }
       capture_store.set_visible_step(action.slot, visible_step);
       emit('action_fired', { action_index, action_type: action.type, target_breath, current_breath: current_tick, late_by: Math.max(0, current_tick - target_breath), actor_ref: context.actor_ref, place_id: context.place_id, slot: action.slot, visible_step });
+      mark_action_completed();
+      return true;
+    } else if (action.type === 'capture_text_value') {
+      const value = runtime_probe.get_text_value?.(action.source, action.field ?? null) ?? null;
+      capture_store.set_text_value(action.slot, value);
+      emit('action_fired', { action_index, action_type: action.type, target_breath, current_breath: current_tick, late_by: Math.max(0, current_tick - target_breath), slot: action.slot, source: action.source, field: action.field ?? null, text_value: value });
       mark_action_completed();
       return true;
     } else if (action.type === 'capture_painter_tool_state') {
@@ -151,6 +159,30 @@ export async function execute_tool_assisted_inputs_action(options: ActionExecuto
         return true;
       }
       emit('action_fired', { action_index, action_type: action.type, target_breath, current_breath: current_tick, late_by: Math.max(0, current_tick - target_breath), actor_ref: context.actor_ref, place_id: context.place_id, slot: action.slot, expected_tile: expected, actual_tile: actual });
+      mark_action_completed();
+      return true;
+    } else if (action.type === 'assert_text_value_equals' || action.type === 'assert_text_value_changed') {
+      const expected = capture_store.get_text_value(action.slot);
+      const actual = runtime_probe.get_text_value?.(action.source, action.field ?? null) ?? null;
+      const same = expected === actual;
+      const passed = action.type === 'assert_text_value_equals' ? same : !same;
+      if (!passed) {
+        diagnostic_report.record_failure({ action_index, action_type: action.type, slot: action.slot, source: action.source, field: action.field ?? null, expected_text: expected, actual_text: actual });
+        emit('action_failed', { action_index, action_type: action.type, target_breath, current_breath: current_tick, error: action.type === 'assert_text_value_equals' ? 'tool_assisted_inputs_assert_text_value_equals_failed' : 'tool_assisted_inputs_assert_text_value_changed_failed', slot: action.slot, source: action.source, field: action.field ?? null, expected_text: expected, actual_text: actual, nonfatal: true });
+        return true;
+      }
+      emit('action_fired', { action_index, action_type: action.type, target_breath, current_breath: current_tick, late_by: Math.max(0, current_tick - target_breath), slot: action.slot, source: action.source, field: action.field ?? null, expected_text: expected, actual_text: actual });
+      mark_action_completed();
+      return true;
+    } else if (action.type === 'assert_text_value_literal') {
+      const actual = runtime_probe.get_text_value?.(action.source, action.field ?? null) ?? null;
+      const passed = actual === action.value;
+      if (!passed) {
+        diagnostic_report.record_failure({ action_index, action_type: action.type, source: action.source, field: action.field ?? null, expected_text: action.value, actual_text: actual });
+        emit('action_failed', { action_index, action_type: action.type, target_breath, current_breath: current_tick, error: 'tool_assisted_inputs_assert_text_value_literal_failed', source: action.source, field: action.field ?? null, expected_text: action.value, actual_text: actual, nonfatal: true });
+        return true;
+      }
+      emit('action_fired', { action_index, action_type: action.type, target_breath, current_breath: current_tick, late_by: Math.max(0, current_tick - target_breath), source: action.source, field: action.field ?? null, actual_text: actual });
       mark_action_completed();
       return true;
     } else if (action.type === 'assert_movement_trace_ready') {
@@ -250,6 +282,8 @@ export async function execute_tool_assisted_inputs_action(options: ActionExecuto
         await new Promise((resolve) => window.setTimeout(resolve, action.hold_ms ?? 0));
       }
       await Promise.resolve(keyboard_driver.send_keyup(action));
+    } else if (action.type === 'text_input') {
+      await Promise.resolve(keyboard_driver.send_text(action));
     } else if (action.type === 'pointer_move') {
       await Promise.resolve(pointer_driver.move(action));
     } else if (action.type === 'pointer_down') {

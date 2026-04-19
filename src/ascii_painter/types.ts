@@ -42,8 +42,6 @@ export type ToolType =
   | 'bucket' 
   | 'eyedropper'
   | 'text'
-  | 'weighter'
-  | 'colorer'
   | 'selectangle'
   | 'lassoselect'
   | 'copy'

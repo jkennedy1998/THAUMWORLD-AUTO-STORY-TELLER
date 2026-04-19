@@ -20,11 +20,34 @@ export function parse_tool_assisted_inputs_script(raw: string): ToolAssistedInpu
     if (clock_mode === 'breath' && typeof action?.at_breath !== 'number') throw new Error(`tool_assisted_inputs_missing_at_breath:${index}`);
     if (type === 'assert_context_ready') return { at_breath, type } as const;
     if (type === 'marker') return { at_breath, type, label: String(action?.label ?? '').trim() || `marker_${index}` } as const;
+    if (type === 'invoke_helper') {
+      const helper = String(action?.helper ?? '').trim();
+      if (!helper) throw new Error(`tool_assisted_inputs_missing_helper:${index}`);
+      const payload = action?.payload && typeof action.payload === 'object' && !Array.isArray(action.payload)
+        ? action.payload as Record<string, unknown>
+        : undefined;
+      return { at_breath, type, helper, payload } as const;
+    }
     if (type === 'capture_actor_tile' || type === 'capture_movement_trace' || type === 'capture_visible_step' || type === 'capture_painter_tool_state' || type === 'capture_painter_focus_plane' || type === 'capture_painter_camera_target' || type === 'capture_painter_bounds' || type === 'capture_painter_interaction_anchor' || type === 'capture_painter_anchor_cell' || type === 'assert_actor_tile_equals' || type === 'assert_actor_tile_changed' || type === 'assert_painter_anchor_cell_changed' || type === 'assert_painter_anchor_cell_equals') {
       const slot = String(action?.slot ?? '').trim();
       if (!slot) throw new Error(`tool_assisted_inputs_missing_slot:${index}`);
       const anchor_slot = typeof action?.anchor_slot === 'string' && action.anchor_slot.trim().length > 0 ? action.anchor_slot.trim() : undefined;
       return { at_breath, type, slot, anchor_slot } as const;
+    }
+    if (type === 'capture_text_value' || type === 'assert_text_value_equals' || type === 'assert_text_value_changed') {
+      const slot = String(action?.slot ?? '').trim();
+      const source = String(action?.source ?? '').trim();
+      const field = typeof action?.field === 'string' && action.field.trim().length > 0 ? action.field.trim() : undefined;
+      if (!slot) throw new Error(`tool_assisted_inputs_missing_slot:${index}`);
+      if (!source) throw new Error(`tool_assisted_inputs_missing_text_source:${index}`);
+      return { at_breath, type, slot, source, field } as const;
+    }
+    if (type === 'assert_text_value_literal') {
+      const source = String(action?.source ?? '').trim();
+      const field = typeof action?.field === 'string' && action.field.trim().length > 0 ? action.field.trim() : undefined;
+      const value = typeof action?.value === 'string' ? action.value : '';
+      if (!source) throw new Error(`tool_assisted_inputs_missing_text_source:${index}`);
+      return { at_breath, type, source, field, value } as const;
     }
     if (type === 'assert_painter_anchor_in_bounds') {
       const anchor_slot = typeof action?.anchor_slot === 'string' && action.anchor_slot.trim().length > 0 ? action.anchor_slot.trim() : undefined;
@@ -138,7 +161,12 @@ export function parse_tool_assisted_inputs_script(raw: string): ToolAssistedInpu
       if (!code) throw new Error(`tool_assisted_inputs_missing_code:${index}`);
       const key = String(action?.key ?? '').trim() || undefined;
       const hold_ms = type === 'key_tap' && Number.isFinite(Number(action?.hold_ms)) ? Math.max(0, Math.floor(Number(action.hold_ms))) : undefined;
-      return { at_breath, type, code, key, hold_ms } as const;
+      return { at_breath, type, code, key, hold_ms, shift: Boolean(action?.shift), ctrl: Boolean(action?.ctrl), alt: Boolean(action?.alt), meta: Boolean(action?.meta) } as const;
+    }
+    if (type === 'text_input') {
+      const text = typeof action?.text === 'string' ? action.text : '';
+      if (text.length < 1) throw new Error(`tool_assisted_inputs_missing_text:${index}`);
+      return { at_breath, type, text } as const;
     }
     throw new Error(`tool_assisted_inputs_unknown_action:${type || index}`);
   }).sort((a, b) => a.at_breath - b.at_breath);

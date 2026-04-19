@@ -16,7 +16,7 @@ import {
   formatDateLocal,
   validateAndRepairLatest,
   listLogDates,
-} from "../dist/launcher/log_utils.js";
+} from "../src/launcher/log_utils.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

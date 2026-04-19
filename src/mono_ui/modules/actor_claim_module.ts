@@ -10,6 +10,7 @@ export type ActorClaimEntry = {
   claimed_by_other: boolean;
   claimed_by_client_session_id: string | null;
   can_claim: boolean;
+  blocked_by_current_claim?: boolean;
   can_delete?: boolean;
 };
 
@@ -159,13 +160,21 @@ export function make_actor_claim_module(opts: ActorClaimModuleConfig): Module {
         if (y <= list_bottom_y - 1) break;
         if (!entry) continue;
         const is_cursor = visible_start + row === cursor;
-        const state = entry.claimed_by_self ? "YOU" : entry.claimed_by_other ? "LOCK" : "OPEN";
+        const state = entry.claimed_by_self
+          ? "YOU"
+          : entry.claimed_by_other
+            ? "LOCK"
+            : entry.blocked_by_current_claim
+              ? "SWAP"
+              : "OPEN";
         const prefix = is_cursor ? ">" : " ";
         const line = trim_to_width(`${prefix}${entry.actor_name} [${state}]`, inner_width);
         const rgb = entry.claimed_by_self
           ? get_color_by_name("vivid_green").rgb
           : entry.claimed_by_other
             ? get_color_by_name("medium_gray").rgb
+            : entry.blocked_by_current_claim
+              ? get_color_by_name("pale_orange").rgb
             : is_cursor
               ? get_color_by_name("vivid_yellow").rgb
               : get_color_by_name("off_white").rgb;
@@ -194,6 +203,8 @@ export function make_actor_claim_module(opts: ActorClaimModuleConfig): Module {
           ? `${selected.actor_ref} - claimed elsewhere`
           : selected.claimed_by_self
             ? `${selected.actor_ref} - currently yours`
+            : selected.blocked_by_current_claim
+              ? `${selected.actor_ref} - release current actor first`
             : `${selected.actor_ref} - available`
         : (entries.length > 0 ? "select an actor" : "no claimable actors");
       draw_line(c, rect.x0 + 1, footer_y, trim_to_width(footer, inner_width), get_color_by_name("medium_gray").rgb, 3);
@@ -210,6 +221,10 @@ export function make_actor_claim_module(opts: ActorClaimModuleConfig): Module {
       const row = row_hits.find((hit) => hit.y === e.y);
       if (!row) return;
       opts.on_select(row.actor_ref);
+      const entry = get_entries().find((candidate) => candidate.actor_ref === row.actor_ref) ?? null;
+      if (e.button === 0 && entry?.can_claim) {
+        opts.on_claim_selected();
+      }
     },
     on_key_down(e: KeyboardEvent): void {
       sync_cursor();

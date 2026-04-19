@@ -3,6 +3,7 @@ import type { Module } from '../mono_ui/types.js';
 import { compute_dom_viewport_for_rect } from '../mono_ui/runtime/dom_viewport.js';
 import { clamp_ui_scale, compute_responsive_grid_size, get_ui_cell_metrics } from '../mono_ui/runtime/ui_metrics.js';
 import { get_theme_font_primary_family, THAUMWORLD_RENDER_THEME } from '../mono_ui/runtime/render_theme.js';
+import { install_runtime_diagnostics_api } from '../shared/diagnostics.js';
 import { APP_CONFIG, create_app_state } from './app_state.js';
 import { PAINTER_CONFIG, create_painter_app_state } from './painter_app_state.js';
 
@@ -12,6 +13,8 @@ const IS_PAINTER_MODE = (window as any).electronAPI?.appMode === 'ascii_painter'
 const el = document.getElementById('mono_canvas') as HTMLCanvasElement | null;
 if (!el) throw new Error('mono_canvas element not found');
 const canvasEl = el;
+
+install_runtime_diagnostics_api();
 
 let modules: readonly Module[];
 let module_registry: any;
@@ -43,7 +46,8 @@ if (IS_PAINTER_MODE) {
         load: painter_state.load_from_file,
         new_canvas: painter_state.new_canvas,
         export_text: painter_state.export_as_text,
-        filename: () => painter_state!.current_filename
+        filename: () => painter_state!.current_filename,
+        multiplayer: painter_state.multiplayer_sync,
     };
 } else {
     // GAME MODE
@@ -99,6 +103,15 @@ const runtime = new CanvasRuntime({
     inject_gameplay_key: (type: 'keydown' | 'keyup', payload: { code: string; key?: string; repeat?: boolean }) => {
         runtime.inject_tool_assisted_gameplay_key(type, payload);
     },
+    inject_ui_key: (type: 'keydown' | 'keyup', payload: { code: string; key?: string; repeat?: boolean }) => {
+        runtime.inject_tool_assisted_ui_key(type, payload);
+    },
+    inject_text_input: (payload: { text: string }) => {
+        runtime.inject_tool_assisted_text_input(payload);
+    },
+    focus_module: (module_id: string) => {
+        return runtime.focus_module_by_id(module_id);
+    },
     inject_pointer_move: (payload: any) => {
         runtime.inject_tool_assisted_pointer_move(payload);
     },
@@ -119,6 +132,9 @@ const runtime = new CanvasRuntime({
     },
     inject_wheel: (payload: any) => {
         runtime.inject_tool_assisted_wheel(payload);
+    },
+    reset_keyboard: () => {
+        runtime.reset_keyboard_state();
     },
 };
 

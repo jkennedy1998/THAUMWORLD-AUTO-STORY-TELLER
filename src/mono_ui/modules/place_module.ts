@@ -14,13 +14,13 @@ import {
 } from "../vision_debugger.js";
 import { get_sense_profile } from "../../action_system/sense_broadcast.js";
 import { get_facing } from "../../npc_ai/facing_system.js";
+import { BREATH_MS } from "../../shared/breath_timing.js";
 import { compute_anchor_world_voxel, eval_body_model_voxels, get_body_model_def } from "../../shared/body_model.js";
 import { get_body_slots_for_character_hit } from "../../shared/body_slot_representation.js";
 import { place_voxel_blocks_los } from "../../place_storage/occupancy_index.js";
 import { can_place_volume } from "../../place_storage/movement_legality.js";
 import { find_path as shared_find_path } from "../../shared/pathfinding.js";
 import { set_npc_tracked_position, get_npc_visual_status } from "./movement_command_handler.js";
-import { play_sfx } from "../sfx/sfx_player.js";
 import { make_entity_payload, make_ground_items_tile_payload, make_item_like_payload, make_item_payload, make_pile_payload, make_simple_tile_payload } from "../../render_shaders/payload_builders.js";
 import { draw_render_queue, select_flash_index, type RenderRequest } from "../../render_shaders/render_queue.js";
 import { ctx_place_tile } from "../../render_shaders/context_builders.js";
@@ -28,10 +28,18 @@ import { PlaceDomLayers } from "../place_dom_layers.js";
 import type { GridCell } from "../../ascii_painter/types.js";
 import { create_canvas } from "../canvas.js";
 import { touch_world_layers_owner } from "../world_layers_owner.js";
+import { diagnostic_enabled, type DiagnosticCategory, type DiagnosticVerbosity } from "../../shared/diagnostics.js";
 import { compute_dom_viewport_for_rect } from "../runtime/dom_viewport.js";
 import { get_ui_cell_metrics } from "../runtime/ui_metrics.js";
 import { compute_anchor_relative_mouse_parallax } from "../runtime/camera_anchor_runtime.js";
 import { create_place_camera_controller } from "../runtime/place_camera_controller.js";
+import {
+  begin_place_render_perf_frame,
+  finish_place_render_perf_frame,
+  record_place_render_perf_layer,
+  record_place_render_perf_phase,
+  set_place_render_perf_counter,
+} from "../runtime/place_render_perf.js";
 import { build_visible_plane_coordinates, get_atlas_view_direction, get_plane_cardinal_neighbor_offsets_for_view_state, get_projected_bounds_with_roll, make_place_view_state, map_screen_move_intent_to_ground_delta, normalize_place_principal_view, normalize_place_view_roll_quarter_turn, project_world_point_with_roll, type PlacePrincipalView, type PlaceViewRollQuarterTurn, type PlaceViewState, type SceneProjectionBounds, unproject_plane_point_with_roll } from "../runtime/place_view_projection.js";
 import type { PlaceViewTransitionFrame } from "../runtime/place_view_camera_runtime.js";
 import { get_move_intent, is_jump_down, subscribe_move_intent_changes, type MoveIntent } from "../runtime/input_actions.js";
@@ -119,12 +127,6 @@ type PlaceCameraFrame = {
   pivot_px: { x: number; y: number };
 };
 
-function footstep_cooldown_ms(speed_tpm: number): number {
-  const tpm = Number.isFinite(speed_tpm) && speed_tpm > 0 ? speed_tpm : 300;
-  const ms_per_tile = (60 * 1000) / tpm;
-  return Math.max(55, Math.min(260, Math.round(ms_per_tile * 0.75)));
-}
-
 function opposite_connector_direction(direction: string): string {
   switch (String(direction)) {
     case 'x+': return 'x-';
@@ -150,9 +152,22 @@ function connector_direction_to_step(direction: string): { dx: number; dy: numbe
 const place_debug_sample_counts = new Map<string, number>();
 const PLACE_MODULE_TIMING_VERSION = '2026-03-14-visible-pulse-v1';
 const DEFAULT_FOCUS_Z = 0;
-const SEAM_SCENE_DEBUG_ENABLED = false;
-const PLACE_CAMERA_DEBUG_ENABLED = false;
-const RENDERER_MOVE_BATCH_TRACE_ENABLED = false;
+function seamSceneDebugEnabled(): boolean { return diagnostic_enabled('renderer', 'trace'); }
+function placeCameraDebugEnabled(): boolean { return diagnostic_enabled('camera', 'trace'); }
+function rendererMoveBatchTraceEnabled(): boolean { return diagnostic_enabled('renderer', 'verbose'); }
+function rendererSceneMotionDiagEnabled(): boolean { return diagnostic_enabled('renderer', 'trace'); }
+const RENDERER_SCENE_MOTION_DIAG_FRAME_BURST = 8;
+const RENDERER_SCENE_MOTION_DIAG_ENTITY_LIMIT = 8;
+let renderer_scene_motion_diag_frames_remaining = 0;
+let renderer_scene_motion_diag_trigger: Record<string, unknown> | null = null;
+let renderer_scene_motion_diag_last_snapshot = new Map<string, { world_x: number; world_y: number; world_z: number; screen_x: number; screen_y: number }>();
+
+function arm_renderer_scene_motion_diag(trigger: Record<string, unknown>): void {
+  if (!rendererSceneMotionDiagEnabled()) return;
+  renderer_scene_motion_diag_frames_remaining = RENDERER_SCENE_MOTION_DIAG_FRAME_BURST;
+  renderer_scene_motion_diag_trigger = trigger;
+  renderer_scene_motion_diag_last_snapshot = new Map();
+}
 function should_sample_place_debug(prefix: string, sampleEvery: number): boolean {
   const next = (place_debug_sample_counts.get(prefix) ?? 0) + 1;
   place_debug_sample_counts.set(prefix, next);
@@ -162,6 +177,15 @@ function should_sample_place_debug(prefix: string, sampleEvery: number): boolean
 function debug_log_place(...args: any[]) {
   const msg = args.map((a: any) => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
   if (msg.includes('scene visible subset')) return;
+  const category: DiagnosticCategory = msg.includes('CANVAS_FRAME_PERF') || msg.includes('VOXEL_DOM_RENDERER_PERF')
+    ? 'performance_metrics'
+    : msg.includes('PLACE_CAMERA') || msg.includes('focus_target') || msg.includes('anchor')
+      ? 'camera'
+      : 'renderer';
+  const verbosity: DiagnosticVerbosity = msg.includes('MOVE_VEL_TEST') || msg.includes('MOVE_UNIFY_TEST') || msg.includes('MOVE_CHURN_TRACE') || msg.includes('RENDERER_SCENE_DIAG')
+    ? 'trace'
+    : 'verbose';
+  if (!diagnostic_enabled(category, verbosity)) return;
   const always =
     msg.includes('MOVE_VEL_TEST') ||
     msg.includes('MOVE_UNIFY_TEST') ||
@@ -177,7 +201,6 @@ function debug_log_place(...args: any[]) {
     if (msg.includes('Cached Actor') && !should_sample_place_debug('cached-actor', 120)) return;
     if (msg.includes('WebSocket TAG_') && !should_sample_place_debug('tag-events', 120)) return;
   }
-  // eslint-disable-next-line no-console
   console.log("[PlaceModule]", ...args.map((a: any) => typeof a === 'object' ? JSON.stringify(a) : a));
 }
 
@@ -234,10 +257,28 @@ type PlaceCameraDebugSnapshot = {
   hard_rotation_debug: boolean;
 };
 
+type CachedDynamicTileTarget = {
+  kind: 'tile' | 'container';
+  slot: number;
+  scene_place_id: string;
+  scene_base_z: number;
+  sx: number;
+  sy: number;
+  tile_x: number;
+  tile_y: number;
+  world_x: number;
+  world_y: number;
+  world_z: number;
+  local_world_z: number;
+};
+
 let scene_place_cache: ScenePlaceCache | null = null;
 
 function invalidate_scene_place_cache(): void {
   scene_place_cache = null;
+  cached_static_tile_queue_key = null;
+  cached_static_tile_requests_by_slot = null;
+  cached_dynamic_tile_targets = null;
 }
 
 // Simple entity tag cache - populated from place data, updated via events
@@ -260,6 +301,11 @@ function invalidate_scene_place_cache(): void {
   let last_dom_viewport_ready = false;
   let last_camera_anchor_key: string | null = null;
   let last_dom_pending_swap_logged: string | null = null;
+  let pending_place_draw_wrapper_ms: number | null = null;
+  let last_rendered_place_breath_index: number | null = null;
+  let cached_static_tile_queue_key: string | null = null;
+  let cached_static_tile_requests_by_slot: RenderRequest[][] | null = null;
+  let cached_dynamic_tile_targets: CachedDynamicTileTarget[] | null = null;
 
 /**
  * Populate tag cache from place data
@@ -989,10 +1035,11 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     return rows;
   }
 
-  function sync_grid_cells_from_canvas(local: any, out: GridCell[][]): boolean {
+  function sync_grid_cells_from_canvas(local: any, out: GridCell[][]): { changed: boolean; changed_cell_count: number } {
     const h = local.height;
     const w = local.width;
     let changed = false;
+    let changed_cell_count = 0;
     for (let y = 0; y < h; y++) {
       const row = out[y];
       if (!row) continue;
@@ -1021,6 +1068,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           dst.rgb.b !== next_rgb.b
         ) {
           changed = true;
+          changed_cell_count += 1;
           dst.char = next_char;
           (dst as any).graphic = next_graphic;
           (dst as any).materials = next_materials;
@@ -1030,7 +1078,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         }
       }
     }
-    return changed;
+    return { changed, changed_cell_count };
   }
 
   // Derived dimensions (excluding border)
@@ -1376,7 +1424,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       connector_lookup,
     };
     scene_place_cache = next_cache;
-    if (SEAM_SCENE_DEBUG_ENABLED) {
+    if (seamSceneDebugEnabled()) {
       debug_log_place(`SEAM_SCENE visible ${JSON.stringify({ selected_place_id: selected_place.id, actor_current_place_id, hops_visible, visible_place_ids: visible_places.map((p) => p.id) })}`);
     }
     return next_cache;
@@ -2293,8 +2341,187 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
   function bps_to_tpm(bps: number): number {
     const breaths = Math.max(1, Math.floor(Number(bps) || 1));
-    const mspt = breaths * 33;
+    const mspt = breaths * BREATH_MS;
     return 60000 / mspt;
+  }
+
+  function payload_has_tag_name(payload: { tags?: any[] } | null | undefined, tag_name: string): boolean {
+    const target = String(tag_name).toUpperCase();
+    const tags = Array.isArray(payload?.tags) ? payload.tags : [];
+    return tags.some((tag: any) => String(tag?.name ?? '').toUpperCase() === target);
+  }
+
+  function build_place_connector_render_request(args: {
+    sx: number;
+    sy: number;
+    world_x: number;
+    world_y: number;
+    world_z: number;
+    center_world_z: number;
+    scene_base_z: number;
+    breath_index: number;
+  }): RenderRequest {
+    return {
+      pass: 'tile',
+      x: args.sx,
+      y: args.sy,
+      order: 8,
+      key: `border:${args.world_x},${args.world_y},${args.world_z}`,
+      payload: make_simple_tile_payload({
+        id: `border:${args.world_x},${args.world_y},${args.world_z}`,
+        def_id: 'place_connector',
+        char: '=',
+        tags: [{ name: 'CONNECTOR', mag: 1 }],
+        base_fg: get_color_by_name('off_white').rgb,
+        weight_index: 2,
+        render_shader: undefined,
+      }) as any,
+      ctx: ctx_place_tile({
+        screen_x: args.sx,
+        screen_y: args.sy,
+        place_x: args.world_x,
+        place_y: args.world_y,
+        world_x: args.world_x,
+        world_y: args.world_y,
+        world_z: args.world_z,
+        focus_world_z: args.center_world_z,
+        place_base_z: args.scene_base_z,
+        breath_index: args.breath_index,
+      }),
+    };
+  }
+
+  function build_place_tile_render_requests(args: {
+    place: Place;
+    scene_place: Place;
+    scene_base_z: number;
+    sx: number;
+    sy: number;
+    tile_x: number;
+    tile_y: number;
+    world_x: number;
+    world_y: number;
+    world_z: number;
+    local_world_z: number;
+    center_world_z: number;
+    breath_index: number;
+    semantic_view_direction: ReturnType<typeof get_atlas_view_direction>;
+    is_tile_container_open: (tile_x: number, tile_y: number, world_z: number) => boolean;
+  }): {
+    tile_request: RenderRequest | null;
+    container_request: RenderRequest | null;
+    has_connector_tag: boolean;
+    has_container_tag: boolean;
+    has_flora_tag: boolean;
+    has_render_shader: boolean;
+  } {
+    const tile = get_place_tile_at_world_z(args.scene_place, args.tile_x, args.tile_y, args.local_world_z);
+    if (!tile) {
+      return {
+        tile_request: null,
+        container_request: null,
+        has_connector_tag: false,
+        has_container_tag: false,
+        has_flora_tag: false,
+        has_render_shader: false,
+      };
+    }
+    const open = args.scene_place.id === args.place.id ? args.is_tile_container_open(args.tile_x, args.tile_y, args.local_world_z) : false;
+    const tile_state = { ...((tile as any).state ?? {}), open };
+    const display = get_tile_display(tile, args.tile_x, args.tile_y);
+    const tile_neighbors = get_tile_plane_neighbor_kinds(args.scene_place, args.tile_x, args.tile_y, args.local_world_z);
+    const has_connector_tag = tile_has_tag(tile, 'CONNECTOR');
+    const has_container_tag = tile_has_tag(tile, 'CONTAINER');
+    const has_flora_tag = payload_has_tag_name(tile as any, 'FLORA');
+    const has_render_shader = !!(tile as any).render_shader;
+    const weight_index = args.local_world_z < args.scene_base_z ? 0 : 1;
+    const key_prefix = has_connector_tag ? 'connector' : (args.local_world_z < args.scene_base_z ? 'tile_lower' : 'tile');
+    const tile_request: RenderRequest = {
+      pass: 'tile',
+      x: args.sx,
+      y: args.sy,
+      order: has_connector_tag ? 10 : 0,
+      key: `${key_prefix}:${args.scene_place.id}:${args.world_z}:${args.tile_x},${args.tile_y}`,
+      payload: make_simple_tile_payload({
+        id: `${key_prefix}:${args.scene_place.id}:${args.world_z}:${args.tile_x},${args.tile_y}`,
+        def_id: String(tile.kind ?? ''),
+        char: display.char,
+        graphics: (tile as any).graphics,
+        materials: (tile as any).materials ?? (tile as any).material_options?.defaults,
+        state: tile_state,
+        facing: (tile as any).facing,
+        tags: (tile as any).tags ?? [],
+        base_fg: hex_to_rgb(display.color),
+        weight_index: has_connector_tag ? 2 : weight_index,
+        render_shader: (tile as any).render_shader,
+      }) as any,
+      ctx: ctx_place_tile({
+        ui: { selected: open },
+        screen_x: args.sx,
+        screen_y: args.sy,
+        place_x: args.tile_x,
+        place_y: args.tile_y,
+        world_x: args.world_x,
+        world_y: args.world_y,
+        world_z: args.world_z,
+        focus_world_z: args.center_world_z,
+        place_base_z: args.scene_base_z,
+        breath_index: args.breath_index,
+        view_direction: args.semantic_view_direction,
+        tile_neighbors,
+      }),
+    };
+    let container_request: RenderRequest | null = null;
+    if (has_container_tag && args.scene_place.id === args.place.id && !(tile as any).graphics) {
+      const container_glyphs = (tile as any).container_glyphs;
+      let container_char = display.char;
+      if (container_glyphs && typeof container_glyphs === 'object') {
+        container_char = open ? container_glyphs.open : container_glyphs.closed;
+      }
+      container_request = {
+        pass: 'tile',
+        x: args.sx,
+        y: args.sy,
+        order: 5,
+        key: `tile_container:${args.scene_place.id}:${args.world_z}:${args.tile_x},${args.tile_y}`,
+        payload: make_simple_tile_payload({
+          id: `tile_container:${args.scene_place.id}:${args.world_z}:${args.tile_x},${args.tile_y}`,
+          def_id: String(tile.kind ?? ''),
+          char: container_char,
+          graphics: (tile as any).graphics,
+          materials: (tile as any).materials ?? (tile as any).material_options?.defaults,
+          state: tile_state,
+          facing: (tile as any).facing,
+          tags: (tile as any).tags ?? [],
+          base_fg: hex_to_rgb(display.color),
+          weight_index: 2,
+          render_shader: (tile as any).render_shader,
+        }) as any,
+        ctx: ctx_place_tile({
+          ui: { selected: open },
+          screen_x: args.sx,
+          screen_y: args.sy,
+          place_x: args.tile_x,
+          place_y: args.tile_y,
+          world_x: args.world_x,
+          world_y: args.world_y,
+          world_z: args.world_z,
+          focus_world_z: args.center_world_z,
+          place_base_z: args.scene_base_z,
+          breath_index: args.breath_index,
+          view_direction: args.semantic_view_direction,
+          tile_neighbors,
+        }),
+      };
+    }
+    return {
+      tile_request,
+      container_request,
+      has_connector_tag,
+      has_container_tag,
+      has_flora_tag,
+      has_render_shader,
+    };
   }
 
   function get_actor_walk_bps(actor_ref: string, mode: string): number | null {
@@ -2427,11 +2654,30 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   }
   
   // Check for entity movement and spawn footsteps
-  function check_entity_movement(place: Place) {
+  function check_entity_movement(place: Place): {
+    actors_seen: number;
+    npcs_seen: number;
+    moved_actor_count: number;
+    moved_npc_count: number;
+    scan_ms: number;
+    movement_particle_ms: number;
+    footstep_sfx_ms: number;
+    sense_broadcast_ms: number;
+    footstep_emit_count: number;
+    sense_broadcast_emit_count: number;
+  } {
     const center_world_z = get_world_z_center_for_place(place);
     const visible_planes_z = get_defined_scene_world_zs(place);
     const now_ms = Date.now();
     const MOVEMENT_RECENT_WINDOW_MS = 280;
+    let moved_actor_count = 0;
+    let moved_npc_count = 0;
+    let movement_particle_ms = 0;
+    let footstep_sfx_ms = 0;
+    let sense_broadcast_ms = 0;
+    let footstep_emit_count = 0;
+    let sense_broadcast_emit_count = 0;
+    const scan_started_at_ms = performance.now();
 
     // Check actors
     for (const actor of place.contents.actors_present) {
@@ -2439,20 +2685,23 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const az = get_entity_world_z(actor as any, center_world_z);
       const moved_this_frame = !!prev && (prev.x !== actor.tile_position.x || prev.y !== actor.tile_position.y || (prev.z ?? 0) !== az);
       if (moved_this_frame) {
+        moved_actor_count += 1;
         // Actor moved, spawn movement particle
+        const movement_particle_started_at_ms = performance.now();
         spawn_movement_particle(actor.tile_position);
+        movement_particle_ms += performance.now() - movement_particle_started_at_ms;
         recent_movement_seen_at.set(actor.actor_ref, now_ms);
 
         // Server-authoritative movement: do not persist actor position from renderer.
 
-        // Movement should create pressure broadcasts (footsteps)
+        // Temporary: footstep audio is disabled while audio is rebuilt around a queued system.
         const n = (movement_sound_step.get(actor.actor_ref) ?? 0) + 1;
         movement_sound_step.set(actor.actor_ref, n);
         if (n % 3 === 1) {
-          play_sfx('footstep_blip', { emitter_ref: actor.actor_ref, channel: 'sfx', cooldown_ms: footstep_cooldown_ms(300) });
           const profile = get_sense_profile("MOVE", get_move_mode());
           const pressure = profile?.broadcasts.find(b => b.sense === "pressure");
           const range = pressure?.range_tiles ?? 5;
+          const sense_broadcast_started_at_ms = performance.now();
           spawn_sense_broadcast_particles({
             origin: {
               x: actor.tile_position.x,
@@ -2464,6 +2713,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
             visible_planes_z,
             source_ref: actor.actor_ref,
           });
+          sense_broadcast_ms += performance.now() - sense_broadcast_started_at_ms;
+          sense_broadcast_emit_count += 1;
         }
       }
       const last_move_seen_ms = recent_movement_seen_at.get(actor.actor_ref) ?? 0;
@@ -2484,18 +2735,21 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const nz = get_entity_world_z(npc as any, center_world_z);
       const moved_this_frame = !!prev && (prev.x !== npc.tile_position.x || prev.y !== npc.tile_position.y || (prev.z ?? 0) !== nz);
       if (moved_this_frame) {
+        moved_npc_count += 1;
         // NPC moved, spawn movement particle
+        const movement_particle_started_at_ms = performance.now();
         spawn_movement_particle(npc.tile_position);
+        movement_particle_ms += performance.now() - movement_particle_started_at_ms;
         recent_movement_seen_at.set(npc.npc_ref, now_ms);
 
-        // Movement sound for NPCs (assume WALK for now)
+        // Temporary: footstep audio is disabled while audio is rebuilt around a queued system.
         const n = (movement_sound_step.get(npc.npc_ref) ?? 0) + 1;
         movement_sound_step.set(npc.npc_ref, n);
         if (n % 3 === 1) {
-          play_sfx('footstep_blip', { emitter_ref: npc.npc_ref, channel: 'sfx', cooldown_ms: footstep_cooldown_ms(300) });
           const profile = get_sense_profile("MOVE", "WALK");
           const pressure = profile?.broadcasts.find(b => b.sense === "pressure");
           const range = pressure?.range_tiles ?? 5;
+          const sense_broadcast_started_at_ms = performance.now();
           spawn_sense_broadcast_particles({
             origin: {
               x: npc.tile_position.x,
@@ -2507,6 +2761,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
             visible_planes_z,
             source_ref: npc.npc_ref,
           });
+          sense_broadcast_ms += performance.now() - sense_broadcast_started_at_ms;
+          sense_broadcast_emit_count += 1;
         }
       }
       const last_move_seen_ms = recent_movement_seen_at.get(npc.npc_ref) ?? 0;
@@ -2520,6 +2776,18 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         recent_movement_seen_at.delete(npc.npc_ref);
       }
     }
+    return {
+      actors_seen: place.contents.actors_present.length,
+      npcs_seen: place.contents.npcs_present.length,
+      moved_actor_count,
+      moved_npc_count,
+      scan_ms: Math.max(0, performance.now() - scan_started_at_ms - movement_particle_ms - footstep_sfx_ms - sense_broadcast_ms),
+      movement_particle_ms,
+      footstep_sfx_ms,
+      sense_broadcast_ms,
+      footstep_emit_count,
+      sense_broadcast_emit_count,
+    };
   }
 
   // Update particles (remove expired ones)
@@ -2538,7 +2806,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const now_ms = performance.now();
       if (dom_last_view_signature === null) dom_last_view_signature = configured_view_signature;
       if (dom_last_view_signature !== configured_view_signature) {
-        if (PLACE_CAMERA_DEBUG_ENABLED) {
+        if (placeCameraDebugEnabled()) {
           try {
             console.log('[PLACE_CAMERA_DEBUG] dom immediate swap', JSON.stringify({
               from: dom_last_view_signature,
@@ -2557,8 +2825,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         last_dom_pending_swap_logged = null;
       }
       const inner = inner_rect();
+      const camera_frame_started_at_ms = performance.now();
       const camera_frame = build_place_camera_frame(place, inner, transition_euler_frame, transition_kind);
-      if (PLACE_CAMERA_DEBUG_ENABLED && camera_frame.transition_active && (now_ms - last_transition_frame_log_ms) >= 16) {
+      if (placeCameraDebugEnabled() && camera_frame.transition_active && (now_ms - last_transition_frame_log_ms) >= 16) {
         last_transition_frame_log_ms = now_ms;
         try {
           console.log('[PLACE_CAMERA_DEBUG] render frame', JSON.stringify({
@@ -2589,9 +2858,25 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const timed_event_active = !!((place as any)?.timed_event_active);
       const timed_event_world_breath_index = Math.floor(Number((place as any)?.timed_event_world_breath_index ?? place_breath_index)) || 0;
       const breath_index = timed_event_active ? timed_event_world_breath_index : place_breath_index;
+      const breath_advanced_since_last_frame = last_rendered_place_breath_index !== null && breath_index !== last_rendered_place_breath_index;
       const scene_places = get_scene_places(place);
+      const render_perf_frame = begin_place_render_perf_frame({
+        place_id: String(place.id),
+        width,
+        height,
+        scene_places: scene_places.length,
+        plane_count: Math.max(1, camera_frame.visible_planes.length),
+        breath_index,
+        transition_active: camera_frame.transition_active,
+        transition_kind,
+        view_signature: camera_frame.view_signature,
+      });
+      if (pending_place_draw_wrapper_ms !== null) {
+        record_place_render_perf_phase(render_perf_frame, 'place_draw_wrapper_ms', pending_place_draw_wrapper_ms);
+      }
+      record_place_render_perf_phase(render_perf_frame, 'camera_frame_ms', performance.now() - camera_frame_started_at_ms);
 
-       // Visible plane coordinates depend on the principal view.
+        // Visible plane coordinates depend on the principal view.
        const center_world_z = get_world_z_center_for_place(place);
        const visible_planes_z = camera_frame.visible_planes;
         const base_z = get_place_base_z(place);
@@ -2620,163 +2905,319 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       canvas.fill_rect(inner, { char: " ", rgb: bg_rgb });
 
       // Spawn/update particles based on movement (used by later particle render pass).
-      check_entity_movement(place);
+      const movement_check_started_at_ms = performance.now();
+      const movement_stats = check_entity_movement(place);
+      record_place_render_perf_phase(render_perf_frame, 'check_entity_movement_ms', performance.now() - movement_check_started_at_ms);
+      record_place_render_perf_phase(render_perf_frame, 'check_entity_movement_scan_ms', movement_stats.scan_ms);
+      record_place_render_perf_phase(render_perf_frame, 'check_entity_movement_particle_ms', movement_stats.movement_particle_ms);
+      record_place_render_perf_phase(render_perf_frame, 'check_entity_movement_sfx_ms', movement_stats.footstep_sfx_ms);
+      record_place_render_perf_phase(render_perf_frame, 'check_entity_movement_broadcast_ms', movement_stats.sense_broadcast_ms);
+      set_place_render_perf_counter(render_perf_frame, 'actors_seen', movement_stats.actors_seen);
+      set_place_render_perf_counter(render_perf_frame, 'npcs_seen', movement_stats.npcs_seen);
+      set_place_render_perf_counter(render_perf_frame, 'moved_actor_count', movement_stats.moved_actor_count);
+      set_place_render_perf_counter(render_perf_frame, 'moved_npc_count', movement_stats.moved_npc_count);
+      set_place_render_perf_counter(render_perf_frame, 'footstep_emit_count', movement_stats.footstep_emit_count);
+      set_place_render_perf_counter(render_perf_frame, 'sense_broadcast_emit_count', movement_stats.sense_broadcast_emit_count);
 
-      for (const scene_place of scene_places) {
-        const scene_offset = get_scene_offset_tiles(place, scene_place);
-        const scene_base_z = get_place_base_z(scene_place);
+      const tile_pass_started_at_ms = performance.now();
+      const scene_place_render_meta = scene_places.map((scene_place) => {
+        const render_bounds = get_place_render_region_bounds(scene_place);
+        const render_min_z = render_bounds.origin.z;
+        const render_max_z = render_min_z + Math.max(1, render_bounds.size.z) - 1;
+        return {
+          scene_place,
+          scene_offset: get_scene_offset_tiles(place, scene_place),
+          scene_base_z: get_place_base_z(scene_place),
+          width: scene_place.tile_grid.width,
+          height: scene_place.tile_grid.height,
+          render_min_z,
+          render_max_z,
+        };
+      });
+      let tile_pass_border_cache_hits = 0;
+      let tile_pass_border_cache_misses = 0;
+      let tile_pass_render_content_cache_hits = 0;
+      let tile_pass_render_content_cache_misses = 0;
+      let tile_pass_tile_cache_hits = 0;
+      let tile_pass_tile_cache_misses = 0;
+      let tile_pass_connector_candidates = 0;
+      let tile_pass_projection_ms = 0;
+      let tile_pass_border_probe_ms = 0;
+      let tile_pass_border_enqueue_ms = 0;
+      let tile_pass_tile_lookup_ms = 0;
+      let tile_pass_tile_derive_ms = 0;
+      let tile_pass_tile_enqueue_ms = 0;
+      let tile_pass_container_overlay_ms = 0;
+      let tile_pass_cells_visited = 0;
+      let tile_pass_interior_cells = 0;
+      let tile_pass_border_hits = 0;
+      let tile_pass_connector_hits = 0;
+      let tile_pass_border_content_hits = 0;
+      let tile_pass_tile_count = 0;
+      let tile_pass_container_overlay_count = 0;
+      let tile_pass_flora_tile_count = 0;
+      let tile_pass_shader_tile_count = 0;
+      let tile_pass_breath_sensitive_tile_count = 0;
+      const static_tile_cache_key = JSON.stringify({
+        place_id: place.id,
+        view_signature: camera_frame.view_signature,
+        width,
+        height,
+        inner_x0: inner.x0,
+        inner_y0: inner.y0,
+        view_offset_x: Math.floor(view.offset_x),
+        view_offset_y: Math.floor(view.offset_y),
+        view_scale: view.scale,
+        visible_planes_z,
+        scene_place_ids: scene_places.map((scene_place) => scene_place.id),
+      });
+      const static_tile_cache_reused = cached_static_tile_queue_key === static_tile_cache_key
+        && Array.isArray(cached_static_tile_requests_by_slot)
+        && Array.isArray(cached_dynamic_tile_targets);
+      const scene_meta_by_place_id = new Map(scene_place_render_meta.map((scene_meta) => [scene_meta.scene_place.id, scene_meta]));
+      let tile_pass_static_request_count = 0;
+      let tile_pass_dynamic_target_count = 0;
 
-        for (const plane_value of visible_planes_z) {
-          const slot = slot_for_world_z(plane_value, visible_planes_z);
-          if (slot === null) continue;
-          const rq = q_for_slot(slot);
-
+      if (static_tile_cache_reused) {
+        const cached_requests = cached_static_tile_requests_by_slot ?? [];
+        for (let slot = 0; slot < plane_count; slot += 1) {
+          const requests = cached_requests[slot] ?? [];
+          tile_pass_static_request_count += requests.length;
+          if (requests.length > 0) q_for_slot(slot).push(...requests);
+        }
+        for (const target of cached_dynamic_tile_targets ?? []) {
+          const scene_meta = scene_meta_by_place_id.get(target.scene_place_id);
+          if (!scene_meta) continue;
+          tile_pass_dynamic_target_count += 1;
+          tile_pass_tile_lookup_ms += 0;
+          tile_pass_tile_cache_misses += 1;
+          const tile_pass_tile_derive_started_at_ms = performance.now();
+          const result = build_place_tile_render_requests({
+            place,
+            scene_place: scene_meta.scene_place,
+            scene_base_z: target.scene_base_z,
+            sx: target.sx,
+            sy: target.sy,
+            tile_x: target.tile_x,
+            tile_y: target.tile_y,
+            world_x: target.world_x,
+            world_y: target.world_y,
+            world_z: target.world_z,
+            local_world_z: target.local_world_z,
+            center_world_z,
+            breath_index,
+            semantic_view_direction,
+            is_tile_container_open,
+          });
+          tile_pass_tile_derive_ms += performance.now() - tile_pass_tile_derive_started_at_ms;
+          if (!result.tile_request) continue;
+          if (result.has_flora_tag) tile_pass_flora_tile_count += 1;
+          if (result.has_render_shader) tile_pass_shader_tile_count += 1;
+          if (result.has_flora_tag || result.has_render_shader) tile_pass_breath_sensitive_tile_count += 1;
+          tile_pass_tile_count += 1;
+          const rq = q_for_slot(target.slot);
+          const tile_pass_tile_enqueue_started_at_ms = performance.now();
+          if (target.kind === 'tile') {
+            rq.push(result.tile_request);
+          }
+          tile_pass_tile_enqueue_ms += performance.now() - tile_pass_tile_enqueue_started_at_ms;
+          if (target.kind === 'container' && result.container_request) {
+            tile_pass_container_overlay_count += 1;
+            const tile_pass_container_overlay_started_at_ms = performance.now();
+            rq.push(result.container_request);
+            tile_pass_container_overlay_ms += performance.now() - tile_pass_container_overlay_started_at_ms;
+          }
+        }
+      } else {
+        const projected_scene_tiles_by_plane = visible_planes_z.map((plane_value) => {
+          const projected_tiles: Array<{ scene_tile_x: number; scene_tile_y: number; world_z: number }> = [];
           for (let sy = inner.y0; sy <= inner.y1; sy++) {
             for (let sx = inner.x0; sx <= inner.x1; sx++) {
-              const scene_tile = view_to_scene_tile(place, Math.floor(view.offset_x + (sx - inner.x0) * view.scale), Math.floor(view.offset_y + (sy - inner.y0) * view.scale), plane_value);
-              const scene_tile_x = Math.floor(scene_tile.x);
-              const scene_tile_y = Math.floor(scene_tile.y);
-              const world_z = Math.floor(scene_tile.z);
-              const local_world_z = world_z - scene_offset.z;
-              const tile_x = scene_tile_x - scene_offset.x;
-              const tile_y = scene_tile_y - scene_offset.y;
+              const scene_tile = view_to_scene_tile(
+                place,
+                Math.floor(view.offset_x + (sx - inner.x0) * view.scale),
+                Math.floor(view.offset_y + (sy - inner.y0) * view.scale),
+                plane_value,
+              );
+              projected_tiles.push({
+                scene_tile_x: Math.floor(scene_tile.x),
+                scene_tile_y: Math.floor(scene_tile.y),
+                world_z: Math.floor(scene_tile.z),
+              });
+            }
+          }
+          return projected_tiles;
+        });
+        const next_static_tile_requests_by_slot: RenderRequest[][] = Array.from({ length: plane_count }, () => []);
+        const next_dynamic_tile_targets: CachedDynamicTileTarget[] = [];
+        for (const scene_meta of scene_place_render_meta) {
+          const { scene_place, scene_offset, scene_base_z, width: scene_width, height: scene_height, render_min_z, render_max_z } = scene_meta;
 
-              const border_hit = get_scene_border_cell(place, scene_place, scene_tile_x, scene_tile_y, world_z);
-              const connector_hit = get_scene_connector_at(place, scene_tile_x, scene_tile_y, world_z);
-              const is_interior_voxel = tile_x >= 0 && tile_x < scene_place.tile_grid.width && tile_y >= 0 && tile_y < scene_place.tile_grid.height;
-              const has_voxel_content = is_interior_voxel && voxel_has_render_content(scene_place, tile_x, tile_y, local_world_z);
-              if ((connector_hit || border_hit) && !has_voxel_content) {
-                rq.push({
-                  pass: 'tile',
-                  x: sx,
-                  y: sy,
-                  order: connector_hit ? 8 : -5,
-                  key: `border:${scene_tile_x},${scene_tile_y},${world_z}`,
-                  payload: make_simple_tile_payload({
-                    id: `border:${scene_tile_x},${scene_tile_y},${world_z}`,
-                    def_id: connector_hit ? 'place_connector' : 'place_border',
-                    char: connector_hit ? '=' : '_',
-                    tags: connector_hit ? [{ name: 'CONNECTOR', mag: 1 }] : [],
-                    base_fg: connector_hit
-                      ? get_color_by_name('off_white').rgb
-                      : ((border_hit?.is_corner ?? false) ? get_color_by_name('light_orange').rgb : (border_hit?.is_edge ?? false) ? get_color_by_name('medium_gray').rgb : get_color_by_name('dark_gray').rgb),
-                    weight_index: connector_hit ? 2 : 0,
-                    render_shader: undefined,
-                  }) as any,
-                  ctx: ctx_place_tile({
-                    screen_x: sx,
-                    screen_y: sy,
-                    place_x: tile_x,
-                    place_y: tile_y,
+          for (let slot = 0; slot < visible_planes_z.length; slot += 1) {
+            const rq = q_for_slot(slot);
+            const projected_scene_tiles = projected_scene_tiles_by_plane[slot] ?? [];
+            let projected_scene_tile_index = 0;
+
+            for (let sy = inner.y0; sy <= inner.y1; sy++) {
+              for (let sx = inner.x0; sx <= inner.x1; sx++) {
+                tile_pass_cells_visited += 1;
+                const tile_pass_projection_started_at_ms = performance.now();
+                const projected_scene_tile = projected_scene_tiles[projected_scene_tile_index++] ?? { scene_tile_x: 0, scene_tile_y: 0, world_z: visible_planes_z[slot] ?? 0 };
+                const scene_tile_x = projected_scene_tile.scene_tile_x;
+                const scene_tile_y = projected_scene_tile.scene_tile_y;
+                const world_z = projected_scene_tile.world_z;
+                const local_world_z = world_z - scene_offset.z;
+                const tile_x = scene_tile_x - scene_offset.x;
+                const tile_y = scene_tile_y - scene_offset.y;
+                tile_pass_projection_ms += performance.now() - tile_pass_projection_started_at_ms;
+
+                const tile_pass_border_probe_started_at_ms = performance.now();
+                const within_render_z = world_z >= render_min_z && world_z <= render_max_z;
+                const is_interior_voxel = tile_x >= 0 && tile_x < scene_width && tile_y >= 0 && tile_y < scene_height;
+                const is_border_candidate = tile_x >= -1 && tile_x <= scene_width && tile_y >= -1 && tile_y <= scene_height
+                  && (tile_x === -1 || tile_y === -1 || tile_x === scene_width || tile_y === scene_height)
+                  && within_render_z;
+                if (is_interior_voxel) tile_pass_interior_cells += 1;
+                let connector_hit: { place_id: string; connector: PlaceConnector } | null = null;
+                if (is_border_candidate) {
+                  tile_pass_connector_candidates += 1;
+                  tile_pass_border_cache_misses += 1;
+                  connector_hit = get_scene_connector_at(place, scene_tile_x, scene_tile_y, world_z);
+                  if (connector_hit) tile_pass_connector_hits += 1;
+                }
+                tile_pass_border_probe_ms += performance.now() - tile_pass_border_probe_started_at_ms;
+                if (connector_hit) {
+                  const connector_request = build_place_connector_render_request({
+                    sx,
+                    sy,
                     world_x: scene_tile_x,
                     world_y: scene_tile_y,
                     world_z,
-                    focus_world_z: center_world_z,
-                    place_base_z: scene_base_z,
+                    center_world_z,
+                    scene_base_z,
                     breath_index,
-                  }),
-                });
-              }
-
-              if (!is_interior_voxel) continue;
-              const tile = get_place_tile_at_world_z(scene_place, tile_x, tile_y, local_world_z);
-              if (!tile) continue;
-              const open = scene_place.id === place.id ? is_tile_container_open(tile_x, tile_y, local_world_z) : false;
-              const tile_state = { ...((tile as any).state ?? {}), open };
-              const display = get_tile_display(tile, tile_x, tile_y);
-              const tile_neighbors = get_tile_plane_neighbor_kinds(scene_place, tile_x, tile_y, local_world_z);
-              const has_connector_tag = tile_has_tag(tile, 'CONNECTOR');
-              const has_container_tag = tile_has_tag(tile, 'CONTAINER');
-              const world_xy = { x: scene_tile_x, y: scene_tile_y };
-              const weight_index = local_world_z < scene_base_z ? 0 : 1;
-              const key_prefix = has_connector_tag ? 'connector' : (local_world_z < scene_base_z ? 'tile_lower' : 'tile');
-              rq.push({
-                pass: 'tile',
-                x: sx,
-                y: sy,
-                order: has_connector_tag ? 10 : 0,
-                key: `${key_prefix}:${scene_place.id}:${world_z}:${tile_x},${tile_y}`,
-                payload: make_simple_tile_payload({
-                  id: `${key_prefix}:${scene_place.id}:${world_z}:${tile_x},${tile_y}`,
-                  def_id: String(tile.kind ?? ''),
-                  char: display.char,
-                  graphics: (tile as any).graphics,
-                  materials: (tile as any).materials ?? (tile as any).material_options?.defaults,
-                  state: tile_state,
-                  facing: (tile as any).facing,
-                  tags: (tile as any).tags ?? [],
-                  base_fg: hex_to_rgb(display.color),
-                  weight_index: has_connector_tag ? 2 : weight_index,
-                  render_shader: (tile as any).render_shader,
-                }) as any,
-                ctx: ctx_place_tile({
-                  ui: { selected: open },
-                  screen_x: sx,
-                  screen_y: sy,
-                  place_x: tile_x,
-                  place_y: tile_y,
-                  world_x: world_xy.x,
-                  world_y: world_xy.y,
-                  world_z,
-                  focus_world_z: center_world_z,
-                  place_base_z: scene_base_z,
-                  breath_index,
-                  view_direction: semantic_view_direction,
-                  tile_neighbors,
-                }),
-              });
-
-              if (has_container_tag && scene_place.id === place.id && !(tile as any).graphics) {
-                const container_glyphs = (tile as any).container_glyphs;
-                let container_char = display.char;
-                if (container_glyphs && typeof container_glyphs === 'object') {
-                  container_char = open ? container_glyphs.open : container_glyphs.closed;
+                  });
+                  const tile_pass_border_enqueue_started_at_ms = performance.now();
+                  rq.push(connector_request);
+                  next_static_tile_requests_by_slot[slot]!.push(connector_request);
+                  tile_pass_static_request_count += 1;
+                  tile_pass_border_enqueue_ms += performance.now() - tile_pass_border_enqueue_started_at_ms;
                 }
-                rq.push({
-                  pass: 'tile',
-                  x: sx,
-                  y: sy,
-                  order: 5,
-                  key: `tile_container:${scene_place.id}:${world_z}:${tile_x},${tile_y}`,
-                  payload: make_simple_tile_payload({
-                    id: `tile_container:${scene_place.id}:${world_z}:${tile_x},${tile_y}`,
-                    def_id: String(tile.kind ?? ''),
-                    char: container_char,
-                    graphics: (tile as any).graphics,
-                    materials: (tile as any).materials ?? (tile as any).material_options?.defaults,
-                    state: tile_state,
-                    facing: (tile as any).facing,
-                    tags: (tile as any).tags ?? [],
-                    base_fg: hex_to_rgb(display.color),
-                    weight_index: 2,
-                    render_shader: (tile as any).render_shader,
-                  }) as any,
-                  ctx: ctx_place_tile({
-                    ui: { selected: open },
-                    screen_x: sx,
-                    screen_y: sy,
-                    place_x: tile_x,
-                    place_y: tile_y,
-                    world_x: world_xy.x,
-                    world_y: world_xy.y,
-                    world_z,
-                    focus_world_z: center_world_z,
-                    place_base_z: scene_base_z,
-                    breath_index,
-                    view_direction: semantic_view_direction,
-                    tile_neighbors,
-                  }),
+
+                if (!is_interior_voxel) continue;
+                const tile_pass_tile_lookup_started_at_ms = performance.now();
+                tile_pass_tile_cache_misses += 1;
+                const result = build_place_tile_render_requests({
+                  place,
+                  scene_place,
+                  scene_base_z,
+                  sx,
+                  sy,
+                  tile_x,
+                  tile_y,
+                  world_x: scene_tile_x,
+                  world_y: scene_tile_y,
+                  world_z,
+                  local_world_z,
+                  center_world_z,
+                  breath_index,
+                  semantic_view_direction,
+                  is_tile_container_open,
                 });
+                tile_pass_tile_lookup_ms += performance.now() - tile_pass_tile_lookup_started_at_ms;
+                if (!result.tile_request) continue;
+                tile_pass_tile_count += 1;
+                if (result.has_flora_tag) tile_pass_flora_tile_count += 1;
+                if (result.has_render_shader) tile_pass_shader_tile_count += 1;
+                if (result.has_flora_tag || result.has_render_shader) tile_pass_breath_sensitive_tile_count += 1;
+                const is_dynamic_tile = result.has_flora_tag || result.has_render_shader || result.has_container_tag;
+                const tile_pass_tile_enqueue_started_at_ms = performance.now();
+                rq.push(result.tile_request);
+                if (is_dynamic_tile) {
+                  next_dynamic_tile_targets.push({
+                    kind: 'tile',
+                    slot,
+                    scene_place_id: scene_place.id,
+                    scene_base_z,
+                    sx,
+                    sy,
+                    tile_x,
+                    tile_y,
+                    world_x: scene_tile_x,
+                    world_y: scene_tile_y,
+                    world_z,
+                    local_world_z,
+                  });
+                  tile_pass_dynamic_target_count += 1;
+                } else {
+                  next_static_tile_requests_by_slot[slot]!.push(result.tile_request);
+                  tile_pass_static_request_count += 1;
+                }
+                tile_pass_tile_enqueue_ms += performance.now() - tile_pass_tile_enqueue_started_at_ms;
+
+                if (result.container_request) {
+                  tile_pass_container_overlay_count += 1;
+                  const tile_pass_container_overlay_started_at_ms = performance.now();
+                  rq.push(result.container_request);
+                  next_dynamic_tile_targets.push({
+                    kind: 'container',
+                    slot,
+                    scene_place_id: scene_place.id,
+                    scene_base_z,
+                    sx,
+                    sy,
+                    tile_x,
+                    tile_y,
+                    world_x: scene_tile_x,
+                    world_y: scene_tile_y,
+                    world_z,
+                    local_world_z,
+                  });
+                  tile_pass_dynamic_target_count += 1;
+                  tile_pass_container_overlay_ms += performance.now() - tile_pass_container_overlay_started_at_ms;
+                }
               }
             }
           }
         }
+        cached_static_tile_queue_key = static_tile_cache_key;
+        cached_static_tile_requests_by_slot = next_static_tile_requests_by_slot;
+        cached_dynamic_tile_targets = next_dynamic_tile_targets;
       }
+      record_place_render_perf_phase(render_perf_frame, 'tile_pass_ms', performance.now() - tile_pass_started_at_ms);
+      record_place_render_perf_phase(render_perf_frame, 'tile_pass_projection_ms', tile_pass_projection_ms);
+      record_place_render_perf_phase(render_perf_frame, 'tile_pass_border_probe_ms', tile_pass_border_probe_ms);
+      record_place_render_perf_phase(render_perf_frame, 'tile_pass_border_enqueue_ms', tile_pass_border_enqueue_ms);
+      record_place_render_perf_phase(render_perf_frame, 'tile_pass_tile_lookup_ms', tile_pass_tile_lookup_ms);
+      record_place_render_perf_phase(render_perf_frame, 'tile_pass_tile_derive_ms', tile_pass_tile_derive_ms);
+      record_place_render_perf_phase(render_perf_frame, 'tile_pass_tile_enqueue_ms', tile_pass_tile_enqueue_ms);
+      record_place_render_perf_phase(render_perf_frame, 'tile_pass_container_overlay_ms', tile_pass_container_overlay_ms);
+      set_place_render_perf_counter(render_perf_frame, 'tile_pass_cells_visited', tile_pass_cells_visited);
+      set_place_render_perf_counter(render_perf_frame, 'tile_pass_interior_cells', tile_pass_interior_cells);
+      set_place_render_perf_counter(render_perf_frame, 'tile_pass_border_hits', tile_pass_border_hits);
+      set_place_render_perf_counter(render_perf_frame, 'tile_pass_connector_hits', tile_pass_connector_hits);
+      set_place_render_perf_counter(render_perf_frame, 'tile_pass_border_content_hits', tile_pass_border_content_hits);
+      set_place_render_perf_counter(render_perf_frame, 'tile_pass_tile_count', tile_pass_tile_count);
+      set_place_render_perf_counter(render_perf_frame, 'tile_pass_container_overlay_count', tile_pass_container_overlay_count);
+      set_place_render_perf_counter(render_perf_frame, 'tile_pass_flora_tile_count', tile_pass_flora_tile_count);
+      set_place_render_perf_counter(render_perf_frame, 'tile_pass_shader_tile_count', tile_pass_shader_tile_count);
+      set_place_render_perf_counter(render_perf_frame, 'tile_pass_breath_sensitive_tile_count', tile_pass_breath_sensitive_tile_count);
+      set_place_render_perf_counter(render_perf_frame, 'tile_pass_static_cache_reused', static_tile_cache_reused);
+      set_place_render_perf_counter(render_perf_frame, 'tile_pass_static_request_count', tile_pass_static_request_count);
+      set_place_render_perf_counter(render_perf_frame, 'tile_pass_dynamic_target_count', tile_pass_dynamic_target_count);
+      set_place_render_perf_counter(render_perf_frame, 'tile_pass_connector_candidates', tile_pass_connector_candidates);
+      set_place_render_perf_counter(render_perf_frame, 'tile_pass_border_cache_hits', tile_pass_border_cache_hits);
+      set_place_render_perf_counter(render_perf_frame, 'tile_pass_border_cache_misses', tile_pass_border_cache_misses);
+      set_place_render_perf_counter(render_perf_frame, 'tile_pass_render_content_cache_hits', tile_pass_render_content_cache_hits);
+      set_place_render_perf_counter(render_perf_frame, 'tile_pass_render_content_cache_misses', tile_pass_render_content_cache_misses);
+      set_place_render_perf_counter(render_perf_frame, 'tile_pass_tile_cache_hits', tile_pass_tile_cache_hits);
+      set_place_render_perf_counter(render_perf_frame, 'tile_pass_tile_cache_misses', tile_pass_tile_cache_misses);
 
     // Track occupied voxels by world layer slot (for correct item/entity overlap behavior).
     const character_occupied = new Set<string>(); // `${slot}:${tile_x}_${tile_y}`
 
     // Render explicit multi-voxel structures.
+    const structure_pass_started_at_ms = performance.now();
     {
       const structs: any[] = (place as any)?.structures ?? [];
       for (const s of structs) {
@@ -2883,12 +3324,14 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         }
       }
     }
+    record_place_render_perf_phase(render_perf_frame, 'structure_pass_ms', performance.now() - structure_pass_started_at_ms);
 
     // Walls/doors come from place.tiles; no extra border drawing here.
 
     // (Movement already checked above; avoid double-spawning.)
     
     // Update debug visuals for all visible scene characters.
+    const debug_visuals_started_at_ms = performance.now();
     const blocks_los_at = (x: number, y: number, world_z: number): boolean => {
       return place_voxel_blocks_los(place as any, x, y, world_z);
     };
@@ -2916,8 +3359,10 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         update_npc_debug_visuals(actor.actor_ref, actor_position, actor_facing, false, visible_planes_z, blocks_los_at, (actor as any).tags);
       }
     }
+    record_place_render_perf_phase(render_perf_frame, 'debug_visuals_ms', performance.now() - debug_visuals_started_at_ms);
     
     // Update particles (path visualization and effects), but enqueue them to draw later.
+    const particle_pass_started_at_ms = performance.now();
     update_particles();
     for (const p of particles) {
       const wz = Number.isFinite(Number(p.world_z)) ? Math.floor(Number(p.world_z)) : DEFAULT_FOCUS_Z;
@@ -2949,8 +3394,10 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         });
       }
     }
+    record_place_render_perf_phase(render_perf_frame, 'particle_pass_ms', performance.now() - particle_pass_started_at_ms);
 
     // Enqueue characters into the correct visible world layer.
+    const character_pass_started_at_ms = performance.now();
     {
       type EntityEntry = {
         scene_place: Place;
@@ -3119,11 +3566,74 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       };
 
       for (const e of chosen) enqueue_entity(e);
+
+      if (rendererSceneMotionDiagEnabled() && renderer_scene_motion_diag_frames_remaining > 0) {
+        const controlled_actor_ref = String(config.get_controlled_actor_ref?.() ?? '').trim();
+        const tracked = chosen
+          .map((ent) => {
+            const scene_tile_x = ent.tile_x0 + ent.scene_offset.x;
+            const scene_tile_y = ent.tile_y0 + ent.scene_offset.y;
+            const projected = scene_to_screen(place, scene_tile_x, scene_tile_y, ent.wz0, inner);
+            const prev = renderer_scene_motion_diag_last_snapshot.get(ent.ref) ?? null;
+            return {
+              ref: ent.ref,
+              kind: ent.is_npc ? 'npc' : 'actor',
+              world_x: scene_tile_x,
+              world_y: scene_tile_y,
+              world_z: ent.wz0,
+              screen_x: projected.x,
+              screen_y: projected.y,
+              world_dx: prev ? scene_tile_x - prev.world_x : 0,
+              world_dy: prev ? scene_tile_y - prev.world_y : 0,
+              world_dz: prev ? ent.wz0 - prev.world_z : 0,
+              screen_dx: prev ? projected.x - prev.screen_x : 0,
+              screen_dy: prev ? projected.y - prev.screen_y : 0,
+              distance_from_controlled: controlled_actor_ref
+                ? Math.abs(scene_tile_x - (chosen.find((item) => item.ref === controlled_actor_ref)?.tile_x0 ?? scene_tile_x)) + Math.abs(scene_tile_y - (chosen.find((item) => item.ref === controlled_actor_ref)?.tile_y0 ?? scene_tile_y))
+                : 999,
+            };
+          })
+          .sort((a, b) => {
+            const ac = a.ref === controlled_actor_ref ? -1 : 0;
+            const bc = b.ref === controlled_actor_ref ? -1 : 0;
+            if (ac !== bc) return ac - bc;
+            return a.distance_from_controlled - b.distance_from_controlled;
+          })
+          .slice(0, RENDERER_SCENE_MOTION_DIAG_ENTITY_LIMIT);
+
+        const nextSnapshot = new Map<string, { world_x: number; world_y: number; world_z: number; screen_x: number; screen_y: number }>();
+        for (const item of tracked) {
+          nextSnapshot.set(item.ref, {
+            world_x: item.world_x,
+            world_y: item.world_y,
+            world_z: item.world_z,
+            screen_x: item.screen_x,
+            screen_y: item.screen_y,
+          });
+        }
+        renderer_scene_motion_diag_last_snapshot = nextSnapshot;
+
+        debug_log_place(`RENDERER_SCENE_DIAG frame ${JSON.stringify({
+          place_id: place.id,
+          breath_index,
+          trigger: renderer_scene_motion_diag_trigger,
+          camera_anchor_world: camera_frame.anchor_world,
+          focus_world_plane: camera_frame.focus_world_plane,
+          controlled_actor_ref: controlled_actor_ref || null,
+          tracked,
+        })}`);
+        renderer_scene_motion_diag_frames_remaining = Math.max(0, renderer_scene_motion_diag_frames_remaining - 1);
+        if (renderer_scene_motion_diag_frames_remaining === 0) {
+          renderer_scene_motion_diag_trigger = null;
+        }
+      }
     }
+    record_place_render_perf_phase(render_perf_frame, 'character_pass_ms', performance.now() - character_pass_started_at_ms);
 
       // Draw items on ground (tabletop UX)
       // - Exactly 1 item on a tile: draw the item (qty-based glyph)
       // - 2+ items on a tile: draw a pile glyph (single interaction target)
+      const ground_item_pass_started_at_ms = performance.now();
       for (const scene_place of scene_places) {
         const scene_offset = get_scene_offset_tiles(place, scene_place);
         const scene_base_z = get_place_base_z(scene_place);
@@ -3326,9 +3836,11 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           });
         }
       }
+      record_place_render_perf_phase(render_perf_frame, 'ground_item_pass_ms', performance.now() - ground_item_pass_started_at_ms);
 
     // System/UI overlays are queued as the final pass.
 
+    const ui_pass_started_at_ms = performance.now();
     // Target highlight (follows entity movement).
     const target_pos = get_target_current_position(place);
     if (target_pos && targeted) {
@@ -3766,11 +4278,27 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           }
         }
       }
+      record_place_render_perf_phase(render_perf_frame, 'ui_pass_ms', performance.now() - ui_pass_started_at_ms);
+
+      const rq_layer_counts = rq_layers.map((layer) => layer.length);
+      const rq_total_count = rq_ui.length + rq_layer_counts.reduce((sum, count) => sum + count, 0);
+      set_place_render_perf_counter(render_perf_frame, 'rq_ui_count', rq_ui.length);
+      set_place_render_perf_counter(render_perf_frame, 'rq_total_count', rq_total_count);
+      set_place_render_perf_counter(render_perf_frame, 'visible_width', width);
+      set_place_render_perf_counter(render_perf_frame, 'visible_height', height);
+      set_place_render_perf_counter(render_perf_frame, 'focused_world_z', visible_planes_z[Math.max(0, Math.min(visible_planes_z.length - 1, camera_frame.focus_slot))] ?? null);
+      set_place_render_perf_counter(render_perf_frame, 'timed_event_active', timed_event_active);
+      set_place_render_perf_counter(render_perf_frame, 'dom_pending_view_swap', !!dom_pending_view_signature && dom_pending_view_signature !== dom_last_view_signature);
+      set_place_render_perf_counter(render_perf_frame, 'rq_layer_counts', JSON.stringify(rq_layer_counts));
+
+      const ui_draw_started_at_ms = performance.now();
       draw_render_queue(canvas, rq_ui, { now_ms: Date.now(), pass_order: ['ui'], character_flash_period_ms: 240 });
+      record_place_render_perf_phase(render_perf_frame, 'ui_draw_ms', performance.now() - ui_draw_started_at_ms);
 
     // World layers render into DOM canvases clipped to the place inner rect.
     const focus_z = camera_frame.focus_slot;
 
+    const dom_prepare_started_at_ms = performance.now();
      // Phase 0.5: explicit ownership heartbeat (prevents stale layers when place isn't drawn).
      touch_world_layers_owner('place');
 
@@ -3901,6 +4429,10 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const vp = camera_frame.viewport_px;
 
       if (!vp) {
+        record_place_render_perf_phase(render_perf_frame, 'dom_prepare_ms', performance.now() - dom_prepare_started_at_ms);
+        set_place_render_perf_counter(render_perf_frame, 'dom_viewport_ready', false);
+        finish_place_render_perf_frame(render_perf_frame);
+        last_rendered_place_breath_index = breath_index;
         render_view_state_override = null;
         return;
       }
@@ -3910,7 +4442,14 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       dom_layers.set_camera_pan(0, 0);
       const defer_dom_content_swap = !!dom_pending_view_signature && dom_pending_view_signature !== dom_last_view_signature;
       if (defer_dom_content_swap) {
+        record_place_render_perf_phase(render_perf_frame, 'dom_prepare_ms', performance.now() - dom_prepare_started_at_ms);
+        set_place_render_perf_counter(render_perf_frame, 'dom_viewport_ready', true);
+        set_place_render_perf_counter(render_perf_frame, 'defer_dom_content_swap', true);
+        const deferred_dom_render_started_at_ms = performance.now();
         dom_layers.render();
+        record_place_render_perf_phase(render_perf_frame, 'dom_render_ms', performance.now() - deferred_dom_render_started_at_ms);
+        finish_place_render_perf_frame(render_perf_frame);
+        last_rendered_place_breath_index = breath_index;
         dom_last_place_id = place.id;
         render_view_state_override = null;
         return;
@@ -3960,21 +4499,45 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         set: (x: number, y: number, cell: Cell) => local.set(x - inner.x0, y - inner.y0, cell),
         get: (x: number, y: number) => local.get(x - inner.x0, y - inner.y0),
       });
+      record_place_render_perf_phase(render_perf_frame, 'dom_prepare_ms', performance.now() - dom_prepare_started_at_ms);
+      set_place_render_perf_counter(render_perf_frame, 'dom_viewport_ready', true);
+      set_place_render_perf_counter(render_perf_frame, 'buffers_rebuilt', buffers_rebuilt);
 
       // Partition particles by world_z.
       // (Other passes are already split at enqueue time.)
       const changed_layers: boolean[] = [];
+      const dom_draw_layers_started_at_ms = performance.now();
+      let dom_sync_layers_total_ms = 0;
+      let changed_cell_count_total = 0;
       for (let slot = 0; slot < plane_count; slot += 1) {
         const off = dom_off_layers[slot]!;
+        const layer_draw_started_at_ms = performance.now();
         draw_render_queue(wrap(off) as any, rq_layers[slot]!, { now_ms: Date.now(), pass_order: ['tile', 'item', 'character', 'particle'], character_flash_period_ms: 240 });
-        const changed = sync_grid_cells_from_canvas(off, dom_cells_layers[slot]!);
-        changed_layers.push(changed);
-        if (changed) dom_cells_versions[slot] = (dom_cells_versions[slot] ?? 0) + 1;
+        const layer_draw_ms = performance.now() - layer_draw_started_at_ms;
+        const layer_sync_started_at_ms = performance.now();
+        const sync_result = sync_grid_cells_from_canvas(off, dom_cells_layers[slot]!);
+        const layer_sync_ms = performance.now() - layer_sync_started_at_ms;
+        dom_sync_layers_total_ms += layer_sync_ms;
+        changed_cell_count_total += sync_result.changed_cell_count;
+        changed_layers.push(sync_result.changed);
+        if (sync_result.changed) dom_cells_versions[slot] = (dom_cells_versions[slot] ?? 0) + 1;
+        record_place_render_perf_layer(render_perf_frame, {
+          slot,
+          rq_count: rq_layers[slot]?.length ?? 0,
+          draw_render_queue_ms: layer_draw_ms,
+          sync_grid_cells_ms: layer_sync_ms,
+          changed: sync_result.changed,
+          changed_cell_count: sync_result.changed_cell_count,
+          content_version: dom_cells_versions[slot] ?? null,
+        });
       }
+      record_place_render_perf_phase(render_perf_frame, 'dom_draw_layers_ms', performance.now() - dom_draw_layers_started_at_ms);
+      record_place_render_perf_phase(render_perf_frame, 'dom_sync_layers_ms', dom_sync_layers_total_ms);
 
       // Only notify DOM layers when content changes (renderer still updates transforms every frame).
       // When buffers are (re)allocated, bind them to layers at least once.
       const pushed_slots: number[] = [];
+      const dom_push_layers_started_at_ms = performance.now();
       for (let slot = 0; slot < plane_count; slot += 1) {
         if (buffers_rebuilt || changed_layers[slot]) {
           dom_layers.set_layer_cells(slot, dom_cells_layers[slot]!, dom_cells_versions[slot]);
@@ -4005,7 +4568,24 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           }
         }
       }
+      record_place_render_perf_phase(render_perf_frame, 'dom_push_layers_ms', performance.now() - dom_push_layers_started_at_ms);
+      const changed_layer_count = changed_layers.filter(Boolean).length;
+      const movement_active_frame = movement_stats.moved_actor_count > 0 || movement_stats.moved_npc_count > 0;
+      const static_breath_churn_frame = breath_advanced_since_last_frame && !movement_active_frame;
+      set_place_render_perf_counter(render_perf_frame, 'breath_advanced_since_last_frame', breath_advanced_since_last_frame);
+      set_place_render_perf_counter(render_perf_frame, 'movement_active_frame', movement_active_frame);
+      set_place_render_perf_counter(render_perf_frame, 'static_breath_churn_frame', static_breath_churn_frame);
+      set_place_render_perf_counter(render_perf_frame, 'changed_layer_count', changed_layer_count);
+      set_place_render_perf_counter(render_perf_frame, 'pushed_layer_count', pushed_slots.length);
+      set_place_render_perf_counter(render_perf_frame, 'changed_layers', JSON.stringify(changed_layers));
+      set_place_render_perf_counter(render_perf_frame, 'pushed_slots', JSON.stringify(pushed_slots));
+      set_place_render_perf_counter(render_perf_frame, 'static_breath_changed_layer_count', static_breath_churn_frame ? changed_layer_count : 0);
+      set_place_render_perf_counter(render_perf_frame, 'static_breath_changed_cell_count', static_breath_churn_frame ? changed_cell_count_total : 0);
+      const dom_render_started_at_ms = performance.now();
       dom_layers.render();
+      record_place_render_perf_phase(render_perf_frame, 'dom_render_ms', performance.now() - dom_render_started_at_ms);
+      finish_place_render_perf_frame(render_perf_frame);
+      last_rendered_place_breath_index = breath_index;
 
       dom_last_place_id = place.id;
       render_view_state_override = null;
@@ -4298,7 +4878,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         z: lastControlledActorStep.z,
         seq: lastControlledActorStep.seq,
       });
-      if (RENDERER_MOVE_BATCH_TRACE_ENABLED && lastControlledActorElevationChange) {
+      if (rendererMoveBatchTraceEnabled() && lastControlledActorElevationChange) {
         console.log(
           '[MOVE_UNIFY_TEST] renderer applied local actor elevation change ' +
             JSON.stringify({
@@ -4313,7 +4893,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         );
       }
       const nowMs = Date.now();
-      if (RENDERER_MOVE_BATCH_TRACE_ENABLED) {
+      if (rendererMoveBatchTraceEnabled()) {
         console.log(
           `[MOVE_VEL_TEST] renderer applied local move ${source} ` +
             JSON.stringify({
@@ -4336,6 +4916,16 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         apply_duration_ms: Math.max(0, Date.now() - apply_started_at_ms),
         last_controlled_seq: lastControlledActorStep.seq,
       })}`);
+      arm_renderer_scene_motion_diag({
+        source,
+        place_id: place.id,
+        controlled_actor_ref: lastControlledActorStep.actor_ref,
+        x: lastControlledActorStep.x,
+        y: lastControlledActorStep.y,
+        z: lastControlledActorStep.z,
+        seq: lastControlledActorStep.seq,
+        sent_at_ms: Number(sent_at_ms ?? 0) || null,
+      });
     }
 
     return {
@@ -4391,6 +4981,15 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         actor_ref: controlled_actor_ref || null,
         raw_update_count: raw_updates.length,
         filtered_update_count: updates.length,
+        sample_filtered_updates: updates.slice(0, 3).map((update: any) => ({
+          entity_ref: String(update?.entity_ref ?? ''),
+          place_id: String(update?.place_id ?? ''),
+          x: Math.floor(Number(update?.x ?? 0)) || 0,
+          y: Math.floor(Number(update?.y ?? 0)) || 0,
+          z: typeof update?.z === 'number' && Number.isFinite(update.z) ? Math.floor(update.z) : null,
+          seq: typeof update?.seq === 'number' && Number.isFinite(update.seq) ? Math.floor(update.seq) : null,
+          breath_index: typeof update?.breath_index === 'number' && Number.isFinite(update.breath_index) ? Math.floor(update.breath_index) : null,
+        })),
         sent_at_ms: Number(msg?.sent_at_ms ?? 0) || null,
         handler_started_at_ms,
         handler_finished_at_ms: Date.now(),
@@ -4612,6 +5211,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
 // Draw callback for PlaceModule - renders the place with all entities and effects
     Draw(canvas: Canvas): void {
+      const place_draw_started_at_ms = performance.now();
       const place = config.get_place();
 
       const { width: view_w, height: view_h } = inner_size();
@@ -4752,8 +5352,10 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       // Unified movement engine handles all position updates
       // Just need to render the current state
       try {
+        pending_place_draw_wrapper_ms = Math.max(0, performance.now() - place_draw_started_at_ms);
         draw_place(canvas, place);
       } finally {
+        pending_place_draw_wrapper_ms = null;
         current_draw_transition_frame = null;
       }
     },

@@ -36,6 +36,7 @@ interface ElectronAPI {
   getAsciiDrawingsDir?: () => Promise<string>;
   showOpenDialog?: (options: any) => Promise<any>;
   appMode?: string;
+  dataSlot?: number;
   startupBootMode?: 'manual_shell' | 'direct_runtime' | 'tas_runtime' | string;
   toolAssistedInputsBootConfig?: {
     enabled?: boolean;

@@ -56,6 +56,37 @@ export type ToolPropertyRow =
       on_cycle: () => void;
     }
   | {
+      type: 'single_toggle';
+      id: string;
+      label: string;
+      value: boolean;
+      enabled?: boolean;
+      on_toggle: () => void;
+    }
+  | {
+      type: 'single_stepper';
+      id: string;
+      label: string;
+      value: string;
+      enabled?: boolean;
+      on_decrement: () => void;
+      on_increment: () => void;
+    }
+  | {
+      type: 'edit_channel_matrix';
+      id: string;
+      columns: Array<{
+        id: string;
+        label: string;
+        shortcut: string;
+        left_value: boolean;
+        right_value: boolean;
+        left_enabled?: boolean;
+        right_enabled?: boolean;
+      }>;
+      on_toggle: (side: 'left' | 'right' | 'both', column_id: string) => void;
+    }
+  | {
       type: 'info';
       id: string;
       text: string;
@@ -365,7 +396,16 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
   }
 
   function get_property_row_height(row: ToolPropertyRow): number {
-    return row.type === 'dual_slider' ? 3 : 1;
+    if (row.type === 'dual_slider' || row.type === 'edit_channel_matrix') return 3;
+    return 1;
+  }
+
+  function is_on_property_stepper_minus(x: number): boolean {
+    return x === rect.x1 - 3;
+  }
+
+  function is_on_property_stepper_plus(x: number): boolean {
+    return x === rect.x1 - 1;
   }
 
   function should_render_property_rows(): boolean {
@@ -386,6 +426,23 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
   function get_property_side_from_x(x: number): 'left' | 'right' | null {
     if (x >= rect.x0 + 15 && x <= rect.x0 + 17) return 'left';
     if (x >= rect.x0 + 19 && x <= rect.x0 + 21) return 'right';
+    return null;
+  }
+
+  function get_edit_channel_matrix_hit(row: Extract<ToolPropertyRow, { type: 'edit_channel_matrix' }>, x: number, y: number, top_y: number): { side: 'left' | 'right' | 'both'; column_id: string } | null {
+    const toggle_y = top_y - 1;
+    if (y !== toggle_y) return null;
+    const inner_width = Math.max(1, rect.x1 - rect.x0 - 3);
+    const col_width = Math.max(5, Math.floor(inner_width / Math.max(1, row.columns.length)));
+    const start_x = rect.x0 + 2;
+    for (let i = 0; i < row.columns.length; i += 1) {
+      const column = row.columns[i]!;
+      const col_x = start_x + (i * col_width);
+      const toggle_x = col_x + Math.max(0, Math.floor((col_width - 5) / 2));
+      if (x === toggle_x) return { side: 'left', column_id: column.id };
+      if (x === toggle_x + 2) return { side: 'right', column_id: column.id };
+      if (x === toggle_x + 4) return { side: 'both', column_id: column.id };
+    }
     return null;
   }
 
@@ -427,8 +484,196 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
       // Fill background
       c.fill_rect(rect, { char: ' ', rgb: bg_color, style: 'regular' });
 
+      if (should_render_property_rows()) {
+        const rows = get_property_rows();
+        const active_side = opts.get_active_side?.() ?? 'left';
+        const header = '            L   R';
+        for (let i = 0; i < header.length; i++) {
+          c.set(rect.x0 + 1 + i, rect.y1 - 2, {
+            char: header[i]!,
+            rgb: text_color,
+            style: 'regular',
+            weight_index: 2,
+          });
+        }
+        let cursor_y = rect.y1 - 3;
+        for (let i = 0; i < rows.length; i++) {
+          const row = rows[i]!;
+          const y = cursor_y;
+          if (y <= rect.y0) break;
+          if (row.type === 'dual_toggle') {
+            const label = row.note ? `${row.label} ${row.note}` : row.label;
+            const label_rgb = row.note ? get_color_by_name('medium_gray').rgb : text_color;
+            for (let j = 0; j < label.length && rect.x0 + 2 + j < rect.x0 + 14 && rect.x0 + 2 + j < rect.x1; j++) {
+              c.set(rect.x0 + 2 + j, y, {
+                char: label[j]!,
+                rgb: label_rgb,
+                style: 'regular',
+                weight_index: 2,
+              });
+            }
+            const left_text = row.left_enabled === false ? ' - ' : (row.left_value ? '[x]' : '[ ]');
+            const right_text = row.right_enabled === false ? ' - ' : (row.right_value ? '[x]' : '[ ]');
+            const left_rgb = active_side === 'left' ? get_color_by_name('vivid_blue').rgb : text_color;
+            const right_rgb = active_side === 'right' ? get_color_by_name('vivid_red').rgb : text_color;
+            for (let j = 0; j < left_text.length; j++) {
+              c.set(rect.x0 + 15 + j, y, { char: left_text[j]!, rgb: left_rgb, style: 'regular', weight_index: 2 });
+            }
+            for (let j = 0; j < right_text.length; j++) {
+              c.set(rect.x0 + 19 + j, y, { char: right_text[j]!, rgb: right_rgb, style: 'regular', weight_index: 2 });
+            }
+          } else if (row.type === 'dual_slider') {
+            const value_label = row.format_value
+              ? `L:${row.format_value(row.left_value)} R:${row.format_value(row.right_value)}`
+              : `L:${row.left_value} R:${row.right_value}`;
+            const label_x = Math.floor((rect.x0 + rect.x1 - value_label.length) / 2);
+            for (let j = 0; j < value_label.length && label_x + j < rect.x1; j++) {
+              c.set(label_x + j, y, {
+                char: value_label[j]!,
+                rgb: text_color,
+                style: 'regular',
+                weight_index: 2,
+              });
+            }
+            const slider_y = y - 1;
+            if (slider_y <= rect.y0) continue;
+            const slider_start_x = rect.x0 + 3;
+            const slider_end_x = rect.x1 - 3;
+            for (let sx = slider_start_x; sx <= slider_end_x; sx++) {
+              c.set(sx, slider_y, { char: '─', rgb: slider_bg, style: 'regular', weight_index: 1 });
+            }
+            const denom = Math.max(1, row.max - row.min);
+            for (let value = row.min; value <= row.max; value++) {
+              const ratio = (value - row.min) / denom;
+              const marker_x = Math.round(slider_start_x + ratio * (slider_end_x - slider_start_x));
+              const is_left = value === row.left_value;
+              const is_right = value === row.right_value;
+              c.set(marker_x, slider_y, {
+                char: is_left && is_right ? '◆' : (is_left || is_right) ? '●' : '○',
+                rgb: is_left || is_right ? slider_fg : slider_bg,
+                style: 'regular',
+                weight_index: is_left || is_right ? 2 : 1,
+              });
+              if (is_left || is_right) {
+                c.set(marker_x, slider_y - 1, {
+                  char: is_left && is_right ? 'B' : is_left ? 'L' : 'R',
+                  rgb: is_left && is_right
+                    ? get_color_by_name('vivid_yellow').rgb
+                    : is_left
+                      ? get_color_by_name('vivid_blue').rgb
+                      : get_color_by_name('vivid_red').rgb,
+                  style: 'regular',
+                  weight_index: 2,
+                });
+              }
+            }
+          } else if (row.type === 'single_cycle') {
+            const label = `${row.label}:`;
+            const value = row.options && row.options.length > 0
+              ? `[${row.value}]`
+              : row.value;
+            const label_rgb = row.enabled === false ? get_color_by_name('medium_gray').rgb : text_color;
+            const value_rgb = row.enabled === false ? get_color_by_name('dark_gray').rgb : get_color_by_name('vivid_yellow').rgb;
+            for (let j = 0; j < label.length && rect.x0 + 2 + j < rect.x1; j++) {
+              c.set(rect.x0 + 2 + j, y, {
+                char: label[j]!,
+                rgb: label_rgb,
+                style: 'regular',
+                weight_index: 2,
+              });
+            }
+            const value_x = Math.min(rect.x1 - value.length - 1, rect.x0 + 2 + label.length + 1);
+            for (let j = 0; j < value.length && value_x + j < rect.x1; j++) {
+              c.set(value_x + j, y, {
+                char: value[j]!,
+                rgb: value_rgb,
+                style: 'regular',
+                weight_index: 2,
+              });
+            }
+          } else if (row.type === 'single_toggle') {
+            const label_rgb = row.enabled === false ? get_color_by_name('medium_gray').rgb : text_color;
+            const value_rgb = row.enabled === false ? get_color_by_name('dark_gray').rgb : get_color_by_name('vivid_yellow').rgb;
+            const label = row.label;
+            const value = row.value ? '[x]' : '[ ]';
+            for (let j = 0; j < label.length && rect.x0 + 2 + j < rect.x1; j++) {
+              c.set(rect.x0 + 2 + j, y, { char: label[j]!, rgb: label_rgb, style: 'regular', weight_index: 2 });
+            }
+            const value_x = Math.min(rect.x1 - value.length - 1, rect.x0 + 14);
+            for (let j = 0; j < value.length && value_x + j < rect.x1; j++) {
+              c.set(value_x + j, y, { char: value[j]!, rgb: value_rgb, style: 'regular', weight_index: 2 });
+            }
+          } else if (row.type === 'single_stepper') {
+            const label_rgb = row.enabled === false ? get_color_by_name('medium_gray').rgb : text_color;
+            const value_rgb = row.enabled === false ? get_color_by_name('dark_gray').rgb : get_color_by_name('vivid_yellow').rgb;
+            const label = `${row.label}:`;
+            for (let j = 0; j < label.length && rect.x0 + 2 + j < rect.x1; j++) {
+              c.set(rect.x0 + 2 + j, y, { char: label[j]!, rgb: label_rgb, style: 'regular', weight_index: 2 });
+            }
+            const value_x = Math.min(rect.x1 - row.value.length - 5, rect.x0 + 2 + label.length + 1);
+            for (let j = 0; j < row.value.length && value_x + j < rect.x1; j++) {
+              c.set(value_x + j, y, { char: row.value[j]!, rgb: value_rgb, style: 'regular', weight_index: 2 });
+            }
+            c.set(rect.x1 - 3, y, { char: '-', rgb: row.enabled === false ? get_color_by_name('dark_gray').rgb : slider_fg, style: 'regular', weight_index: 2 });
+            c.set(rect.x1 - 1, y, { char: '+', rgb: row.enabled === false ? get_color_by_name('dark_gray').rgb : get_color_by_name('vivid_green').rgb, style: 'regular', weight_index: 2 });
+          } else if (row.type === 'edit_channel_matrix') {
+            const title_y = y;
+            const checks_y = y - 1;
+            const shortcut_y = y - 2;
+            if (shortcut_y <= rect.y0) continue;
+            const inner_width = Math.max(1, rect.x1 - rect.x0 - 3);
+            const col_width = Math.max(5, Math.floor(inner_width / Math.max(1, row.columns.length)));
+            const start_x = rect.x0 + 2;
+            for (let i = 0; i < row.columns.length; i += 1) {
+              const column = row.columns[i]!;
+              const col_x = start_x + (i * col_width);
+              const title = column.label.slice(0, 3);
+              const shortcut = column.shortcut.slice(0, 3).toLowerCase();
+              const title_x = col_x + Math.max(0, Math.floor((col_width - title.length) / 2));
+              const shortcut_x = col_x + Math.max(0, Math.floor((col_width - shortcut.length) / 2));
+              const toggle_x = col_x + Math.max(0, Math.floor((col_width - 5) / 2));
+              const both_on = column.left_value && column.right_value;
+              const title_rgb = both_on ? get_color_by_name('vivid_yellow').rgb : text_color;
+              for (let j = 0; j < title.length && title_x + j < rect.x1; j++) {
+                c.set(title_x + j, title_y, { char: title[j]!, rgb: title_rgb, style: 'regular', weight_index: 4 });
+              }
+              c.set(toggle_x, checks_y, {
+                char: 'L',
+                rgb: column.left_enabled === false ? get_color_by_name('dark_gray').rgb : (column.left_value ? get_color_by_name('vivid_blue').rgb : get_color_by_name('medium_gray').rgb),
+                style: column.left_value ? 'reverse' : 'regular',
+                weight_index: column.left_value ? 3 : 1,
+              });
+              c.set(toggle_x + 2, checks_y, {
+                char: 'R',
+                rgb: column.right_enabled === false ? get_color_by_name('dark_gray').rgb : (column.right_value ? get_color_by_name('vivid_red').rgb : get_color_by_name('medium_gray').rgb),
+                style: column.right_value ? 'reverse' : 'regular',
+                weight_index: column.right_value ? 3 : 1,
+              });
+              c.set(toggle_x + 4, checks_y, {
+                char: 'B',
+                rgb: both_on ? get_color_by_name('vivid_yellow').rgb : get_color_by_name('medium_gray').rgb,
+                style: both_on ? 'reverse' : 'regular',
+                weight_index: both_on ? 3 : 1,
+              });
+              for (let j = 0; j < shortcut.length && shortcut_x + j < rect.x1; j++) {
+                c.set(shortcut_x + j, shortcut_y, { char: shortcut[j]!, rgb: get_color_by_name('medium_gray').rgb, style: 'regular', weight_index: 1 });
+              }
+            }
+          } else if (row.type === 'info') {
+            for (let j = 0; j < row.text.length && rect.x0 + 2 + j < rect.x1; j++) {
+              c.set(rect.x0 + 2 + j, y, {
+                char: row.text[j]!,
+                rgb: row.rgb ?? get_color_by_name('medium_gray').rgb,
+                style: 'regular',
+                weight_index: 1,
+              });
+            }
+          }
+          cursor_y -= get_property_row_height(row);
+        }
+      }
       // Show brush size slider only for brush tools
-      if (opts.get_current_tool() === 'pencil' || opts.get_current_tool() === 'eraser' || opts.get_current_tool() === 'weighter' || opts.get_current_tool() === 'colorer') {
+      else if (opts.get_current_tool() === 'pencil' || opts.get_current_tool() === 'eraser') {
         const left_size = opts.get_left_brush_size?.() ?? opts.get_brush_size();
         const right_size = opts.get_right_brush_size?.() ?? opts.get_brush_size();
         const active_side = opts.get_active_side?.() ?? 'left';
@@ -859,125 +1104,6 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
           style: 'regular',
           weight_index: 1
         });
-      } else if (should_render_property_rows()) {
-        const rows = get_property_rows();
-        const active_side = opts.get_active_side?.() ?? 'left';
-        const header = '            L   R';
-        for (let i = 0; i < header.length; i++) {
-          c.set(rect.x0 + 1 + i, rect.y1 - 2, {
-            char: header[i]!,
-            rgb: text_color,
-            style: 'regular',
-            weight_index: 2,
-          });
-        }
-        let cursor_y = rect.y1 - 3;
-        for (let i = 0; i < rows.length; i++) {
-          const row = rows[i]!;
-          const y = cursor_y;
-          if (y <= rect.y0) break;
-          if (row.type === 'dual_toggle') {
-            const label = row.note ? `${row.label} ${row.note}` : row.label;
-            const label_rgb = row.note ? get_color_by_name('medium_gray').rgb : text_color;
-            for (let j = 0; j < label.length && rect.x0 + 2 + j < rect.x0 + 14 && rect.x0 + 2 + j < rect.x1; j++) {
-              c.set(rect.x0 + 2 + j, y, {
-                char: label[j]!,
-                rgb: label_rgb,
-                style: 'regular',
-                weight_index: 2,
-              });
-            }
-            const left_text = row.left_enabled === false ? ' - ' : (row.left_value ? '[x]' : '[ ]');
-            const right_text = row.right_enabled === false ? ' - ' : (row.right_value ? '[x]' : '[ ]');
-            const left_rgb = active_side === 'left' ? get_color_by_name('vivid_blue').rgb : text_color;
-            const right_rgb = active_side === 'right' ? get_color_by_name('vivid_red').rgb : text_color;
-            for (let j = 0; j < left_text.length; j++) {
-              c.set(rect.x0 + 15 + j, y, { char: left_text[j]!, rgb: left_rgb, style: 'regular', weight_index: 2 });
-            }
-            for (let j = 0; j < right_text.length; j++) {
-              c.set(rect.x0 + 19 + j, y, { char: right_text[j]!, rgb: right_rgb, style: 'regular', weight_index: 2 });
-            }
-          } else if (row.type === 'dual_slider') {
-            const value_label = row.format_value
-              ? `L:${row.format_value(row.left_value)} R:${row.format_value(row.right_value)}`
-              : `L:${row.left_value} R:${row.right_value}`;
-            const label_x = Math.floor((rect.x0 + rect.x1 - value_label.length) / 2);
-            for (let j = 0; j < value_label.length && label_x + j < rect.x1; j++) {
-              c.set(label_x + j, y, {
-                char: value_label[j]!,
-                rgb: text_color,
-                style: 'regular',
-                weight_index: 2,
-              });
-            }
-            const slider_y = y - 1;
-            if (slider_y <= rect.y0) continue;
-            const slider_start_x = rect.x0 + 3;
-            const slider_end_x = rect.x1 - 3;
-            for (let sx = slider_start_x; sx <= slider_end_x; sx++) {
-              c.set(sx, slider_y, { char: '─', rgb: slider_bg, style: 'regular', weight_index: 1 });
-            }
-            const denom = Math.max(1, row.max - row.min);
-            for (let value = row.min; value <= row.max; value++) {
-              const ratio = (value - row.min) / denom;
-              const marker_x = Math.round(slider_start_x + ratio * (slider_end_x - slider_start_x));
-              const is_left = value === row.left_value;
-              const is_right = value === row.right_value;
-              c.set(marker_x, slider_y, {
-                char: is_left && is_right ? '◆' : (is_left || is_right) ? '●' : '○',
-                rgb: is_left || is_right ? slider_fg : slider_bg,
-                style: 'regular',
-                weight_index: is_left || is_right ? 2 : 1,
-              });
-              if (is_left || is_right) {
-                c.set(marker_x, slider_y - 1, {
-                  char: is_left && is_right ? 'B' : is_left ? 'L' : 'R',
-                  rgb: is_left && is_right
-                    ? get_color_by_name('vivid_yellow').rgb
-                    : is_left
-                      ? get_color_by_name('vivid_blue').rgb
-                      : get_color_by_name('vivid_red').rgb,
-                  style: 'regular',
-                  weight_index: 2,
-                });
-              }
-            }
-          } else if (row.type === 'single_cycle') {
-            const label = `${row.label}:`;
-            const value = row.options && row.options.length > 0
-              ? `[${row.value}]`
-              : row.value;
-            const label_rgb = row.enabled === false ? get_color_by_name('medium_gray').rgb : text_color;
-            const value_rgb = row.enabled === false ? get_color_by_name('dark_gray').rgb : get_color_by_name('vivid_yellow').rgb;
-            for (let j = 0; j < label.length && rect.x0 + 2 + j < rect.x1; j++) {
-              c.set(rect.x0 + 2 + j, y, {
-                char: label[j]!,
-                rgb: label_rgb,
-                style: 'regular',
-                weight_index: 2,
-              });
-            }
-            const value_x = Math.min(rect.x1 - value.length - 1, rect.x0 + 2 + label.length + 1);
-            for (let j = 0; j < value.length && value_x + j < rect.x1; j++) {
-              c.set(value_x + j, y, {
-                char: value[j]!,
-                rgb: value_rgb,
-                style: 'regular',
-                weight_index: 2,
-              });
-            }
-          } else if (row.type === 'info') {
-            for (let j = 0; j < row.text.length && rect.x0 + 2 + j < rect.x1; j++) {
-              c.set(rect.x0 + 2 + j, y, {
-                char: row.text[j]!,
-                rgb: row.rgb ?? get_color_by_name('medium_gray').rgb,
-                style: 'regular',
-                weight_index: 1,
-              });
-            }
-          }
-          cursor_y -= get_property_row_height(row);
-        }
       } else if (opts.custom_panel?.should_render()) {
         opts.custom_panel.draw(c, rect);
       } else {
@@ -999,9 +1125,14 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
     },
     on_pointer_down_content(e: PointerEvent): void {
       if (should_render_property_rows()) {
+        const rows = get_property_rows();
         const row_index = get_property_row_index_at(e.y);
         if (row_index !== null) {
-          const row = get_property_rows()[row_index];
+          const row = rows[row_index];
+          let row_top_y = rect.y1 - 3;
+          for (let i = 0; i < row_index; i += 1) {
+            row_top_y -= get_property_row_height(rows[i]!);
+          }
           if (row?.type === 'dual_slider') {
             const side = get_property_side_from_x(e.x) ?? (e.button === 2 ? 'right' : 'left');
             const value = get_dual_slider_value_from_x(row, e.x);
@@ -1021,13 +1152,39 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             row.on_cycle();
             return;
           }
+          if (row?.type === 'single_toggle') {
+            if (row.enabled === false) return;
+            row.on_toggle();
+            return;
+          }
+          if (row?.type === 'single_stepper') {
+            if (row.enabled === false) return;
+            if (is_on_property_stepper_minus(e.x)) {
+              row.on_decrement();
+              return;
+            }
+            if (is_on_property_stepper_plus(e.x)) {
+              row.on_increment();
+              return;
+            }
+          }
+          if (row?.type === 'edit_channel_matrix') {
+            const hit = get_edit_channel_matrix_hit(row, e.x, e.y, row_top_y);
+            if (!hit) return;
+            const column = row.columns.find((entry) => entry.id === hit.column_id);
+            if (!column) return;
+            if ((hit.side === 'left' && column.left_enabled === false) || (hit.side === 'right' && column.right_enabled === false)) return;
+            if (hit.side === 'both' && column.left_enabled === false && column.right_enabled === false) return;
+            row.on_toggle(hit.side, hit.column_id);
+            return;
+          }
         }
       }
       if (opts.custom_panel?.should_render() && opts.custom_panel.on_pointer_down?.(e, rect)) {
         return;
       }
       // Handle brush size slider
-      if ((opts.get_current_tool() === 'pencil' || opts.get_current_tool() === 'eraser' || opts.get_current_tool() === 'weighter' || opts.get_current_tool() === 'colorer') && is_on_slider(e.x, e.y)) {
+      if ((opts.get_current_tool() === 'pencil' || opts.get_current_tool() === 'eraser') && is_on_slider(e.x, e.y)) {
         is_dragging_slider = true;
         dragging_brush_side = e.button === 2 ? 'right' : 'left';
         const new_size = get_size_from_x(e.x);
@@ -1188,7 +1345,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
         return;
       }
       // Handle slider dragging
-      if (is_dragging_slider && (opts.get_current_tool() === 'pencil' || opts.get_current_tool() === 'eraser' || opts.get_current_tool() === 'weighter' || opts.get_current_tool() === 'colorer')) {
+      if (is_dragging_slider && (opts.get_current_tool() === 'pencil' || opts.get_current_tool() === 'eraser')) {
         const new_size = get_size_from_x(e.x);
         const current_size = dragging_brush_side === 'right'
           ? (opts.get_right_brush_size?.() ?? opts.get_brush_size())
