@@ -2,13 +2,15 @@
  * ASCII Painter Save/Export System
  *
  * Handles saving, loading, and exporting ASCII art creations.
- * Supports both legacy Grid format (v1) and new VoxelSpace format (v2).
+ * Supports legacy Grid format (v1), VoxelSpace format (v2), and painter documents (v3).
  */
 
 import type { Grid, GridExport } from './types.js';
 import { exportGrid, importGrid } from './types.js';
 import type { VoxelSpace, VoxelSpaceExport } from './voxel_space.js';
 import { exportVoxelSpace, importVoxelSpace, gridToVoxelSpace, voxelSpaceToGrid } from './voxel_space.js';
+import type { PainterDocument } from './painter_document.js';
+import { clone_painter_document } from './painter_document.js';
 import type { ToolType } from './types.js';
 import { clamp_weight_index } from '../mono_ui/weight_system.js';
 import { ALL_EDIT_CHANNELS, sanitize_edit_channels, type EditChannels } from './edit_mask.js';
@@ -212,6 +214,18 @@ export function exportVoxelSpaceArtworkToJSON(space: VoxelSpace): string {
   return JSON.stringify(data, null, 2);
 }
 
+export function exportPainterDocumentToJSON(document: PainterDocument): string {
+  return JSON.stringify(clone_painter_document(document), null, 2);
+}
+
+export function importPainterDocumentFromJSON(json: string): PainterDocument {
+  const parsed = JSON.parse(json);
+  if (!parsed || parsed.version !== 3 || !parsed.bounds || !parsed.groups || !Array.isArray(parsed.group_order)) {
+    throw new Error('Unsupported painter document format');
+  }
+  return clone_painter_document(parsed as PainterDocument);
+}
+
 /**
  * Import VoxelSpace from JSON string (supports v1 and v2)
  */
@@ -245,10 +259,12 @@ export function exportVoxelSpaceToText(space: VoxelSpace): string {
 /**
  * Detect if JSON is VoxelSpace (v2) or legacy Grid (v1)
  */
-export function detectFileFormat(json: string): 'voxel_space' | 'grid' | 'unknown' {
+export function detectFileFormat(json: string): 'painter_document' | 'voxel_space' | 'grid' | 'unknown' {
   try {
     const parsed = JSON.parse(json);
-    if (parsed.version === 2 && parsed.type === 'voxel_space') {
+    if (parsed.version === 3 && parsed.bounds && parsed.groups && Array.isArray(parsed.group_order)) {
+      return 'painter_document';
+    } else if (parsed.version === 2 && parsed.type === 'voxel_space') {
       return 'voxel_space';
     } else if (parsed.version === 1) {
       return 'grid';
@@ -271,6 +287,16 @@ export function autoSaveVoxelSpace(space: VoxelSpace, filename: string = 'untitl
   }
 }
 
+export function autoSavePainterDocument(document: PainterDocument, filename: string = 'untitled'): void {
+  void filename;
+  try {
+    const data = exportPainterDocumentToJSON(document);
+    localStorage.setItem(AUTOSAVE_KEY, data);
+  } catch (e) {
+    console.warn('PainterDocument auto-save failed:', e);
+  }
+}
+
 /**
  * Load auto-saved VoxelSpace from localStorage
  * Returns null if no auto-save exists or if it's legacy format
@@ -288,6 +314,26 @@ export function loadAutoSaveVoxelSpace(): VoxelSpace | null {
   } catch (e) {
     console.warn('Load VoxelSpace auto-save failed:', e);
     return null;
+  }
+}
+
+export function loadAutoSavePainterDocument(): PainterDocument | null {
+  try {
+    const data = localStorage.getItem(AUTOSAVE_KEY);
+    if (!data) return null;
+    if (detectFileFormat(data) !== 'painter_document') return null;
+    return importPainterDocumentFromJSON(data);
+  } catch (e) {
+    console.warn('Load PainterDocument auto-save failed:', e);
+    return null;
+  }
+}
+
+export function clearAutoSaveVoxelSpace(): void {
+  try {
+    localStorage.removeItem(AUTOSAVE_KEY);
+  } catch (e) {
+    console.warn('Clear VoxelSpace auto-save failed:', e);
   }
 }
 
@@ -431,6 +477,14 @@ export function loadToolProperties(): ToolProperties {
   }
 }
 
+export function clearToolProperties(): void {
+  try {
+    localStorage.removeItem(TOOL_PROPERTIES_KEY);
+  } catch (e) {
+    console.warn('Clear tool properties failed:', e);
+  }
+}
+
 // Camera config persistence key
 const CAMERA_CONFIG_KEY = 'thaumworld_ascii_painter_camera_config';
 
@@ -449,6 +503,7 @@ export interface CameraConfigSaveData {
   mouse_angle_yaw_deg?: number;
   mouse_angle_pitch_deg?: number;
   mouse_angle_spring?: number;
+  render_distance_planes?: number;
   base_layer_scale?: number;
   char_spacing_x?: number;
   char_spacing_y?: number;

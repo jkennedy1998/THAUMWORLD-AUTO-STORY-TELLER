@@ -26,6 +26,7 @@ export type FileMenuOptions = {
   on_toggle_brush_preview?: () => void;
   on_toggle_tool_properties?: () => void;
   on_toggle_layer_palette?: () => void;
+  on_toggle_navigation?: () => void;
   on_toggle_camera?: () => void;
   on_toggle_controls?: () => void;
   get_status_text?: () => string;
@@ -49,6 +50,7 @@ export function make_file_menu_module(opts: FileMenuOptions): Module {
   if (opts.on_toggle_brush_preview) module_items.push({ id: 'swatch', label: 'SWATCH', onPress: opts.on_toggle_brush_preview, width: 8 });
   if (opts.on_toggle_tool_properties) module_items.push({ id: 'props', label: 'PROPS', onPress: opts.on_toggle_tool_properties, width: 7 });
   if (opts.on_toggle_layer_palette) module_items.push({ id: 'layers', label: 'LAYERS', onPress: opts.on_toggle_layer_palette, width: 8 });
+  if (opts.on_toggle_navigation) module_items.push({ id: 'nav', label: 'NAV', onPress: opts.on_toggle_navigation, width: 5 });
   if (opts.on_toggle_camera) module_items.push({ id: 'camera', label: 'CAMERA', onPress: opts.on_toggle_camera, width: 8 });
   if (opts.on_toggle_controls) module_items.push({ id: 'controls', label: 'CONTROLS', onPress: opts.on_toggle_controls, width: 10 });
 

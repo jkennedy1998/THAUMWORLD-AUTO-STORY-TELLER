@@ -48,9 +48,8 @@ export {
 export type { HistoryManager } from './history.js';
 export {
   createHistoryManager,
-  pushSnapshot,
-  undo,
-  redo,
+  undoLegacyHistory,
+  redoLegacyHistory,
   canUndo,
   canRedo,
   getHistoryState,
@@ -133,6 +132,47 @@ export {
   voxelSpaceToGrid,
   debugVoxelSpace
 } from './voxel_space.js';
+
+// Group-based Painter Document Runtime
+export type {
+  PainterCoordKey,
+  PainterOccupiedBounds,
+  PainterDocumentMetadata,
+  PainterVoxelRecord,
+  PainterVoxelDelta,
+  PainterGroupFrame,
+  PainterGroup,
+  PainterDocument,
+} from './painter_document.js';
+
+export {
+  make_painter_coord_key,
+  create_painter_voxel_record,
+  clone_painter_voxel_record,
+  create_painter_group,
+  clone_painter_group,
+  create_painter_document,
+  clone_painter_document,
+} from './painter_document.js';
+
+export type {
+  ResolvedPainterVoxel,
+  PainterDocumentRuntime,
+  ResolveVoxelWinnerResult,
+} from './painter_document_runtime.js';
+
+export {
+  derive_painter_occupied_bounds,
+  resolve_painter_voxel_winner,
+  normalize_painter_document_runtime,
+  get_group_voxel,
+  set_group_voxel,
+  erase_group_voxel,
+  reorder_painter_groups,
+  set_painter_group_visibility,
+  set_painter_group_locked,
+  export_painter_document,
+} from './painter_document_runtime.js';
 
 // DOM Renderer
 export type { ViewportState } from './voxel_dom_renderer.js';

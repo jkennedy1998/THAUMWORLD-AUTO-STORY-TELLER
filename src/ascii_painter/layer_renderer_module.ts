@@ -1,8 +1,9 @@
 /**
  * Layer Renderer Module
  * 
- * Renders a single Z-layer of a VoxelSpace.
- * Part of the 3D voxel rendering pipeline.
+ * Legacy compatibility renderer for a single Z-layer of a VoxelSpace.
+ * Active painter rendering now flows through projected/runtime-native paths
+ * instead of this per-layer module.
  */
 
 import type { Module, Canvas, Rect as RectType, Rgb, PointerEvent, DragEvent, WheelEvent } from '../mono_ui/types.js';
@@ -22,7 +23,7 @@ export type LayerRendererOptions = {
 };
 
 /**
- * Create a module that renders one layer of the voxel space
+ * Create a legacy compatibility module that renders one layer of a voxel space.
  */
 export function makeLayerRendererModule(opts: LayerRendererOptions): Module {
   let rect = opts.getViewportRect();

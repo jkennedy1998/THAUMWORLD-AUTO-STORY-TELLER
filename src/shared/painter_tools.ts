@@ -1,6 +1,6 @@
-import { trace_line_2d } from './math3d.js';
+import { trace_line_2d, trace_line_3d } from './math3d.js';
 import type { PlaneId, PlanePoint, Point2, Voxel3 } from './coords.js';
-import { key_point2 } from './coords.js';
+import { key_point2, key_voxel3, trunc_voxel3, voxel3 } from './coords.js';
 import { unproject_plane_to_voxel } from './plane_coords.js';
 
 export type PainterPoint = Point2;
@@ -25,6 +25,32 @@ export function get_line_points(x0: number, y0: number, x1: number, y1: number):
     points.push(point);
   });
   return points;
+}
+
+export type PainterLineRenderMethod = 'voxel_dda';
+
+export function get_line_voxels_3d(
+  start: Voxel3,
+  end: Voxel3,
+  method: PainterLineRenderMethod = 'voxel_dda',
+): Voxel3[] {
+  const normalizedStart = trunc_voxel3(start);
+  const normalizedEnd = trunc_voxel3(end);
+  const voxels: Voxel3[] = [];
+  const seen = new Set<string>();
+
+  switch (method) {
+    case 'voxel_dda':
+    default:
+      trace_line_3d(normalizedStart, normalizedEnd, (point) => {
+        const voxel = voxel3(point.x, point.y, point.z);
+        const key = key_voxel3(voxel);
+        if (seen.has(key)) return;
+        seen.add(key);
+        voxels.push(voxel);
+      });
+      return voxels;
+  }
 }
 
 export function get_rect_stroke_points(x0: number, y0: number, x1: number, y1: number): PainterPoint[] {

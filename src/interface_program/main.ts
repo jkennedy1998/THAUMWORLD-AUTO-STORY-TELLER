@@ -91,7 +91,7 @@ import { apply_character_patch, load_character_by_ref, save_character_by_ref } f
 import { remove_character_tag, remove_character_tag_by_selector, upsert_character_tag, upsert_character_tag_by_selector } from "../shared/character_tags.js";
 import { get_character_id_from_ref, get_character_role_from_ref } from "../shared/character_storage.js";
 import { assign_controlled_actor_ref_for_client_session, get_claiming_client_session_id_for_actor_ref, get_controlled_actor_ref_for_client_session, list_controlled_actor_claims, release_controlled_actor_claim_by_actor_ref, release_controlled_actor_ref_for_client_session, set_controlled_actor_ref_for_client_session, touch_controlled_actor_ref_for_client_session } from "../shared/session_control.js";
-import { apply_painter_cell_changes, get_or_create_painter_document_snapshot } from "../shared/painter_document_store.js";
+import { apply_painter_group_structure_change, apply_painter_group_voxel_changes, get_or_create_painter_document_snapshot, redo_painter_group_changes, undo_painter_group_changes } from "../shared/painter_document_store.js";
 import { normalize_place_actor_presence, normalize_place_npc_presence, project_public_place_actor_presence, project_public_place_npc_presence } from "../shared/place_character_presence.js";
 import { build_actor_owner_inventory_view, build_npc_owner_inventory_view } from "../inventory_surfaces/actor_owner_view.js";
 import { build_container_owner_inventory_view } from "../inventory_surfaces/container_owner_view.js";
@@ -13810,32 +13810,102 @@ function start_http_server(log_path: string): void {
                     require_request_client_session_id(slot, { session_token: data?.session_token });
                     const command = data?.command ?? {};
                     const kind = String(command?.kind ?? "").trim();
-                    if (kind !== "apply_cells") {
+                    const normalized_document_id = String(command?.document_id ?? "default_canvas").trim() || "default_canvas";
+                    let snapshot;
+                    let group_id: string | null = null;
+                    if (kind === "apply_group_voxels") {
+                        group_id = String(command?.group_id ?? "").trim();
+                        if (!group_id) {
+                            throw new Error("painter_group_required");
+                        }
+                        snapshot = apply_painter_group_voxel_changes(
+                            slot,
+                            normalized_document_id,
+                            group_id,
+                            Array.isArray(command?.voxels)
+                                ? command.voxels.map((voxel: any) => ({
+                                    x: Math.floor(Number(voxel?.x ?? 0)),
+                                    y: Math.floor(Number(voxel?.y ?? 0)),
+                                    z: Math.floor(Number(voxel?.z ?? 0)),
+                                    cell: {
+                                        char: typeof voxel?.char === "string" && voxel.char.length > 0 ? voxel.char[0]! : " ",
+                                        rgb: {
+                                            r: Math.max(0, Math.min(255, Math.floor(Number(voxel?.rgb?.r ?? 0)) || 0)),
+                                            g: Math.max(0, Math.min(255, Math.floor(Number(voxel?.rgb?.g ?? 0)) || 0)),
+                                            b: Math.max(0, Math.min(255, Math.floor(Number(voxel?.rgb?.b ?? 0)) || 0)),
+                                        },
+                                        weight_index: Math.max(0, Math.min(3, Math.floor(Number(voxel?.weight_index ?? 0)) || 0)),
+                                    },
+                                }))
+                                : []
+                        );
+                    } else if (kind === "create_group") {
+                        snapshot = apply_painter_group_structure_change(slot, normalized_document_id, {
+                            kind: 'create_group',
+                            group_name: String(command?.group_name ?? '').trim() || undefined,
+                            target_group_id: String(command?.target_group_id ?? '').trim() || undefined,
+                        });
+                    } else if (kind === "delete_group") {
+                        group_id = String(command?.group_id ?? "").trim();
+                        if (!group_id) throw new Error("painter_group_required");
+                        snapshot = apply_painter_group_structure_change(slot, normalized_document_id, { kind: 'delete_group', group_id });
+                    } else if (kind === "duplicate_group") {
+                        const source_group_id = String(command?.source_group_id ?? command?.group_id ?? "").trim();
+                        if (!source_group_id) throw new Error("painter_group_required");
+                        group_id = source_group_id;
+                        snapshot = apply_painter_group_structure_change(slot, normalized_document_id, {
+                            kind: 'duplicate_group',
+                            source_group_id,
+                            target_group_id: String(command?.target_group_id ?? '').trim() || undefined,
+                        });
+                    } else if (kind === "rename_group") {
+                        group_id = String(command?.group_id ?? "").trim();
+                        if (!group_id) throw new Error("painter_group_required");
+                        snapshot = apply_painter_group_structure_change(slot, normalized_document_id, {
+                            kind: 'rename_group',
+                            group_id,
+                            group_name: String(command?.group_name ?? '').trim(),
+                        });
+                    } else if (kind === "set_group_visibility") {
+                        group_id = String(command?.group_id ?? "").trim();
+                        if (!group_id) throw new Error("painter_group_required");
+                        snapshot = apply_painter_group_structure_change(slot, normalized_document_id, {
+                            kind: 'set_group_visibility',
+                            group_id,
+                            visible: Boolean(command?.visible),
+                        });
+                    } else if (kind === "set_group_locked") {
+                        group_id = String(command?.group_id ?? "").trim();
+                        if (!group_id) throw new Error("painter_group_required");
+                        snapshot = apply_painter_group_structure_change(slot, normalized_document_id, {
+                            kind: 'set_group_locked',
+                            group_id,
+                            locked: Boolean(command?.locked),
+                        });
+                    } else if (kind === "reorder_groups") {
+                        snapshot = apply_painter_group_structure_change(slot, normalized_document_id, {
+                            kind: 'reorder_groups',
+                            next_group_order: Array.isArray(command?.next_group_order)
+                                ? command.next_group_order.map((value: any) => String(value ?? '').trim()).filter(Boolean)
+                                : [],
+                        });
+                    } else if (kind === "reset_document") {
+                        snapshot = apply_painter_group_structure_change(slot, normalized_document_id, { kind: 'reset_document' });
+                    } else if (kind === "undo_group") {
+                        group_id = String(command?.group_id ?? "").trim();
+                        if (!group_id) throw new Error("painter_group_required");
+                        snapshot = undo_painter_group_changes(slot, normalized_document_id, group_id);
+                    } else if (kind === "redo_group") {
+                        group_id = String(command?.group_id ?? "").trim();
+                        if (!group_id) throw new Error("painter_group_required");
+                        snapshot = redo_painter_group_changes(slot, normalized_document_id, group_id);
+                    } else {
                         throw new Error("painter_command_not_supported");
                     }
-                    const snapshot = apply_painter_cell_changes(
-                        slot,
-                        String(command?.document_id ?? "default_canvas").trim() || "default_canvas",
-                        Array.isArray(command?.cells)
-                            ? command.cells.map((cell: any) => ({
-                                x: Math.floor(Number(cell?.x ?? 0)),
-                                y: Math.floor(Number(cell?.y ?? 0)),
-                                z: Math.floor(Number(cell?.z ?? 0)),
-                                cell: {
-                                    char: typeof cell?.char === "string" && cell.char.length > 0 ? cell.char[0]! : " ",
-                                    rgb: {
-                                        r: Math.max(0, Math.min(255, Math.floor(Number(cell?.rgb?.r ?? 0)) || 0)),
-                                        g: Math.max(0, Math.min(255, Math.floor(Number(cell?.rgb?.g ?? 0)) || 0)),
-                                        b: Math.max(0, Math.min(255, Math.floor(Number(cell?.rgb?.b ?? 0)) || 0)),
-                                    },
-                                    weight_index: Math.max(0, Math.min(3, Math.floor(Number(cell?.weight_index ?? 0)) || 0)),
-                                    render_index: Number.isFinite(Number(cell?.render_index)) ? Math.floor(Number(cell.render_index)) : undefined,
-                                },
-                            }))
-                            : []
-                    );
                     void emitBridgeMessage('PAINTER_DOCUMENT_PATCHED', {
                         document_id: snapshot.document_id,
+                        group_id,
+                        command_kind: kind,
                         revision: snapshot.revision,
                         updated_at: snapshot.updated_at,
                         snapshot: snapshot.snapshot,
@@ -13844,6 +13914,8 @@ function start_http_server(log_path: string): void {
                     res.writeHead(200, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({
                         ok: true,
+                        command_kind: kind,
+                        group_id,
                         document_id: snapshot.document_id,
                         revision: snapshot.revision,
                         updated_at: snapshot.updated_at,

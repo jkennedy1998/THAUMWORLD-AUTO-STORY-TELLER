@@ -1,0 +1,23 @@
+{
+  "id": "painter_layer_palette_secondary_click_preserves_selection",
+  "test_name": "paint_test_layer_palette_secondary_click_preserves_selected_group",
+  "clock_mode": "realtime_ms",
+  "open_ms": 9000,
+  "description": "Create three painter groups, select the top palette row, then secondary-click the same row and verify active group selection does not snap back.",
+  "start_delay_ms": 1500,
+  "end_delay_ms": 1000,
+  "actions": [
+    { "at_ms": 0, "type": "invoke_helper", "helper": "reset_painter_document" },
+    { "at_ms": 250, "type": "invoke_helper", "helper": "add_group" },
+    { "at_ms": 500, "type": "invoke_helper", "helper": "add_group" },
+    { "at_ms": 900, "type": "invoke_helper", "helper": "reset_painter_module_layout" },
+    { "at_ms": 1100, "type": "invoke_helper", "helper": "focus_module", "payload": { "module_id": "layer_palette" } },
+    { "at_ms": 1350, "type": "invoke_helper", "helper": "select_group_by_palette_z", "payload": { "z": 2 } },
+    { "at_ms": 1650, "type": "capture_text_value", "slot": "active_group_before_secondary", "source": "runtime_value", "field": "active_group_id" },
+    { "at_ms": 1700, "type": "capture_text_value", "slot": "active_palette_z_before_secondary", "source": "runtime_value", "field": "active_group_palette_z" },
+    { "at_ms": 2000, "type": "pointer_move", "space": "grid", "x": 112, "y": 20, "pointer_action": "secondary" },
+    { "at_ms": 2150, "type": "pointer_click", "space": "grid", "x": 112, "y": 20, "pointer_action": "secondary" },
+    { "at_ms": 2550, "type": "assert_text_value_equals", "slot": "active_group_before_secondary", "source": "runtime_value", "field": "active_group_id" },
+    { "at_ms": 2600, "type": "assert_text_value_equals", "slot": "active_palette_z_before_secondary", "source": "runtime_value", "field": "active_group_palette_z" }
+  ]
+}

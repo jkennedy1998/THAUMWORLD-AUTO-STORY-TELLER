@@ -160,6 +160,7 @@ function spawnWithLogging(name: string, command: string, args: string[], options
       THAUM_STARTUP_BOOT_MODE: tai_entry ? 'tas_runtime' : 'manual_shell',
       ...(tai_entry ? {
         THAUM_TAI_ENABLED: 'true',
+        THAUM_TAI_RESET_STATE: 'true',
         THAUM_TAI_ID: tai_entry.id,
         THAUM_TAI_TEST_NAME: tai_entry.testName,
         THAUM_TAI_OPEN_MS: String(tai_entry.openMs),

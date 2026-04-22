@@ -116,6 +116,7 @@ export interface CameraConfig {
   mouse_angle_yaw_deg: number;        // Max spring-centered yaw from mouse input
   mouse_angle_pitch_deg: number;      // Max spring-centered pitch from mouse input
   mouse_angle_spring: number;         // Spring strength returning camera angle toward target
+  render_distance_planes: number;     // Visible depth radius around current target/focus plane
 
   // Base layer scale and character spacing for grid alignment
   base_layer_scale: number;           // Scale of the selected/reference layer (default 0.5, range 0.2-1.5)
@@ -152,6 +153,7 @@ export const DEFAULT_CAMERA_VALUES = {
   mouse_angle_yaw_deg: 18,
   mouse_angle_pitch_deg: 14,
   mouse_angle_spring: 12,
+  render_distance_planes: 2,
   base_layer_scale: 1.0,
   char_spacing_x: 1.0,
   char_spacing_y: 1.0,

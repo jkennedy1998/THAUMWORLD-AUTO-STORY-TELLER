@@ -46,5 +46,26 @@
   },
   "16": {
     "path": "tai16_painter_text_enter_retarget/script.json"
+  },
+  "17": {
+    "path": "tai17_painter_group_runtime_smoke/script.json"
+  },
+  "18": {
+    "path": "tai18_painter_multiplayer_patch_smoke/script.json"
+  },
+  "19": {
+    "path": "tai19_painter_layer_palette_secondary_click_preserves_selection/script.json"
+  },
+  "20": {
+    "path": "tai20_painter_canvas_secondary_click_preserves_selection/script.json"
+  },
+  "21": {
+    "path": "tai21_painter_secondary_drag_wheel_depth_preserves_selection/script.json"
+  },
+  "22": {
+    "path": "tai22_painter_secondary_drag_nav_depth_preserves_selection/script.json"
+  },
+  "23": {
+    "path": "tai23_painter_primary_hold_wheel_move_keeps_display_focus_on_camera_depth/script.json"
   }
 }

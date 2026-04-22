@@ -10562,7 +10562,7 @@ export function create_app_state(): AppState {
         makePlaceCameraControlModule({
             id: 'camera_control',
             rect: get_persisted_rect('camera_control', { x0: 126, y0: 10, x1: 158, y1: 42 }),
-            getSpace: () => get_camera_control_space(),
+            getCamera: () => get_camera_control_space().camera,
             onParallaxMoveToggle: (enabled) => {
                 update_camera_control_spaces((space) => { space.camera.parallax_move_enabled = enabled; });
                 saveCameraConfig({ parallax_move_enabled: enabled });

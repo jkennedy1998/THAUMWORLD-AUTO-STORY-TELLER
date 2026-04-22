@@ -1,4 +1,4 @@
-import type { VoxelSpaceExport } from '../ascii_painter/voxel_space.js';
+import type { PainterDocument, PainterVoxelRecord } from '../ascii_painter/painter_document.js';
 
 export type PainterDocumentAuthorityMode = 'local_compat' | 'authoritative_host';
 
@@ -9,7 +9,7 @@ export type PainterDocumentBootstrap = {
   authority_mode: PainterDocumentAuthorityMode;
   slot: number;
   revision: number;
-  snapshot: VoxelSpaceExport | null;
+  snapshot: PainterDocument | null;
   session_token: string | null;
   connection_id: string | null;
   reconnect_token: string | null;
@@ -19,35 +19,40 @@ export type PainterDocumentBootstrap = {
   error?: string | null;
 };
 
-export type PainterApplyCellsCommand = {
-  kind: 'apply_cells';
+export type PainterApplyGroupVoxelsCommand = {
+  kind: 'apply_group_voxels';
   document_id: string;
+  group_id: string;
   base_revision: number;
   command_id: string;
-  cells: Array<{
-    x: number;
-    y: number;
-    z: number;
-    char: string;
-    rgb: { r: number; g: number; b: number };
-    weight_index: number;
-    render_index?: number;
-  }>;
+  voxels: PainterVoxelRecord[];
 };
 
-export type PainterLayerCommand = {
-  kind: 'add_layer' | 'delete_layer' | 'duplicate_layer' | 'toggle_layer_visibility' | 'toggle_layer_lock' | 'rename_layer';
+export type PainterGroupCommand = {
+  kind:
+    | 'create_group'
+    | 'delete_group'
+    | 'duplicate_group'
+    | 'rename_group'
+    | 'set_group_visibility'
+    | 'set_group_locked'
+    | 'reorder_groups'
+    | 'reset_document'
+    | 'undo_group'
+    | 'redo_group';
   document_id: string;
   base_revision: number;
   command_id: string;
-  z?: number;
-  next_z?: number;
+  group_id?: string;
+  source_group_id?: string;
+  target_group_id?: string;
+  group_name?: string;
   visible?: boolean;
   locked?: boolean;
-  name?: string;
+  next_group_order?: string[];
 };
 
-export type PainterCommand = PainterApplyCellsCommand | PainterLayerCommand;
+export type PainterCommand = PainterApplyGroupVoxelsCommand | PainterGroupCommand;
 
 export type PainterDocumentEvent = {
   type:
@@ -59,5 +64,7 @@ export type PainterDocumentEvent = {
     | 'PAINTER_REVISION_CONFLICT';
   document_id: string;
   revision: number;
+  group_id?: string | null;
+  command_kind?: string | null;
   payload?: Record<string, unknown>;
 };

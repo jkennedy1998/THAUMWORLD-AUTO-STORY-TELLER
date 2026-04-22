@@ -1,13 +1,13 @@
 /**
  * Voxel DOM Renderer
  *
- * Renders all voxel layers to HTML5 Canvas elements with CSS transforms.
- * Selected layer aligns exactly with type grid, other layers transform relative to it.
+ * Renders projected display slots to HTML5 Canvas elements with CSS transforms.
+ * Selected display slot aligns exactly with type grid, other slots transform relative to it.
  *
  * Architecture:
- * - One canvas per Z-layer
- * - Selected layer (Z = focus_plane) is reference point (scale 1.0, no parallax)
- * - Other layers scale and parallax relative to selected layer
+ * - One canvas per projected display slot
+ * - Selected display slot (focus_plane) is reference point (scale 1.0, no parallax)
+ * - Other display slots scale and parallax relative to the selected slot
  * - CSS 3D transforms for position, scale, rotation
  * - Hardware-accelerated with translate3d()
  * - Clipped to canvas bounds
@@ -44,14 +44,14 @@ export type VoxelDomRendererDebugState = {
     tileH: number;
   };
   viewport_ready: boolean;
-  selected_layer: {
-    z: number | null;
+  selected_slot: {
+    slot_index: number | null;
     grid_w: number;
     grid_h: number;
     grid_px_w: number;
     grid_px_h: number;
-    layer_left_px: number;
-    layer_top_px: number;
+    slot_left_px: number;
+    slot_top_px: number;
     pan_x: number;
     pan_y: number;
     pan_offset_x_px: number;
@@ -61,9 +61,9 @@ export type VoxelDomRendererDebugState = {
     delta_pan_x: number;
     delta_pan_y: number;
   };
-  layer_events: Array<{
+  slot_events: Array<{
     kind: 'create_canvas' | 'resize_canvas';
-    z: number;
+    slot_index: number;
     width: number;
     height: number;
     selected: boolean;
@@ -73,14 +73,14 @@ export type VoxelDomRendererDebugState = {
 export class VoxelDOMRenderer {
   private container: HTMLElement;
   private clipContainer: HTMLElement;
-  private layerCanvases: Map<number, HTMLCanvasElement> = new Map();
-  private layerContexts: Map<number, CanvasRenderingContext2D> = new Map();
+  private slotCanvases: Map<number, HTMLCanvasElement> = new Map();
+  private slotContexts: Map<number, CanvasRenderingContext2D> = new Map();
   private space: VoxelSpace | null = null;
 
-  // Layer content invalidation: callers can bump a version per Z to avoid
-  // re-rasterizing glyphs when only transforms (parallax/pan) change.
-  private layerContentVersion: Map<number, number> = new Map();
-  private layerRenderedVersion: Map<number, number> = new Map();
+  // Display-slot content invalidation: callers can bump a version per projected slot
+  // to avoid re-rasterizing glyphs when only transforms (parallax/pan) change.
+  private slotContentVersion: Map<number, number> = new Map();
+  private slotRenderedVersion: Map<number, number> = new Map();
 
   // Configuration
   private fontFamily: string;
@@ -100,14 +100,14 @@ export class VoxelDOMRenderer {
   private debugState: VoxelDomRendererDebugState = {
     viewport: { x: 0, y: 0, width: 0, height: 0, tileW: 0, tileH: 0 },
     viewport_ready: false,
-    selected_layer: {
-      z: null,
+    selected_slot: {
+      slot_index: null,
       grid_w: 0,
       grid_h: 0,
       grid_px_w: 0,
       grid_px_h: 0,
-      layer_left_px: 0,
-      layer_top_px: 0,
+      slot_left_px: 0,
+      slot_top_px: 0,
       pan_x: 0,
       pan_y: 0,
       pan_offset_x_px: 0,
@@ -117,7 +117,7 @@ export class VoxelDOMRenderer {
       delta_pan_x: 0,
       delta_pan_y: 0,
     },
-    layer_events: [],
+    slot_events: [],
   };
   private perfRenderIndex = 0;
   private perfSummary = {
@@ -125,10 +125,10 @@ export class VoxelDOMRenderer {
     slow_frames: 0,
     max_total_ms: 0,
     summed_total_ms: 0,
-    summed_create_layers_ms: 0,
+    summed_create_slots_ms: 0,
     summed_raster_ms: 0,
     summed_transform_ms: 0,
-    summed_reraster_layer_count: 0,
+    summed_reraster_slot_count: 0,
     summed_resize_count: 0,
   };
 
@@ -170,16 +170,16 @@ export class VoxelDOMRenderer {
    */
   setSpace(space: VoxelSpace): void {
     this.space = space;
-    this.createOrUpdateLayers();
+    this.createOrUpdateSlots();
   }
 
   /**
-   * Hint that a layer's cell content changed.
+   * Hint that a projected slot's cell content changed.
    * Renderer will re-rasterize only when the version differs.
    */
-  setLayerContentVersion(z: number, version: number): void {
+  setSlotContentVersion(slotIndex: number, version: number): void {
     const v = Number.isFinite(version) ? Math.trunc(version) : 0;
-    this.layerContentVersion.set(z, v);
+    this.slotContentVersion.set(slotIndex, v);
   }
 
   /**
@@ -229,17 +229,17 @@ export class VoxelDOMRenderer {
   }
 
   private resetPerfSummary(): void {
-    this.perfSummary = {
-      frames: 0,
-      slow_frames: 0,
-      max_total_ms: 0,
-      summed_total_ms: 0,
-      summed_create_layers_ms: 0,
-      summed_raster_ms: 0,
-      summed_transform_ms: 0,
-      summed_reraster_layer_count: 0,
-      summed_resize_count: 0,
-    };
+      this.perfSummary = {
+        frames: 0,
+        slow_frames: 0,
+        max_total_ms: 0,
+        summed_total_ms: 0,
+        summed_create_slots_ms: 0,
+        summed_raster_ms: 0,
+        summed_transform_ms: 0,
+        summed_reraster_slot_count: 0,
+        summed_resize_count: 0,
+      };
   }
 
   /**
@@ -329,7 +329,7 @@ export class VoxelDOMRenderer {
     const zCounts = new Map<number, number>();
     
     for (const canvas of canvases) {
-      const zMatch = canvas.className.match(/layer-z-(\d+)/);
+      const zMatch = canvas.className.match(/slot-z-(\d+)/);
       if (zMatch && zMatch[1]) {
         const z = parseInt(zMatch[1]);
         zCounts.set(z, (zCounts.get(z) || 0) + 1);
@@ -346,47 +346,47 @@ export class VoxelDOMRenderer {
     }
     
     if (hasDuplicates) {
-      console.error(`[VoxelDOMRenderer] duplicate canvases: ${duplicates.join(', ')} | DOM=${canvases.length}, tracked=${this.layerCanvases.size}`);
+        console.error(`[VoxelDOMRenderer] duplicate canvases: ${duplicates.join(', ')} | DOM=${canvases.length}, tracked=${this.slotCanvases.size}`);
     }
   }
 
   /**
-   * Create or update canvas elements for each layer
+   * Create or update canvas elements for each projected display slot.
    */
-  private createOrUpdateLayers(perf?: { resize_count: number; create_count: number }): void {
+  private createOrUpdateSlots(perf?: { resize_count: number; create_count: number }): void {
     if (!this.space) return;
 
     // Check for duplicates before making changes
     this.checkForDuplicateCanvases();
 
-    const zValues = Array.from(this.space.layers.keys()).sort((a, b) => a - b);
+    const slotIndices = Array.from(this.space.layers.keys()).sort((a, b) => a - b);
 
     // Remove canvases for deleted layers
-    for (const [z, canvas] of this.layerCanvases) {
-      if (!zValues.includes(z)) {
+    for (const [slotIndex, canvas] of this.slotCanvases) {
+      if (!slotIndices.includes(slotIndex)) {
         canvas.remove();
-        this.layerCanvases.delete(z);
-        this.layerContexts.delete(z);
+        this.slotCanvases.delete(slotIndex);
+        this.slotContexts.delete(slotIndex);
       }
     }
 
-    // Create/update canvases for all layers
-    for (const z of zValues) {
-      this.getOrCreateCanvas(z, perf);
+    // Create/update canvases for all projected display slots.
+    for (const slotIndex of slotIndices) {
+      this.getOrCreateSlotCanvas(slotIndex, perf);
     }
   }
 
   /**
-   * Get existing canvas or create new one
-   * Selected layer canvas is sized to exactly match the grid
-   * Other layers are larger to accommodate scaling
+   * Get existing canvas or create new one for a projected display slot.
+   * Selected slot canvas is sized to exactly match the grid.
+   * Other slots are larger to accommodate scaling.
    */
-  private getOrCreateCanvas(z: number, perf?: { resize_count: number; create_count: number }): HTMLCanvasElement {
-    let canvas = this.layerCanvases.get(z);
+  private getOrCreateSlotCanvas(slotIndex: number, perf?: { resize_count: number; create_count: number }): HTMLCanvasElement {
+    let canvas = this.slotCanvases.get(slotIndex);
 
     if (!canvas) {
       canvas = document.createElement('canvas');
-      canvas.className = `voxel-layer layer-z-${z}`;
+      canvas.className = `voxel-slot slot-z-${slotIndex}`;
       canvas.style.position = 'absolute';
       // Override CSS centering rules; renderer positions via transforms.
       canvas.style.left = '0px';
@@ -399,24 +399,24 @@ export class VoxelDOMRenderer {
       const ctx = canvas.getContext('2d', { alpha: true });
       if (!ctx) throw new Error('Failed to get 2D context');
 
-      this.layerCanvases.set(z, canvas);
-      this.layerContexts.set(z, ctx);
+      this.slotCanvases.set(slotIndex, canvas);
+      this.slotContexts.set(slotIndex, ctx);
       this.clipContainer.appendChild(canvas);
       if (perf) perf.create_count += 1;
-      this.debugState.layer_events.push({ kind: 'create_canvas', z, width: canvas.width, height: canvas.height, selected: false });
-      this.debugState.layer_events = this.debugState.layer_events.slice(-12);
+      this.debugState.slot_events.push({ kind: 'create_canvas', slot_index: slotIndex, width: canvas.width, height: canvas.height, selected: false });
+      this.debugState.slot_events = this.debugState.slot_events.slice(-12);
     }
 
     // Update canvas size based on layer dimensions
-    const layer = this.space?.layers.get(z);
-    if (layer) {
+    const displaySlot = this.space?.layers.get(slotIndex);
+    if (displaySlot) {
       const { w: cellW, h: cellH } = this.getCellSize();
-      const gridW = layer.cells[0]?.length ?? 0;
-      const gridH = layer.cells.length;
+      const gridW = displaySlot.cells[0]?.length ?? 0;
+      const gridH = displaySlot.cells.length;
       
       // Selected layer: exact size
       // Other layers: larger to accommodate scaling
-      const isSelected = z === this.space?.camera.focus_plane;
+      const isSelected = slotIndex === this.space?.camera.focus_plane;
       const paddingFactor = isSelected ? 1.0 : 1.5;
       
       const nextW = Math.ceil(gridW * cellW * paddingFactor);
@@ -429,16 +429,16 @@ export class VoxelDOMRenderer {
       if (prevH !== nextH) canvas.height = nextH;
       if (prevW !== nextW || prevH !== nextH) {
         if (perf) perf.resize_count += 1;
-        this.debugState.layer_events.push({ kind: 'resize_canvas', z, width: nextW, height: nextH, selected: isSelected });
-        this.debugState.layer_events = this.debugState.layer_events.slice(-12);
+        this.debugState.slot_events.push({ kind: 'resize_canvas', slot_index: slotIndex, width: nextW, height: nextH, selected: isSelected });
+        this.debugState.slot_events = this.debugState.slot_events.slice(-12);
       }
 
       // If size changed, force raster refresh next render.
       if (prevW !== nextW || prevH !== nextH) {
         // If caller is using versioned invalidation, force a raster refresh.
-        if (this.layerContentVersion.has(z)) {
-          const expected = this.layerContentVersion.get(z) ?? 0;
-          this.layerRenderedVersion.set(z, expected - 1);
+        if (this.slotContentVersion.has(slotIndex)) {
+          const expected = this.slotContentVersion.get(slotIndex) ?? 0;
+          this.slotRenderedVersion.set(slotIndex, expected - 1);
         }
       }
     }
@@ -447,15 +447,15 @@ export class VoxelDOMRenderer {
   }
 
   /**
-   * Calculate transform for a layer
-   * Selected layer is reference point (scale 1.0, at viewport center)
-   * Other layers scale and parallax relative to selected layer
+   * Calculate transform for a projected display slot.
+   * Selected slot is reference point (scale 1.0, at viewport center).
+   * Other slots scale and parallax relative to the selected slot.
    */
-  private calculateTransform(layer: VoxelLayer, selectedZ: number): { transform: string; origin: string } {
+  private calculateTransform(displaySlot: VoxelLayer, selectedSlot: number): { transform: string; origin: string } {
     const camera = this.space?.camera;
     if (!camera) return { transform: '', origin: 'center center' };
 
-    const zDistance = layer.z - selectedZ;
+    const zDistance = displaySlot.z - selectedSlot;
     const isSelected = zDistance === 0;
 
     // Place mode keeps follow-pan uniform across layers so the target tile remains grounded.
@@ -467,8 +467,8 @@ export class VoxelDOMRenderer {
 
     // Get cell size
     const { w: cellW, h: cellH } = this.getCellSize();
-    const gridW = layer.cells[0]?.length ?? 0;
-    const gridH = layer.cells.length;
+    const gridW = displaySlot.cells[0]?.length ?? 0;
+    const gridH = displaySlot.cells.length;
     const gridPxW = gridW * cellW;
     const gridPxH = gridH * cellH;
     const paddingFactor = isSelected ? 1.0 : 1.5;
@@ -552,21 +552,21 @@ export class VoxelDOMRenderer {
       const originX = Number.isFinite(viewportCenterX) ? viewportCenterX - layerLeft : canvasW / 2;
       const originY = Number.isFinite(viewportCenterY) ? viewportCenterY - layerTop : canvasH / 2;
       if (isSelected) {
-        const prev = this.debugState.selected_layer;
-        this.debugState.selected_layer = {
-          z: layer.z,
+        const prev = this.debugState.selected_slot;
+        this.debugState.selected_slot = {
+          slot_index: displaySlot.z,
           grid_w: gridW,
           grid_h: gridH,
           grid_px_w: gridPxW,
           grid_px_h: gridPxH,
-          layer_left_px: layerLeft,
-          layer_top_px: layerTop,
+          slot_left_px: layerLeft,
+          slot_top_px: layerTop,
           pan_x: clampedPanX,
           pan_y: clampedPanY,
           pan_offset_x_px: panOffsetX,
           pan_offset_y_px: panOffsetY,
-          delta_left_px: layerLeft - prev.layer_left_px,
-          delta_top_px: layerTop - prev.layer_top_px,
+          delta_left_px: layerLeft - prev.slot_left_px,
+          delta_top_px: layerTop - prev.slot_top_px,
           delta_pan_x: clampedPanX - prev.pan_x,
           delta_pan_y: clampedPanY - prev.pan_y,
         };
@@ -600,17 +600,17 @@ export class VoxelDOMRenderer {
    * Render layer content to canvas
    * Renders cells with Y-flip correction (grid Y=0 is bottom, canvas Y=0 is top)
    */
-  private renderLayer(layer: VoxelLayer, ctx: CanvasRenderingContext2D): void {
+  private renderDisplaySlot(displaySlot: VoxelLayer, ctx: CanvasRenderingContext2D): void {
     const { w: cellW, h: cellH } = this.getCellSize();
     const fontSizePx = this.getFontSizePx();
 
-    const gridW = layer.cells[0]?.length ?? 0;
-    const gridH = layer.cells.length;
+    const gridW = displaySlot.cells[0]?.length ?? 0;
+    const gridH = displaySlot.cells.length;
     const gridPxW = gridW * cellW;
     const gridPxH = gridH * cellH;
 
-    // Non-selected layers may use a larger canvas (padding) to avoid clipping during transforms.
-    // Center the grid content inside the canvas so all layers share the same visual origin.
+    // Non-selected display slots may use a larger canvas (padding) to avoid clipping during transforms.
+    // Center the grid content inside the canvas so all display slots share the same visual origin.
     const padX = Math.max(0, (ctx.canvas.width - gridPxW) / 2);
     const padY = Math.max(0, (ctx.canvas.height - gridPxH) / 2);
 
@@ -624,13 +624,13 @@ export class VoxelDOMRenderer {
 
     // Weight index to CSS font weight mapping
     // Render cells with Y-flip (grid Y=0 at bottom, canvas Y=0 is top)
-    for (let gridY = 0; gridY < layer.cells.length; gridY++) {
-      const row = layer.cells[gridY];
+    for (let gridY = 0; gridY < displaySlot.cells.length; gridY++) {
+      const row = displaySlot.cells[gridY];
       if (!row) continue;
 
       // Flip Y coordinate for canvas rendering
       // Grid Y=0 is bottom, Canvas Y-0 is top, so we invert
-      const canvasY = layer.cells.length - 1 - gridY;
+      const canvasY = displaySlot.cells.length - 1 - gridY;
 
       for (let gridX = 0; gridX < row.length; gridX++) {
         const cell = row[gridX];
@@ -664,71 +664,71 @@ export class VoxelDOMRenderer {
     if (!this.space) return;
     const perf_enabled = this.isPerfEnabled();
     const render_started_at_ms = perf_enabled ? performance.now() : 0;
-    let create_layers_ms = 0;
+    let create_slots_ms = 0;
     let raster_ms = 0;
     let transform_ms = 0;
     const perf_counts = { resize_count: 0, create_count: 0 };
-    let reraster_layer_count = 0;
+    let reraster_slot_count = 0;
     this.updateSpringCenteredViewAngles(performance.now());
 
-    // Layers can be added/removed at runtime (e.g. via the layer palette).
-    // Keep the backing canvas set in sync so newly-created layers render immediately.
-    const create_layers_started_at_ms = perf_enabled ? performance.now() : 0;
-    this.createOrUpdateLayers(perf_counts);
-    if (perf_enabled) create_layers_ms = Math.max(0, performance.now() - create_layers_started_at_ms);
+    // Display slots can be added/removed at runtime as projection changes.
+    // Keep the backing canvas set in sync so newly-created slots render immediately.
+    const create_slots_started_at_ms = perf_enabled ? performance.now() : 0;
+    this.createOrUpdateSlots(perf_counts);
+    if (perf_enabled) create_slots_ms = Math.max(0, performance.now() - create_slots_started_at_ms);
 
-    const selectedZ = this.space.camera.focus_plane;
-    const visibleLayers = Array.from(this.space.layers.values())
-      .filter(layer => layer.visible)
+    const selectedSlot = this.space.camera.focus_plane;
+    const visibleSlots = Array.from(this.space.layers.values())
+      .filter(displaySlot => displaySlot.visible)
       .sort((a, b) => a.z - b.z);
 
     // Check for duplicates at start of render
     this.checkForDuplicateCanvases();
 
-    for (const layer of visibleLayers) {
-      // Ensure canvas/context exist (layer may have been added since last frame)
-      const canvas = this.getOrCreateCanvas(layer.z, perf_counts);
-      const ctx = this.layerContexts.get(layer.z);
+    for (const displaySlot of visibleSlots) {
+      // Ensure canvas/context exist (slot may have been added since last frame)
+      const canvas = this.getOrCreateSlotCanvas(displaySlot.z, perf_counts);
+      const ctx = this.slotContexts.get(displaySlot.z);
       if (!ctx) continue;
 
-      // Render layer content.
+      // Render display-slot content.
       // Default behavior: rerender every frame (painter correctness).
-      // Optimized behavior: if caller supplies per-layer content versions, rerender only when changed.
-      if (!this.layerContentVersion.has(layer.z)) {
+      // Optimized behavior: if caller supplies per-slot content versions, rerender only when changed.
+      if (!this.slotContentVersion.has(displaySlot.z)) {
         const raster_started_at_ms = perf_enabled ? performance.now() : 0;
-        this.renderLayer(layer, ctx);
+        this.renderDisplaySlot(displaySlot, ctx);
         if (perf_enabled) {
           raster_ms += Math.max(0, performance.now() - raster_started_at_ms);
-          reraster_layer_count += 1;
+          reraster_slot_count += 1;
         }
       } else {
-        const version = this.layerContentVersion.get(layer.z) ?? 0;
-        const renderedVersion = this.layerRenderedVersion.get(layer.z);
+        const version = this.slotContentVersion.get(displaySlot.z) ?? 0;
+        const renderedVersion = this.slotRenderedVersion.get(displaySlot.z);
         if (renderedVersion !== version) {
           const raster_started_at_ms = perf_enabled ? performance.now() : 0;
-          this.renderLayer(layer, ctx);
-          this.layerRenderedVersion.set(layer.z, version);
+          this.renderDisplaySlot(displaySlot, ctx);
+          this.slotRenderedVersion.set(displaySlot.z, version);
           if (perf_enabled) {
             raster_ms += Math.max(0, performance.now() - raster_started_at_ms);
-            reraster_layer_count += 1;
+            reraster_slot_count += 1;
           }
         }
       }
 
       // Apply transform
       const transform_started_at_ms = perf_enabled ? performance.now() : 0;
-      const placement = this.calculateTransform(layer, selectedZ);
+      const placement = this.calculateTransform(displaySlot, selectedSlot);
       canvas.style.transform = placement.transform;
       canvas.style.transformOrigin = placement.origin;
-      canvas.style.opacity = (layer.opacity ?? 1).toString();
+      canvas.style.opacity = (displaySlot.opacity ?? 1).toString();
       canvas.style.display = 'block';
       if (perf_enabled) transform_ms += Math.max(0, performance.now() - transform_started_at_ms);
     }
 
-    // Hide invisible layers
-    for (const [z, canvas] of this.layerCanvases) {
-      const layer = this.space.layers.get(z);
-      if (!layer || !layer.visible) {
+    // Hide invisible projected display slots.
+    for (const [slotIndex, canvas] of this.slotCanvases) {
+      const displaySlot = this.space.layers.get(slotIndex);
+      if (!displaySlot || !displaySlot.visible) {
         canvas.style.display = 'none';
       }
     }
@@ -741,10 +741,10 @@ export class VoxelDOMRenderer {
     const summary_every = Math.max(1, Math.floor(this.readPerfNumber('voxel_dom_renderer_perf_summary_every', 120)));
     this.perfSummary.frames += 1;
     this.perfSummary.summed_total_ms += total_ms;
-    this.perfSummary.summed_create_layers_ms += create_layers_ms;
+    this.perfSummary.summed_create_slots_ms += create_slots_ms;
     this.perfSummary.summed_raster_ms += raster_ms;
     this.perfSummary.summed_transform_ms += transform_ms;
-    this.perfSummary.summed_reraster_layer_count += reraster_layer_count;
+    this.perfSummary.summed_reraster_slot_count += reraster_slot_count;
     this.perfSummary.summed_resize_count += perf_counts.resize_count;
     this.perfSummary.max_total_ms = Math.max(this.perfSummary.max_total_ms, total_ms);
     if (total_ms >= slow_frame_ms) this.perfSummary.slow_frames += 1;
@@ -753,11 +753,11 @@ export class VoxelDOMRenderer {
       console.log('[VOXEL_DOM_RENDERER_PERF] frame ' + JSON.stringify({
         render_index: this.perfRenderIndex,
         total_ms: this.roundPerfMs(total_ms),
-        create_layers_ms: this.roundPerfMs(create_layers_ms),
+        create_slots_ms: this.roundPerfMs(create_slots_ms),
         raster_ms: this.roundPerfMs(raster_ms),
         transform_ms: this.roundPerfMs(transform_ms),
-        visible_layer_count: visibleLayers.length,
-        reraster_layer_count,
+        visible_slot_count: visibleSlots.length,
+        reraster_slot_count,
         resize_count: perf_counts.resize_count,
         create_count: perf_counts.create_count,
       }));
@@ -770,10 +770,10 @@ export class VoxelDOMRenderer {
         frames: this.perfSummary.frames,
         slow_frames: this.perfSummary.slow_frames,
         avg_total_ms: this.roundPerfMs(this.perfSummary.summed_total_ms / frames),
-        avg_create_layers_ms: this.roundPerfMs(this.perfSummary.summed_create_layers_ms / frames),
+        avg_create_slots_ms: this.roundPerfMs(this.perfSummary.summed_create_slots_ms / frames),
         avg_raster_ms: this.roundPerfMs(this.perfSummary.summed_raster_ms / frames),
         avg_transform_ms: this.roundPerfMs(this.perfSummary.summed_transform_ms / frames),
-        avg_reraster_layer_count: this.roundPerfMs(this.perfSummary.summed_reraster_layer_count / frames),
+        avg_reraster_slot_count: this.roundPerfMs(this.perfSummary.summed_reraster_slot_count / frames),
         avg_resize_count: this.roundPerfMs(this.perfSummary.summed_resize_count / frames),
         max_total_ms: this.roundPerfMs(this.perfSummary.max_total_ms),
       }));
@@ -786,8 +786,8 @@ export class VoxelDOMRenderer {
    */
   destroy(): void {
     this.clipContainer.remove();
-    this.layerCanvases.clear();
-    this.layerContexts.clear();
+    this.slotCanvases.clear();
+    this.slotContexts.clear();
   }
 }
 

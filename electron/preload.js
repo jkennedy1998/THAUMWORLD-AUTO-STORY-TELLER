@@ -9,6 +9,7 @@ const startupBootMode = process.env.THAUM_STARTUP_BOOT_MODE || 'manual_shell';
 const dataSlot = Number(process.env.DATA_SLOT || 1) || 1;
 const toolAssistedInputsBootConfig = {
   enabled: process.env.THAUM_TAI_ENABLED === 'true',
+  resetState: process.env.THAUM_TAI_RESET_STATE === 'true',
   taiId: process.env.THAUM_TAI_ID || '',
   testName: process.env.THAUM_TAI_TEST_NAME || '',
   openMs: Number(process.env.THAUM_TAI_OPEN_MS || 0) || 0,

@@ -14,7 +14,7 @@ import type { Grid, Brush, ToolType, GridCell } from '../../ascii_painter/types.
 import { createGrid, getCell, setCell } from '../../ascii_painter/types.js';
 import { drawCell, drawLine, eraseCell, applyTool, sampleCell, previewLine, previewRectStroke, previewRectFill } from '../../ascii_painter/tools.js';
 import { has_any_edit_channel, resolve_edit_channels_with_modifiers, type EditChannels } from '../../ascii_painter/edit_mask.js';
-import { logCellAction, logSelectionAction, startBatch, endBatch, addToBatch, cancelBatch, undo, redo, getHistoryState, type HistoryManager, type CellChange } from '../../ascii_painter/history.js';
+import { logCellAction, logSelectionAction, startBatch, endBatch, addToBatch, cancelBatch, getHistoryState, type HistoryManager, type CellChange } from '../../ascii_painter/history.js';
 import { get_brightest_indexed_rgb, get_color_by_name, get_darkest_indexed_rgb } from '../colors.js';
 import { draw_module_border, PANEL_BORDER_PRESETS } from '../module_borders.js';
 import type { SelectionBitmap, SelectionMode } from '../../ascii_painter/selection.js';
@@ -27,11 +27,11 @@ import type { GradiatorState } from '../../ascii_painter/gradiator.js';
 import { scaleCopyData, scaleTextToCopyData } from '../../ascii_painter/gradiator.js';
 import type { ModuleGizmosConfig, GizmoState } from '../module_gizmos.js';
 import { clear_gizmo_hover_state, draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area, handle_move_drag, get_resize_edge, handle_resize_drag, handle_global_pointer_down_for_gizmos, should_draw_module_chrome, update_gizmo_hover_state } from '../module_gizmos.js';
-import type { VoxelSpace } from '../../ascii_painter/voxel_space.js';
-import { getOrCreateLayer, getVisibleLayers, getVoxel, setVoxel } from '../../ascii_painter/voxel_space.js';
+import type { CameraConfig } from '../../ascii_painter/voxel_space.js';
 import type { CameraAnchor } from '../runtime/camera_anchor_runtime.js';
-import { make_place_view_state, map_screen_direction_to_world_delta, type PlaceViewState } from '../runtime/place_view_projection.js';
+import { get_principal_view_plane_axis, make_place_view_state, map_screen_direction_to_world_delta, type PlaceViewState } from '../runtime/place_view_projection.js';
 import { diag_log } from '../../shared/diagnostics.js';
+import { get_line_voxels_3d } from '../../shared/painter_tools.js';
 
 function painterCanvasDiag(message: string, payload?: Record<string, unknown>): void {
   diag_log('painter', 'verbose', 'PAINTER_CANVAS', message, payload);
@@ -55,9 +55,12 @@ export type PainterCanvasOptions = {
   rect: Rect;
   grid: Grid;
   brush?: Brush;
-  // Always fetch the latest space (it can be replaced on load/new).
-  get_space: () => VoxelSpace;
+  get_camera: () => CameraConfig;
   get_selected_z: () => number;
+  get_active_group_id: () => string | null;
+  get_world_cell: (world: { x: number; y: number; z: number }) => GridCell;
+  get_active_group_world_cell?: (world: { x: number; y: number; z: number }) => GridCell;
+  get_active_group_locked?: () => boolean;
   get_current_tool: () => ToolType;
   get_preview_brush?: () => Brush;
   get_brush_for_button?: (button: number) => Brush;
@@ -73,7 +76,8 @@ export type PainterCanvasOptions = {
   get_text_enterlead: () => number; // -16 to 16, vertical movement per Enter key
   get_text_enterspace: () => number; // -16 to 16, horizontal offset on Enter key
   preview_points: { x: number; y: number }[];
-  on_push_snapshot: () => void;
+  on_edit_committed: () => void;
+  on_live_stroke_preview?: (args: { changes: CellChange[]; anchor_world: { x: number; y: number; z: number } | null; plane: number | null }) => void;
   on_sample_cell: (cell: { char: string; rgb: Rgb; weight_index: number }, sample: { button: number; shift: boolean; ctrl: boolean; alt: boolean; meta: boolean }) => void;
   get_left_click_tool: () => ToolType;
   get_right_click_tool: () => ToolType;
@@ -106,16 +110,20 @@ export type PainterCanvasOptions = {
   get_paste_ignore_color: () => boolean;
   get_paste_ignore_color_rgb: () => { r: number; g: number; b: number };
   get_world_point_for_grid?: (x: number, y: number) => { x: number; y: number; z: number } | null;
+  get_world_point_for_grid_on_plane?: (x: number, y: number, plane: number) => { x: number; y: number; z: number } | null;
   get_grid_point_for_world?: (world: { x: number; y: number; z: number }) => { x: number; y: number } | null;
   get_view_state?: () => PlaceViewState;
   get_focus_content_bounds?: () => { min_x: number; min_y: number; max_x: number; max_y: number } | null;
   get_selection_overlay_cells?: () => Array<{ x: number; y: number; char: string; weight_index: number }>;
   get_selection_status?: () => string | null;
   on_history_applied?: () => void;
+  on_undo_request: () => string | null;
+  on_redo_request: () => string | null;
   on_commit_cell_changes?: (args: {
     action_type: 'draw_cells' | 'erase_cells' | 'fill' | 'paste' | 'clear_canvas';
     description: string;
-    z: number;
+    z?: number;
+    group_id: string;
     changes: CellChange[];
   }) => void;
 };
@@ -124,6 +132,14 @@ export type PainterInteractionAnchor = CameraAnchor;
 
 export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   let rect = opts.rect;
+
+  function requireActiveGroupId(): string {
+    const groupId = opts.get_active_group_id();
+    if (!groupId) {
+      throw new Error('Active group id is required for painter history changes');
+    }
+    return groupId;
+  }
 
   function getBrushForButton(button: number): Brush {
     if (opts.get_brush_for_button) return opts.get_brush_for_button(button === 2 ? 2 : 0);
@@ -139,14 +155,24 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     return (drag_start_buttons & 2) ? 2 : 0;
   }
 
+  function getCurrentDragTool(): ToolType {
+    return getDragButton() === 2 ? opts.get_right_click_tool() : opts.get_left_click_tool();
+  }
+
+  function getCurrentDragChannels(modifiers?: { shift: boolean; ctrl: boolean; alt: boolean; meta: boolean }): EditChannels {
+    const button = getDragButton();
+    const base_channels = opts.get_brush_edit_channels_for_button?.(button) ?? { char: true, color: true, weight: true };
+    return resolve_edit_channels_with_modifiers(base_channels, modifiers ?? { shift: false, ctrl: false, alt: false, meta: false });
+  }
+
   function getPreviewBrush(): Brush {
       return drag_start_buttons
         ? getBrushForButton(getDragButton())
       : opts.get_preview_brush?.() ?? opts.brush ?? getBrushForButton(0);
   }
 
-  function getSpace(): VoxelSpace {
-    return opts.get_space();
+  function getCamera(): CameraConfig {
+    return opts.get_camera();
   }
   
   // Size constraints for canvas resize
@@ -173,17 +199,17 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   /**
    * Get total pan (camera pan + global CSS pan offset)
    * This is the single source of truth for pan calculations
-   */
+    */
   function getTotalPan(): { x: number; y: number } {
-    const space = getSpace();
+    const camera = getCamera();
     return {
       // NOTE: Pointer events delivered to modules are already in grid-tile coordinates
       // that account for the mono_canvas CSS transform (global UI pan) via
       // getBoundingClientRect() in CanvasRuntime.
       // If we also apply the global pan here, the mouse-to-grid mapping drifts
       // further off with every global pan tile.
-      x: (space.camera.pan_x ?? 0),
-      y: (space.camera.pan_y ?? 0)
+      x: (camera.pan_x ?? 0),
+      y: (camera.pan_y ?? 0)
     };
   }
   
@@ -254,6 +280,23 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       };
     }
 
+    if ((is_drawing || is_erasing) && active_stroke_anchor_world) {
+      const strokeGrid = opts.get_grid_point_for_world?.(active_stroke_anchor_world);
+      const strokeScreen = strokeGrid
+        ? {
+            x: rect.x0 + strokeGrid.x + 0.5,
+            y: rect.y0 + strokeGrid.y + 0.5,
+          }
+        : (current_mouse_pos
+            ? { x: current_mouse_pos.x + 0.5, y: current_mouse_pos.y + 0.5 }
+            : null);
+      return {
+        kind: 'pointer',
+        world: { ...active_stroke_anchor_world },
+        screen: strokeScreen,
+      };
+    }
+
     if (current_mouse_pos && current_mouse_pos.x >= rect.x0 && current_mouse_pos.x <= rect.x1 && current_mouse_pos.y >= rect.y0 && current_mouse_pos.y <= rect.y1) {
       const grid = screenToGrid(current_mouse_pos.x, current_mouse_pos.y);
       const world = opts.get_world_point_for_grid?.(grid.x, grid.y) ?? { x: grid.x, y: grid.y, z: focusZ };
@@ -293,7 +336,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   // Positive deltaX = pan right (shows content to the left)
   // Positive deltaY = pan up (shows content below)
   function panBy(deltaX: number, deltaY: number): void {
-    const camera = getSpace().camera;
+    const camera = getCamera();
     const oldX = camera.pan_x ?? 0;
     const oldY = camera.pan_y ?? 0;
     camera.pan_x = oldX + deltaX;
@@ -302,7 +345,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   }
 
   function panTo(x: number, y: number): void {
-    const camera = getSpace().camera;
+    const camera = getCamera();
     const oldX = camera.pan_x ?? 0;
     const oldY = camera.pan_y ?? 0;
     camera.pan_x = x;
@@ -314,6 +357,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   let is_drawing = false;
   let is_erasing = false;
   let active_draw_channels: EditChannels = { char: true, color: true, weight: true };
+  let active_stroke_tool: ToolType | null = null;
   let drag_start: { x: number; y: number } | null = null;
   let last_draw_pos: { x: number; y: number } | null = null;
   let pan_start: { x: number; y: number } | null = null;
@@ -352,6 +396,286 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   let paste_preview_world_data: WorldCopyData | null = null;
   let paste_preview_world_anchor: { x: number; y: number; z: number } | null = null;
 
+  function cloneGridCell(cell: GridCell): GridCell {
+    return {
+      char: cell.char,
+      rgb: { ...cell.rgb },
+      weight_index: cell.weight_index,
+    };
+  }
+
+  function gridCellsEqual(a: GridCell | null | undefined, b: GridCell | null | undefined): boolean {
+    if (!a || !b) return false;
+    return a.char === b.char
+      && a.rgb.r === b.rgb.r
+      && a.rgb.g === b.rgb.g
+      && a.rgb.b === b.rgb.b
+      && a.weight_index === b.weight_index;
+  }
+
+  function worldKey(world: { x: number; y: number; z: number }): string {
+    return `${world.x},${world.y},${world.z}`;
+  }
+
+  function getActiveGroupWorldCell(world: { x: number; y: number; z: number }): GridCell {
+    return opts.get_active_group_world_cell?.(world) ?? opts.get_world_cell(world);
+  }
+
+  function normalizeCommittedChanges(changes: CellChange[]): CellChange[] {
+    return changes.filter((change) => !gridCellsEqual(change.oldCell, change.newCell));
+  }
+
+  function buildChange(world: { x: number; y: number; z: number }, oldCell: GridCell, newCell: GridCell, gridPoint?: { x: number; y: number } | null): CellChange {
+    return {
+      x: gridPoint?.x ?? -1,
+      y: gridPoint?.y ?? -1,
+      worldX: world.x,
+      worldY: world.y,
+      worldZ: world.z,
+      group_id: requireActiveGroupId(),
+      oldCell: cloneGridCell(oldCell),
+      newCell: cloneGridCell(newCell),
+    };
+  }
+
+  function emitPreviewChanges(changes: CellChange[], anchor_world: { x: number; y: number; z: number } | null, plane: number | null): void {
+    if (!opts.on_live_stroke_preview || changes.length < 1) return;
+    opts.on_live_stroke_preview({
+      changes: changes.map((change) => ({
+        ...change,
+        oldCell: cloneGridCell(change.oldCell),
+        newCell: cloneGridCell(change.newCell),
+      })),
+      anchor_world: anchor_world ? { ...anchor_world } : null,
+      plane,
+    });
+  }
+
+  function replacePendingPreviewChanges(nextChanges: CellChange[], anchor_world: { x: number; y: number; z: number } | null, plane: number | null): void {
+    const previous = pending_changes.map((change) => ({
+      ...change,
+      oldCell: cloneGridCell(change.oldCell),
+      newCell: cloneGridCell(change.newCell),
+    }));
+    const nextByKey = new Map<string, CellChange>();
+    for (const change of nextChanges) {
+      nextByKey.set(`${change.worldX},${change.worldY},${change.worldZ}`, {
+        ...change,
+        oldCell: cloneGridCell(change.oldCell),
+        newCell: cloneGridCell(change.newCell),
+      });
+    }
+    const previewChanges: CellChange[] = [];
+    for (const change of previous) {
+      const key = `${change.worldX},${change.worldY},${change.worldZ}`;
+      if (nextByKey.has(key)) continue;
+      previewChanges.push({
+        ...change,
+        oldCell: cloneGridCell(change.oldCell),
+        newCell: cloneGridCell(change.oldCell),
+      });
+    }
+    for (const change of nextByKey.values()) {
+      previewChanges.push(change);
+    }
+    emitPreviewChanges(previewChanges, anchor_world, plane);
+    pending_changes = normalizeCommittedChanges(Array.from(nextByKey.values()));
+  }
+
+  function clearPendingPreviewChanges(anchor_world: { x: number; y: number; z: number } | null = null, plane: number | null = null): void {
+    if (pending_changes.length < 1) {
+      clearLiveStrokePreview();
+      return;
+    }
+    emitPreviewChanges(pending_changes.map((change) => ({
+      ...change,
+      oldCell: cloneGridCell(change.oldCell),
+      newCell: cloneGridCell(change.oldCell),
+    })), anchor_world, plane);
+    pending_changes = [];
+    clearLiveStrokePreview();
+  }
+
+  function buildShapePreviewChanges(tool: 'line' | 'rect_stroke' | 'rect_fill', start: { x: number; y: number }, end: { x: number; y: number }, brush: Brush, plane: number | null): CellChange[] {
+    const points = tool === 'line'
+      ? previewLine(start.x, start.y, end.x, end.y)
+      : tool === 'rect_stroke'
+        ? previewRectStroke(start.x, start.y, end.x, end.y)
+        : previewRectFill(start.x, start.y, end.x, end.y);
+    const changesByWorld = new Map<string, CellChange>();
+    for (const point of points) {
+      if (!canEditCell(point.x, point.y)) continue;
+      const world = getWorldPointForEditPlane(point.x, point.y, plane ?? opts.get_selected_z());
+      if (!world) continue;
+      const oldCell = cloneGridCell(getActiveGroupWorldCell(world));
+      const newCell: GridCell = {
+        char: brush.char,
+        rgb: { ...brush.rgb },
+        weight_index: brush.weight_index,
+      };
+      if (gridCellsEqual(oldCell, newCell)) continue;
+      changesByWorld.set(worldKey(world), buildChange(world, oldCell, newCell, { x: point.x, y: point.y }));
+    }
+    return Array.from(changesByWorld.values());
+  }
+
+  function buildLinePreviewChanges(start_world: { x: number; y: number; z: number }, end_world: { x: number; y: number; z: number }, brush: Brush): CellChange[] {
+    const changesByWorld = new Map<string, CellChange>();
+    for (const world of get_line_voxels_3d(start_world, end_world)) {
+      const gridPoint = opts.get_grid_point_for_world?.(world) ?? null;
+      if (gridPoint && !canEditCell(gridPoint.x, gridPoint.y)) continue;
+      const oldCell = cloneGridCell(getActiveGroupWorldCell(world));
+      const newCell: GridCell = {
+        char: brush.char,
+        rgb: { ...brush.rgb },
+        weight_index: brush.weight_index,
+      };
+      if (gridCellsEqual(oldCell, newCell)) continue;
+      changesByWorld.set(worldKey(world), buildChange(world, oldCell, newCell, gridPoint));
+    }
+    return Array.from(changesByWorld.values());
+  }
+
+  function setPreviewPoints(points: Array<{ x: number; y: number }>): void {
+    opts.preview_points.length = 0;
+    opts.preview_points.push(...points);
+  }
+
+  type PastePreviewResult = {
+    changes: CellChange[];
+    placed: number;
+    cleared: number;
+    preserved: number;
+    skippedIgnored: number;
+    minPasteZ: number;
+    maxPasteZ: number;
+  };
+
+  function createEmptyPastePreviewResult(): PastePreviewResult {
+    return {
+      changes: [],
+      placed: 0,
+      cleared: 0,
+      preserved: 0,
+      skippedIgnored: 0,
+      minPasteZ: Number.POSITIVE_INFINITY,
+      maxPasteZ: Number.NEGATIVE_INFINITY,
+    };
+  }
+
+  function buildWorldPastePreviewChanges(worldData: WorldCopyData, anchor: { x: number; y: number; z: number }): PastePreviewResult {
+    const result = createEmptyPastePreviewResult();
+    const ignoreColorRgb = opts.get_paste_ignore_color_rgb();
+    const changesByWorld = new Map<string, CellChange>();
+    for (const entry of worldData.cells) {
+      const world = {
+        x: anchor.x + entry.dx,
+        y: anchor.y + entry.dy,
+        z: anchor.z + entry.dz,
+      };
+      result.minPasteZ = Math.min(result.minPasteZ, world.z);
+      result.maxPasteZ = Math.max(result.maxPasteZ, world.z);
+      const oldCell = cloneGridCell(opts.get_world_cell(world));
+      const isIgnored = isIgnoredPasteCell(entry.cell, ignoreColorRgb);
+      if (isIgnored) {
+        result.skippedIgnored += 1;
+        result.preserved += 1;
+        continue;
+      }
+      if (entry.cell && entry.cell.char !== ' ') {
+        changesByWorld.set(worldKey(world), buildChange(world, oldCell, entry.cell, opts.get_grid_point_for_world?.(world) ?? null));
+        result.placed += 1;
+        continue;
+      }
+      if (opts.get_paste_space_replace()) {
+        const clearedCell = makeEmptyCell();
+        changesByWorld.set(worldKey(world), buildChange(world, oldCell, clearedCell, opts.get_grid_point_for_world?.(world) ?? null));
+        result.cleared += 1;
+      } else {
+        result.preserved += 1;
+      }
+    }
+    result.changes = Array.from(changesByWorld.values()).filter((change) => !gridCellsEqual(change.oldCell, change.newCell));
+    return result;
+  }
+
+  function buildFlatPastePreviewChanges(data: CopyData, origin: { x: number; y: number }): PastePreviewResult {
+    const result = createEmptyPastePreviewResult();
+    const ignoreColorRgb = opts.get_paste_ignore_color_rgb();
+    const changesByWorld = new Map<string, CellChange>();
+    for (let y = 0; y < data.height; y++) {
+      for (let x = 0; x < data.width; x++) {
+        const cell = data.cells[y]?.[x];
+        const gridX = origin.x + x;
+        const gridY = origin.y + y;
+        const world = opts.get_world_point_for_grid?.(gridX, gridY) ?? { x: gridX, y: gridY, z: opts.get_selected_z() };
+        result.minPasteZ = Math.min(result.minPasteZ, world.z);
+        result.maxPasteZ = Math.max(result.maxPasteZ, world.z);
+        const oldCell = cloneGridCell(opts.get_world_cell(world));
+        const isIgnored = isIgnoredPasteCell(cell ?? null, ignoreColorRgb);
+        if (isIgnored) {
+          result.skippedIgnored += 1;
+          result.preserved += 1;
+          continue;
+        }
+        if (cell && cell.char !== ' ') {
+          changesByWorld.set(worldKey(world), buildChange(world, oldCell, cell, { x: gridX, y: gridY }));
+          result.placed += 1;
+          continue;
+        }
+        if (opts.get_paste_space_replace()) {
+          const clearedCell = makeEmptyCell();
+          changesByWorld.set(worldKey(world), buildChange(world, oldCell, clearedCell, { x: gridX, y: gridY }));
+          result.cleared += 1;
+        } else {
+          result.preserved += 1;
+        }
+      }
+    }
+    result.changes = Array.from(changesByWorld.values()).filter((change) => !gridCellsEqual(change.oldCell, change.newCell));
+    return result;
+  }
+
+  function updateLineRectPreview(end: { x: number; y: number }): void {
+    if (!drag_start || !isShapeTool(active_stroke_tool)) return;
+    if (active_stroke_tool === 'line' && shape_start_world) {
+      const endWorld = getWorldPointForEditPlane(end.x, end.y, active_stroke_world_plane ?? opts.get_selected_z());
+      if (!endWorld) {
+        pending_changes = [];
+        setPreviewPoints([]);
+        clearLiveStrokePreview();
+        return;
+      }
+      active_stroke_anchor_world = { ...endWorld };
+      pending_changes = normalizeCommittedChanges(buildLinePreviewChanges(shape_start_world, endWorld, getBrushForButton(getDragButton())));
+      setPreviewPoints([]);
+      maybeEmitLiveStrokePreview();
+      return;
+    }
+    const previewChanges = buildShapePreviewChanges(active_stroke_tool as 'line' | 'rect_stroke' | 'rect_fill', drag_start, end, getBrushForButton(getDragButton()), active_stroke_world_plane);
+    pending_changes = normalizeCommittedChanges(previewChanges);
+    const points = active_stroke_tool === 'rect_stroke'
+      ? previewRectStroke(drag_start.x, drag_start.y, end.x, end.y)
+      : previewRectFill(drag_start.x, drag_start.y, end.x, end.y);
+    setPreviewPoints(points);
+    maybeEmitLiveStrokePreview();
+  }
+
+  function updatePastePreviewAtGrid(grid_x: number, grid_y: number): void {
+    if (paste_preview_world_data) {
+      paste_preview_world_anchor = opts.get_world_point_for_grid?.(grid_x, grid_y) ?? { x: grid_x, y: grid_y, z: opts.get_selected_z() };
+      const preview = buildWorldPastePreviewChanges(paste_preview_world_data, paste_preview_world_anchor);
+      replacePendingPreviewChanges(preview.changes, paste_preview_world_anchor, paste_preview_world_anchor.z);
+      return;
+    }
+    if (paste_preview_data) {
+      paste_preview_pos = { x: grid_x, y: grid_y };
+      const anchorWorld = opts.get_world_point_for_grid?.(grid_x, grid_y) ?? { x: grid_x, y: grid_y, z: opts.get_selected_z() };
+      const preview = buildFlatPastePreviewChanges(paste_preview_data, paste_preview_pos);
+      replacePendingPreviewChanges(preview.changes, anchorWorld, anchorWorld.z);
+    }
+  }
+
   function exitTextMode(commitPending: boolean): void {
     if (!text_mode_active) return;
     if (commitPending) commitPendingTextChanges('Type Text');
@@ -366,6 +690,99 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   function cloneWorldPoint(world: { x: number; y: number; z: number } | null | undefined): { x: number; y: number; z: number } | null {
     if (!world) return null;
     return { x: world.x, y: world.y, z: world.z };
+  }
+
+  function setWorldPointPlaneCoordinate(world: { x: number; y: number; z: number }, plane: number): { x: number; y: number; z: number } {
+    const viewState = opts.get_view_state?.() ?? make_place_view_state('top');
+    const axis = get_principal_view_plane_axis(viewState.principal_view);
+    if (axis === 'x') return { ...world, x: plane };
+    if (axis === 'y') return { ...world, y: plane };
+    return { ...world, z: plane };
+  }
+
+  function getCurrentStrokeGridPoint(): { x: number; y: number } | null {
+    if (current_mouse_pos) {
+      const local_x = current_mouse_pos.x - rect.x0;
+      const local_y = current_mouse_pos.y - rect.y0;
+      const grid_coords = localToGrid(local_x, local_y);
+      if (grid_coords.x >= 0 && grid_coords.x < opts.grid.width && grid_coords.y >= 0 && grid_coords.y < opts.grid.height) {
+        return grid_coords;
+      }
+    }
+    return last_draw_pos ? { ...last_draw_pos } : null;
+  }
+
+  function isShapeTool(tool: ToolType | null | undefined): tool is 'line' | 'rect_stroke' | 'rect_fill' {
+    return tool === 'line' || tool === 'rect_stroke' || tool === 'rect_fill';
+  }
+
+  function isActivePencilStroke(): boolean {
+    return is_drawing && active_stroke_tool === 'pencil';
+  }
+
+  function isActiveEraserStroke(): boolean {
+    return is_erasing && active_stroke_tool === 'eraser';
+  }
+
+  function isActiveShapeStroke(): boolean {
+    return is_drawing && isShapeTool(active_stroke_tool) && !!drag_start;
+  }
+
+  function isActiveLineStroke(): boolean {
+    return is_drawing && active_stroke_tool === 'line' && !!drag_start;
+  }
+
+  function clearActiveStrokeState(): void {
+    clearLiveStrokePreview();
+    is_drawing = false;
+    is_erasing = false;
+    active_draw_channels = { char: true, color: true, weight: true };
+    active_stroke_tool = null;
+    active_stroke_world_plane = null;
+    active_stroke_anchor_world = null;
+    shape_start_world = null;
+    drag_start = null;
+    last_draw_pos = null;
+    setPreviewPoints([]);
+    drag_start_buttons = 0;
+  }
+
+  function handleDepthStepDuringActiveStroke(nextPlane: number): void {
+    if (!(is_drawing || is_erasing)) return;
+    if (!isActivePencilStroke() && !isActiveEraserStroke() && !isActiveShapeStroke()) return;
+    const normalizedPlane = Math.floor(nextPlane);
+    if (!Number.isFinite(normalizedPlane) || active_stroke_world_plane === normalizedPlane) return;
+    maybeEmitLiveStrokePreview(true);
+    active_stroke_world_plane = normalizedPlane;
+    const strokeGridPoint = getCurrentStrokeGridPoint();
+    const nextAnchor = strokeGridPoint
+      ? getWorldPointForEditPlane(strokeGridPoint.x, strokeGridPoint.y, normalizedPlane)
+      : null;
+    active_stroke_anchor_world = nextAnchor
+      ?? (active_stroke_anchor_world ? setWorldPointPlaneCoordinate(active_stroke_anchor_world, normalizedPlane) : null);
+    if (!strokeGridPoint) return;
+    if (isActivePencilStroke()) {
+      applyBrushEditWithBrushSize(
+        strokeGridPoint.x,
+        strokeGridPoint.y,
+        getBrushForButton(getDragButton()),
+        getBrushSizeForButton(getDragButton()),
+        active_draw_channels,
+      );
+    } else if (isActiveEraserStroke()) {
+      drawWithBrushSize(
+        strokeGridPoint.x,
+        strokeGridPoint.y,
+        true,
+        getBrushForButton(getDragButton()),
+        getBrushSizeForButton(getDragButton()),
+      );
+    } else if (isActiveShapeStroke()) {
+      updateLineRectPreview(strokeGridPoint);
+      return;
+    }
+    last_draw_pos = { ...strokeGridPoint };
+    maybeEmitLiveStrokePreview(true);
   }
 
   function sameWorldPoint(a: { x: number; y: number; z: number } | null | undefined, b: { x: number; y: number; z: number } | null | undefined): boolean {
@@ -405,6 +822,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       text_cursor_world = { x: world.x, y: world.y, z: world.z };
       return true;
     }
+    if (opts.get_grid_point_for_world) return false;
     if (world.x < 0 || world.x >= opts.grid.width || world.y < 0 || world.y >= opts.grid.height) return false;
     moveTextCursorTo(world.x, world.y);
     return true;
@@ -459,24 +877,145 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   function commitPendingTextChanges(description: string = 'Type Text'): void {
     if (pending_changes.length < 1) return;
     const committed_changes = pending_changes.map((change) => ({ ...change, oldCell: { ...change.oldCell }, newCell: { ...change.newCell } }));
-    logCellAction(opts.history, 'draw_cells', description, opts.get_selected_z(), pending_changes);
+    const active_group_id = requireActiveGroupId();
+    logCellAction(opts.history, 'draw_cells', description, { z: opts.get_selected_z(), group_id: active_group_id }, pending_changes);
     opts.on_commit_cell_changes?.({
       action_type: 'draw_cells',
       description,
       z: opts.get_selected_z(),
+      group_id: active_group_id,
       changes: committed_changes,
     });
     pending_changes = [];
-    opts.on_push_snapshot();
+    clearLiveStrokePreview();
+    opts.on_edit_committed();
   }
 
   function commitLoggedCellChanges(action_type: 'draw_cells' | 'erase_cells' | 'fill' | 'paste' | 'clear_canvas', description: string, z: number): void {
     if (pending_changes.length < 1) return;
     const committed_changes = pending_changes.map((change) => ({ ...change, oldCell: { ...change.oldCell }, newCell: { ...change.newCell } }));
-    logCellAction(opts.history, action_type, description, z, pending_changes);
-    opts.on_commit_cell_changes?.({ action_type, description, z, changes: committed_changes });
+    const active_group_id = requireActiveGroupId();
+    logCellAction(opts.history, action_type, description, { z, group_id: active_group_id }, pending_changes);
+    opts.on_commit_cell_changes?.({ action_type, description, z, group_id: active_group_id, changes: committed_changes });
     pending_changes = [];
-    opts.on_push_snapshot();
+    clearLiveStrokePreview();
+    opts.on_edit_committed();
+  }
+
+  function clonePendingChanges(): CellChange[] {
+    return pending_changes.map((change) => ({
+      ...change,
+      oldCell: { ...change.oldCell },
+      newCell: { ...change.newCell },
+    }));
+  }
+
+  function maybeEmitLiveStrokePreview(force: boolean = false): void {
+    if (!opts.on_live_stroke_preview || pending_changes.length < 1) return;
+    const now = Date.now();
+    if (!force && now - last_live_stroke_preview_at < LIVE_STROKE_PREVIEW_INTERVAL_MS) return;
+    last_live_stroke_preview_at = now;
+    opts.on_live_stroke_preview({
+      changes: clonePendingChanges(),
+      anchor_world: active_stroke_anchor_world ? { ...active_stroke_anchor_world } : null,
+      plane: active_stroke_world_plane,
+    });
+  }
+
+  function clearLiveStrokePreview(): void {
+    opts.on_live_stroke_preview?.({
+      changes: [],
+      anchor_world: null,
+      plane: null,
+    });
+  }
+
+  function maybeEmitLiveTextPreview(force: boolean = false): void {
+    if (!opts.on_live_stroke_preview || pending_changes.length < 1) return;
+    const anchorWorld = cloneWorldPoint(text_cursor_world)
+      ?? cloneWorldPoint(text_start_world)
+      ?? opts.get_world_point_for_grid?.(text_cursor_x, text_cursor_y)
+      ?? { x: text_cursor_x, y: text_cursor_y, z: opts.get_selected_z() };
+    const plane = anchorWorld.z;
+    const now = Date.now();
+    if (!force && now - last_live_stroke_preview_at < LIVE_STROKE_PREVIEW_INTERVAL_MS) return;
+    last_live_stroke_preview_at = now;
+    opts.on_live_stroke_preview({
+      changes: clonePendingChanges(),
+      anchor_world: { ...anchorWorld },
+      plane,
+    });
+  }
+
+  function insertTextAtCursor(text: string): void {
+    if (!text_mode_active || !text) return;
+    syncTextCursorGridFromWorld();
+
+    if (opts.get_active_group_locked?.()) {
+      showStatus('Cannot type: active group is locked');
+      return;
+    }
+
+    const isChunkInput = text.length > 1;
+    const commitDescription = isChunkInput ? 'Paste Text' : 'Type Text';
+
+    for (const char of text) {
+      if (char === '\n' || char === '\r') {
+        if (!isChunkInput) {
+          commitPendingTextChanges('Type Text');
+        }
+        moveTextCursorToNextLine();
+        if (text_cursor_x < 0 || text_cursor_x >= opts.grid.width || text_cursor_y < 0 || text_cursor_y >= opts.grid.height) {
+          text_mode_active = false;
+          break;
+        }
+        continue;
+      }
+
+      if (text_cursor_x < 0 || text_cursor_x >= opts.grid.width || text_cursor_y < 0 || text_cursor_y >= opts.grid.height) continue;
+
+      const text_brush = getPreviewBrush();
+      const oldCell = getGridCell(text_cursor_x, text_cursor_y);
+
+      if (char === ' ') {
+        if (opts.get_space_replace()) {
+          opts.grid.cells[text_cursor_y]![text_cursor_x] = {
+            char: ' ',
+            rgb: { ...text_brush.rgb },
+            weight_index: text_brush.weight_index,
+          };
+          const newCell = getGridCell(text_cursor_x, text_cursor_y);
+          if (oldCell && newCell) {
+            trackChange(text_cursor_x, text_cursor_y, oldCell, newCell);
+            maybeEmitLiveTextPreview(true);
+          }
+        }
+      } else {
+        opts.grid.cells[text_cursor_y]![text_cursor_x] = {
+          char,
+          rgb: { ...text_brush.rgb },
+          weight_index: text_brush.weight_index,
+        };
+        const newCell = getGridCell(text_cursor_x, text_cursor_y);
+        if (oldCell && newCell) {
+          trackChange(text_cursor_x, text_cursor_y, oldCell, newCell);
+          maybeEmitLiveTextPreview(true);
+        }
+      }
+
+      moveTextCursorByScreenDelta(opts.get_text_spacing(), opts.get_text_charlead());
+      setCurrentLineEndWorld(getTextCurrentWorld());
+
+      if (text_cursor_x < 0 || text_cursor_x >= opts.grid.width || text_cursor_y < 0 || text_cursor_y >= opts.grid.height) {
+        commitPendingTextChanges(commitDescription);
+        text_mode_active = false;
+        break;
+      }
+    }
+
+    if (text_mode_active && isChunkInput) {
+      commitPendingTextChanges(commitDescription);
+    }
   }
 
   // Function to emit viewport updates for DOM renderer
@@ -523,6 +1062,11 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   // Cell change tracking for action-based undo
   let pending_changes: CellChange[] = [];
   let is_drawing_batch = false;
+  let last_live_stroke_preview_at = 0;
+  const LIVE_STROKE_PREVIEW_INTERVAL_MS = 24;
+  let active_stroke_world_plane: number | null = null;
+  let active_stroke_anchor_world: { x: number; y: number; z: number } | null = null;
+  let shape_start_world: { x: number; y: number; z: number } | null = null;
 
   function showStatus(msg: string): void {
     status_message = msg;
@@ -545,12 +1089,18 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     return Math.max(lo, Math.min(hi, n));
   }
 
+  function getWorldPointForEditPlane(x: number, y: number, plane: number = active_stroke_world_plane ?? opts.get_selected_z()): { x: number; y: number; z: number } | null {
+    const fixedPlaneWorld = opts.get_world_point_for_grid_on_plane?.(x, y, plane);
+    if (fixedPlaneWorld) return fixedPlaneWorld;
+    if (!opts.get_world_point_for_grid_on_plane) {
+      return opts.get_world_point_for_grid?.(x, y) ?? { x, y, z: plane };
+    }
+    return null;
+  }
+
   // Check if a cell can be edited (inside selection or no selection active, and layer not locked)
   function canEditCell(x: number, y: number): boolean {
-    // Check if current layer is locked
-    const selectedZ = opts.get_selected_z();
-    const layer = getSpace().layers.get(selectedZ);
-    if (layer?.locked) return false;
+    if (opts.get_active_group_locked?.()) return false;
     
     // If no selection, allow editing anywhere
     if (!hasSelection(selection_bitmap)) return true;
@@ -566,20 +1116,23 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   }
 
   // Track a cell change for undo
-  function trackChange(x: number, y: number, oldCell: GridCell, newCell: GridCell): void {
-    const world = opts.get_world_point_for_grid?.(x, y) ?? { x, y, z: opts.get_selected_z() };
+  function trackChange(x: number, y: number, oldCell: GridCell, newCell: GridCell): boolean {
+    const world = getWorldPointForEditPlane(x, y);
+    if (!world) return false;
+    const group_id = requireActiveGroupId();
     const existingIndex = pending_changes.findIndex(c => c.worldX === world.x && c.worldY === world.y && c.worldZ === world.z);
     if (existingIndex >= 0 && pending_changes[existingIndex]) {
       // Update newCell but keep original oldCell
       pending_changes[existingIndex].newCell = newCell;
     } else {
-      pending_changes.push({ x, y, worldX: world.x, worldY: world.y, worldZ: world.z, oldCell: { ...oldCell }, newCell: { ...newCell } });
+      pending_changes.push({ x, y, worldX: world.x, worldY: world.y, worldZ: world.z, group_id, oldCell: { ...oldCell }, newCell: { ...newCell } });
     }
     
     // Also add to batch if batching
     if (is_drawing_batch) {
-      addToBatch(opts.history, { x, y, worldX: world.x, worldY: world.y, worldZ: world.z, oldCell, newCell });
+      addToBatch(opts.history, { x, y, worldX: world.x, worldY: world.y, worldZ: world.z, group_id, oldCell, newCell });
     }
+    return true;
   }
 
   function makeEmptyCell(): GridCell {
@@ -611,7 +1164,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     if (existingIndex >= 0 && pending_changes[existingIndex]) {
       pending_changes[existingIndex].newCell = normalizedNew;
     } else {
-      pending_changes.push({ x, y, worldX: world.x, worldY: world.y, worldZ: world.z, oldCell: normalizedOld, newCell: normalizedNew });
+      pending_changes.push({ x, y, worldX: world.x, worldY: world.y, worldZ: world.z, group_id: requireActiveGroupId(), oldCell: normalizedOld, newCell: normalizedNew });
     }
   }
 
@@ -641,6 +1194,12 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       if (is_erasing) {
         tool_name = 'Erase';
         action_type = 'erase_cells';
+      } else if (active_stroke_tool === 'line') {
+        tool_name = 'Draw Line';
+      } else if (active_stroke_tool === 'rect_stroke') {
+        tool_name = 'Draw Rectangle (stroke)';
+      } else if (active_stroke_tool === 'rect_fill') {
+        tool_name = 'Draw Rectangle (fill)';
       } else if (active_draw_channels.char && !active_draw_channels.color && !active_draw_channels.weight) {
         tool_name = 'Apply Char';
       } else if (!active_draw_channels.char && !active_draw_channels.color && active_draw_channels.weight) {
@@ -656,13 +1215,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       const selected_z = opts.get_selected_z();
       commitLoggedCellChanges('draw_cells', 'Type Text', selected_z);
     }
-    is_drawing = false;
-    is_erasing = false;
-    active_draw_channels = { char: true, color: true, weight: true };
-    drag_start = null;
-    last_draw_pos = null;
-    opts.preview_points.length = 0;
-    drag_start_buttons = 0;
+    clearActiveStrokeState();
   }
 
   function moveTextCursorTo(grid_x: number, grid_y: number): void {
@@ -781,12 +1334,14 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           }
           
           // Always track changes
-          if (oldCell) {
-            const newCell = getGridCell(draw_x, draw_y);
-            if (newCell) {
-              trackChange(draw_x, draw_y, oldCell, newCell);
+            if (oldCell) {
+              const newCell = getGridCell(draw_x, draw_y);
+              if (newCell) {
+                if (!trackChange(draw_x, draw_y, oldCell, newCell)) {
+                  opts.grid.cells[draw_y]![draw_x] = { ...oldCell };
+                }
+              }
             }
-          }
         }
       }
     }
@@ -825,7 +1380,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           if (cell && cell.char !== ' ' && oldCell) {
             cell.char = char;
             const newCell = getGridCell(draw_x, draw_y);
-            if (newCell) trackChange(draw_x, draw_y, oldCell, newCell);
+            if (newCell && !trackChange(draw_x, draw_y, oldCell, newCell)) {
+              opts.grid.cells[draw_y]![draw_x] = { ...oldCell };
+            }
           }
         }
       }
@@ -845,7 +1402,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             cell.char = brush.char;
             cell.rgb = { ...brush.rgb };
             const newCell = getGridCell(draw_x, draw_y);
-            if (newCell) trackChange(draw_x, draw_y, oldCell, newCell);
+            if (newCell && !trackChange(draw_x, draw_y, oldCell, newCell)) {
+              opts.grid.cells[draw_y]![draw_x] = { ...oldCell };
+            }
           }
         }
       }
@@ -888,7 +1447,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (channels.color) cell.rgb = { ...brush.rgb };
         if (channels.weight) cell.weight_index = brush.weight_index;
         const newCell = getGridCell(draw_x, draw_y);
-        if (newCell) trackChange(draw_x, draw_y, oldCell, newCell);
+        if (newCell && !trackChange(draw_x, draw_y, oldCell, newCell)) {
+          opts.grid.cells[draw_y]![draw_x] = { ...oldCell };
+        }
       }
     }
   }
@@ -929,7 +1490,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             cell.weight_index = weight_index;
             const newCell = getGridCell(draw_x, draw_y);
             if (newCell) {
-              trackChange(draw_x, draw_y, oldCell, newCell);
+              if (!trackChange(draw_x, draw_y, oldCell, newCell)) {
+                opts.grid.cells[draw_y]![draw_x] = { ...oldCell };
+              }
             }
           }
         }
@@ -955,7 +1518,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             cell.rgb = { ...rgb };
             const newCell = getGridCell(draw_x, draw_y);
             if (newCell) {
-              trackChange(draw_x, draw_y, oldCell, newCell);
+              if (!trackChange(draw_x, draw_y, oldCell, newCell)) {
+                opts.grid.cells[draw_y]![draw_x] = { ...oldCell };
+              }
             }
           }
         }
@@ -983,6 +1548,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     setGlobalPanOffset: (x: number, y: number) => void;
     getInteractionAnchor: () => PainterInteractionAnchor;
     finalizePendingChanges: () => void;
+    handleDepthStepDuringActiveStroke: (nextPlane: number) => void;
   } = {
     id: opts.id,
     get rect() { return rect; },
@@ -1034,6 +1600,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
     finalizePendingChanges: () => finalizePendingChanges(),
 
+    handleDepthStepDuringActiveStroke: (nextPlane: number) => handleDepthStepDuringActiveStroke(nextPlane),
+
     Draw(c: Canvas): void {
       ensureGridShapeState();
       updateFlash();
@@ -1047,8 +1615,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       const end_y = clamp(Math.floor(totalPan.y + viewport_height), 0, opts.grid.height);
 
       const selected_z = opts.get_selected_z();
-      const space = getSpace();
-
       // NOTE: All layers (including selected) are now rendered by the DOM renderer
       // with proper transforms, parallax, and scaling. 
       // The type grid only renders editing overlays (selection, paste preview, etc).
@@ -1083,7 +1649,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       /*
       // OLD CODE - Rendered all layers to type grid with transforms
       // This caused issues with scaling (gaps between cells) and positioning
-      const visibleLayers = getVisibleLayers(space).sort((a, b) => a.z - b.z);
+      const visibleLayers = [];
       const occlusionBuffer = new Map<string, number>();
       
       for (const layer of visibleLayers) {
@@ -1165,111 +1731,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         }
       }
 
-      // Draw paste preview - shows exactly what will be pasted (with ignore filters applied)
-      if (paste_preview_data && paste_preview_pos) {
-        const space_replace = opts.get_paste_space_replace();
-        const ignore_space = opts.get_paste_ignore_space();
-        const ignore_black = opts.get_paste_ignore_black();
-        const ignore_white = opts.get_paste_ignore_white();
-        const ignore_color = opts.get_paste_ignore_color();
-        const ignore_color_rgb = opts.get_paste_ignore_color_rgb();
-        
-        for (let y = 0; y < paste_preview_data.height; y++) {
-          for (let x = 0; x < paste_preview_data.width; x++) {
-            const paste_cell = paste_preview_data.cells[y]?.[x];
-            
-            const grid_x = paste_preview_pos.x + x;
-            const grid_y = paste_preview_pos.y + y;
-            
-            if (grid_x < start_x || grid_x >= end_x || grid_y < start_y || grid_y >= end_y) continue;
-            
-            const canvas_x = rect.x0 + (grid_x - start_x);
-            const canvas_y = rect.y0 + (grid_y - start_y);
-            
-            let char: string;
-            let rgb: { r: number; g: number; b: number };
-            let weight: number;
-            let should_show_paste = false;
-            
-            // Check if this cell should be ignored
-            let is_ignored = false;
-            
-            // Check ignore space (null/undefined cells represent spaces in copy data)
-            if (ignore_space && (!paste_cell || paste_cell.char === ' ')) {
-              is_ignored = true;
-            }
-            
-            if (paste_cell && !is_ignored) {
-              // Check ignore black (only pure black RGB 0,0,0)
-              if (ignore_black) {
-                if (paste_cell.rgb.r === 0 && paste_cell.rgb.g === 0 && paste_cell.rgb.b === 0) {
-                  is_ignored = true;
-                }
-              }
-              
-              // Check ignore white (only pure white RGB 255,255,255)
-              if (!is_ignored && ignore_white) {
-                if (paste_cell.rgb.r === 255 && paste_cell.rgb.g === 255 && paste_cell.rgb.b === 255) {
-                  is_ignored = true;
-                }
-              }
-              
-              // Check ignore color
-              if (!is_ignored && ignore_color) {
-                const colorThreshold = 30;
-                const rDiff = Math.abs(paste_cell.rgb.r - ignore_color_rgb.r);
-                const gDiff = Math.abs(paste_cell.rgb.g - ignore_color_rgb.g);
-                const bDiff = Math.abs(paste_cell.rgb.b - ignore_color_rgb.b);
-                if (rDiff <= colorThreshold && gDiff <= colorThreshold && bDiff <= colorThreshold) {
-                  is_ignored = true;
-                }
-              }
-            }
-            
-            if (is_ignored) {
-              // Ignored - show underlying cell
-              const underlying = getCell(opts.grid, grid_x, grid_y);
-              char = underlying?.char ?? ' ';
-              rgb = underlying?.rgb ?? { r: 0, g: 0, b: 0 };
-              weight = underlying?.weight_index ?? 0;
-              should_show_paste = false;
-            } else if (paste_cell && paste_cell.char !== ' ') {
-              // Show the paste cell
-              char = paste_cell.char;
-              rgb = paste_cell.rgb;
-              weight = paste_cell.weight_index;
-              should_show_paste = true;
-            } else if (space_replace) {
-              // Space with replace mode: show space
-              char = ' ';
-              rgb = { r: 0, g: 0, b: 0 };
-              weight = 0;
-              should_show_paste = true;
-            } else {
-              // Space with preserve mode: show underlying cell
-              const underlying = getCell(opts.grid, grid_x, grid_y);
-              char = underlying?.char ?? ' ';
-              rgb = underlying?.rgb ?? { r: 0, g: 0, b: 0 };
-              weight = underlying?.weight_index ?? 0;
-              should_show_paste = false;
-            }
-            
-            // Flash effect for preview
-            // Use high render_index (200) to ensure paste preview appears ABOVE all layers
-            // Layers use render_index = layerZ + 10, so minimum is 10, maximum depends on layer count
-            if (flash_state === 1 || !should_show_paste) {
-              c.set(canvas_x, canvas_y, {
-                char: char,
-                rgb: rgb,
-                style: 'regular',
-                weight_index: weight,
-                render_index: 200
-              });
-            }
-          }
-        }
-      }
-
       // Draw preview points for line/rect/select/lasso tools
       if (opts.preview_points.length > 0) {
         const is_selection_preview = is_selecting || is_lasso_selecting;
@@ -1279,8 +1740,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           : preview_brush.rgb;
         const preview_char = is_selection_preview ? '▫' : preview_brush.char;
         for (const point of opts.preview_points) {
-          const canvas_x = rect.x0 + (point.x - start_x);
-          const canvas_y = rect.y0 + (point.y - start_y);
+          const canvas_x = rect.x0 + (opts.get_world_point_for_grid ? point.x : (point.x - start_x));
+          const canvas_y = rect.y0 + (opts.get_world_point_for_grid ? point.y : (point.y - start_y));
           if (canvas_x >= rect.x0 && canvas_x <= rect.x1 &&
               canvas_y >= rect.y0 && canvas_y <= rect.y1) {
             c.set(canvas_x, canvas_y, {
@@ -1394,31 +1855,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           });
         }
       }
-      if (paste_preview_world_data && paste_preview_world_anchor) {
-        const previewWorldData: WorldCopyData = paste_preview_world_data as WorldCopyData;
-        const previewWorldAnchor: { x: number; y: number; z: number } = paste_preview_world_anchor as { x: number; y: number; z: number };
-        for (const entry of previewWorldData.cells) {
-          const cell = entry.cell;
-          const world = {
-            x: previewWorldAnchor.x + entry.dx,
-            y: previewWorldAnchor.y + entry.dy,
-            z: previewWorldAnchor.z + entry.dz,
-          };
-          const gridPoint = opts.get_grid_point_for_world?.(world);
-          if (!gridPoint) continue;
-          const canvas_x = rect.x0 + gridPoint.x;
-          const canvas_y = rect.y0 + gridPoint.y;
-          if (canvas_x < rect.x0 || canvas_x > rect.x1 || canvas_y < rect.y0 || canvas_y > rect.y1) continue;
-          c.set(canvas_x, canvas_y, {
-            char: cell?.char ?? '•',
-            rgb: cell?.rgb ?? get_color_by_name('vivid_cyan').rgb,
-            style: 'regular',
-            weight_index: cell?.weight_index ?? 1,
-            render_index: 2,
-          });
-        }
-      }
-
       // Draw a border around the selected canvas bounds (replaces the origin crosshair).
       // This stays clipped to the module rect and gives a clear "drawing space" frame.
       if (!gizmo_state.is_resize_mode) {
@@ -1576,12 +2012,20 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         is_panning = true;
         pan_start = { x: local_x, y: local_y };
         // Use camera pan as the starting point
-        const camera = getSpace().camera;
+        const camera = getCamera();
         view_start = { x: camera.pan_x ?? 0, y: camera.pan_y ?? 0 };
         return;
       }
 
       const tool_for_button = e.button === 2 ? opts.get_right_click_tool() : opts.get_left_click_tool();
+
+      if (tool_for_button !== 'paste' && (paste_preview_data || paste_preview_world_data)) {
+        clearPendingPreviewChanges();
+        paste_preview_data = null;
+        paste_preview_pos = null;
+        paste_preview_world_data = null;
+        paste_preview_world_anchor = null;
+      }
 
       if (text_mode_active) {
         if (tool_for_button === 'text') {
@@ -1594,6 +2038,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
       // Handle paste tool
       if (tool_for_button === 'paste') {
+        clearPendingPreviewChanges();
         const scale = opts.get_paste_scale();
         // Get fresh gradiator state at paste time (not cached)
         const freshGradiatorState = opts.get_gradiator_state();
@@ -1615,6 +2060,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
               x: grid_x - Math.floor(scaledData.width / 2), 
               y: grid_y - Math.floor(scaledData.height / 2) 
             };
+            updatePastePreviewAtGrid(paste_preview_pos.x, paste_preview_pos.y);
             showStatus(`Image paste: ${scaledData.width}x${scaledData.height} @ ${Math.round(scale * 100)}% - Click to place`);
           } else {
             // No image, try text clipboard
@@ -1625,6 +2071,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
                 if (worldData) {
                   paste_preview_world_data = worldData;
                   paste_preview_world_anchor = opts.get_world_point_for_grid?.(grid_x, grid_y) ?? { x: grid_x, y: grid_y, z: opts.get_selected_z() };
+                  updatePastePreviewAtGrid(grid_x, grid_y);
                   opts.set_world_copy_data?.(clipboard);
                   showStatus(`3D paste preview: ${worldData.cells.length} voxels - Click to place`);
                   return;
@@ -1653,6 +2100,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
                     x: grid_x - Math.floor(scaledData.width / 2), 
                     y: grid_y - Math.floor(scaledData.height / 2) 
                   };
+                  updatePastePreviewAtGrid(paste_preview_pos.x, paste_preview_pos.y);
                   showStatus(`Paste preview: ${scaledData.width}x${scaledData.height} @ ${Math.round(scale * 100)}% - Click to place`);
                 } else {
                   // Plain text - convert and scale
@@ -1665,6 +2113,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
                     x: grid_x - Math.floor(textData.width / 2), 
                     y: grid_y - Math.floor(textData.height / 2) 
                   };
+                  updatePastePreviewAtGrid(paste_preview_pos.x, paste_preview_pos.y);
                   showStatus(`Paste preview: ${textData.width}x${textData.height} @ ${Math.round(scale * 100)}% - Click to place`);
                 }
               } else {
@@ -1730,16 +2179,36 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (tool_for_button === 'pencil') {
           const base_channels = opts.get_brush_edit_channels_for_button?.(e.button) ?? { char: true, color: true, weight: true };
           active_draw_channels = resolve_edit_channels_with_modifiers(base_channels, e);
+          active_stroke_tool = 'pencil';
+          active_stroke_world_plane = opts.get_selected_z();
+          active_stroke_anchor_world = getWorldPointForEditPlane(grid_x, grid_y, active_stroke_world_plane);
+          if (!active_stroke_anchor_world) {
+            showStatus('Cannot start stroke on selected depth here');
+            active_stroke_tool = null;
+            active_stroke_world_plane = null;
+            return;
+          }
           is_drawing = true;
           last_draw_pos = { x: grid_x, y: grid_y };
           applyBrushEditWithBrushSize(grid_x, grid_y, getBrushForButton(e.button), getBrushSizeForButton(e.button), active_draw_channels);
+          maybeEmitLiveStrokePreview(true);
           return;
         }
 
         if (tool_for_button === 'eraser') {
+          active_stroke_tool = 'eraser';
+          active_stroke_world_plane = opts.get_selected_z();
+          active_stroke_anchor_world = getWorldPointForEditPlane(grid_x, grid_y, active_stroke_world_plane);
+          if (!active_stroke_anchor_world) {
+            showStatus('Cannot start stroke on selected depth here');
+            active_stroke_tool = null;
+            active_stroke_world_plane = null;
+            return;
+          }
           is_erasing = true;
           last_draw_pos = { x: grid_x, y: grid_y };
           drawWithBrushSize(grid_x, grid_y, true, getBrushForButton(e.button), getBrushSizeForButton(e.button));
+          maybeEmitLiveStrokePreview(true);
           return;
         }
 
@@ -1768,8 +2237,21 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         }
 
         if (tool_for_button === 'line' || tool_for_button.startsWith('rect_')) {
+          active_stroke_tool = tool_for_button;
+          active_stroke_world_plane = opts.get_selected_z();
+          active_stroke_anchor_world = getWorldPointForEditPlane(grid_x, grid_y, active_stroke_world_plane);
+          if (!active_stroke_anchor_world) {
+            showStatus('Cannot start stroke on selected depth here');
+            active_stroke_tool = null;
+            active_stroke_world_plane = null;
+            return;
+          }
+          shape_start_world = { ...active_stroke_anchor_world };
           is_drawing = true;
           drag_start = { x: grid_x, y: grid_y };
+          setPreviewPoints(tool_for_button === 'line'
+            ? [{ x: grid_x, y: grid_y }]
+            : []);
         }
       }
     },
@@ -1827,7 +2309,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         return;
       }
 
-      if (is_erasing && last_draw_pos) {
+      if (isActiveEraserStroke() && last_draw_pos) {
         const grid_coords = localToGrid(local_x, local_y);
         const grid_x = grid_coords.x;
         const grid_y = grid_coords.y;
@@ -1835,11 +2317,12 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (grid_x !== last_draw_pos.x || grid_y !== last_draw_pos.y) {
           drawLineWithBrushSize(last_draw_pos.x, last_draw_pos.y, grid_x, grid_y, true, getBrushForButton(getDragButton()), getBrushSizeForButton(getDragButton()));
           last_draw_pos = { x: grid_x, y: grid_y };
+          maybeEmitLiveStrokePreview();
         }
         return;
       }
 
-      if (is_drawing && last_draw_pos) {
+      if (isActivePencilStroke() && last_draw_pos) {
         const grid_coords = localToGrid(local_x, local_y);
         const grid_x = grid_coords.x;
         const grid_y = grid_coords.y;
@@ -1847,6 +2330,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (grid_x !== last_draw_pos.x || grid_y !== last_draw_pos.y) {
           drawLineWithBrushEditChannels(last_draw_pos.x, last_draw_pos.y, grid_x, grid_y, getBrushForButton(getDragButton()), getBrushSizeForButton(getDragButton()), active_draw_channels);
           last_draw_pos = { x: grid_x, y: grid_y };
+          maybeEmitLiveStrokePreview();
         }
         return;
       }
@@ -1888,33 +2372,21 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         return;
       }
 
-      if (is_drawing && drag_start) {
-        const current_coords = localToGrid(local_x, local_y);
-        const current_x = current_coords.x;
-        const current_y = current_coords.y;
-        const tool_for_drag = (drag_start_buttons & 2) ? opts.get_right_click_tool() : opts.get_left_click_tool();
-        let new_points: { x: number; y: number }[] = [];
-        if (tool_for_drag === 'line') {
-          new_points = previewLine(drag_start.x, drag_start.y, current_x, current_y);
-        } else if (tool_for_drag === 'rect_stroke') {
-          new_points = previewRectStroke(drag_start.x, drag_start.y, current_x, current_y);
-        } else if (tool_for_drag === 'rect_fill') {
-          new_points = previewRectFill(drag_start.x, drag_start.y, current_x, current_y);
+        if (isActiveShapeStroke()) {
+          const current_coords = localToGrid(local_x, local_y);
+          const current_x = current_coords.x;
+          const current_y = current_coords.y;
+          updateLineRectPreview({ x: current_x, y: current_y });
         }
-        if (new_points.length > 0) {
-          opts.preview_points.length = 0;
-          opts.preview_points.push(...new_points);
-        }
-      }
 
-      // Paste preview follows mouse
-      if (opts.get_current_tool() === 'paste' && paste_preview_data) {
-        const grid_coords = localToGrid(local_x, local_y);
-        paste_preview_pos = { x: grid_coords.x, y: grid_coords.y };
-      } else if (opts.get_current_tool() === 'paste' && paste_preview_world_data) {
-        const grid_coords = localToGrid(local_x, local_y);
-        paste_preview_world_anchor = opts.get_world_point_for_grid?.(grid_coords.x, grid_coords.y) ?? { x: grid_coords.x, y: grid_coords.y, z: opts.get_selected_z() };
-      }
+        // Paste preview follows mouse
+        if (opts.get_current_tool() === 'paste' && paste_preview_data) {
+          const grid_coords = localToGrid(local_x, local_y);
+          updatePastePreviewAtGrid(grid_coords.x, grid_coords.y);
+        } else if (opts.get_current_tool() === 'paste' && paste_preview_world_data) {
+          const grid_coords = localToGrid(local_x, local_y);
+          updatePastePreviewAtGrid(grid_coords.x, grid_coords.y);
+        }
     },
 
     OnDragEnd(e: DragEvent): void {
@@ -1992,101 +2464,27 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         return;
       }
 
-      const tool_for_end = (drag_start_buttons & 2) ? opts.get_right_click_tool() : opts.get_left_click_tool();
-      if ((tool_for_end === 'line' || tool_for_end.startsWith('rect_')) && drag_start) {
-        const local_x = e.x - rect.x0;
-        const local_y = e.y - rect.y0;
-        const grid_coords = localToGrid(local_x, local_y);
-        const end_x = grid_coords.x;
-        const end_y = grid_coords.y;
-        const start_x = drag_start.x;
-        const start_y = drag_start.y;
-        
-        // Capture region before applying tool
-        const minX = Math.min(start_x, end_x);
-        const maxX = Math.max(start_x, end_x);
-        const minY = Math.min(start_y, end_y);
-        const maxY = Math.max(start_y, end_y);
-        const beforeRegion = captureRegion(minX, minY, maxX, maxY);
-        
-        // Apply the tool
-        applyTool(opts.grid, tool_for_end, end_x, end_y, getBrushForButton(getDragButton()), drag_start);
-        
-        // Diff and track changes
-        diffRegion(beforeRegion, minX, minY, maxX, maxY);
-        
-        // Log the action
-        if (pending_changes.length > 0) {
-          const selected_z = opts.get_selected_z();
-          const toolName = tool_for_end === 'line' ? 'Draw Line' : 
-                          tool_for_end === 'rect_stroke' ? 'Draw Rectangle (stroke)' : 
-                          'Draw Rectangle (fill)';
-          commitLoggedCellChanges('draw_cells', toolName, selected_z);
-        }
+      if (isActiveLineStroke()) {
+        return;
       }
 
-      is_drawing = false;
-      is_erasing = false;
-      active_draw_channels = { char: true, color: true, weight: true };
-      drag_start = null;
-      last_draw_pos = null;
-      opts.preview_points = [];
-      drag_start_buttons = 0;
+      clearActiveStrokeState();
     },
 
     OnPointerUp(e: PointerEvent): void {
       if (opts.get_current_tool() === 'paste' && paste_preview_world_data && paste_preview_world_anchor) {
-        const spaceReplace = opts.get_paste_space_replace();
-        const ignoreColorRgb = opts.get_paste_ignore_color_rgb();
-        let placed = 0;
-        let cleared = 0;
-        let preserved = 0;
-        let skippedIgnored = 0;
-        const createdLayers = new Set<number>();
-        let minPasteZ = Number.POSITIVE_INFINITY;
-        let maxPasteZ = Number.NEGATIVE_INFINITY;
-        for (const entry of paste_preview_world_data.cells) {
-          const world = {
-            x: paste_preview_world_anchor.x + entry.dx,
-            y: paste_preview_world_anchor.y + entry.dy,
-            z: paste_preview_world_anchor.z + entry.dz,
-          };
-          minPasteZ = Math.min(minPasteZ, world.z);
-          maxPasteZ = Math.max(maxPasteZ, world.z);
-          const oldCell = getVoxel(getSpace(), world.x, world.y, world.z);
-          const isIgnored = isIgnoredPasteCell(entry.cell, ignoreColorRgb);
-          if (isIgnored) {
-            skippedIgnored++;
-            preserved++;
-          } else if (entry.cell && entry.cell.char !== ' ') {
-            if (!getSpace().layers.has(world.z)) createdLayers.add(world.z);
-            getOrCreateLayer(getSpace(), world.z);
-            if (setVoxel(getSpace(), world.x, world.y, world.z, { ...entry.cell })) {
-              trackWorldChange(world, oldCell, entry.cell);
-              placed++;
-            } else {
-              preserved++;
-            }
-          } else if (spaceReplace) {
-            const clearedCell = makeEmptyCell();
-            if (!getSpace().layers.has(world.z)) createdLayers.add(world.z);
-            getOrCreateLayer(getSpace(), world.z);
-            if (setVoxel(getSpace(), world.x, world.y, world.z, clearedCell)) {
-              trackWorldChange(world, oldCell, clearedCell);
-              cleared++;
-            } else {
-              preserved++;
-            }
-          } else {
-            preserved++;
-          }
+        if (opts.get_active_group_locked?.()) {
+          showStatus('Cannot paste: active group is locked');
+          return;
         }
+        const preview = buildWorldPastePreviewChanges(paste_preview_world_data, paste_preview_world_anchor);
+        pending_changes = preview.changes;
         if (pending_changes.length > 0) {
           const selected_z = opts.get_selected_z();
-          commitLoggedCellChanges('draw_cells', 'Paste', selected_z);
+          commitLoggedCellChanges('paste', 'Paste', selected_z);
         }
-        const zLabel = Number.isFinite(minPasteZ) && Number.isFinite(maxPasteZ) ? ` Z:${minPasteZ}->${maxPasteZ}` : '';
-        showStatus(`Pasted 3D (${placed} placed, ${skippedIgnored} ignored, ${preserved} preserved, ${cleared} cleared, ${createdLayers.size} layers created${zLabel})`);
+        const zLabel = Number.isFinite(preview.minPasteZ) && Number.isFinite(preview.maxPasteZ) ? ` Z:${preview.minPasteZ}->${preview.maxPasteZ}` : '';
+        showStatus(`Pasted 3D (${preview.placed} placed, ${preview.skippedIgnored} ignored, ${preview.preserved} preserved, ${preview.cleared} cleared${zLabel})`);
         paste_preview_world_data = null;
         paste_preview_world_anchor = null;
         return;
@@ -2094,178 +2492,41 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
       // Handle paste placement
       if (opts.get_current_tool() === 'paste' && paste_preview_data && paste_preview_pos) {
-        // Check if current layer is locked
-        const selectedZ = opts.get_selected_z();
-        const layer = getSpace().layers.get(selectedZ);
-        if (layer?.locked) {
-          showStatus('Cannot paste: layer is locked');
+        if (opts.get_active_group_locked?.()) {
+          showStatus('Cannot paste: active group is locked');
           return;
         }
         
-        const spaceReplace = opts.get_paste_space_replace();
-        const ignoreSpace = opts.get_paste_ignore_space();
-        const ignoreBlack = opts.get_paste_ignore_black();
-        const ignoreWhite = opts.get_paste_ignore_white();
-        const ignoreColor = opts.get_paste_ignore_color();
-        const ignoreColorRgb = opts.get_paste_ignore_color_rgb();
-        
-        painterCanvasDiag('paste settings', { spaceReplace, ignoreSpace, ignoreBlack, ignoreWhite, ignoreColor });
-        
-        // Build ignore status message
-        const ignoredParts: string[] = [];
-        if (ignoreSpace) ignoredParts.push('spaces');
-        if (ignoreBlack) ignoredParts.push('black');
-        if (ignoreWhite) ignoredParts.push('white');
-        if (ignoreColor) ignoredParts.push('color');
-        const ignoreStatus = ignoredParts.length > 0 ? ignoredParts.join('+') : 'none';
-        
-        // Custom paste with ignore support - ignored cells preserve underlying content
-        let placed = 0;
-        let preserved = 0;
-        let cleared = 0;
-        let skippedIgnored = 0;
-        
-        // Debug: Log first few cells of paste data
-        painterCanvasDiag('paste data sample begin');
-        for (let y = 0; y < Math.min(3, paste_preview_data.height); y++) {
-          let row = '';
-          for (let x = 0; x < Math.min(10, paste_preview_data.width); x++) {
-            const cell = paste_preview_data.cells[y]?.[x];
-            row += cell ? cell.char : '?';
-          }
-          painterCanvasDiag('paste data sample row', { row_index: y, row });
-        }
-        
-        for (let y = 0; y < paste_preview_data.height; y++) {
-          for (let x = 0; x < paste_preview_data.width; x++) {
-            const cell = paste_preview_data.cells[y]?.[x];
-            const targetX = paste_preview_pos.x + x;
-            const targetY = paste_preview_pos.y + y;
-            
-            // Debug first cell
-            if (y === 0 && x === 0 && cell) {
-              painterCanvasDiag('first pasted cell', { char: cell.char, rgb: cell.rgb, weight_index: cell.weight_index });
-            }
-            
-            // Check bounds
-            if (targetX < 0 || targetX >= opts.grid.width || targetY < 0 || targetY >= opts.grid.height) {
-              continue;
-            }
-            
-            // Check if this cell should be ignored
-            let isIgnored = false;
-            
-            // Check ignore space (null/undefined cells represent spaces in copy data)
-            if (ignoreSpace && (!cell || cell.char === ' ')) {
-              isIgnored = true;
-            }
-            
-            if (cell && !isIgnored) {
-              // Check ignore black (only pure black RGB 0,0,0)
-              if (ignoreBlack) {
-                if (cell.rgb.r === 0 && cell.rgb.g === 0 && cell.rgb.b === 0) {
-                  isIgnored = true;
-                }
-              }
-              
-              // Check ignore white (only pure white RGB 255,255,255)
-              if (!isIgnored && ignoreWhite) {
-                if (cell.rgb.r === 255 && cell.rgb.g === 255 && cell.rgb.b === 255) {
-                  isIgnored = true;
-                }
-              }
-              
-              // Check ignore color
-              if (!isIgnored && ignoreColor) {
-                const colorThreshold = 30;
-                const rDiff = Math.abs(cell.rgb.r - ignoreColorRgb.r);
-                const gDiff = Math.abs(cell.rgb.g - ignoreColorRgb.g);
-                const bDiff = Math.abs(cell.rgb.b - ignoreColorRgb.b);
-                if (rDiff <= colorThreshold && gDiff <= colorThreshold && bDiff <= colorThreshold) {
-                  isIgnored = true;
-                }
-              }
-            }
-            
-            // Handle the cell
-            if (isIgnored) {
-              // Ignored cells always preserve underlying content
-              skippedIgnored++;
-              preserved++;
-            } else if (cell && cell.char !== ' ') {
-              // Non-space cell: place it
-              const oldCell = getGridCell(targetX, targetY);
-              opts.grid.cells[targetY]![targetX] = { ...cell };
-              const newCell = getGridCell(targetX, targetY);
-              if (oldCell && newCell) {
-                trackChange(targetX, targetY, oldCell, newCell);
-              }
-              placed++;
-            } else {
-              // Space/empty cell: handle based on spaceReplace
-              if (spaceReplace) {
-                const oldCell = getGridCell(targetX, targetY);
-                opts.grid.cells[targetY]![targetX] = {
-                  char: ' ',
-                  rgb: { r: 0, g: 0, b: 0 },
-                  weight_index: 0
-                };
-                const newCell = getGridCell(targetX, targetY);
-                if (oldCell && newCell) {
-                  trackChange(targetX, targetY, oldCell, newCell);
-                }
-                cleared++;
-              } else {
-                preserved++;
-              }
-            }
-          }
-        }
-        
-        // Log the paste action
+        const preview = buildFlatPastePreviewChanges(paste_preview_data, paste_preview_pos);
+        pending_changes = preview.changes;
         if (pending_changes.length > 0) {
           const selected_z = opts.get_selected_z();
           commitLoggedCellChanges('draw_cells', 'Paste', selected_z);
         }
-        
-        painterCanvasImportant('paste complete', { placed, ignored_preserved: skippedIgnored, cleared, preserved });
-        showStatus(`Pasted ${paste_preview_data.width}x${paste_preview_data.height} (placed:${placed}, ignored:${skippedIgnored}, preserved:${preserved}, cleared:${cleared})`);
+        painterCanvasImportant('paste complete', { placed: preview.placed, ignored_preserved: preview.skippedIgnored, cleared: preview.cleared, preserved: preview.preserved });
+        showStatus(`Pasted ${paste_preview_data.width}x${paste_preview_data.height} (placed:${preview.placed}, ignored:${preview.skippedIgnored}, preserved:${preview.preserved}, cleared:${preview.cleared})`);
         paste_preview_data = null;
         paste_preview_pos = null;
         return;
       }
 
       const tool_for_up = (drag_start_buttons & 2) ? opts.get_right_click_tool() : opts.get_left_click_tool();
-      if (is_drawing && drag_start && (tool_for_up === 'line' || tool_for_up.startsWith('rect_'))) {
+      if (isActiveLineStroke() && tool_for_up === 'line') {
         const local_x = e.x - rect.x0;
         const local_y = e.y - rect.y0;
         const end_coords = localToGrid(local_x, local_y);
-        const end_x = end_coords.x;
-        const end_y = end_coords.y;
-        const start_x = drag_start.x;
-        const start_y = drag_start.y;
-        
-        // Capture region before applying tool
-        const minX = Math.min(start_x, end_x);
-        const maxX = Math.max(start_x, end_x);
-        const minY = Math.min(start_y, end_y);
-        const maxY = Math.max(start_y, end_y);
-        const beforeRegion = captureRegion(minX, minY, maxX, maxY);
-        
-        // Apply the tool
-        applyTool(opts.grid, tool_for_up, end_x, end_y, getBrushForButton(getDragButton()), drag_start);
-        
-        // Diff and track changes
-        diffRegion(beforeRegion, minX, minY, maxX, maxY);
-        
-        // Log the action
+        updateLineRectPreview({ x: end_coords.x, y: end_coords.y });
         if (pending_changes.length > 0) {
-          const selected_z = opts.get_selected_z();
-          const toolName = tool_for_up === 'line' ? 'Draw Line' : 
-                          tool_for_up === 'rect_stroke' ? 'Draw Rectangle (stroke)' : 
-                          'Draw Rectangle (fill)';
-          commitLoggedCellChanges('draw_cells', toolName, selected_z);
+          commitLoggedCellChanges('draw_cells', 'Draw Line', opts.get_selected_z());
         }
+        clearActiveStrokeState();
+        return;
+      }
+      if (is_drawing && drag_start && tool_for_up.startsWith('rect_')) {
+        const local_x = e.x - rect.x0;
+        const local_y = e.y - rect.y0;
+        const end_coords = localToGrid(local_x, local_y);
+        updateLineRectPreview({ x: end_coords.x, y: end_coords.y });
       }
       
       // Handle selection in OnPointerUp as fallback (OnDragEnd might not fire for clicks)
@@ -2355,6 +2616,12 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (is_erasing) {
           tool_name = 'Erase';
           action_type = 'erase_cells';
+        } else if (active_stroke_tool === 'line') {
+          tool_name = 'Draw Line';
+        } else if (active_stroke_tool === 'rect_stroke') {
+          tool_name = 'Draw Rectangle (stroke)';
+        } else if (active_stroke_tool === 'rect_fill') {
+          tool_name = 'Draw Rectangle (fill)';
         } else if (active_draw_channels.char && !active_draw_channels.color && !active_draw_channels.weight) {
           tool_name = 'Apply Char';
         } else if (!active_draw_channels.char && !active_draw_channels.color && active_draw_channels.weight) {
@@ -2377,6 +2644,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       is_drawing = false;
       is_erasing = false;
       active_draw_channels = { char: true, color: true, weight: true };
+      active_stroke_tool = null;
+      active_stroke_world_plane = null;
+      active_stroke_anchor_world = null;
       is_selecting = false;
       is_lasso_selecting = false;
       selection_drag_start = null;
@@ -2422,7 +2692,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         return;
       }
 
-      if (!e.shift && opts.cycle_focus_layer) {
+      if (!e.shift && !e.alt && opts.cycle_focus_layer) {
         if (is_selecting && selection_drag_start) {
           const dir = e.delta_y < 0 ? 1 : (e.delta_y > 0 ? -1 : 0);
           if (dir !== 0) {
@@ -2445,15 +2715,12 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         }
       }
 
-      // Scroll updates camera pan position
-      // Note: In grid coordinates, Y increases upward
-      // Scroll down (delta_y > 0) = show content above = decrease pan_y
+      // Plain vertical wheel is reserved for depth navigation.
+      // Shift/Alt wheel keep explicit pan controls available.
       const scroll_step = 2; // Grid cells per scroll
       if (e.shift) {
-        // Horizontal scroll: right shows content to the left = increase pan_x
-        panBy(e.delta_x > 0 ? scroll_step : -scroll_step, 0);
-      } else {
-        // Vertical scroll: down shows content above = decrease pan_y
+        panBy(e.delta_y > 0 ? scroll_step : -scroll_step, 0);
+      } else if (e.alt) {
         panBy(0, e.delta_y > 0 ? -scroll_step : scroll_step);
       }
     },
@@ -2463,7 +2730,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       // Undo - Ctrl+Z
       if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
         finalizePendingChanges();
-        const description = undo(opts.history, getSpace());
+        const description = opts.on_undo_request();
         if (description) {
           opts.on_history_applied?.();
           showStatus(`Undo: ${description}`);
@@ -2477,7 +2744,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       // Redo - Ctrl+Y or Ctrl+Shift+Z
       if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
         finalizePendingChanges();
-        const description = redo(opts.history, getSpace());
+        const description = opts.on_redo_request();
         if (description) {
           opts.on_history_applied?.();
           showStatus(`Redo: ${description}`);
@@ -2499,12 +2766,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       // Text mode handling
       if (text_mode_active) {
         syncTextCursorGridFromWorld();
-        const selected_z = opts.get_selected_z();
-        
-        // Check if current layer is locked
-        const layer = getSpace().layers.get(selected_z);
-        if (layer?.locked) {
-          showStatus('Cannot type: layer is locked');
+
+        if (opts.get_active_group_locked?.()) {
+          showStatus('Cannot type: active group is locked');
           e.preventDefault();
           return;
         }
@@ -2550,6 +2814,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
               const newCell = getGridCell(text_cursor_x, text_cursor_y);
               if (oldCell && newCell) {
                 trackChange(text_cursor_x, text_cursor_y, oldCell, newCell);
+                maybeEmitLiveTextPreview(true);
               }
             }
           }
@@ -2570,6 +2835,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             const newCell = getGridCell(text_cursor_x, text_cursor_y);
             if (oldCell && newCell) {
               trackChange(text_cursor_x, text_cursor_y, oldCell, newCell);
+              maybeEmitLiveTextPreview(true);
             }
           }
           e.preventDefault();
@@ -2612,12 +2878,19 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
               const newCell = getGridCell(text_cursor_x, text_cursor_y);
               if (oldCell && newCell) {
                 trackChange(text_cursor_x, text_cursor_y, oldCell, newCell);
+                maybeEmitLiveTextPreview(true);
               }
             }
             // Move cursor by spacing and charlead
             moveTextCursorByScreenDelta(opts.get_text_spacing(), opts.get_text_charlead());
             setCurrentLineEndWorld(getTextCurrentWorld());
           }
+          e.preventDefault();
+          return;
+        }
+
+        if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) {
+          insertTextAtCursor(e.key);
           e.preventDefault();
           return;
         }
@@ -2680,11 +2953,18 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
     OnBlur(): void {
       exitTextMode(true);
+      clearPendingPreviewChanges();
+      paste_preview_data = null;
+      paste_preview_pos = null;
+      paste_preview_world_data = null;
+      paste_preview_world_anchor = null;
       space_held = false;
       is_panning = false;
       is_drawing = false;
       is_erasing = false;
       active_draw_channels = { char: true, color: true, weight: true };
+      active_stroke_world_plane = null;
+      active_stroke_anchor_world = null;
       is_selecting = false;
       is_lasso_selecting = false;
       pan_start = null;
@@ -2697,90 +2977,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     },
 
     OnTextInput(text: string): void {
-      if (!text_mode_active || !text) return;
-      syncTextCursorGridFromWorld();
-      
-      const selected_z = opts.get_selected_z();
-      
-      // Check if current layer is locked
-      const layer = getSpace().layers.get(selected_z);
-      if (layer?.locked) {
-        showStatus('Cannot type: layer is locked');
-        return;
-      }
-      
-      const isChunkInput = text.length > 1;
-      const commitDescription = isChunkInput ? 'Paste Text' : 'Type Text';
-
-      for (const char of text) {
-        // Handle newline characters (from paste operations) like Enter key
-        if (char === '\n' || char === '\r') {
-          if (!isChunkInput) {
-            commitPendingTextChanges('Type Text');
-          }
-
-          // New line using enterlead and enterspace (same as Enter key)
-          moveTextCursorToNextLine();
-          
-          // Check bounds after newline
-          if (text_cursor_x < 0 || text_cursor_x >= opts.grid.width ||
-              text_cursor_y < 0 || text_cursor_y >= opts.grid.height) {
-            text_mode_active = false;
-            break;
-          }
-          continue;
-        }
-        
-        if (text_cursor_x >= 0 && text_cursor_x < opts.grid.width &&
-            text_cursor_y >= 0 && text_cursor_y < opts.grid.height) {
-          const text_brush = getPreviewBrush();
-          
-          // Track the change for undo
-          const oldCell = getGridCell(text_cursor_x, text_cursor_y);
-          
-          if (char === ' ') {
-            if (opts.get_space_replace()) {
-              opts.grid.cells[text_cursor_y]![text_cursor_x] = {
-                char: ' ',
-                rgb: { ...text_brush.rgb },
-                weight_index: text_brush.weight_index
-              };
-              const newCell = getGridCell(text_cursor_x, text_cursor_y);
-              if (oldCell && newCell) {
-                trackChange(text_cursor_x, text_cursor_y, oldCell, newCell);
-              }
-            }
-          } else {
-            opts.grid.cells[text_cursor_y]![text_cursor_x] = {
-              char: char,
-              rgb: { ...text_brush.rgb },
-              weight_index: text_brush.weight_index
-            };
-            const newCell = getGridCell(text_cursor_x, text_cursor_y);
-            if (oldCell && newCell) {
-              trackChange(text_cursor_x, text_cursor_y, oldCell, newCell);
-            }
-          }
-          
-          // Move cursor according to spacing and charlead
-          const spacing = opts.get_text_spacing();
-          const charlead = opts.get_text_charlead();
-          moveTextCursorByScreenDelta(spacing, charlead);
-          setCurrentLineEndWorld(getTextCurrentWorld());
-          
-          // Check bounds
-          if (text_cursor_x < 0 || text_cursor_x >= opts.grid.width ||
-              text_cursor_y < 0 || text_cursor_y >= opts.grid.height) {
-            commitPendingTextChanges(commitDescription);
-            text_mode_active = false;
-            break;
-          }
-        }
-      }
-
-      if (text_mode_active && isChunkInput) {
-        commitPendingTextChanges(commitDescription);
-      }
+      insertTextAtCursor(text);
     },
 
     WantsTextCapture(): boolean {

@@ -17,18 +17,37 @@
  */
 
 import type { Module, Canvas, Rect, PointerEvent, DragEvent } from '../mono_ui/types.js';
-import type { VoxelSpace, VoxelLayer } from './voxel_space.js';
+import type { VoxelSpace } from './voxel_space.js';
 import { get_color_by_name } from '../mono_ui/colors.js';
 import { MODULE_CHROME_RENDER_INDEX, PANEL_BORDER_PRESETS, draw_panel_horizontal_divider } from '../mono_ui/module_borders.js';
-import { addLayer, removeLayer, duplicateLayer, getVisibleLayers } from './voxel_space.js';
 import type { ModuleGizmosConfig } from '../mono_ui/module_gizmos.js';
 import { make_floating_panel_module } from '../mono_ui/modules/floating_panel_module.js';
+
+export type LayerPaletteRow = {
+  z: number;
+  name: string;
+  visible: boolean;
+  locked: boolean;
+};
 
 export type LayerPaletteOptions = {
   id: string;
   rect: Rect;
-  // Always fetch the latest space (it can be replaced on load/new).
-  getSpace: () => VoxelSpace;
+  title?: string;
+  // Legacy fallback for callers that still operate on VoxelSpace directly.
+  getSpace?: () => VoxelSpace;
+  // Preferred row-provider path for callers that already have stable layer/group rows.
+  getRows?: () => LayerPaletteRow[];
+  getSelectedZ?: () => number | null;
+  getLayerId?: (z: number) => string | null;
+  getSelectedLayerId?: () => string | null;
+  onLayerIdSelect?: (layer_id: string) => void;
+  onLayerIdVisibilityToggle?: (layer_id: string) => void;
+  onLayerIdLockToggle?: (layer_id: string) => void;
+  onLayerIdRename?: (layer_id: string, newName: string) => void;
+  onDeleteLayerId?: (layer_id: string) => void;
+  onDuplicateLayerId?: (layer_id: string) => void;
+  onReorderLayerIds?: (layer_ids: string[]) => void;
   onLayerSelect: (z: number) => void;
   onLayerVisibilityToggle: (z: number) => void;
   onLayerLockToggle: (z: number) => void;
@@ -64,8 +83,8 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
   let scrollOffset = 0;
   const headerHeight = 3;
 
-  function getSpace(): VoxelSpace {
-    return opts.getSpace();
+  function getSpace(): VoxelSpace | null {
+    return opts.getSpace?.() ?? null;
   }
   
   // Colors
@@ -90,7 +109,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
     dragStartY: number;
     dragStartX: number;
     currentDropIndex: number | null;
-    draggedLayer: VoxelLayer | null;
+    draggedLayer: LayerPaletteRow | null;
   } = {
     isDragging: false,
     sourceLayerZ: null,
@@ -104,11 +123,13 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
   let renameState: {
     isRenaming: boolean;
     layerZ: number | null;
+    layerId: string | null;
     editText: string;
     cursorPosition: number;
   } = {
     isRenaming: false,
     layerZ: null,
+    layerId: null,
     editText: '',
     cursorPosition: 0,
   };
@@ -123,10 +144,16 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
     on_move: opts.onMove,
   };
   
-  function getSortedLayers(): VoxelLayer[] {
+  function getSortedLayers(): LayerPaletteRow[] {
+    const rows = opts.getRows?.();
+    if (rows) return [...rows].sort((a, b) => b.z - a.z);
     const space = getSpace();
-    return Array.from(space.layers.values())
-      .sort((a, b) => b.z - a.z);
+    if (!space) return [];
+    return Array.from(space.layers.values()).sort((a, b) => b.z - a.z);
+  }
+
+  function getLayerByZ(z: number): LayerPaletteRow | null {
+    return getSortedLayers().find((layer) => layer.z === z) ?? null;
   }
   
   // Calculate Y position for a given row index
@@ -142,13 +169,110 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
     const index = layers.findIndex(l => l.z === z);
     return index + 1;
   }
+
+  function getLayerId(z: number): string | null {
+    return opts.getLayerId?.(z) ?? null;
+  }
+
+  function isSelectedLayer(layer: LayerPaletteRow): boolean {
+    const layerId = getLayerId(layer.z);
+    const selectedLayerId = opts.getSelectedLayerId?.() ?? null;
+    if (layerId && selectedLayerId) return layerId === selectedLayerId;
+    const selectedZ = opts.getSelectedZ?.();
+    if (typeof selectedZ === 'number') return layer.z === selectedZ;
+    return layer.z === (getSpace()?.camera.focus_plane ?? null);
+  }
+
+  function selectLayer(layer: LayerPaletteRow): void {
+    const layerId = getLayerId(layer.z);
+    if (layerId && opts.onLayerIdSelect) {
+      opts.onLayerIdSelect(layerId);
+      return;
+    }
+    opts.onLayerSelect(layer.z);
+  }
+
+  function toggleLayerVisibility(layer: LayerPaletteRow): void {
+    const layerId = getLayerId(layer.z);
+    if (layerId && opts.onLayerIdVisibilityToggle) {
+      opts.onLayerIdVisibilityToggle(layerId);
+      return;
+    }
+    opts.onLayerVisibilityToggle(layer.z);
+  }
+
+  function toggleLayerLock(layer: LayerPaletteRow): void {
+    const layerId = getLayerId(layer.z);
+    if (layerId && opts.onLayerIdLockToggle) {
+      opts.onLayerIdLockToggle(layerId);
+      return;
+    }
+    opts.onLayerLockToggle(layer.z);
+  }
+
+  function renameLayer(layerZ: number, editText: string): void {
+    const layerId = renameState.layerId ?? getLayerId(layerZ);
+    if (layerId && opts.onLayerIdRename) {
+      opts.onLayerIdRename(layerId, editText);
+      return;
+    }
+    opts.onLayerRename(layerZ, editText);
+  }
+
+  function deleteLayer(layer: LayerPaletteRow): void {
+    const layerId = getLayerId(layer.z);
+    if (layerId && opts.onDeleteLayerId) {
+      opts.onDeleteLayerId(layerId);
+      return;
+    }
+    opts.onDeleteLayer(layer.z);
+  }
+
+  function duplicateLayerEntry(layer: LayerPaletteRow): void {
+    const layerId = getLayerId(layer.z);
+    if (layerId && opts.onDuplicateLayerId) {
+      opts.onDuplicateLayerId(layerId);
+      return;
+    }
+    opts.onDuplicateLayer(layer.z);
+  }
+
+  function reorderLayers(layers: LayerPaletteRow[], sourceLayerZ: number, currentDropIndex: number): void {
+    const sourceIndex = layers.findIndex(l => l.z === sourceLayerZ);
+    let effectiveDropIndex = currentDropIndex;
+    if (currentDropIndex > sourceIndex) {
+      effectiveDropIndex = currentDropIndex - 1;
+    }
+    const isDifferentPosition = 
+      (currentDropIndex < sourceIndex && currentDropIndex !== sourceIndex) ||
+      (currentDropIndex > sourceIndex && effectiveDropIndex !== sourceIndex);
+    if (!isDifferentPosition) return;
+    const remainingLayers = layers.filter(l => l.z !== sourceLayerZ);
+    const reorderedLayers: LayerPaletteRow[] = [];
+    const clampedDropIndex = Math.max(0, Math.min(remainingLayers.length, effectiveDropIndex));
+    for (let i = 0; i < clampedDropIndex && i < remainingLayers.length; i++) reorderedLayers.push(remainingLayers[i]!);
+    const draggedLayer = layers[sourceIndex];
+    if (draggedLayer) reorderedLayers.push(draggedLayer);
+    for (let i = clampedDropIndex; i < remainingLayers.length; i++) reorderedLayers.push(remainingLayers[i]!);
+    if (opts.onReorderLayerIds) {
+      const layerIds = reorderedLayers
+        .map((layer) => getLayerId(layer.z))
+        .filter((layer_id): layer_id is string => Boolean(layer_id));
+      if (layerIds.length === reorderedLayers.length) {
+        opts.onReorderLayerIds(layerIds);
+        return;
+      }
+    }
+    opts.onReorderLayers(reorderedLayers.map((layer) => layer.z));
+  }
   
   function beginRenameLayer(z: number): boolean {
-    const layer = getSpace().layers.get(z);
+    const layer = getLayerByZ(z);
     if (!layer) return false;
-    opts.onLayerSelect(z);
+    selectLayer(layer);
     renameState.isRenaming = true;
     renameState.layerZ = layer.z;
+    renameState.layerId = getLayerId(layer.z);
     renameState.editText = layer.name;
     renameState.cursorPosition = layer.name.length;
     return true;
@@ -157,7 +281,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
   const module = make_floating_panel_module({
     id: opts.id,
     rect: opts.rect,
-    title: 'LAYERS',
+    title: opts.title ?? 'LAYERS',
     gizmos: gizmo_config,
     background: { rgb: bgColor },
     border: {
@@ -242,7 +366,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
           continue;
         }
         
-        const isSelected = layer.z === getSpace().camera.focus_plane;
+        const isSelected = isSelectedLayer(layer);
         const isBeingRenamed = renameState.isRenaming && renameState.layerZ === layer.z;
         const rowColor = isSelected ? selectedColor : textColor;
         const visualOrder = getVisualOrder(layer.z);
@@ -357,7 +481,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
       if (dragState.isDragging && dragState.draggedLayer) {
         const mouseY = dragState.dragStartY;
         const layer = dragState.draggedLayer;
-        const isSelected = layer.z === getSpace().camera.focus_plane;
+        const isSelected = isSelectedLayer(layer);
         const rowColor = isSelected ? selectedColor : textColor;
         const dragBgColor = get_color_by_name('deep_blue').rgb;
         
@@ -418,6 +542,8 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
       
     },
     on_pointer_down_content(e: PointerEvent, rect: Rect): void {
+      if (e.button !== 0) return;
+
       // If currently renaming, check if we clicked elsewhere
       if (renameState.isRenaming) {
         const localY = e.y - rect.y0;
@@ -442,10 +568,11 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
         if (!clickedOnRenameField) {
           // Clicked outside rename field, confirm rename
           if (renameState.layerZ !== null) {
-            opts.onLayerRename(renameState.layerZ, renameState.editText);
+            renameLayer(renameState.layerZ, renameState.editText);
           }
           renameState.isRenaming = false;
           renameState.layerZ = null;
+          renameState.layerId = null;
         }
       }
       
@@ -474,13 +601,13 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
       // Check which column was clicked
       if (localX === COL_VIS) {
         // Visibility toggle
-        opts.onLayerVisibilityToggle(layer.z);
+        toggleLayerVisibility(layer);
       } else if (localX === COL_LOCK) {
         // Lock toggle
-        opts.onLayerLockToggle(layer.z);
+        toggleLayerLock(layer);
       } else if (localX === rect.x1 - rect.x0 - 2 && layers.length > 1) {
         // Delete button
-        opts.onDeleteLayer(layer.z);
+        deleteLayer(layer);
       } else if (localX === COL_DRAG || (localX >= COL_ORDER_START && localX < COL_NAME_START)) {
         // Drag handle OR order number clicked - start dragging immediately
         dragState.isDragging = true;
@@ -492,13 +619,13 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
       } else if (localX >= COL_NAME_START && localX < rect.x1 - rect.x0 - 2) {
         // Name clicked - select layer AND start rename
         // First select the layer
-          opts.onLayerSelect(layer.z);
+          selectLayer(layer);
 
           // Then enter rename mode
           if (renameState.isRenaming && renameState.layerZ !== layer.z) {
             // Confirm any existing rename first
             if (renameState.layerZ !== null) {
-              opts.onLayerRename(renameState.layerZ, renameState.editText);
+              renameLayer(renameState.layerZ, renameState.editText);
             }
           }
 
@@ -532,47 +659,7 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
       if (dragState.isDragging && dragState.sourceLayerZ !== null) {
         if (dragState.currentDropIndex !== null) {
           const layers = getSortedLayers();
-          const sourceIndex = layers.findIndex(l => l.z === dragState.sourceLayerZ);
-          
-          // Calculate effective drop index based on drag direction
-          // When dragging DOWN, we need to adjust because we removed the source layer
-          let effectiveDropIndex = dragState.currentDropIndex;
-          if (dragState.currentDropIndex > sourceIndex) {
-            // Dragging down: the drop index in the filtered array is one less
-            // because we removed the source layer which was before the drop point
-            effectiveDropIndex = dragState.currentDropIndex - 1;
-          }
-          
-          // Only reorder if moved to a different position
-          // For dragging UP: can't drop at same index or one before (would be same position)
-          // For dragging DOWN: can't drop at same index or one after (would be same position)
-          const isDifferentPosition = 
-            (dragState.currentDropIndex < sourceIndex && dragState.currentDropIndex !== sourceIndex) ||
-            (dragState.currentDropIndex > sourceIndex && effectiveDropIndex !== sourceIndex);
-          
-          if (isDifferentPosition) {
-            // Build new order
-            const remainingLayers = layers.filter(l => l.z !== dragState.sourceLayerZ);
-            const newOrder: number[] = [];
-            
-            // Clamp effective drop index to valid range
-            const clampedDropIndex = Math.max(0, Math.min(remainingLayers.length, effectiveDropIndex));
-            
-            // Insert layers before drop position
-            for (let i = 0; i < clampedDropIndex && i < remainingLayers.length; i++) {
-              newOrder.push(remainingLayers[i]!.z);
-            }
-            
-            // Insert dragged layer
-            newOrder.push(dragState.sourceLayerZ);
-            
-            // Insert remaining layers after
-            for (let i = clampedDropIndex; i < remainingLayers.length; i++) {
-              newOrder.push(remainingLayers[i]!.z);
-            }
-            
-            opts.onReorderLayers(newOrder);
-          }
+          reorderLayers(layers, dragState.sourceLayerZ, dragState.currentDropIndex);
         }
         
         // Reset drag state
@@ -585,18 +672,20 @@ export function makeLayerPaletteModule(opts: LayerPaletteOptions): Module {
     on_key_down(e: KeyboardEvent): void {
       if (!renameState.isRenaming) return;
       
-      if (e.key === 'Enter') {
+        if (e.key === 'Enter') {
         // Confirm rename
         if (renameState.layerZ !== null) {
-          opts.onLayerRename(renameState.layerZ, renameState.editText);
+          renameLayer(renameState.layerZ, renameState.editText);
         }
         renameState.isRenaming = false;
         renameState.layerZ = null;
+        renameState.layerId = null;
         e.preventDefault();
       } else if (e.key === 'Escape') {
         // Cancel rename
         renameState.isRenaming = false;
         renameState.layerZ = null;
+        renameState.layerId = null;
         e.preventDefault();
       } else if (e.key === 'Backspace') {
         // Delete character before cursor

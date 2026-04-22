@@ -40,6 +40,7 @@ interface ElectronAPI {
   startupBootMode?: 'manual_shell' | 'direct_runtime' | 'tas_runtime' | string;
   toolAssistedInputsBootConfig?: {
     enabled?: boolean;
+    resetState?: boolean;
     taiId?: string;
     testName?: string;
     openMs?: number;

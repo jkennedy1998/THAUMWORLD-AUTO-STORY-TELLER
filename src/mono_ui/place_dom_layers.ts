@@ -252,7 +252,7 @@ export class PlaceDomLayers {
     if (!layer) return;
     layer.cells = cells;
     if (this.renderer && typeof content_version === 'number' && Number.isFinite(content_version)) {
-      this.renderer.setLayerContentVersion(layer_z, Math.trunc(content_version));
+      this.renderer.setSlotContentVersion(layer_z, Math.trunc(content_version));
     }
   }
 

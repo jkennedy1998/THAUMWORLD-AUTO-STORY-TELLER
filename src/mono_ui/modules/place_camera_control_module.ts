@@ -2,12 +2,12 @@ import type { Module, Canvas, Rect, PointerEvent } from '../types.js';
 import { get_color_by_name } from '../colors.js';
 import type { ModuleGizmosConfig } from '../module_gizmos.js';
 import { make_floating_panel_module } from './floating_panel_module.js';
-import type { VoxelSpace } from '../../ascii_painter/voxel_space.js';
+import type { CameraConfig } from '../../ascii_painter/voxel_space.js';
 
 export type PlaceCameraControlOptions = {
   id: string;
   rect: Rect;
-  getSpace: () => VoxelSpace;
+  getCamera: () => CameraConfig;
   title?: string;
   action_rows?: Array<Array<{ id: string; label: string }>>;
   onAction?: (id: string) => void;
@@ -24,6 +24,13 @@ export type PlaceCameraControlOptions = {
   onMouseAngleYawDegChange?: (value: number) => void;
   onMouseAnglePitchDegChange?: (value: number) => void;
   onMouseAngleSpringChange?: (value: number) => void;
+  onRenderDistancePlanesChange?: (value: number) => void;
+  slider_specs?: Partial<Record<'scale_per_layer' | 'movement_per_layer' | 'mouse_angle_yaw_deg' | 'mouse_angle_pitch_deg' | 'mouse_angle_spring' | 'calibration_x' | 'calibration_y' | 'render_distance_planes', {
+    min: number;
+    max: number;
+    step: number;
+    digits?: number;
+  }>>;
   onMove?: (new_rect: Rect) => void;
   onResize?: (new_rect: Rect) => void;
   onClose?: () => void;
@@ -71,15 +78,32 @@ const ROW_CALIBRATION_X_SLIDER = 33;
 const ROW_CALIBRATION_Y_VALUE = 34;
 const ROW_CALIBRATION_Y_SLIDER = 35;
 const ROW_RESET = 36;
+const ROW_SEPARATOR_8 = 37;
+const ROW_RENDER_DISTANCE_LABEL = 38;
+const ROW_RENDER_DISTANCE = 39;
+const ROW_RENDER_DISTANCE_SLIDER = 40;
 
-const CONTENT_HEIGHT = 37;
+const CONTENT_HEIGHT = 41;
 const COL_TOGGLE = 2;
 const COL_LABEL = 4;
+
+type SliderKind = 'movement_per_layer' | 'scale_per_layer' | 'mouse_angle_yaw_deg' | 'mouse_angle_pitch_deg' | 'mouse_angle_spring' | 'calibration_x' | 'calibration_y' | 'render_distance_planes';
+
+const DEFAULT_SLIDER_SPECS: Record<SliderKind, { min: number; max: number; step: number; digits?: number }> = {
+  mouse_angle_yaw_deg: { min: -45, max: 45, step: 0.5, digits: 1 },
+  mouse_angle_pitch_deg: { min: -45, max: 45, step: 0.5, digits: 1 },
+  mouse_angle_spring: { min: 1, max: 30, step: 0.5, digits: 1 },
+  movement_per_layer: { min: -500, max: 500, step: 1, digits: 0 },
+  scale_per_layer: { min: -1, max: 1, step: 0.01, digits: 2 },
+  calibration_x: { min: -500, max: 500, step: 1, digits: 0 },
+  calibration_y: { min: -500, max: 500, step: 1, digits: 0 },
+  render_distance_planes: { min: 0, max: 8, step: 1, digits: 0 },
+};
 
 export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): Module {
   let rect = opts.rect;
   let scroll_offset = 0;
-  let is_dragging_slider: 'movement_per_layer' | 'scale_per_layer' | 'mouse_angle_yaw_deg' | 'mouse_angle_pitch_deg' | 'mouse_angle_spring' | 'calibration_x' | 'calibration_y' | null = null;
+  let is_dragging_slider: SliderKind | null = null;
   let buttonHitboxes: Array<{ id: string; x0: number; y0: number; x1: number; y1: number }> = [];
   let pressedButtons = new Set<string>();
 
@@ -230,19 +254,40 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
     c.set(knobX, y, { char: '◆', rgb: sliderFgColor, weight_index: 2, render_index: 10 });
   }
 
+  function getSliderSpec(kind: SliderKind) {
+    return { ...DEFAULT_SLIDER_SPECS[kind], ...(opts.slider_specs?.[kind] ?? {}) };
+  }
+
+  function quantizeSliderValue(kind: SliderKind, value: number): number {
+    const spec = getSliderSpec(kind);
+    const clamped = Math.max(spec.min, Math.min(spec.max, value));
+    const step = spec.step > 0 ? spec.step : 1;
+    const snapped = Math.round(clamped / step) * step;
+    const digits = spec.digits ?? (Number.isInteger(step) ? 0 : 2);
+    return Number(snapped.toFixed(digits));
+  }
+
+  function formatSliderValue(kind: SliderKind, value: number): string {
+    const digits = getSliderSpec(kind).digits ?? 0;
+    return digits > 0 ? value.toFixed(digits) : Math.round(value).toString();
+  }
+
   function nudgeSlider(kind: typeof is_dragging_slider, dir: -1 | 1): void {
     const cam = camera();
-    if (kind === 'mouse_angle_yaw_deg') opts.onMouseAngleYawDegChange?.(Math.max(-45, Math.min(45, Math.round(((cam.mouse_angle_yaw_deg ?? 0) + dir * 0.5) * 10) / 10)));
-    else if (kind === 'mouse_angle_pitch_deg') opts.onMouseAnglePitchDegChange?.(Math.max(-45, Math.min(45, Math.round(((cam.mouse_angle_pitch_deg ?? 0) + dir * 0.5) * 10) / 10)));
-    else if (kind === 'mouse_angle_spring') opts.onMouseAngleSpringChange?.(Math.max(1, Math.min(30, Math.round(((cam.mouse_angle_spring ?? 10) + dir * 0.5) * 10) / 10)));
-    else if (kind === 'movement_per_layer') opts.onMovementPerLayerChange?.(Math.max(-500, Math.min(500, Math.round((cam.movement_per_layer ?? 0) + dir))));
-    else if (kind === 'scale_per_layer') opts.onScalePerLayerChange?.(Math.max(-1, Math.min(1, Math.round(((cam.scale_per_layer ?? 0) + dir * 0.01) * 100) / 100)));
-    else if (kind === 'calibration_x') opts.onCalibrationChange?.(Math.max(-500, Math.min(500, Math.round((cam.calibration?.x ?? 0) + dir))), Math.round(cam.calibration?.y ?? 0));
-    else if (kind === 'calibration_y') opts.onCalibrationChange?.(Math.round(cam.calibration?.x ?? 0), Math.max(-500, Math.min(500, Math.round((cam.calibration?.y ?? 0) + dir))));
+    if (!kind) return;
+    const spec = getSliderSpec(kind);
+    if (kind === 'mouse_angle_yaw_deg') opts.onMouseAngleYawDegChange?.(quantizeSliderValue(kind, (cam.mouse_angle_yaw_deg ?? 0) + dir * spec.step));
+    else if (kind === 'mouse_angle_pitch_deg') opts.onMouseAnglePitchDegChange?.(quantizeSliderValue(kind, (cam.mouse_angle_pitch_deg ?? 0) + dir * spec.step));
+    else if (kind === 'mouse_angle_spring') opts.onMouseAngleSpringChange?.(quantizeSliderValue(kind, (cam.mouse_angle_spring ?? 10) + dir * spec.step));
+    else if (kind === 'movement_per_layer') opts.onMovementPerLayerChange?.(quantizeSliderValue(kind, (cam.movement_per_layer ?? 0) + dir * spec.step));
+    else if (kind === 'scale_per_layer') opts.onScalePerLayerChange?.(quantizeSliderValue(kind, (cam.scale_per_layer ?? 0) + dir * spec.step));
+    else if (kind === 'calibration_x') opts.onCalibrationChange?.(quantizeSliderValue(kind, (cam.calibration?.x ?? 0) + dir * spec.step), Math.round(cam.calibration?.y ?? 0));
+    else if (kind === 'calibration_y') opts.onCalibrationChange?.(Math.round(cam.calibration?.x ?? 0), quantizeSliderValue(kind, (cam.calibration?.y ?? 0) + dir * spec.step));
+    else if (kind === 'render_distance_planes') opts.onRenderDistancePlanesChange?.(quantizeSliderValue(kind, ((cam.render_distance_planes ?? 2)) + dir * spec.step));
   }
 
   function camera() {
-    return opts.getSpace().camera;
+    return opts.getCamera();
   }
 
   return make_floating_panel_module({
@@ -266,31 +311,31 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
       drawActionRow(c, ROW_ACTIONS_2, opts.action_rows?.[1] ?? []);
       drawSeparator(c, ROW_SEPARATOR_2B);
       drawLabel(c, ROW_MOUSE_YAW_LABEL, 'Mouse Yaw°');
-      drawValue(c, ROW_MOUSE_YAW, (cam.mouse_angle_yaw_deg ?? 0).toFixed(1));
-      drawSlider(c, ROW_MOUSE_YAW_SLIDER, cam.mouse_angle_yaw_deg ?? 0, -45, 45);
+      drawValue(c, ROW_MOUSE_YAW, formatSliderValue('mouse_angle_yaw_deg', cam.mouse_angle_yaw_deg ?? 0));
+      drawSlider(c, ROW_MOUSE_YAW_SLIDER, cam.mouse_angle_yaw_deg ?? 0, getSliderSpec('mouse_angle_yaw_deg').min, getSliderSpec('mouse_angle_yaw_deg').max);
       drawSeparator(c, ROW_SEPARATOR_3);
       drawLabel(c, ROW_MOUSE_PITCH_LABEL, 'Mouse Pitch°');
-      drawValue(c, ROW_MOUSE_PITCH, (cam.mouse_angle_pitch_deg ?? 0).toFixed(1));
-      drawSlider(c, ROW_MOUSE_PITCH_SLIDER, cam.mouse_angle_pitch_deg ?? 0, -45, 45);
+      drawValue(c, ROW_MOUSE_PITCH, formatSliderValue('mouse_angle_pitch_deg', cam.mouse_angle_pitch_deg ?? 0));
+      drawSlider(c, ROW_MOUSE_PITCH_SLIDER, cam.mouse_angle_pitch_deg ?? 0, getSliderSpec('mouse_angle_pitch_deg').min, getSliderSpec('mouse_angle_pitch_deg').max);
       drawSeparator(c, ROW_SEPARATOR_4);
       drawLabel(c, ROW_MOUSE_SPRING_LABEL, 'Mouse Spring');
-      drawValue(c, ROW_MOUSE_SPRING, (cam.mouse_angle_spring ?? 0).toFixed(1));
-      drawSlider(c, ROW_MOUSE_SPRING_SLIDER, cam.mouse_angle_spring ?? 0, 1, 30);
+      drawValue(c, ROW_MOUSE_SPRING, formatSliderValue('mouse_angle_spring', cam.mouse_angle_spring ?? 0));
+      drawSlider(c, ROW_MOUSE_SPRING_SLIDER, cam.mouse_angle_spring ?? 0, getSliderSpec('mouse_angle_spring').min, getSliderSpec('mouse_angle_spring').max);
       drawSeparator(c, ROW_SEPARATOR_5);
       drawLabel(c, ROW_LAYER_MOVE_LABEL, 'Depth Move');
-      drawValue(c, ROW_LAYER_MOVE, Math.round(cam.movement_per_layer ?? 0).toString());
-      drawSlider(c, ROW_LAYER_MOVE_SLIDER, cam.movement_per_layer ?? 0, -500, 500);
+      drawValue(c, ROW_LAYER_MOVE, formatSliderValue('movement_per_layer', cam.movement_per_layer ?? 0));
+      drawSlider(c, ROW_LAYER_MOVE_SLIDER, cam.movement_per_layer ?? 0, getSliderSpec('movement_per_layer').min, getSliderSpec('movement_per_layer').max);
       drawSeparator(c, ROW_SEPARATOR_6);
       drawLabel(c, ROW_LAYER_SCALE_LABEL, 'Scale/Layer');
-      drawValue(c, ROW_LAYER_SCALE, (cam.scale_per_layer ?? 0).toFixed(2));
-      drawSlider(c, ROW_LAYER_SCALE_SLIDER, cam.scale_per_layer ?? 0, -1, 1);
+      drawValue(c, ROW_LAYER_SCALE, formatSliderValue('scale_per_layer', cam.scale_per_layer ?? 0));
+      drawSlider(c, ROW_LAYER_SCALE_SLIDER, cam.scale_per_layer ?? 0, getSliderSpec('scale_per_layer').min, getSliderSpec('scale_per_layer').max);
       drawSeparator(c, ROW_SEPARATOR_7);
       drawLabel(c, ROW_CALIBRATION_LABEL, 'Calibration');
       const cal = cam.calibration ?? { x: 0, y: 0 };
-      drawValue(c, ROW_CALIBRATION_X_VALUE, `X:${Math.round(cal.x)}`);
-      drawSlider(c, ROW_CALIBRATION_X_SLIDER, cal.x, -500, 500);
-      drawValue(c, ROW_CALIBRATION_Y_VALUE, `Y:${Math.round(cal.y)}`);
-      drawSlider(c, ROW_CALIBRATION_Y_SLIDER, cal.y, -500, 500);
+      drawValue(c, ROW_CALIBRATION_X_VALUE, `X:${formatSliderValue('calibration_x', cal.x)}`);
+      drawSlider(c, ROW_CALIBRATION_X_SLIDER, cal.x, getSliderSpec('calibration_x').min, getSliderSpec('calibration_x').max);
+      drawValue(c, ROW_CALIBRATION_Y_VALUE, `Y:${formatSliderValue('calibration_y', cal.y)}`);
+      drawSlider(c, ROW_CALIBRATION_Y_SLIDER, cal.y, getSliderSpec('calibration_y').min, getSliderSpec('calibration_y').max);
       if (is_row_visible(ROW_RESET)) {
         const y = get_screen_y(ROW_RESET);
         const label = '[Reset Calibration]';
@@ -298,21 +343,29 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
         for (let i = 0; i < label.length; i += 1) c.set(x + i, y, { char: label[i]!, rgb: pressedButtons.has('reset_calibration') ? accentColor : textColor, weight_index: 1, render_index: 10 });
         set_button_hitbox('reset_calibration', x, y, x + label.length - 1, y);
       }
+      if (opts.onRenderDistancePlanesChange) {
+        drawSeparator(c, ROW_SEPARATOR_8);
+        drawLabel(c, ROW_RENDER_DISTANCE_LABEL, 'Render Distance');
+        drawValue(c, ROW_RENDER_DISTANCE, formatSliderValue('render_distance_planes', cam.render_distance_planes ?? 2));
+        drawSlider(c, ROW_RENDER_DISTANCE_SLIDER, cam.render_distance_planes ?? 2, getSliderSpec('render_distance_planes').min, getSliderSpec('render_distance_planes').max);
+      }
     },
     on_pointer_down_content(e: PointerEvent): void {
       if (is_dragging_slider !== null) is_dragging_slider = null;
       const cam = camera();
-      const updateSlider = (kind: typeof is_dragging_slider, min: number, max: number, cb: (value: number) => void) => {
+      const updateSlider = (kind: SliderKind, cb: (value: number) => void) => {
         is_dragging_slider = kind;
-        cb(get_slider_value(e.x, min, max));
+        const spec = getSliderSpec(kind);
+        cb(quantizeSliderValue(kind, get_slider_value(e.x, spec.min, spec.max)));
       };
-      if (is_on_slider(e.x, e.y, ROW_MOUSE_YAW_SLIDER)) return updateSlider('mouse_angle_yaw_deg', -45, 45, (v) => opts.onMouseAngleYawDegChange?.(Math.round(v * 10) / 10));
-      if (is_on_slider(e.x, e.y, ROW_MOUSE_PITCH_SLIDER)) return updateSlider('mouse_angle_pitch_deg', -45, 45, (v) => opts.onMouseAnglePitchDegChange?.(Math.round(v * 10) / 10));
-      if (is_on_slider(e.x, e.y, ROW_MOUSE_SPRING_SLIDER)) return updateSlider('mouse_angle_spring', 1, 30, (v) => opts.onMouseAngleSpringChange?.(Math.round(v * 10) / 10));
-      if (is_on_slider(e.x, e.y, ROW_LAYER_MOVE_SLIDER)) return updateSlider('movement_per_layer', -500, 500, (v) => opts.onMovementPerLayerChange?.(Math.round(v)));
-      if (is_on_slider(e.x, e.y, ROW_LAYER_SCALE_SLIDER)) return updateSlider('scale_per_layer', -1, 1, (v) => opts.onScalePerLayerChange?.(Math.round(v * 100) / 100));
-      if (is_on_slider(e.x, e.y, ROW_CALIBRATION_X_SLIDER)) return updateSlider('calibration_x', -500, 500, (v) => opts.onCalibrationChange?.(Math.round(v), Math.round(cam.calibration?.y ?? 0)));
-      if (is_on_slider(e.x, e.y, ROW_CALIBRATION_Y_SLIDER)) return updateSlider('calibration_y', -500, 500, (v) => opts.onCalibrationChange?.(Math.round(cam.calibration?.x ?? 0), Math.round(v)));
+      if (is_on_slider(e.x, e.y, ROW_MOUSE_YAW_SLIDER)) return updateSlider('mouse_angle_yaw_deg', (v) => opts.onMouseAngleYawDegChange?.(v));
+      if (is_on_slider(e.x, e.y, ROW_MOUSE_PITCH_SLIDER)) return updateSlider('mouse_angle_pitch_deg', (v) => opts.onMouseAnglePitchDegChange?.(v));
+      if (is_on_slider(e.x, e.y, ROW_MOUSE_SPRING_SLIDER)) return updateSlider('mouse_angle_spring', (v) => opts.onMouseAngleSpringChange?.(v));
+      if (is_on_slider(e.x, e.y, ROW_LAYER_MOVE_SLIDER)) return updateSlider('movement_per_layer', (v) => opts.onMovementPerLayerChange?.(v));
+      if (is_on_slider(e.x, e.y, ROW_LAYER_SCALE_SLIDER)) return updateSlider('scale_per_layer', (v) => opts.onScalePerLayerChange?.(v));
+      if (is_on_slider(e.x, e.y, ROW_CALIBRATION_X_SLIDER)) return updateSlider('calibration_x', (v) => opts.onCalibrationChange?.(v, Math.round(cam.calibration?.y ?? 0)));
+      if (is_on_slider(e.x, e.y, ROW_CALIBRATION_Y_SLIDER)) return updateSlider('calibration_y', (v) => opts.onCalibrationChange?.(Math.round(cam.calibration?.x ?? 0), v));
+      if (opts.onRenderDistancePlanesChange && is_on_slider(e.x, e.y, ROW_RENDER_DISTANCE_SLIDER)) return updateSlider('render_distance_planes', (v) => opts.onRenderDistancePlanesChange?.(v));
 
       if (is_on_minus(e.x, e.y, ROW_MOUSE_YAW_SLIDER)) return void nudgeSlider('mouse_angle_yaw_deg', -1);
       if (is_on_plus(e.x, e.y, ROW_MOUSE_YAW_SLIDER)) return void nudgeSlider('mouse_angle_yaw_deg', 1);
@@ -328,6 +381,8 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
       if (is_on_plus(e.x, e.y, ROW_CALIBRATION_X_SLIDER)) return void nudgeSlider('calibration_x', 1);
       if (is_on_minus(e.x, e.y, ROW_CALIBRATION_Y_SLIDER)) return void nudgeSlider('calibration_y', -1);
       if (is_on_plus(e.x, e.y, ROW_CALIBRATION_Y_SLIDER)) return void nudgeSlider('calibration_y', 1);
+      if (opts.onRenderDistancePlanesChange && is_on_minus(e.x, e.y, ROW_RENDER_DISTANCE_SLIDER)) return void nudgeSlider('render_distance_planes', -1);
+      if (opts.onRenderDistancePlanesChange && is_on_plus(e.x, e.y, ROW_RENDER_DISTANCE_SLIDER)) return void nudgeSlider('render_distance_planes', 1);
 
       const hit = find_button_hitbox(e.x, e.y);
       if (!hit) return;
@@ -350,13 +405,17 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
       }
     },
     on_pointer_move_content(e: PointerEvent): void {
-      if (is_dragging_slider === 'mouse_angle_yaw_deg') opts.onMouseAngleYawDegChange?.(Math.round(get_slider_value(e.x, -45, 45) * 10) / 10);
-      else if (is_dragging_slider === 'mouse_angle_pitch_deg') opts.onMouseAnglePitchDegChange?.(Math.round(get_slider_value(e.x, -45, 45) * 10) / 10);
-      else if (is_dragging_slider === 'mouse_angle_spring') opts.onMouseAngleSpringChange?.(Math.round(get_slider_value(e.x, 1, 30) * 10) / 10);
-      else if (is_dragging_slider === 'movement_per_layer') opts.onMovementPerLayerChange?.(Math.round(get_slider_value(e.x, -500, 500)));
-      else if (is_dragging_slider === 'scale_per_layer') opts.onScalePerLayerChange?.(Math.round(get_slider_value(e.x, -1, 1) * 100) / 100);
-      else if (is_dragging_slider === 'calibration_x') opts.onCalibrationChange?.(Math.round(get_slider_value(e.x, -500, 500)), Math.round(camera().calibration?.y ?? 0));
-      else if (is_dragging_slider === 'calibration_y') opts.onCalibrationChange?.(Math.round(camera().calibration?.x ?? 0), Math.round(get_slider_value(e.x, -500, 500)));
+      if (!is_dragging_slider) return;
+      const spec = getSliderSpec(is_dragging_slider);
+      const nextValue = quantizeSliderValue(is_dragging_slider, get_slider_value(e.x, spec.min, spec.max));
+      if (is_dragging_slider === 'mouse_angle_yaw_deg') opts.onMouseAngleYawDegChange?.(nextValue);
+      else if (is_dragging_slider === 'mouse_angle_pitch_deg') opts.onMouseAnglePitchDegChange?.(nextValue);
+      else if (is_dragging_slider === 'mouse_angle_spring') opts.onMouseAngleSpringChange?.(nextValue);
+      else if (is_dragging_slider === 'movement_per_layer') opts.onMovementPerLayerChange?.(nextValue);
+      else if (is_dragging_slider === 'scale_per_layer') opts.onScalePerLayerChange?.(nextValue);
+      else if (is_dragging_slider === 'calibration_x') opts.onCalibrationChange?.(nextValue, Math.round(camera().calibration?.y ?? 0));
+      else if (is_dragging_slider === 'calibration_y') opts.onCalibrationChange?.(Math.round(camera().calibration?.x ?? 0), nextValue);
+      else if (is_dragging_slider === 'render_distance_planes') opts.onRenderDistancePlanesChange?.(nextValue);
     },
     on_pointer_up_content(): void {
       is_dragging_slider = null;

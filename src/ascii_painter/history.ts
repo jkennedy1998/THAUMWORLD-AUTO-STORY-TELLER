@@ -5,9 +5,10 @@
  * Inspired by Blender's undo system.
  */
 
-import type { Grid, GridCell, HistorySnapshot } from './types.js';
-import { getOrCreateLayer, type VoxelSpace, type VoxelLayer } from './voxel_space.js';
+import type { GridCell, HistorySnapshot } from './types.js';
+import { getOrCreateLayer, type VoxelSpace } from './voxel_space.js';
 import type { SelectionBitmap } from './selection.js';
+import type { PainterGroup } from './painter_document.js';
 
 // Action types
 export type ActionType = 
@@ -16,9 +17,13 @@ export type ActionType =
   | 'fill'           // Bucket fill
   | 'paste'          // Paste operation
   | 'clear_canvas'   // Clear entire layer
-  | 'add_layer'      // Create new layer
-  | 'delete_layer'   // Remove layer
-  | 'duplicate_layer' // Copy layer
+  | 'create_group'
+  | 'delete_group'
+  | 'duplicate_group'
+  | 'rename_group'
+  | 'set_group_visibility'
+  | 'set_group_locked'
+  | 'reorder_groups'
   | 'selection_change'; // Rect, lasso, clear, invert, select-all
 
 // Cell change tracking
@@ -28,6 +33,7 @@ export interface CellChange {
   worldX: number;
   worldY: number;
   worldZ: number;
+  group_id: string;
   oldCell: GridCell;
   newCell: GridCell;
 }
@@ -43,7 +49,8 @@ export interface HistoryAction {
   id: string;
   type: ActionType;
   description: string;
-  z: number;
+  z?: number;
+  group_id?: string;
   timestamp: number;
   
   // For cell-based actions
@@ -52,10 +59,14 @@ export interface HistoryAction {
   // For selection actions
   selectionChange?: SelectionChange;
   
-  // For layer operations
-  layerData?: VoxelLayer;
-  sourceZ?: number;
-  targetZ?: number;
+  // For group operations
+  groupId?: string;
+  sourceGroupId?: string;
+  targetGroupId?: string;
+  oldGroupData?: PainterGroup;
+  newGroupData?: PainterGroup;
+  oldGroupOrder?: string[];
+  newGroupOrder?: string[];
 }
 
 export interface HistoryManager {
@@ -101,19 +112,29 @@ function cloneCell(cell: GridCell): GridCell {
   };
 }
 
-/**
- * Clone a VoxelLayer
- */
-function cloneLayer(layer: VoxelLayer): VoxelLayer {
+function clonePainterGroup(group: PainterGroup): PainterGroup {
   return {
-    z: layer.z,
-    name: layer.name,
-    visible: layer.visible,
-    opacity: layer.opacity,
-    locked: layer.locked,
-    cells: layer.cells.map(row => 
-      row.map(cell => cloneCell(cell))
-    )
+    ...group,
+    voxels: group.voxels.map((voxel) => ({
+      ...voxel,
+      rgb: { ...voxel.rgb },
+    })),
+    frames: Array.isArray(group.frames)
+      ? group.frames.map((frame) => ({
+          ...frame,
+          deltas: frame.deltas.map((delta) => ({
+            ...delta,
+            next: delta.next ? {
+              ...delta.next,
+              rgb: { ...delta.next.rgb },
+            } : null,
+          })),
+        }))
+      : [],
+    metadata: group.metadata ? {
+      ...group.metadata,
+      origin: group.metadata.origin ? { ...group.metadata.origin } : undefined,
+    } : undefined,
   };
 }
 
@@ -135,7 +156,7 @@ export function logCellAction(
   history: HistoryManager,
   type: 'draw_cells' | 'erase_cells' | 'fill' | 'paste' | 'clear_canvas',
   description: string,
-  z: number,
+  options: { z?: number; group_id: string },
   changes: CellChange[]
 ): void {
   if (changes.length === 0) return;
@@ -149,7 +170,8 @@ export function logCellAction(
     id: generateActionId(),
     type,
     description: `${description} (${changes.length} cell${changes.length !== 1 ? 's' : ''})`,
-    z,
+    z: options.z,
+    group_id: options.group_id,
     timestamp: Date.now(),
     cellChanges: changes.map(c => ({
       x: c.x,
@@ -157,6 +179,7 @@ export function logCellAction(
       worldX: c.worldX,
       worldY: c.worldY,
       worldZ: c.worldZ,
+      group_id: c.group_id,
       oldCell: cloneCell(c.oldCell),
       newCell: cloneCell(c.newCell)
     }))
@@ -211,37 +234,42 @@ export function logSelectionAction(
   }
 }
 
-/**
- * Log a layer operation action
- */
-export function logLayerAction(
+export function logGroupAction(
   history: HistoryManager,
-  type: 'add_layer' | 'delete_layer' | 'duplicate_layer',
+  type: 'create_group' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'reorder_groups',
   description: string,
-  z: number,
-  layerData?: VoxelLayer,
-  sourceZ?: number,
-  targetZ?: number
+  options: {
+    groupId?: string;
+    sourceGroupId?: string;
+    targetGroupId?: string;
+    oldGroupData?: PainterGroup;
+    newGroupData?: PainterGroup;
+    oldGroupOrder?: string[];
+    newGroupOrder?: string[];
+  }
 ): void {
-  // Clear redo history
   if (history.current_index < history.actions.length) {
     history.actions = history.actions.slice(0, history.current_index);
   }
-  
+
   const action: HistoryAction = {
     id: generateActionId(),
     type,
     description,
-    z,
+    z: 0,
     timestamp: Date.now(),
-    layerData: layerData ? cloneLayer(layerData) : undefined,
-    sourceZ,
-    targetZ
+    groupId: options.groupId,
+    sourceGroupId: options.sourceGroupId,
+    targetGroupId: options.targetGroupId,
+    oldGroupData: options.oldGroupData ? clonePainterGroup(options.oldGroupData) : undefined,
+    newGroupData: options.newGroupData ? clonePainterGroup(options.newGroupData) : undefined,
+    oldGroupOrder: options.oldGroupOrder ? [...options.oldGroupOrder] : undefined,
+    newGroupOrder: options.newGroupOrder ? [...options.newGroupOrder] : undefined,
   };
-  
+
   history.actions.push(action);
   history.current_index++;
-  
+
   if (history.actions.length > history.max_history) {
     history.actions.shift();
     history.current_index--;
@@ -264,7 +292,7 @@ function selectionBitmapsEqual(a: SelectionBitmap, b: SelectionBitmap): boolean 
 /**
  * Start batching cell changes (for continuous drawing)
  */
-export function startBatch(history: HistoryManager, type: ActionType, description: string, z: number): void {
+export function startBatch(history: HistoryManager, type: ActionType, description: string, options: { z?: number; group_id: string }): void {
   if (history.isBatching && history.batchAction) {
     // Already batching, commit current batch first
     endBatch(history);
@@ -275,7 +303,8 @@ export function startBatch(history: HistoryManager, type: ActionType, descriptio
     id: generateActionId(),
     type,
     description,
-    z,
+    z: options.z,
+    group_id: options.group_id,
     timestamp: Date.now(),
     cellChanges: []
   };
@@ -303,6 +332,7 @@ export function addToBatch(history: HistoryManager, change: CellChange): void {
       worldX: change.worldX,
       worldY: change.worldY,
       worldZ: change.worldZ,
+      group_id: change.group_id,
       oldCell: cloneCell(change.oldCell),
       newCell: cloneCell(change.newCell)
     });
@@ -347,10 +377,10 @@ export function cancelBatch(history: HistoryManager): void {
 }
 
 /**
- * Undo: revert last action
+ * Legacy undo: revert last action against a voxel-space replay target.
  * Returns the action description if successful, null otherwise
  */
-export function undo(history: HistoryManager, space: VoxelSpace): string | null {
+export function undoLegacyHistory(history: HistoryManager, space: VoxelSpace): string | null {
   if (!canUndo(history)) {
     return null;
   }
@@ -376,28 +406,16 @@ export function undo(history: HistoryManager, space: VoxelSpace): string | null 
     case 'selection_change':
       // Selection undo handled by caller (they have the selection bitmap)
       break;
-      
-    case 'add_layer':
-      undoAddLayer(space, action);
-      break;
-      
-    case 'delete_layer':
-      undoDeleteLayer(space, action);
-      break;
-      
-    case 'duplicate_layer':
-      undoDuplicateLayer(space, action);
-      break;
   }
   
   return action.description;
 }
 
 /**
- * Redo: re-apply undone action
+ * Legacy redo: re-apply undone action against a voxel-space replay target.
  * Returns the action description if successful, null otherwise
  */
-export function redo(history: HistoryManager, space: VoxelSpace): string | null {
+export function redoLegacyHistory(history: HistoryManager, space: VoxelSpace): string | null {
   if (!canRedo(history)) {
     return null;
   }
@@ -421,18 +439,6 @@ export function redo(history: HistoryManager, space: VoxelSpace): string | null 
     case 'selection_change':
       // Selection redo handled by caller
       break;
-      
-    case 'add_layer':
-      redoAddLayer(space, action);
-      break;
-      
-    case 'delete_layer':
-      redoDeleteLayer(space, action);
-      break;
-      
-    case 'duplicate_layer':
-      redoDuplicateLayer(space, action);
-      break;
   }
   
   history.current_index++;
@@ -455,71 +461,6 @@ function redoCellAction(space: VoxelSpace, action: HistoryAction): void {
     const layer = getOrCreateLayer(space, change.worldZ);
     const row = layer.cells[change.worldY];
     if (row && row[change.worldX]) row[change.worldX] = cloneCell(change.newCell);
-  }
-}
-
-function undoAddLayer(space: VoxelSpace, action: HistoryAction): void {
-  space.layers.delete(action.z);
-  // Update bounds
-  const zs = Array.from(space.layers.keys());
-  if (zs.length > 0) {
-    space.bounds.minZ = Math.min(...zs);
-    space.bounds.maxZ = Math.max(...zs);
-    space.bounds.depth = zs.length;
-  }
-}
-
-function redoAddLayer(space: VoxelSpace, action: HistoryAction): void {
-  if (action.layerData) {
-    space.layers.set(action.z, cloneLayer(action.layerData));
-    // Update bounds
-    space.bounds.minZ = Math.min(space.bounds.minZ, action.z);
-    space.bounds.maxZ = Math.max(space.bounds.maxZ, action.z);
-    space.bounds.depth = space.layers.size;
-  }
-}
-
-function undoDeleteLayer(space: VoxelSpace, action: HistoryAction): void {
-  if (action.layerData) {
-    space.layers.set(action.z, cloneLayer(action.layerData));
-    // Update bounds
-    space.bounds.minZ = Math.min(space.bounds.minZ, action.z);
-    space.bounds.maxZ = Math.max(space.bounds.maxZ, action.z);
-    space.bounds.depth = space.layers.size;
-  }
-}
-
-function redoDeleteLayer(space: VoxelSpace, action: HistoryAction): void {
-  space.layers.delete(action.z);
-  // Update bounds
-  const zs = Array.from(space.layers.keys());
-  if (zs.length > 0) {
-    space.bounds.minZ = Math.min(...zs);
-    space.bounds.maxZ = Math.max(...zs);
-    space.bounds.depth = zs.length;
-  }
-}
-
-function undoDuplicateLayer(space: VoxelSpace, action: HistoryAction): void {
-  if (action.targetZ !== undefined) {
-    space.layers.delete(action.targetZ);
-    // Update bounds
-    const zs = Array.from(space.layers.keys());
-    if (zs.length > 0) {
-      space.bounds.minZ = Math.min(...zs);
-      space.bounds.maxZ = Math.max(...zs);
-      space.bounds.depth = zs.length;
-    }
-  }
-}
-
-function redoDuplicateLayer(space: VoxelSpace, action: HistoryAction): void {
-  if (action.layerData && action.targetZ !== undefined) {
-    space.layers.set(action.targetZ, cloneLayer(action.layerData));
-    // Update bounds
-    space.bounds.minZ = Math.min(space.bounds.minZ, action.targetZ);
-    space.bounds.maxZ = Math.max(space.bounds.maxZ, action.targetZ);
-    space.bounds.depth = space.layers.size;
   }
 }
 
@@ -572,14 +513,4 @@ export function clearHistory(history: HistoryManager): void {
     clearTimeout(history.batchTimeout);
     history.batchTimeout = null;
   }
-}
-
-// Legacy functions for backward compatibility (will be removed)
-/**
- * @deprecated Use logCellAction instead
- */
-export function pushSnapshot(history: HistoryManager, grid: Grid): void {
-  console.warn('pushSnapshot is deprecated. Use logCellAction instead.');
-  // Legacy behavior - create a clear_canvas action
-  // This is a placeholder to prevent breaking existing code
 }

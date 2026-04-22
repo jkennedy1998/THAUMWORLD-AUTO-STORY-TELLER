@@ -1,0 +1,32 @@
+{
+  "id": "painter_group_runtime_smoke",
+  "test_name": "paint_test_group_runtime_add_duplicate_reorder_draw_undo",
+  "clock_mode": "realtime_ms",
+  "open_ms": 11000,
+  "description": "Create groups through helpers, reverse order, draw a cell, then undo through the active group runtime path.",
+  "start_delay_ms": 1800,
+  "end_delay_ms": 1000,
+  "actions": [
+    { "at_ms": 0, "type": "invoke_helper", "helper": "reset_painter_document" },
+    { "at_ms": 240, "type": "capture_text_value", "slot": "group_count_before", "source": "runtime_value", "field": "group_count" },
+    { "at_ms": 250, "type": "capture_text_value", "slot": "group_order_before", "source": "runtime_value", "field": "group_order" },
+    { "at_ms": 280, "type": "invoke_helper", "helper": "add_group" },
+    { "at_ms": 250, "type": "invoke_helper", "helper": "duplicate_active_group" },
+    { "at_ms": 500, "type": "invoke_helper", "helper": "reverse_group_order" },
+    { "at_ms": 650, "type": "assert_text_value_changed", "slot": "group_count_before", "source": "runtime_value", "field": "group_count" },
+    { "at_ms": 660, "type": "assert_text_value_changed", "slot": "group_order_before", "source": "runtime_value", "field": "group_order" },
+    { "at_ms": 700, "type": "pointer_move", "space": "grid", "x": 60, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 760, "type": "capture_painter_interaction_anchor", "slot": "anchor_before_draw" },
+    { "at_ms": 820, "type": "assert_painter_anchor_in_bounds", "anchor_slot": "anchor_before_draw" },
+    { "at_ms": 900, "type": "invoke_helper", "helper": "clear_anchor_cell" },
+    { "at_ms": 1080, "type": "capture_text_value", "slot": "history_after_clear", "source": "runtime_value", "field": "active_group_history_index" },
+    { "at_ms": 1320, "type": "key_tap", "code": "KeyP", "key": "p", "hold_ms": 30 },
+    { "at_ms": 1660, "type": "pointer_drag", "space": "grid", "from_x": 60, "from_y": 24, "to_x": 63, "to_y": 24, "steps": 3, "pointer_action": "primary" },
+    { "at_ms": 2060, "type": "capture_text_value", "slot": "history_after_draw", "source": "runtime_value", "field": "active_group_history_index" },
+    { "at_ms": 2110, "type": "assert_text_value_changed", "slot": "history_after_clear", "source": "runtime_value", "field": "active_group_history_index" },
+    { "at_ms": 2560, "type": "invoke_helper", "helper": "undo_painter" },
+    { "at_ms": 3160, "type": "assert_text_value_equals", "slot": "history_after_clear", "source": "runtime_value", "field": "active_group_history_index" },
+    { "at_ms": 3460, "type": "invoke_helper", "helper": "redo_painter" },
+    { "at_ms": 4060, "type": "assert_text_value_equals", "slot": "history_after_draw", "source": "runtime_value", "field": "active_group_history_index" }
+  ]
+}

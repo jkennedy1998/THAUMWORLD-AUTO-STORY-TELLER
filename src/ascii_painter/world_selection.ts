@@ -1,5 +1,4 @@
 import type { GridCell } from './types.js';
-import { getVoxel, type VoxelSpace } from './voxel_space.js';
 
 export type WorldCellKey = `${number},${number},${number}`;
 
@@ -101,22 +100,6 @@ export function apply_world_selection_mode(current: WorldSelection, incoming: Wo
     if (current.cells.has(key)) next.add(key);
   }
   current.cells = next;
-}
-
-export function create_world_copy_data_from_selection(selection: WorldSelection, space: VoxelSpace): WorldCopyData | null {
-  const bounds = get_world_selection_bounds(selection);
-  if (!bounds) return null;
-  const anchor = { x: bounds.min_x, y: bounds.min_y, z: bounds.min_z };
-  const cells = Array.from(selection.cells).map((key) => {
-    const point = parse_world_cell_key(key);
-    return {
-      dx: point.x - anchor.x,
-      dy: point.y - anchor.y,
-      dz: point.z - anchor.z,
-      cell: cloneCell(getVoxel(space, point.x, point.y, point.z)),
-    };
-  });
-  return { anchor, cells };
 }
 
 export function encode_world_copy_data(data: WorldCopyData): string {

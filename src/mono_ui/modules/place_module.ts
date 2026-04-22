@@ -251,8 +251,8 @@ type PlaceCameraDebugSnapshot = {
   module_center_local: { x: number; y: number };
   offsets: { x: number; y: number };
   dom_viewport: { ready: boolean; x: number; y: number; width: number; height: number; tileW: number; tileH: number } | null;
-  dom_selected_layer: { left: number; top: number; dleft: number; dtop: number; pan_x: number; pan_y: number; dpan_x: number; dpan_y: number } | null;
-  dom_layer_events: string[];
+  dom_selected_slot: { left: number; top: number; dleft: number; dtop: number; pan_x: number; pan_y: number; dpan_x: number; dpan_y: number } | null;
+  dom_slot_events: string[];
   transition_euler: { x: number; y: number; z: number };
   hard_rotation_debug: boolean;
 };
@@ -955,7 +955,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           anchor: last_camera_debug_snapshot.anchor,
           projected_screen: last_camera_debug_snapshot.projected_screen,
           dom_viewport: last_camera_debug_snapshot.dom_viewport,
-          dom_selected_layer: last_camera_debug_snapshot.dom_selected_layer,
+          dom_selected_slot: last_camera_debug_snapshot.dom_selected_slot,
           transition_euler: last_camera_debug_snapshot.transition_euler,
         } : null,
       }));
@@ -987,7 +987,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           anchor: last_camera_debug_snapshot.anchor,
           projected_screen: last_camera_debug_snapshot.projected_screen,
           dom_viewport: last_camera_debug_snapshot.dom_viewport,
-          dom_selected_layer: last_camera_debug_snapshot.dom_selected_layer,
+          dom_selected_slot: last_camera_debug_snapshot.dom_selected_slot,
           transition_euler: last_camera_debug_snapshot.transition_euler,
         } : null,
       }));
@@ -3940,8 +3940,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         const line1 = `CAM ${snap.hard_rotation_debug ? 'HARD*' : 'LIVE '} A:${snap.anchor?.source ?? 'none'} W:${snap.anchor ? `${snap.anchor.x},${snap.anchor.y},${snap.anchor.z}` : '-'} O:${snap.offsets.x},${snap.offsets.y}`;
         const line2 = `CTR:${snap.module_center_local.x},${snap.module_center_local.y} SCR:${snap.projected_screen ? `${snap.projected_screen.x - inner.x0},${snap.projected_screen.y - inner.y0}` : '-'} V:${snap.projected_view ? `${snap.projected_view.x},${snap.projected_view.y},${snap.projected_view.plane}` : '-'} T:${Math.round(snap.transition_euler.x)},${Math.round(snap.transition_euler.y)},${Math.round(snap.transition_euler.z)}`;
         const line3 = `DOM VP:${snap.dom_viewport ? `${snap.dom_viewport.ready ? 'ready' : 'wait'} ${snap.dom_viewport.width}x${snap.dom_viewport.height}@${snap.dom_viewport.tileW},${snap.dom_viewport.tileH}` : 'none'}`;
-        const line4 = `DOM SEL:${snap.dom_selected_layer ? `L${snap.dom_selected_layer.left}/${snap.dom_selected_layer.top} d${snap.dom_selected_layer.dleft}/${snap.dom_selected_layer.dtop} P${snap.dom_selected_layer.pan_x}/${snap.dom_selected_layer.pan_y} d${snap.dom_selected_layer.dpan_x}/${snap.dom_selected_layer.dpan_y}` : 'none'}`;
-        const line5 = `DOM EVT:${snap.dom_layer_events.length > 0 ? snap.dom_layer_events[snap.dom_layer_events.length - 1] : 'none'}`;
+        const line4 = `DOM SLOT:${snap.dom_selected_slot ? `${snap.dom_selected_slot.left}/${snap.dom_selected_slot.top} d${snap.dom_selected_slot.dleft}/${snap.dom_selected_slot.dtop} P${snap.dom_selected_slot.pan_x}/${snap.dom_selected_slot.pan_y} d${snap.dom_selected_slot.dpan_x}/${snap.dom_selected_slot.dpan_y}` : 'none'}`;
+        const line5 = `DOM SLOT EVT:${snap.dom_slot_events.length > 0 ? snap.dom_slot_events[snap.dom_slot_events.length - 1] : 'none'}`;
         const lines = [line1, line2, line3, line4, line5];
         for (let li = 0; li < lines.length; li += 1) {
           let x = inner.x0;
@@ -4382,17 +4382,17 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           tileW: Math.round(dom_debug.viewport.tileW * 100) / 100,
           tileH: Math.round(dom_debug.viewport.tileH * 100) / 100,
         } : null,
-        dom_selected_layer: dom_debug ? {
-          left: Math.round(dom_debug.selected_layer.layer_left_px * 100) / 100,
-          top: Math.round(dom_debug.selected_layer.layer_top_px * 100) / 100,
-          dleft: Math.round(dom_debug.selected_layer.delta_left_px * 100) / 100,
-          dtop: Math.round(dom_debug.selected_layer.delta_top_px * 100) / 100,
-          pan_x: Math.round(dom_debug.selected_layer.pan_x * 100) / 100,
-          pan_y: Math.round(dom_debug.selected_layer.pan_y * 100) / 100,
-          dpan_x: Math.round(dom_debug.selected_layer.delta_pan_x * 100) / 100,
-          dpan_y: Math.round(dom_debug.selected_layer.delta_pan_y * 100) / 100,
+        dom_selected_slot: dom_debug ? {
+          left: Math.round(dom_debug.selected_slot.slot_left_px * 100) / 100,
+          top: Math.round(dom_debug.selected_slot.slot_top_px * 100) / 100,
+          dleft: Math.round(dom_debug.selected_slot.delta_left_px * 100) / 100,
+          dtop: Math.round(dom_debug.selected_slot.delta_top_px * 100) / 100,
+          pan_x: Math.round(dom_debug.selected_slot.pan_x * 100) / 100,
+          pan_y: Math.round(dom_debug.selected_slot.pan_y * 100) / 100,
+          dpan_x: Math.round(dom_debug.selected_slot.delta_pan_x * 100) / 100,
+          dpan_y: Math.round(dom_debug.selected_slot.delta_pan_y * 100) / 100,
         } : null,
-        dom_layer_events: dom_debug ? dom_debug.layer_events.map((ev) => `${ev.kind}:${ev.z}:${ev.width}x${ev.height}${ev.selected ? ':sel' : ''}`) : [],
+        dom_slot_events: dom_debug ? dom_debug.slot_events.map((ev) => `${ev.kind}:${ev.slot_index}:${ev.width}x${ev.height}${ev.selected ? ':sel' : ''}`) : [],
         transition_euler,
         hard_rotation_debug,
       };
@@ -4416,7 +4416,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
             anchor: anchor_tile,
             offsets: debug_snapshot.offsets,
             projected_screen: debug_snapshot.projected_screen,
-            dom_selected_layer: debug_snapshot.dom_selected_layer,
+            dom_selected_slot: debug_snapshot.dom_selected_slot,
           }));
         } catch {
           // ignore debug logging failures
