@@ -56,7 +56,7 @@ This means the layers module becomes a group-ordering module for authored 3D dat
 ## Architecture Goals
 
 - One voxel coordinate system: `x/y/z` remains world space only.
-- One stable editable workspace: document bounds remain fixed unless explicitly resized.
+- One content-derived extent model: document bounds describe current authored content and never limit painting.
 - One authored ownership model: groups own sparse voxel contributions.
 - One explicit group ordering model: order determines the winner only when multiple groups overlap at the same exact coordinate.
 - Focus plane remains a camera/editing concept, not a group identifier.
@@ -106,12 +106,13 @@ This means the layers module becomes a group-ordering module for authored 3D dat
 - reorder never changes them
 - projection derives visible plane relationships from coordinates, not from authored group ids
 
-### 4. Workspace Bounds vs Occupied Bounds
+### 4. Content Bounds vs Occupied Bounds
 
-- the document keeps fixed editable workspace bounds for stable navigation, paste behavior, and multiplayer UX
+- the document keeps content-derived bounds that expand or shrink from committed authored edits
+- painting is allowed beyond current bounds; committed writes update the document extent afterward
+- active strokes should not resize bounds every drag tick; bounds update at stable commit boundaries
 - authored content also tracks occupied bounds derived from actual stored voxels across all groups
-- occupied bounds are used for framing, centering, export logic, culling, and future animation extent work
-- occupied bounds never replace the editable workspace as the primary canvas extent
+- occupied bounds may remain as a compatibility/export helper, but `bounds` is the primary authored-content extent
 
 ## Target Model
 
@@ -200,7 +201,7 @@ Notes:
 - the resolved view is derived and should never replace authored data as the saved source of truth.
 - `frames` are reserved for later animation work and should not block the base group refactor.
 - `key` should be a stable coordinate key such as `"x:y:z"` to support sparse indexing and fast overwrite within a single group.
-- `bounds` are fixed workspace extents.
+- `bounds` are content-derived authored extents with a minimal empty-document fallback.
 - `occupied_bounds` are derived from authored content and may be null for an empty document.
 
 ## Canonical Indexes
@@ -579,7 +580,7 @@ Server-side rules:
 - [ ] multiplayer authoritative store must persist v3 authored snapshots
 - [ ] autosave and file export paths must stop assuming `layers[]`
 - [ ] resolved visible voxels are derived, not persisted as the primary source of truth
-- [ ] fixed workspace bounds and derived occupied bounds are both persisted clearly
+- [ ] content-derived bounds and derived occupied bounds are both persisted clearly
 
 Compatibility rule:
 
@@ -692,7 +693,7 @@ The following contracts must exist before the broad refactor starts touching ren
 ### Document Contracts
 
 - [x] `PainterDocument.version === 3`
-- [x] `PainterDocument.bounds` represents fixed editable workspace bounds only
+- [x] `PainterDocument.bounds` represents current authored content extent and does not limit painting
 - [x] `PainterDocument.occupied_bounds` is derived from authored voxel content only
 - [x] `PainterDocument.groups` is the authoritative authored source of truth
 - [x] `PainterDocument.group_order` is the only overlap precedence list
@@ -837,14 +838,14 @@ The first implementation slice should create the new document/runtime helpers wi
 - [x] Define the authored-data versus resolved-render split.
 - [x] Define canonical runtime indexes for authored overlap.
 - [~] Define active group vs focus plane app-state split.
-- [x] Define fixed workspace bounds plus derived occupied bounds behavior.
+- [x] Define content-derived bounds plus derived occupied bounds behavior.
 - [ ] Define command/event payloads in `painter_protocol.ts` for groups.
 
 Acceptance:
 
 - [x] Architecture types exist on paper and do not rely on numeric Z as identity.
 - [x] Winner resolution and authored write semantics are deterministic and explicit.
-- [x] Document bounds behavior is explicit; authored `x/y/z` extents now resize from committed content rather than staying fixed, and active strokes do not resize bounds mid-drag.
+- [x] Document bounds behavior is explicit; authored `x/y/z` extents resize from committed content, active strokes do not resize bounds mid-drag, and empty documents fall back to a minimal `1x1x1` extent.
 
 ### Phase 2: Remove Dangerous Reorder Semantics
 
@@ -1028,7 +1029,7 @@ Mitigation:
 
 ### 7. Bounds Confusion Risk
 
-If occupied bounds and fixed workspace bounds are mixed up, camera, export, and mutation rules will become unstable.
+If occupied bounds and content-derived document bounds are mixed up, camera, export, and mutation rules will become unstable.
 
 Mitigation:
 
@@ -1056,29 +1057,33 @@ Mitigation:
 
 Locked decisions in this revision:
 
-- [x] Fixed workspace bounds remain the primary editable canvas extent.
+- [x] `PainterDocument.bounds` is content-derived, updates from committed authored edits, and never limits painting.
 - [x] Occupied bounds are derived from authored voxel content.
+- [x] Empty documents fall back to a minimal `1x1x1` extent.
 - [x] Copy reads from the active group only in v1.
 - [x] Paste writes into the active group only in v1 using copied `x/y/z` offsets.
 - [x] Hide removes a group from resolved rendering without deleting authored voxels.
 - [x] Lock blocks edits to that group only.
 - [x] Per-group undo is the default undo model.
+- [x] Multiple groups may overlap at the same exact `x,y,z`.
+- [x] The highest visible group in `group_order` wins exact-coordinate rendering.
+- [x] Hiding or deleting the top contribution reveals the next lower contribution automatically.
 - [x] The long-term UI direction is a reusable `groups_module`, not a painter-only or layer-only palette.
 
 ## Recommended Defaults
 
-- [ ] Multiple groups may overlap at the same exact `x,y,z`.
-- [ ] The highest visible group in `group_order` wins exact-coordinate rendering.
+- [x] Multiple groups may overlap at the same exact `x,y,z`.
+- [x] The highest visible group in `group_order` wins exact-coordinate rendering.
 - [ ] Newly drawn voxels are written into the active group only.
 - [ ] Erasing removes authored voxels from the active group only.
 - [ ] Reorder edits `group_order` only.
-- [ ] Copy/paste should flatten into the active group first, then gain overlap-preserving behavior later if needed.
+- [x] Copy/paste should flatten into the active group first, then gain overlap-preserving behavior later if needed.
 - [ ] Animation should later use `base state + breath deltas`, not whole-document duplicated frames.
 
 Recommended implementation default for scalability:
 
 - [ ] Store authored voxels sparsely per group.
-- [ ] Keep fixed workspace bounds for UX stability.
+- [x] Keep camera framing anchored to current content extent by default while allowing explicit movement and painting beyond bounds.
 - [ ] Derive occupied bounds for framing/export/optimization.
 - [ ] Cache resolved winners incrementally by dirty coordinate key.
 - [ ] Keep edit targeting strictly active-group-only.

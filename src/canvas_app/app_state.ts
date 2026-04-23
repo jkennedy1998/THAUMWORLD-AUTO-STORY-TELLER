@@ -20,7 +20,7 @@ import { make_initiative_module } from '../mono_ui/modules/initiative_module.js'
 import { make_toolbox_module } from '../mono_ui/modules/toolbox_module.js';
 import { make_tool_properties_module, type ToolPropertyRow } from '../mono_ui/modules/tool_properties_module.js';
 import { make_controls_module } from '../mono_ui/modules/controls_module.js';
-import { makeLayerPaletteModule } from '../ascii_painter/layer_palette_module.js';
+import { makeGroupsModule } from '../mono_ui/modules/groups_module.js';
 import { makePlaceCameraControlModule } from '../mono_ui/modules/place_camera_control_module.js';
 import { createVoxelSpace, type VoxelSpace } from '../ascii_painter/voxel_space.js';
 import { loadPlaceCameraConfig, saveCameraConfig, savePlaceCameraCalibration } from '../ascii_painter/save_system.js';
@@ -3504,48 +3504,39 @@ export function create_app_state(): AppState {
     }
 
     function make_place_painter_layers_module(rect: Rect): Module {
-        const layerSpace: any = {
-            layers: new Map<number, any>(),
-            camera: { focus_plane: 0 },
-        };
-        const rebuild = () => {
-            layerSpace.layers.clear();
-            const place = ui_state.place.current_place;
-            const zs = get_defined_place_world_zs(place);
-            const focusWorldZ = get_focus_world_z_for_current_place();
-            layerSpace.camera.focus_plane = focusWorldZ;
-            for (const z of zs) {
-                layerSpace.layers.set(z, {
-                    z,
-                    name: `Layer ${z}`,
-                    visible: true,
-                    locked: false,
-                    cells: [],
-                });
-            }
-        };
-        rebuild();
-        return makeLayerPaletteModule({
+        return makeGroupsModule({
             id: 'place_painter_layers',
             rect,
-            getSpace: () => {
-                rebuild();
-                return layerSpace;
+            title: 'LAYERS',
+            get_groups: () => {
+                const place = ui_state.place.current_place;
+                const zs = get_defined_place_world_zs(place).sort((a, b) => b - a);
+                const focusWorldZ = get_focus_world_z_for_current_place();
+                return zs.map((z) => ({
+                    id: String(z),
+                    label: `Layer ${z}`,
+                    selected: z === focusWorldZ,
+                    visible: true,
+                    locked: false,
+                    can_delete: zs.length > 1,
+                }));
             },
-            onLayerSelect: (z) => {
+            on_select_group: (group_id) => {
+                const z = Number(group_id);
+                if (!Number.isFinite(z)) return;
                 set_place_focus_world_z(z);
                 flash_status([`Layer ${z}`], 1000);
             },
-            onLayerVisibilityToggle: (_z) => {
+            on_toggle_group_visibility: (_group_id) => {
                 flash_status(['Layer visibility toggle not yet implemented'], 1000);
             },
-            onLayerLockToggle: (_z) => {
+            on_toggle_group_lock: (_group_id) => {
                 flash_status(['Layer lock not used for place painter'], 1000);
             },
-            onLayerRename: (_z, _newName) => {
+            on_rename_group: (_group_id, _newName) => {
                 // no-op for place layers
             },
-            onAddLayer: async () => {
+            on_add_group: async () => {
                 const place = ui_state.place.current_place;
                 if (!place?.id) return;
                 const zs = get_defined_place_world_zs(place);
@@ -3553,27 +3544,24 @@ export function create_app_state(): AppState {
                 const ok = await mutate_place_painter_layer(place.id, next, 'add');
                 flash_status([ok ? `Added layer ${next}` : `Add layer failed ${next}`], 1200);
             },
-            onDeleteLayer: async (z) => {
+            on_delete_group: async (group_id) => {
+                const z = Number(group_id);
+                if (!Number.isFinite(z)) return;
                 const place = ui_state.place.current_place;
                 if (!place?.id) return;
                 const ok = await mutate_place_painter_layer(place.id, z, 'delete');
                 flash_status([ok ? `Deleted layer ${z}` : `Delete layer failed ${z}`], 1200);
             },
-            onDuplicateLayer: (_z) => {
-                flash_status(['Layer duplicate not implemented for place painter'], 1000);
-            },
-            onMergeDown: (_z) => {
-                flash_status(['Layer merge not implemented for place painter'], 1000);
-            },
-            onReorderLayers: async (_newZOrder) => {
+            on_reorder_groups: async (ids_in_display_order) => {
                 const place = ui_state.place.current_place;
                 if (!place?.id) return;
-                const ok = await mutate_place_painter_layer(place.id, get_focus_world_z_for_current_place(), 'reorder' as any, _newZOrder);
+                const newZOrder = ids_in_display_order.map((id) => Number(id)).filter((z) => Number.isFinite(z));
+                const ok = await mutate_place_painter_layer(place.id, get_focus_world_z_for_current_place(), 'reorder' as any, newZOrder);
                 flash_status([ok ? 'Reordered layers' : 'Layer reorder failed'], 1200);
             },
-            onMove: (new_rect) => persist_module_rect('place_painter_layers', new_rect),
-            onResize: (new_rect) => persist_module_rect('place_painter_layers', new_rect),
-            onClose: () => set_module_visible('place_painter_layers', false),
+            on_move: (new_rect) => persist_module_rect('place_painter_layers', new_rect),
+            on_resize: (new_rect) => persist_module_rect('place_painter_layers', new_rect),
+            on_close: () => set_module_visible('place_painter_layers', false),
         });
     }
 

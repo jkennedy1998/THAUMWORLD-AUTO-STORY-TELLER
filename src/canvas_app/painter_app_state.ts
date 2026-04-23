@@ -9,7 +9,7 @@ import type { Module, Rect, Rgb } from '../mono_ui/types.js';
 import { create_module_registry, type ModuleRegistry } from '../mono_ui/module_registry.js';
 import type { Grid, Brush, ToolType, GridCell } from '../ascii_painter/types.js';
 import { createGrid, exportGrid, importGrid } from '../ascii_painter/types.js';
-import { createHistoryManager, logCellAction, logGroupAction, clearHistory, canUndo, canRedo, getHistoryState, type HistoryAction, type HistoryManager } from '../ascii_painter/history.js';
+import { createHistoryManager, logCellAction, logGroupAction, clearHistory, canUndoGroup, canRedoGroup, getGroupHistoryState, popRedoGroupAction, popUndoGroupAction, type HistoryAction, type HistoryManager } from '../ascii_painter/history.js';
 import { get_color_by_name } from '../mono_ui/colors.js';
 import type { SelectionMode } from '../ascii_painter/selection.js';
 import { clearSelection, createSelectionBitmap, invertSelection, isSelected, selectAll, setSelected, type SelectionBitmap } from '../ascii_painter/selection.js';
@@ -76,11 +76,13 @@ import {
   debugVoxelSpace,
   createDefaultCamera,
 } from '../ascii_painter/voxel_space.js';
-import { makeLayerPaletteModule, type LayerPaletteRow } from '../ascii_painter/layer_palette_module.js';
+import { makeGroupsModule, type GroupListItem } from '../mono_ui/modules/groups_module.js';
 import { make_navigation_module } from '../ascii_painter/navigation_module.js';
 import { build_legacy_voxel_space_from_painter_runtime, import_legacy_voxel_space_as_painter_document } from '../ascii_painter/painter_document_legacy_adapter.js';
 import { create_painter_document, create_painter_group, create_painter_voxel_record, type PainterDocument } from '../ascii_painter/painter_document.js';
 import { add_painter_group, duplicate_painter_group, erase_group_voxel, export_painter_document, normalize_painter_document_runtime, remove_painter_group, rename_painter_group, reorder_painter_groups, set_group_voxel, set_painter_group_locked, set_painter_group_visibility, type PainterDocumentRuntime } from '../ascii_painter/painter_document_runtime.js';
+import { create_painter_session_core } from '../ascii_painter/painter_session_core.js';
+import type { PainterGroupPlaneRegistry } from '../ascii_painter/painter_session_types.js';
 import { resolve_edit_channels_with_modifiers, type EditChannels } from '../ascii_painter/edit_mask.js';
 import { diag_log } from '../shared/diagnostics.js';
 
@@ -102,6 +104,9 @@ import { control_binding_matches_keyboard_event } from '../mono_ui/runtime/contr
 import { create_painter_tool_shortcut_interpreter } from './painter_tool_shortcut_interpreter.js';
 import { create_painter_sync_client } from './painter_sync_client.js';
 import { PAINTER_APP_CONFIG } from './painter_runtime_config.js';
+import type { PainterLaunchIntent } from './painter_launch_types.js';
+import { clear_launch_record } from '../engine_launch/persistence.js';
+import { persist_painter_resume_file } from './painter_launch_adapter.js';
 
 function painterDiag(message: string, payload?: Record<string, unknown>): void {
   diag_log('painter', 'verbose', 'PAINTER', message, payload);
@@ -194,8 +199,14 @@ export type PainterAppState = {
   load_from_file: (file: File) => Promise<void>;
   export_as_text: () => string;
   new_canvas: (width: number, height: number) => void;
+  start_from_launch_intent: (intent: PainterLaunchIntent) => Promise<void>;
   current_filename: string;
   multiplayer_sync: ReturnType<typeof create_painter_sync_client>;
+};
+
+type PainterAppStateOptions = {
+  skip_boot_restore?: boolean;
+  skip_multiplayer_bootstrap?: boolean;
 };
 
 type PainterDomViewport = {
@@ -216,16 +227,11 @@ type LegacyPainterGroupCompatState = {
   active_group_id: string | null;
 };
 
-type PainterGroupPlaneRegistry = {
-  group_id_to_plane: Map<string, number>;
-  plane_to_group_id: Map<number, string>;
-};
-
 function create_legacy_painter_group_id(): string {
   return `painter_group_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export function create_painter_app_state(): PainterAppState {
+export function create_painter_app_state(options?: PainterAppStateOptions): PainterAppState {
   if (is_tai_fresh_state_enabled()) {
     clearAutoSave();
     clearToolProperties();
@@ -245,13 +251,15 @@ export function create_painter_app_state(): PainterAppState {
     websocket_port: PAINTER_APP_CONFIG.websocket_port,
     reconnect_token_storage_key: PAINTER_APP_CONFIG.reconnect_token_storage_key,
   });
-  void painter_sync.bootstrap().then((sync_state) => {
-    painterImportant('painter authority ready', {
-      authority_mode: sync_state.authority_mode,
-      lifecycle: sync_state.lifecycle,
-      slot: PAINTER_APP_CONFIG.selected_data_slot,
+  if (!options?.skip_multiplayer_bootstrap) {
+    void painter_sync.bootstrap().then((sync_state) => {
+      painterImportant('painter authority ready', {
+        authority_mode: sync_state.authority_mode,
+        lifecycle: sync_state.lifecycle,
+        slot: PAINTER_APP_CONFIG.selected_data_slot,
+      });
     });
-  });
+  }
 
   // Create the drawing grid (legacy 2D)
   const grid = createGrid(CANVAS_WIDTH, CANVAS_HEIGHT);
@@ -259,6 +267,7 @@ export function create_painter_app_state(): PainterAppState {
   // Create VoxelSpace (new 3D system) - wraps the grid
   let voxelSpace = createVoxelSpace(CANVAS_WIDTH, CANVAS_HEIGHT, { defaultZ: 0 });
   let painter_document_runtime: PainterDocumentRuntime = normalize_painter_document_runtime(import_legacy_voxel_space_as_painter_document(voxelSpace));
+  const painter_session_core = create_painter_session_core(export_painter_document(painter_document_runtime));
   let last_projection_runtime_log_signature = '';
   const world_selection: WorldSelection = create_world_selection();
   let world_clipboard_data: WorldCopyData | null = null;
@@ -267,13 +276,26 @@ export function create_painter_app_state(): PainterAppState {
     group_order: [],
     active_group_id: null,
   };
+  let current_filename = 'untitled';
+  let current_file_path: string | null = null;
+  let current_painter_document_lineage_id: string | null = null;
+  let suppress_recent_file_persistence = false;
+  let authoritative_revision_applied = 0;
+  const LAST_FILE_PATH_KEY = 'thaumworld_ascii_painter_last_file_path';
   let runtime_group_planes: PainterGroupPlaneRegistry = {
     group_id_to_plane: new Map<string, number>(),
     plane_to_group_id: new Map<number, string>(),
   };
 
+  function sync_local_session_state_from_core(): void {
+    const state = painter_session_core.get_state();
+    painter_document_runtime = state.runtime;
+    runtime_group_planes = state.group_plane_registry;
+  }
+  sync_local_session_state_from_core();
+
   function get_group_id_for_legacy_z(z: number): string | null {
-    return runtime_group_planes.plane_to_group_id.get(z) ?? null;
+    return painter_session_core.get_group_id_for_plane(z);
   }
 
   function get_legacy_group_planes(): number[] {
@@ -281,49 +303,21 @@ export function create_painter_app_state(): PainterAppState {
   }
 
   function get_legacy_z_for_group_id(group_id: string | null | undefined): number | null {
-    if (!group_id) return null;
-    return runtime_group_planes.group_id_to_plane.get(group_id) ?? null;
+    return painter_session_core.get_plane_for_group_id(group_id);
   }
 
   function rebuild_runtime_group_plane_registry(options?: { preserve_existing?: boolean }): void {
-    const preserve_existing = options?.preserve_existing ?? true;
-    const discovered_ids = [...painter_document_runtime.document.group_order].filter((group_id) => !!painter_document_runtime.document.groups[group_id]);
-    const preserved = preserve_existing
-      ? new Map(runtime_group_planes.group_id_to_plane)
-      : new Map<string, number>();
-    const next_group_id_to_plane = new Map<string, number>();
-    const used_planes = new Set<number>();
-    for (const group_id of discovered_ids) {
-      const priorPlane = preserved.get(group_id);
-      if (typeof priorPlane === 'number' && !used_planes.has(priorPlane)) {
-        next_group_id_to_plane.set(group_id, priorPlane);
-        used_planes.add(priorPlane);
-      }
-    }
-    let nextPlane = used_planes.size > 0 ? Math.max(...Array.from(used_planes)) + 1 : 0;
-    for (const group_id of discovered_ids) {
-      if (next_group_id_to_plane.has(group_id)) continue;
-      while (used_planes.has(nextPlane)) nextPlane += 1;
-      next_group_id_to_plane.set(group_id, nextPlane);
-      used_planes.add(nextPlane);
-      nextPlane += 1;
-    }
-    runtime_group_planes = {
-      group_id_to_plane: next_group_id_to_plane,
-      plane_to_group_id: new Map(Array.from(next_group_id_to_plane.entries(), ([group_id, plane]) => [plane, group_id])),
-    };
+    painter_session_core.refresh_derived_state({ preserve_existing_group_planes: options?.preserve_existing ?? true });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
   }
 
   function get_runtime_group_planes(): number[] {
-    return Array.from(runtime_group_planes.plane_to_group_id.keys()).sort((a, b) => a - b);
+    return painter_session_core.get_group_planes();
   }
 
   function get_nearest_runtime_group_plane(plane: number): number | null {
-    const planes = get_runtime_group_planes();
-    if (planes.length < 1) return null;
-    return planes.reduce((best, candidate) => (
-      Math.abs(candidate - plane) < Math.abs(best - plane) ? candidate : best
-    ), planes[0]!);
+    return painter_session_core.get_nearest_group_plane(plane);
   }
 
   function getPainterFocusPlaneAxis(viewState?: PlaceViewState): 'x' | 'y' | 'z' {
@@ -381,7 +375,12 @@ export function create_painter_app_state(): PainterAppState {
       group_order: preserve_group_order ? legacy_group_compat.group_order : undefined,
       active_group_id: legacy_group_compat.active_group_id,
     });
-    painter_document_runtime = normalize_painter_document_runtime(next_document);
+    painter_session_core.replace_document(next_document, {
+      lineage_id: current_painter_document_lineage_id,
+      authoritative_revision: authoritative_revision_applied,
+    });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
     sync_legacy_group_compat_state({ preserve_group_order });
   }
 
@@ -404,6 +403,15 @@ export function create_painter_app_state(): PainterAppState {
     if (legacy_group_compat.active_group_id && !legacy_group_compat.group_order.includes(legacy_group_compat.active_group_id)) {
       legacy_group_compat.active_group_id = legacy_group_compat.group_order[0] ?? null;
     }
+  }
+
+  function sync_painter_runtime_after_mutation(options?: { preserve_group_order?: boolean; focus_active_group?: boolean }): void {
+    sync_legacy_group_compat_state({ preserve_group_order: options?.preserve_group_order ?? true });
+    if (options?.focus_active_group) {
+      focusActiveGroupPlane();
+    }
+    ensureValidFocusPlane();
+    refreshPainterProjectionFromWorld();
   }
 
   function log_runtime_summary(event: string): void {
@@ -429,7 +437,7 @@ export function create_painter_app_state(): PainterAppState {
     locked?: boolean;
     next_group_order?: string[];
   }): void {
-    if (painter_sync.get_state().authority_mode !== 'authoritative_host') return;
+    if (!can_submit_to_authoritative_document()) return;
     void painter_sync.submit_group_command(command).catch((error) => {
       diag_log('painter', 'important', 'PAINTER', 'failed to submit painter group command', {
         kind: command.kind,
@@ -468,7 +476,7 @@ export function create_painter_app_state(): PainterAppState {
     const applied = apply_authored_group_cell_changes(changes);
     if (!applied) return false;
     refreshPainterProjectionFromWorld();
-    if (painter_sync.get_state().authority_mode === 'authoritative_host') {
+    if (can_submit_to_authoritative_document()) {
       void painter_sync.submit_cell_changes(active_group_id, changes.map((change) => ({
         x: change.worldX,
         y: change.worldY,
@@ -492,6 +500,7 @@ export function create_painter_app_state(): PainterAppState {
   function reset_painter_document_state(): boolean {
     const document = create_painter_document(CANVAS_WIDTH, CANVAS_HEIGHT, { min_z: 0, max_z: 0, default_group_name: 'Group 1' });
     applyPainterDocumentSnapshot(document);
+    setCurrentPainterDocumentLineage(`memory:reset:${Date.now()}`, 'reset_document');
     log_runtime_summary('painter document reset summary');
     if (painter_sync.get_state().authority_mode === 'authoritative_host') {
       submit_group_command_if_authoritative({ kind: 'reset_document' });
@@ -569,8 +578,7 @@ export function create_painter_app_state(): PainterAppState {
       default:
         return false;
     }
-    rebuild_voxel_space_from_runtime();
-    refreshPainterProjectionFromWorld();
+    sync_painter_runtime_after_mutation({ preserve_group_order: true });
     log_runtime_summary(direction === 'undo' ? 'group structural undo summary' : 'group structural redo summary');
     return true;
   }
@@ -594,51 +602,52 @@ export function create_painter_app_state(): PainterAppState {
         }));
       }
     }
-    rebuild_voxel_space_from_runtime();
-    refreshPainterProjectionFromWorld();
+    sync_painter_runtime_after_mutation({ preserve_group_order: true });
     log_runtime_summary(direction === 'undo' ? 'cell history undo summary' : 'cell history redo summary');
     return true;
   }
 
   function apply_painter_history_action(action: HistoryAction, direction: 'undo' | 'redo'): boolean {
-    if (is_group_structural_action(action)) {
-      return apply_group_structural_action_from_history(action, direction);
-    }
     if (is_cell_history_action(action)) {
       return apply_cell_action_from_history(action, direction);
     }
     return false;
   }
 
+  function get_total_group_history_entries(): number {
+    let total = 0;
+    for (const stack of history.group_histories.values()) {
+      total += stack.undo.length + stack.redo.length;
+    }
+    return total;
+  }
+
   function undo_painter_history(): string | null {
-    if (!canUndo(history)) return null;
-    const action = history.actions[history.current_index - 1];
+    const group_id = resolve_current_runtime_group_id();
+    if (!group_id || !canUndoGroup(history, group_id)) return null;
+    const action = popUndoGroupAction(history, group_id);
     if (!action) return null;
-    history.current_index -= 1;
     if (apply_painter_history_action(action, 'undo')) {
       return action.description;
     }
-    history.current_index += 1;
     return null;
   }
 
   function redo_painter_history(): string | null {
-    if (!canRedo(history)) return null;
-    const action = history.actions[history.current_index];
+    const group_id = resolve_current_runtime_group_id();
+    if (!group_id || !canRedoGroup(history, group_id)) return null;
+    const action = popRedoGroupAction(history, group_id);
     if (!action) return null;
-    history.current_index += 1;
     if (apply_painter_history_action(action, 'redo')) {
       return action.description;
     }
-    history.current_index -= 1;
     return null;
   }
 
   function performPainterUndo(): string | null {
+    const group_id = resolve_current_runtime_group_id();
     const description = undo_painter_history();
     if (description) {
-      const action = history.actions[history.current_index];
-      const group_id = action?.group_id ?? null;
       if (group_id) submit_group_command_if_authoritative({ kind: 'undo_group', group_id });
       return description;
     }
@@ -646,10 +655,9 @@ export function create_painter_app_state(): PainterAppState {
   }
 
   function performPainterRedo(): string | null {
-    const action = history.actions[history.current_index] ?? null;
+    const group_id = resolve_current_runtime_group_id();
     const description = redo_painter_history();
     if (description) {
-      const group_id = action?.group_id ?? null;
       if (group_id) submit_group_command_if_authoritative({ kind: 'redo_group', group_id });
       return description;
     }
@@ -657,17 +665,19 @@ export function create_painter_app_state(): PainterAppState {
   }
 
   function get_group_history_stats(group_id: string): { current_index: number; total_actions: number } {
-    let current_index = 0;
-    let total_actions = 0;
-    for (let index = 0; index < history.actions.length; index += 1) {
-      const action = history.actions[index];
-      if (!action) continue;
-      const action_group_id = action.group_id ?? action.groupId ?? action.targetGroupId ?? action.sourceGroupId ?? null;
-      if (action_group_id !== group_id) continue;
-      total_actions += 1;
-      if (index < history.current_index) current_index += 1;
-    }
-    return { current_index, total_actions };
+    const state = getGroupHistoryState(history, group_id);
+    return {
+      current_index: state.current_position,
+      total_actions: state.total_actions,
+    };
+  }
+
+  function get_group_undo_redo_counts(group_id: string): { undo_count: number; redo_count: number } {
+    const state = getGroupHistoryState(history, group_id);
+    return {
+      undo_count: state.current_position,
+      redo_count: Math.max(0, state.total_actions - state.current_position),
+    };
   }
 
   function make_history_cell_from_runtime_record(record: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number } | null | undefined): { char: string; rgb: { r: number; g: number; b: number }; weight_index: number } {
@@ -699,59 +709,20 @@ export function create_painter_app_state(): PainterAppState {
       painterDiag('skipping authored group mutation: group locked', { active_group_id, change_count: changes.length });
       return false;
     }
-    const history_changes: Array<{
-      x: number;
-      y: number;
-      worldX: number;
-      worldY: number;
-      worldZ: number;
-      group_id: string;
-      oldCell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number };
-      newCell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number };
-    }> = [];
-    for (const change of changes) {
-      const nextChar = String(change.newCell.char ?? ' ').slice(0, 1) || ' ';
-      const coordKey = `${Math.floor(change.worldX)}:${Math.floor(change.worldY)}:${Math.floor(change.worldZ)}`;
-      const prior = painter_document_runtime.group_voxel_index.get(active_group_id)?.get(coordKey) ?? null;
-      const oldCell = make_history_cell_from_runtime_record(prior);
-      const nextCell = make_history_cell_from_runtime_record({
-        char: nextChar,
-        rgb: { ...change.newCell.rgb },
-        weight_index: change.newCell.weight_index,
-      });
-      if (nextChar === ' ') {
-        erase_group_voxel(painter_document_runtime, active_group_id, coordKey);
-      } else {
-        set_group_voxel(painter_document_runtime, active_group_id, create_painter_voxel_record({
-          x: change.worldX,
-          y: change.worldY,
-          z: change.worldZ,
-          char: nextChar,
-          rgb: { ...change.newCell.rgb },
-          weight_index: change.newCell.weight_index,
-        }));
-      }
-      history_changes.push({
-        x: change.worldX,
-        y: change.worldY,
-        worldX: change.worldX,
-        worldY: change.worldY,
-        worldZ: change.worldZ,
-        group_id: active_group_id,
-        oldCell,
-        newCell: nextCell,
-      });
-    }
-    rebuild_voxel_space_from_runtime();
+    const { applied, history_changes } = painter_session_core.apply_cell_changes(active_group_id, changes);
+    if (!applied) return false;
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    sync_painter_runtime_after_mutation({ preserve_group_order: true });
     if (options?.log_history !== false && history_changes.length > 0) {
       logCellAction(history, 'draw_cells', `Group ${active_group_id} edit`, { group_id: active_group_id }, history_changes);
     }
-    painterDiag('applied authored group cell changes', {
-      active_group_id,
-      change_count: changes.length,
-      occupied_bounds: painter_document_runtime.document.occupied_bounds,
-      history_size: history.actions.length,
-    });
+      painterDiag('applied authored group cell changes', {
+        active_group_id,
+        change_count: changes.length,
+        occupied_bounds: painter_document_runtime.document.occupied_bounds,
+        history_size: get_total_group_history_entries(),
+      });
     log_runtime_summary('authored group cell changes applied summary');
     return true;
   }
@@ -872,13 +843,19 @@ export function create_painter_app_state(): PainterAppState {
     };
   }
 
-  function getPaletteGroupRows(): LayerPaletteRow[] {
-    return get_palette_group_entries().map((entry) => ({
-      z: entry.fake_z,
-      name: entry.layer.name,
-      visible: entry.layer.visible,
-      locked: entry.layer.locked,
-    }));
+  function getPainterGroupListItems(): GroupListItem[] {
+    const order = [...painter_document_runtime.document.group_order].filter((group_id) => !!painter_document_runtime.document.groups[group_id]);
+    return order.slice().reverse().map((group_id) => {
+      const group = painter_document_runtime.document.groups[group_id]!;
+      return {
+        id: group_id,
+        label: group.name,
+        selected: legacy_group_compat.active_group_id === group_id,
+        visible: group.visible,
+        locked: group.locked,
+        can_delete: order.length > 1,
+      };
+    });
   }
 
   const PAINTER_CAMERA_LIMITS = {
@@ -991,7 +968,7 @@ export function create_painter_app_state(): PainterAppState {
   let painter_camera_target_world = {
     x: painter_document_runtime.document.bounds.minX + Math.floor(painter_document_runtime.document.bounds.width / 2),
     y: painter_document_runtime.document.bounds.minY + Math.floor(painter_document_runtime.document.bounds.height / 2),
-    z: painter_document_runtime.document.bounds.minZ,
+    z: painter_document_runtime.document.bounds.minZ + Math.floor((painter_document_runtime.document.bounds.maxZ - painter_document_runtime.document.bounds.minZ) / 2),
   };
   sync_legacy_group_compat_state();
   let painter_display_projection!: PainterDisplayProjection;
@@ -1027,7 +1004,16 @@ export function create_painter_app_state(): PainterAppState {
     return {
       x: bounds.minX + Math.floor((bounds.width - 1) / 2),
       y: bounds.minY + Math.floor((bounds.height - 1) / 2),
-      z: voxelSpace.camera.focus_plane,
+      z: bounds.minZ + Math.floor((bounds.maxZ - bounds.minZ) / 2),
+    };
+  }
+
+  function normalizePainterWorld(world: { x: number; y: number; z: number } | null | undefined, fallback?: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
+    const safeFallback = fallback ?? getPainterDocumentCenterWorld();
+    return {
+      x: Number.isFinite(world?.x) ? Math.floor(world!.x) : safeFallback.x,
+      y: Number.isFinite(world?.y) ? Math.floor(world!.y) : safeFallback.y,
+      z: Number.isFinite(world?.z) ? Math.floor(world!.z) : safeFallback.z,
     };
   }
 
@@ -1098,33 +1084,17 @@ export function create_painter_app_state(): PainterAppState {
   }
 
   function getPainterFallbackTargetWorld(): { x: number; y: number; z: number } {
-    const bounds = getPainterDocumentBounds();
-    const axis = getPainterFocusPlaneAxis(getPainterDisplayViewState());
-    const fallbackZ = getPainterCameraTargetPlaneCoordinate(getPainterDisplayViewState());
-    return {
-      x: Math.max(bounds.minX, Math.min(bounds.minX + bounds.width - 1, painter_camera_target_world.x)),
-      y: Math.max(bounds.minY, Math.min(bounds.minY + bounds.height - 1, painter_camera_target_world.y)),
-      z: axis === 'z'
-        ? Math.floor(Number.isFinite(painter_camera_target_world.z) ? painter_camera_target_world.z : fallbackZ)
-        : Math.max(bounds.minZ, Math.min(bounds.maxZ, Number.isFinite(painter_camera_target_world.z) ? painter_camera_target_world.z : fallbackZ)),
-    };
+    return normalizePainterWorld(painter_camera_target_world, getPainterDocumentCenterWorld());
   }
 
-  function clampPainterWorldToDocument(world: { x: number; y: number; z: number }, viewState: PlaceViewState = getPainterDisplayViewState()): { x: number; y: number; z: number } {
-    const bounds = getPainterDocumentBounds();
-    const axis = getPainterFocusPlaneAxis(viewState);
-    return {
-      x: Math.max(bounds.minX, Math.min(bounds.minX + bounds.width - 1, Math.floor(world.x))),
-      y: Math.max(bounds.minY, Math.min(bounds.minY + bounds.height - 1, Math.floor(world.y))),
-      z: axis === 'z'
-        ? Math.floor(world.z)
-        : Math.max(bounds.minZ, Math.min(bounds.maxZ, Math.floor(world.z))),
-    };
+  function normalizePainterWorldTarget(world: { x: number; y: number; z: number }, viewState: PlaceViewState = getPainterDisplayViewState()): { x: number; y: number; z: number } {
+    void viewState;
+    return normalizePainterWorld(world, getPainterFallbackTargetWorld());
   }
 
   function setPainterCameraTargetWorld(world: { x: number; y: number; z: number } | null | undefined): void {
     if (!world) return;
-    painter_camera_target_world = clampPainterWorldToDocument(world);
+    painter_camera_target_world = normalizePainterWorldTarget(world);
   }
 
   function getCurrentFocusWorldPlane(): number {
@@ -1257,10 +1227,10 @@ export function create_painter_app_state(): PainterAppState {
       setPainterCameraTargetWorld(requestedTargetWorld);
     }
     const targetWorld = requestedTargetWorld
-      ? clampPainterWorldToDocument(requestedTargetWorld)
+      ? normalizePainterWorldTarget(requestedTargetWorld)
       : getPainterFallbackTargetWorld();
     const projectionAnchorWorld = options?.projection_anchor_world
-      ? clampPainterWorldToDocument(options.projection_anchor_world)
+      ? normalizePainterWorldTarget(options.projection_anchor_world)
       : targetWorld;
     const viewport = getPainterViewportTiles();
     const projected = project_painter_runtime_display_space({
@@ -1443,20 +1413,24 @@ export function create_painter_app_state(): PainterAppState {
   function addPainterGroupStructure(): void {
     finalizePendingPainterCanvasChanges();
     commitProjectedGridToWorld();
-    const created = add_painter_group(painter_document_runtime, create_painter_group(createNextPainterGroupName()));
-    rebuild_runtime_group_plane_registry({ preserve_existing: true });
+    painterImportant('group add starting', {
+      current_file_path,
+      current_filename,
+      active_group_id: legacy_group_compat.active_group_id,
+    });
+    const created = create_painter_group(createNextPainterGroupName());
+    const result = painter_session_core.apply_group_command({ kind: 'create_group', group: created });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
     logGroupAction(history, 'create_group', `Create Group ${created.name}`, {
-      groupId: created.id,
+      groupId: result.created_group_id ?? created.id,
       newGroupData: created,
     });
-    submit_group_command_if_authoritative({ kind: 'create_group', group_name: created.name, target_group_id: created.id });
-    legacy_group_compat.active_group_id = created.id;
-    rebuild_voxel_space_from_runtime();
-    focusActiveGroupPlane();
-    ensureValidFocusPlane();
-    refreshPainterProjectionFromWorld();
+    submit_group_command_if_authoritative({ kind: 'create_group', group_name: created.name, target_group_id: result.created_group_id ?? created.id });
+    legacy_group_compat.active_group_id = result.created_group_id ?? created.id;
+    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
     schedule_auto_save();
-    painterImportant('group added', { group_id: created.id, name: created.name });
+    painterImportant('group added', { group_id: result.created_group_id ?? created.id, name: created.name });
     log_runtime_summary('group added summary');
   }
 
@@ -1468,8 +1442,9 @@ export function create_painter_app_state(): PainterAppState {
     const oldGroupData = painter_document_runtime.document.groups[entry.group_id]
       ? structuredClone(painter_document_runtime.document.groups[entry.group_id]!)
       : undefined;
-    remove_painter_group(painter_document_runtime, entry.group_id);
-    rebuild_runtime_group_plane_registry({ preserve_existing: true });
+    painter_session_core.apply_group_command({ kind: 'delete_group', group_id: entry.group_id });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
     logGroupAction(history, 'delete_group', `Delete Group ${oldGroupData?.name ?? entry.group_id}`, {
       groupId: entry.group_id,
       oldGroupData,
@@ -1478,10 +1453,7 @@ export function create_painter_app_state(): PainterAppState {
     if (legacy_group_compat.active_group_id === entry.group_id) {
       legacy_group_compat.active_group_id = painter_document_runtime.document.group_order[0] ?? null;
     }
-    rebuild_voxel_space_from_runtime();
-    focusActiveGroupPlane();
-    ensureValidFocusPlane();
-    refreshPainterProjectionFromWorld();
+    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
     schedule_auto_save();
     painterImportant('group deleted', { group_id: entry.group_id, z: entry.legacy_z });
     log_runtime_summary('group deleted summary');
@@ -1492,8 +1464,12 @@ export function create_painter_app_state(): PainterAppState {
     commitProjectedGridToWorld();
     const entry = get_group_entry_for_palette_z(z);
     if (!entry) return;
-    const duplicated = duplicate_painter_group(painter_document_runtime, entry.group_id);
-    rebuild_runtime_group_plane_registry({ preserve_existing: true });
+    const result = painter_session_core.apply_group_command({ kind: 'duplicate_group', source_group_id: entry.group_id });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    const duplicatedId = result.created_group_id;
+    const duplicated = duplicatedId ? structuredClone(painter_document_runtime.document.groups[duplicatedId]!) : null;
+    if (!duplicated) return;
     logGroupAction(history, 'duplicate_group', `Duplicate Group ${duplicated.name}`, {
       sourceGroupId: entry.group_id,
       targetGroupId: duplicated.id,
@@ -1501,10 +1477,7 @@ export function create_painter_app_state(): PainterAppState {
     });
     submit_group_command_if_authoritative({ kind: 'duplicate_group', source_group_id: entry.group_id, target_group_id: duplicated.id });
     legacy_group_compat.active_group_id = duplicated.id;
-    rebuild_voxel_space_from_runtime();
-    focusActiveGroupPlane();
-    ensureValidFocusPlane();
-    refreshPainterProjectionFromWorld();
+    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
     schedule_auto_save();
     painterImportant('group duplicated', { source_group_id: entry.group_id, duplicated_group_id: duplicated.id });
     log_runtime_summary('group duplicated summary');
@@ -1547,7 +1520,9 @@ export function create_painter_app_state(): PainterAppState {
     const group = painter_document_runtime.document.groups[group_id];
     if (!group) return;
     const oldGroupData = structuredClone(group);
-    set_painter_group_visibility(painter_document_runtime, group_id, !group.visible);
+    painter_session_core.apply_group_command({ kind: 'set_group_visibility', group_id, visible: !group.visible });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
     const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
     logGroupAction(history, 'set_group_visibility', `Toggle Group Visibility ${group.name}`, {
       groupId: group_id,
@@ -1555,8 +1530,7 @@ export function create_painter_app_state(): PainterAppState {
       newGroupData,
     });
     submit_group_command_if_authoritative({ kind: 'set_group_visibility', group_id, visible: Boolean(newGroupData?.visible) });
-    rebuild_voxel_space_from_runtime();
-    refreshPainterProjectionFromWorld();
+    sync_painter_runtime_after_mutation({ preserve_group_order: true });
     schedule_auto_save();
     painterDiag('group visibility toggled', { group_id, visible: Boolean(newGroupData?.visible) });
   }
@@ -1567,7 +1541,9 @@ export function create_painter_app_state(): PainterAppState {
     const group = painter_document_runtime.document.groups[group_id];
     if (!group) return;
     const oldGroupData = structuredClone(group);
-    set_painter_group_locked(painter_document_runtime, group_id, !group.locked);
+    painter_session_core.apply_group_command({ kind: 'set_group_locked', group_id, locked: !group.locked });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
     const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
     logGroupAction(history, 'set_group_locked', `Toggle Group Lock ${group.name}`, {
       groupId: group_id,
@@ -1575,7 +1551,7 @@ export function create_painter_app_state(): PainterAppState {
       newGroupData,
     });
     submit_group_command_if_authoritative({ kind: 'set_group_locked', group_id, locked: Boolean(newGroupData?.locked) });
-    rebuild_voxel_space_from_runtime();
+    sync_painter_runtime_after_mutation({ preserve_group_order: true });
     schedule_auto_save();
     painterDiag('group lock toggled', { group_id, locked: Boolean(newGroupData?.locked) });
   }
@@ -1586,7 +1562,9 @@ export function create_painter_app_state(): PainterAppState {
     if (!group) return;
     const oldGroupData = structuredClone(group);
     const oldName = group.name;
-    rename_painter_group(painter_document_runtime, group_id, newName);
+    painter_session_core.apply_group_command({ kind: 'rename_group', group_id, group_name: newName });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
     const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
     logGroupAction(history, 'rename_group', `Rename Group ${oldName}`, {
       groupId: group_id,
@@ -1594,7 +1572,7 @@ export function create_painter_app_state(): PainterAppState {
       newGroupData,
     });
     submit_group_command_if_authoritative({ kind: 'rename_group', group_id, group_name: newName });
-    rebuild_voxel_space_from_runtime();
+    sync_painter_runtime_after_mutation({ preserve_group_order: true });
     schedule_auto_save();
     painterImportant('group renamed', { group_id, legacy_z: entry?.legacy_z ?? null, old_name: oldName, new_name: newName });
   }
@@ -1602,14 +1580,16 @@ export function create_painter_app_state(): PainterAppState {
   function reorderPainterGroups(next_group_order: string[]): void {
     if (next_group_order.length < 1) return;
     const oldGroupOrder = [...painter_document_runtime.document.group_order];
-    reorder_painter_groups(painter_document_runtime, next_group_order);
+    painter_session_core.apply_group_command({ kind: 'reorder_groups', next_group_order });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
     logGroupAction(history, 'reorder_groups', 'Reorder Groups', {
       oldGroupOrder,
       newGroupOrder: [...painter_document_runtime.document.group_order],
     });
     submit_group_command_if_authoritative({ kind: 'reorder_groups', next_group_order: [...painter_document_runtime.document.group_order] });
     legacy_group_compat.group_order = [...painter_document_runtime.document.group_order];
-    rebuild_voxel_space_from_runtime();
+    sync_painter_runtime_after_mutation({ preserve_group_order: true });
     schedule_auto_save();
     painterDiag('reordered groups without mutating world z', {
       next_group_order,
@@ -1767,11 +1747,7 @@ export function create_painter_app_state(): PainterAppState {
     const currentPlane = getCurrentFocusWorldPlane();
     let nextPlane = currentPlane + dir;
     if (axis === 'x') {
-      const bounds = getPainterDocumentBounds();
-      nextPlane = Math.max(bounds.minX, Math.min(bounds.minX + bounds.width - 1, nextPlane));
     } else if (axis === 'y') {
-      const bounds = getPainterDocumentBounds();
-      nextPlane = Math.max(bounds.minY, Math.min(bounds.minY + bounds.height - 1, nextPlane));
     } else {
       const planes = get_runtime_group_planes();
       if (planes.length < 1) return;
@@ -1867,16 +1843,12 @@ export function create_painter_app_state(): PainterAppState {
       return;
     }
     if (axis === 'x') {
-      const bounds = getPainterDocumentBounds();
-      const nextPlane = Math.max(bounds.minX, Math.min(bounds.minX + bounds.width - 1, getCurrentFocusWorldPlane()));
-      if (nextPlane !== getCurrentFocusWorldPlane()) {
-        setCurrentFocusWorldPlane(nextPlane);
+      if (!Number.isFinite(getCurrentFocusWorldPlane())) {
+        setCurrentFocusWorldPlane(getPainterDocumentCenterWorld().x);
       }
     } else if (axis === 'y') {
-      const bounds = getPainterDocumentBounds();
-      const nextPlane = Math.max(bounds.minY, Math.min(bounds.minY + bounds.height - 1, getCurrentFocusWorldPlane()));
-      if (nextPlane !== getCurrentFocusWorldPlane()) {
-        setCurrentFocusWorldPlane(nextPlane);
+      if (!Number.isFinite(getCurrentFocusWorldPlane())) {
+        setCurrentFocusWorldPlane(getPainterDocumentCenterWorld().y);
       }
     } else if (!Number.isFinite(getCurrentFocusWorldPlane())) {
       setCurrentFocusWorldPlane(zs[0]!);
@@ -1895,22 +1867,32 @@ export function create_painter_app_state(): PainterAppState {
 
   // Create history manager
   const history = createHistoryManager(50);
+  function sync_lineage_state_from_core(): void {
+    const state = painter_session_core.get_state();
+    current_painter_document_lineage_id = state.lineage_id;
+    authoritative_revision_applied = state.authoritative_revision;
+  }
+  sync_lineage_state_from_core();
   let boot_document_restored = false;
 
   // Try to load auto-save on startup (try VoxelSpace first, then fallback to Grid)
-  const saved_painter_document = loadAutoSavePainterDocument();
+  const saved_painter_document = options?.skip_boot_restore ? null : loadAutoSavePainterDocument();
   if (saved_painter_document) {
     painterDiag('restoring autosaved painter document');
+    painterImportant('boot restore source chosen', { source: 'autosaved_painter_document' });
     applyPainterDocumentSnapshot(saved_painter_document);
+    setCurrentPainterDocumentLineage(`autosave:painter_document:${Date.now()}`, 'autosaved_painter_document');
     clearLastUsedFilePath();
     boot_document_restored = true;
     painterImportant('loaded autosaved painter document artwork');
   } else {
-    const saved_voxel_space = loadAutoSaveVoxelSpace();
+    const saved_voxel_space = options?.skip_boot_restore ? null : loadAutoSaveVoxelSpace();
     if (saved_voxel_space) {
     painterDiag('restoring autosaved voxel space');
+    painterImportant('boot restore source chosen', { source: 'autosaved_voxel_space' });
     voxelSpace = saved_voxel_space;
     rebuild_runtime_from_voxel_space();
+    setCurrentPainterDocumentLineage(`autosave:voxel_space:${Date.now()}`, 'autosaved_voxel_space');
     // Re-apply saved camera config after loading auto-save (camera settings are global, not per-artwork)
     const savedCameraConfig = loadCameraConfig();
     mergeSavedPainterCameraConfig(savedCameraConfig);
@@ -1925,15 +1907,17 @@ export function create_painter_app_state(): PainterAppState {
     painterImportant('loaded autosaved voxel space artwork');
     } else {
       // Fallback to legacy grid auto-save
-      const saved_grid = loadAutoSave();
+      const saved_grid = options?.skip_boot_restore ? null : loadAutoSave();
       if (saved_grid) {
         painterDiag('restoring legacy autosaved grid');
+        painterImportant('boot restore source chosen', { source: 'legacy_autosaved_grid' });
         grid.width = saved_grid.width;
         grid.height = saved_grid.height;
         grid.cells = saved_grid.cells;
         // Sync voxelSpace to grid
         voxelSpace = gridToVoxelSpace(grid, 0);
         rebuild_runtime_from_voxel_space();
+        setCurrentPainterDocumentLineage(`autosave:legacy_grid:${Date.now()}`, 'legacy_autosaved_grid');
         // Re-apply saved camera config after loading legacy auto-save
         const savedCameraConfig = loadCameraConfig();
         mergeSavedPainterCameraConfig(savedCameraConfig);
@@ -2105,11 +2089,6 @@ export function create_painter_app_state(): PainterAppState {
   // Preview points for line/rect tools
   let preview_points: { x: number; y: number }[] = [];
 
-  // Current filename for save operations
-  let current_filename = 'untitled';
-  let current_file_path: string | null = null;
-  let authoritative_revision_applied = 0;
-  const LAST_FILE_PATH_KEY = 'thaumworld_ascii_painter_last_file_path';
   let live_stroke_preview_changes: Array<{
     worldX: number;
     worldY: number;
@@ -2130,6 +2109,7 @@ export function create_painter_app_state(): PainterAppState {
   function clearLastUsedFilePath(): void {
     try {
       window.localStorage.removeItem(LAST_FILE_PATH_KEY);
+      painterImportant('last used file path cleared');
     } catch {
       // ignore
     }
@@ -2139,12 +2119,61 @@ export function create_painter_app_state(): PainterAppState {
     current_file_path = filePath;
     current_filename = inferFilenameFromPath(filePath);
     rememberLastUsedFilePath(filePath);
+    if (!suppress_recent_file_persistence) {
+      persist_painter_resume_file(filePath);
+    }
+    painterImportant('active file association set', {
+      current_file_path,
+      current_filename,
+      suppress_recent_file_persistence,
+    });
   }
 
   function clearActiveFileAssociation(nextFilename: string = 'untitled', opts?: { clearLastUsed?: boolean }): void {
     current_file_path = null;
     current_filename = nextFilename;
     if (opts?.clearLastUsed) clearLastUsedFilePath();
+    if (opts?.clearLastUsed) clear_launch_record('ascii_painter', PAINTER_APP_CONFIG.selected_data_slot);
+    painterImportant('active file association cleared', {
+      current_file_path,
+      current_filename,
+      current_painter_document_lineage_id,
+      clear_last_used: Boolean(opts?.clearLastUsed),
+    });
+  }
+
+  function setCurrentPainterDocumentLineage(lineage_id: string, source: string): void {
+    painter_session_core.set_lineage(lineage_id, 0);
+    sync_lineage_state_from_core();
+    painterImportant('painter document lineage set', {
+      lineage_id,
+      source,
+      current_file_path,
+      current_filename,
+    });
+  }
+
+  function make_authoritative_lineage_id(document_id: string): string {
+    return `authoritative:${String(document_id ?? '').trim() || 'default_canvas'}`;
+  }
+
+  function can_submit_to_authoritative_document(): boolean {
+    const sync_state = painter_sync.get_state();
+    if (sync_state.authority_mode !== 'authoritative_host') return false;
+    const document_id = String(sync_state.bootstrap?.document_id ?? '').trim();
+    if (!document_id) return false;
+    const authoritative_lineage_id = make_authoritative_lineage_id(document_id);
+    const matches = current_painter_document_lineage_id === authoritative_lineage_id;
+    if (!matches) {
+      painterImportant('authoritative submit blocked due to lineage mismatch', {
+        current_painter_document_lineage_id,
+        authoritative_lineage_id,
+        document_id,
+        current_file_path,
+        current_filename,
+      });
+    }
+    return matches;
   }
 
   function cloneGridCellForPreview(cell: GridCell): GridCell {
@@ -2222,8 +2251,22 @@ export function create_painter_app_state(): PainterAppState {
 
   function apply_authoritative_painter_bootstrap(bootstrap: { document_id: string; revision: number; snapshot: PainterDocument | null }): void {
     if (!bootstrap.snapshot || bootstrap.revision <= authoritative_revision_applied) return;
+    const result = painter_session_core.apply_authoritative_snapshot(bootstrap.snapshot, {
+      document_id: bootstrap.document_id,
+      revision: bootstrap.revision,
+    });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    if (!result.applied) {
+      painterImportant('authoritative bootstrap skipped due to local lineage mismatch', {
+        incoming_document_id: bootstrap.document_id,
+        incoming_lineage_id: make_authoritative_lineage_id(bootstrap.document_id),
+        current_painter_document_lineage_id,
+        revision: bootstrap.revision,
+      });
+      return;
+    }
     applyPainterDocumentSnapshot(bootstrap.snapshot);
-    authoritative_revision_applied = bootstrap.revision;
     clearActiveFileAssociation(String(bootstrap.document_id ?? '').trim() || 'untitled', { clearLastUsed: true });
     boot_document_restored = true;
     painterImportant('applied authoritative painter bootstrap', {
@@ -2254,7 +2297,12 @@ export function create_painter_app_state(): PainterAppState {
   }
 
   function applyPainterDocumentSnapshot(document: PainterDocument): void {
-    painter_document_runtime = normalize_painter_document_runtime(document);
+    painter_session_core.replace_document(document, {
+      lineage_id: current_painter_document_lineage_id,
+      authoritative_revision: authoritative_revision_applied,
+    });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
     rebuild_voxel_space_from_runtime();
     clear_world_selection(world_selection);
 
@@ -2296,10 +2344,23 @@ export function create_painter_app_state(): PainterAppState {
       auto_save_timer = null;
     }
     // Prefer file-backed autosave when a file is active.
+    painterImportant('flush auto save requested', {
+      current_file_path,
+      current_filename,
+      file_backed: Boolean(current_file_path && window.electronAPI?.writeFileAtomic),
+    });
     if (current_file_path && window.electronAPI?.writeFileAtomic) {
+      painterImportant('flush auto save writing active file', {
+        current_file_path,
+        current_filename,
+      });
       await writeArtworkToFileAtomic(current_file_path);
       return;
     }
+    painterImportant('flush auto save writing in-memory autosave', {
+      current_file_path,
+      current_filename,
+    });
     autoSavePainterDocument(exportCurrentPainterDocument(), current_filename);
   }
 
@@ -2343,9 +2404,11 @@ export function create_painter_app_state(): PainterAppState {
 
     if (loadedPainterDocument) {
       applyPainterDocumentSnapshot(loadedPainterDocument);
+      setCurrentPainterDocumentLineage(loadedPath ? `file:${loadedPath}` : `memory:json:${Date.now()}`, loadedPath ? 'json_file_load' : 'json_memory_load');
     } else {
       voxelSpace = importVoxelSpaceFromJSON(content);
       rebuild_runtime_from_voxel_space({ preserve_group_order: true });
+      setCurrentPainterDocumentLineage(loadedPath ? `file:${loadedPath}` : `memory:legacy_json:${Date.now()}`, loadedPath ? 'legacy_file_load' : 'legacy_memory_load');
       clear_world_selection(world_selection);
 
       // Apply persisted camera/UI settings (do not import from file)
@@ -2370,6 +2433,12 @@ export function create_painter_app_state(): PainterAppState {
       clearActiveFileAssociation(current_filename, { clearLastUsed: true });
     }
 
+    painterImportant('artwork content loaded', {
+      loaded_path: loadedPath ?? null,
+      current_file_path,
+      current_filename,
+    });
+
     schedule_auto_save();
   }
 
@@ -2379,6 +2448,7 @@ export function create_painter_app_state(): PainterAppState {
       // Fallback: just create a new in-memory canvas
       voxelSpace = createVoxelSpace(CANVAS_WIDTH, CANVAS_HEIGHT, { defaultZ: 0 });
       rebuild_runtime_from_voxel_space();
+      setCurrentPainterDocumentLineage(`memory:new_file:${Date.now()}`, 'new_file_in_memory');
       clear_world_selection(world_selection);
       const savedCam = loadCameraConfig();
       if (savedCam && Object.keys(savedCam).length > 0) {
@@ -2402,6 +2472,7 @@ export function create_painter_app_state(): PainterAppState {
 
     voxelSpace = createVoxelSpace(CANVAS_WIDTH, CANVAS_HEIGHT, { defaultZ: 0 });
     rebuild_runtime_from_voxel_space();
+    setCurrentPainterDocumentLineage(`file:${filePath}`, 'new_file_backed');
     clear_world_selection(world_selection);
     const savedCam = loadCameraConfig();
     if (savedCam && Object.keys(savedCam).length > 0) {
@@ -2477,17 +2548,29 @@ export function create_painter_app_state(): PainterAppState {
   // Auto-open the last file on boot (best effort).
   // IMPORTANT: Never set current_file_path without loading, otherwise beforeunload autosave
   // could overwrite the last file with whatever is currently in memory.
-  if (window.electronAPI?.readFile) {
+  if (!options?.skip_boot_restore && window.electronAPI?.readFile) {
     void (async () => {
       const api = window.electronAPI;
       if (!api?.readFile) return;
-      if (boot_document_restored) return;
+      if (boot_document_restored) {
+        painterImportant('boot reopen skipped', {
+          reason: 'boot_document_restored',
+          current_file_path,
+          current_filename,
+        });
+        return;
+      }
       let last: string | null = null;
       try {
         last = window.localStorage.getItem(LAST_FILE_PATH_KEY);
       } catch {
         last = null;
       }
+      painterImportant('boot reopen candidate read', {
+        last_file_path: last,
+        current_file_path,
+        current_filename,
+      });
       if (!last) return;
 
       const res = await api.readFile(last);
@@ -2500,6 +2583,10 @@ export function create_painter_app_state(): PainterAppState {
         return;
       }
 
+      painterImportant('boot restore source chosen', {
+        source: 'last_file_reopen',
+        path: last,
+      });
       await loadArtworkFromContent(res.content, last);
     })().catch(() => {
       // ignore
@@ -2651,8 +2738,7 @@ export function create_painter_app_state(): PainterAppState {
       if (applied_locally) {
         refreshPainterProjectionPreservingCurrentTarget();
       }
-      const authority_mode = painter_sync.get_state().authority_mode;
-      if (authority_mode !== 'authoritative_host') return;
+      if (!can_submit_to_authoritative_document()) return;
       const active_group_id = resolve_current_runtime_group_id();
       if (!active_group_id) return;
       void painter_sync.submit_cell_changes(active_group_id, changes.map((change) => ({
@@ -2844,6 +2930,16 @@ export function create_painter_app_state(): PainterAppState {
           if (!active_group_id) return '0';
           return String(get_group_history_stats(active_group_id).total_actions);
         }
+        if (key === 'active_group_undo_count') {
+          const active_group_id = resolve_current_runtime_group_id();
+          if (!active_group_id) return '0';
+          return String(get_group_undo_redo_counts(active_group_id).undo_count);
+        }
+        if (key === 'active_group_redo_count') {
+          const active_group_id = resolve_current_runtime_group_id();
+          if (!active_group_id) return '0';
+          return String(get_group_undo_redo_counts(active_group_id).redo_count);
+        }
       }
       return null;
     },
@@ -2851,12 +2947,10 @@ export function create_painter_app_state(): PainterAppState {
       if (helper === 'start_layer_rename') {
         const z = Number((payload as any)?.z ?? 0);
         const layerPalette = layer_palette_module as any;
-        if (!Number.isFinite(z) || typeof layerPalette?.beginRenameLayer !== 'function') return false;
-        const direct_palette_z = get_group_entry_for_palette_z(Math.floor(z)) ? Math.floor(z) : null;
+        if (!Number.isFinite(z) || typeof layerPalette?.beginRenameGroup !== 'function') return false;
         const legacy_group_id = get_group_id_for_legacy_z(Math.floor(z));
-        const palette_z = direct_palette_z ?? get_palette_z_for_group_id(legacy_group_id);
-        if (!Number.isFinite(Number(palette_z))) return false;
-        const started = Boolean(layerPalette.beginRenameLayer(Number(palette_z)));
+        if (!legacy_group_id) return false;
+        const started = Boolean(layerPalette.beginRenameGroup(legacy_group_id));
         if (!started) return false;
         try {
           return Boolean((window as any).TOOL_ASSISTED_INPUTS_RUNTIME?.focus_module?.('layer_palette'));
@@ -2915,22 +3009,29 @@ export function create_painter_app_state(): PainterAppState {
         return Boolean(performPainterRedo());
       }
       if (helper === 'add_group') {
-        const created = add_painter_group(painter_document_runtime, create_painter_group(`Layer ${painter_document_runtime.document.group_order.length + 1}`));
+        const created = create_painter_group(`Layer ${painter_document_runtime.document.group_order.length + 1}`);
+        const result = painter_session_core.apply_group_command({ kind: 'create_group', group: created });
+        sync_local_session_state_from_core();
+        sync_lineage_state_from_core();
         logGroupAction(history, 'create_group', `Create Group ${created.name}`, {
-          groupId: created.id,
+          groupId: result.created_group_id ?? created.id,
           newGroupData: created,
         });
-        submit_group_command_if_authoritative({ kind: 'create_group', group_name: created.name, target_group_id: created.id });
-        legacy_group_compat.active_group_id = created.id;
-        rebuild_voxel_space_from_runtime();
-        refreshPainterProjectionFromWorld();
+        submit_group_command_if_authoritative({ kind: 'create_group', group_name: created.name, target_group_id: result.created_group_id ?? created.id });
+        legacy_group_compat.active_group_id = result.created_group_id ?? created.id;
+        sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
         log_runtime_summary('tai add group summary');
         return true;
       }
       if (helper === 'duplicate_active_group') {
         const active_group_id = resolve_current_runtime_group_id();
         if (!active_group_id) return false;
-        const duplicated = duplicate_painter_group(painter_document_runtime, active_group_id);
+        const result = painter_session_core.apply_group_command({ kind: 'duplicate_group', source_group_id: active_group_id });
+        sync_local_session_state_from_core();
+        sync_lineage_state_from_core();
+        const duplicatedId = result.created_group_id;
+        const duplicated = duplicatedId ? structuredClone(painter_document_runtime.document.groups[duplicatedId]!) : null;
+        if (!duplicated) return false;
         logGroupAction(history, 'duplicate_group', `Duplicate Group ${duplicated.name}`, {
           sourceGroupId: active_group_id,
           targetGroupId: duplicated.id,
@@ -2938,22 +3039,22 @@ export function create_painter_app_state(): PainterAppState {
         });
         submit_group_command_if_authoritative({ kind: 'duplicate_group', source_group_id: active_group_id, target_group_id: duplicated.id });
         legacy_group_compat.active_group_id = duplicated.id;
-        rebuild_voxel_space_from_runtime();
-        refreshPainterProjectionFromWorld();
+        sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
         log_runtime_summary('tai duplicate active group summary');
         return true;
       }
       if (helper === 'reverse_group_order') {
         const oldGroupOrder = [...painter_document_runtime.document.group_order];
-        reorder_painter_groups(painter_document_runtime, [...painter_document_runtime.document.group_order].reverse());
+        painter_session_core.apply_group_command({ kind: 'reorder_groups', next_group_order: [...painter_document_runtime.document.group_order].reverse() });
+        sync_local_session_state_from_core();
+        sync_lineage_state_from_core();
         logGroupAction(history, 'reorder_groups', 'Reorder Groups', {
           oldGroupOrder,
           newGroupOrder: [...painter_document_runtime.document.group_order],
         });
         submit_group_command_if_authoritative({ kind: 'reorder_groups', next_group_order: [...painter_document_runtime.document.group_order] });
         legacy_group_compat.group_order = [...painter_document_runtime.document.group_order];
-        rebuild_voxel_space_from_runtime();
-        refreshPainterProjectionFromWorld();
+        sync_painter_runtime_after_mutation({ preserve_group_order: true });
         log_runtime_summary('tai reverse group order summary');
         return true;
       }
@@ -3660,7 +3761,8 @@ export function create_painter_app_state(): PainterAppState {
       const preview = getPreviewBrush();
       const focusPlane = painter_display_projection?.focus_world_plane ?? voxelSpace.camera.focus_plane;
       const activeGroup = resolve_current_runtime_group_id() ?? '-';
-      return `L:${left_click_tool} R:${right_click_tool} CUR:${current_tool} CHAR:${preview.char} SIZE:L${getBrushSizeForSide('left')} R${getBrushSizeForSide('right')} DEPTH:${focusPlane} GRP:${activeGroup}`;
+      const counts = activeGroup !== '-' ? get_group_undo_redo_counts(activeGroup) : { undo_count: 0, redo_count: 0 };
+      return `L:${left_click_tool} R:${right_click_tool} CUR:${current_tool} CHAR:${preview.char} SIZE:L${getBrushSizeForSide('left')} R${getBrushSizeForSide('right')} DEPTH:${focusPlane} GRP:${activeGroup} U:${counts.undo_count} R:${counts.redo_count}`;
     },
     on_save: () => {
       void save_file().catch((e) => {
@@ -3792,92 +3894,44 @@ export function create_painter_app_state(): PainterAppState {
   let layer_palette_module: Module | null = null;
   
   function create_layer_palette_module(): Module {
-    return makeLayerPaletteModule({
+    return makeGroupsModule({
       id: 'layer_palette',
       rect: layer_palette_rect,
       title: 'GROUPS',
-      getRows: () => getPaletteGroupRows(),
-      getSelectedZ: () => get_palette_z_for_group_id(legacy_group_compat.active_group_id) ?? null,
-      getLayerId: (z) => get_group_entry_for_palette_z(z)?.group_id ?? null,
-      getSelectedLayerId: () => legacy_group_compat.active_group_id,
-      onLayerIdSelect: (group_id) => {
+      get_groups: () => getPainterGroupListItems(),
+      on_select_group: (group_id: string) => {
         selectPainterGroup(group_id);
       },
-      onLayerIdVisibilityToggle: (group_id) => {
+      on_toggle_group_visibility: (group_id: string) => {
         togglePainterGroupVisibility(group_id);
       },
-      onLayerIdLockToggle: (group_id) => {
+      on_toggle_group_lock: (group_id: string) => {
         togglePainterGroupLock(group_id);
       },
-      onLayerIdRename: (group_id, newName) => {
+      on_rename_group: (group_id: string, newName: string) => {
         renamePainterGroup(group_id, newName);
       },
-      onDeleteLayerId: (group_id) => {
-        deletePainterGroup(group_id);
-      },
-      onDuplicateLayerId: (group_id) => {
-        duplicatePainterGroup(group_id);
-      },
-      onReorderLayerIds: (next_group_order) => {
-        reorderPainterGroups([...next_group_order].reverse());
-      },
-      onLayerSelect: (z) => {
-        const entry = get_group_entry_for_palette_z(z);
-        if (!entry) return;
-        selectPainterGroup(entry.group_id);
-      },
-      onLayerVisibilityToggle: (z) => {
-        const entry = get_group_entry_for_palette_z(z);
-        if (!entry) return;
-        togglePainterGroupVisibility(entry.group_id);
-      },
-      onLayerLockToggle: (z) => {
-        const entry = get_group_entry_for_palette_z(z);
-        if (!entry) return;
-        togglePainterGroupLock(entry.group_id);
-      },
-      onLayerRename: (z, newName) => {
-        const entry = get_group_entry_for_palette_z(z);
-        if (!entry) return;
-        renamePainterGroup(entry.group_id, newName);
-      },
-      onAddLayer: () => {
+      on_add_group: () => {
         addPainterGroupStructure();
       },
-      onDeleteLayer: (z) => {
-        deletePainterGroupStructure(z);
+      on_delete_group: (group_id: string) => {
+        deletePainterGroup(group_id);
       },
-      onDuplicateLayer: (z) => {
-        duplicatePainterGroupStructure(z);
-      },
-      onMergeDown: (z) => {
-        const entry = get_group_entry_for_palette_z(z);
-        if (!entry) return;
-        const { mergeLayerDown } = require('../ascii_painter/voxel_space.js');
-        mergeLayerDown(voxelSpace, entry.legacy_z);
-        sync_legacy_group_compat_state({ preserve_group_order: true });
-        sync_active_group_to_focus_plane();
-        refreshPainterProjectionFromWorld();
-        painterImportant('merged layer down', { z: entry.legacy_z });
-      },
-      onReorderLayers: (newZOrder) => {
-        const next_group_order = newZOrder
-          .map((fake_z) => get_group_entry_for_palette_z(fake_z)?.group_id ?? null)
-          .filter((group_id): group_id is string => !!group_id);
+      on_reorder_groups: (next_group_order: string[]) => {
         reorderPainterGroups([...next_group_order].reverse());
       },
-      onMove: (new_rect) => {
+      on_move: (new_rect) => {
         if (layer_palette_module) {
           layer_palette_module.rect = new_rect;
           saveModulePosition('layer_palette', new_rect);
         }
       },
-      onResize: (new_rect) => {
+      on_resize: (new_rect) => {
         if (layer_palette_module) {
           layer_palette_module.rect = new_rect;
         }
       },
-      onClose: () => {
+      on_close: () => {
         setModuleOpen('layer_palette', false, (v) => { layer_palette_open = v; });
       }
     });
@@ -4173,6 +4227,29 @@ export function create_painter_app_state(): PainterAppState {
 
     file_menu_rect.x1 = GRID_WIDTH - 1;
   }
+
+  async function start_from_launch_intent(intent: PainterLaunchIntent): Promise<void> {
+    const previousSuppress = suppress_recent_file_persistence;
+    suppress_recent_file_persistence = intent.persist_recent === false;
+    try {
+      if (intent.kind === 'new_document') {
+        await new_file();
+        return;
+      }
+      if (intent.kind === 'resume_file' || intent.kind === 'load_file') {
+        const api = window.electronAPI;
+        if (!api?.readFile) throw new Error('electronAPI.readFile unavailable');
+        const readResp = await api.readFile(intent.path);
+        if (!readResp?.success || typeof readResp.content !== 'string') {
+          throw new Error(readResp?.error || 'Failed to read painting file');
+        }
+        await loadArtworkFromContent(readResp.content, intent.path);
+        return;
+      }
+    } finally {
+      suppress_recent_file_persistence = previousSuppress;
+    }
+  }
   
   return {
     modules: registry.get_all(),
@@ -4197,6 +4274,7 @@ export function create_painter_app_state(): PainterAppState {
         // Copy new grid data
         voxelSpace = gridToVoxelSpace(new_grid, 0);
         rebuild_runtime_from_voxel_space();
+        setCurrentPainterDocumentLineage(`memory:import_grid:${Date.now()}`, 'import_grid');
         clear_world_selection(world_selection);
         syncPainterCameraViewTransform();
         ensureValidFocusPlane();
@@ -4249,10 +4327,12 @@ export function create_painter_app_state(): PainterAppState {
     export_as_text: () => {
       return exportCurrentPainterDocumentText();
     },
+    start_from_launch_intent,
 
     new_canvas: (width: number, height: number) => {
       const document = create_painter_document(width, height, { min_z: 0, max_z: 0, default_group_name: 'Group 1' });
       applyPainterDocumentSnapshot(document);
+      setCurrentPainterDocumentLineage(`memory:new_canvas:${Date.now()}`, 'new_canvas');
       clearActiveFileAssociation('untitled', { clearLastUsed: true });
       clearAutoSave();
       painterImportant('new canvas created', { width, height, group_count: painter_document_runtime.document.group_order.length });
@@ -4271,6 +4351,7 @@ export function create_painter_app_state(): PainterAppState {
         const parsed = JSON.parse(json);
         voxelSpace = importVoxelSpace(parsed);
         rebuild_runtime_from_voxel_space({ preserve_group_order: true });
+        setCurrentPainterDocumentLineage(`memory:import_legacy_voxel_space:${Date.now()}`, 'import_legacy_voxel_space');
         clear_world_selection(world_selection);
         syncPainterCameraViewTransform();
         ensureValidFocusPlane();

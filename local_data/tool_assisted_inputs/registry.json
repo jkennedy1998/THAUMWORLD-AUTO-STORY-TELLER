@@ -1,71 +1,20 @@
 {
   "01": {
-    "path": "tai01_hold_w/script.json"
+    "path": "tai01_game_movement_smoke/script.json"
   },
   "02": {
-    "path": "tai02_tap_w/script.json"
+    "path": "tai02_game_input_text_regression/script.json"
   },
   "03": {
-    "path": "tai03_replace_w_to_d/script.json"
+    "path": "tai03_painter_launch_and_tools_smoke/script.json"
   },
   "04": {
-    "path": "tai04_jump_while_w/script.json"
+    "path": "tai04_painter_text_regression/script.json"
   },
   "05": {
-    "path": "tai05_hold_alternating_ws/script.json"
+    "path": "tai05_painter_group_workflow/script.json"
   },
   "06": {
-    "path": "tai06_painter_assign_tools/script.json"
-  },
-  "07": {
-    "path": "tai07_painter_primary_click_draw/script.json"
-  },
-  "08": {
-    "path": "tai08_painter_secondary_click_erase/script.json"
-  },
-  "09": {
-    "path": "tai09_painter_primary_drag_draw/script.json"
-  },
-  "10": {
-    "path": "tai10_idle_profile/script.json"
-  },
-  "11": {
-    "path": "tai11_game_input_text_entry/script.json"
-  },
-  "12": {
-    "path": "tai12_character_creation_text_fields/script.json"
-  },
-  "13": {
-    "path": "tai13_painter_text_tool_arrow_nav/script.json"
-  },
-  "14": {
-    "path": "tai14_painter_layer_rename/script.json"
-  },
-  "15": {
-    "path": "tai15_painter_text_paste_and_undo/script.json"
-  },
-  "16": {
-    "path": "tai16_painter_text_enter_retarget/script.json"
-  },
-  "17": {
-    "path": "tai17_painter_group_runtime_smoke/script.json"
-  },
-  "18": {
-    "path": "tai18_painter_multiplayer_patch_smoke/script.json"
-  },
-  "19": {
-    "path": "tai19_painter_layer_palette_secondary_click_preserves_selection/script.json"
-  },
-  "20": {
-    "path": "tai20_painter_canvas_secondary_click_preserves_selection/script.json"
-  },
-  "21": {
-    "path": "tai21_painter_secondary_drag_wheel_depth_preserves_selection/script.json"
-  },
-  "22": {
-    "path": "tai22_painter_secondary_drag_nav_depth_preserves_selection/script.json"
-  },
-  "23": {
-    "path": "tai23_painter_primary_hold_wheel_move_keeps_display_focus_on_camera_depth/script.json"
+    "path": "tai06_painter_depth_focus_regression/script.json"
   }
 }

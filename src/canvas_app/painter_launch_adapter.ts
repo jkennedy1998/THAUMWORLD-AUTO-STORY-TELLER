@@ -1,0 +1,133 @@
+import type { LaunchAdapter } from '../engine_launch/controller.js';
+import { load_launch_record, save_launch_record } from '../engine_launch/persistence.js';
+import type { ResumeValidationResult } from '../engine_launch/types.js';
+import { importPainterDocumentFromJSON, importVoxelSpaceFromJSON } from '../ascii_painter/save_system.js';
+import type { PainterLaunchIntent } from './painter_launch_types.js';
+import { PAINTER_APP_CONFIG } from './painter_runtime_config.js';
+
+const APP_ID = 'ascii_painter' as const;
+
+async function validate_painter_file(path: string): Promise<boolean> {
+  const api = window.electronAPI;
+  if (!api?.readFile) return false;
+  const res = await api.readFile(path).catch(() => null);
+  if (!res?.success || typeof res.content !== 'string') return false;
+  try {
+    importPainterDocumentFromJSON(res.content);
+    return true;
+  } catch {
+    try {
+      importVoxelSpaceFromJSON(res.content);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+function get_tai_painter_boot_file_path(): string | null {
+  const config = (window as Window).electronAPI?.toolAssistedInputsBootConfig as { enabled?: boolean; painterBootFilePath?: string } | undefined;
+  if (!config?.enabled) return null;
+  const path = String(config.painterBootFilePath ?? '').trim();
+  return path || null;
+}
+
+function is_tai_boot_enabled(): boolean {
+  return Boolean((window as Window).electronAPI?.toolAssistedInputsBootConfig?.enabled);
+}
+
+export function create_painter_launch_adapter(): LaunchAdapter<PainterLaunchIntent> {
+  const slot = PAINTER_APP_CONFIG.selected_data_slot;
+  return {
+    title: 'PAINTING MENU',
+    initial_status_lines: ['Resume opens the last valid painting file', 'New creates and hosts a new painting file'],
+    async validate_resume(): Promise<ResumeValidationResult<PainterLaunchIntent>> {
+      const taiBootPath = get_tai_painter_boot_file_path();
+      if (taiBootPath) {
+        const valid = await validate_painter_file(taiBootPath);
+        if (valid) {
+          return {
+            resumable: true,
+            candidate: {
+              app_id: APP_ID,
+              slot,
+              source: { kind: 'file', path: taiBootPath },
+              summary: {
+                title: taiBootPath.split(/[/\\]/).pop() ?? taiBootPath,
+                subtitle: `TAI boot file: ${taiBootPath}`,
+                updated_at_ms: null,
+              },
+            },
+            resolved_intent: { kind: 'resume_file', slot, path: taiBootPath, persist_recent: false },
+          };
+        }
+      }
+      const record = load_launch_record(APP_ID, slot);
+      const path = String(record?.resume_candidate?.file_path ?? '').trim();
+      if (!path) return { resumable: false, reason: 'No recent painting file' };
+      const valid = await validate_painter_file(path);
+      if (!valid) return { resumable: false, reason: 'Last painting file is missing or invalid' };
+      return {
+        resumable: true,
+        candidate: {
+          app_id: APP_ID,
+          slot,
+          source: { kind: 'file', path },
+          summary: {
+            title: path.split(/[/\\]/).pop() ?? path,
+            subtitle: path,
+            updated_at_ms: record?.last_updated_at_ms ?? null,
+          },
+        },
+        resolved_intent: { kind: 'resume_file', slot, path },
+      };
+    },
+    async create_new_intent(): Promise<PainterLaunchIntent> {
+      return { kind: 'new_document', slot };
+    },
+    async create_load_intent(): Promise<PainterLaunchIntent | null> {
+      const api = window.electronAPI;
+      if (!api?.showOpenDialog) return null;
+      const openResp = await api.showOpenDialog({
+        title: 'Load Painting',
+        filters: [{ name: 'JSON Files', extensions: ['json'] }],
+        properties: ['openFile'],
+      }).catch(() => null);
+      const path = String(openResp?.filePaths?.[0] ?? '').trim();
+      if (!path) return null;
+      return { kind: 'load_file', slot, path };
+    },
+    async create_join_intent(): Promise<PainterLaunchIntent | null> {
+      return null;
+    },
+  };
+}
+
+export async function resolve_painter_tai_boot_intent(): Promise<PainterLaunchIntent | null> {
+  const path = get_tai_painter_boot_file_path();
+  if (path) {
+    const valid = await validate_painter_file(path);
+    if (!valid) return null;
+    return { kind: 'resume_file', slot: PAINTER_APP_CONFIG.selected_data_slot, path, persist_recent: false };
+  }
+  if (is_tai_boot_enabled()) {
+    return { kind: 'new_document', slot: PAINTER_APP_CONFIG.selected_data_slot, persist_recent: false };
+  }
+  return null;
+}
+
+export function persist_painter_resume_file(path: string): void {
+  save_launch_record({
+    version: 1,
+    app_id: APP_ID,
+    slot: PAINTER_APP_CONFIG.selected_data_slot,
+    last_action: 'load',
+    last_updated_at_ms: Date.now(),
+    resume_candidate: {
+      kind: 'file',
+      file_path: path,
+      title: path.split(/[/\\]/).pop() ?? path,
+      updated_at_ms: Date.now(),
+    },
+  });
+}

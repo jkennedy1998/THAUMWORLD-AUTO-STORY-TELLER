@@ -6,6 +6,9 @@ import { get_theme_font_primary_family, THAUMWORLD_RENDER_THEME } from '../mono_
 import { install_runtime_diagnostics_api } from '../shared/diagnostics.js';
 import { APP_CONFIG, create_app_state } from './app_state.js';
 import { PAINTER_CONFIG, create_painter_app_state } from './painter_app_state.js';
+import { create_launch_controller } from '../engine_launch/controller.js';
+import { create_painter_launch_adapter, resolve_painter_tai_boot_intent } from './painter_launch_adapter.js';
+import type { PainterLaunchIntent } from './painter_launch_types.js';
 
 // Detect if we're in painter mode (set by preload script before page loads)
 const IS_PAINTER_MODE = (window as any).electronAPI?.appMode === 'ascii_painter';
@@ -21,34 +24,52 @@ let module_registry: any;
 let on_drag_end_outside: ((x: number, y: number) => void) | undefined;
 let on_pointer_move_global: ((x: number, y: number, e: any) => void) | undefined;
 let on_after_compose: ((canvas: any) => void) | undefined;
+let launch_controller: ReturnType<typeof create_launch_controller<PainterLaunchIntent>> | null = null;
+let launchPainterIntent: ((intent: PainterLaunchIntent) => Promise<void>) | null = null;
 
 let painter_state: ReturnType<typeof create_painter_app_state> | null = null;
 let game_state: ReturnType<typeof create_app_state> | null = null;
 
 if (IS_PAINTER_MODE) {
-    // PAINTER MODE
-    console.log('🎨 Initializing ASCII Painter...');
-    painter_state = create_painter_app_state();
-    modules = painter_state.modules;
-    module_registry = painter_state.module_registry;
-    on_drag_end_outside = undefined;
-    on_pointer_move_global = painter_state.on_pointer_move_global;
-
-    // Initialize DOM renderer for voxel layers
-    painter_state.init_dom_renderer();
-
-    // Expose painter API globally
-    (window as any).painter = {
-        export: painter_state.export_grid,
-        import: painter_state.import_grid,
-        clear: painter_state.clear_canvas,
-        save: painter_state.save_to_file,
-        load: painter_state.load_from_file,
-        new_canvas: painter_state.new_canvas,
-        export_text: painter_state.export_as_text,
-        filename: () => painter_state!.current_filename,
-        multiplayer: painter_state.multiplayer_sync,
+    console.log('🎨 Initializing ASCII Painter Launch...');
+    launchPainterIntent = async (intent: PainterLaunchIntent) => {
+        painter_state = create_painter_app_state({ skip_boot_restore: true, skip_multiplayer_bootstrap: true });
+        await painter_state.start_from_launch_intent(intent);
+        modules = painter_state.modules;
+        module_registry = painter_state.module_registry;
+        on_drag_end_outside = undefined;
+        on_pointer_move_global = painter_state.on_pointer_move_global;
+        on_after_compose = undefined;
+        runtime.set_modules(get_visible_modules());
+        if (module_registry?.subscribe) {
+            module_registry.subscribe(() => {
+                runtime.set_modules(get_visible_modules());
+            });
+        }
+        painter_state.init_dom_renderer();
+        (window as any).painter = {
+            export: painter_state.export_grid,
+            import: painter_state.import_grid,
+            clear: painter_state.clear_canvas,
+            save: painter_state.save_to_file,
+            load: painter_state.load_from_file,
+            new_canvas: painter_state.new_canvas,
+            export_text: painter_state.export_as_text,
+            filename: () => painter_state!.current_filename,
+            multiplayer: painter_state.multiplayer_sync,
+        };
     };
+    launch_controller = create_launch_controller<PainterLaunchIntent>({
+        id: 'painter_launch_module',
+        rect: { x0: 22, y0: 10, x1: 62, y1: 28 },
+        adapter: create_painter_launch_adapter(),
+        on_launch_intent: launchPainterIntent,
+    });
+    modules = launch_controller.modules;
+    module_registry = null;
+    on_drag_end_outside = undefined;
+    on_pointer_move_global = undefined;
+    on_after_compose = undefined;
 } else {
     // GAME MODE
     console.log('🎮 Initializing Game...');
@@ -61,7 +82,9 @@ if (IS_PAINTER_MODE) {
 }
 
 const config = IS_PAINTER_MODE ? PAINTER_CONFIG : APP_CONFIG;
-const layout_state = IS_PAINTER_MODE ? painter_state : game_state;
+function get_layout_state() {
+    return IS_PAINTER_MODE ? painter_state : game_state;
+}
 
 function compute_responsive_grid(scale: number): { width: number; height: number } | null {
     const viewport = canvasEl.parentElement;
@@ -94,9 +117,9 @@ const runtime = new CanvasRuntime({
     render_backend: config.render_backend,
     render_theme_id: config.render_theme_id,
     modules: get_visible_modules(),
-    on_drag_end_outside,
-    on_pointer_move_global,
-    on_after_compose,
+    on_drag_end_outside: (x, y) => on_drag_end_outside?.(x, y),
+    on_pointer_move_global: (x, y, e) => on_pointer_move_global?.(x, y, e),
+    on_after_compose: (canvas) => on_after_compose?.(canvas),
 });
 
 (window as any).TOOL_ASSISTED_INPUTS_RUNTIME = {
@@ -142,7 +165,7 @@ function apply_responsive_layout(scale: number): void {
     const next = compute_responsive_grid(scale);
     if (!next) return;
     runtime.set_grid_size(next.width, next.height);
-    layout_state?.update_layout(next.width, next.height);
+    get_layout_state()?.update_layout(next.width, next.height);
 }
 
 // Subscribe to module registry changes
@@ -152,9 +175,19 @@ if (module_registry) {
     });
 }
 
+if (IS_PAINTER_MODE && launch_controller) {
+    void (async () => {
+        const taiBootIntent = await resolve_painter_tai_boot_intent();
+        if (taiBootIntent) {
+        await launchPainterIntent?.(taiBootIntent);
+        return;
+      }
+        await launch_controller!.refresh();
+    })();
+}
+
 // Hook DOM renderer into render loop for painter mode
-if (IS_PAINTER_MODE && painter_state) {
-    const painterRef = painter_state;
+if (IS_PAINTER_MODE) {
     const originalTick = (runtime as any)['tick'].bind(runtime);
     
     // Track tile size and global pan offset for viewport calculations
@@ -190,6 +223,11 @@ if (IS_PAINTER_MODE && painter_state) {
     let lastViewportLogKey = '';
 
     (runtime as any)['tick'] = () => {
+        const painterRef = painter_state;
+        if (!painterRef) {
+            originalTick();
+            return;
+        }
         // During the first few frames after boot the DOM/layout/font metrics can settle.
         // We re-sample metrics and canvas position to avoid a "snap" that only corrects
         // itself after the first manual global pan.

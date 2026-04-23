@@ -1,0 +1,77 @@
+{
+  "version": 3,
+  "bounds": {
+    "minX": 0,
+    "minY": 0,
+    "width": 80,
+    "height": 40,
+    "depth": 1,
+    "minZ": 0,
+    "maxZ": 0
+  },
+  "occupied_bounds": null,
+  "groups": {
+    "group_1776884402416_nx14smg6": {
+      "id": "group_1776884402416_nx14smg6",
+      "name": "Layer 0",
+      "visible": true,
+      "locked": false,
+      "opacity": 1,
+      "voxels": [],
+      "frames": [],
+      "metadata": {
+        "created_at": "2026-04-22T19:00:02.416Z",
+        "modified_at": "2026-04-22T19:00:02.417Z"
+      }
+    }
+  },
+  "group_order": [
+    "group_1776884402416_nx14smg6"
+  ],
+  "metadata": {
+    "created_at": "2026-04-22T19:00:02.416Z",
+    "modified_at": "2026-04-22T19:00:02.416Z"
+  },
+  "camera": {
+    "mode": "straight_ortho",
+    "orientation": "xy",
+    "principal_view": "top",
+    "roll_quarter_turn": 0,
+    "focus_plane": 0,
+    "parallax_intensity": 0.7,
+    "show_all_layers": false,
+    "use_focus_layer_opacity": true,
+    "center_target_in_view": false,
+    "parallax_move_enabled": false,
+    "parallax_size_enabled": false,
+    "euler_rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "transition_euler": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "visual_pivot_px": {
+      "x": 0,
+      "y": 0
+    },
+    "calibration": {
+      "x": 0,
+      "y": 0
+    },
+    "scale_per_layer": 0.12,
+    "movement_per_layer": 29,
+    "mouse_angle_yaw_deg": 18,
+    "mouse_angle_pitch_deg": 14,
+    "mouse_angle_spring": 12,
+    "render_distance_planes": 2,
+    "base_layer_scale": 1,
+    "char_spacing_x": 1,
+    "char_spacing_y": 1,
+    "pan_x": 0,
+    "pan_y": 0
+  }
+}

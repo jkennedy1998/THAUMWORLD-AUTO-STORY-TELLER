@@ -14,7 +14,7 @@ import type { Grid, Brush, ToolType, GridCell } from '../../ascii_painter/types.
 import { createGrid, getCell, setCell } from '../../ascii_painter/types.js';
 import { drawCell, drawLine, eraseCell, applyTool, sampleCell, previewLine, previewRectStroke, previewRectFill } from '../../ascii_painter/tools.js';
 import { has_any_edit_channel, resolve_edit_channels_with_modifiers, type EditChannels } from '../../ascii_painter/edit_mask.js';
-import { logCellAction, logSelectionAction, startBatch, endBatch, addToBatch, cancelBatch, getHistoryState, type HistoryManager, type CellChange } from '../../ascii_painter/history.js';
+import { logGroupCellAction, addToGroupBatch, type HistoryManager, type CellChange } from '../../ascii_painter/history.js';
 import { get_brightest_indexed_rgb, get_color_by_name, get_darkest_indexed_rgb } from '../colors.js';
 import { draw_module_border, PANEL_BORDER_PRESETS } from '../module_borders.js';
 import type { SelectionBitmap, SelectionMode } from '../../ascii_painter/selection.js';
@@ -878,7 +878,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     if (pending_changes.length < 1) return;
     const committed_changes = pending_changes.map((change) => ({ ...change, oldCell: { ...change.oldCell }, newCell: { ...change.newCell } }));
     const active_group_id = requireActiveGroupId();
-    logCellAction(opts.history, 'draw_cells', description, { z: opts.get_selected_z(), group_id: active_group_id }, pending_changes);
+    logGroupCellAction(opts.history, 'draw_cells', description, { z: opts.get_selected_z(), group_id: active_group_id }, pending_changes);
     opts.on_commit_cell_changes?.({
       action_type: 'draw_cells',
       description,
@@ -895,7 +895,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     if (pending_changes.length < 1) return;
     const committed_changes = pending_changes.map((change) => ({ ...change, oldCell: { ...change.oldCell }, newCell: { ...change.newCell } }));
     const active_group_id = requireActiveGroupId();
-    logCellAction(opts.history, action_type, description, { z, group_id: active_group_id }, pending_changes);
+    logGroupCellAction(opts.history, action_type, description, { z, group_id: active_group_id }, pending_changes);
     opts.on_commit_cell_changes?.({ action_type, description, z, group_id: active_group_id, changes: committed_changes });
     pending_changes = [];
     clearLiveStrokePreview();
@@ -1130,7 +1130,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     
     // Also add to batch if batching
     if (is_drawing_batch) {
-      addToBatch(opts.history, { x, y, worldX: world.x, worldY: world.y, worldZ: world.z, group_id, oldCell, newCell });
+      addToGroupBatch(opts.history, { x, y, worldX: world.x, worldY: world.y, worldZ: world.z, group_id, oldCell, newCell });
     }
     return true;
   }

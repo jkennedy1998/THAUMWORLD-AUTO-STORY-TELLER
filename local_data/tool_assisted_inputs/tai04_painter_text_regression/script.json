@@ -1,0 +1,28 @@
+{
+  "id": "painter_text_regression",
+  "test_name": "paint_test_text_tool_nav_paste_enter_and_undo",
+  "clock_mode": "realtime_ms",
+  "open_ms": 14000,
+  "description": "Boot the painter into a new painting, enter text mode, verify typed text, arrow navigation, newline retargeting, paste, and undo.",
+  "start_delay_ms": 1800,
+  "end_delay_ms": 1000,
+  "actions": [
+    { "at_ms": 0, "type": "pointer_move", "space": "grid", "x": 60, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 50, "type": "capture_painter_interaction_anchor", "slot": "anchor_start" },
+    { "at_ms": 120, "type": "pointer_move", "space": "grid", "x": 60, "y": 25, "pointer_action": "primary" },
+    { "at_ms": 170, "type": "capture_painter_interaction_anchor", "slot": "anchor_next_line" },
+    { "at_ms": 400, "type": "key_tap", "code": "KeyT", "key": "t", "hold_ms": 30 },
+    { "at_ms": 700, "type": "pointer_click", "space": "grid", "x": 60, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 1000, "type": "capture_painter_anchor_cell", "slot": "start_before", "anchor_slot": "anchor_start" },
+    { "at_ms": 1200, "type": "text_input", "text": "PA" },
+    { "at_ms": 1600, "type": "assert_painter_anchor_cell_changed", "slot": "start_before", "anchor_slot": "anchor_start" },
+    { "at_ms": 1800, "type": "key_tap", "code": "ArrowRight", "key": "ArrowRight", "hold_ms": 30 },
+    { "at_ms": 2100, "type": "key_tap", "code": "Enter", "key": "Enter", "hold_ms": 30 },
+    { "at_ms": 2500, "type": "capture_painter_anchor_cell", "slot": "next_before", "anchor_slot": "anchor_next_line" },
+    { "at_ms": 2700, "type": "text_input", "text": "ST" },
+    { "at_ms": 3100, "type": "assert_painter_anchor_cell_changed", "slot": "next_before", "anchor_slot": "anchor_next_line" },
+    { "at_ms": 3400, "type": "text_input", "text": "\nOK" },
+    { "at_ms": 4000, "type": "key_tap", "code": "Escape", "key": "Escape", "hold_ms": 30 },
+    { "at_ms": 4500, "type": "key_tap", "code": "KeyZ", "key": "z", "ctrl": true, "hold_ms": 30 }
+  ]
+}

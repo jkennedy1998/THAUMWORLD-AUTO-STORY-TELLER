@@ -48,6 +48,12 @@ export {
 export type { HistoryManager } from './history.js';
 export {
   createHistoryManager,
+  logGroupCellAction,
+  canUndoGroup,
+  canRedoGroup,
+  getGroupHistoryState,
+  popUndoGroupAction,
+  popRedoGroupAction,
   undoLegacyHistory,
   redoLegacyHistory,
   canUndo,

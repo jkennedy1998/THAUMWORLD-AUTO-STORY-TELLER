@@ -1,0 +1,39 @@
+{
+  "id": "game_movement_smoke",
+  "test_name": "game_test_movement_smoke_hold_tap_swap_jump",
+  "clock_mode": "breath",
+  "open_ms": 22000,
+  "description": "General game movement smoke covering hold, tap, direction swap, and jump while movement traces stay healthy.",
+  "start_delay_ms": 2500,
+  "end_delay_ms": 3000,
+  "boot": {
+    "auto_connect": true,
+    "auto_claim": true,
+    "actor_ref": "actor.ent_ZPHB7TZ3AV"
+  },
+  "actions": [
+    { "at_breath": 0, "type": "assert_context_ready" },
+    { "at_breath": 1, "type": "capture_actor_tile", "slot": "start_tile" },
+    { "at_breath": 3, "type": "key_down", "code": "KeyW", "key": "w" },
+    { "at_breath": 10, "type": "capture_movement_trace", "slot": "trace_hold_w" },
+    { "at_breath": 10, "type": "assert_movement_trace_ready", "min_input_seq": 1, "require_direction": true, "require_gate": "ok" },
+    { "at_breath": 12, "type": "capture_actor_tile", "slot": "tile_after_hold_w" },
+    { "at_breath": 12, "type": "assert_actor_tile_changed", "slot": "start_tile" },
+    { "at_breath": 13, "type": "key_up", "code": "KeyW", "key": "w" },
+    { "at_breath": 16, "type": "capture_actor_tile", "slot": "tile_before_tap_d" },
+    { "at_breath": 17, "type": "key_tap", "code": "KeyD", "key": "d", "hold_ms": 30 },
+    { "at_breath": 21, "type": "capture_actor_tile", "slot": "tile_after_tap_d" },
+    { "at_breath": 21, "type": "assert_actor_tile_changed", "slot": "tile_before_tap_d" },
+    { "at_breath": 23, "type": "key_down", "code": "KeyW", "key": "w" },
+    { "at_breath": 26, "type": "key_up", "code": "KeyW", "key": "w" },
+    { "at_breath": 27, "type": "key_down", "code": "KeyD", "key": "d" },
+    { "at_breath": 30, "type": "capture_movement_trace", "slot": "trace_after_swap" },
+    { "at_breath": 30, "type": "assert_movement_trace_ready", "min_input_seq": 1, "require_direction": true, "require_gate": "ok" },
+    { "at_breath": 31, "type": "key_up", "code": "KeyD", "key": "d" },
+    { "at_breath": 33, "type": "key_down", "code": "KeyW", "key": "w" },
+    { "at_breath": 34, "type": "key_tap", "code": "Space", "key": " ", "hold_ms": 30 },
+    { "at_breath": 36, "type": "key_up", "code": "KeyW", "key": "w" },
+    { "at_breath": 38, "type": "capture_movement_trace", "slot": "trace_after_jump" },
+    { "at_breath": 38, "type": "assert_movement_trace_ready", "min_input_seq": 1, "require_direction": true, "require_gate": "ok" }
+  ]
+}

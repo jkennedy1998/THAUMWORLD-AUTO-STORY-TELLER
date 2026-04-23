@@ -33,6 +33,15 @@ export type ResolveVoxelWinnerResult = {
 
 type PainterDocumentBounds = PainterDocument['bounds'];
 
+type PainterVoxelExtents = {
+  minX: number;
+  minY: number;
+  minZ: number;
+  maxX: number;
+  maxY: number;
+  maxZ: number;
+};
+
 function touch_modified_at(document: PainterDocument): void {
   if (document.metadata) document.metadata.modified_at = new Date().toISOString();
 }
@@ -71,7 +80,7 @@ function normalize_document_bounds(bounds: PainterDocument['bounds']): PainterDo
   };
 }
 
-export function derive_painter_occupied_bounds(runtime: PainterDocumentRuntime): PainterOccupiedBounds | null {
+function scan_runtime_voxel_extents(runtime: PainterDocumentRuntime): PainterVoxelExtents | null {
   let minX = Number.POSITIVE_INFINITY;
   let minY = Number.POSITIVE_INFINITY;
   let minZ = Number.POSITIVE_INFINITY;
@@ -90,6 +99,41 @@ export function derive_painter_occupied_bounds(runtime: PainterDocumentRuntime):
   }
   if (!Number.isFinite(minX)) return null;
   return { minX, minY, minZ, maxX, maxY, maxZ };
+}
+
+export function derive_painter_occupied_bounds(runtime: PainterDocumentRuntime): PainterOccupiedBounds | null {
+  const extents = scan_runtime_voxel_extents(runtime);
+  if (!extents) return null;
+  return { ...extents };
+}
+
+function derive_painter_document_bounds(runtime: PainterDocumentRuntime): PainterDocumentBounds {
+  const extents = scan_runtime_voxel_extents(runtime);
+  if (!extents) {
+    return {
+      minX: 0,
+      minY: 0,
+      width: 1,
+      height: 1,
+      depth: 1,
+      minZ: 0,
+      maxZ: 0,
+    };
+  }
+  return {
+    minX: extents.minX,
+    minY: extents.minY,
+    width: Math.max(1, extents.maxX - extents.minX + 1),
+    height: Math.max(1, extents.maxY - extents.minY + 1),
+    depth: Math.max(1, extents.maxZ - extents.minZ + 1),
+    minZ: extents.minZ,
+    maxZ: extents.maxZ,
+  };
+}
+
+function refresh_document_extents(runtime: PainterDocumentRuntime): void {
+  runtime.document.bounds = derive_painter_document_bounds(runtime);
+  runtime.document.occupied_bounds = derive_painter_occupied_bounds(runtime);
 }
 
 export function resolve_painter_voxel_winner(runtime: PainterDocumentRuntime, coordKey: PainterCoordKey): ResolveVoxelWinnerResult {
@@ -153,7 +197,7 @@ export function normalize_painter_document_runtime(document: PainterDocument): P
     coordinate_group_index: coordinateGroupIndex,
     resolved_visible_index: new Map<string, ResolvedPainterVoxel>(),
   };
-  runtime.document.occupied_bounds = derive_painter_occupied_bounds(runtime);
+  refresh_document_extents(runtime);
   for (const key of coordinateGroupIndex.keys()) rebuild_winner_for_coord(runtime, key);
   return runtime;
 }
@@ -178,7 +222,7 @@ export function set_group_voxel(runtime: PainterDocumentRuntime, groupId: string
   runtime.coordinate_group_index.set(normalized.key, contributors);
   set_group_voxel_array(group, voxelMap);
   touch_modified_at(runtime.document);
-  runtime.document.occupied_bounds = derive_painter_occupied_bounds(runtime);
+  refresh_document_extents(runtime);
   rebuild_winner_for_coord(runtime, normalized.key);
 }
 
@@ -192,7 +236,7 @@ export function erase_group_voxel(runtime: PainterDocumentRuntime, groupId: stri
   if (nextContributors.length > 0) runtime.coordinate_group_index.set(coordKey, nextContributors);
   else runtime.coordinate_group_index.delete(coordKey);
   touch_modified_at(runtime.document);
-  runtime.document.occupied_bounds = derive_painter_occupied_bounds(runtime);
+  refresh_document_extents(runtime);
   rebuild_winner_for_coord(runtime, coordKey);
 }
 
@@ -261,7 +305,7 @@ export function remove_painter_group(runtime: PainterDocumentRuntime, groupId: s
   delete runtime.document.groups[groupId];
   runtime.document.group_order = runtime.document.group_order.filter((id) => id !== groupId);
   touch_modified_at(runtime.document);
-  runtime.document.occupied_bounds = derive_painter_occupied_bounds(runtime);
+  refresh_document_extents(runtime);
 }
 
 export function duplicate_painter_group(runtime: PainterDocumentRuntime, groupId: string, newName?: string): PainterGroup {
@@ -282,12 +326,12 @@ export function duplicate_painter_group(runtime: PainterDocumentRuntime, groupId
   }
   runtime.group_voxel_index.set(inserted.id, voxelMap);
   runtime.document.groups[inserted.id] = { ...runtime.document.groups[inserted.id]!, voxels: Array.from(voxelMap.values()).map(clone_painter_voxel_record) };
-  runtime.document.occupied_bounds = derive_painter_occupied_bounds(runtime);
+  refresh_document_extents(runtime);
   touch_modified_at(runtime.document);
   return clone_painter_group(runtime.document.groups[inserted.id]!);
 }
 
 export function export_painter_document(runtime: PainterDocumentRuntime): PainterDocument {
-  runtime.document.occupied_bounds = derive_painter_occupied_bounds(runtime);
+  refresh_document_extents(runtime);
   return clone_painter_document(runtime.document);
 }

@@ -1,0 +1,25 @@
+{
+  "id": "painter_launch_and_tools_smoke",
+  "test_name": "paint_test_launch_new_and_basic_tool_smoke",
+  "clock_mode": "realtime_ms",
+  "open_ms": 14000,
+  "description": "Boot the painter into a new painting through TAI startup, assign tools, draw, erase, and drag draw as a general painter smoke.",
+  "start_delay_ms": 1800,
+  "end_delay_ms": 1200,
+  "actions": [
+    { "at_ms": 0, "type": "capture_painter_tool_state", "slot": "start_tools" },
+    { "at_ms": 100, "type": "key_tap", "code": "KeyP", "key": "p", "hold_ms": 30 },
+    { "at_ms": 400, "type": "assert_painter_primary_tool", "tool": "pencil" },
+    { "at_ms": 500, "type": "key_tap", "code": "KeyE", "key": "e", "hold_ms": 30 },
+    { "at_ms": 650, "type": "key_tap", "code": "KeyE", "key": "e", "hold_ms": 30 },
+    { "at_ms": 1000, "type": "assert_painter_secondary_tool", "tool": "eraser" },
+    { "at_ms": 1200, "type": "pointer_move", "space": "grid", "x": 60, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 1400, "type": "capture_painter_anchor_cell", "slot": "before_primary_draw" },
+    { "at_ms": 1650, "type": "pointer_click", "space": "grid", "x": 60, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 2100, "type": "assert_painter_anchor_cell_changed", "slot": "before_primary_draw" },
+    { "at_ms": 2500, "type": "pointer_click", "space": "grid", "x": 60, "y": 24, "pointer_action": "secondary" },
+    { "at_ms": 2900, "type": "assert_painter_anchor_cell_equals", "slot": "before_primary_draw" },
+    { "at_ms": 3200, "type": "key_tap", "code": "KeyP", "key": "p", "hold_ms": 30 },
+    { "at_ms": 3500, "type": "pointer_drag", "space": "grid", "from_x": 60, "from_y": 24, "to_x": 66, "to_y": 24, "steps": 4, "pointer_action": "primary" }
+  ]
+}

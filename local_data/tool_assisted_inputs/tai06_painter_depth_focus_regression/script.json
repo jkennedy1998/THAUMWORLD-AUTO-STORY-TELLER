@@ -1,0 +1,31 @@
+{
+  "id": "painter_depth_focus_regression",
+  "test_name": "paint_test_depth_focus_and_selection_regression",
+  "clock_mode": "realtime_ms",
+  "open_ms": 14000,
+  "description": "Boot the painter into a new painting, verify camera depth focus stability during held and secondary interactions, and ensure display focus follows camera depth correctly.",
+  "start_delay_ms": 1800,
+  "end_delay_ms": 1000,
+  "actions": [
+    { "at_ms": 0, "type": "invoke_helper", "helper": "reset_painter_document" },
+    { "at_ms": 400, "type": "key_tap", "code": "KeyP", "key": "p", "hold_ms": 30 },
+    { "at_ms": 700, "type": "assert_painter_primary_tool", "tool": "pencil" },
+    { "at_ms": 900, "type": "capture_text_value", "slot": "camera_target_before_hold", "source": "runtime_value", "field": "camera_target_plane" },
+    { "at_ms": 950, "type": "assert_text_value_equals", "slot": "camera_target_before_hold", "source": "runtime_value", "field": "display_focus_plane" },
+    { "at_ms": 1150, "type": "pointer_move", "space": "grid", "x": 60, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 1300, "type": "pointer_down", "space": "grid", "x": 60, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 1600, "type": "wheel", "space": "grid", "x": 60, "y": 24, "delta_x": 0, "delta_y": -120 },
+    { "at_ms": 1900, "type": "capture_text_value", "slot": "camera_target_after_wheel", "source": "runtime_value", "field": "camera_target_plane" },
+    { "at_ms": 1950, "type": "assert_text_value_changed", "slot": "camera_target_before_hold", "source": "runtime_value", "field": "camera_target_plane" },
+    { "at_ms": 2000, "type": "assert_text_value_equals", "slot": "camera_target_after_wheel", "source": "runtime_value", "field": "display_focus_plane" },
+    { "at_ms": 2200, "type": "pointer_move", "space": "grid", "x": 66, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 2500, "type": "pointer_up", "space": "grid", "x": 66, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 2800, "type": "pointer_move", "space": "grid", "x": 60, "y": 24, "pointer_action": "secondary" },
+    { "at_ms": 3000, "type": "pointer_click", "space": "grid", "x": 60, "y": 24, "pointer_action": "secondary" },
+    { "at_ms": 3300, "type": "pointer_down", "space": "grid", "x": 60, "y": 24, "pointer_action": "secondary" },
+    { "at_ms": 3600, "type": "wheel", "space": "grid", "x": 60, "y": 24, "delta_x": 0, "delta_y": -120 },
+    { "at_ms": 3900, "type": "pointer_move", "space": "grid", "x": 66, "y": 24, "pointer_action": "secondary" },
+    { "at_ms": 4200, "type": "pointer_up", "space": "grid", "x": 66, "y": 24, "pointer_action": "secondary" },
+    { "at_ms": 4600, "type": "assert_text_value_equals", "slot": "camera_target_after_wheel", "source": "runtime_value", "field": "display_focus_plane" }
+  ]
+}
