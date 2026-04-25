@@ -4841,6 +4841,24 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         authority_mode: sync_state.authority_mode,
         lifecycle: sync_state.lifecycle,
       });
+      if (sync_state.authority_mode !== 'authoritative_host' || !sync_state.bootstrap?.session_token) {
+        console.error('[PAINTER_LAUNCH]', JSON.stringify({
+          event: 'host_bootstrap_blocked',
+          intent_kind: intent.kind,
+          authority_mode: sync_state.authority_mode,
+          lifecycle: sync_state.lifecycle,
+          session_token_present: Boolean(sync_state.bootstrap?.session_token),
+          error: sync_state.bootstrap?.error ?? null,
+        }));
+        throw new Error(`painter_host_bootstrap_not_authoritative:${sync_state.bootstrap?.error ?? sync_state.authority_mode}`);
+      }
+      console.log('[PAINTER_LAUNCH]', JSON.stringify({
+        event: 'host_bootstrap_authoritative_ready',
+        intent_kind: intent.kind,
+        authority_mode: sync_state.authority_mode,
+        lifecycle: sync_state.lifecycle,
+        session_token_present: true,
+      }));
       current_session_role = 'host';
       console.log('[PAINTER_LAUNCH]', JSON.stringify({ event: 'launch_role_assigned', intent_kind: intent.kind, role: current_session_role }));
       if (intent.kind === 'new_document') {

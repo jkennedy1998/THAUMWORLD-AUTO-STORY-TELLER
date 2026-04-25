@@ -135,6 +135,19 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
     async bootstrap(force: boolean = false, document_id?: string | null): Promise<PainterSyncState> {
       set_state({ ...state, lifecycle: 'bootstrapping', last_command_error: null });
       const session_state = await session.ensure_ready(force);
+      console.log('[PAINTER_SYNC_BOOTSTRAP]', JSON.stringify({
+        event: 'session_ready_result',
+        slot: options.slot,
+        force,
+        requested_document_id: String(document_id ?? '').trim() || null,
+        authority_mode: session_state.authority_mode,
+        lifecycle: session_state.lifecycle,
+        session_token_present: Boolean(session_state.session_token),
+        connection_id: session_state.connection_id,
+        join_mode: session_state.join_mode,
+        supports_join: session_state.supports_join,
+        error: session_state.error ?? null,
+      }));
       if (session_state.authority_mode === 'authoritative_host' && session_state.session_token) {
         ensure_patch_listener();
         const requested_document_id = String(document_id ?? '').trim();
@@ -148,8 +161,24 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
         const response = await fetch(`${options.get_api_base_url()}/painter/document/bootstrap?${query.join('&')}`);
         const data = await response.json().catch(() => null) as any;
         if (!response.ok || !data?.ok) {
+          console.warn('[PAINTER_SYNC_BOOTSTRAP]', JSON.stringify({
+            event: 'document_bootstrap_failed',
+            slot: options.slot,
+            force,
+            requested_document_id,
+            status: response.status,
+            error: data?.error ?? null,
+          }));
           throw new Error(String(data?.error ?? `painter_document_bootstrap_failed:${response.status}`));
         }
+        console.log('[PAINTER_SYNC_BOOTSTRAP]', JSON.stringify({
+          event: 'document_bootstrap_succeeded',
+          slot: options.slot,
+          force,
+          requested_document_id,
+          document_id: String(data?.document_id ?? session_state.document_id),
+          revision: Number(data?.revision ?? 0) || 0,
+        }));
         set_state({
           authority_mode: 'authoritative_host',
           lifecycle: 'ready',
@@ -177,6 +206,16 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
         });
         return state;
       }
+      console.warn('[PAINTER_SYNC_BOOTSTRAP]', JSON.stringify({
+        event: 'session_not_authoritative',
+        slot: options.slot,
+        force,
+        requested_document_id: String(document_id ?? '').trim() || null,
+        authority_mode: session_state.authority_mode,
+        lifecycle: session_state.lifecycle,
+        session_token_present: Boolean(session_state.session_token),
+        error: session_state.error ?? null,
+      }));
       return state;
     },
     async submit_cell_changes(group_id: string, changes: Array<{ x: number; y: number; z: number; cell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number; render_index?: number } }>): Promise<PainterSyncState> {

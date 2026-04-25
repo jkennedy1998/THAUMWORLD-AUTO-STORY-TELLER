@@ -17,6 +17,19 @@ type PainterMultiplayerSessionOptions = {
 
 type SessionSubscriber = (state: PainterMultiplayerSessionState) => void;
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function get_boot_role(): string {
+  return String((window as Window).electronAPI?.bootRole ?? '').trim().toLowerCase();
+}
+
+function is_local_host_transport(transport: MultiplayerTransportConfig): boolean {
+  const host = String(transport.host_input ?? '').trim().toLowerCase();
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === 'local';
+}
+
 function resolve_painter_transport(options: PainterMultiplayerSessionOptions): MultiplayerTransportConfig {
   const api_url = new URL(options.get_api_base_url());
   const bridge_ws_url = new URL(options.get_bridge_ws_base_url());
@@ -134,44 +147,77 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
     bootstrap_promise = (async () => {
       set_state({ ...state, lifecycle: 'connecting', error: null });
       const transport = resolve_painter_transport(options);
+      const boot_role = get_boot_role();
+      const strict_local_host_boot = boot_role === 'host' && is_local_host_transport(transport);
+      const max_attempts = strict_local_host_boot ? 8 : 1;
       debug_log('[PAINTER_SESSION]', 'bootstrapping painter multiplayer session', {
         slot: options.slot,
         force,
         reconnect_token_storage_key: options.reconnect_token_storage_key,
         api_base_url: transport.api_base_url,
         bridge_ws_base_url: transport.bridge_ws_base_url,
+        boot_role,
+        strict_local_host_boot,
+        max_attempts,
       });
       console.log('[PAINTER_SESSION_BOOT]', JSON.stringify({
         slot: options.slot,
         force,
         api_base_url: transport.api_base_url,
         bridge_ws_base_url: transport.bridge_ws_base_url,
+        boot_role,
+        strict_local_host_boot,
+        max_attempts,
       }));
-      console.log('[JOIN_CONNECT]', JSON.stringify({
-        event: 'painter_host_status_started',
-        slot: options.slot,
-        api_base_url: transport.api_base_url,
-        bridge_ws_base_url: transport.bridge_ws_base_url,
-      }));
-      const host_status = await fetch_host_status(options.slot, transport);
-      console.log('[JOIN_CONNECT]', JSON.stringify({
-        event: 'painter_host_status_completed',
-        slot: options.slot,
-        api_base_url: transport.api_base_url,
-        supports_join: Boolean(host_status?.supports_join),
-        join_mode: host_status?.join_mode ?? null,
-        host_mode: host_status?.host_mode ?? null,
-        painter_document_id: host_status?.painter_document_id ?? null,
-      }));
+      let host_status: Awaited<ReturnType<typeof fetch_host_status>> = null;
+      for (let attempt = 1; attempt <= max_attempts; attempt += 1) {
+        console.log('[JOIN_CONNECT]', JSON.stringify({
+          event: 'painter_host_status_started',
+          slot: options.slot,
+          api_base_url: transport.api_base_url,
+          bridge_ws_base_url: transport.bridge_ws_base_url,
+          attempt,
+          max_attempts,
+          boot_role,
+        }));
+        host_status = await fetch_host_status(options.slot, transport);
+        console.log('[JOIN_CONNECT]', JSON.stringify({
+          event: 'painter_host_status_completed',
+          slot: options.slot,
+          api_base_url: transport.api_base_url,
+          attempt,
+          max_attempts,
+          supports_join: Boolean(host_status?.supports_join),
+          join_mode: host_status?.join_mode ?? null,
+          host_mode: host_status?.host_mode ?? null,
+          painter_document_id: host_status?.painter_document_id ?? null,
+        }));
+        if (host_status?.ok && host_status.supports_join) break;
+        if (attempt < max_attempts) {
+          console.warn('[PAINTER_SESSION_BOOT]', JSON.stringify({
+            slot: options.slot,
+            reason: 'host_status_retry_wait',
+            attempt,
+            max_attempts,
+            api_base_url: transport.api_base_url,
+            boot_role,
+          }));
+          await sleep(400 * attempt);
+        }
+      }
       if (!host_status?.ok || !host_status.supports_join) {
         debug_warn('[PAINTER_SESSION]', 'local host join unavailable; using local compatibility mode', {
           slot: options.slot,
           host_status,
+          boot_role,
+          strict_local_host_boot,
         });
         console.warn('[PAINTER_SESSION_BOOT]', JSON.stringify({
           slot: options.slot,
           reason: 'host_join_unavailable',
           host_status,
+          boot_role,
+          strict_local_host_boot,
         }));
         return set_state({
           ...state,
@@ -186,28 +232,64 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
         });
       }
       const reconnect_token = read_reconnect_token();
-      console.log('[JOIN_CONNECT]', JSON.stringify({
-        event: 'painter_connect_started',
-        slot: options.slot,
-        api_base_url: transport.api_base_url,
-        bridge_ws_base_url: transport.bridge_ws_base_url,
-        reconnect_token_present: Boolean(reconnect_token),
-      }));
-      const response = await fetch(`${transport.api_base_url}/connect`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ slot: options.slot, reconnect_token }),
-      });
-      const data = await response.json().catch(() => null) as any;
-      if (!response.ok || !data?.ok) {
-        console.warn('[JOIN_CONNECT]', JSON.stringify({
-          event: 'painter_connect_failed',
+      let response: Response | null = null;
+      let data: any = null;
+      let last_connect_error: string | null = null;
+      for (let attempt = 1; attempt <= max_attempts; attempt += 1) {
+        console.log('[JOIN_CONNECT]', JSON.stringify({
+          event: 'painter_connect_started',
           slot: options.slot,
-          status: response.status,
           api_base_url: transport.api_base_url,
-          error: data?.error ?? null,
+          bridge_ws_base_url: transport.bridge_ws_base_url,
+          reconnect_token_present: Boolean(reconnect_token),
+          attempt,
+          max_attempts,
+          boot_role,
         }));
-        throw new Error(String(data?.error ?? `painter_connect_failed:${response.status}`));
+        try {
+          response = await fetch(`${transport.api_base_url}/connect`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ slot: options.slot, reconnect_token }),
+          });
+          data = await response.json().catch(() => null) as any;
+          if (response.ok && data?.ok) break;
+          last_connect_error = String(data?.error ?? `painter_connect_failed:${response.status}`);
+          console.warn('[JOIN_CONNECT]', JSON.stringify({
+            event: 'painter_connect_failed',
+            slot: options.slot,
+            status: response.status,
+            api_base_url: transport.api_base_url,
+            error: data?.error ?? null,
+            attempt,
+            max_attempts,
+          }));
+        } catch (error) {
+          last_connect_error = error instanceof Error ? error.message : String(error);
+          console.warn('[JOIN_CONNECT]', JSON.stringify({
+            event: 'painter_connect_error',
+            slot: options.slot,
+            api_base_url: transport.api_base_url,
+            message: last_connect_error,
+            attempt,
+            max_attempts,
+          }));
+        }
+        if (attempt < max_attempts) {
+          console.warn('[PAINTER_SESSION_BOOT]', JSON.stringify({
+            slot: options.slot,
+            reason: 'connect_retry_wait',
+            attempt,
+            max_attempts,
+            api_base_url: transport.api_base_url,
+            boot_role,
+            last_connect_error,
+          }));
+          await sleep(400 * attempt);
+        }
+      }
+      if (!response?.ok || !data?.ok) {
+        throw new Error(last_connect_error ?? `painter_connect_failed:${response?.status ?? 'unknown'}`);
       }
       const session_token = String(data?.session_token ?? '').trim();
       if (!session_token) throw new Error('painter_connect_invalid_session_token');
@@ -259,7 +341,7 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
       const message = error instanceof Error ? error.message : String(error);
       debug_warn('[PAINTER_SESSION]', 'multiplayer bootstrap failed; using local compatibility mode', { message, slot: options.slot });
       console.warn('[PAINTER_SESSION_BOOT]', JSON.stringify({
-        slot: options.slot,
+          slot: options.slot,
         reason: 'bootstrap_failed',
         message,
         stack: error instanceof Error ? error.stack ?? null : null,
