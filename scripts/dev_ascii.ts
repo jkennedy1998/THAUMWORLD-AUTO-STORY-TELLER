@@ -26,7 +26,8 @@ const args = process.argv.slice(2);
 const slot_arg = args.find((arg) => arg.startsWith("--slot="));
 const data_slot = slot_arg ? parseInt(slot_arg.split("=")[1] ?? "1", 10) : 1;
 const mode_arg = args.find((arg) => arg.startsWith("--mode="));
-const launch_mode = (mode_arg ? String(mode_arg.split("=")[1] ?? "smart") : "smart").trim().toLowerCase();
+const launch_mode_raw = (mode_arg ? String(mode_arg.split("=")[1] ?? "smart") : "smart").trim().toLowerCase();
+const launch_mode = launch_mode_raw === 'host-only' ? 'host-only' : launch_mode_raw;
 const tai_id_arg = args.find((arg) => arg.startsWith("--tai-id="));
 const tai_id = tai_id_arg ? String(tai_id_arg.split("=")[1] ?? "").trim() : "";
 const host_arg = args.find((arg) => arg.startsWith("--host="));
@@ -242,10 +243,15 @@ function startPainterClientProcesses(viteExists: boolean, bootRole: 'host' | 'cl
   }, viteExists ? 1000 : 5000);
 }
 
+function logLaunchDecision(payload: Record<string, unknown>): void {
+  appendToLog(formatLogEntry("LAUNCHER", "INFO", `Painter launch decision ${JSON.stringify(payload)}`));
+}
+
 async function startPainter(): Promise<void> {
   console.log("Starting painter...");
   const hostProbeOptions = remote_transport ? { apiBaseUrl: remote_transport.api_base_url } : undefined;
   let hostExists = remote_transport ? await detectHost(data_slot, hostProbeOptions) : await detectLocalHost(data_slot);
+  const initialHostExists = hostExists;
   const viteExists = await detectPainterVite();
   appendToLog(formatLogEntry("LAUNCHER", "INFO", `Painter launch host probe ${JSON.stringify({
     data_slot,
@@ -259,15 +265,84 @@ async function startPainter(): Promise<void> {
     hostExists = await detectLocalHost(data_slot);
   }
   let rendererBootRole: 'host' | 'client' = 'client';
+  let spawnRenderer = true;
+  let startHostServices = false;
+  let lockAcquired = false;
+  let decisionReason = 'unresolved';
+  let hostLockPath: string | null = null;
+
+  if ((launch_mode === 'host' || launch_mode === 'host-only') && remote_transport) {
+    throw new Error(`invalid_launch_mode_host_with_remote_target:${preferred_host}`);
+  }
+
   if (launch_mode === 'client') {
     rendererBootRole = 'client';
+    spawnRenderer = true;
+    startHostServices = false;
+    decisionReason = remote_transport ? 'explicit_client_remote_attach' : 'explicit_client_local_attach';
     if (remote_transport) {
       hostExists = await waitForHost(data_slot, 20000, hostProbeOptions);
       console.log(`Remote host wait result while attaching: ${hostExists ? 'ready' : 'not_reachable'}`);
+      if (!hostExists) decisionReason = 'explicit_client_remote_unreachable';
     }
-  } else if (launch_mode === 'host' || !hostExists) {
+  } else if (launch_mode === 'host' || launch_mode === 'host-only') {
+    if (hostExists) {
+      decisionReason = 'host_blocked_existing_host';
+      logLaunchDecision({
+        data_slot,
+        launch_mode,
+        host_exists_initial: initialHostExists,
+        host_exists_final: hostExists,
+        lock_acquired: false,
+        remote_transport: preferred_host || null,
+        renderer_boot_role: null,
+        spawn_renderer: false,
+        start_host_services: false,
+        decision_reason: decisionReason,
+      });
+      throw new Error(`painter_host_mode_conflict_existing_host:slot_${data_slot}`);
+    }
     const lock = acquireHostLaunchLock(baseDir, data_slot);
+    hostLockPath = lock.lockPath;
+    if (!lock.ok) {
+      decisionReason = 'host_blocked_lock_lost';
+      logLaunchDecision({
+        data_slot,
+        launch_mode,
+        host_exists_initial: initialHostExists,
+        host_exists_final: hostExists,
+        lock_acquired: false,
+        remote_transport: preferred_host || null,
+        renderer_boot_role: null,
+        spawn_renderer: false,
+        start_host_services: false,
+        decision_reason: decisionReason,
+        lock_path: lock.lockPath,
+      });
+      throw new Error(`painter_host_mode_lock_conflict:slot_${data_slot}`);
+    }
+    lockAcquired = true;
+    console.log(`Host lock acquired at ${lock.lockPath}`);
+    appendToLog(formatLogEntry("LAUNCHER", "INFO", `Painter host owner elected ${JSON.stringify({
+      data_slot,
+      lock_path: lock.lockPath,
+      session_id: sessionId,
+    })}`));
+    writePainterHostSessionMetadata();
+    startPainterHostProcesses();
+    setTimeout(() => releaseHostLaunchLock(lock.lockPath), 20000);
+    startHostServices = true;
+    hostExists = await waitForLocalHost(data_slot, 20000);
+    console.log(`Host wait result after start: ${hostExists ? 'ready' : 'not_reachable'}`);
+    rendererBootRole = 'host';
+    spawnRenderer = launch_mode === 'host';
+    decisionReason = launch_mode === 'host' ? 'explicit_host_started' : 'explicit_host_only_started';
+    if (!hostExists) decisionReason = launch_mode === 'host' ? 'explicit_host_unreachable_after_start' : 'explicit_host_only_unreachable_after_start';
+  } else if (!hostExists) {
+    const lock = acquireHostLaunchLock(baseDir, data_slot);
+    hostLockPath = lock.lockPath;
     if (lock.ok) {
+      lockAcquired = true;
       console.log(`Host lock acquired at ${lock.lockPath}`);
       appendToLog(formatLogEntry("LAUNCHER", "INFO", `Painter host owner elected ${JSON.stringify({
         data_slot,
@@ -277,9 +352,12 @@ async function startPainter(): Promise<void> {
       writePainterHostSessionMetadata();
       startPainterHostProcesses();
       setTimeout(() => releaseHostLaunchLock(lock.lockPath), 20000);
+      startHostServices = true;
       hostExists = await waitForLocalHost(data_slot, 20000);
-      rendererBootRole = 'host';
       console.log(`Host wait result after start: ${hostExists ? 'ready' : 'not_reachable'}`);
+      rendererBootRole = 'host';
+      spawnRenderer = true;
+      decisionReason = hostExists ? 'smart_started_local_host' : 'smart_started_local_host_unreachable';
     } else {
       console.log('Another launcher is starting the local host; waiting to attach...');
       appendToLog(formatLogEntry("LAUNCHER", "INFO", `Painter attach waiting for existing host ${JSON.stringify({
@@ -287,11 +365,16 @@ async function startPainter(): Promise<void> {
         lock_path: lock.lockPath,
       })}`));
       hostExists = await waitForLocalHost(data_slot, 20000);
-      rendererBootRole = 'client';
       console.log(`Host wait result while attaching: ${hostExists ? 'ready' : 'not_reachable'}`);
+      rendererBootRole = 'client';
+      spawnRenderer = true;
+      decisionReason = hostExists ? 'smart_attached_existing_host' : 'smart_existing_host_unreachable';
     }
   } else {
     rendererBootRole = 'client';
+    spawnRenderer = true;
+    startHostServices = false;
+    decisionReason = remote_transport ? 'smart_remote_attach' : 'smart_attached_existing_host';
     console.log(remote_transport ? 'Remote host detected; attaching painter client only' : 'Local host detected; attaching painter client only');
     appendToLog(formatLogEntry("LAUNCHER", "INFO", `Painter attach-only launch ${JSON.stringify({
       data_slot,
@@ -300,7 +383,22 @@ async function startPainter(): Promise<void> {
       preferred_host: preferred_host || null,
     })}`));
   }
-  if (launch_mode === 'host') {
+
+  logLaunchDecision({
+    data_slot,
+    launch_mode,
+    host_exists_initial: initialHostExists,
+    host_exists_final: hostExists,
+    lock_acquired: lockAcquired,
+    lock_path: hostLockPath,
+    remote_transport: preferred_host || null,
+    renderer_boot_role: spawnRenderer ? rendererBootRole : null,
+    spawn_renderer: spawnRenderer,
+    start_host_services: startHostServices,
+    decision_reason: decisionReason,
+  });
+
+  if (!spawnRenderer) {
     console.log('Painter host services started');
     console.log("Press Ctrl+C to stop");
     return;
@@ -311,6 +409,7 @@ async function startPainter(): Promise<void> {
     renderer_boot_role: rendererBootRole,
     host_exists: hostExists,
     preferred_host: preferred_host || null,
+    decision_reason: decisionReason,
   })}`));
   startPainterClientProcesses(viteExists, rendererBootRole);
   console.log(hostExists ? 'Painter multiplayer compatibility boot ready' : 'Painter host unavailable; client will fall back locally');
