@@ -154,6 +154,9 @@ function spawnWithLogging(name: string, command: string, args: string[], options
       DEBUG_LEVEL: diag_profile === 'logs' ? '3' : '2',
       THAUM_STARTUP_BOOT_MODE: tai_entry ? 'tas_runtime' : 'manual_shell',
       ...(preferred_host ? {
+        THAUM_JOIN_PREFERRED_HOST: preferred_host,
+      } : {}),
+      ...(preferred_host ? {
         THAUM_TAI_JOIN_HOST: preferred_host,
         THAUM_TAI_JOIN_CONNECTION_KIND: 'saved_manual',
       } : {}),
@@ -227,19 +230,20 @@ function writePainterHostSessionMetadata(): void {
   })}`));
 }
 
-function startPainterClientProcesses(viteExists: boolean, bootRole: 'host' | 'client'): void {
+function startPainterClientProcesses(viteExists: boolean, bootRole: 'host' | 'client', startupJoinAutoOpen: boolean): void {
   appendToLog(formatLogEntry("LAUNCHER", "INFO", `Painter client processes starting ${JSON.stringify({
     data_slot,
     vite_exists: viteExists,
     boot_role: bootRole,
     launch_mode,
     preferred_host: preferred_host || null,
+    startup_join_auto_open: startupJoinAutoOpen,
   })}`));
   if (!viteExists) {
-    spawnWithLogging("vite", "npx", ["vite", "--config", "vite.painter.config.ts"], { env: { THAUM_BOOT_ROLE: bootRole } });
+    spawnWithLogging("vite", "npx", ["vite", "--config", "vite.painter.config.ts"], { env: { THAUM_BOOT_ROLE: bootRole, THAUM_JOIN_AUTO_OPEN: startupJoinAutoOpen ? 'true' : 'false' } });
   }
   setTimeout(() => {
-    spawnWithLogging("electron", "npx", ["electron", "."], { env: { THAUM_BOOT_ROLE: bootRole } });
+    spawnWithLogging("electron", "npx", ["electron", "."], { env: { THAUM_BOOT_ROLE: bootRole, THAUM_JOIN_AUTO_OPEN: startupJoinAutoOpen ? 'true' : 'false' } });
   }, viteExists ? 1000 : 5000);
 }
 
@@ -265,6 +269,7 @@ async function startPainter(): Promise<void> {
     hostExists = await detectLocalHost(data_slot);
   }
   let rendererBootRole: 'host' | 'client' = 'client';
+  let startupJoinAutoOpen = false;
   let spawnRenderer = true;
   let startHostServices = false;
   let lockAcquired = false;
@@ -280,6 +285,7 @@ async function startPainter(): Promise<void> {
     spawnRenderer = true;
     startHostServices = false;
     decisionReason = remote_transport ? 'explicit_client_remote_attach' : 'explicit_client_local_attach';
+    startupJoinAutoOpen = Boolean(preferred_host);
     if (remote_transport) {
       hostExists = await waitForHost(data_slot, 20000, hostProbeOptions);
       console.log(`Remote host wait result while attaching: ${hostExists ? 'ready' : 'not_reachable'}`);
@@ -334,9 +340,10 @@ async function startPainter(): Promise<void> {
     startHostServices = true;
     hostExists = await waitForLocalHost(data_slot, 20000);
     console.log(`Host wait result after start: ${hostExists ? 'ready' : 'not_reachable'}`);
-    rendererBootRole = 'host';
-    spawnRenderer = launch_mode === 'host';
-    decisionReason = launch_mode === 'host' ? 'explicit_host_started' : 'explicit_host_only_started';
+      rendererBootRole = 'host';
+      spawnRenderer = launch_mode === 'host';
+      startupJoinAutoOpen = false;
+      decisionReason = launch_mode === 'host' ? 'explicit_host_started' : 'explicit_host_only_started';
     if (!hostExists) decisionReason = launch_mode === 'host' ? 'explicit_host_unreachable_after_start' : 'explicit_host_only_unreachable_after_start';
   } else if (!hostExists) {
     const lock = acquireHostLaunchLock(baseDir, data_slot);
@@ -357,6 +364,7 @@ async function startPainter(): Promise<void> {
       console.log(`Host wait result after start: ${hostExists ? 'ready' : 'not_reachable'}`);
       rendererBootRole = 'host';
       spawnRenderer = true;
+      startupJoinAutoOpen = false;
       decisionReason = hostExists ? 'smart_started_local_host' : 'smart_started_local_host_unreachable';
     } else {
       console.log('Another launcher is starting the local host; waiting to attach...');
@@ -368,12 +376,14 @@ async function startPainter(): Promise<void> {
       console.log(`Host wait result while attaching: ${hostExists ? 'ready' : 'not_reachable'}`);
       rendererBootRole = 'client';
       spawnRenderer = true;
+      startupJoinAutoOpen = false;
       decisionReason = hostExists ? 'smart_attached_existing_host' : 'smart_existing_host_unreachable';
     }
   } else {
     rendererBootRole = 'client';
     spawnRenderer = true;
     startHostServices = false;
+    startupJoinAutoOpen = Boolean(preferred_host);
     decisionReason = remote_transport ? 'smart_remote_attach' : 'smart_attached_existing_host';
     console.log(remote_transport ? 'Remote host detected; attaching painter client only' : 'Local host detected; attaching painter client only');
     appendToLog(formatLogEntry("LAUNCHER", "INFO", `Painter attach-only launch ${JSON.stringify({
@@ -393,6 +403,7 @@ async function startPainter(): Promise<void> {
     lock_path: hostLockPath,
     remote_transport: preferred_host || null,
     renderer_boot_role: spawnRenderer ? rendererBootRole : null,
+    startup_join_auto_open: startupJoinAutoOpen,
     spawn_renderer: spawnRenderer,
     start_host_services: startHostServices,
     decision_reason: decisionReason,
@@ -410,8 +421,9 @@ async function startPainter(): Promise<void> {
     host_exists: hostExists,
     preferred_host: preferred_host || null,
     decision_reason: decisionReason,
+    startup_join_auto_open: startupJoinAutoOpen,
   })}`));
-  startPainterClientProcesses(viteExists, rendererBootRole);
+  startPainterClientProcesses(viteExists, rendererBootRole, startupJoinAutoOpen);
   console.log(hostExists ? 'Painter multiplayer compatibility boot ready' : 'Painter host unavailable; client will fall back locally');
   console.log("Press Ctrl+C to stop");
 }

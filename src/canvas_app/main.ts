@@ -9,6 +9,7 @@ import { PAINTER_CONFIG, create_painter_app_state } from './painter_app_state.js
 import { apply_painter_multiplayer_transport_config } from './painter_runtime_config.js';
 import { create_launch_controller } from '../engine_launch/controller.js';
 import { create_join_controller } from '../engine_launch/join_controller.js';
+import { save_manual_connection } from '../engine_multiplayer/connection_store.js';
 import { create_painter_launch_adapter, resolve_painter_tai_boot_intent, resolve_painter_tai_join_request } from './painter_launch_adapter.js';
 import type { PainterLaunchIntent } from './painter_launch_types.js';
 import { diag_log } from '../shared/diagnostics.js';
@@ -17,6 +18,8 @@ import type { ToolAssistedInputsJoinSnapshot } from '../mono_ui/runtime/automati
 
 // Detect if we're in painter mode (set by preload script before page loads)
 const IS_PAINTER_MODE = (window as any).electronAPI?.appMode === 'ascii_painter';
+const PAINTER_BOOT_ROLE = String((window as any).electronAPI?.bootRole ?? '').trim().toLowerCase();
+const PAINTER_STARTUP_JOIN_CONFIG = (window as any).electronAPI?.startupJoinConfig ?? {};
 
 const el = document.getElementById('mono_canvas') as HTMLCanvasElement | null;
 if (!el) throw new Error('mono_canvas element not found');
@@ -132,6 +135,10 @@ if (IS_PAINTER_MODE) {
         adapter: create_painter_launch_adapter(),
         on_launch_intent: launchPainterIntent,
         on_join_requested: async () => {
+            if (PAINTER_BOOT_ROLE === 'host') {
+                console.warn('[PAINTER_JOIN_MODE]', JSON.stringify({ event: 'join_ui_blocked_for_host_role', boot_role: PAINTER_BOOT_ROLE }));
+                return;
+            }
             painter_join_visible = true;
             refresh_painter_shell_modules();
             await painter_join_controller?.refresh();
@@ -260,6 +267,40 @@ if (module_registry) {
 
 if (IS_PAINTER_MODE && launch_controller) {
     void (async () => {
+        const preferredStartupHost = String(PAINTER_STARTUP_JOIN_CONFIG?.preferredHost ?? '').trim();
+        const startupJoinAutoOpen = Boolean(PAINTER_STARTUP_JOIN_CONFIG?.autoOpen);
+        if (PAINTER_BOOT_ROLE === 'client' && preferredStartupHost) {
+            try {
+                const saved = save_manual_connection(preferredStartupHost, preferredStartupHost);
+                console.log('[PAINTER_JOIN_STARTUP]', JSON.stringify({
+                    event: 'manual_startup_host_seeded',
+                    boot_role: PAINTER_BOOT_ROLE,
+                    preferred_host: preferredStartupHost,
+                    connection_id: saved.id,
+                }));
+            } catch (error) {
+                console.warn('[PAINTER_JOIN_STARTUP]', JSON.stringify({
+                    event: 'manual_startup_host_seed_failed',
+                    boot_role: PAINTER_BOOT_ROLE,
+                    preferred_host: preferredStartupHost,
+                    message: error instanceof Error ? error.message : String(error),
+                }));
+            }
+            if (startupJoinAutoOpen && painter_join_controller) {
+                painter_join_visible = true;
+                refresh_painter_shell_modules();
+                await painter_join_controller.refresh();
+                const selected = painter_join_controller.select_connection_by_host(preferredStartupHost);
+                console.log('[PAINTER_JOIN_STARTUP]', JSON.stringify({
+                    event: 'manual_startup_join_opened',
+                    boot_role: PAINTER_BOOT_ROLE,
+                    preferred_host: preferredStartupHost,
+                    selected,
+                    selected_connection_id: painter_join_controller.get_selected_connection_id(),
+                }));
+                return;
+            }
+        }
         const taiBootIntent = await resolve_painter_tai_boot_intent();
         if (taiBootIntent) {
         await launchPainterIntent?.(taiBootIntent);

@@ -9,6 +9,10 @@ const startupBootMode = process.env.THAUM_STARTUP_BOOT_MODE || 'manual_shell';
 const bootRole = process.env.THAUM_BOOT_ROLE || '';
 const dataSlot = Number(process.env.DATA_SLOT || 1) || 1;
 const clientInstanceId = process.env.THAUM_CLIENT_INSTANCE_ID || '';
+const startupJoinConfig = {
+  preferredHost: process.env.THAUM_JOIN_PREFERRED_HOST || '',
+  autoOpen: process.env.THAUM_JOIN_AUTO_OPEN === 'true',
+};
 const joinAutoJoinEnv = String(process.env.THAUM_TAI_JOIN_AUTO_JOIN || '').trim().toLowerCase();
 const toolAssistedInputsBootConfig = {
   enabled: process.env.THAUM_TAI_ENABLED === 'true',
@@ -55,6 +59,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   clientInstanceId,
   startupBootMode,
   bootRole,
+  startupJoinConfig,
   toolAssistedInputsBootConfig,
 
   // Current gameplay input host implementation. Renderer code uses this as a seam
