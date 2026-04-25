@@ -13838,14 +13838,40 @@ function start_http_server(log_path: string): void {
                     const payload = body ? JSON.parse(body) : {};
                     const slot = Number(payload?.slot ?? data_slot_number) || data_slot_number;
                     const session_token = String(payload?.session_token ?? "").trim();
+                    console.log('[HOSTED_PAINTER_SESSION]', JSON.stringify({
+                        event: 'request_received',
+                        method: req.method,
+                        slot,
+                        remote_address: req.socket.remoteAddress ?? null,
+                        remote_port: req.socket.remotePort ?? null,
+                        session_token_present: Boolean(session_token),
+                        document_id: String(payload?.document_id ?? '').trim() || null,
+                        display_name: String(payload?.display_name ?? '').trim() || null,
+                        file_backed: Boolean(payload?.file_backed),
+                    }));
                     const session = resolve_multiplayer_session_by_token(slot, session_token);
-                    if (!session) throw new Error("invalid_session_token");
+                    if (!session) {
+                        console.warn('[HOSTED_PAINTER_SESSION]', JSON.stringify({
+                            event: 'invalid_session',
+                            method: req.method,
+                            slot,
+                            remote_address: req.socket.remoteAddress ?? null,
+                        }));
+                        throw new Error("invalid_session_token");
+                    }
                     if (req.method === "DELETE") {
                         write_painter_hosted_session(slot, null);
                         void emitBridgeMessage('PAINTER_HOSTED_SESSION_UPDATED', {
                             hosted_session: null,
                             sent_at_ms: Date.now(),
                         });
+                        console.log('[HOSTED_PAINTER_SESSION]', JSON.stringify({
+                            event: 'request_succeeded',
+                            method: req.method,
+                            slot,
+                            remote_address: req.socket.remoteAddress ?? null,
+                            hosted_session: null,
+                        }));
                         res.writeHead(200, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: true }));
                         return;
@@ -13862,11 +13888,25 @@ function start_http_server(log_path: string): void {
                         hosted_session,
                         sent_at_ms: Date.now(),
                     });
+                    console.log('[HOSTED_PAINTER_SESSION]', JSON.stringify({
+                        event: 'request_succeeded',
+                        method: req.method,
+                        slot,
+                        remote_address: req.socket.remoteAddress ?? null,
+                        hosted_session,
+                    }));
                     res.writeHead(200, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: true, hosted_session }));
                 } catch (err: any) {
                     const error = err?.message ?? "painter_hosted_session_failed";
                     const status = error === "invalid_session_token" ? 401 : 500;
+                    console.warn('[HOSTED_PAINTER_SESSION]', JSON.stringify({
+                        event: 'request_failed',
+                        method: req.method,
+                        remote_address: req.socket.remoteAddress ?? null,
+                        error,
+                        status,
+                    }));
                     res.writeHead(status, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error }));
                 }

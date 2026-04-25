@@ -2311,11 +2311,50 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     return current_session_role === 'participant';
   }
 
+  function log_painter_host_flow(event: string, payload: Record<string, unknown> = {}): void {
+    const sync_state = painter_sync.get_state();
+    console.log('[PAINTER_HOST_FLOW]', JSON.stringify({
+      event,
+      slot: PAINTER_APP_CONFIG.selected_data_slot,
+      current_session_role,
+      authority_mode: sync_state.authority_mode,
+      lifecycle: sync_state.lifecycle,
+      session_token_present: Boolean(sync_state.bootstrap?.session_token),
+      document_id: String(sync_state.bootstrap?.document_id ?? '').trim() || get_active_painter_document_id(),
+      current_file_path,
+      current_filename,
+      ...payload,
+    }));
+  }
+
+  function log_painter_hosted_session(event: string, payload: Record<string, unknown> = {}): void {
+    console.log('[PAINTER_HOSTED_SESSION]', JSON.stringify({
+      event,
+      slot: PAINTER_APP_CONFIG.selected_data_slot,
+      api_base_url: PAINTER_APP_CONFIG.api_base_url,
+      current_session_role,
+      current_file_path,
+      current_filename,
+      ...payload,
+    }));
+  }
+
   async function publish_hosted_painter_session_metadata(): Promise<void> {
-    if (!is_multiplayer_host_role()) return;
+    log_painter_hosted_session('publish_entered');
+    if (!is_multiplayer_host_role()) {
+      log_painter_hosted_session('publish_skipped', {
+        reason: 'not_multiplayer_host_role',
+      });
+      return;
+    }
     const sync_state = painter_sync.get_state();
     const session_token = String(sync_state.bootstrap?.session_token ?? '').trim();
-    if (!session_token) return;
+    if (!session_token) {
+      log_painter_hosted_session('publish_skipped', {
+        reason: 'missing_session_token',
+      });
+      return;
+    }
     const payload = {
       slot: PAINTER_APP_CONFIG.selected_data_slot,
       session_token,
@@ -2323,6 +2362,12 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       display_name: current_filename,
       file_backed: Boolean(current_file_path),
     };
+    log_painter_hosted_session('publish_request', {
+      document_id: payload.document_id,
+      display_name: payload.display_name,
+      file_backed: payload.file_backed,
+      session_token_present: true,
+    });
     painterImportant('publishing hosted painter session metadata', payload);
     const response = await fetch(`${PAINTER_APP_CONFIG.api_base_url}/painter/hosted-session`, {
       method: 'POST',
@@ -2330,9 +2375,24 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       body: JSON.stringify(payload),
     });
     const data = await response.json().catch(() => null) as any;
+    log_painter_hosted_session('publish_response', {
+      status: response.status,
+      ok: Boolean(data?.ok),
+      error: data?.error ?? null,
+      hosted_document_id: data?.hosted_session?.document_id ?? null,
+    });
     if (!response.ok || !data?.ok) {
+      log_painter_hosted_session('publish_failed', {
+        status: response.status,
+        error: data?.error ?? null,
+      });
       throw new Error(String(data?.error ?? `painter_hosted_session_publish_failed:${response.status}`));
     }
+    log_painter_hosted_session('publish_succeeded', {
+      hosted_document_id: data?.hosted_session?.document_id ?? payload.document_id,
+      display_name: data?.hosted_session?.display_name ?? payload.display_name,
+      file_backed: data?.hosted_session?.file_backed ?? payload.file_backed,
+    });
   }
 
   async function clear_hosted_painter_session_metadata(): Promise<void> {
@@ -2384,9 +2444,27 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   }
 
   async function sync_hosted_document_authority(document: PainterDocument, source: string): Promise<void> {
-    if (!is_multiplayer_host_role()) return;
-    await replace_authoritative_document_for_all(document, source);
-    await publish_hosted_painter_session_metadata();
+    log_painter_host_flow('sync_authority_started', { source });
+    if (!is_multiplayer_host_role()) {
+      log_painter_host_flow('sync_authority_skipped', { source, reason: 'not_multiplayer_host_role' });
+      return;
+    }
+    try {
+      log_painter_host_flow('replace_started', { source });
+      await replace_authoritative_document_for_all(document, source);
+      log_painter_host_flow('replace_succeeded', { source });
+    } catch (error) {
+      log_painter_host_flow('replace_failed', { source, message: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }
+    try {
+      log_painter_host_flow('publish_started', { source });
+      await publish_hosted_painter_session_metadata();
+      log_painter_host_flow('publish_succeeded', { source });
+    } catch (error) {
+      log_painter_host_flow('publish_failed', { source, message: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }
   }
 
   function return_to_painter_launch_menu(reason: string): void {
@@ -2729,6 +2807,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   }
 
   async function new_file(): Promise<void> {
+    log_painter_host_flow('new_file_started');
     const preservedCameraState = getPainterPreservedCameraState();
     const dir = await getAsciiDrawingsDir();
     if (!dir) {
@@ -2751,7 +2830,14 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       resetPainterHistoryState('new file in-memory fallback');
       clearActiveFileAssociation('untitled', { clearLastUsed: true });
       clearAutoSave();
-      await sync_hosted_document_authority(exportCurrentPainterDocument(), 'host_new_file_memory');
+      log_painter_host_flow('new_file_ready_for_sync', { branch: 'in_memory' });
+      try {
+        await sync_hosted_document_authority(exportCurrentPainterDocument(), 'host_new_file_memory');
+        log_painter_host_flow('new_file_sync_completed', { branch: 'in_memory' });
+      } catch (error) {
+        log_painter_host_flow('new_file_sync_failed', { branch: 'in_memory', message: error instanceof Error ? error.message : String(error) });
+        throw error;
+      }
       return;
     }
 
@@ -2778,7 +2864,14 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     setActiveFileAssociation(filePath);
 
     await writeArtworkToFileAtomic(filePath);
-    await sync_hosted_document_authority(exportCurrentPainterDocument(), 'host_new_file');
+    log_painter_host_flow('new_file_ready_for_sync', { branch: 'file_backed', file_path: filePath });
+    try {
+      await sync_hosted_document_authority(exportCurrentPainterDocument(), 'host_new_file');
+      log_painter_host_flow('new_file_sync_completed', { branch: 'file_backed', file_path: filePath });
+    } catch (error) {
+      log_painter_host_flow('new_file_sync_failed', { branch: 'file_backed', file_path: filePath, message: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }
   }
 
   async function save_file(): Promise<void> {
