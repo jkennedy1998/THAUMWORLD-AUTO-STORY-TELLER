@@ -27,7 +27,8 @@ function get_boot_role(): string {
 
 function is_local_host_transport(transport: MultiplayerTransportConfig): boolean {
   const host = String(transport.host_input ?? '').trim().toLowerCase();
-  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === 'local';
+  const hostname = host.replace(/:\d+$/, '');
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === 'local';
 }
 
 function resolve_painter_transport(options: PainterMultiplayerSessionOptions): MultiplayerTransportConfig {

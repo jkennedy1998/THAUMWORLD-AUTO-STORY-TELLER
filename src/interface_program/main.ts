@@ -10217,25 +10217,61 @@ async function ensure_ollama_running(): Promise<void> {
     const initial = await check_ollama_server(OLLAMA_HOST);
     if (initial.ok) {
         debug_log("Ollama: server already running", { models: initial.models.length });
+        console.log('[OLLAMA]', JSON.stringify({ event: 'server_already_running', host: OLLAMA_HOST, models: initial.models.length }));
         return;
     }
 
     debug_log("Ollama: starting local server");
     try {
         ollama_process = spawn("ollama", ["serve"], { stdio: "ignore", windowsHide: true });
+        ollama_process.on("error", (err) => {
+            debug_warn("Ollama: failed to spawn", { error: err instanceof Error ? err.message : String(err) });
+            console.warn('[OLLAMA]', JSON.stringify({
+                event: 'spawn_failed',
+                host: OLLAMA_HOST,
+                code: (err as NodeJS.ErrnoException)?.code ?? null,
+                message: err instanceof Error ? err.message : String(err),
+                degraded_mode: 'interface_continues_without_ollama',
+            }));
+            ollama_process = null;
+            ollama_spawned = false;
+        });
+        ollama_process.on("exit", (code, signal) => {
+            console.warn('[OLLAMA]', JSON.stringify({
+                event: 'process_exited',
+                host: OLLAMA_HOST,
+                code,
+                signal,
+                degraded_mode: 'interface_continues_without_ollama',
+            }));
+        });
         ollama_spawned = true;
+        console.log('[OLLAMA]', JSON.stringify({ event: 'spawn_started', host: OLLAMA_HOST }));
     } catch (err) {
         debug_warn("Ollama: failed to spawn", { error: err instanceof Error ? err.message : String(err) });
+        console.warn('[OLLAMA]', JSON.stringify({
+            event: 'spawn_threw',
+            host: OLLAMA_HOST,
+            message: err instanceof Error ? err.message : String(err),
+            degraded_mode: 'interface_continues_without_ollama',
+        }));
         return;
     }
 
     const ready = await wait_for_ollama(OLLAMA_HOST, OLLAMA_BOOT_TIMEOUT_MS);
     if (!ready.ok) {
         debug_warn("Ollama: server did not respond in time", { host: OLLAMA_HOST });
+        console.warn('[OLLAMA]', JSON.stringify({
+            event: 'server_not_ready',
+            host: OLLAMA_HOST,
+            timeout_ms: OLLAMA_BOOT_TIMEOUT_MS,
+            degraded_mode: 'interface_continues_without_ollama',
+        }));
         return;
     }
 
     debug_log("Ollama: server ready", { models: ready.models.length });
+    console.log('[OLLAMA]', JSON.stringify({ event: 'server_ready', host: OLLAMA_HOST, models: ready.models.length }));
 }
 
 async function warmup_renderer_model(): Promise<void> {
