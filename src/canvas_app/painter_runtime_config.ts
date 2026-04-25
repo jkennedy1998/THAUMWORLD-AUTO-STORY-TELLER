@@ -7,13 +7,21 @@ import {
 import type { MultiplayerTransportConfig } from '../shared/multiplayer_transport.js';
 import { build_multiplayer_transport_config, normalize_join_host_input, read_browser_manual_join_host } from '../shared/multiplayer_transport.js';
 
+function resolve_painter_boot_role(): string {
+  return String((window as Window).electronAPI?.bootRole ?? '').trim().toLowerCase();
+}
+
+const painter_boot_role = resolve_painter_boot_role();
 const painter_manual_join_host = read_browser_manual_join_host();
+const painter_startup_host = painter_boot_role === 'host' ? 'localhost' : painter_manual_join_host ?? undefined;
 const PAINTER_TRANSPORT = build_multiplayer_transport_config({
-  host: painter_manual_join_host ?? undefined,
+  host: painter_startup_host,
 });
 console.log('[PAINTER_RUNTIME_CONFIG]', JSON.stringify({
   event: 'startup_transport_resolved',
+  boot_role: painter_boot_role || null,
   manual_join_host_raw: painter_manual_join_host ?? null,
+  startup_host_input: painter_startup_host ?? null,
   normalized_manual_join_host: painter_manual_join_host ? normalize_join_host_input(painter_manual_join_host).normalized_host : null,
   api_base_url: PAINTER_TRANSPORT.api_base_url,
   bridge_ws_base_url: PAINTER_TRANSPORT.bridge_ws_base_url,
@@ -57,12 +65,20 @@ export function apply_painter_multiplayer_transport_config(transport: Pick<Multi
   (PAINTER_APP_CONFIG as any).bridge_ws_base_url = String(transport.bridge_ws_base_url ?? '').trim() || PAINTER_APP_CONFIG.bridge_ws_base_url;
   console.log('[PAINTER_RUNTIME_CONFIG]', JSON.stringify({
     event: 'apply_transport',
+    boot_role: painter_boot_role || null,
     host_input: String(transport.host_input ?? '').trim() || null,
     api_base_url: (PAINTER_APP_CONFIG as any).api_base_url,
     bridge_ws_base_url: (PAINTER_APP_CONFIG as any).bridge_ws_base_url,
   }));
   try {
     const host_input = String(transport.host_input ?? '').trim();
+    if (painter_boot_role === 'host') {
+      console.log('[PAINTER_RUNTIME_CONFIG]', JSON.stringify({
+        event: 'skip_manual_host_persist_for_host_role',
+        host_input: host_input || null,
+      }));
+      return;
+    }
     if (host_input && !/^local$/i.test(host_input)) window.localStorage.setItem('thaumworld_manual_join_host', host_input);
   } catch {
     // ignore persistence failures

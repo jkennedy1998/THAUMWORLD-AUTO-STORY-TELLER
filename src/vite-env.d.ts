@@ -39,6 +39,7 @@ interface ElectronAPI {
   dataSlot?: number;
   clientInstanceId?: string;
   startupBootMode?: 'manual_shell' | 'direct_runtime' | 'tas_runtime' | string;
+  bootRole?: string;
   toolAssistedInputsBootConfig?: {
     enabled?: boolean;
     resetState?: boolean;

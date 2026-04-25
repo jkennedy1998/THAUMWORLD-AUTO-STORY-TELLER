@@ -6,6 +6,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 // Determine which mode we're in based on environment variable
 const appMode = process.env.THAUM_APP_MODE || 'game';
 const startupBootMode = process.env.THAUM_STARTUP_BOOT_MODE || 'manual_shell';
+const bootRole = process.env.THAUM_BOOT_ROLE || '';
 const dataSlot = Number(process.env.DATA_SLOT || 1) || 1;
 const clientInstanceId = process.env.THAUM_CLIENT_INSTANCE_ID || '';
 const joinAutoJoinEnv = String(process.env.THAUM_TAI_JOIN_AUTO_JOIN || '').trim().toLowerCase();
@@ -53,6 +54,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   dataSlot,
   clientInstanceId,
   startupBootMode,
+  bootRole,
   toolAssistedInputsBootConfig,
 
   // Current gameplay input host implementation. Renderer code uses this as a seam
