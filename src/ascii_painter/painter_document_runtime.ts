@@ -31,6 +31,15 @@ export type ResolveVoxelWinnerResult = {
   cell: PainterVoxelRecord | null;
 };
 
+export type PainterPreviewCellChange = {
+  x: number;
+  y: number;
+  z: number;
+  char: string;
+  rgb: { r: number; g: number; b: number };
+  weight_index: number;
+};
+
 type PainterDocumentBounds = PainterDocument['bounds'];
 
 type PainterVoxelExtents = {
@@ -152,6 +161,50 @@ export function resolve_painter_voxel_winner(runtime: PainterDocumentRuntime, co
       };
     }
   }
+  return { winning_group_id: null, cell: null };
+}
+
+export function resolve_painter_group_preview_winner(
+  runtime: PainterDocumentRuntime,
+  groupId: string,
+  change: PainterPreviewCellChange,
+): ResolveVoxelWinnerResult {
+  const coordKey = make_painter_coord_key(change.x, change.y, change.z);
+  const previewClearsCell = String(change.char ?? ' ') === ' ';
+  const contributors = new Set(runtime.coordinate_group_index.get(coordKey) ?? []);
+  if (previewClearsCell) contributors.delete(groupId);
+  else contributors.add(groupId);
+  if (contributors.size < 1) return { winning_group_id: null, cell: null };
+
+  for (let i = runtime.document.group_order.length - 1; i >= 0; i -= 1) {
+    const candidateGroupId = runtime.document.group_order[i]!;
+    if (!contributors.has(candidateGroupId)) continue;
+    const group = runtime.document.groups[candidateGroupId];
+    if (!group?.visible) continue;
+    if (candidateGroupId === groupId) {
+      if (previewClearsCell) continue;
+      return {
+        winning_group_id: groupId,
+        cell: clone_painter_voxel_record({
+          x: Math.floor(change.x),
+          y: Math.floor(change.y),
+          z: Math.floor(change.z),
+          key: coordKey,
+          char: String(change.char ?? ' ').charAt(0) || ' ',
+          rgb: { ...change.rgb },
+          weight_index: change.weight_index,
+        }),
+      };
+    }
+    const voxel = runtime.group_voxel_index.get(candidateGroupId)?.get(coordKey) ?? null;
+    if (voxel) {
+      return {
+        winning_group_id: candidateGroupId,
+        cell: clone_painter_voxel_record(voxel),
+      };
+    }
+  }
+
   return { winning_group_id: null, cell: null };
 }
 

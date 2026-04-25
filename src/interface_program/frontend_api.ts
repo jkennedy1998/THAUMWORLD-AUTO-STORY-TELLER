@@ -7,6 +7,8 @@
  * This maintains its own state that the backend syncs with via HTTP API.
  */
 
+import { DEFAULT_LOCAL_MULTIPLAYER_TRANSPORT } from '../shared/multiplayer_transport.js';
+
 // Volume levels for communication
 export type VolumeLevel = "WHISPER" | "NORMAL" | "SHOUT";
 
@@ -17,7 +19,13 @@ let current_message: string = "";
 
 let actor_ref = "actor.player";
 let session_token = "";
-const API_BASE = "http://localhost:8787/api";
+let api_base = DEFAULT_LOCAL_MULTIPLAYER_TRANSPORT.api_base_url;
+
+export function set_api_base_url(next_api_base_url: string): void {
+    const trimmed = typeof next_api_base_url === 'string' ? next_api_base_url.trim() : '';
+    if (!trimmed) return;
+    api_base = trimmed.replace(/\/+$/, '');
+}
 
 export function set_current_actor_ref(next_actor_ref: string): void {
     const ref = typeof next_actor_ref === "string" ? next_actor_ref.trim() : "";
@@ -46,7 +54,7 @@ export function handleEntityClick(entity_ref: string, entity_type: "npc" | "acto
     };
     
     // Send to backend via HTTP API
-    fetch(`${API_BASE}/target`, {
+    fetch(`${api_base}/target`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -132,7 +140,7 @@ export function clearCurrentTarget(): void {
     current_target = null;
     
     // Send to backend via HTTP API
-    fetch(`${API_BASE}/target`, {
+    fetch(`${api_base}/target`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

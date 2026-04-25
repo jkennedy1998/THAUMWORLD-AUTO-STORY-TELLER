@@ -37,6 +37,7 @@ interface ElectronAPI {
   showOpenDialog?: (options: any) => Promise<any>;
   appMode?: string;
   dataSlot?: number;
+  clientInstanceId?: string;
   startupBootMode?: 'manual_shell' | 'direct_runtime' | 'tas_runtime' | string;
   toolAssistedInputsBootConfig?: {
     enabled?: boolean;
@@ -46,6 +47,13 @@ interface ElectronAPI {
     openMs?: number;
     endDelayMs?: number;
     scriptPath?: string;
+    painterBootFilePath?: string;
+    joinPreferredConnectionId?: string;
+    joinPreferredConnectionKind?: 'local' | 'saved_manual' | 'lan_discovered' | string;
+    joinPreferredHost?: string;
+    joinAutoJoin?: boolean;
+    gameActorId?: string;
+    actorId?: string;
   };
   inputHostKind?: 'dom_window' | 'electron_bridge';
   gameplayInputPublishContext?: (ctx: {

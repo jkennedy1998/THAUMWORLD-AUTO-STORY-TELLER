@@ -1,6 +1,7 @@
 import type { Place } from '../types/place.js';
 import type { ActorClaimEntry } from '../mono_ui/modules/actor_claim_module.js';
 import { get_movement_debug_snapshot } from '../shared/movement_debug_state.js';
+import type { ToolAssistedInputsJoinSnapshot } from '../mono_ui/runtime/automation_interfaces.js';
 import { create_thaumworld_bootstrap_adapter } from './automation_boot_thaumworld.js';
 import { create_place_breath_clock_source } from '../mono_ui/runtime/automation_clock_place_breath.js';
 import { create_tool_assisted_inputs_keyboard_driver_electron } from '../mono_ui/runtime/automation_keyboard_driver_electron.js';
@@ -16,11 +17,13 @@ type ToolAssistedInputsWiringOptions = {
   resolve_controlled_actor_binding: (force?: boolean) => Promise<{ kind: 'bound' | 'unbound' | 'binding_required'; error?: string | null }>;
   refresh_actor_claim_state: (status_lines?: string[]) => Promise<void>;
   claim_actor: (actor_ref: string) => Promise<void>;
+  claim_actor_by_id: (actor_id: string) => Promise<{ ok: boolean; reason?: string }>;
   get_actor_claim_entries: () => ActorClaimEntry[];
   get_session_token: () => string | null;
   get_current_actor_ref: () => string | null;
   get_current_place: () => Place | null;
   get_current_actor_tile: () => { x: number; y: number; z: number } | null;
+  get_join_snapshot: () => ToolAssistedInputsJoinSnapshot | null;
   get_text_value: (source: string, field?: string | null) => string | null;
   invoke_helper: (helper: string, payload?: Record<string, unknown>) => Promise<unknown> | unknown;
 };
@@ -37,6 +40,7 @@ export function create_tool_assisted_inputs_wiring(options: ToolAssistedInputsWi
       resolve_controlled_actor_binding: options.resolve_controlled_actor_binding,
       refresh_actor_claim_state: options.refresh_actor_claim_state,
       claim_actor: options.claim_actor,
+      claim_actor_by_id: options.claim_actor_by_id,
       get_actor_claim_entries: options.get_actor_claim_entries,
       get_current_context: () => ({
         session_token: options.get_session_token() || null,
@@ -51,6 +55,7 @@ export function create_tool_assisted_inputs_wiring(options: ToolAssistedInputsWi
     pointer_driver: create_tool_assisted_inputs_pointer_driver_runtime(),
     runtime_probe: {
       get_current_actor_tile: () => options.get_current_actor_tile(),
+      get_join_snapshot: () => options.get_join_snapshot(),
       get_movement_trace: () => {
         const snapshot = get_movement_debug_snapshot();
         const trace = snapshot.responsiveness_trace;

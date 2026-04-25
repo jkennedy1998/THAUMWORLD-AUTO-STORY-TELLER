@@ -13,9 +13,10 @@ import { make_actor_claim_module, type ActorClaimEntry } from '../mono_ui/module
 import { make_character_creation_module, type CharacterCreationField } from '../mono_ui/modules/character_creation_module.js';
 import { make_debug_commander_module, type DebugCommanderAction } from '../mono_ui/modules/debug_commander_module.js';
 import { make_world_entry_module } from '../mono_ui/modules/world_entry_module.js';
-import { make_world_join_module, type JoinableWorldEntry } from '../mono_ui/modules/world_join_module.js';
+import { make_world_join_module, type JoinableWorldEntry as UiJoinableWorldEntry } from '../mono_ui/modules/world_join_module.js';
 import { make_option_picker_module, type OptionPickerEntry } from '../mono_ui/modules/option_picker_module.js';
-import { discover_joinable_worlds, fetch_local_host_status } from './world_discovery.js';
+import { discover_joinable_worlds, fetch_local_host_status, type JoinableWorldEntry as DiscoveredJoinableWorldEntry } from './world_discovery.js';
+import { create_join_controller } from '../engine_launch/join_controller.js';
 import { make_initiative_module } from '../mono_ui/modules/initiative_module.js';
 import { make_toolbox_module } from '../mono_ui/modules/toolbox_module.js';
 import { make_tool_properties_module, type ToolPropertyRow } from '../mono_ui/modules/tool_properties_module.js';
@@ -27,7 +28,7 @@ import { loadPlaceCameraConfig, saveCameraConfig, savePlaceCameraCalibration } f
 import type { SlotType } from '../equipment/body_slot_resolver.js';
 import type { Canvas, Module, PointerEvent, Rgb, Rect } from '../mono_ui/types.js';
 import { create_module_registry, type ModuleRegistry } from '../mono_ui/module_registry.js';
-import { handleEntityClick, set_current_actor_ref, set_session_token } from '../interface_program/frontend_api.js';
+import { handleEntityClick, set_api_base_url, set_current_actor_ref, set_session_token } from '../interface_program/frontend_api.js';
 import type { Place, TilePosition } from '../types/place.js';
 import { debug_warn, debug_log } from '../shared/debug.js';
 import { diagnostic_enabled, diag_log } from '../shared/diagnostics.js';
@@ -46,6 +47,26 @@ import { type ItemInstance } from '../item_instances/store.js';
 import { type ItemDefinition } from '../item_storage/store.js';
 import type { OwnerInventoryView, StorageSlot, StorageSurface } from '../inventory_surfaces/types.js';
 import { get_container_id_from_target_id } from '../inventory_surfaces/target_ids.js';
+import type {
+    CompatibleSlot,
+    DragPayload,
+    InteractionConsumerAdapters,
+    InteractionHoverResolution,
+    InteractionSessionResolution,
+    ResolvedTarget,
+} from '../mono_ui/runtime/interaction_runtime_types.js';
+import {
+    build_interaction_pointer_state,
+    build_equipment_slot_target,
+    build_inventory_slot_target,
+    build_place_tile_target,
+    build_view_instance,
+    create_item_payload_compatibility_adapter,
+    create_interaction_registry_runtime,
+    evaluate_payload_compatibility,
+    order_resolved_targets,
+    select_current_resolved_target_of_type,
+} from '../mono_ui/runtime/interaction_runtime_types.js';
 import { tag_key } from '../tag_system/tag_key.js';
 import type { TagInstance } from '../tag_system/registry.js';
 import { resolve_grow_tag_configs } from '../mag/grow.js';
@@ -83,6 +104,12 @@ import { resolve_place_view_transition_frame } from '../mono_ui/runtime/place_vi
 import { create_tool_assisted_inputs_wiring } from './tool_assisted_inputs_wiring.js';
 import { create_game_controls_runtime } from './controls_wiring.js';
 import { control_binding_matches_keyboard_event } from '../mono_ui/runtime/controls_binding_matcher.js';
+import { DEFAULT_LOCAL_MULTIPLAYER_TRANSPORT, build_api_url, type MultiplayerTransportConfig } from '../shared/multiplayer_transport.js';
+import { forget_manual_connection, mark_connection_connected, rename_manual_connection, save_manual_connection } from '../engine_multiplayer/connection_store.js';
+import type { EngineJoinSelection } from '../engine_multiplayer/connection_types.js';
+import type { TaiJoinRequest } from '../engine_launch/join_menu_types.js';
+
+const DEFAULT_APP_TRANSPORT = DEFAULT_LOCAL_MULTIPLAYER_TRANSPORT;
 
 export const APP_CONFIG = {
     render_backend: THAUMWORLD_RENDER_THEME.backend,
@@ -97,19 +124,42 @@ export const APP_CONFIG = {
     grid_width: 200,  // Expanded: 160 for main UI + 40 for debug button column
     grid_height: 50,
 
-    action_input_endpoint: 'http://localhost:8787/api/input',
-    action_log_endpoint: 'http://localhost:8787/api/log',
-    action_status_endpoint: 'http://localhost:8787/api/status',
-    action_targets_endpoint: 'http://localhost:8787/api/targets',
-    place_endpoint: 'http://localhost:8787/api/place',
-    roller_status_endpoint: 'http://localhost:8787/api/roller_status',
-    roller_roll_endpoint: 'http://localhost:8787/api/roll',
+    api_base_url: DEFAULT_APP_TRANSPORT.api_base_url,
+    bridge_ws_base_url: DEFAULT_APP_TRANSPORT.bridge_ws_base_url,
+    action_input_endpoint: build_api_url(DEFAULT_APP_TRANSPORT.api_base_url, '/input'),
+    action_log_endpoint: build_api_url(DEFAULT_APP_TRANSPORT.api_base_url, '/log'),
+    action_status_endpoint: build_api_url(DEFAULT_APP_TRANSPORT.api_base_url, '/status'),
+    action_targets_endpoint: build_api_url(DEFAULT_APP_TRANSPORT.api_base_url, '/targets'),
+    place_endpoint: build_api_url(DEFAULT_APP_TRANSPORT.api_base_url, '/place'),
+    roller_status_endpoint: build_api_url(DEFAULT_APP_TRANSPORT.api_base_url, '/roller_status'),
+    roller_roll_endpoint: build_api_url(DEFAULT_APP_TRANSPORT.api_base_url, '/roll'),
     selected_data_slot: 1,
     input_actor_id: '',
-} as const;
+    join_target_id: 'local:1',
+    join_target_label: 'Local World Slot 1',
+  } as const;
 
 const APP_PLACE_TIMING_VERSION = '2026-03-14-visible-pulse-v1';
 const DEBUG_WINDOW_REFRESH_MS = 500;
+
+type WorldJoinTransportEntry = UiJoinableWorldEntry & Partial<DiscoveredJoinableWorldEntry>;
+type WorldJoinEditorMode = 'hidden' | 'add' | 'rename';
+
+function apply_multiplayer_transport_config(transport: MultiplayerTransportConfig, metadata?: { join_target_id?: string | null; join_target_label?: string | null }): void {
+    const api_base_url = transport.api_base_url.replace(/\/+$/, '');
+    (APP_CONFIG as any).api_base_url = api_base_url;
+    (APP_CONFIG as any).bridge_ws_base_url = transport.bridge_ws_base_url;
+    (APP_CONFIG as any).action_input_endpoint = build_api_url(api_base_url, '/input');
+    (APP_CONFIG as any).action_log_endpoint = build_api_url(api_base_url, '/log');
+    (APP_CONFIG as any).action_status_endpoint = build_api_url(api_base_url, '/status');
+    (APP_CONFIG as any).action_targets_endpoint = build_api_url(api_base_url, '/targets');
+    (APP_CONFIG as any).place_endpoint = build_api_url(api_base_url, '/place');
+    (APP_CONFIG as any).roller_status_endpoint = build_api_url(api_base_url, '/roller_status');
+    (APP_CONFIG as any).roller_roll_endpoint = build_api_url(api_base_url, '/roll');
+    if (metadata?.join_target_id) (APP_CONFIG as any).join_target_id = metadata.join_target_id;
+    if (metadata?.join_target_label) (APP_CONFIG as any).join_target_label = metadata.join_target_label;
+    set_api_base_url(api_base_url);
+}
 
 type ItemMutationRefreshScope = 'place_render' | 'container_contents' | 'character_render';
 
@@ -170,7 +220,17 @@ export type AppState = {
     module_registry: ModuleRegistry;
     on_drag_end_outside: (x: number, y: number) => void;
     on_pointer_move_global: (x: number, y: number, e: any) => void;
+    on_pointer_down_global: (x: number, y: number, e: any) => void;
+    on_pointer_up_global: (x: number, y: number, e: any) => void;
     on_after_compose: (canvas: any) => void;
+    get_interaction_adapters: () => {
+        painter: InteractionConsumerAdapters | null;
+        place: InteractionConsumerAdapters | null;
+        character: InteractionConsumerAdapters | null;
+        inventory: InteractionConsumerAdapters | null;
+    };
+    get_interaction_hover_state: () => InteractionHoverResolution | null;
+    get_interaction_session_state: () => InteractionSessionResolution | null;
     set_current_place_pause_source: (source: string, paused: boolean) => Promise<boolean>;
     get_current_place_pause_state: () => { paused: boolean; time_scale: number; pause_sources: string[] };
     create_current_place_pause_controller: (source: string) => {
@@ -205,6 +265,7 @@ export function create_app_state(): AppState {
     const game_controls = create_game_controls_runtime(APP_CONFIG.selected_data_slot);
     void game_controls.load();
     const configured_boot_mode = String((window as Window).electronAPI?.startupBootMode ?? '').trim().toLowerCase();
+    const tai_boot_config = (window as Window).electronAPI?.toolAssistedInputsBootConfig;
     const boot_mode: 'manual_shell' | 'direct_runtime' | 'tas_runtime' = Boolean((window as Window).electronAPI?.toolAssistedInputsBootConfig?.enabled)
         ? 'tas_runtime'
         : configured_boot_mode === 'direct_runtime'
@@ -214,6 +275,29 @@ export function create_app_state(): AppState {
     const reconnect_token_storage_key = 'thaumworld_reconnect_token';
     const controlled_actor_storage_key = 'thaumworld_controlled_actor_ref';
     let multiplayer_session_bootstrap_promise: Promise<void> | null = null;
+
+    function resolve_tai_join_request(): TaiJoinRequest | null {
+        if (!tai_boot_config?.enabled) return null;
+        const preferred_host = String(tai_boot_config.joinPreferredHost ?? '').trim() || null;
+        if (preferred_host) {
+            try {
+                save_manual_connection(preferred_host, preferred_host);
+            } catch {
+                // ignore invalid host bootstrap input here; join flow will report it
+            }
+        }
+        return {
+            preferred_connection_id: String(tai_boot_config.joinPreferredConnectionId ?? '').trim() || null,
+            preferred_connection_kind: (String(tai_boot_config.joinPreferredConnectionKind ?? '').trim() || (preferred_host ? 'saved_manual' : 'local')) as TaiJoinRequest['preferred_connection_kind'],
+            preferred_host,
+            auto_join: tai_boot_config.joinAutoJoin !== false,
+        };
+    }
+
+    function get_tai_game_actor_id(): string | null {
+        const value = String(tai_boot_config?.gameActorId ?? '').trim();
+        return value || null;
+    }
 
     function get_or_create_reconnect_token(): string {
         const existing = String((APP_CONFIG as any).reconnect_token ?? '').trim();
@@ -244,7 +328,7 @@ export function create_app_state(): AppState {
             if (multiplayer_session_bootstrap_promise) return multiplayer_session_bootstrap_promise;
         }
         const reconnect_token = get_or_create_reconnect_token();
-        multiplayer_session_bootstrap_promise = fetch('http://localhost:8787/api/connect', {
+        multiplayer_session_bootstrap_promise = fetch(build_api_url(APP_CONFIG.api_base_url, '/connect'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -272,12 +356,80 @@ export function create_app_state(): AppState {
             } catch {
                 // ignore persistence failure
             }
-            const wsClient = initWebSocketClient(undefined, { sessionToken: next_session_token, slot: APP_CONFIG.selected_data_slot });
+            const wsClient = initWebSocketClient(APP_CONFIG.bridge_ws_base_url, {
+                baseUrl: APP_CONFIG.bridge_ws_base_url,
+                sessionToken: next_session_token,
+                slot: APP_CONFIG.selected_data_slot,
+            });
             void wsClient;
         }).finally(() => {
             multiplayer_session_bootstrap_promise = null;
         });
         return multiplayer_session_bootstrap_promise;
+    }
+
+    function resolve_selected_world_entry(): WorldJoinTransportEntry | null {
+        const selected_world_id = String(ui_state.world_join.selected_world_id ?? '').trim();
+        if (!selected_world_id) return null;
+        return ui_state.world_join.entries.find((entry) => entry.id === selected_world_id) ?? null;
+    }
+
+    function open_world_join_editor(mode: WorldJoinEditorMode): void {
+        const selected = resolve_selected_world_entry();
+        ui_state.world_join.editor.mode = mode;
+        ui_state.world_join.editor.error = null;
+        ui_state.world_join.editor.active_field = mode === 'rename' ? 'label' : 'host';
+        ui_state.world_join.editor.host = mode === 'rename' ? String(selected?.host_address ?? '') : '';
+        ui_state.world_join.editor.label = mode === 'rename' ? String(selected?.label ?? '') : '';
+        ui_state.world_join.status_lines = mode === 'rename'
+            ? ['rename saved Wi-Fi host', 'press enter to save']
+            : ['add saved Wi-Fi host', 'type host address then save'];
+    }
+
+    function close_world_join_editor(): void {
+        ui_state.world_join.editor.mode = 'hidden';
+        ui_state.world_join.editor.error = null;
+        ui_state.world_join.editor.host = '';
+        ui_state.world_join.editor.label = '';
+        ui_state.world_join.editor.active_field = 'host';
+    }
+
+    function apply_selected_world_transport(entry: WorldJoinTransportEntry): void {
+        const api_base_url = String(entry.api_base_url ?? '').trim() || DEFAULT_APP_TRANSPORT.api_base_url;
+        const bridge_ws_base_url = String(entry.bridge_ws_base_url ?? '').trim() || DEFAULT_APP_TRANSPORT.bridge_ws_base_url;
+        apply_multiplayer_transport_config({
+            host_input: String(entry.host_origin ?? DEFAULT_APP_TRANSPORT.host_input),
+            host_origin: String(entry.host_origin ?? DEFAULT_APP_TRANSPORT.host_origin),
+            api_base_url,
+            bridge_http_url: DEFAULT_APP_TRANSPORT.bridge_http_url,
+            bridge_ws_base_url,
+        }, {
+            join_target_id: entry.id,
+            join_target_label: entry.label,
+        });
+    }
+
+    function apply_join_selection_transport(selection: EngineJoinSelection): void {
+        debug_log('[WORLD_BOOT]', 'apply_join_selection_transport', {
+            connection_id: selection.connection.id,
+            connection_kind: selection.connection.kind,
+            connection_host: selection.connection.host,
+            probe_status: selection.probe?.status ?? null,
+            supports_join: Boolean(selection.probe?.supports_join),
+            join_mode: selection.probe?.join_mode ?? null,
+            api_base_url: selection.transport.api_base_url,
+            bridge_ws_base_url: selection.transport.bridge_ws_base_url,
+        });
+        apply_multiplayer_transport_config({
+            host_input: selection.connection.host,
+            host_origin: selection.connection.host === 'local' ? DEFAULT_APP_TRANSPORT.host_origin : selection.transport.api_base_url.replace(/\/api\/?$/, ''),
+            api_base_url: selection.transport.api_base_url,
+            bridge_http_url: DEFAULT_APP_TRANSPORT.bridge_http_url,
+            bridge_ws_base_url: selection.transport.bridge_ws_base_url,
+        }, {
+            join_target_id: selection.connection.id,
+            join_target_label: selection.connection.name,
+        });
     }
 
     async function refresh_joinable_worlds(): Promise<void> {
@@ -289,12 +441,16 @@ export function create_app_state(): AppState {
             ui_state.world_join.selected_world_id = previous_selected_world_id && entries.some((entry) => entry.id === previous_selected_world_id)
                 ? previous_selected_world_id
                 : entries[0]?.id ?? null;
+            const localCount = entries.filter((entry) => entry.local).length;
+            const wifiCount = entries.filter((entry) => !entry.local).length;
+            const onlineCount = entries.filter((entry) => entry.online !== false).length;
+            const selectedEntry = entries.find((entry) => entry.id === ui_state.world_join.selected_world_id) ?? entries[0] ?? null;
             ui_state.world_join.status_lines = entries.length > 0
                 ? [
-                    'local worlds detected',
-                    String((entries.find((entry) => entry.id === ui_state.world_join.selected_world_id) ?? entries[0])?.description ?? 'join enabled'),
+                    `${onlineCount}/${entries.length} online | local ${localCount} | wifi ${wifiCount}`,
+                    String(selectedEntry?.description ?? 'join enabled'),
                   ]
-                : ['no local world detected', 'launch a world first or start a local host'];
+                : ['no join target detected', 'launch a local host or add a saved Wi-Fi host'];
         } finally {
             ui_state.world_join.is_loading = false;
         }
@@ -339,9 +495,12 @@ export function create_app_state(): AppState {
               ];
     }
 
-    async function begin_world_session(): Promise<void> {
-        ui_state.world_entry.status_lines = ['connecting to local host...', 'bootstrapping multiplayer session'];
-        ui_state.world_join.status_lines = ['connecting to selected world...', 'bootstrapping multiplayer session'];
+    async function begin_world_session(selection?: EngineJoinSelection | null): Promise<void> {
+        if (selection) {
+            apply_join_selection_transport(selection);
+        }
+        const target_label = String(selection?.connection.name ?? APP_CONFIG.join_target_label ?? 'selected world').trim() || 'selected world';
+        ui_state.world_entry.status_lines = [`connecting to ${target_label}...`, 'bootstrapping multiplayer session'];
         debug_log('[WORLD_BOOT]', 'begin_world_session start');
         try {
             await ensure_multiplayer_session_bootstrap(true);
@@ -350,6 +509,13 @@ export function create_app_state(): AppState {
             ui_state.world_join.is_visible = false;
             apply_runtime_module_visibility();
             await refresh_controlled_actor_binding(true);
+            const tai_actor_id = get_tai_game_actor_id();
+            if (tool_assisted_inputs_boot_enabled && tai_actor_id && !get_controlled_actor_id()) {
+                const claim = await apply_tai_actor_claim_request(tai_actor_id);
+                if (!claim.ok) {
+                    throw new Error(`tai_actor_claim_failed:${claim.reason ?? 'unknown'}`);
+                }
+            }
             debug_log('[WORLD_BOOT]', 'begin_world_session refresh_controlled_actor_binding complete');
         } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
@@ -357,9 +523,9 @@ export function create_app_state(): AppState {
             ui_state.world_entry.is_visible = true;
             ui_state.world_join.is_visible = false;
             ui_state.world_entry.status_lines = [
-                'failed to connect to local host',
+                `failed to connect to ${target_label}`,
                 message,
-                'restart with a host boot or launch again',
+                'check the host address or launch a local host',
             ];
             apply_runtime_module_visibility();
             throw err;
@@ -369,18 +535,76 @@ export function create_app_state(): AppState {
     async function open_world_join_module(): Promise<void> {
         ui_state.world_entry.is_visible = false;
         ui_state.world_join.is_visible = true;
-        ui_state.world_join.status_lines = ['searching for local worlds...'];
         apply_runtime_module_visibility();
+        await world_join_controller.refresh();
+    }
+
+    function begin_add_world_join_host(): void {
+        open_world_join_editor('add');
+    }
+
+    function begin_rename_selected_world_join_host(): void {
+        const entry = resolve_selected_world_entry();
+        if (!entry?.saved_host_id) {
+            ui_state.world_join.status_lines = ['select a saved Wi-Fi host first'];
+            return;
+        }
+        open_world_join_editor('rename');
+    }
+
+    async function forget_selected_world_join_host(): Promise<void> {
+        const entry = resolve_selected_world_entry();
+        if (!entry?.saved_host_id) {
+            ui_state.world_join.status_lines = ['select a saved Wi-Fi host to forget'];
+            return;
+        }
+        forget_manual_connection(entry.saved_host_id);
+        ui_state.world_join.status_lines = [`forgot ${entry.label}`];
         await refresh_joinable_worlds();
     }
 
+    async function submit_world_join_editor(): Promise<void> {
+        const mode = ui_state.world_join.editor.mode;
+        const host = String(ui_state.world_join.editor.host ?? '').trim();
+        const label = String(ui_state.world_join.editor.label ?? '').trim();
+        try {
+            if (mode === 'add') {
+                if (!host) throw new Error('host address required');
+                const saved = save_manual_connection(host, label || host);
+                close_world_join_editor();
+                await refresh_joinable_worlds();
+                ui_state.world_join.selected_world_id = `saved:${saved.id}`;
+                ui_state.world_join.status_lines = [`saved ${saved.name}`, `probing ${saved.host}...`];
+                await refresh_joinable_worlds();
+                return;
+            }
+            if (mode === 'rename') {
+                const entry = resolve_selected_world_entry();
+                if (!entry?.saved_host_id) throw new Error('saved host missing');
+                const saved = rename_manual_connection(entry.saved_host_id, label || entry.label || 'Saved Host');
+                close_world_join_editor();
+                await refresh_joinable_worlds();
+                ui_state.world_join.selected_world_id = `saved:${saved.id}`;
+                ui_state.world_join.status_lines = [`renamed to ${saved.name}`];
+            }
+        } catch (err) {
+            ui_state.world_join.editor.error = err instanceof Error ? err.message : String(err);
+        }
+    }
+
     async function join_selected_world(): Promise<void> {
-        if (!ui_state.world_join.selected_world_id) {
+        const entry = resolve_selected_world_entry();
+        if (!entry) {
             ui_state.world_join.status_lines = ['select a world to join'];
             return;
         }
+        close_world_join_editor();
+        apply_selected_world_transport(entry);
         try {
             await begin_world_session();
+            if (entry.saved_host_id) {
+                mark_connection_connected(entry.saved_host_id);
+            }
         } catch {
             ui_state.world_join.is_visible = true;
             ui_state.world_entry.is_visible = false;
@@ -434,7 +658,7 @@ export function create_app_state(): AppState {
                 slot: APP_CONFIG.selected_data_slot,
                 session_token,
             });
-            const url = 'http://localhost:8787/api/actors/release';
+            const url = build_api_url(APP_CONFIG.api_base_url, '/actors/release');
             if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
                 const blob = new Blob([payload], { type: 'application/json' });
                 navigator.sendBeacon(url, blob);
@@ -787,8 +1011,15 @@ export function create_app_state(): AppState {
             is_visible: false,
             is_loading: false,
             selected_world_id: null as string | null,
-            entries: [] as JoinableWorldEntry[],
+            entries: [] as WorldJoinTransportEntry[],
             status_lines: ['searching for local worlds...'],
+            editor: {
+                mode: 'hidden' as WorldJoinEditorMode,
+                host: '',
+                label: '',
+                active_field: 'host' as 'host' | 'label',
+                error: null as string | null,
+            },
         },
         actor_claim: {
             is_visible: false,
@@ -2273,7 +2504,7 @@ export function create_app_state(): AppState {
     async function start_debug_timed_event(place_id: string, event_type: 'combat' | 'conversation' = 'combat'): Promise<{ ok: boolean; error?: string; participants?: string[] }> {
         try {
             if (TIMED_EVENT_DEBUG_UI_LOGS_ENABLED) debug_log('[TIMED_EVENT_DEBUG_UI] start request', { place_id, event_type, slot: APP_CONFIG.selected_data_slot });
-            const res = await fetch(`http://localhost:8787/api/timed_event/debug/start?slot=${APP_CONFIG.selected_data_slot}`, {
+            const res = await fetch(`${build_api_url(APP_CONFIG.api_base_url, '/timed_event/debug/start')}?slot=${APP_CONFIG.selected_data_slot}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ place_id, event_type }),
@@ -2291,7 +2522,7 @@ export function create_app_state(): AppState {
 
     async function fetch_timed_event_state(): Promise<any | null> {
         try {
-            const res = await fetch(`http://localhost:8787/api/timed_event/state?slot=${APP_CONFIG.selected_data_slot}`);
+            const res = await fetch(`${build_api_url(APP_CONFIG.api_base_url, '/timed_event/state')}?slot=${APP_CONFIG.selected_data_slot}`);
             if (!res.ok) return null;
             const data = await res.json().catch(() => null as any);
             if (TIMED_EVENT_DEBUG_UI_LOGS_ENABLED) debug_log('[TIMED_EVENT_DEBUG_UI] state fetch', { status: res.status, ok: res.ok, data });
@@ -2311,7 +2542,7 @@ export function create_app_state(): AppState {
             if (!session_token) {
                 return { ok: false, error: 'invalid_session_token' };
             }
-            const res = await fetch(`http://localhost:8787/api/timed_event/next_turn?slot=${APP_CONFIG.selected_data_slot}`, {
+            const res = await fetch(`${build_api_url(APP_CONFIG.api_base_url, '/timed_event/next_turn')}?slot=${APP_CONFIG.selected_data_slot}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -2332,7 +2563,7 @@ export function create_app_state(): AppState {
     async function debug_move_refresh(): Promise<{ ok: boolean; error?: string; actor_ref?: string }> {
         try {
             const action_cost = String(ui_state.controls.override_cost ?? 'FULL').toUpperCase();
-            const res = await fetch(`http://localhost:8787/api/timed_event/debug/move?slot=${APP_CONFIG.selected_data_slot}`, {
+            const res = await fetch(`${build_api_url(APP_CONFIG.api_base_url, '/timed_event/debug/move')}?slot=${APP_CONFIG.selected_data_slot}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ action_cost }),
@@ -2350,7 +2581,7 @@ export function create_app_state(): AppState {
     async function debug_end_timed_event(): Promise<{ ok: boolean; error?: string }> {
         try {
             if (TIMED_EVENT_DEBUG_UI_LOGS_ENABLED) debug_log('[TIMED_EVENT_DEBUG_UI] end request', { slot: APP_CONFIG.selected_data_slot });
-            const res = await fetch(`http://localhost:8787/api/timed_event/debug/end?slot=${APP_CONFIG.selected_data_slot}`, {
+            const res = await fetch(`${build_api_url(APP_CONFIG.api_base_url, '/timed_event/debug/end')}?slot=${APP_CONFIG.selected_data_slot}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
             });
@@ -4329,6 +4560,224 @@ export function create_app_state(): AppState {
         }
     };
 
+    function get_current_drag_payload(): DragPayload | null {
+        if (!drag_state.is_dragging || !drag_state.item_instance_id || !drag_state.item_definition) return null;
+        return {
+            payload_kind: 'item',
+            source_module_id: String(drag_state.source_module ?? 'unknown'),
+            source_view_id: String(drag_state.source_module ?? 'unknown'),
+            item_instance_id: String(drag_state.item_instance_id),
+            container_id: drag_state.source_container_id,
+            slot_index: drag_state.source_slot_index,
+            compatibility_tags: Array.isArray((drag_state.item_definition as any)?.tags)
+                ? (drag_state.item_definition as any).tags.map((tag: any) => typeof tag === 'string' ? tag : String(tag?.name ?? '')).filter(Boolean)
+                : undefined,
+            preview_metadata: {
+                item_name: drag_state.item_definition.name,
+                source_target_id: drag_state.source_target_id,
+            },
+        };
+    }
+
+    function get_place_primary_view_instance() {
+        const fallback_rect = get_persisted_rect('place', { x0: L_X0, y0: Y_PLACE0, x1: L_X1, y1: Y_PLACE1 });
+        const place_rect = module_registry.get('place')?.rect ?? fallback_rect;
+        return build_view_instance({
+            module_id: 'place',
+            view_id: 'place_primary_view',
+            space_kind: 'hybrid',
+            viewport_rect: place_rect,
+            capabilities: {
+                resolves_2d_targets: true,
+                resolves_3d_targets: true,
+                accepts_drag_payloads: true,
+                produces_drag_payloads: true,
+                supports_wheel_depth: true,
+                owns_view_instances: true,
+            },
+            content_ref: get_current_place()?.id ?? 'place',
+        });
+    }
+
+    function get_place_runtime_api(): ((Module & { resolveInteractionTargets?: (x: number, y: number) => any }) | null) {
+        const place_mod = module_registry.get('place');
+        return place_mod as (Module & { resolveInteractionTargets?: (x: number, y: number) => any }) | null;
+    }
+
+    function get_character_view_instance() {
+        const fallback_rect = get_persisted_rect('character_module', { x0: 160, y0: 2, x1: 198, y1: 17 });
+        const rect = module_registry.get('character_module')?.rect ?? fallback_rect;
+        return build_view_instance({
+            module_id: 'character_module',
+            view_id: 'character_view',
+            space_kind: '2d',
+            viewport_rect: rect,
+            capabilities: {
+                resolves_2d_targets: true,
+                accepts_drag_payloads: true,
+                produces_drag_payloads: true,
+                owns_view_instances: true,
+            },
+            content_ref: get_controlled_actor_id() || 'character',
+        });
+    }
+
+    function get_character_runtime_api(): ((Module & { resolveInteractionTargets?: (x: number, y: number) => any }) | null) {
+        const mod = module_registry.get('character_module');
+        return mod as (Module & { resolveInteractionTargets?: (x: number, y: number) => any }) | null;
+    }
+
+    function get_inventory_view_instance() {
+        const fallback_rect = get_persisted_rect('inventory_container', { x0: 160, y0: 18, x1: 198, y1: 35 });
+        const rect = module_registry.get('inventory_container')?.rect ?? fallback_rect;
+        return build_view_instance({
+            module_id: 'inventory_container',
+            view_id: 'inventory_container_view',
+            space_kind: '2d',
+            viewport_rect: rect,
+            capabilities: {
+                resolves_2d_targets: true,
+                accepts_drag_payloads: true,
+                produces_drag_payloads: true,
+                owns_view_instances: true,
+            },
+            content_ref: ui_state.container.owner_view?.owner_name ?? 'inventory',
+        });
+    }
+
+    function get_inventory_runtime_api(): ((Module & { resolveInteractionTargets?: (x: number, y: number) => any }) | null) {
+        const mod = module_registry.get('inventory_container');
+        return mod as (Module & { resolveInteractionTargets?: (x: number, y: number) => any }) | null;
+    }
+
+    function build_runtime_resolution_adapter(args: {
+        get_view_instance: () => ReturnType<typeof build_view_instance>;
+        get_runtime_api: () => (Module & { resolveInteractionTargets?: (x: number, y: number) => any }) | null;
+        payload_compatibility?: InteractionConsumerAdapters['payload_compatibility'];
+    }): InteractionConsumerAdapters {
+        return {
+            view_registration: {
+                get_view_instances: () => [args.get_view_instance()],
+            },
+            resolution: {
+                resolve_targets: (input) => args.get_runtime_api()?.resolveInteractionTargets?.(input.pointer.x, input.pointer.y) ?? order_resolved_targets([]),
+            },
+            payload_compatibility: args.payload_compatibility,
+        };
+    }
+
+    const interaction_registry = create_interaction_registry_runtime();
+    let current_interaction_hover_state: InteractionHoverResolution | null = null;
+    let current_interaction_session_state: InteractionSessionResolution | null = null;
+
+    function getCurrentPlaceInteractionTarget(): Extract<ResolvedTarget, { target_type: 'place_tile' }> | null {
+        return select_current_resolved_target_of_type({
+            session_state: current_interaction_session_state,
+            hover_state: current_interaction_hover_state,
+            target_type: 'place_tile',
+        });
+    }
+
+    function getCurrentPlaceHoveredGroundItemId(): string | null {
+        const placeTarget = getCurrentPlaceInteractionTarget();
+        const place = get_current_place();
+        if (!placeTarget || !place || placeTarget.target_ref.indexOf(`${place.id}:`) !== 0) return null;
+        const itemIds = ui_state.place.ground_items_by_position.get(`${placeTarget.tile_position.x}_${placeTarget.tile_position.y}`) ?? [];
+        return itemIds.length === 1 ? itemIds[0] ?? null : null;
+    }
+
+    function getCurrentUiInteractionTarget<T extends ResolvedTarget['target_type']>(target_type: T, module_id?: string): Extract<ResolvedTarget, { target_type: T }> | null {
+        return select_current_resolved_target_of_type({
+            session_state: current_interaction_session_state,
+            hover_state: current_interaction_hover_state,
+            target_type,
+            module_id,
+        });
+    }
+
+    function resolve_place_drop_target(place_id: string, tile_x: number, tile_y: number, world_z: number): ResolvedTarget {
+        const place_view = get_place_primary_view_instance();
+        return build_place_tile_target({
+            module_id: place_view.module_id,
+            view_id: place_view.view_id,
+            place_id,
+            tile_x,
+            tile_y,
+            world_z,
+        });
+    }
+
+    const resolve_inventory_slot_target = build_inventory_slot_target;
+
+    const resolve_equipment_slot_target = build_equipment_slot_target;
+
+    const item_payload_compatibility_adapter = create_item_payload_compatibility_adapter({
+        get_compatible_slots_for_item: async (payload, _target): Promise<CompatibleSlot[]> => {
+            return await get_compatible_slots_for_instance(
+                payload.item_instance_id,
+                payload.container_id ?? null,
+                drag_state.item_definition ?? undefined,
+            );
+        },
+    });
+
+    const registered_interaction_adapters = {
+        painter: null as InteractionConsumerAdapters | null,
+        place: build_runtime_resolution_adapter({
+            get_view_instance: get_place_primary_view_instance,
+            get_runtime_api: get_place_runtime_api,
+            payload_compatibility: item_payload_compatibility_adapter,
+        }),
+        character: build_runtime_resolution_adapter({
+            get_view_instance: get_character_view_instance,
+            get_runtime_api: get_character_runtime_api,
+            payload_compatibility: item_payload_compatibility_adapter,
+        }),
+        inventory: build_runtime_resolution_adapter({
+            get_view_instance: get_inventory_view_instance,
+            get_runtime_api: get_inventory_runtime_api,
+            payload_compatibility: item_payload_compatibility_adapter,
+        }),
+    };
+
+    function refresh_painter_interaction_adapter(): void {
+        const painterModule = module_registry.get('ascii_painter') as ({ get_interaction_adapters?: () => InteractionConsumerAdapters } | null);
+        registered_interaction_adapters.painter = painterModule?.get_interaction_adapters?.() ?? null;
+    }
+
+    function get_registered_interaction_adapters() {
+        return registered_interaction_adapters;
+    }
+
+    function refresh_interaction_registry(): void {
+        refresh_painter_interaction_adapter();
+        interaction_registry.sync_consumers(registered_interaction_adapters);
+    }
+
+    async function apply_item_legality_highlight_from_payload(payload: DragPayload, source_label: string): Promise<void> {
+        if (payload.payload_kind !== 'item') {
+            clear_item_legality_highlight();
+            return;
+        }
+        const compatible = await get_compatible_slots_for_instance(payload.item_instance_id, payload.container_id ?? null, drag_state.item_definition ?? undefined);
+        ui_state.character.highlighted_slots = compatible;
+        ui_state.character.hovered_item = { name: String(payload.preview_metadata?.item_name ?? drag_state.item_definition?.name ?? 'item'), source: source_label };
+    }
+
+    async function apply_target_compatibility_highlight(target: ResolvedTarget): Promise<void> {
+        const payload = get_current_drag_payload();
+        if (!payload) return;
+        const compatibility = await evaluate_payload_compatibility({
+            adapter: item_payload_compatibility_adapter,
+            payload,
+            target,
+        });
+        if (!compatibility.considered) return;
+        if (target.target_type === 'equipment_slot' && compatibility.accepted) {
+            ui_state.character.hovered_item = { name: '(drop target)', source: target.target_ref };
+        }
+    }
+
     function create_empty_ground_item_cache(): PlaceGroundItemCache {
         return {
             by_id: new Map<string, GroundItemMetaRecord>(),
@@ -4446,7 +4895,7 @@ export function create_app_state(): AppState {
     // Calls backend API for tag-based compatibility (single source of truth)
     async function get_compatible_slots(item_def: ItemDefinition): Promise<Array<{ slot_name: string; slot_type: SlotType; garb_index?: number }>> {
         try {
-            const response = await fetch(`http://localhost:8787/api/item/compatible_slots?item_def_id=${item_def.id}&actor_id=${get_controlled_actor_id()}`);
+            const response = await fetch(`${build_api_url(APP_CONFIG.api_base_url, '/item/compatible_slots')}?item_def_id=${item_def.id}&actor_id=${get_controlled_actor_id()}`);
             if (response.ok) {
                 const data = await response.json();
                 if (data.ok && data.compatible_slots) {
@@ -4512,13 +4961,13 @@ export function create_app_state(): AppState {
             if (source_container_id && source_container_id.startsWith('place.')) {
                 const place = get_current_place();
                 if (!place) return [];
-                const res = await fetch(`http://localhost:8787/api/place_item/compatible_slots?place_id=${encodeURIComponent(place.id)}&item_id=${encodeURIComponent(item_instance_id)}`);
+                const res = await fetch(`${build_api_url(APP_CONFIG.api_base_url, '/place_item/compatible_slots')}?place_id=${encodeURIComponent(place.id)}&item_id=${encodeURIComponent(item_instance_id)}`);
                 if (res.ok) {
                     const data = await res.json();
                     if (data.ok && data.compatible_slots) return data.compatible_slots;
                 }
             } else {
-                const res = await fetch(`http://localhost:8787/api/item_instance/compatible_slots?actor_id=${encodeURIComponent(get_controlled_actor_id())}&item_id=${encodeURIComponent(item_instance_id)}`);
+                const res = await fetch(`${build_api_url(APP_CONFIG.api_base_url, '/item_instance/compatible_slots')}?actor_id=${encodeURIComponent(get_controlled_actor_id())}&item_id=${encodeURIComponent(item_instance_id)}`);
                 if (res.ok) {
                     const data = await res.json();
                     if (data.ok && data.compatible_slots) return data.compatible_slots;
@@ -4692,8 +5141,8 @@ export function create_app_state(): AppState {
     }> {
         const slot = APP_CONFIG.selected_data_slot;
         const url = character_ref.startsWith('actor.')
-            ? `http://localhost:8787/api/actor/private_state?actor_ref=${encodeURIComponent(character_ref)}&slot=${slot}&session_token=${encodeURIComponent(get_session_token())}`
-            : `http://localhost:8787/api/character?ref=${encodeURIComponent(character_ref)}&slot=${slot}`;
+            ? `${build_api_url(APP_CONFIG.api_base_url, '/actor/private_state')}?actor_ref=${encodeURIComponent(character_ref)}&slot=${slot}&session_token=${encodeURIComponent(get_session_token())}`
+            : `${build_api_url(APP_CONFIG.api_base_url, '/character')}?ref=${encodeURIComponent(character_ref)}&slot=${slot}`;
         const response = await fetch(url);
         if (!response.ok) {
             throw new Error(`character_fetch_failed:${response.status}`);
@@ -5056,7 +5505,7 @@ export function create_app_state(): AppState {
         ui_state.character_editor.saving = true;
         ui_state.character_editor.status_lines = [get_character_editor_subject_label(character_ref), 'saving...'];
         try {
-            const res = await fetch('http://localhost:8787/api/character/update', {
+            const res = await fetch(build_api_url(APP_CONFIG.api_base_url, '/character/update'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -5137,7 +5586,7 @@ export function create_app_state(): AppState {
     }
 
     async function load_tile_editor_data(place_id: string, x: number, y: number, z: number): Promise<Record<string, unknown>> {
-        const res = await fetch(`http://localhost:8787/api/tile/editor?place_id=${encodeURIComponent(place_id)}&x=${Math.floor(x)}&y=${Math.floor(y)}&z=${Math.floor(z)}&slot=${APP_CONFIG.selected_data_slot}`);
+        const res = await fetch(`${build_api_url(APP_CONFIG.api_base_url, '/tile/editor')}?place_id=${encodeURIComponent(place_id)}&x=${Math.floor(x)}&y=${Math.floor(y)}&z=${Math.floor(z)}&slot=${APP_CONFIG.selected_data_slot}`);
         const data = await res.json().catch(() => null as any);
         if (!res.ok || !data?.ok || !data?.tile) {
             throw new Error(String(data?.error ?? `HTTP ${res.status}`));
@@ -5253,7 +5702,7 @@ export function create_app_state(): AppState {
     async function fetch_tag_definition_for_ui(name: string): Promise<TagPickerDefinition | null> {
         const tag_name = String(name ?? '').trim().toUpperCase();
         if (!tag_name) return null;
-        const res = await fetch(`http://localhost:8787/api/tag/definition?name=${encodeURIComponent(tag_name)}`);
+        const res = await fetch(`${build_api_url(APP_CONFIG.api_base_url, '/tag/definition')}?name=${encodeURIComponent(tag_name)}`);
         const data = await res.json().catch(() => null as any);
         if (!res.ok || !data?.ok || !data?.definition) throw new Error(String(data?.error ?? `HTTP ${res.status}`));
         const definition = data.definition as any;
@@ -5374,10 +5823,10 @@ export function create_app_state(): AppState {
             const is_item = entity_ref.startsWith('item.');
             const tile_ref = parse_tile_entity_ref(entity_ref);
             const endpoint = is_tile
-                ? 'http://localhost:8787/api/tile/tag/update'
+                ? build_api_url(APP_CONFIG.api_base_url, '/tile/tag/update')
                 : is_item
-                    ? 'http://localhost:8787/api/item/tag/update'
-                    : 'http://localhost:8787/api/character/tag/update';
+                    ? build_api_url(APP_CONFIG.api_base_url, '/item/tag/update')
+                    : build_api_url(APP_CONFIG.api_base_url, '/character/tag/update');
             const body = is_tile && tile_ref
                 ? {
                     slot: APP_CONFIG.selected_data_slot,
@@ -5460,10 +5909,10 @@ export function create_app_state(): AppState {
             const is_item = entity_ref.startsWith('item.');
             const tile_ref = parse_tile_entity_ref(entity_ref);
             const endpoint = is_tile
-                ? 'http://localhost:8787/api/tile/tag/update'
+                ? build_api_url(APP_CONFIG.api_base_url, '/tile/tag/update')
                 : is_item
-                    ? 'http://localhost:8787/api/item/tag/update'
-                    : 'http://localhost:8787/api/character/tag/update';
+                    ? build_api_url(APP_CONFIG.api_base_url, '/item/tag/update')
+                    : build_api_url(APP_CONFIG.api_base_url, '/character/tag/update');
             const body = is_tile && tile_ref
                 ? {
                     slot: APP_CONFIG.selected_data_slot,
@@ -5599,7 +6048,7 @@ export function create_app_state(): AppState {
     }
 
     async function load_item_editor_data(selection: ItemInspectorSelection): Promise<Record<string, unknown>> {
-        const res = await fetch('http://localhost:8787/api/item/editor', {
+        const res = await fetch(build_api_url(APP_CONFIG.api_base_url, '/item/editor'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ slot: APP_CONFIG.selected_data_slot, ...selection }),
@@ -5736,7 +6185,7 @@ export function create_app_state(): AppState {
         ui_state.character_creation.is_loading = true;
         try {
             const query = kind_id ? `?kind_id=${encodeURIComponent(kind_id)}` : '';
-            const res = await fetch(`http://localhost:8787/api/character/create/bootstrap${query}`);
+            const res = await fetch(`${build_api_url(APP_CONFIG.api_base_url, '/character/create/bootstrap')}${query}`);
             const data = await res.json().catch(() => null) as any;
             if (!res.ok || !data?.ok) {
                 throw new Error(String(data?.error ?? `character_create_bootstrap_failed:${res.status}`));
@@ -5845,7 +6294,7 @@ export function create_app_state(): AppState {
         }
         ui_state.character_creation.is_submitting = true;
         try {
-            const res = await fetch('http://localhost:8787/api/character/create', {
+            const res = await fetch(build_api_url(APP_CONFIG.api_base_url, '/character/create'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -5875,7 +6324,7 @@ export function create_app_state(): AppState {
     async function refresh_actor_claim_state(status_lines?: string[]): Promise<void> {
         await ensure_multiplayer_session_bootstrap();
         const session_token = get_session_token();
-        const url = `http://localhost:8787/api/actors/claimable?slot=${encodeURIComponent(String(APP_CONFIG.selected_data_slot))}&session_token=${encodeURIComponent(session_token)}`;
+        const url = `${build_api_url(APP_CONFIG.api_base_url, '/actors/claimable')}?slot=${encodeURIComponent(String(APP_CONFIG.selected_data_slot))}&session_token=${encodeURIComponent(session_token)}`;
         ui_state.actor_claim.is_loading = true;
         ui_state.actor_claim.error = null;
         try {
@@ -5941,7 +6390,7 @@ export function create_app_state(): AppState {
         ui_state.actor_claim.is_submitting = true;
         ui_state.actor_claim.error = null;
         try {
-            const res = await fetch('http://localhost:8787/api/actors/claim', {
+            const res = await fetch(build_api_url(APP_CONFIG.api_base_url, '/actors/claim'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -5983,7 +6432,7 @@ export function create_app_state(): AppState {
         await ensure_multiplayer_session_bootstrap();
         ui_state.actor_claim.is_submitting = true;
         try {
-            const res = await fetch('http://localhost:8787/api/actors/release', {
+            const res = await fetch(build_api_url(APP_CONFIG.api_base_url, '/actors/release'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -6022,6 +6471,41 @@ export function create_app_state(): AppState {
         ui_state.actor_claim.selected_actor_ref = actor_ref;
     }
 
+    function select_actor_claim_by_id(actor_id: string): boolean {
+        const normalized_actor_id = String(actor_id ?? '').trim();
+        if (!normalized_actor_id) return false;
+        const match = ui_state.actor_claim.actors.find((actor) => actor.actor_id === normalized_actor_id) ?? null;
+        if (!match) return false;
+        select_actor_claim_entry(match.actor_ref);
+        return true;
+    }
+
+    async function apply_tai_actor_claim_request(actor_id: string): Promise<{ ok: boolean; reason?: string }> {
+        const normalized_actor_id = String(actor_id ?? '').trim();
+        if (!normalized_actor_id) return { ok: false, reason: 'actor_id_missing' };
+        await refresh_actor_claim_state(['TAI actor claim', `looking for ${normalized_actor_id}`]);
+        const match = ui_state.actor_claim.actors.find((actor) => actor.actor_id === normalized_actor_id) ?? null;
+        if (!match) {
+            console.warn('[TAI_GAME_ACTOR_CLAIM]', JSON.stringify({ actor_id: normalized_actor_id, ok: false, reason: 'actor_not_found' }));
+            return { ok: false, reason: 'actor_not_found' };
+        }
+        if (!match.can_claim) {
+            const reason = match.claimed_by_other ? 'actor_claimed_by_other' : 'actor_not_claimable';
+            console.warn('[TAI_GAME_ACTOR_CLAIM]', JSON.stringify({ actor_id: normalized_actor_id, actor_ref: match.actor_ref, ok: false, reason }));
+            return { ok: false, reason };
+        }
+        select_actor_claim_entry(match.actor_ref);
+        console.log('[TAI_GAME_ACTOR_CLAIM]', JSON.stringify({ actor_id: normalized_actor_id, actor_ref: match.actor_ref, ok: true, phase: 'selected' }));
+        await claim_selected_actor();
+        const controlled_actor_ref = String(ui_state.actor_claim.current_actor_ref ?? '').trim() || null;
+        if (!controlled_actor_ref) {
+            console.warn('[TAI_GAME_ACTOR_CLAIM]', JSON.stringify({ actor_id: normalized_actor_id, actor_ref: match.actor_ref, ok: false, reason: 'controlled_actor_missing_after_claim' }));
+            return { ok: false, reason: 'controlled_actor_missing_after_claim' };
+        }
+        console.log('[TAI_GAME_ACTOR_CLAIM]', JSON.stringify({ actor_id: normalized_actor_id, actor_ref: match.actor_ref, controlled_actor_ref, ok: true, phase: 'claimed' }));
+        return { ok: true };
+    }
+
     type ControlledActorBindingResolution = {
         kind: 'bound' | 'unbound' | 'binding_required';
         error?: string | null;
@@ -6035,7 +6519,7 @@ export function create_app_state(): AppState {
         await ensure_multiplayer_session_bootstrap();
         const session_token = get_session_token();
         const query = [`slot=${encodeURIComponent(String(APP_CONFIG.selected_data_slot))}`, `session_token=${encodeURIComponent(session_token)}`];
-        const res = await fetch(`http://localhost:8787/api/session/control?${query.join('&')}`);
+        const res = await fetch(`${build_api_url(APP_CONFIG.api_base_url, '/session/control')}?${query.join('&')}`);
         const data = await res.json().catch(() => null) as any;
         if (res.ok && String(data?.binding_state ?? '') === 'unbound') {
             clear_controlled_actor_runtime_state();
@@ -6073,9 +6557,9 @@ export function create_app_state(): AppState {
             : ui_state.character.display_name;
         apply_runtime_module_visibility();
         if (changed) {
-            void load_claimed_actor_runtime(actor_id, actor_ref, 'session_control_binding');
+            await load_claimed_actor_runtime(actor_id, actor_ref, 'session_control_binding');
         } else if (!ui_state.place.current_place_id) {
-            void load_claimed_actor_runtime(actor_id, actor_ref, 'session_control_resume');
+            await load_claimed_actor_runtime(actor_id, actor_ref, 'session_control_resume');
         }
         return { kind: 'bound' };
     }
@@ -6137,7 +6621,7 @@ export function create_app_state(): AppState {
         ui_state.actor_claim.is_submitting = true;
         ui_state.actor_claim.error = null;
         try {
-            const res = await fetch('http://localhost:8787/api/actors/delete', {
+            const res = await fetch(build_api_url(APP_CONFIG.api_base_url, '/actors/delete'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -6319,7 +6803,7 @@ export function create_app_state(): AppState {
                 description: 'add FIRE! tag to controlled actor',
                 rgb: get_color_by_name('vivid_red').rgb,
                 on_trigger: async () => {
-                    const response = await fetch('http://localhost:8787/api/tag/add', {
+                    const response = await fetch(build_api_url(APP_CONFIG.api_base_url, '/tag/add'), {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
@@ -6339,7 +6823,7 @@ export function create_app_state(): AppState {
                 rgb: get_color_by_name('pale_green').rgb,
                 on_trigger: async () => {
                     const actor_id = get_controlled_actor_id();
-                    const items_res = await fetch(`http://localhost:8787/api/actor/items?actor_id=${actor_id}`);
+                    const items_res = await fetch(`${build_api_url(APP_CONFIG.api_base_url, '/actor/items')}?actor_id=${actor_id}`);
                     const items_data = await items_res.json();
                     if (!items_data.ok) {
                         flash_status(['Failed to load inventory'], 1500);
@@ -6475,7 +6959,7 @@ export function create_app_state(): AppState {
                 rgb: get_color_by_name('vivid_yellow').rgb,
                 on_trigger: async () => {
                     const actor_id = get_controlled_actor_id();
-                    const actor_res = await fetch(`http://localhost:8787/api/actor?id=${actor_id}`);
+                    const actor_res = await fetch(`${build_api_url(APP_CONFIG.api_base_url, '/actor')}?id=${actor_id}`);
                     if (!actor_res.ok) {
                         flash_status(['Failed to fetch actor'], 1500);
                         return;
@@ -6709,7 +7193,7 @@ export function create_app_state(): AppState {
                 target_kind: 'character_editor',
                 target_field: 'kind',
                 selected_value: ui_state.character_editor.draft.kind,
-                fetch_url: `http://localhost:8787/api/character/editor/options?field=kind&ref=${encodeURIComponent(character_ref)}&slot=${APP_CONFIG.selected_data_slot}`,
+                fetch_url: `${build_api_url(APP_CONFIG.api_base_url, '/character/editor/options')}?field=kind&ref=${encodeURIComponent(character_ref)}&slot=${APP_CONFIG.selected_data_slot}`,
             });
             return;
         }
@@ -6719,7 +7203,7 @@ export function create_app_state(): AppState {
                 target_kind: 'character_editor',
                 target_field: 'sex',
                 selected_value: ui_state.character_editor.draft.sex,
-                fetch_url: `http://localhost:8787/api/character/editor/options?field=sex&ref=${encodeURIComponent(character_ref)}&slot=${APP_CONFIG.selected_data_slot}`,
+                fetch_url: `${build_api_url(APP_CONFIG.api_base_url, '/character/editor/options')}?field=sex&ref=${encodeURIComponent(character_ref)}&slot=${APP_CONFIG.selected_data_slot}`,
             });
         }
     }
@@ -6733,7 +7217,7 @@ export function create_app_state(): AppState {
             target_kind: 'tag_picker',
             target_field: 'name',
             selected_value: ui_state.tag_picker.draft?.name ?? null,
-            fetch_url: `http://localhost:8787/api/tag/options?scope=${encodeURIComponent(scope ?? 'CHARACTER')}&ref=${encodeURIComponent(entity_ref)}&slot=${APP_CONFIG.selected_data_slot}`,
+            fetch_url: `${build_api_url(APP_CONFIG.api_base_url, '/tag/options')}?scope=${encodeURIComponent(scope ?? 'CHARACTER')}&ref=${encodeURIComponent(entity_ref)}&slot=${APP_CONFIG.selected_data_slot}`,
         });
     }
 
@@ -6872,7 +7356,7 @@ export function create_app_state(): AppState {
     async function load_actor_owner_inventory_view(actor_id: string): Promise<OwnerInventoryView | null> {
         if (!actor_id) return null;
         try {
-            const payload = await fetch_inventory_owner_view_payload(`http://localhost:8787/api/actor/private_state?actor_ref=${encodeURIComponent(`actor.${actor_id}`)}&slot=${APP_CONFIG.selected_data_slot}&session_token=${encodeURIComponent(get_session_token())}`);
+            const payload = await fetch_inventory_owner_view_payload(`${build_api_url(APP_CONFIG.api_base_url, '/actor/private_state')}?actor_ref=${encodeURIComponent(`actor.${actor_id}`)}&slot=${APP_CONFIG.selected_data_slot}&session_token=${encodeURIComponent(get_session_token())}`);
             const view = extract_inventory_owner_view(payload);
             if (!view) {
                 debug_log(`[InventoryOwnerView] Failed to load actor inventory view for ${actor_id}: ${JSON.stringify(payload?.data ?? null)}`);
@@ -6889,7 +7373,7 @@ export function create_app_state(): AppState {
         const normalized_actor_ref = String(actor_ref ?? '').trim();
         if (!normalized_actor_ref.startsWith('actor.')) return null;
         try {
-            const payload = await fetch_inventory_owner_view_payload(`http://localhost:8787/api/actor/private_state?actor_ref=${encodeURIComponent(normalized_actor_ref)}&slot=${APP_CONFIG.selected_data_slot}&session_token=${encodeURIComponent(get_session_token())}`);
+            const payload = await fetch_inventory_owner_view_payload(`${build_api_url(APP_CONFIG.api_base_url, '/actor/private_state')}?actor_ref=${encodeURIComponent(normalized_actor_ref)}&slot=${APP_CONFIG.selected_data_slot}&session_token=${encodeURIComponent(get_session_token())}`);
             if (!payload?.ok || !payload.data?.ok || !payload.data?.actor) return null;
             const place_id = String(payload.data.actor?.location?.place_id ?? '').trim();
             return place_id || null;
@@ -7287,6 +7771,7 @@ export function create_app_state(): AppState {
         resolve_controlled_actor_binding,
         refresh_actor_claim_state,
         claim_actor,
+        claim_actor_by_id: apply_tai_actor_claim_request,
         get_actor_claim_entries: () => ui_state.actor_claim.actors,
         get_session_token,
         get_current_actor_ref: () => ui_state.actor_claim.current_actor_ref,
@@ -7295,6 +7780,7 @@ export function create_app_state(): AppState {
             const tile = get_entity_focus_tile_in_place(get_current_place(), get_input_actor_ref());
             return tile ? { x: tile.x, y: tile.y, z: tile.z } : null;
         },
+        get_join_snapshot: () => world_join_controller.get_tai_join_snapshot(),
         get_text_value: (source, field) => {
             if (source === 'communication_input') {
                 return String(ui_state.controls.draft ?? '');
@@ -7304,6 +7790,34 @@ export function create_app_state(): AppState {
                 if (!key) return null;
                 const value = (ui_state.character_creation.draft as any)?.[key];
                 return typeof value === 'string' ? value : value == null ? '' : String(value);
+            }
+            if (source === 'join') {
+                const snapshot = world_join_controller.get_tai_join_snapshot();
+                const key = String(field ?? '').trim();
+                if (key === 'selected_connection_id') return snapshot.selected_connection_id ?? '';
+                if (key === 'selected_connection_host') return snapshot.selected_connection_host ?? '';
+                if (key === 'selected_connection_kind') return snapshot.selected_connection_kind ?? '';
+                if (key === 'probe_status') return snapshot.probe_status ?? '';
+                if (key === 'supports_join') return snapshot.supports_join ? 'true' : 'false';
+                if (key === 'join_mode') return snapshot.join_mode ?? '';
+                if (key === 'world_label') return snapshot.world_label ?? '';
+                if (key === 'painter_document_id') return snapshot.painter_document_id ?? '';
+                if (key === 'api_base_url') return snapshot.api_base_url ?? '';
+                if (key === 'bridge_ws_base_url') return snapshot.bridge_ws_base_url ?? '';
+                const status_line_match = /^status_line_(\d+)$/.exec(key);
+                if (status_line_match) {
+                    const index = Number(status_line_match[1]);
+                    return snapshot.status_lines[index] ?? '';
+                }
+                return null;
+            }
+            if (source === 'session') {
+                const key = String(field ?? '').trim();
+                if (key === 'session_token_present') return get_session_token() ? 'true' : 'false';
+                if (key === 'controlled_actor_ref') return ui_state.actor_claim.current_actor_ref ?? '';
+                if (key === 'controlled_actor_id') return get_controlled_actor_id() ?? '';
+                if (key === 'current_place_id') return get_current_place()?.id ?? '';
+                return null;
             }
             return null;
         },
@@ -8304,6 +8818,7 @@ export function create_app_state(): AppState {
 
     async function refresh_controlled_actor_binding(force: boolean = false, allow_ui_fallback: boolean = !tool_assisted_inputs_boot_enabled): Promise<void> {
         if (ui_state.world_entry.is_visible || ui_state.world_join.is_visible) return;
+        if (ui_state.actor_claim.is_submitting) return;
         ui_state.actor_claim.binding_refresh_in_flight = true;
         apply_runtime_module_visibility();
         try {
@@ -9000,6 +9515,14 @@ export function create_app_state(): AppState {
         }
         if (boot_mode === 'direct_runtime') {
             void refresh_controlled_actor_binding(true, true);
+        } else if (boot_mode === 'tas_runtime') {
+            const taiJoinRequest = resolve_tai_join_request();
+            if (taiJoinRequest) {
+                ui_state.world_entry.is_visible = false;
+                ui_state.world_join.is_visible = true;
+                apply_runtime_module_visibility();
+                void world_join_controller.apply_tai_join_request(taiJoinRequest);
+            }
         }
         void tool_assisted_inputs_runtime.start_configured();
     }, 0);
@@ -9043,6 +9566,10 @@ export function create_app_state(): AppState {
 
     // Create module registry for dynamic module management (Phase 7.5)
     const module_registry = create_module_registry();
+    refresh_interaction_registry();
+    module_registry.subscribe(() => {
+        refresh_interaction_registry();
+    });
 
     const camera_control_fallback_space = createVoxelSpace(1, 1);
     function apply_saved_camera_config_to_space(space: VoxelSpace): void {
@@ -9498,6 +10025,25 @@ export function create_app_state(): AppState {
         return false;
     }
 
+    const world_join_controller = create_join_controller({
+        id: 'world_join_module',
+        rect: get_persisted_rect('world_join_module', { x0: 64, y0: 6, x1: 136, y1: 30 }),
+        title: 'JOIN WORLD',
+        slot: APP_CONFIG.selected_data_slot,
+        get_is_visible: () => ui_state.world_join.is_visible,
+        on_join_selection: async (selection) => {
+            try {
+                await begin_world_session(selection);
+            } catch {
+                ui_state.world_join.is_visible = true;
+                ui_state.world_entry.is_visible = false;
+                apply_runtime_module_visibility();
+            }
+        },
+        on_back: () => open_world_entry_module(),
+        on_move: (new_rect) => persist_module_rect('world_join_module', new_rect),
+    });
+
     const modules: Module[] = [
         // Action lock helpers for communicate/inspect during timed events.
         make_fill_module({
@@ -9736,6 +10282,7 @@ export function create_app_state(): AppState {
             },
             get_controlled_actor_ref: () => get_input_actor_ref() || null,
             get_session_token: () => get_session_token() || null,
+            get_api_base_url: () => APP_CONFIG.api_base_url,
             request_scene_place_refresh: (place_id: string) => { void refresh_single_scene_place(place_id); },
             on_double_click_npc: (npc_ref: string) => {
                 debug_log(`[PlaceModule] Double-click on NPC: ${npc_ref}`);
@@ -9894,11 +10441,12 @@ export function create_app_state(): AppState {
             },
 
             on_hover_ground_item: (_tile_x: number, _tile_y: number, item_id: string | null) => {
-                if (!item_id) {
+                const effective_item_id = getCurrentPlaceHoveredGroundItemId() ?? item_id;
+                if (!effective_item_id) {
                     ui_state.character.highlighted_slots = [];
                     return;
                 }
-                const meta = ui_state.place.ground_items_by_id.get(item_id);
+                const meta = ui_state.place.ground_items_by_id.get(effective_item_id);
                 if (!meta) {
                     ui_state.character.highlighted_slots = [];
                     return;
@@ -9925,7 +10473,7 @@ export function create_app_state(): AppState {
                 void (async () => {
                     const place = get_current_place();
                     const source = place ? `place.ground.${place.id}` : 'place.ground';
-                    await apply_item_legality_highlight(item_id, source, def, source);
+                    await apply_item_legality_highlight(effective_item_id, source, def, source);
                 })();
             },
 
@@ -9968,12 +10516,23 @@ export function create_app_state(): AppState {
                 debug_log(`[PlaceModule] get_drag_source: ${JSON.stringify(source)}`);
                 return source;
             },
+            get_drag_payload: () => get_current_drag_payload(),
+            resolve_drop_target: (tile_x: number, tile_y: number, world_z: number) => {
+                const place = get_current_place();
+                if (!place) return null;
+                return resolve_place_drop_target(place.id, tile_x, tile_y, world_z);
+            },
 
             on_drop: async (tile_x: number, tile_y: number): Promise<boolean> => {
                 debug_log(`[PlaceModule] ========== on_drop called ==========`);
                 debug_log(`[PlaceModule] Target tile: (${tile_x}, ${tile_y})`);
                 debug_log(`[PlaceModule] Drag state: is_dragging=${drag_state.is_dragging}, source_module=${drag_state.source_module}`);
                 debug_log(`[PlaceModule] Item: ${drag_state.item_instance_id} from ${drag_state.source_container_id}`);
+
+                const orchestratorPlaceTarget = getCurrentPlaceInteractionTarget();
+                const effective_tile_x = orchestratorPlaceTarget?.tile_position.x ?? tile_x;
+                const effective_tile_y = orchestratorPlaceTarget?.tile_position.y ?? tile_y;
+                const effective_focus_wz = orchestratorPlaceTarget?.world_position?.z ?? get_focus_world_z_for_current_place();
 
                 if (!drag_state.is_dragging) {
                     debug_log(`[PlaceModule] on_drop: Not dragging - rejecting`);
@@ -9985,9 +10544,8 @@ export function create_app_state(): AppState {
                 try {
                     const place0 = get_current_place();
                     if (place0) {
-                        const focus_wz0 = get_focus_world_z_for_current_place();
-                        if (is_tile_or_structure_container_at(place0, tile_x, tile_y, focus_wz0)) {
-                            return await perform_drag_drop_into_tile_container({ place: place0, tile_x, tile_y, world_z: focus_wz0 });
+                        if (is_tile_or_structure_container_at(place0, effective_tile_x, effective_tile_y, effective_focus_wz)) {
+                            return await perform_drag_drop_into_tile_container({ place: place0, tile_x: effective_tile_x, tile_y: effective_tile_y, world_z: effective_focus_wz });
                         }
                     }
                 } catch (err) {
@@ -10004,19 +10562,19 @@ export function create_app_state(): AppState {
                     const place_id = parts.length >= 4 ? parts[2] : null;
                     const position_key = parts.length >= 4 ? parts[3] : null;
                     const source_z = get_drag_source_ground_elevation() ?? get_focus_world_z_for_current_place();
-                    const focus_z = get_focus_world_z_for_current_place();
+                    const focus_z = effective_focus_wz;
                     const target_z = focus_z !== source_z ? focus_z : source_z;
                     if (!place_id || !position_key) {
                         drag_state.reject_drag();
                         return false;
                     }
-                    const dest_key = `${tile_x}_${tile_y}_${target_z}`;
+                    const dest_key = `${effective_tile_x}_${effective_tile_y}_${target_z}`;
                     if (position_key === dest_key) {
                         drag_state.end_drag();
                         return true;
                     }
                     try {
-                        const to_key = `${tile_x}_${tile_y}_${target_z}`;
+                        const to_key = `${effective_tile_x}_${effective_tile_y}_${target_z}`;
                         const mv = await api_transfer_inline({
                             actor_id: get_controlled_actor_id(),
                             item_instance_id: String(drag_state.item_instance_id ?? ''),
@@ -10025,12 +10583,12 @@ export function create_app_state(): AppState {
                         });
                         if (mv.ok) {
                             const moved_item_id = String(drag_state.item_instance_id ?? '');
-                            apply_local_ground_item_move(moved_item_id, tile_x, tile_y, target_z, place_id);
-                            log_ground_item_cache_position('pre-refresh optimistic check', moved_item_id, tile_x, tile_y, target_z, place_id);
+                            apply_local_ground_item_move(moved_item_id, effective_tile_x, effective_tile_y, target_z, place_id);
+                            log_ground_item_cache_position('pre-refresh optimistic check', moved_item_id, effective_tile_x, effective_tile_y, target_z, place_id);
                             flash_status(['Dragged'], 900);
                             drag_state.end_drag();
                             await refresh_place_visual_state(place_id);
-                            log_ground_item_cache_position('post-refresh authoritative check', moved_item_id, tile_x, tile_y, target_z, place_id);
+                            log_ground_item_cache_position('post-refresh authoritative check', moved_item_id, effective_tile_x, effective_tile_y, target_z, place_id);
                             void refresh_container_data();
                             return true;
                         }
@@ -10050,7 +10608,7 @@ export function create_app_state(): AppState {
                     const parts = src.split('.');
                     const kind = parts[1];
                     const source_z = get_drag_source_ground_elevation() ?? get_focus_world_z_for_current_place();
-                    const focus_z = get_focus_world_z_for_current_place();
+                    const focus_z = effective_focus_wz;
                     const target_z = focus_z !== source_z ? focus_z : source_z;
                     // place.ground.<place_id>.<x_y> OR place.pile.<place_id>.<x_y>
                     const place_id = parts.length >= 4 ? parts[2] : null;
@@ -10060,7 +10618,7 @@ export function create_app_state(): AppState {
                         return false;
                     }
 
-                    const dest_key = `${tile_x}_${tile_y}_${target_z}`;
+                    const dest_key = `${effective_tile_x}_${effective_tile_y}_${target_z}`;
                     if (position_key === dest_key) {
                         drag_state.end_drag();
                         return true;
@@ -10068,7 +10626,7 @@ export function create_app_state(): AppState {
 
                     // Dragging a pile/item within the place: use /api/transfer.
                     try {
-                        const to_key = `${tile_x}_${tile_y}_${target_z}`;
+                        const to_key = `${effective_tile_x}_${effective_tile_y}_${target_z}`;
                         const mv = await api_transfer_inline({
                             actor_id: get_controlled_actor_id(),
                             item_instance_id: String(drag_state.item_instance_id ?? ''),
@@ -10077,12 +10635,12 @@ export function create_app_state(): AppState {
                         });
                         if (mv.ok) {
                             const moved_item_id = String(drag_state.item_instance_id ?? '');
-                            apply_local_ground_item_move(moved_item_id, tile_x, tile_y, target_z, place_id);
-                            log_ground_item_cache_position('pre-refresh optimistic check', moved_item_id, tile_x, tile_y, target_z, place_id);
+                            apply_local_ground_item_move(moved_item_id, effective_tile_x, effective_tile_y, target_z, place_id);
+                            log_ground_item_cache_position('pre-refresh optimistic check', moved_item_id, effective_tile_x, effective_tile_y, target_z, place_id);
                             flash_status(['Dragged'], 900);
                             drag_state.end_drag();
                             await refresh_place_visual_state(place_id);
-                            log_ground_item_cache_position('post-refresh authoritative check', moved_item_id, tile_x, tile_y, target_z, place_id);
+                            log_ground_item_cache_position('post-refresh authoritative check', moved_item_id, effective_tile_x, effective_tile_y, target_z, place_id);
                             void refresh_container_data();
                             return true;
                         }
@@ -10105,8 +10663,8 @@ export function create_app_state(): AppState {
 
                 // Shortcut: dropping an item onto a ground container-item deposits into it.
                 // Only when exactly one ground item exists on that tile and it is a container.
-                const focus_wz = get_focus_world_z_for_current_place();
-                const position_key = `${tile_x}_${tile_y}_${focus_wz}`;
+                const focus_wz = effective_focus_wz;
+                const position_key = `${effective_tile_x}_${effective_tile_y}_${focus_wz}`;
                     const ground_ids = ui_state.place.ground_items_by_voxel.get(position_key) ?? [];
                     if (ground_ids.length === 1) {
                         const ground_item_id = ground_ids[0]!;
@@ -10163,8 +10721,8 @@ export function create_app_state(): AppState {
                 const spill_src = String(drag_state.source_container_id ?? '');
                 if (spill_src.startsWith('place.item.')) {
                     try {
-                        const to_z = get_drag_source_ground_elevation() ?? get_focus_world_z_for_current_place();
-                        const to_container = `place.ground.${place.id}.${tile_x}_${tile_y}_${to_z}`;
+                        const to_z = get_drag_source_ground_elevation() ?? effective_focus_wz;
+                        const to_container = `place.ground.${place.id}.${effective_tile_x}_${effective_tile_y}_${to_z}`;
                         const sp = await api_transfer_inline({
                             actor_id: get_controlled_actor_id(),
                             item_instance_id: String(drag_state.item_instance_id ?? ''),
@@ -10191,8 +10749,8 @@ export function create_app_state(): AppState {
 
                 if (spill_src.startsWith('place.tile.')) {
                     try {
-                        const to_z = get_focus_world_z_for_current_place();
-                        const to_container = `place.ground.${place.id}.${tile_x}_${tile_y}_${to_z}`;
+                        const to_z = effective_focus_wz;
+                        const to_container = `place.ground.${place.id}.${effective_tile_x}_${effective_tile_y}_${to_z}`;
                         const sp = await api_transfer_inline({
                             actor_id: get_controlled_actor_id(),
                             item_instance_id: String(drag_state.item_instance_id ?? ''),
@@ -10230,8 +10788,8 @@ export function create_app_state(): AppState {
 
                 try {
                     const actor_id = get_controlled_actor_id();
-                    const to_z = get_drag_source_ground_elevation() ?? get_focus_world_z_for_current_place();
-                    const to_container = `place.ground.${place.id}.${tile_x}_${tile_y}_${to_z}`;
+                    const to_z = get_drag_source_ground_elevation() ?? effective_focus_wz;
+                    const to_container = `place.ground.${place.id}.${effective_tile_x}_${effective_tile_y}_${to_z}`;
                     const drop_res = await api_transfer_inline({
                         actor_id,
                         item_instance_id: String(drag_state.item_instance_id ?? ''),
@@ -10243,7 +10801,7 @@ export function create_app_state(): AppState {
 
                     if (drop_res.ok) {
                         debug_log(`[PlaceModule] on_drop: SUCCESS!`);
-                        flash_status([`Dropped item at (${tile_x}, ${tile_y})`], 1500);
+                        flash_status([`Dropped item at (${effective_tile_x}, ${effective_tile_y})`], 1500);
                         // Refresh place view to show dropped item
                         await refresh_place_visual_state(place.id);
                         // BUG FIX: Refresh source container to remove item from inventory display
@@ -10651,22 +11209,33 @@ export function create_app_state(): AppState {
                 select_item_for_entity_inspector({ item_ref: `item.${item.id}`, owner_kind: 'actor', owner_id: actor_id });
             },
             on_slot_hover: (slot_name: string | null, slot_type: SlotType | null, garb_index: number | null, equipped_item: { instance: ItemInstance; definition: ItemDefinition } | null) => {
+                const orchestratorTarget = getCurrentUiInteractionTarget('equipment_slot', 'character_module');
+                const effective_slot_name = orchestratorTarget?.slot_name ?? slot_name;
+                const effective_slot_type = (orchestratorTarget?.slot_type as SlotType | null | undefined) ?? slot_type;
+                const effective_garb_index = orchestratorTarget?.garb_index ?? garb_index;
                 if (equipped_item) {
-                    ui_state.character.hovered_item = { name: equipped_item.definition.name, source: slot_name || 'character' };
-                } else if (slot_name) {
-                    ui_state.character.hovered_item = { name: '(empty slot)', source: slot_name };
+                    ui_state.character.hovered_item = { name: equipped_item.definition.name, source: effective_slot_name || 'character' };
+                } else if (effective_slot_name) {
+                    ui_state.character.hovered_item = { name: '(empty slot)', source: effective_slot_name };
                 } else {
                     ui_state.character.hovered_item = null;
                 }
                 
                 // Track hovered slot for bidirectional highlighting
-                ui_state.character.hovered_slot = slot_name;
+                ui_state.character.hovered_slot = effective_slot_name;
                 
                 // Find and highlight compatible items in open containers
-                if (slot_name) {
-                    const compatible_items = get_compatible_items_for_slot(slot_name);
+                if (effective_slot_name) {
+                    void apply_target_compatibility_highlight(orchestratorTarget ?? resolve_equipment_slot_target({
+                        module_id: 'character_module',
+                        view_id: 'character_view',
+                        slot_name: effective_slot_name,
+                        slot_type: effective_slot_type ?? 'tool',
+                        garb_index: effective_garb_index,
+                    }));
+                    const compatible_items = get_compatible_items_for_slot(effective_slot_name);
                     ui_state.character.highlighted_items = compatible_items;
-                    debug_log(`[Character] Hovered slot ${slot_name}.${slot_type}${garb_index !== null ? `.${garb_index}` : ''} - highlighting ${compatible_items.length} compatible items`);
+                    debug_log(`[Character] Hovered slot ${effective_slot_name}.${effective_slot_type}${effective_garb_index !== null ? `.${effective_garb_index}` : ''} - highlighting ${compatible_items.length} compatible items`);
                 } else {
                     ui_state.character.highlighted_items = [];
                 }
@@ -10683,7 +11252,12 @@ export function create_app_state(): AppState {
                 // Store in shared drag state
                 drag_state.start_drag('character', item.id, container_id, definition);
                 // Highlight compatible slots (call API for tag-based compatibility)
-                await apply_item_legality_highlight(item.id, container_id, definition, container_id);
+                const payload = get_current_drag_payload();
+                if (payload) {
+                    await apply_item_legality_highlight_from_payload(payload, container_id);
+                } else {
+                    await apply_item_legality_highlight(item.id, container_id, definition, container_id);
+                }
                 console.log(`[Character] Drag started from ${slot_name}.${slot_type}${garb_index !== null ? `.${garb_index}` : ''} - legality highlight applied`);
             },
             on_invalid_drop: (message: string) => {
@@ -11336,19 +11910,7 @@ export function create_app_state(): AppState {
             on_move: (new_rect) => persist_module_rect('world_entry_module', new_rect),
         }),
 
-        make_world_join_module({
-            id: 'world_join_module',
-            rect: get_persisted_rect('world_join_module', { x0: 72, y0: 8, x1: 132, y1: 28 }),
-            get_is_visible: () => ui_state.world_join.is_visible,
-            get_entries: () => ui_state.world_join.entries,
-            get_selected_world_id: () => ui_state.world_join.selected_world_id,
-            get_status_lines: () => ui_state.world_join.status_lines,
-            on_select_world: (world_id) => { ui_state.world_join.selected_world_id = world_id; },
-            on_join_selected: () => { void join_selected_world(); },
-            on_back: () => open_world_entry_module(),
-            on_refresh: () => { void refresh_joinable_worlds(); },
-            on_move: (new_rect) => persist_module_rect('world_join_module', new_rect),
-        }),
+        ...world_join_controller.modules,
 
         make_actor_claim_module({
             id: 'actor_claim_module',
@@ -11460,8 +12022,9 @@ export function create_app_state(): AppState {
                 select_item_for_entity_inspector(selection);
             },
             on_slot_hover: async (_surface, slot) => {
+                const orchestratorTarget = getCurrentUiInteractionTarget('inventory_slot', 'inventory_container');
                 if (slot?.item) {
-                    const source_container_id = get_container_id_from_target_id(slot.slot_target_id);
+                    const source_container_id = orchestratorTarget?.container_id ?? get_container_id_from_target_id(slot.slot_target_id);
                     if (!source_container_id) {
                         clear_item_legality_highlight();
                         return;
@@ -11472,6 +12035,15 @@ export function create_app_state(): AppState {
                         display_char: slot.item.display_char,
                         tags: slot.item.tags,
                     } as ItemDefinition;
+                    void apply_target_compatibility_highlight(orchestratorTarget ?? resolve_inventory_slot_target({
+                        module_id: 'inventory_container',
+                        view_id: 'inventory_container_view',
+                        container_id: source_container_id,
+                        slot_index: slot.slot_index,
+                        target_ref: slot.slot_target_id,
+                        grid_x: slot.grid_x,
+                        grid_y: slot.grid_y,
+                    }));
                     await apply_item_legality_highlight(slot.item.id, source_container_id, definition, source_container_id);
                 } else {
                     clear_item_legality_highlight();
@@ -11492,7 +12064,12 @@ export function create_app_state(): AppState {
                 // Reuse the legacy 'container' drag lane for now so existing cross-module
                 // transfer and world-drop behavior keeps working during the surface migration.
                 drag_state.start_drag('container', slot.item.id, source_container_id, definition, slot.slot_index, slot.slot_target_id);
-                void apply_item_legality_highlight(slot.item.id, source_container_id, definition, source_container_id);
+                const payload = get_current_drag_payload();
+                if (payload) {
+                    void apply_item_legality_highlight_from_payload(payload, source_container_id);
+                } else {
+                    void apply_item_legality_highlight(slot.item.id, source_container_id, definition, source_container_id);
+                }
             },
             on_drop: async (surface, slot): Promise<boolean> => {
                 if (!drag_state.is_dragging) return false;
@@ -12122,8 +12699,9 @@ export function create_app_state(): AppState {
                     select_item_for_entity_inspector(selection);
                 },
                 on_slot_hover: async (_surface, slot) => {
+                    const orchestratorTarget = getCurrentUiInteractionTarget('inventory_slot', instance_id);
                     if (slot?.item) {
-                        const source_container_id = get_container_id_from_target_id(slot.slot_target_id);
+                        const source_container_id = orchestratorTarget?.container_id ?? get_container_id_from_target_id(slot.slot_target_id);
                         if (!source_container_id) {
                             clear_item_legality_highlight();
                             return;
@@ -12134,6 +12712,15 @@ export function create_app_state(): AppState {
                             display_char: slot.item.display_char,
                             tags: slot.item.tags,
                         } as ItemDefinition;
+                        void apply_target_compatibility_highlight(orchestratorTarget ?? resolve_inventory_slot_target({
+                            module_id: instance_id,
+                            view_id: `${instance_id}_view`,
+                            container_id: source_container_id,
+                            slot_index: slot.slot_index,
+                            target_ref: slot.slot_target_id,
+                            grid_x: slot.grid_x,
+                            grid_y: slot.grid_y,
+                        }));
                         await apply_item_legality_highlight(slot.item.id, source_container_id, definition, source_container_id);
                     } else {
                         clear_item_legality_highlight();
@@ -12149,7 +12736,12 @@ export function create_app_state(): AppState {
                     const source_container_id = get_container_id_from_target_id(slot.slot_target_id) ?? get_container_id_from_target_id(surface.surface_target_id);
                     if (!source_container_id) return;
                     drag_state.start_drag('container', slot.item.id, source_container_id, definition, slot.slot_index, slot.slot_target_id);
-                    void apply_item_legality_highlight(slot.item.id, source_container_id, definition, source_container_id);
+                    const payload = get_current_drag_payload();
+                    if (payload) {
+                        void apply_item_legality_highlight_from_payload(payload, source_container_id);
+                    } else {
+                        void apply_item_legality_highlight(slot.item.id, source_container_id, definition, source_container_id);
+                    }
                 },
                 on_drop: async (surface, slot): Promise<boolean> => {
                     if (!drag_state.is_dragging) return false;
@@ -12624,6 +13216,9 @@ export function create_app_state(): AppState {
         update_layout,
         start_window_feed_polling,
         module_registry,  // Expose for subscription
+        get_interaction_adapters: () => get_registered_interaction_adapters(),
+        get_interaction_hover_state: () => current_interaction_hover_state,
+        get_interaction_session_state: () => current_interaction_session_state,
         // Called when drag ends outside any module - triggers rejection animation
         on_drag_end_outside: (x: number, y: number) => {
             if (drag_state.is_dragging) {
@@ -12633,6 +13228,10 @@ export function create_app_state(): AppState {
         // Global pointer move hook used by CanvasRuntime.
         on_pointer_move_global: (x: number, y: number) => {
             drag_state.update_position(x, y);
+            const pointer_state = build_interaction_pointer_state({ x, y });
+            const move_resolution = interaction_registry.process_pointer_move(pointer_state);
+            current_interaction_hover_state = move_resolution.hover;
+            current_interaction_session_state = move_resolution.session ?? current_interaction_session_state;
 
             // Update Place DOM parallax (centered on place module inner rect, clamped).
             try {
@@ -12653,6 +13252,36 @@ export function create_app_state(): AppState {
             } catch {
                 // ignore
             }
+        },
+        on_pointer_down_global: (x: number, y: number, e: any) => {
+            const pointer_state = build_interaction_pointer_state({
+                x,
+                y,
+                pointer_id: e?.pointer_id,
+                button: e?.button,
+                buttons: e?.buttons,
+                shift: e?.shift,
+                ctrl: e?.ctrl,
+                alt: e?.alt,
+                meta: e?.meta,
+            });
+            const down_resolution = interaction_registry.process_pointer_down(pointer_state, 'drag');
+            current_interaction_session_state = down_resolution.session;
+        },
+        on_pointer_up_global: (x: number, y: number, e: any) => {
+            const pointer_state = build_interaction_pointer_state({
+                x,
+                y,
+                pointer_id: e?.pointer_id,
+                button: e?.button,
+                buttons: e?.buttons,
+                shift: e?.shift,
+                ctrl: e?.ctrl,
+                alt: e?.alt,
+                meta: e?.meta,
+            });
+            const up_resolution = interaction_registry.process_pointer_up(pointer_state);
+            current_interaction_session_state = up_resolution.session;
         },
         set_current_place_pause_source,
         create_current_place_pause_controller,

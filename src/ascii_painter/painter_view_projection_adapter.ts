@@ -1,7 +1,7 @@
 import type { GridCell } from './types.js';
 import type { Grid } from './types.js';
 import type { PainterDocumentRuntime } from './painter_document_runtime.js';
-import { createVoxelSpace, getVoxel, type VoxelLayer, type VoxelSpace } from './voxel_space.js';
+import { createVoxelSpace, getVoxel, type CameraConfig, type VoxelLayer, type VoxelSpace } from './voxel_space.js';
 import {
   build_visible_plane_coordinates,
   get_principal_view_plane_axis,
@@ -15,7 +15,7 @@ import {
 const PAINTER_DEPTH_MARGIN = 2;
 
 export type PainterDisplayProjection = {
-  space: VoxelSpace;
+  scene: PainterProjectedScene;
   world_bounds: {
     min_x: number;
     min_y: number;
@@ -47,9 +47,33 @@ export type PainterDisplayProjection = {
   plane_to_slot: ReadonlyMap<number, number>;
 };
 
+export type PainterProjectedSlot = {
+  z: number;
+  world_plane: number;
+  name: string;
+  visible: boolean;
+  opacity: number;
+  locked: boolean;
+  cells: GridCell[][];
+};
+
+export type PainterProjectedScene = {
+  bounds: {
+    width: number;
+    height: number;
+    minZ: number;
+    maxZ: number;
+    depth: number;
+  };
+  camera: CameraConfig;
+  slots: Map<number, PainterProjectedSlot>;
+};
+
 function make_empty_cell(): GridCell {
   return {
     char: ' ',
+    graphic: undefined,
+    materials: undefined,
     rgb: { r: 0, g: 0, b: 0 },
     weight_index: 1,
   };
@@ -62,8 +86,11 @@ function make_empty_cells(width: number, height: number): GridCell[][] {
 function clone_cell(cell: GridCell): GridCell {
   return {
     char: cell.char,
+    graphic: cell.graphic,
+    materials: cell.materials,
     rgb: { ...cell.rgb },
     weight_index: cell.weight_index,
+    render_index: cell.render_index,
   };
 }
 
@@ -202,10 +229,13 @@ export function project_painter_display_space(args: {
       if (!row) continue;
       for (let x = 0; x < source.bounds.width; x += 1) {
         const cell = row[x] ?? getVoxel(source, x, y, worldZ);
-        if (!cell || cell.char === ' ') continue;
+        if (!cell) continue;
+        const has_text = typeof cell.char === 'string' && cell.char !== ' ';
+        const has_graphic = !!cell.graphic;
+        if (!has_text && !has_graphic) continue;
         const displayCell = project_world_to_painter_display_cell({
           projection: {
-            space: display,
+            scene: projected_scene_from_voxel_space(display),
             world_bounds: {
               ...bounds,
               max_x: bounds.min_x + bounds.width - 1,
@@ -246,7 +276,7 @@ export function project_painter_display_space(args: {
   }
 
   return {
-    space: display,
+    scene: projected_scene_from_voxel_space(display),
     world_bounds: {
       ...bounds,
       max_x: bounds.min_x + bounds.width - 1,
@@ -306,45 +336,49 @@ export function project_painter_runtime_display_space(args: {
     width: viewportWidth,
     height: viewportHeight,
   };
-  const display = createVoxelSpace(projected_bounds.width, projected_bounds.height, {
-    minZ: 0,
-    maxZ: Math.max(0, visible_planes.length - 1),
-    defaultZ: 0,
-  });
-  display.layers.clear();
-  display.bounds.minZ = 0;
-  display.bounds.maxZ = Math.max(0, visible_planes.length - 1);
-  display.bounds.depth = Math.max(1, visible_planes.length);
-
-  const focus_slot = Math.max(0, Math.min(Math.max(0, visible_planes.length - 1), Math.floor(args.focus_slot)));
-  const plane_to_slot = build_plane_to_slot_map(visible_planes);
-  const content_bounds_by_slot: Array<{ min_x: number; min_y: number; max_x: number; max_y: number } | null> = Array.from({ length: Math.max(1, visible_planes.length) }, () => null);
-  display.camera = {
-    ...display.camera,
+  const slots = new Map<number, PainterProjectedSlot>();
+  const camera: CameraConfig = {
+    ...createVoxelSpace(1, 1, { defaultZ: 0 }).camera,
     ...(runtime.document.camera ?? {}),
     mode: 'rotated_ortho',
     euler_rotation: { x: 0, y: 0, z: 0 },
     transition_euler: { x: 0, y: 0, z: 0 },
-    focus_plane: focus_slot,
+    focus_plane: Math.max(0, Math.min(Math.max(0, visible_planes.length - 1), Math.floor(args.focus_slot))),
   };
+
+  const focus_slot = Math.max(0, Math.min(Math.max(0, visible_planes.length - 1), Math.floor(args.focus_slot)));
+  const plane_to_slot = build_plane_to_slot_map(visible_planes);
+  const content_bounds_by_slot: Array<{ min_x: number; min_y: number; max_x: number; max_y: number } | null> = Array.from({ length: Math.max(1, visible_planes.length) }, () => null);
+  camera.focus_plane = focus_slot;
 
   for (let slot = 0; slot < Math.max(1, visible_planes.length); slot += 1) {
     const world_plane = visible_planes[slot] ?? slot;
-    const layer: VoxelLayer = {
+    const layer: PainterProjectedSlot = {
       z: slot,
+      world_plane,
       name: `slot_${slot}_plane_${world_plane}`,
       visible: true,
       opacity: 1,
       locked: true,
       cells: make_empty_cells(projected_bounds.width, projected_bounds.height),
     };
-    display.layers.set(slot, layer);
+    slots.set(slot, layer);
   }
 
   for (const resolved of runtime.resolved_visible_index.values()) {
     const displayCell = project_world_to_painter_display_cell({
       projection: {
-        space: display,
+        scene: {
+          bounds: {
+            width: projected_bounds.width,
+            height: projected_bounds.height,
+            minZ: 0,
+            maxZ: Math.max(0, visible_planes.length - 1),
+            depth: Math.max(1, visible_planes.length),
+          },
+          camera,
+          slots,
+        },
         world_bounds: {
           ...bounds,
           max_x: bounds.min_x + bounds.width - 1,
@@ -366,7 +400,7 @@ export function project_painter_runtime_display_space(args: {
       world: { x: resolved.x, y: resolved.y, z: resolved.z },
     });
     if (!displayCell) continue;
-    const displayLayer = display.layers.get(displayCell.slot);
+    const displayLayer = slots.get(displayCell.slot);
     if (!displayLayer) continue;
     const outRow = displayLayer.cells[displayCell.y];
     if (!outRow) continue;
@@ -383,7 +417,17 @@ export function project_painter_runtime_display_space(args: {
   }
 
   return {
-    space: display,
+    scene: {
+      bounds: {
+        width: projected_bounds.width,
+        height: projected_bounds.height,
+        minZ: 0,
+        maxZ: Math.max(0, visible_planes.length - 1),
+        depth: Math.max(1, visible_planes.length),
+      },
+      camera,
+      slots,
+    },
     world_bounds: {
       ...bounds,
       max_x: bounds.min_x + bounds.width - 1,
@@ -406,6 +450,60 @@ export function project_painter_runtime_display_space(args: {
 
 export function get_painter_projection_focus_content_bounds(projection: PainterDisplayProjection): { min_x: number; min_y: number; max_x: number; max_y: number } | null {
   return projection.content_bounds_by_slot[projection.focus_slot] ?? null;
+}
+
+export function projected_scene_from_voxel_space(source: VoxelSpace): PainterProjectedScene {
+  const slots = new Map<number, PainterProjectedSlot>();
+  for (const [z, layer] of source.layers.entries()) {
+    slots.set(z, {
+      z: layer.z,
+      world_plane: z,
+      name: layer.name,
+      visible: layer.visible,
+      opacity: layer.opacity,
+      locked: layer.locked,
+      cells: layer.cells.map((row) => row.map((cell) => clone_cell(cell))),
+    });
+  }
+  return {
+    bounds: {
+      width: source.bounds.width,
+      height: source.bounds.height,
+      minZ: source.bounds.minZ,
+      maxZ: source.bounds.maxZ,
+      depth: source.bounds.depth,
+    },
+    camera: {
+      ...source.camera,
+      calibration: { ...source.camera.calibration },
+      euler_rotation: { ...source.camera.euler_rotation },
+      transition_euler: source.camera.transition_euler ? { ...source.camera.transition_euler } : undefined,
+      visual_pivot_px: source.camera.visual_pivot_px ? { ...source.camera.visual_pivot_px } : undefined,
+    },
+    slots,
+  };
+}
+
+export function clone_projected_scene(scene: PainterProjectedScene): PainterProjectedScene {
+  return {
+    bounds: { ...scene.bounds },
+    camera: {
+      ...scene.camera,
+      calibration: { ...scene.camera.calibration },
+      euler_rotation: { ...scene.camera.euler_rotation },
+      transition_euler: scene.camera.transition_euler ? { ...scene.camera.transition_euler } : undefined,
+      visual_pivot_px: scene.camera.visual_pivot_px ? { ...scene.camera.visual_pivot_px } : undefined,
+    },
+    slots: new Map(Array.from(scene.slots.entries(), ([z, slot]) => [z, {
+      z: slot.z,
+      world_plane: slot.world_plane,
+      name: slot.name,
+      visible: slot.visible,
+      opacity: slot.opacity,
+      locked: slot.locked,
+      cells: slot.cells.map((row) => row.map((cell) => clone_cell(cell))),
+    }])),
+  };
 }
 
 export function get_painter_world_content_bounds_center(source: VoxelSpace): { x: number; y: number; z: number } {
@@ -447,7 +545,7 @@ export function get_painter_world_content_bounds_center(source: VoxelSpace): { x
 }
 
 export function sync_grid_to_painter_projection(grid: Grid, projection: PainterDisplayProjection): void {
-  const layer = projection.space.layers.get(projection.focus_slot) ?? projection.space.layers.get(0);
+  const layer = projection.scene.slots.get(projection.focus_slot) ?? projection.scene.slots.get(0);
   grid.width = projection.projected_bounds.width;
   grid.height = projection.projected_bounds.height;
   grid.cells = layer ? layer.cells : make_empty_cells(grid.width, grid.height);

@@ -6,9 +6,14 @@ import { get_theme_font_primary_family, THAUMWORLD_RENDER_THEME } from '../mono_
 import { install_runtime_diagnostics_api } from '../shared/diagnostics.js';
 import { APP_CONFIG, create_app_state } from './app_state.js';
 import { PAINTER_CONFIG, create_painter_app_state } from './painter_app_state.js';
+import { apply_painter_multiplayer_transport_config } from './painter_runtime_config.js';
 import { create_launch_controller } from '../engine_launch/controller.js';
-import { create_painter_launch_adapter, resolve_painter_tai_boot_intent } from './painter_launch_adapter.js';
+import { create_join_controller } from '../engine_launch/join_controller.js';
+import { create_painter_launch_adapter, resolve_painter_tai_boot_intent, resolve_painter_tai_join_request } from './painter_launch_adapter.js';
 import type { PainterLaunchIntent } from './painter_launch_types.js';
+import { diag_log } from '../shared/diagnostics.js';
+import type { EngineJoinSelection } from '../engine_multiplayer/connection_types.js';
+import type { ToolAssistedInputsJoinSnapshot } from '../mono_ui/runtime/automation_interfaces.js';
 
 // Detect if we're in painter mode (set by preload script before page loads)
 const IS_PAINTER_MODE = (window as any).electronAPI?.appMode === 'ascii_painter';
@@ -23,22 +28,39 @@ let modules: readonly Module[];
 let module_registry: any;
 let on_drag_end_outside: ((x: number, y: number) => void) | undefined;
 let on_pointer_move_global: ((x: number, y: number, e: any) => void) | undefined;
+let on_pointer_down_global: ((x: number, y: number, e: any) => void) | undefined;
+let on_pointer_up_global: ((x: number, y: number, e: any) => void) | undefined;
 let on_after_compose: ((canvas: any) => void) | undefined;
 let launch_controller: ReturnType<typeof create_launch_controller<PainterLaunchIntent>> | null = null;
+let painter_join_controller: ReturnType<typeof create_join_controller> | null = null;
 let launchPainterIntent: ((intent: PainterLaunchIntent) => Promise<void>) | null = null;
+let painter_join_visible = false;
+let painter_tai_join_snapshot: ToolAssistedInputsJoinSnapshot | null = null;
+const get_painter_tai_join_snapshot = () => painter_tai_join_snapshot ?? painter_join_controller?.get_tai_join_snapshot() ?? null;
 
 let painter_state: ReturnType<typeof create_painter_app_state> | null = null;
 let game_state: ReturnType<typeof create_app_state> | null = null;
+let runtime!: CanvasRuntime;
+
+const refresh_painter_shell_modules = () => {
+    if (!launch_controller || !painter_join_controller) return;
+    modules = painter_join_visible
+        ? [...launch_controller.modules, ...painter_join_controller.modules]
+        : [...launch_controller.modules];
+    if (runtime) runtime.set_modules(get_visible_modules());
+};
 
 if (IS_PAINTER_MODE) {
     console.log('🎨 Initializing ASCII Painter Launch...');
     launchPainterIntent = async (intent: PainterLaunchIntent) => {
-        painter_state = create_painter_app_state({ skip_boot_restore: true, skip_multiplayer_bootstrap: true });
+        painter_state = create_painter_app_state({ skip_boot_restore: true, skip_multiplayer_bootstrap: true, get_join_snapshot: get_painter_tai_join_snapshot });
         await painter_state.start_from_launch_intent(intent);
         modules = painter_state.modules;
         module_registry = painter_state.module_registry;
         on_drag_end_outside = undefined;
         on_pointer_move_global = painter_state.on_pointer_move_global;
+        on_pointer_down_global = painter_state.on_pointer_down_global;
+        on_pointer_up_global = painter_state.on_pointer_up_global;
         on_after_compose = undefined;
         runtime.set_modules(get_visible_modules());
         if (module_registry?.subscribe) {
@@ -59,16 +81,68 @@ if (IS_PAINTER_MODE) {
             multiplayer: painter_state.multiplayer_sync,
         };
     };
+    const launch_painter_join_selection = async (selection: EngineJoinSelection) => {
+        painter_tai_join_snapshot = painter_join_controller?.get_tai_join_snapshot() ?? painter_tai_join_snapshot;
+        apply_painter_multiplayer_transport_config({
+            host_input: selection.connection.host,
+            api_base_url: selection.transport.api_base_url,
+            bridge_ws_base_url: selection.transport.bridge_ws_base_url,
+        });
+        const document_id = String(selection.probe?.painter_document_id ?? '').trim();
+        if (!document_id) {
+            throw new Error(`painter_join_unavailable:${selection.connection.id}`);
+        }
+        console.log('[PAINTER_JOIN]', JSON.stringify({
+            connection_id: selection.connection.id,
+            connection_name: selection.connection.name,
+            host: selection.connection.host,
+            api_base_url: selection.transport.api_base_url,
+            bridge_ws_base_url: selection.transport.bridge_ws_base_url,
+            document_id,
+            display_name: selection.probe?.painter_display_name ?? selection.connection.name,
+        }));
+        painter_join_visible = false;
+        refresh_painter_shell_modules();
+        await launchPainterIntent?.({
+            kind: 'join_authoritative',
+            slot: PAINTER_CONFIG.selected_data_slot,
+            document_id,
+            display_name: String(selection.probe?.painter_display_name ?? selection.connection.name ?? 'untitled'),
+            join_target_id: selection.connection.id,
+            api_base_url: selection.transport.api_base_url,
+            bridge_ws_base_url: selection.transport.bridge_ws_base_url,
+            persist_recent: false,
+        });
+    };
+    painter_join_controller = create_join_controller({
+        id: 'painter_join_module',
+        rect: { x0: 16, y0: 7, x1: 104, y1: 31 },
+        title: 'JOIN PAINTING',
+        slot: PAINTER_CONFIG.selected_data_slot,
+        get_is_visible: () => painter_join_visible,
+        on_join_selection: launch_painter_join_selection,
+        on_back: () => {
+            painter_join_visible = false;
+            refresh_painter_shell_modules();
+        },
+    });
     launch_controller = create_launch_controller<PainterLaunchIntent>({
         id: 'painter_launch_module',
         rect: { x0: 22, y0: 10, x1: 62, y1: 28 },
         adapter: create_painter_launch_adapter(),
         on_launch_intent: launchPainterIntent,
+        on_join_requested: async () => {
+            painter_join_visible = true;
+            refresh_painter_shell_modules();
+            await painter_join_controller?.refresh();
+        },
     });
-    modules = launch_controller.modules;
+    refresh_painter_shell_modules();
     module_registry = null;
     on_drag_end_outside = undefined;
     on_pointer_move_global = undefined;
+    on_pointer_down_global = undefined;
+    on_pointer_up_global = undefined;
     on_after_compose = undefined;
 } else {
     // GAME MODE
@@ -78,6 +152,8 @@ if (IS_PAINTER_MODE) {
     module_registry = game_state.module_registry;
     on_drag_end_outside = game_state.on_drag_end_outside;
     on_pointer_move_global = game_state.on_pointer_move_global;
+    on_pointer_down_global = game_state.on_pointer_down_global;
+    on_pointer_up_global = game_state.on_pointer_up_global;
     on_after_compose = game_state.on_after_compose;
 }
 
@@ -105,7 +181,7 @@ function get_visible_modules(): readonly Module[] {
     });
 }
 
-const runtime = new CanvasRuntime({
+runtime = new CanvasRuntime({
     canvas: canvasEl,
     grid_width: config.grid_width,
     grid_height: config.grid_height,
@@ -119,8 +195,15 @@ const runtime = new CanvasRuntime({
     modules: get_visible_modules(),
     on_drag_end_outside: (x, y) => on_drag_end_outside?.(x, y),
     on_pointer_move_global: (x, y, e) => on_pointer_move_global?.(x, y, e),
+    on_pointer_down_global: (x, y, e) => on_pointer_down_global?.(x, y, e),
+    on_pointer_up_global: (x, y, e) => on_pointer_up_global?.(x, y, e),
     on_after_compose: (canvas) => on_after_compose?.(canvas),
 });
+
+if (IS_PAINTER_MODE && launch_controller && painter_join_controller) {
+    modules = [...launch_controller.modules];
+    runtime.set_modules(get_visible_modules());
+}
 
 (window as any).TOOL_ASSISTED_INPUTS_RUNTIME = {
     inject_gameplay_key: (type: 'keydown' | 'keyup', payload: { code: string; key?: string; repeat?: boolean }) => {
@@ -182,6 +265,14 @@ if (IS_PAINTER_MODE && launch_controller) {
         await launchPainterIntent?.(taiBootIntent);
         return;
       }
+        const taiJoinRequest = resolve_painter_tai_join_request();
+        if (taiJoinRequest && painter_join_controller) {
+            painter_join_visible = true;
+            refresh_painter_shell_modules();
+            await painter_join_controller.apply_tai_join_request(taiJoinRequest);
+            painter_tai_join_snapshot = painter_join_controller.get_tai_join_snapshot();
+            return;
+        }
         await launch_controller!.refresh();
     })();
 }
@@ -197,6 +288,7 @@ if (IS_PAINTER_MODE) {
     let gotPanEvent = false;
     let boot_frames_left = 10;
     let boot_recentering_done = false;
+    let forcePainterViewportResync = false;
 
     function computeTileMetrics(scale: number): { tileW: number; tileH: number; fontSizePx: number } | null {
         const metrics = get_ui_cell_metrics(scale, config.base_font_size_px);
@@ -221,6 +313,126 @@ if (IS_PAINTER_MODE) {
     }) as EventListener);
     
     let lastViewportLogKey = '';
+    let lastPainterViewportInvalidReason = '';
+    let lastPainterViewportStateKey = '';
+
+    const logPainterViewportIssue = (reason: string, extra?: Record<string, unknown>) => {
+        const key = JSON.stringify({ reason, ...(extra ?? {}) });
+        if (key === lastPainterViewportInvalidReason) return;
+        lastPainterViewportInvalidReason = key;
+        diag_log('painter', 'important', 'PAINTER_VIEWPORT_DEBUG', reason, {
+            tile_w: tileSize.w,
+            tile_h: tileSize.h,
+            global_pan_x: Math.round(globalPan.x),
+            global_pan_y: Math.round(globalPan.y),
+            got_pan_event: gotPanEvent,
+            ui_scale: uiScale,
+            boot_frames_left,
+            canvas_rect: {
+                x: Math.round(canvasEl.getBoundingClientRect().x),
+                y: Math.round(canvasEl.getBoundingClientRect().y),
+                width: Math.round(canvasEl.getBoundingClientRect().width),
+                height: Math.round(canvasEl.getBoundingClientRect().height),
+            },
+            visibility_state: document.visibilityState,
+            window_focused: document.hasFocus(),
+            ...extra,
+        });
+    };
+
+    const logPainterViewportState = (reason: string, extra?: Record<string, unknown>) => {
+        const key = JSON.stringify({ reason, ...(extra ?? {}) });
+        if (key === lastPainterViewportStateKey) return;
+        lastPainterViewportStateKey = key;
+        diag_log('painter', 'important', 'PAINTER_VIEWPORT_DEBUG', reason, {
+            tile_w: tileSize.w,
+            tile_h: tileSize.h,
+            global_pan_x: Math.round(globalPan.x),
+            global_pan_y: Math.round(globalPan.y),
+            got_pan_event: gotPanEvent,
+            ui_scale: uiScale,
+            boot_frames_left,
+            canvas_rect: {
+                x: Math.round(canvasEl.getBoundingClientRect().x),
+                y: Math.round(canvasEl.getBoundingClientRect().y),
+                width: Math.round(canvasEl.getBoundingClientRect().width),
+                height: Math.round(canvasEl.getBoundingClientRect().height),
+            },
+            visibility_state: document.visibilityState,
+            window_focused: document.hasFocus(),
+            ...extra,
+        });
+    };
+
+    try {
+        window.addEventListener('focus', () => {
+            forcePainterViewportResync = true;
+            diag_log('painter', 'important', 'PAINTER_VIEWPORT_DEBUG', 'window focus observed', {
+                visibility_state: document.visibilityState,
+                window_focused: document.hasFocus(),
+                canvas_rect: {
+                    x: Math.round(canvasEl.getBoundingClientRect().x),
+                    y: Math.round(canvasEl.getBoundingClientRect().y),
+                    width: Math.round(canvasEl.getBoundingClientRect().width),
+                    height: Math.round(canvasEl.getBoundingClientRect().height),
+                },
+                tile_w: tileSize.w,
+                tile_h: tileSize.h,
+                got_pan_event: gotPanEvent,
+            });
+        });
+        window.addEventListener('blur', () => {
+            diag_log('painter', 'important', 'PAINTER_VIEWPORT_DEBUG', 'window blur observed', {
+                visibility_state: document.visibilityState,
+                window_focused: document.hasFocus(),
+                canvas_rect: {
+                    x: Math.round(canvasEl.getBoundingClientRect().x),
+                    y: Math.round(canvasEl.getBoundingClientRect().y),
+                    width: Math.round(canvasEl.getBoundingClientRect().width),
+                    height: Math.round(canvasEl.getBoundingClientRect().height),
+                },
+                tile_w: tileSize.w,
+                tile_h: tileSize.h,
+                got_pan_event: gotPanEvent,
+            });
+        });
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') {
+                forcePainterViewportResync = true;
+            }
+            diag_log('painter', 'important', 'PAINTER_VIEWPORT_DEBUG', 'document visibilitychange observed', {
+                visibility_state: document.visibilityState,
+                window_focused: document.hasFocus(),
+                canvas_rect: {
+                    x: Math.round(canvasEl.getBoundingClientRect().x),
+                    y: Math.round(canvasEl.getBoundingClientRect().y),
+                    width: Math.round(canvasEl.getBoundingClientRect().width),
+                    height: Math.round(canvasEl.getBoundingClientRect().height),
+                },
+                tile_w: tileSize.w,
+                tile_h: tileSize.h,
+                got_pan_event: gotPanEvent,
+            });
+        });
+        window.addEventListener('resize', () => {
+            forcePainterViewportResync = true;
+            diag_log('painter', 'important', 'PAINTER_VIEWPORT_DEBUG', 'window resize observed', {
+                visibility_state: document.visibilityState,
+                window_focused: document.hasFocus(),
+                canvas_rect: {
+                    x: Math.round(canvasEl.getBoundingClientRect().x),
+                    y: Math.round(canvasEl.getBoundingClientRect().y),
+                    width: Math.round(canvasEl.getBoundingClientRect().width),
+                    height: Math.round(canvasEl.getBoundingClientRect().height),
+                },
+                tile_w: tileSize.w,
+                tile_h: tileSize.h,
+                got_pan_event: gotPanEvent,
+            });
+        });
+    } catch {
+        // ignore
+    }
 
     (runtime as any)['tick'] = () => {
         const painterRef = painter_state;
@@ -232,11 +444,18 @@ if (IS_PAINTER_MODE) {
         // We re-sample metrics and canvas position to avoid a "snap" that only corrects
         // itself after the first manual global pan.
         const bootWarmup = boot_frames_left > 0;
+        const forceResync = forcePainterViewportResync;
+        if (forceResync) {
+            gotPanEvent = false;
+            logPainterViewportState('forcing painter viewport resync on restore-sensitive tick', {
+                reason: 'focus_visibility_or_resize',
+            });
+        }
 
         // Ensure we have sane initial metrics even before the first pan event.
         // On some boots the first recenter can run before the window layout is stable,
         // so we fall back to DOM + derived font metrics until events arrive.
-        if (tileSize.w <= 0 || tileSize.h <= 0 || bootWarmup) {
+        if (tileSize.w <= 0 || tileSize.h <= 0 || bootWarmup || forceResync) {
             const m = computeTileMetrics(runtime.get_scale());
             if (m) {
                 tileSize.w = m.tileW;
@@ -245,7 +464,7 @@ if (IS_PAINTER_MODE) {
             }
         }
 
-        if (!gotPanEvent || bootWarmup) {
+        if (!gotPanEvent || bootWarmup || forceResync) {
             const r = canvasEl.getBoundingClientRect();
             if (Number.isFinite(r.left) && Number.isFinite(r.top)) {
                 globalPan.x = r.left;
@@ -281,6 +500,7 @@ if (IS_PAINTER_MODE) {
                 ui_scale: uiScale,
             });
             if (vp) {
+                lastPainterViewportInvalidReason = '';
                 const logKey = `${vp.x.toFixed(2)},${vp.y.toFixed(2)},${vp.width.toFixed(2)},${vp.height.toFixed(2)}|${vp.tileW.toFixed(3)},${vp.tileH.toFixed(3)}|${vp.fontSizePx.toFixed(2)}`;
                 lastViewportLogKey = logKey;
 
@@ -295,7 +515,31 @@ if (IS_PAINTER_MODE) {
                     offsetX: 0,
                     offsetY: 0
                 });
+                if (forceResync) {
+                    logPainterViewportState('completed forced painter viewport resync', {
+                        viewport: {
+                            x: Math.round(vp.x),
+                            y: Math.round(vp.y),
+                            width: Math.round(vp.width),
+                            height: Math.round(vp.height),
+                        },
+                    });
+                }
+            } else {
+                logPainterViewportIssue('computed painter viewport unavailable', {
+                    module_rect: rect,
+                });
             }
+        } else if (!canvasModule) {
+            logPainterViewportIssue('painter canvas module missing');
+        } else {
+            logPainterViewportIssue('painter tile metrics invalid', {
+                module_rect: canvasModule.rect,
+            });
+        }
+
+        if (forceResync) {
+            forcePainterViewportResync = false;
         }
 
         if (boot_frames_left > 0) boot_frames_left -= 1;
@@ -304,6 +548,97 @@ if (IS_PAINTER_MODE) {
         painterRef.render_dom_layers();
         
         // Render mono_canvas last (on top)
+        originalTick();
+    };
+} else {
+    const originalTick = (runtime as any)['tick'].bind(runtime);
+    let tileSize = { w: 0, h: 0 };
+    let globalPan = { x: 0, y: 0 };
+    let uiScale = 1.0;
+    let gotPanEvent = false;
+    let boot_frames_left = 10;
+    let forcePlaceViewportResync = false;
+
+    function computeTileMetrics(scale: number): { tileW: number; tileH: number; fontSizePx: number } | null {
+        const metrics = get_ui_cell_metrics(scale, config.base_font_size_px);
+        return {
+            tileW: metrics.cell_w_px,
+            tileH: metrics.cell_h_px,
+            fontSizePx: metrics.font_size_px,
+        };
+    }
+
+    window.addEventListener('thaumworld_ui_pan', ((ev: CustomEvent) => {
+        tileSize.w = ev.detail?.tile_w_px ?? 0;
+        tileSize.h = ev.detail?.tile_h_px ?? 0;
+        globalPan.x = ev.detail?.pan_x_px ?? 0;
+        globalPan.y = ev.detail?.pan_y_px ?? 0;
+        uiScale = ev.detail?.scale ?? uiScale;
+        gotPanEvent = true;
+    }) as EventListener);
+
+    try {
+        const markPlaceViewportResyncNeeded = () => {
+            forcePlaceViewportResync = true;
+            gotPanEvent = false;
+        };
+        window.addEventListener('focus', markPlaceViewportResyncNeeded);
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') {
+                markPlaceViewportResyncNeeded();
+            }
+        });
+        window.addEventListener('resize', markPlaceViewportResyncNeeded);
+    } catch {
+        // ignore
+    }
+
+    (runtime as any)['tick'] = () => {
+        const currentModules: readonly Module[] = module_registry?.get_all ? module_registry.get_all() : modules;
+        const placeModule = currentModules.find(m => m.id === 'place') as any;
+        const bootWarmup = boot_frames_left > 0;
+        const forceResync = forcePlaceViewportResync;
+
+        if (tileSize.w <= 0 || tileSize.h <= 0 || bootWarmup || forceResync) {
+            const metrics = computeTileMetrics(runtime.get_scale());
+            if (metrics) {
+                tileSize.w = metrics.tileW;
+                tileSize.h = metrics.tileH;
+                uiScale = runtime.get_scale();
+            }
+        }
+
+        if (!gotPanEvent || bootWarmup || forceResync) {
+            const r = canvasEl.getBoundingClientRect();
+            if (Number.isFinite(r.left) && Number.isFinite(r.top)) {
+                globalPan.x = r.left;
+                globalPan.y = r.top;
+            }
+        }
+
+        if (forceResync && typeof placeModule?.force_dom_resync === 'function') {
+            placeModule.force_dom_resync('main_runtime_visibility_focus_resize_resync');
+        }
+
+        if (placeModule?.rect && typeof placeModule.set_dom_viewport === 'function' && tileSize.w > 0 && tileSize.h > 0) {
+            const vp = compute_dom_viewport_for_rect({
+                pan_x_px: globalPan.x,
+                pan_y_px: globalPan.y,
+                tile_w_px: tileSize.w,
+                tile_h_px: tileSize.h,
+                grid_height: config.grid_height,
+                rect: placeModule.rect,
+                base_font_size_px: config.base_font_size_px,
+                ui_scale: uiScale,
+            });
+            placeModule.set_dom_viewport(vp ?? null);
+        }
+
+        if (forceResync) {
+            forcePlaceViewportResync = false;
+        }
+        if (boot_frames_left > 0) boot_frames_left -= 1;
+
         originalTick();
     };
 }

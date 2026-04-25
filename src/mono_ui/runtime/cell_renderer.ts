@@ -43,6 +43,7 @@ const warned_fallbacks = new Set<string>();
 const pending_atlas_loads = new Set<string>();
 let loggedAtlasBackend = false;
 const loggedAtlasGraphics = new Set<string>();
+const loggedAtlasOutcomes = new Set<string>();
 
 function draw_font_cell(opts: DrawCellOpts, cache?: FontDrawStateCache): void {
   const weight_index = clamp_weight_index(opts.cell.weight_index);
@@ -85,6 +86,15 @@ function draw_atlas_cell(opts: DrawCellOpts): AtlasDrawResult {
   const materials = opts.cell.materials ?? {};
   const cached = get_cached_resolved_atlas_frame(graphic, materials, opts.cell.light_mag);
   if (cached) {
+    const drawnKey = `drawn:${graphic.graphic_id}`;
+    if (!loggedAtlasOutcomes.has(drawnKey)) {
+      loggedAtlasOutcomes.add(drawnKey);
+      console.log('[ATLAS_DRAW_DEBUG] atlas frame drawn ' + JSON.stringify({
+        graphic_id: graphic.graphic_id,
+        view_direction: graphic.view_direction,
+        weight_index: graphic.weight_index,
+      }));
+    }
     opts.ctx.imageSmoothingEnabled = false;
     opts.ctx.drawImage(
       cached.image,
@@ -97,6 +107,17 @@ function draw_atlas_cell(opts: DrawCellOpts): AtlasDrawResult {
   }
   const key = JSON.stringify([graphic.graphic_id, graphic.weight_index, graphic.view_direction, graphic.facing, materials, opts.cell.light_mag ?? null]);
   if (!pending_atlas_loads.has(key)) {
+    const pendingKey = `pending:${graphic.graphic_id}`;
+    if (!loggedAtlasOutcomes.has(pendingKey)) {
+      loggedAtlasOutcomes.add(pendingKey);
+      console.log('[ATLAS_DRAW_DEBUG] atlas frame pending ' + JSON.stringify({
+        graphic_id: graphic.graphic_id,
+        view_direction: graphic.view_direction,
+        weight_index: graphic.weight_index,
+        materials,
+        light_mag: opts.cell.light_mag ?? null,
+      }));
+    }
     pending_atlas_loads.add(key);
     void load_resolved_atlas_frame(graphic, materials, opts.cell.light_mag).finally(() => {
       pending_atlas_loads.delete(key);
@@ -150,15 +171,36 @@ export function create_canvas_cell_renderer(opts: {
           {
             const atlas_result = draw_atlas_cell(opts2);
             if (atlas_result === 'drawn') return;
-            // Atlas-addressable cells should have a single source of truth.
-            // If the atlas frame is still loading, leave the cell blank instead of
-            // flashing an ASCII fallback that will be replaced a frame later.
-            if (atlas_result === 'pending') return;
+            if (opts2.cell.graphic) {
+              const key = `${resolved.effective_backend}:${atlas_result}:${opts2.cell.graphic.graphic_id}`;
+              if (!loggedAtlasOutcomes.has(key)) {
+                loggedAtlasOutcomes.add(key);
+                console.log('[ATLAS_DRAW_DEBUG] atlas draw result ' + JSON.stringify({
+                  requested_backend: opts.backend,
+                  effective_backend: resolved.effective_backend,
+                  result: atlas_result,
+                  graphic_id: opts2.cell.graphic.graphic_id,
+                  char: opts2.cell.char,
+                }));
+              }
+            }
           }
           draw_font_cell(opts2, font_draw_state_cache);
           return;
         case 'font':
         default:
+          if (opts2.cell.graphic) {
+            const key = `font_fallback:${opts2.cell.graphic.graphic_id}`;
+            if (!loggedAtlasOutcomes.has(key)) {
+              loggedAtlasOutcomes.add(key);
+              console.log('[ATLAS_DRAW_DEBUG] graphic cell reached font renderer ' + JSON.stringify({
+                requested_backend: opts.backend,
+                effective_backend: resolved.effective_backend,
+                graphic_id: opts2.cell.graphic.graphic_id,
+                char: opts2.cell.char,
+              }));
+            }
+          }
           draw_font_cell(opts2, font_draw_state_cache);
       }
     },

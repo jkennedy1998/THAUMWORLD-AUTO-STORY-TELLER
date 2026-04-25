@@ -12,7 +12,6 @@
  */
 
 import { debug_event } from "./debug_event.js";
-import { emitToBridge } from "./event_bridge_client.js";
 
 /**
  * Tag change event types
@@ -166,6 +165,26 @@ export class EventEmitter {
  */
 export const eventEmitter = new EventEmitter();
 
+const maybeProcess = typeof globalThis !== 'undefined' ? (globalThis as any).process : undefined;
+
+function can_emit_to_bridge(): boolean {
+  return !!maybeProcess?.versions?.node;
+}
+
+async function emit_to_bridge_if_available(event: TagChangeEvent): Promise<void> {
+  if (!can_emit_to_bridge()) return;
+  try {
+    const bridge = await import('./event_bridge_client.js');
+    await bridge.emitToBridge(event);
+  } catch (err) {
+    debug_event('EVENT_EMITTER', 'bridge_emit_skipped', {
+      type: event.type,
+      entityRef: event.entityRef,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 /**
  * Helper function to emit tag change events
  * @param event - TagChangeEvent payload
@@ -179,7 +198,7 @@ export function emitTagChange(event: TagChangeEvent): void {
   
   // NEW: Send to event bridge for cross-process broadcasting to renderer
   // This allows events from state_applier, turn_manager, etc. to reach the UI
-  void emitToBridge(event);
+  void emit_to_bridge_if_available(event);
 }
 
 /**

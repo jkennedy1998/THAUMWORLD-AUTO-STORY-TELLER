@@ -1,0 +1,25 @@
+{
+  "id": "game_join_actor_claim_smoke",
+  "test_name": "game_test_join_actor_claim_smoke",
+  "clock_mode": "breath",
+  "open_ms": 22000,
+  "description": "Engine join screen TAI smoke for local join, session bootstrap, actor claim, and first movement.",
+  "start_delay_ms": 2500,
+  "end_delay_ms": 3000,
+  "boot": {
+    "auto_connect": true,
+    "auto_claim": true,
+    "actor_ref": "actor.ent_ZPHB7TZ3AV"
+  },
+  "actions": [
+    { "at_breath": 0, "type": "assert_context_ready" },
+    { "at_breath": 0, "type": "assert_text_value_literal", "source": "join", "field": "selected_connection_kind", "value": "local" },
+    { "at_breath": 0, "type": "assert_text_value_literal", "source": "join", "field": "probe_status", "value": "online" },
+    { "at_breath": 0, "type": "assert_text_value_literal", "source": "join", "field": "supports_join", "value": "true" },
+    { "at_breath": 0, "type": "assert_text_value_literal", "source": "session", "field": "session_token_present", "value": "true" },
+    { "at_breath": 0, "type": "assert_text_value_literal", "source": "join", "field": "selected_connection_host", "value": "local" },
+    { "at_breath": 1, "type": "capture_join_snapshot", "slot": "join_snapshot" },
+    { "at_breath": 1, "type": "capture_actor_tile", "slot": "current_tile" },
+    { "at_breath": 1, "type": "assert_text_value_literal", "source": "session", "field": "current_place_id", "value": "eden_crossroads_tavern" }
+  ]
+}

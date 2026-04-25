@@ -80,7 +80,7 @@ import { makeGroupsModule, type GroupListItem } from '../mono_ui/modules/groups_
 import { make_navigation_module } from '../ascii_painter/navigation_module.js';
 import { build_legacy_voxel_space_from_painter_runtime, import_legacy_voxel_space_as_painter_document } from '../ascii_painter/painter_document_legacy_adapter.js';
 import { create_painter_document, create_painter_group, create_painter_voxel_record, type PainterDocument } from '../ascii_painter/painter_document.js';
-import { add_painter_group, duplicate_painter_group, erase_group_voxel, export_painter_document, normalize_painter_document_runtime, remove_painter_group, rename_painter_group, reorder_painter_groups, set_group_voxel, set_painter_group_locked, set_painter_group_visibility, type PainterDocumentRuntime } from '../ascii_painter/painter_document_runtime.js';
+import { add_painter_group, duplicate_painter_group, erase_group_voxel, export_painter_document, normalize_painter_document_runtime, remove_painter_group, rename_painter_group, reorder_painter_groups, resolve_painter_group_preview_winner, set_group_voxel, set_painter_group_locked, set_painter_group_visibility, type PainterDocumentRuntime } from '../ascii_painter/painter_document_runtime.js';
 import { create_painter_session_core } from '../ascii_painter/painter_session_core.js';
 import type { PainterGroupPlaneRegistry } from '../ascii_painter/painter_session_types.js';
 import { resolve_edit_channels_with_modifiers, type EditChannels } from '../ascii_painter/edit_mask.js';
@@ -91,7 +91,7 @@ function normalize_painter_tool(tool: ToolType): ToolType {
 }
 import { makePlaceCameraControlModule } from '../mono_ui/modules/place_camera_control_module.js';
 import { VoxelDOMRenderer, createVoxelDOMRenderer } from '../ascii_painter/voxel_dom_renderer.js';
-import { commit_grid_to_painter_world, get_painter_focus_slot_for_anchor, get_painter_projection_focus_content_bounds, get_painter_world_content_bounds_center, painter_projection_grid_point_to_world, painter_projection_world_to_grid_point, project_painter_display_space, project_painter_runtime_display_space, project_world_to_painter_display_cell, sync_grid_to_painter_projection, type PainterDisplayProjection } from '../ascii_painter/painter_view_projection_adapter.js';
+import { clone_projected_scene, commit_grid_to_painter_world, get_painter_focus_slot_for_anchor, get_painter_projection_focus_content_bounds, get_painter_world_content_bounds_center, painter_projection_grid_point_to_world, painter_projection_world_to_grid_point, project_painter_display_space, project_painter_runtime_display_space, project_world_to_painter_display_cell, sync_grid_to_painter_projection, type PainterDisplayProjection, type PainterProjectedScene } from '../ascii_painter/painter_view_projection_adapter.js';
 import { touch_world_layers_owner } from '../mono_ui/world_layers_owner.js';
 import { get_principal_view_plane_axis, get_transition_tilt_for_command, make_place_view_state, type PlaceViewState } from '../mono_ui/runtime/place_view_projection.js';
 import { start_roll_transition, start_swing_transition, type PlaceCameraTransition } from '../mono_ui/runtime/place_camera_pose.js';
@@ -103,10 +103,25 @@ import { create_painter_controls_runtime } from './controls_wiring.js';
 import { control_binding_matches_keyboard_event } from '../mono_ui/runtime/controls_binding_matcher.js';
 import { create_painter_tool_shortcut_interpreter } from './painter_tool_shortcut_interpreter.js';
 import { create_painter_sync_client } from './painter_sync_client.js';
-import { PAINTER_APP_CONFIG } from './painter_runtime_config.js';
+import { PAINTER_APP_CONFIG, apply_painter_multiplayer_transport_config } from './painter_runtime_config.js';
 import type { PainterLaunchIntent } from './painter_launch_types.js';
 import { clear_launch_record } from '../engine_launch/persistence.js';
 import { persist_painter_resume_file } from './painter_launch_adapter.js';
+import {
+  build_interaction_pointer_state,
+  build_view_instance,
+  create_interaction_registry_runtime,
+  order_resolved_targets,
+  select_current_resolved_target,
+  type InteractionConsumerAdapters,
+  type InteractionHoverState,
+  type InteractionHoverResolution,
+  type ResolvedTarget,
+  type InteractionSession,
+  type InteractionSessionResolution,
+  type OrderedResolvedTargets,
+  type ViewInstance,
+} from '../mono_ui/runtime/interaction_runtime_types.js';
 
 function painterDiag(message: string, payload?: Record<string, unknown>): void {
   diag_log('painter', 'verbose', 'PAINTER', message, payload);
@@ -152,16 +167,16 @@ export type PainterAppState = {
 
   // Global pointer move hook for screen-space parallax.
   on_pointer_move_global?: (x: number, y: number, e: any) => void;
+  on_pointer_down_global?: (x: number, y: number, e: any) => void;
+  on_pointer_up_global?: (x: number, y: number, e: any) => void;
 
-  // Grid operations (legacy - operates on current layer)
+  // Import/export surface kept for existing UI wiring; uses PainterDocument.
   export_grid: () => string;
   import_grid: (json: string) => void;
   clear_canvas: () => void;
 
   // Document operations
   export_document: () => string;
-  import_legacy_voxel_space: (json: string) => void;
-  get_legacy_voxel_space: () => VoxelSpace;
   set_camera_mode: (mode: CameraMode) => void;
   set_parallax_intensity: (intensity: number) => void;
   toggle_show_all_layers: () => void;
@@ -201,12 +216,18 @@ export type PainterAppState = {
   new_canvas: (width: number, height: number) => void;
   start_from_launch_intent: (intent: PainterLaunchIntent) => Promise<void>;
   current_filename: string;
+  get_interaction_adapters: () => InteractionConsumerAdapters;
+  get_interaction_hover_state: () => InteractionHoverResolution | null;
+  get_interaction_session_state: () => InteractionSessionResolution | null;
   multiplayer_sync: ReturnType<typeof create_painter_sync_client>;
 };
+
+type PainterSessionRole = 'host' | 'participant';
 
 type PainterAppStateOptions = {
   skip_boot_restore?: boolean;
   skip_multiplayer_bootstrap?: boolean;
+  get_join_snapshot?: () => import('../mono_ui/runtime/automation_interfaces.js').ToolAssistedInputsJoinSnapshot | null;
 };
 
 type PainterDomViewport = {
@@ -222,8 +243,6 @@ type PainterDomViewport = {
 };
 
 type LegacyPainterGroupCompatState = {
-  group_ids_by_legacy_z: Map<number, string>;
-  group_order: string[];
   active_group_id: string | null;
 };
 
@@ -247,8 +266,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   const painter_sync = create_painter_sync_client({
     slot: PAINTER_APP_CONFIG.selected_data_slot,
-    api_base_url: PAINTER_APP_CONFIG.api_base_url,
-    websocket_port: PAINTER_APP_CONFIG.websocket_port,
+    get_api_base_url: () => PAINTER_APP_CONFIG.api_base_url,
+    get_bridge_ws_base_url: () => PAINTER_APP_CONFIG.bridge_ws_base_url,
     reconnect_token_storage_key: PAINTER_APP_CONFIG.reconnect_token_storage_key,
   });
   if (!options?.skip_multiplayer_bootstrap) {
@@ -263,21 +282,18 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   // Create the drawing grid (legacy 2D)
   const grid = createGrid(CANVAS_WIDTH, CANVAS_HEIGHT);
-  
-  // Create VoxelSpace (new 3D system) - wraps the grid
-  let voxelSpace = createVoxelSpace(CANVAS_WIDTH, CANVAS_HEIGHT, { defaultZ: 0 });
-  let painter_document_runtime: PainterDocumentRuntime = normalize_painter_document_runtime(import_legacy_voxel_space_as_painter_document(voxelSpace));
+  const initial_painter_document = create_painter_document(CANVAS_WIDTH, CANVAS_HEIGHT, { min_z: 0, max_z: 0, default_group_name: 'Group 1' });
+  let painter_document_runtime: PainterDocumentRuntime = normalize_painter_document_runtime(initial_painter_document);
   const painter_session_core = create_painter_session_core(export_painter_document(painter_document_runtime));
   let last_projection_runtime_log_signature = '';
   const world_selection: WorldSelection = create_world_selection();
   let world_clipboard_data: WorldCopyData | null = null;
   let legacy_group_compat: LegacyPainterGroupCompatState = {
-    group_ids_by_legacy_z: new Map<number, string>(),
-    group_order: [],
     active_group_id: null,
   };
   let current_filename = 'untitled';
   let current_file_path: string | null = null;
+  let current_session_role: PainterSessionRole = 'host';
   let current_painter_document_lineage_id: string | null = null;
   let suppress_recent_file_persistence = false;
   let authoritative_revision_applied = 0;
@@ -293,6 +309,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     runtime_group_planes = state.group_plane_registry;
   }
   sync_local_session_state_from_core();
+  let voxelSpace = build_legacy_voxel_space_from_painter_runtime(painter_document_runtime);
 
   function get_group_id_for_legacy_z(z: number): string | null {
     return painter_session_core.get_group_id_for_plane(z);
@@ -321,41 +338,15 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   }
 
   function getPainterFocusPlaneAxis(viewState?: PlaceViewState): 'x' | 'y' | 'z' {
-    const resolvedViewState = viewState ?? make_place_view_state(voxelSpace.camera.principal_view, voxelSpace.camera.roll_quarter_turn);
+    const resolvedViewState = viewState ?? make_place_view_state(painter_camera_state.principal_view, painter_camera_state.roll_quarter_turn);
     return get_principal_view_plane_axis(resolvedViewState.principal_view);
   }
 
-  function sync_active_group_to_focus_plane(): void {
-    if (getPainterFocusPlaneAxis() !== 'z') {
-      if (!legacy_group_compat.active_group_id || !legacy_group_compat.group_order.includes(legacy_group_compat.active_group_id)) {
-        legacy_group_compat.active_group_id = legacy_group_compat.group_order[0] ?? null;
-      }
-      return;
-    }
-    const from_focus = get_group_id_for_legacy_z(getCurrentFocusWorldPlane());
-    if (from_focus) {
-      legacy_group_compat.active_group_id = from_focus;
-      return;
-    }
-    legacy_group_compat.active_group_id = legacy_group_compat.group_order[0] ?? null;
-  }
-
   function sync_legacy_group_compat_state(options?: { preserve_group_order?: boolean }): void {
-    const preserve_group_order = options?.preserve_group_order ?? false;
-    const discovered_ids = [...painter_document_runtime.document.group_order].filter((group_id) => !!painter_document_runtime.document.groups[group_id]);
+    void options;
     rebuild_runtime_group_plane_registry({ preserve_existing: true });
-    legacy_group_compat.group_ids_by_legacy_z = new Map(Array.from(runtime_group_planes.plane_to_group_id.entries()));
-    if (preserve_group_order) {
-      const next_order = legacy_group_compat.group_order.filter((group_id) => discovered_ids.includes(group_id));
-      for (const group_id of discovered_ids) {
-        if (!next_order.includes(group_id)) next_order.push(group_id);
-      }
-      legacy_group_compat.group_order = next_order;
-    } else {
-      legacy_group_compat.group_order = discovered_ids;
-    }
-    if (!legacy_group_compat.active_group_id || !legacy_group_compat.group_order.includes(legacy_group_compat.active_group_id)) {
-      sync_active_group_to_focus_plane();
+    if (!legacy_group_compat.active_group_id || !painter_document_runtime.document.groups[legacy_group_compat.active_group_id]) {
+      legacy_group_compat.active_group_id = painter_document_runtime.document.group_order[0] ?? null;
     }
   }
 
@@ -371,8 +362,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   function rebuild_runtime_from_voxel_space(options?: { preserve_group_order?: boolean }): void {
     const preserve_group_order = options?.preserve_group_order ?? false;
     const next_document = import_legacy_voxel_space_as_painter_document(voxelSpace, {
-      group_ids_by_legacy_z: legacy_group_compat.group_ids_by_legacy_z,
-      group_order: preserve_group_order ? legacy_group_compat.group_order : undefined,
+      group_order: preserve_group_order ? painter_document_runtime.document.group_order : undefined,
       active_group_id: legacy_group_compat.active_group_id,
     });
     painter_session_core.replace_document(next_document, {
@@ -384,32 +374,33 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     sync_legacy_group_compat_state({ preserve_group_order });
   }
 
-  function syncPainterDocumentCameraFromVoxelCamera(): void {
-    painter_document_runtime.document.camera = structuredClone(voxelSpace.camera);
+  function syncVoxelSpaceCameraFromPainterCamera(): void {
+    voxelSpace.camera = structuredClone(painter_camera_state);
+  }
+
+  function syncPainterDocumentCameraFromPainterCamera(): void {
+    painter_document_runtime.document.camera = structuredClone(painter_camera_state);
   }
 
   function rebuild_voxel_space_from_runtime(): void {
     const preferred_active_group_id = legacy_group_compat.active_group_id;
-    const preservedCamera = structuredClone(voxelSpace.camera);
-    syncPainterDocumentCameraFromVoxelCamera();
+    const preservedCamera = structuredClone(painter_camera_state);
+    syncPainterDocumentCameraFromPainterCamera();
     voxelSpace = build_legacy_voxel_space_from_painter_runtime(painter_document_runtime);
-    voxelSpace.camera = preservedCamera;
-    syncPainterDocumentCameraFromVoxelCamera();
+    painter_camera_state = structuredClone(preservedCamera);
+    syncVoxelSpaceCameraFromPainterCamera();
+    syncPainterDocumentCameraFromPainterCamera();
     sync_legacy_group_compat_state({ preserve_group_order: true });
-    legacy_group_compat.group_order = painter_document_runtime.document.group_order.filter((group_id) => !!painter_document_runtime.document.groups[group_id]);
-    if (preferred_active_group_id && legacy_group_compat.group_order.includes(preferred_active_group_id)) {
+    if (preferred_active_group_id && painter_document_runtime.document.groups[preferred_active_group_id]) {
       legacy_group_compat.active_group_id = preferred_active_group_id;
     }
-    if (legacy_group_compat.active_group_id && !legacy_group_compat.group_order.includes(legacy_group_compat.active_group_id)) {
-      legacy_group_compat.active_group_id = legacy_group_compat.group_order[0] ?? null;
+    if (legacy_group_compat.active_group_id && !painter_document_runtime.document.groups[legacy_group_compat.active_group_id]) {
+      legacy_group_compat.active_group_id = painter_document_runtime.document.group_order[0] ?? null;
     }
   }
 
   function sync_painter_runtime_after_mutation(options?: { preserve_group_order?: boolean; focus_active_group?: boolean }): void {
     sync_legacy_group_compat_state({ preserve_group_order: options?.preserve_group_order ?? true });
-    if (options?.focus_active_group) {
-      focusActiveGroupPlane();
-    }
     ensureValidFocusPlane();
     refreshPainterProjectionFromWorld();
   }
@@ -447,7 +438,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   }
 
   function clear_current_anchor_cell(): boolean {
-    const anchorWorld = getPainterInteractionAnchor().world;
+    const anchorWorld = getPainterOrchestratorInteractionAnchor().world ?? getPainterInteractionAnchor().world;
     if (!anchorWorld) return false;
     const applied = apply_authored_group_cell_changes([{
       worldX: anchorWorld.x,
@@ -729,9 +720,10 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   function get_palette_group_entries(): Array<{ group_id: string; legacy_z: number; fake_z: number; layer: VoxelLayer }> {
     const entries: Array<{ group_id: string; legacy_z: number; fake_z: number; layer: VoxelLayer }> = [];
-    const count = legacy_group_compat.group_order.length;
+    const orderedGroupIds = painter_document_runtime.document.group_order.filter((group_id) => !!painter_document_runtime.document.groups[group_id]);
+    const count = orderedGroupIds.length;
     for (let index = 0; index < count; index += 1) {
-      const group_id = legacy_group_compat.group_order[index]!;
+      const group_id = orderedGroupIds[index]!;
       const group = painter_document_runtime.document.groups[group_id];
       if (!group) continue;
       const legacy_z = get_legacy_z_for_group_id(group_id) ?? index;
@@ -758,10 +750,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   function get_palette_z_for_group_id(group_id: string | null | undefined): number | null {
     return get_palette_group_entries().find((entry) => entry.group_id === group_id)?.fake_z ?? null;
-  }
-
-  function get_active_group_legacy_z(): number | null {
-    return get_legacy_z_for_group_id(legacy_group_compat.active_group_id) ?? getCurrentFocusWorldPlane();
   }
 
   function resolve_current_runtime_group_id(): string | null {
@@ -906,24 +894,24 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     return next;
   }
 
-  function getEffectivePainterCameraForProjection(): typeof voxelSpace.camera {
+  function getEffectivePainterCameraForProjection(): CameraConfig {
     return {
-      ...voxelSpace.camera,
-      movement_per_layer: clampPainterCameraScalar(voxelSpace.camera.movement_per_layer ?? 0, PAINTER_CAMERA_LIMITS.movement_per_layer),
-      scale_per_layer: clampPainterCameraScalar(voxelSpace.camera.scale_per_layer ?? 0, PAINTER_CAMERA_LIMITS.scale_per_layer),
-      mouse_angle_yaw_deg: clampPainterCameraScalar(voxelSpace.camera.mouse_angle_yaw_deg ?? 0, PAINTER_CAMERA_LIMITS.mouse_angle_yaw_deg),
-      mouse_angle_pitch_deg: clampPainterCameraScalar(voxelSpace.camera.mouse_angle_pitch_deg ?? 0, PAINTER_CAMERA_LIMITS.mouse_angle_pitch_deg),
-      mouse_angle_spring: clampPainterCameraScalar(voxelSpace.camera.mouse_angle_spring ?? 0, PAINTER_CAMERA_LIMITS.mouse_angle_spring),
-      render_distance_planes: Math.round(clampPainterCameraScalar(voxelSpace.camera.render_distance_planes ?? 2, PAINTER_CAMERA_LIMITS.render_distance_planes)),
+      ...painter_camera_state,
+      movement_per_layer: clampPainterCameraScalar(painter_camera_state.movement_per_layer ?? 0, PAINTER_CAMERA_LIMITS.movement_per_layer),
+      scale_per_layer: clampPainterCameraScalar(painter_camera_state.scale_per_layer ?? 0, PAINTER_CAMERA_LIMITS.scale_per_layer),
+      mouse_angle_yaw_deg: clampPainterCameraScalar(painter_camera_state.mouse_angle_yaw_deg ?? 0, PAINTER_CAMERA_LIMITS.mouse_angle_yaw_deg),
+      mouse_angle_pitch_deg: clampPainterCameraScalar(painter_camera_state.mouse_angle_pitch_deg ?? 0, PAINTER_CAMERA_LIMITS.mouse_angle_pitch_deg),
+      mouse_angle_spring: clampPainterCameraScalar(painter_camera_state.mouse_angle_spring ?? 0, PAINTER_CAMERA_LIMITS.mouse_angle_spring),
+      render_distance_planes: Math.round(clampPainterCameraScalar(painter_camera_state.render_distance_planes ?? 2, PAINTER_CAMERA_LIMITS.render_distance_planes)),
       calibration: {
-        x: clampPainterCameraScalar(Math.round(voxelSpace.camera.calibration?.x ?? 0), PAINTER_CAMERA_LIMITS.calibration),
-        y: clampPainterCameraScalar(Math.round(voxelSpace.camera.calibration?.y ?? 0), PAINTER_CAMERA_LIMITS.calibration),
+        x: clampPainterCameraScalar(Math.round(painter_camera_state.calibration?.x ?? 0), PAINTER_CAMERA_LIMITS.calibration),
+        y: clampPainterCameraScalar(Math.round(painter_camera_state.calibration?.y ?? 0), PAINTER_CAMERA_LIMITS.calibration),
       },
       parallax_size_enabled: false,
     };
   }
 
-  function createSanitizedPainterCamera(overrides?: Partial<typeof voxelSpace.camera> | null | undefined): typeof voxelSpace.camera {
+  function createSanitizedPainterCamera(overrides?: Partial<CameraConfig> | null | undefined): CameraConfig {
     const base = createDefaultCamera();
     return {
       ...base,
@@ -932,23 +920,27 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     };
   }
 
-  let painter_target_view = make_place_view_state(voxelSpace.camera.principal_view, voxelSpace.camera.roll_quarter_turn);
-  let painter_display_view = make_place_view_state(voxelSpace.camera.principal_view, voxelSpace.camera.roll_quarter_turn);
+  let painter_camera_state: CameraConfig = createSanitizedPainterCamera();
+  syncVoxelSpaceCameraFromPainterCamera();
+  let painter_target_view = make_place_view_state(painter_camera_state.principal_view, painter_camera_state.roll_quarter_turn);
+  let painter_display_view = make_place_view_state(painter_camera_state.principal_view, painter_camera_state.roll_quarter_turn);
 
   function mergeSavedPainterCameraConfig(config: ReturnType<typeof loadCameraConfig> | null | undefined): void {
-    voxelSpace.camera = { ...voxelSpace.camera, ...sanitizePainterCameraConfig(voxelSpace.camera) };
+    painter_camera_state = { ...painter_camera_state, ...sanitizePainterCameraConfig(painter_camera_state) };
     if (!config || Object.keys(config).length < 1) return;
-    voxelSpace.camera = { ...voxelSpace.camera, ...sanitizePainterCameraConfig(config) };
+    painter_camera_state = { ...painter_camera_state, ...sanitizePainterCameraConfig(config) };
     syncPainterViewStatesFromLegacyCamera();
     if (typeof config.use_focus_layer_opacity !== 'boolean' && typeof config.show_all_layers === 'boolean') {
-      voxelSpace.camera.use_focus_layer_opacity = !config.show_all_layers;
+      painter_camera_state.use_focus_layer_opacity = !config.show_all_layers;
     }
+    syncVoxelSpaceCameraFromPainterCamera();
   }
   
   // Load saved camera configuration
   const savedCameraConfig = loadCameraConfig();
   mergeSavedPainterCameraConfig(savedCameraConfig);
-  voxelSpace.camera.mode = 'rotated_ortho';
+  painter_camera_state.mode = 'rotated_ortho';
+  syncVoxelSpaceCameraFromPainterCamera();
   syncPainterCameraViewTransform();
 
   // Flag to prevent saving during initialization
@@ -1039,10 +1031,12 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   };
 
   let canvas_rect: Rect = get_default_canvas_rect();
+  const PAINTER_CANVAS_VIEW_ID = 'painter_canvas_view';
 
   function syncPainterCameraViewStateToLegacyCamera(): void {
-    voxelSpace.camera.principal_view = painter_target_view.principal_view;
-    voxelSpace.camera.roll_quarter_turn = painter_target_view.roll_quarter_turn;
+    painter_camera_state.principal_view = painter_target_view.principal_view;
+    painter_camera_state.roll_quarter_turn = painter_target_view.roll_quarter_turn;
+    syncVoxelSpaceCameraFromPainterCamera();
   }
 
   function setPainterTargetViewState(viewState: PlaceViewState): void {
@@ -1055,7 +1049,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   }
 
   function syncPainterViewStatesFromLegacyCamera(): void {
-    const current = make_place_view_state(voxelSpace.camera.principal_view, voxelSpace.camera.roll_quarter_turn);
+    const current = make_place_view_state(painter_camera_state.principal_view, painter_camera_state.roll_quarter_turn);
     setPainterTargetViewState(current);
     setPainterDisplayViewState(current);
   }
@@ -1069,8 +1063,47 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   }
 
   function getPainterInteractionAnchor(): PainterInteractionAnchor {
-    const canvasWithAnchor = canvas_module as typeof canvas_module & { getInteractionAnchor?: () => PainterInteractionAnchor };
-    return canvasWithAnchor.getInteractionAnchor?.() ?? { kind: 'viewport_center', screen: null, world: null };
+    const orchestratorAnchor = getPainterOrchestratorInteractionAnchor();
+    if (orchestratorAnchor.world || orchestratorAnchor.screen) return orchestratorAnchor;
+    const textAnchor = getPainterCanvasRuntimeApi()?.getTextCursorInteractionAnchor?.() ?? null;
+    if (textAnchor) return textAnchor;
+    return getPainterStableViewAnchor();
+  }
+
+  function getPainterOrchestratorInteractionAnchor(): PainterInteractionAnchor {
+    const orchestratorTarget = getPainterOrchestratorResolvedTarget();
+    if (!orchestratorTarget) {
+      return { kind: 'viewport_center', screen: null, world: null };
+    }
+    return {
+      kind: 'pointer',
+      screen: orchestratorTarget.screen_position
+        ? { x: orchestratorTarget.screen_position.x, y: orchestratorTarget.screen_position.y }
+        : null,
+      world: orchestratorTarget.world_position
+        ? {
+            x: orchestratorTarget.world_position.x,
+            y: orchestratorTarget.world_position.y,
+            z: orchestratorTarget.world_position.z,
+          }
+        : null,
+    };
+  }
+
+  function getPainterOrchestratorResolvedTarget(): ResolvedTarget | null {
+    return select_current_resolved_target({
+      session_state: painter_interaction_session_state,
+      hover_state: painter_interaction_hover_state,
+    });
+  }
+
+  function getPainterOrchestratorFocusTargetWorld(viewState: PlaceViewState = getPainterDisplayViewState()): { x: number; y: number; z: number } | null {
+    const orchestratorTarget = getPainterOrchestratorResolvedTarget();
+    if (!orchestratorTarget?.world_position) return null;
+    const plane = orchestratorTarget.target_type === 'painter_plane'
+      ? orchestratorTarget.plane_coordinate
+      : null;
+    return getPainterPreviewFocusTargetWorld(orchestratorTarget.world_position, plane, viewState);
   }
 
   function getPainterViewportTiles(): { width: number; height: number } {
@@ -1085,6 +1118,93 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   function getPainterFallbackTargetWorld(): { x: number; y: number; z: number } {
     return normalizePainterWorld(painter_camera_target_world, getPainterDocumentCenterWorld());
+  }
+
+  function getPainterPreservedCameraState(): {
+    target_world: { x: number; y: number; z: number };
+    focus_world_plane: number;
+  } {
+    return {
+      target_world: { ...getPainterFallbackTargetWorld() },
+      focus_world_plane: getCurrentFocusWorldPlane(),
+    };
+  }
+
+  function restorePainterCameraState(state: {
+    target_world: { x: number; y: number; z: number };
+    focus_world_plane: number;
+  } | null | undefined): void {
+    const fallbackTarget = getPainterDocumentCenterWorld();
+    const nextTarget = state?.target_world ?? fallbackTarget;
+    setPainterCameraTargetWorld(nextTarget);
+    if (Number.isFinite(state?.focus_world_plane)) {
+      setCurrentFocusWorldPlane(state!.focus_world_plane);
+    } else {
+      ensureValidFocusPlane();
+    }
+  }
+
+  function setPainterWorldPlaneCoordinate(world: { x: number; y: number; z: number }, plane: number, viewState: PlaceViewState = getPainterDisplayViewState()): { x: number; y: number; z: number } {
+    const axis = get_principal_view_plane_axis(viewState.principal_view);
+    if (axis === 'x') return { ...world, x: Math.floor(plane) };
+    if (axis === 'y') return { ...world, y: Math.floor(plane) };
+    return { ...world, z: Math.floor(plane) };
+  }
+
+  function getPainterCanvasFrameAnchorWorld(): { x: number; y: number; z: number } {
+    return getPainterFallbackTargetWorld();
+  }
+
+  function getPainterPreviewFocusTargetWorld(interactionWorld: { x: number; y: number; z: number } | null, plane: number | null, viewState: PlaceViewState = getPainterDisplayViewState()): { x: number; y: number; z: number } {
+    const frameWorld = getPainterCanvasFrameAnchorWorld();
+    if (interactionWorld) {
+      const normalizedInteraction = normalizePainterWorldTarget(interactionWorld, viewState);
+      const axis = get_principal_view_plane_axis(viewState.principal_view);
+      if (axis === 'x') return { ...frameWorld, x: normalizedInteraction.x };
+      if (axis === 'y') return { ...frameWorld, y: normalizedInteraction.y };
+      return { ...frameWorld, z: normalizedInteraction.z };
+    }
+    if (typeof plane === 'number') {
+      return setPainterWorldPlaneCoordinate(frameWorld, plane, viewState);
+    }
+    return frameWorld;
+  }
+
+  function getPainterCanvasViewInstance(): ViewInstance {
+    return build_view_instance({
+      module_id: 'painter_canvas',
+      view_id: PAINTER_CANVAS_VIEW_ID,
+      space_kind: 'hybrid',
+      viewport_rect: canvas_rect,
+      capabilities: {
+        resolves_2d_targets: true,
+        resolves_3d_targets: true,
+        produces_drag_payloads: true,
+        accepts_drag_payloads: true,
+        supports_text_input: true,
+        supports_wheel_depth: true,
+        owns_view_instances: true,
+      },
+      camera_state: {
+        frame_anchor: getPainterCanvasFrameAnchorWorld(),
+        focus_target: getPainterOrchestratorFocusTargetWorld()
+          ?? (painter_display_projection ? getPainterPreviewFocusTargetWorld(null, painter_display_projection.focus_world_plane) : getPainterCanvasFrameAnchorWorld()),
+        focus_plane: painter_display_projection?.focus_world_plane ?? getPainterCameraTargetPlaneCoordinate(),
+        orientation: getPainterDisplayViewState().principal_view,
+        projection_mode: 'rotated_ortho',
+        transition_state: painter_view_transition ? { active: true, kind: painter_view_transition.kind, phase: painter_view_transition.phase } : null,
+      },
+      content_ref: current_file_path ?? current_filename ?? 'painter_document',
+    });
+  }
+
+  type PainterCanvasRuntimeApi = typeof canvas_module & {
+    getTextCursorInteractionAnchor?: () => PainterInteractionAnchor | null;
+    resolveInteractionTargets?: (x: number, y: number) => OrderedResolvedTargets;
+  };
+
+  function getPainterCanvasRuntimeApi(): PainterCanvasRuntimeApi | null {
+    return canvas_module as PainterCanvasRuntimeApi;
   }
 
   function normalizePainterWorldTarget(world: { x: number; y: number; z: number }, viewState: PlaceViewState = getPainterDisplayViewState()): { x: number; y: number; z: number } {
@@ -1124,7 +1244,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   function syncCompatibilityFocusPlaneFromCameraTarget(viewState: PlaceViewState = getPainterDisplayViewState()): number {
     const plane = getPainterCameraTargetPlaneCoordinate(viewState);
-    voxelSpace.camera.focus_plane = plane;
+    painter_camera_state.focus_plane = plane;
+    syncVoxelSpaceCameraFromPainterCamera();
     return plane;
   }
 
@@ -1137,7 +1258,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     });
     painter_display_projection.focus_slot = focus.focus_slot;
     painter_display_projection.focus_world_plane = focus.focus_world_plane;
-    painter_display_projection.space.camera.focus_plane = focus.focus_slot;
+    painter_display_projection.scene.camera.focus_plane = focus.focus_slot;
   }
 
   function setCurrentFocusWorldPlane(worldPlane: number, options?: { persist?: boolean }): void {
@@ -1197,10 +1318,11 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   function syncPainterCameraViewTransform(state: PlaceViewState = getPainterViewState()): void {
     void state;
-    voxelSpace.camera.mode = 'rotated_ortho';
-    voxelSpace.camera.pan_x = 0;
-    voxelSpace.camera.pan_y = 0;
-    voxelSpace.camera.euler_rotation = { x: 0, y: 0, z: 0 };
+    painter_camera_state.mode = 'rotated_ortho';
+    painter_camera_state.pan_x = 0;
+    painter_camera_state.pan_y = 0;
+    painter_camera_state.euler_rotation = { x: 0, y: 0, z: 0 };
+    syncVoxelSpaceCameraFromPainterCamera();
   }
 
   function getCurrentPainterFocusSlot(): number {
@@ -1208,7 +1330,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   }
 
   function shouldCenterPainterTarget(anchor: PainterInteractionAnchor): boolean {
-    if (!(voxelSpace.camera.center_target_in_view ?? false)) return false;
+    if (!(painter_camera_state.center_target_in_view ?? false)) return false;
     switch (anchor.kind) {
       case 'text_cursor':
         return true;
@@ -1257,7 +1379,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     });
     projected.focus_slot = focus.focus_slot;
     projected.focus_world_plane = focus.focus_world_plane;
-    projected.space.camera.focus_plane = focus.focus_slot;
+    projected.scene.camera.focus_plane = focus.focus_slot;
     const projectionSummary = {
       contributor_coords: painter_document_runtime.coordinate_group_index.size,
       resolved_coords: painter_document_runtime.resolved_visible_index.size,
@@ -1290,7 +1412,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     visual_pivot_px?: { x: number; y: number } | null;
   }): void {
     if (!painter_display_projection) return;
-    const projectedCamera = painter_display_projection.space.camera;
+    const projectedCamera = painter_display_projection.scene.camera;
     const effectiveCamera = getEffectivePainterCameraForProjection();
     projectedCamera.mode = 'rotated_ortho';
     (projectedCamera as any).pan_behavior = 'uniform';
@@ -1314,11 +1436,11 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     projectedCamera.euler_rotation = { x: 0, y: 0, z: 0 };
     const nextTransitionEuler = args?.transition_euler
       ?? (active_transition_visual.active ? active_transition_visual.transition_euler : undefined)
-      ?? voxelSpace.camera.transition_euler
+      ?? painter_camera_state.transition_euler
       ?? { x: 0, y: 0, z: 0 };
     (projectedCamera as any).transition_euler = { ...nextTransitionEuler };
     const nextVisualPivot = args?.visual_pivot_px === undefined
-      ? (active_transition_visual.active ? active_transition_visual.visual_pivot_px : getPainterAnchorPivotPx(getPainterInteractionAnchor()))
+      ? (active_transition_visual.active ? active_transition_visual.visual_pivot_px : getPainterAnchorPivotPx(getPainterOrchestratorInteractionAnchor().world ? getPainterOrchestratorInteractionAnchor() : getPainterInteractionAnchor()))
       : args.visual_pivot_px;
     if (nextVisualPivot) {
       (projectedCamera as any).visual_pivot_px = { ...nextVisualPivot };
@@ -1327,7 +1449,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     }
     const focusSlot = painter_display_projection.focus_slot;
     projectedCamera.focus_plane = focusSlot;
-    for (const [slot, layer] of painter_display_projection.space.layers.entries()) {
+    for (const [slot, layer] of painter_display_projection.scene.slots.entries()) {
       if (!layer) continue;
       if (!(projectedCamera.use_focus_layer_opacity ?? true)) {
         layer.opacity = 1.0;
@@ -1389,11 +1511,11 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   }
 
   function refreshPainterProjectionPreservingCurrentTarget(): void {
-    const targetWorld = getPainterFallbackTargetWorld();
+    const targetWorld = getPainterOrchestratorFocusTargetWorld() ?? getPainterFallbackTargetWorld();
     refreshPainterProjectionFromWorld(getPainterStableViewAnchor(), {
       persist_target_world: false,
       target_world: targetWorld,
-      projection_anchor_world: targetWorld,
+      projection_anchor_world: getPainterCanvasFrameAnchorWorld(),
     });
   }
 
@@ -1403,8 +1525,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   function focusActiveGroupPlane(): void {
     if (getPainterFocusPlaneAxis() !== 'z') return;
-    sync_legacy_group_compat_state({ preserve_group_order: true });
-    const selectedZ = get_active_group_legacy_z();
+    const active_group_id = resolve_current_runtime_group_id();
+    const selectedZ = get_legacy_z_for_group_id(active_group_id) ?? getCurrentFocusWorldPlane();
     if (selectedZ !== null) {
       setCurrentFocusWorldPlane(selectedZ, { persist: true });
     }
@@ -1489,18 +1611,52 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   function deletePainterGroup(group_id: string): void {
     try {
-      const fake_z = get_palette_z_for_group_id(group_id);
-      if (fake_z === null) return;
-      deletePainterGroupStructure(fake_z);
+      finalizePendingPainterCanvasChanges();
+      commitProjectedGridToWorld();
+      const oldGroupData = painter_document_runtime.document.groups[group_id]
+        ? structuredClone(painter_document_runtime.document.groups[group_id]!)
+        : undefined;
+      if (!oldGroupData) return;
+      painter_session_core.apply_group_command({ kind: 'delete_group', group_id });
+      sync_local_session_state_from_core();
+      sync_lineage_state_from_core();
+      logGroupAction(history, 'delete_group', `Delete Group ${oldGroupData.name ?? group_id}`, {
+        groupId: group_id,
+        oldGroupData,
+      });
+      submit_group_command_if_authoritative({ kind: 'delete_group', group_id });
+      if (legacy_group_compat.active_group_id === group_id) {
+        legacy_group_compat.active_group_id = painter_document_runtime.document.group_order[0] ?? null;
+      }
+      sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
+      schedule_auto_save();
+      painterImportant('group deleted', { group_id });
+      log_runtime_summary('group deleted summary');
     } catch (e) {
       diag_log('painter', 'important', 'PAINTER', 'cannot delete group', { group_id, error: e instanceof Error ? e.message : String(e) }, { sink: 'error' });
     }
   }
 
   function duplicatePainterGroup(group_id: string): void {
-    const fake_z = get_palette_z_for_group_id(group_id);
-    if (fake_z === null) return;
-    duplicatePainterGroupStructure(fake_z);
+    finalizePendingPainterCanvasChanges();
+    commitProjectedGridToWorld();
+    const result = painter_session_core.apply_group_command({ kind: 'duplicate_group', source_group_id: group_id });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    const duplicatedId = result.created_group_id;
+    const duplicated = duplicatedId ? structuredClone(painter_document_runtime.document.groups[duplicatedId]!) : null;
+    if (!duplicated) return;
+    logGroupAction(history, 'duplicate_group', `Duplicate Group ${duplicated.name}`, {
+      sourceGroupId: group_id,
+      targetGroupId: duplicated.id,
+      newGroupData: duplicated,
+    });
+    submit_group_command_if_authoritative({ kind: 'duplicate_group', source_group_id: group_id, target_group_id: duplicated.id });
+    legacy_group_compat.active_group_id = duplicated.id;
+    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
+    schedule_auto_save();
+    painterImportant('group duplicated', { source_group_id: group_id, duplicated_group_id: duplicated.id });
+    log_runtime_summary('group duplicated summary');
   }
 
   function selectPainterGroup(group_id: string): void {
@@ -1508,7 +1664,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     commitProjectedGridToWorld();
     rebuild_runtime_group_plane_registry({ preserve_existing: true });
     legacy_group_compat.active_group_id = group_id;
-    focusActiveGroupPlane();
     ensureValidFocusPlane();
     refreshPainterProjectionFromWorld();
     painterDiag('group selected', { group_id, focus_plane: voxelSpace.camera.focus_plane });
@@ -1588,7 +1743,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       newGroupOrder: [...painter_document_runtime.document.group_order],
     });
     submit_group_command_if_authoritative({ kind: 'reorder_groups', next_group_order: [...painter_document_runtime.document.group_order] });
-    legacy_group_compat.group_order = [...painter_document_runtime.document.group_order];
     sync_painter_runtime_after_mutation({ preserve_group_order: true });
     schedule_auto_save();
     painterDiag('reordered groups without mutating world z', {
@@ -1818,7 +1972,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       PAINTER_CONFIG.render_theme_id,
     );
     applyPainterProjectedCameraTuning();
-    domRenderer.setSpace(getPainterRenderSpace());
+    domRenderer.setProjectedScene(getPainterRenderScene());
     painterImportant('dom renderer initialized');
   }
 
@@ -1826,7 +1980,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   function syncDOMRenderer(): void {
     if (domRenderer) {
       applyPainterProjectedCameraTuning();
-      domRenderer.setSpace(getPainterRenderSpace());
+      domRenderer.setProjectedScene(getPainterRenderScene());
     }
   }
 
@@ -1854,15 +2008,16 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       setCurrentFocusWorldPlane(zs[0]!);
     } else {
       const currentPlane = getCurrentFocusWorldPlane();
-      const nearestPlane = zs.reduce((best, candidate) => (
-        Math.abs(candidate - currentPlane) < Math.abs(best - currentPlane) ? candidate : best
-      ), zs[0]!);
-      if (nearestPlane !== currentPlane && !zs.includes(currentPlane)) {
-        setCurrentFocusWorldPlane(nearestPlane);
+      if (!zs.includes(currentPlane)) {
+        const nearestPlane = zs.reduce((best, candidate) => (
+          Math.abs(candidate - currentPlane) < Math.abs(best - currentPlane) ? candidate : best
+        ), zs[0]!);
+        if (nearestPlane !== currentPlane) {
+          setCurrentFocusWorldPlane(nearestPlane);
+        }
       }
     }
     syncCompatibilityFocusPlaneFromCameraTarget();
-    sync_active_group_to_focus_plane();
   }
 
   // Create history manager
@@ -2142,6 +2297,103 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     });
   }
 
+  function get_active_painter_document_id(): string {
+    const sync_state = painter_sync.get_state();
+    return String(sync_state.bootstrap?.document_id ?? 'default_canvas').trim() || 'default_canvas';
+  }
+
+  function is_multiplayer_host_role(): boolean {
+    const sync_state = painter_sync.get_state();
+    return current_session_role === 'host' && sync_state.authority_mode === 'authoritative_host' && Boolean(sync_state.bootstrap?.session_token);
+  }
+
+  function is_participant_role(): boolean {
+    return current_session_role === 'participant';
+  }
+
+  async function publish_hosted_painter_session_metadata(): Promise<void> {
+    if (!is_multiplayer_host_role()) return;
+    const sync_state = painter_sync.get_state();
+    const session_token = String(sync_state.bootstrap?.session_token ?? '').trim();
+    if (!session_token) return;
+    const payload = {
+      slot: PAINTER_APP_CONFIG.selected_data_slot,
+      session_token,
+      document_id: get_active_painter_document_id(),
+      display_name: current_filename,
+      file_backed: Boolean(current_file_path),
+    };
+    painterImportant('publishing hosted painter session metadata', payload);
+    const response = await fetch(`${PAINTER_APP_CONFIG.api_base_url}/painter/hosted-session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => null) as any;
+    if (!response.ok || !data?.ok) {
+      throw new Error(String(data?.error ?? `painter_hosted_session_publish_failed:${response.status}`));
+    }
+  }
+
+  async function clear_hosted_painter_session_metadata(): Promise<void> {
+    const sync_state = painter_sync.get_state();
+    const session_token = String(sync_state.bootstrap?.session_token ?? '').trim();
+    if (!session_token) return;
+    painterImportant('clearing hosted painter session metadata', { slot: PAINTER_APP_CONFIG.selected_data_slot });
+    const response = await fetch(`${PAINTER_APP_CONFIG.api_base_url}/painter/hosted-session`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slot: PAINTER_APP_CONFIG.selected_data_slot, session_token }),
+    });
+    const data = await response.json().catch(() => null) as any;
+    if (!response.ok || !data?.ok) {
+      throw new Error(String(data?.error ?? `painter_hosted_session_clear_failed:${response.status}`));
+    }
+  }
+
+  async function replace_authoritative_document_for_all(document: PainterDocument, source: string): Promise<void> {
+    if (!is_multiplayer_host_role()) return;
+    const sync_state = painter_sync.get_state();
+    const session_token = String(sync_state.bootstrap?.session_token ?? '').trim();
+    if (!session_token) return;
+    const document_id = get_active_painter_document_id();
+    const payload = {
+      slot: PAINTER_APP_CONFIG.selected_data_slot,
+      session_token,
+      document_id,
+      base_revision: sync_state.bootstrap?.revision ?? 0,
+      command_id: `replace_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+      snapshot: document,
+    };
+    painterImportant('replacing authoritative painter document', {
+      document_id,
+      source,
+      current_filename,
+      file_backed: Boolean(current_file_path),
+    });
+    const response = await fetch(`${PAINTER_APP_CONFIG.api_base_url}/painter/document/replace`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => null) as any;
+    if (!response.ok || !data?.ok) {
+      throw new Error(String(data?.error ?? `painter_document_replace_failed:${response.status}`));
+    }
+    setCurrentPainterDocumentLineage(make_authoritative_lineage_id(document_id), source);
+  }
+
+  async function sync_hosted_document_authority(document: PainterDocument, source: string): Promise<void> {
+    if (!is_multiplayer_host_role()) return;
+    await replace_authoritative_document_for_all(document, source);
+    await publish_hosted_painter_session_metadata();
+  }
+
+  function return_to_painter_launch_menu(reason: string): void {
+    painterImportant('returning to painter launch menu', { reason, role: current_session_role });
+    window.location.reload();
+  }
+
   function setCurrentPainterDocumentLineage(lineage_id: string, source: string): void {
     painter_session_core.set_lineage(lineage_id, 0);
     sync_lineage_state_from_core();
@@ -2184,47 +2436,44 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     };
   }
 
-  function cloneProjectedRenderSpace(space: VoxelSpace): VoxelSpace {
+  function makeResolvedPreviewCell(winner: ReturnType<typeof resolve_painter_group_preview_winner>): GridCell {
+    if (!winner.cell) {
+      return { char: ' ', rgb: { r: 0, g: 0, b: 0 }, weight_index: 0 };
+    }
     return {
-      bounds: { ...space.bounds },
-      camera: {
-        ...space.camera,
-        calibration: { ...space.camera.calibration },
-        euler_rotation: { ...space.camera.euler_rotation },
-        transition_euler: space.camera.transition_euler ? { ...space.camera.transition_euler } : undefined,
-        visual_pivot_px: space.camera.visual_pivot_px ? { ...space.camera.visual_pivot_px } : undefined,
-      },
-      metadata: space.metadata ? { ...space.metadata } : undefined,
-      layers: new Map(Array.from(space.layers.entries(), ([z, layer]) => [z, {
-        z: layer.z,
-        name: layer.name,
-        visible: layer.visible,
-        opacity: layer.opacity,
-        // Preview overlays write into a transient clone of the projected display space.
-        locked: false,
-        cells: layer.cells.map((row) => row.map((cell) => cloneGridCellForPreview(cell))),
-      }])),
+      char: winner.cell.char,
+      rgb: { ...winner.cell.rgb },
+      weight_index: winner.cell.weight_index,
     };
   }
 
-  function getPainterRenderSpace(): VoxelSpace {
+  function getPainterRenderScene(): PainterProjectedScene {
     if (!painter_display_projection || live_stroke_preview_changes.length < 1) {
-      return painter_display_projection.space;
+      return painter_display_projection.scene;
     }
-    const previewSpace = cloneProjectedRenderSpace(painter_display_projection.space);
+    const previewScene = clone_projected_scene(painter_display_projection.scene);
+    const active_group_id = resolve_current_runtime_group_id();
+    if (!active_group_id) return previewScene;
     for (const change of live_stroke_preview_changes) {
       const displayCell = project_world_to_painter_display_cell({
         projection: painter_display_projection,
         world: { x: change.worldX, y: change.worldY, z: change.worldZ },
       });
       if (!displayCell) continue;
-      setVoxel(previewSpace, displayCell.x, displayCell.y, displayCell.slot, {
+      const slot = previewScene.slots.get(displayCell.slot);
+      const row = slot?.cells[displayCell.y];
+      if (!row) continue;
+      const winner = resolve_painter_group_preview_winner(painter_document_runtime, active_group_id, {
+        x: change.worldX,
+        y: change.worldY,
+        z: change.worldZ,
         char: change.newCell.char,
         rgb: { ...change.newCell.rgb },
         weight_index: change.newCell.weight_index,
       });
+      row[displayCell.x] = makeResolvedPreviewCell(winner);
     }
-    return previewSpace;
+    return previewScene;
   }
 
   async function getAsciiDrawingsDir(): Promise<string | null> {
@@ -2266,12 +2515,16 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       });
       return;
     }
-    applyPainterDocumentSnapshot(bootstrap.snapshot);
-    clearActiveFileAssociation(String(bootstrap.document_id ?? '').trim() || 'untitled', { clearLastUsed: true });
+    applyPainterDocumentSnapshot(bootstrap.snapshot, { reset_history: false });
+    if (is_participant_role()) {
+      clearActiveFileAssociation(current_filename || String(bootstrap.document_id ?? '').trim() || 'untitled', { clearLastUsed: true });
+    }
+    authoritative_revision_applied = Math.max(authoritative_revision_applied, bootstrap.revision);
     boot_document_restored = true;
     painterImportant('applied authoritative painter bootstrap', {
       document_id: bootstrap.document_id,
       revision: bootstrap.revision,
+      role: current_session_role,
     });
   }
 
@@ -2296,7 +2549,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     return lines.join('\n');
   }
 
-  function applyPainterDocumentSnapshot(document: PainterDocument): void {
+  function applyPainterDocumentSnapshot(document: PainterDocument, options?: { reset_history?: boolean }): void {
+    const preservedCameraState = getPainterPreservedCameraState();
     painter_session_core.replace_document(document, {
       lineage_id: current_painter_document_lineage_id,
       authoritative_revision: authoritative_revision_applied,
@@ -2308,23 +2562,40 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
     const savedCam = loadCameraConfig();
     if (savedCam && Object.keys(savedCam).length > 0) {
-      voxelSpace.camera = createSanitizedPainterCamera(savedCam);
+      painter_camera_state = createSanitizedPainterCamera(savedCam);
+      syncVoxelSpaceCameraFromPainterCamera();
       syncPainterViewStatesFromLegacyCamera();
     }
 
     syncPainterCameraViewTransform();
     ensureValidFocusPlane();
-    setPainterCameraTargetWorld(getPainterDocumentCenterWorld());
+    restorePainterCameraState(preservedCameraState);
     painter_display_projection = rebuildPainterDisplayProjection(getPainterDisplayViewState(), { kind: 'viewport_center', screen: null, world: painter_camera_target_world });
     syncProjectedGridFromDisplay();
     syncDOMRenderer();
-    resetPainterHistoryState('apply painter document snapshot');
+    if (options?.reset_history !== false) {
+      resetPainterHistoryState('apply painter document snapshot');
+    }
   }
 
   painter_sync.subscribe((sync_state) => {
-    if (sync_state.authority_mode !== 'authoritative_host' || !sync_state.bootstrap?.snapshot) return;
+    if (!sync_state.bootstrap?.snapshot) return;
     apply_authoritative_painter_bootstrap(sync_state.bootstrap);
   });
+
+  window.addEventListener('painter-hosted-session-updated', ((event: Event) => {
+    const payload = (event as CustomEvent<{ hosted_session?: { display_name?: string | null } | null }>).detail;
+    const hosted_session = payload?.hosted_session ?? null;
+    if (!is_participant_role()) return;
+    if (!hosted_session) return;
+    current_filename = String(hosted_session.display_name ?? current_filename).trim() || current_filename;
+    painterImportant('participant updated hosted painting display name', { current_filename });
+  }) as EventListener);
+
+  window.addEventListener('painter-session-ended', ((event: Event) => {
+    const payload = (event as CustomEvent<{ reason?: string | null }>).detail;
+    return_to_painter_launch_menu(String(payload?.reason ?? 'session_ended'));
+  }) as EventListener);
 
   async function writeArtworkToFileAtomic(filePath: string): Promise<void> {
     const data = exportPainterDocumentToJSON(exportCurrentPainterDocument());
@@ -2366,9 +2637,14 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   // Auto-save timer
   let auto_save_timer: ReturnType<typeof setTimeout> | null = null;
+  let painter_interaction_registry: ReturnType<typeof create_interaction_registry_runtime> | null = null;
 
   // Create module registry
   const registry = create_module_registry();
+  refreshPainterInteractionRegistry();
+  registry.subscribe(() => {
+    refreshPainterInteractionRegistry();
+  });
 
   // Schedule auto-save (debounced - waits for user to stop making changes)
   function schedule_auto_save() {
@@ -2395,6 +2671,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   async function loadArtworkFromContent(content: string, loadedPath?: string): Promise<void> {
     painterDiag('loading artwork content', { loadedPath: loadedPath ?? null, size: content.length });
+    const preservedCameraState = getPainterPreservedCameraState();
     let loadedPainterDocument: PainterDocument | null = null;
     try {
       loadedPainterDocument = importPainterDocumentFromJSON(content);
@@ -2414,12 +2691,13 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       // Apply persisted camera/UI settings (do not import from file)
       const savedCam = loadCameraConfig();
       if (savedCam && Object.keys(savedCam).length > 0) {
-        voxelSpace.camera = createSanitizedPainterCamera(savedCam);
+        painter_camera_state = createSanitizedPainterCamera(savedCam);
+        syncVoxelSpaceCameraFromPainterCamera();
         syncPainterViewStatesFromLegacyCamera();
       }
 
       ensureValidFocusPlane();
-      setPainterCameraTargetWorld(getPainterDocumentCenterWorld());
+      restorePainterCameraState(preservedCameraState);
       painter_display_projection = rebuildPainterDisplayProjection(getPainterDisplayViewState(), { kind: 'viewport_center', screen: null, world: painter_camera_target_world });
       syncProjectedGridFromDisplay();
       syncDOMRenderer();
@@ -2440,48 +2718,51 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     });
 
     schedule_auto_save();
+    await sync_hosted_document_authority(exportCurrentPainterDocument(), loadedPath ? 'host_load_file' : 'host_load_memory');
   }
 
   async function new_file(): Promise<void> {
+    const preservedCameraState = getPainterPreservedCameraState();
     const dir = await getAsciiDrawingsDir();
     if (!dir) {
       // Fallback: just create a new in-memory canvas
-      voxelSpace = createVoxelSpace(CANVAS_WIDTH, CANVAS_HEIGHT, { defaultZ: 0 });
-      rebuild_runtime_from_voxel_space();
+      const document = create_painter_document(CANVAS_WIDTH, CANVAS_HEIGHT, { min_z: 0, max_z: 0, default_group_name: 'Group 1' });
+      applyPainterDocumentSnapshot(document);
       setCurrentPainterDocumentLineage(`memory:new_file:${Date.now()}`, 'new_file_in_memory');
       clear_world_selection(world_selection);
       const savedCam = loadCameraConfig();
       if (savedCam && Object.keys(savedCam).length > 0) {
-        voxelSpace.camera = { ...voxelSpace.camera, ...savedCam };
+        painter_camera_state = { ...painter_camera_state, ...sanitizePainterCameraConfig(savedCam) };
+        syncVoxelSpaceCameraFromPainterCamera();
         syncPainterViewStatesFromLegacyCamera();
       }
       syncPainterCameraViewTransform();
-      ensureValidFocusPlane();
-      setPainterCameraTargetWorld(getPainterDocumentCenterWorld());
+      restorePainterCameraState(preservedCameraState);
       painter_display_projection = rebuildPainterDisplayProjection(getPainterDisplayViewState(), { kind: 'viewport_center', screen: null, world: painter_camera_target_world });
       syncProjectedGridFromDisplay();
       syncDOMRenderer();
       resetPainterHistoryState('new file in-memory fallback');
       clearActiveFileAssociation('untitled', { clearLastUsed: true });
       clearAutoSave();
+      await sync_hosted_document_authority(exportCurrentPainterDocument(), 'host_new_file_memory');
       return;
     }
 
     const basename = makeNewFileBasename();
     const filePath = `${dir}\\${basename}`;
 
-    voxelSpace = createVoxelSpace(CANVAS_WIDTH, CANVAS_HEIGHT, { defaultZ: 0 });
-    rebuild_runtime_from_voxel_space();
+    const document = create_painter_document(CANVAS_WIDTH, CANVAS_HEIGHT, { min_z: 0, max_z: 0, default_group_name: 'Group 1' });
+    applyPainterDocumentSnapshot(document);
     setCurrentPainterDocumentLineage(`file:${filePath}`, 'new_file_backed');
     clear_world_selection(world_selection);
     const savedCam = loadCameraConfig();
     if (savedCam && Object.keys(savedCam).length > 0) {
-      voxelSpace.camera = { ...voxelSpace.camera, ...savedCam };
+      painter_camera_state = { ...painter_camera_state, ...sanitizePainterCameraConfig(savedCam) };
+      syncVoxelSpaceCameraFromPainterCamera();
       syncPainterViewStatesFromLegacyCamera();
     }
     syncPainterCameraViewTransform();
-    ensureValidFocusPlane();
-    setPainterCameraTargetWorld(getPainterDocumentCenterWorld());
+    restorePainterCameraState(preservedCameraState);
     painter_display_projection = rebuildPainterDisplayProjection(getPainterDisplayViewState(), { kind: 'viewport_center', screen: null, world: painter_camera_target_world });
     syncProjectedGridFromDisplay();
     syncDOMRenderer();
@@ -2490,6 +2771,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     setActiveFileAssociation(filePath);
 
     await writeArtworkToFileAtomic(filePath);
+    await sync_hosted_document_authority(exportCurrentPainterDocument(), 'host_new_file');
   }
 
   async function save_file(): Promise<void> {
@@ -2507,6 +2789,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     }
     await writeArtworkToFileAtomic(current_file_path);
     rememberLastUsedFilePath(current_file_path);
+    await publish_hosted_painter_session_metadata();
   }
 
   async function load_file(): Promise<void> {
@@ -2543,6 +2826,50 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     const readResp = await api.readFile(path);
     if (!readResp?.success) throw new Error(readResp?.error || 'Failed to read file');
     await loadArtworkFromContent(readResp.content || '', path);
+  }
+
+  async function rename_painting(): Promise<void> {
+    if (!is_multiplayer_host_role() && current_session_role !== 'host') return;
+    const next_name = String(window.prompt('Rename painting', current_filename) ?? '').trim();
+    if (!next_name) return;
+    const sanitized = next_name.endsWith('.json') ? next_name : `${next_name}.json`;
+    if (current_file_path && window.electronAPI?.writeFileAtomic) {
+      const dir = current_file_path.includes('\\') ? current_file_path.slice(0, current_file_path.lastIndexOf('\\')) : null;
+      if (dir) {
+        const next_path = `${dir}\${sanitized}`;
+        await writeArtworkToFileAtomic(next_path);
+        setActiveFileAssociation(next_path);
+      } else {
+        current_filename = sanitized.replace(/\.json$/i, '');
+      }
+    } else {
+      current_filename = sanitized.replace(/\.json$/i, '');
+    }
+    await publish_hosted_painter_session_metadata();
+    painterImportant('painting renamed', { current_file_path, current_filename });
+  }
+
+  async function quit_painting(): Promise<void> {
+    if (current_session_role === 'host' && is_multiplayer_host_role()) {
+      const sync_state = painter_sync.get_state();
+      const session_token = String(sync_state.bootstrap?.session_token ?? '').trim();
+      if (session_token) {
+        const response = await fetch(`${PAINTER_APP_CONFIG.api_base_url}/painter/session/end`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            slot: PAINTER_APP_CONFIG.selected_data_slot,
+            session_token,
+            reason: 'host_quit_painting',
+          }),
+        });
+        const data = await response.json().catch(() => null) as any;
+        if (!response.ok || !data?.ok) {
+          throw new Error(String(data?.error ?? `painter_session_end_failed:${response.status}`));
+        }
+      }
+    }
+    return_to_painter_launch_menu(current_session_role === 'host' ? 'host_quit_painting' : 'participant_quit_painting');
   }
 
   // Auto-open the last file on boot (best effort).
@@ -2603,8 +2930,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     anchor_world: { x: number; y: number; z: number } | null;
     plane: number | null;
   }): void {
-    void args.anchor_world;
-    void args.plane;
     live_stroke_preview_changes = args.changes.map((change) => ({
       worldX: change.worldX,
       worldY: change.worldY,
@@ -2615,6 +2940,38 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         weight_index: change.newCell.weight_index,
       },
     }));
+    const normalizedAnchor = args.anchor_world ? normalizePainterWorldTarget(args.anchor_world) : null;
+    const painterView = getPainterCanvasViewInstance();
+    const frameAnchorWorld = painterView.camera_state?.frame_anchor ?? getPainterCanvasFrameAnchorWorld();
+    const previewTargetWorld = getPainterPreviewFocusTargetWorld(normalizedAnchor, args.plane, getPainterDisplayViewState());
+    const anchorChanged = !!normalizedAnchor && (
+      previewTargetWorld.x !== frameAnchorWorld.x
+      || previewTargetWorld.y !== frameAnchorWorld.y
+      || previewTargetWorld.z !== frameAnchorWorld.z
+    );
+    const planeChanged = typeof args.plane === 'number'
+      && Math.floor(args.plane) !== (painter_display_projection?.focus_world_plane ?? getPainterCameraTargetPlaneCoordinate());
+    if (normalizedAnchor && (anchorChanged || planeChanged)) {
+      const currentAnchor = getPainterInteractionAnchor();
+      refreshPainterProjectionFromWorld({
+        ...currentAnchor,
+        kind: 'pointer',
+        world: { ...normalizedAnchor },
+      }, {
+        persist_target_world: false,
+        target_world: previewTargetWorld,
+        projection_anchor_world: frameAnchorWorld,
+      });
+      return;
+    }
+    if (!normalizedAnchor && planeChanged) {
+      refreshPainterProjectionFromWorld(getPainterStableViewAnchor(), {
+        persist_target_world: false,
+        target_world: previewTargetWorld,
+        projection_anchor_world: frameAnchorWorld,
+      });
+      return;
+    }
     syncDOMRenderer();
   }
   
@@ -2624,11 +2981,12 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   // Create canvas module
   const canvas_module = make_painter_canvas_module({
     id: 'painter_canvas',
+    view_id: PAINTER_CANVAS_VIEW_ID,
     rect: canvas_rect,
     grid,
     get_camera: () => voxelSpace.camera,
     get_selected_z: () => getPainterCameraTargetPlaneCoordinate(),
-    get_active_group_id: () => legacy_group_compat.active_group_id,
+    get_active_group_id: () => resolve_current_runtime_group_id(),
     get_world_cell: (world) => {
       const coordKey = `${Math.floor(world.x)}:${Math.floor(world.y)}:${Math.floor(world.z)}`;
       const resolved = painter_document_runtime.resolved_visible_index.get(coordKey) ?? null;
@@ -2830,11 +3188,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       refreshPainterProjectionPreservingCurrentTarget();
       painterDiag('canvas reset to default position');
     },
-    on_viewport_change: (viewport) => {
-      // Viewport is driven by the main render loop (src/canvas_app/main.ts) using runtime tile metrics.
-      // No-op to avoid mixing coordinate systems.
-      void viewport;
-    },
     on_mouse_move: (offsetX, offsetY) => {
       void offsetX;
       void offsetY;
@@ -2897,7 +3250,39 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       const plane = typeof z === 'number' ? z : (painter_display_projection?.focus_world_plane ?? getPainterCameraTargetPlaneCoordinate());
       return getVoxel(voxelSpace, x, y, plane);
     },
+    get_join_snapshot: () => options?.get_join_snapshot?.() ?? null,
     get_text_value: (source, field) => {
+      if (source === 'join') {
+        const snapshot = options?.get_join_snapshot?.() ?? null;
+        const key = String(field ?? '').trim();
+        if (!snapshot) return null;
+        if (key === 'selected_connection_id') return snapshot.selected_connection_id ?? '';
+        if (key === 'selected_connection_host') return snapshot.selected_connection_host ?? '';
+        if (key === 'selected_connection_kind') return snapshot.selected_connection_kind ?? '';
+        if (key === 'probe_status') return snapshot.probe_status ?? '';
+        if (key === 'supports_join') return snapshot.supports_join ? 'true' : 'false';
+        if (key === 'join_mode') return snapshot.join_mode ?? '';
+        if (key === 'world_label') return snapshot.world_label ?? '';
+        if (key === 'painter_document_id') return snapshot.painter_document_id ?? '';
+        if (key === 'api_base_url') return snapshot.api_base_url ?? '';
+        if (key === 'bridge_ws_base_url') return snapshot.bridge_ws_base_url ?? '';
+        const status_line_match = /^status_line_(\d+)$/.exec(key);
+        if (status_line_match) {
+          const index = Number(status_line_match[1]);
+          return snapshot.status_lines[index] ?? '';
+        }
+        return null;
+      }
+      if (source === 'session') {
+        const key = String(field ?? '').trim();
+        if (key === 'authority_mode') return painter_sync.get_state().authority_mode;
+        if (key === 'session_lifecycle') return painter_sync.get_state().lifecycle;
+        if (key === 'document_id') return String(painter_sync.get_state().bootstrap?.document_id ?? '');
+        if (key === 'connection_id') return String(painter_sync.get_state().bootstrap?.connection_id ?? '');
+        if (key === 'supports_join') return painter_sync.get_state().bootstrap?.supports_join ? 'true' : 'false';
+        if (key === 'join_mode') return String(painter_sync.get_state().bootstrap?.join_mode ?? '');
+        return null;
+      }
       if (source === 'layer_name') {
         const z = Number(field ?? '');
         if (!Number.isFinite(z)) return null;
@@ -3053,7 +3438,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
           newGroupOrder: [...painter_document_runtime.document.group_order],
         });
         submit_group_command_if_authoritative({ kind: 'reorder_groups', next_group_order: [...painter_document_runtime.document.group_order] });
-        legacy_group_compat.group_order = [...painter_document_runtime.document.group_order];
         sync_painter_runtime_after_mutation({ preserve_group_order: true });
         log_runtime_summary('tai reverse group order summary');
         return true;
@@ -3084,6 +3468,61 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       return false;
     },
   });
+
+  let painter_interaction_hover_state: InteractionHoverResolution | null = null;
+  let painter_interaction_session_state: InteractionSessionResolution | null = null;
+
+  function toPainterSessionResolution(session: InteractionSession): InteractionSessionResolution {
+    return {
+      consumer_id: 'painter',
+      view: getPainterCanvasViewInstance(),
+      session,
+    };
+  }
+
+  function toPainterHoverResolution(hover: InteractionHoverState): InteractionHoverResolution {
+    return {
+      consumer_id: 'painter',
+      view: getPainterCanvasViewInstance(),
+      hover,
+      resolved_targets: hover.resolved_targets,
+    };
+  }
+
+  const painter_interaction_adapters: InteractionConsumerAdapters = {
+    view_registration: {
+      get_view_instances: () => [getPainterCanvasViewInstance()],
+    },
+    resolution: {
+      resolve_targets: (input) => {
+        const runtimeApi = getPainterCanvasRuntimeApi();
+        return runtimeApi?.resolveInteractionTargets?.(input.pointer.x, input.pointer.y) ?? order_resolved_targets([]);
+      },
+    },
+    session_handler: {
+      begin_interaction: (session) => {
+        painter_interaction_session_state = toPainterSessionResolution(session);
+      },
+      update_interaction: (session) => {
+        painter_interaction_session_state = toPainterSessionResolution(session);
+      },
+      end_interaction: (session) => {
+        painter_interaction_session_state = toPainterSessionResolution(session);
+      },
+      cancel_interaction: (session) => {
+        painter_interaction_session_state = toPainterSessionResolution(session);
+      },
+      update_hover: (hover) => {
+        painter_interaction_hover_state = toPainterHoverResolution(hover);
+      },
+    },
+  };
+  painter_interaction_registry = create_interaction_registry_runtime();
+
+  function refreshPainterInteractionRegistry(): void {
+    painter_interaction_registry?.sync_consumers({ painter: painter_interaction_adapters });
+  }
+  refreshPainterInteractionRegistry();
   window.setTimeout(() => {
     void painter_tai.runtime.start_configured();
   }, 0);
@@ -3756,6 +4195,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   const file_menu = make_file_menu_module({
     id: 'painter_file_menu',
     rect: file_menu_rect,
+    get_is_host: () => current_session_role === 'host',
     get_screen_size: () => ({ width: GRID_WIDTH, height: GRID_HEIGHT }),
     get_status_text: () => {
       const preview = getPreviewBrush();
@@ -3765,18 +4205,21 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       return `L:${left_click_tool} R:${right_click_tool} CUR:${current_tool} CHAR:${preview.char} SIZE:L${getBrushSizeForSide('left')} R${getBrushSizeForSide('right')} DEPTH:${focusPlane} GRP:${activeGroup} U:${counts.undo_count} R:${counts.redo_count}`;
     },
     on_save: () => {
+      if (current_session_role !== 'host') return;
       void save_file().catch((e) => {
         diag_log('painter', 'important', 'PAINTER', 'save failed', { error: e instanceof Error ? e.message : String(e) }, { sink: 'error' });
         alert('Save failed: ' + (e as Error).message);
       });
     },
     on_load: () => {
+      if (current_session_role !== 'host') return;
       void load_file().catch((e) => {
         diag_log('painter', 'important', 'PAINTER', 'load failed', { error: e instanceof Error ? e.message : String(e) }, { sink: 'error' });
         alert('Load failed: ' + (e as Error).message);
       });
     },
     on_new: () => {
+      if (current_session_role !== 'host') return;
       if (!confirm('Create new file? Unsaved changes will be lost.')) return;
       void new_file().catch((e) => {
         diag_log('painter', 'important', 'PAINTER', 'new file failed', { error: e instanceof Error ? e.message : String(e) }, { sink: 'error' });
@@ -3791,6 +4234,17 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       painterImportant('active group cleared', { undo_available: true, active_group_id: resolve_current_runtime_group_id() });
       schedule_auto_save();
     },
+    on_rename_painting: () => {
+      if (current_session_role !== 'host') return;
+      void rename_painting().catch((e) => {
+        diag_log('painter', 'important', 'PAINTER', 'rename painting failed', { error: e instanceof Error ? e.message : String(e) }, { sink: 'error' });
+      });
+    },
+    on_quit_painting: () => {
+      void quit_painting().catch((e) => {
+        diag_log('painter', 'important', 'PAINTER', 'quit painting failed', { error: e instanceof Error ? e.message : String(e) }, { sink: 'error' });
+      });
+    },
     on_reset_positions: () => {
       if (confirm('Reset all panel positions?')) {
         clearModulePositions();
@@ -3802,7 +4256,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       if (confirm('Reset camera to default settings?')) {
         clearCameraConfig();
         // Apply default camera settings immediately
-        voxelSpace.camera = createSanitizedPainterCamera();
+        painter_camera_state = createSanitizedPainterCamera();
+        syncVoxelSpaceCameraFromPainterCamera();
         syncPainterViewStatesFromLegacyCamera();
         refreshPainterProjectionPreservingCurrentTarget();
       }
@@ -4037,8 +4492,9 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         }
       },
       onParallaxMoveToggle: (enabled) => {
-        voxelSpace.camera.parallax_move_enabled = enabled;
-        syncPainterDocumentCameraFromVoxelCamera();
+        painter_camera_state.parallax_move_enabled = enabled;
+        syncVoxelSpaceCameraFromPainterCamera();
+        syncPainterDocumentCameraFromPainterCamera();
         applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
           saveCameraConfig({ parallax_move_enabled: enabled });
@@ -4046,8 +4502,9 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         painterCameraDiag('parallax move toggled', { enabled });
       },
       onParallaxSizeToggle: (enabled) => {
-        voxelSpace.camera.parallax_size_enabled = false;
-        syncPainterDocumentCameraFromVoxelCamera();
+        painter_camera_state.parallax_size_enabled = false;
+        syncVoxelSpaceCameraFromPainterCamera();
+        syncPainterDocumentCameraFromPainterCamera();
         applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
           saveCameraConfig({ parallax_size_enabled: false });
@@ -4055,10 +4512,11 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         painterCameraDiag('parallax size toggled', { enabled: false });
       },
       occlusionLabel: 'Focus Opacity',
-      getOcclusionEnabled: () => voxelSpace.camera.use_focus_layer_opacity ?? true,
+      getOcclusionEnabled: () => painter_camera_state.use_focus_layer_opacity ?? true,
       onOcclusionToggle: (enabled) => {
-        voxelSpace.camera.use_focus_layer_opacity = enabled;
-        syncPainterDocumentCameraFromVoxelCamera();
+        painter_camera_state.use_focus_layer_opacity = enabled;
+        syncVoxelSpaceCameraFromPainterCamera();
+        syncPainterDocumentCameraFromPainterCamera();
         applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
           saveCameraConfig({ use_focus_layer_opacity: enabled });
@@ -4066,8 +4524,9 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         painterCameraDiag('focus opacity toggled', { enabled });
       },
       onCenterTargetToggle: (enabled) => {
-        voxelSpace.camera.center_target_in_view = enabled;
-        syncPainterDocumentCameraFromVoxelCamera();
+        painter_camera_state.center_target_in_view = enabled;
+        syncVoxelSpaceCameraFromPainterCamera();
+        syncPainterDocumentCameraFromPainterCamera();
         refreshPainterProjectionPreservingCurrentTarget();
         if (isAppInitialized) {
           saveCameraConfig({ center_target_in_view: enabled });
@@ -4076,16 +4535,18 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       },
       onCalibrationChange: (x, y) => {
         const nextCalibration = sanitizePainterCameraConfig({ calibration: { x, y } }).calibration ?? { x: 0, y: 0 };
-        voxelSpace.camera.calibration = nextCalibration;
-        syncPainterDocumentCameraFromVoxelCamera();
+        painter_camera_state.calibration = nextCalibration;
+        syncVoxelSpaceCameraFromPainterCamera();
+        syncPainterDocumentCameraFromPainterCamera();
         applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
           savePainterCameraCalibration(nextCalibration);
         }
       },
       onCalibrationReset: () => {
-        voxelSpace.camera.calibration = { x: 0, y: 0 };
-        syncPainterDocumentCameraFromVoxelCamera();
+        painter_camera_state.calibration = { x: 0, y: 0 };
+        syncVoxelSpaceCameraFromPainterCamera();
+        syncPainterDocumentCameraFromPainterCamera();
         applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
           savePainterCameraCalibration({ x: 0, y: 0 });
@@ -4093,8 +4554,9 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       },
       onScalePerLayerChange: (value) => {
         const nextValue = sanitizePainterCameraConfig({ scale_per_layer: value }).scale_per_layer ?? 0;
-        voxelSpace.camera.scale_per_layer = nextValue;
-        syncPainterDocumentCameraFromVoxelCamera();
+        painter_camera_state.scale_per_layer = nextValue;
+        syncVoxelSpaceCameraFromPainterCamera();
+        syncPainterDocumentCameraFromPainterCamera();
         applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
           saveCameraConfig({ scale_per_layer: nextValue });
@@ -4102,8 +4564,9 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       },
       onMovementPerLayerChange: (value) => {
         const nextValue = sanitizePainterCameraConfig({ movement_per_layer: value }).movement_per_layer ?? 0;
-        voxelSpace.camera.movement_per_layer = nextValue;
-        syncPainterDocumentCameraFromVoxelCamera();
+        painter_camera_state.movement_per_layer = nextValue;
+        syncVoxelSpaceCameraFromPainterCamera();
+        syncPainterDocumentCameraFromPainterCamera();
         applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
           saveCameraConfig({ movement_per_layer: nextValue });
@@ -4111,8 +4574,9 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       },
       onMouseAngleYawDegChange: (value) => {
         const nextValue = sanitizePainterCameraConfig({ mouse_angle_yaw_deg: value }).mouse_angle_yaw_deg ?? 0;
-        voxelSpace.camera.mouse_angle_yaw_deg = nextValue;
-        syncPainterDocumentCameraFromVoxelCamera();
+        painter_camera_state.mouse_angle_yaw_deg = nextValue;
+        syncVoxelSpaceCameraFromPainterCamera();
+        syncPainterDocumentCameraFromPainterCamera();
         applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
           saveCameraConfig({ mouse_angle_yaw_deg: nextValue });
@@ -4120,17 +4584,19 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       },
       onMouseAnglePitchDegChange: (value) => {
         const nextValue = sanitizePainterCameraConfig({ mouse_angle_pitch_deg: value }).mouse_angle_pitch_deg ?? 0;
-        voxelSpace.camera.mouse_angle_pitch_deg = nextValue;
-        syncPainterDocumentCameraFromVoxelCamera();
+        painter_camera_state.mouse_angle_pitch_deg = nextValue;
+        syncVoxelSpaceCameraFromPainterCamera();
+        syncPainterDocumentCameraFromPainterCamera();
         applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
           saveCameraConfig({ mouse_angle_pitch_deg: nextValue });
         }
       },
       onMouseAngleSpringChange: (value) => {
-        const nextValue = sanitizePainterCameraConfig({ mouse_angle_spring: value }).mouse_angle_spring ?? voxelSpace.camera.mouse_angle_spring;
-        voxelSpace.camera.mouse_angle_spring = nextValue;
-        syncPainterDocumentCameraFromVoxelCamera();
+        const nextValue = sanitizePainterCameraConfig({ mouse_angle_spring: value }).mouse_angle_spring ?? painter_camera_state.mouse_angle_spring;
+        painter_camera_state.mouse_angle_spring = nextValue;
+        syncVoxelSpaceCameraFromPainterCamera();
+        syncPainterDocumentCameraFromPainterCamera();
         applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
           saveCameraConfig({ mouse_angle_spring: nextValue });
@@ -4138,8 +4604,9 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       },
       onRenderDistancePlanesChange: (value) => {
         const nextValue = sanitizePainterCameraConfig({ render_distance_planes: value }).render_distance_planes ?? 2;
-        voxelSpace.camera.render_distance_planes = nextValue;
-        syncPainterDocumentCameraFromVoxelCamera();
+        painter_camera_state.render_distance_planes = nextValue;
+        syncVoxelSpaceCameraFromPainterCamera();
+        syncPainterDocumentCameraFromPainterCamera();
         refreshPainterProjectionPreservingCurrentTarget();
         if (isAppInitialized) {
           saveCameraConfig({ render_distance_planes: nextValue });
@@ -4232,6 +4699,38 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     const previousSuppress = suppress_recent_file_persistence;
     suppress_recent_file_persistence = intent.persist_recent === false;
     try {
+      if (intent.kind === 'join_authoritative') {
+        if (intent.api_base_url && intent.bridge_ws_base_url) {
+          apply_painter_multiplayer_transport_config({
+            api_base_url: intent.api_base_url,
+            bridge_ws_base_url: intent.bridge_ws_base_url,
+          });
+        }
+        current_session_role = 'participant';
+        current_filename = intent.display_name;
+        const sync_state = await painter_sync.bootstrap(true, intent.document_id);
+        painterImportant('launch intent bootstrapped multiplayer state', {
+          intent_kind: intent.kind,
+          authority_mode: sync_state.authority_mode,
+          lifecycle: sync_state.lifecycle,
+          join_target_id: intent.join_target_id,
+          document_id: intent.document_id,
+        });
+        if (!sync_state.bootstrap?.snapshot) {
+          throw new Error(`missing_authoritative_snapshot:${intent.document_id}`);
+        }
+        apply_authoritative_painter_bootstrap(sync_state.bootstrap);
+        current_filename = intent.display_name;
+        clearActiveFileAssociation(intent.display_name, { clearLastUsed: true });
+        return;
+      }
+      const sync_state = await painter_sync.bootstrap(true);
+      painterImportant('launch intent bootstrapped multiplayer state', {
+        intent_kind: intent.kind,
+        authority_mode: sync_state.authority_mode,
+        lifecycle: sync_state.lifecycle,
+      });
+      current_session_role = 'host';
       if (intent.kind === 'new_document') {
         await new_file();
         return;
@@ -4257,34 +4756,67 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     multiplayer_sync: painter_sync,
     update_layout,
 
-     on_pointer_move_global: (x: number, y: number) => {
+     on_pointer_move_global: (x: number, y: number, e: any) => {
        last_pointer_x = x;
        last_pointer_y = y;
+       const pointer_state = build_interaction_pointer_state({
+         x,
+         y,
+         pointer_id: e?.pointer_id,
+         button: e?.button,
+         buttons: e?.buttons,
+         shift: e?.shift,
+         ctrl: e?.ctrl,
+         alt: e?.alt,
+         meta: e?.meta,
+       });
+       const move_resolution = painter_interaction_registry.process_pointer_move(pointer_state);
+       painter_interaction_hover_state = move_resolution.hover;
+       painter_interaction_session_state = move_resolution.session ?? painter_interaction_session_state;
+     },
+     on_pointer_down_global: (x: number, y: number, e: any) => {
+       const pointer_state = build_interaction_pointer_state({
+         x,
+         y,
+         pointer_id: e?.pointer_id,
+         button: e?.button,
+         buttons: e?.buttons,
+         shift: e?.shift,
+         ctrl: e?.ctrl,
+         alt: e?.alt,
+         meta: e?.meta,
+       });
+       const down_resolution = painter_interaction_registry.process_pointer_down(pointer_state, 'draw');
+       painter_interaction_session_state = down_resolution.session;
+     },
+     on_pointer_up_global: (x: number, y: number, e: any) => {
+       const pointer_state = build_interaction_pointer_state({
+         x,
+         y,
+         pointer_id: e?.pointer_id,
+         button: e?.button,
+         buttons: e?.buttons,
+         shift: e?.shift,
+         ctrl: e?.ctrl,
+         alt: e?.alt,
+         meta: e?.meta,
+       });
+       const up_resolution = painter_interaction_registry.process_pointer_up(pointer_state);
+       painter_interaction_session_state = up_resolution.session;
      },
     
-    export_grid: () => {
-      const data = exportGrid(grid);
-      return JSON.stringify(data, null, 2);
-    },
+    export_grid: () => exportPainterDocumentToJSON(exportCurrentPainterDocument()),
     
     import_grid: (json: string) => {
       try {
-        const data = JSON.parse(json);
-        const new_grid = importGrid(data);
-        // Copy new grid data
-        voxelSpace = gridToVoxelSpace(new_grid, 0);
-        rebuild_runtime_from_voxel_space();
-        setCurrentPainterDocumentLineage(`memory:import_grid:${Date.now()}`, 'import_grid');
-        clear_world_selection(world_selection);
-        syncPainterCameraViewTransform();
-        ensureValidFocusPlane();
-        setPainterCameraTargetWorld(getPainterDocumentCenterWorld());
-        painter_display_projection = rebuildPainterDisplayProjection(getPainterDisplayViewState(), { kind: 'viewport_center', screen: null, world: painter_camera_target_world });
-        syncProjectedGridFromDisplay();
-        syncDOMRenderer();
-        resetPainterHistoryState('import legacy grid');
+        const document = importPainterDocumentFromJSON(json);
+        applyPainterDocumentSnapshot(document);
+        setCurrentPainterDocumentLineage(`memory:import_document:${Date.now()}`, 'import_document');
+        clearActiveFileAssociation('untitled', { clearLastUsed: true });
+        clearAutoSave();
+        painterImportant('imported painter document');
       } catch (e) {
-        diag_log('painter', 'important', 'PAINTER', 'failed to import grid', { error: e instanceof Error ? e.message : String(e) }, { sink: 'error' });
+        diag_log('painter', 'important', 'PAINTER', 'failed to import painter document', { error: e instanceof Error ? e.message : String(e) }, { sink: 'error' });
       }
     },
     
@@ -4328,6 +4860,9 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       return exportCurrentPainterDocumentText();
     },
     start_from_launch_intent,
+    get_interaction_adapters: () => painter_interaction_adapters,
+    get_interaction_hover_state: () => painter_interaction_hover_state,
+    get_interaction_session_state: () => painter_interaction_session_state,
 
     new_canvas: (width: number, height: number) => {
       const document = create_painter_document(width, height, { min_z: 0, max_z: 0, default_group_name: 'Group 1' });
@@ -4344,41 +4879,20 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     export_document: () => {
       return exportPainterDocumentToJSON(exportCurrentPainterDocument());
     },
-    
-    import_legacy_voxel_space: (json: string) => {
-      try {
-        const { importVoxelSpace } = require('../ascii_painter/voxel_space.js');
-        const parsed = JSON.parse(json);
-        voxelSpace = importVoxelSpace(parsed);
-        rebuild_runtime_from_voxel_space({ preserve_group_order: true });
-        setCurrentPainterDocumentLineage(`memory:import_legacy_voxel_space:${Date.now()}`, 'import_legacy_voxel_space');
-        clear_world_selection(world_selection);
-        syncPainterCameraViewTransform();
-        ensureValidFocusPlane();
-        setPainterCameraTargetWorld(getPainterDocumentCenterWorld());
-        painter_display_projection = rebuildPainterDisplayProjection(getPainterDisplayViewState(), { kind: 'viewport_center', screen: null, world: painter_camera_target_world });
-        syncProjectedGridFromDisplay();
-        syncDOMRenderer();
-        resetPainterHistoryState('import legacy voxel space');
-        painterImportant('imported legacy voxel space');
-        painterDiag('imported legacy voxel space summary', { summary: debugVoxelSpace(voxelSpace) });
-      } catch (e) {
-        diag_log('painter', 'important', 'PAINTER', 'failed to import legacy voxel space', { error: e instanceof Error ? e.message : String(e) }, { sink: 'error' });
-      }
-    },
-    
-    get_legacy_voxel_space: () => voxelSpace,
-    
+
     set_camera_mode: (_mode: CameraMode) => {
-      voxelSpace.camera.mode = 'rotated_ortho';
+      painter_camera_state.mode = 'rotated_ortho';
+      syncVoxelSpaceCameraFromPainterCamera();
     },
     
     set_parallax_intensity: (intensity: number) => {
-      voxelSpace.camera.parallax_intensity = Math.max(0, Math.min(1, intensity));
+      painter_camera_state.parallax_intensity = Math.max(0, Math.min(1, intensity));
+      syncVoxelSpaceCameraFromPainterCamera();
     },
     
     toggle_show_all_layers: () => {
-      voxelSpace.camera.use_focus_layer_opacity = !voxelSpace.camera.use_focus_layer_opacity;
+      painter_camera_state.use_focus_layer_opacity = !painter_camera_state.use_focus_layer_opacity;
+      syncVoxelSpaceCameraFromPainterCamera();
       applyPainterProjectedCameraTuning();
     },
     
@@ -4450,7 +4964,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
           transition_euler: voxelSpace.camera.transition_euler,
           visual_pivot_px: pivotPx,
         });
-        domRenderer.setSpace(getPainterRenderSpace());
+        domRenderer.setProjectedScene(getPainterRenderScene());
         domRenderer.setMouseParallax(mouseParallax.x, mouseParallax.y);
         painter_view_transition = resolved.transition;
         if (!resolved.frame.active) {

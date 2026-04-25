@@ -29,8 +29,8 @@ const topProjection = project_painter_display_space({
 });
 assert(JSON.stringify(topProjection.visible_planes) === JSON.stringify([0, 1]), 'top view should preserve ascending z planes');
 assert(topProjection.target_projected.u === 1 && topProjection.target_projected.v === 1, 'top view target projection should be tracked');
-assert(topProjection.space.layers.get(0)?.cells[1]?.[1]?.char === 'A', 'top view slot 0 should recenter content around target');
-assert(topProjection.space.layers.get(1)?.cells[2]?.[3]?.char === 'B', 'top view slot 1 should recenter higher plane content');
+assert(topProjection.scene.slots.get(0)?.cells[1]?.[1]?.char === 'A', 'top view slot 0 should recenter content around target');
+assert(topProjection.scene.slots.get(1)?.cells[2]?.[3]?.char === 'B', 'top view slot 1 should recenter higher plane content');
 assert(getLayer(space, 0)?.cells[0]?.[0]?.char === 'A', 'source voxel space should retain original world-space cell position');
 
 space.camera.center_target_in_view = false;
@@ -162,7 +162,7 @@ const overlapGridPoint = painter_projection_world_to_grid_point({
   world: { x: 2, y: 2, z: 1 },
 });
 assert(!!overlapGridPoint, 'runtime top projection should map overlap world coordinate into focused slot');
-assert(runtimeTopProjection.space.layers.get(runtimeTopProjection.focus_slot)?.cells[overlapGridPoint!.y]?.[overlapGridPoint!.x]?.char === 'B', 'runtime top projection should render top group winner at exact overlap');
+assert(runtimeTopProjection.scene.slots.get(runtimeTopProjection.focus_slot)?.cells[overlapGridPoint!.y]?.[overlapGridPoint!.x]?.char === 'B', 'runtime top projection should render top group winner at exact overlap');
 
 const runtimeSouthProjection = project_painter_runtime_display_space({
   runtime,
@@ -184,8 +184,8 @@ const highPlaneGridPoint = painter_projection_world_to_grid_point({
   world: { x: 2, y: 1, z: 2 },
 });
 assert(!!lowPlaneGridPoint && !!highPlaneGridPoint, 'runtime south projection should map multi-plane group voxels on the focused y plane');
-assert(runtimeSouthProjection.space.layers.get(runtimeSouthProjection.focus_slot)?.cells[lowPlaneGridPoint!.y]?.[lowPlaneGridPoint!.x]?.char === 'L', 'runtime south projection should render lower-z voxel from the same group');
-assert(runtimeSouthProjection.space.layers.get(runtimeSouthProjection.focus_slot)?.cells[highPlaneGridPoint!.y]?.[highPlaneGridPoint!.x]?.char === 'H', 'runtime south projection should render higher-z voxel from the same group');
+assert(runtimeSouthProjection.scene.slots.get(runtimeSouthProjection.focus_slot)?.cells[lowPlaneGridPoint!.y]?.[lowPlaneGridPoint!.x]?.char === 'L', 'runtime south projection should render lower-z voxel from the same group');
+assert(runtimeSouthProjection.scene.slots.get(runtimeSouthProjection.focus_slot)?.cells[highPlaneGridPoint!.y]?.[highPlaneGridPoint!.x]?.char === 'H', 'runtime south projection should render higher-z voxel from the same group');
 
 const singlePlaneDocument = create_painter_document(4, 4, { min_z: 0, max_z: 0, default_group_name: 'Solo' });
 const singlePlaneRuntime = normalize_painter_document_runtime(singlePlaneDocument);

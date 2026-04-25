@@ -28,7 +28,7 @@ export function parse_tool_assisted_inputs_script(raw: string): ToolAssistedInpu
         : undefined;
       return { at_breath, type, helper, payload } as const;
     }
-    if (type === 'capture_actor_tile' || type === 'capture_movement_trace' || type === 'capture_visible_step' || type === 'capture_painter_tool_state' || type === 'capture_painter_focus_plane' || type === 'capture_painter_camera_target' || type === 'capture_painter_bounds' || type === 'capture_painter_interaction_anchor' || type === 'capture_painter_anchor_cell' || type === 'assert_actor_tile_equals' || type === 'assert_actor_tile_changed' || type === 'assert_painter_anchor_cell_changed' || type === 'assert_painter_anchor_cell_equals') {
+    if (type === 'capture_actor_tile' || type === 'capture_movement_trace' || type === 'capture_visible_step' || type === 'capture_join_snapshot' || type === 'capture_painter_tool_state' || type === 'capture_painter_focus_plane' || type === 'capture_painter_camera_target' || type === 'capture_painter_bounds' || type === 'capture_painter_interaction_anchor' || type === 'capture_painter_anchor_cell' || type === 'assert_actor_tile_equals' || type === 'assert_actor_tile_changed' || type === 'assert_painter_anchor_cell_changed' || type === 'assert_painter_anchor_cell_equals') {
       const slot = String(action?.slot ?? '').trim();
       if (!slot) throw new Error(`tool_assisted_inputs_missing_slot:${index}`);
       const anchor_slot = typeof action?.anchor_slot === 'string' && action.anchor_slot.trim().length > 0 ? action.anchor_slot.trim() : undefined;
@@ -185,6 +185,7 @@ export function parse_tool_assisted_inputs_script(raw: string): ToolAssistedInpu
       auto_connect: data.boot.auto_connect !== false,
       auto_claim: Boolean(data.boot.auto_claim),
       actor_ref: typeof data.boot.actor_ref === 'string' ? data.boot.actor_ref.trim() || null : null,
+      actor_id: typeof data.boot.actor_id === 'string' ? data.boot.actor_id.trim() || null : null,
     } : undefined,
     actions,
   };

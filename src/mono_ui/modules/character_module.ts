@@ -26,6 +26,7 @@ import {
 import { has_resolved_tag } from "../../tag_system/canonical_readers.js";
 import { tag_key } from "../../tag_system/tag_key.js";
 import type { TagInstance } from "../../tag_system/registry.js";
+import { build_equipment_slot_target, build_inventory_slot_target, order_resolved_targets, type OrderedResolvedTargets } from "../runtime/interaction_runtime_types.js";
 
 export const CHARACTER_MODULE_TAG_ROWS = 4;
 export const CHARACTER_MODULE_TAG_AREA_HEIGHT = CHARACTER_MODULE_TAG_ROWS + 1;
@@ -365,7 +366,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
     }
   }
 
-  return make_floating_panel_module({
+  const mod = make_floating_panel_module({
     id: opts.id,
     rect: opts.rect,
     title: () => opts.get_actor_name(),
@@ -888,4 +889,32 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       opts.on_cross_module_drop?.(e.x, e.y);
     },
   });
+
+  (mod as any).resolveInteractionTargets = (x: number, y: number): OrderedResolvedTargets => {
+    const targets = [] as any[];
+    const slot = get_resolved_slot_at_position(x, y);
+    if (slot) {
+      targets.push(build_equipment_slot_target({
+        module_id: opts.id,
+        view_id: `${opts.id}_view`,
+        slot_name: slot.body_slot,
+        slot_type: slot.slot_type,
+        garb_index: slot.garb_index,
+        container_id: get_slot_container_id(opts.get_actor_id(), slot),
+      }));
+    }
+    const sidebar = get_sidebar_container_at_position(x, y);
+    if (sidebar) {
+      targets.push(build_inventory_slot_target({
+        module_id: opts.id,
+        view_id: `${opts.id}_view`,
+        container_id: sidebar.container_id,
+        slot_index: -1,
+        target_ref: sidebar.container_id,
+      }));
+    }
+    return order_resolved_targets(targets);
+  };
+
+  return mod as any;
 }

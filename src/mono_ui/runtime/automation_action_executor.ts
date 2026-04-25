@@ -70,6 +70,17 @@ export async function execute_tool_assisted_inputs_action(options: ActionExecuto
       emit('action_fired', { action_index, action_type: action.type, target_breath, current_breath: current_tick, late_by: Math.max(0, current_tick - target_breath), slot: action.slot, source: action.source, field: action.field ?? null, text_value: value });
       mark_action_completed();
       return true;
+    } else if (action.type === 'capture_join_snapshot') {
+      const snapshot = runtime_probe.get_join_snapshot?.() ?? null;
+      if (!snapshot) {
+        diagnostic_report.record_failure({ action_index, action_type: action.type, slot: action.slot, error: 'tool_assisted_inputs_join_snapshot_unavailable' });
+        emit('action_failed', { action_index, action_type: action.type, target_breath, current_breath: current_tick, slot: action.slot, error: 'tool_assisted_inputs_join_snapshot_unavailable', nonfatal: true });
+        return true;
+      }
+      capture_store.set_text_value(action.slot, JSON.stringify(snapshot));
+      emit('action_fired', { action_index, action_type: action.type, target_breath, current_breath: current_tick, late_by: Math.max(0, current_tick - target_breath), slot: action.slot, join_snapshot: snapshot });
+      mark_action_completed();
+      return true;
     } else if (action.type === 'capture_painter_tool_state') {
       const tool_state = runtime_probe.get_painter_tool_state?.() ?? null;
       if (!tool_state) {

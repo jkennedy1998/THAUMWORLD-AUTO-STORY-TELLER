@@ -1,7 +1,8 @@
 // Debug levels: 0 = off, 1 = errors only, 2 = warnings + errors, 3 = info + warnings + errors, 4 = verbose
 // Check if we're in Node.js environment (process exists) or browser (process undefined)
-const isNode = typeof process !== 'undefined' && process.env;
-export const DEBUG_LEVEL = Number(isNode ? process.env.DEBUG_LEVEL ?? 3 : 3);
+const maybeProcess = typeof globalThis !== 'undefined' ? (globalThis as any).process : undefined;
+const isNode = !!maybeProcess?.env;
+export const DEBUG_LEVEL = Number(isNode ? maybeProcess.env.DEBUG_LEVEL ?? 3 : 3);
 export const DEBUG_ENABLED = DEBUG_LEVEL > 0;
 
 const ANSI = {

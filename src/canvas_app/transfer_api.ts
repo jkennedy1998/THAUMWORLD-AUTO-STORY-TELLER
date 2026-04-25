@@ -1,3 +1,5 @@
+import { DEFAULT_LOCAL_MULTIPLAYER_TRANSPORT } from '../shared/multiplayer_transport.js';
+
 export type ApiOk<T extends object = {}> = { ok: true } & T;
 export type ApiErr = { ok: false; error: string; http_status?: number; detail?: any };
 export type ApiResult<T extends object = {}> = ApiOk<T> | ApiErr;
@@ -18,7 +20,7 @@ export type TransferArgs = {
 
 // Single endpoint for everything.
 export async function api_transfer_inline(args: TransferArgs): Promise<ApiResult> {
-  const base = args.transfer_base_url ?? 'http://localhost:8787';
+  const base = args.transfer_base_url ?? DEFAULT_LOCAL_MULTIPLAYER_TRANSPORT.host_origin.replace(/\/+$/, '');
   const from_container = String(args.from_container ?? '');
   const to_container = String(args.to_container ?? '');
   const inferredSubtype = args.intent_subtype

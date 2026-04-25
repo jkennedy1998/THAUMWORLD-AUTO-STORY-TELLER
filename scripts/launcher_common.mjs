@@ -15,18 +15,32 @@ export async function probeJson(url) {
   }
 }
 
-export async function detectLocalHost(slot) {
-  const status = await probeJson(`http://localhost:8787/api/host/status?slot=${slot}`);
+function normalizeApiBaseUrl(apiBaseUrl) {
+  const trimmed = String(apiBaseUrl ?? '').trim();
+  return trimmed || 'http://localhost:8787/api';
+}
+
+export async function detectHost(slot, options = {}) {
+  const apiBaseUrl = normalizeApiBaseUrl(options.apiBaseUrl);
+  const status = await probeJson(`${apiBaseUrl}/host/status?slot=${slot}`);
   return Boolean(status?.ok);
 }
 
-export async function waitForLocalHost(slot, timeoutMs = 20000) {
+export async function detectLocalHost(slot) {
+  return detectHost(slot);
+}
+
+export async function waitForHost(slot, timeoutMs = 20000, options = {}) {
   const started = Date.now();
   while ((Date.now() - started) < timeoutMs) {
-    if (await detectLocalHost(slot)) return true;
+    if (await detectHost(slot, options)) return true;
     await sleep(500);
   }
   return false;
+}
+
+export async function waitForLocalHost(slot, timeoutMs = 20000) {
+  return waitForHost(slot, timeoutMs);
 }
 
 export async function detectVite() {

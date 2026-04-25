@@ -91,7 +91,8 @@ import { apply_character_patch, load_character_by_ref, save_character_by_ref } f
 import { remove_character_tag, remove_character_tag_by_selector, upsert_character_tag, upsert_character_tag_by_selector } from "../shared/character_tags.js";
 import { get_character_id_from_ref, get_character_role_from_ref } from "../shared/character_storage.js";
 import { assign_controlled_actor_ref_for_client_session, get_claiming_client_session_id_for_actor_ref, get_controlled_actor_ref_for_client_session, list_controlled_actor_claims, release_controlled_actor_claim_by_actor_ref, release_controlled_actor_ref_for_client_session, set_controlled_actor_ref_for_client_session, touch_controlled_actor_ref_for_client_session } from "../shared/session_control.js";
-import { apply_painter_group_structure_change, apply_painter_group_voxel_changes, get_or_create_painter_document_snapshot, redo_painter_group_changes, undo_painter_group_changes } from "../shared/painter_document_store.js";
+import { apply_painter_group_structure_command, apply_painter_group_voxel_command, get_or_create_painter_document_snapshot, redo_painter_group_command, replace_painter_document_snapshot, undo_painter_group_command } from "../shared/painter_document_store.js";
+import { read_painter_hosted_session, write_painter_hosted_session } from "../shared/painter_hosted_session_store.js";
 import { normalize_place_actor_presence, normalize_place_npc_presence, project_public_place_actor_presence, project_public_place_npc_presence } from "../shared/place_character_presence.js";
 import { build_actor_owner_inventory_view, build_npc_owner_inventory_view } from "../inventory_surfaces/actor_owner_view.js";
 import { build_container_owner_inventory_view } from "../inventory_surfaces/container_owner_view.js";
@@ -13795,6 +13796,164 @@ function start_http_server(log_path: string): void {
             return;
         }
 
+        if (url.pathname === "/api/painter/hosted-session") {
+            if (req.method === "GET") {
+                const slot_raw = url.searchParams.get("slot");
+                const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+                const hosted = read_painter_hosted_session(slot);
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, hosted_session: hosted }));
+                return;
+            }
+            if (req.method !== "POST" && req.method !== "DELETE") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+            let body = "";
+            req.on("data", (chunk) => {
+                body += chunk;
+            });
+            req.on("end", () => {
+                try {
+                    const payload = body ? JSON.parse(body) : {};
+                    const slot = Number(payload?.slot ?? data_slot_number) || data_slot_number;
+                    const session_token = String(payload?.session_token ?? "").trim();
+                    const session = resolve_multiplayer_session_by_token(slot, session_token);
+                    if (!session) throw new Error("invalid_session_token");
+                    if (req.method === "DELETE") {
+                        write_painter_hosted_session(slot, null);
+                        void emitBridgeMessage('PAINTER_HOSTED_SESSION_UPDATED', {
+                            hosted_session: null,
+                            sent_at_ms: Date.now(),
+                        });
+                        res.writeHead(200, { "Content-Type": "application/json" });
+                        res.end(JSON.stringify({ ok: true }));
+                        return;
+                    }
+                    const hosted_session = {
+                        document_id: String(payload?.document_id ?? "default_canvas").trim() || "default_canvas",
+                        display_name: String(payload?.display_name ?? "untitled").trim() || "untitled",
+                        file_backed: Boolean(payload?.file_backed),
+                        owner_session_token: session.session_token,
+                        updated_at: new Date().toISOString(),
+                    };
+                    write_painter_hosted_session(slot, hosted_session);
+                    void emitBridgeMessage('PAINTER_HOSTED_SESSION_UPDATED', {
+                        hosted_session,
+                        sent_at_ms: Date.now(),
+                    });
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, hosted_session }));
+                } catch (err: any) {
+                    const error = err?.message ?? "painter_hosted_session_failed";
+                    const status = error === "invalid_session_token" ? 401 : 500;
+                    res.writeHead(status, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error }));
+                }
+            });
+            return;
+        }
+
+        if (url.pathname === "/api/painter/document/replace") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+            let body = "";
+            req.on("data", (chunk) => {
+                body += chunk;
+            });
+            req.on("end", () => {
+                try {
+                    const payload = body ? JSON.parse(body) : {};
+                    const slot = Number(payload?.slot ?? data_slot_number) || data_slot_number;
+                    const session_token = String(payload?.session_token ?? "").trim();
+                    const session = resolve_multiplayer_session_by_token(slot, session_token);
+                    if (!session) throw new Error("invalid_session_token");
+                    const document_id = String(payload?.document_id ?? "default_canvas").trim() || "default_canvas";
+                    const result = replace_painter_document_snapshot(slot, document_id, payload?.snapshot, {
+                        base_revision: Number.isFinite(Number(payload?.base_revision)) ? Math.floor(Number(payload.base_revision)) : null,
+                    });
+                    const snapshot = result.snapshot;
+                    void emitBridgeMessage('PAINTER_DOCUMENT_PATCHED', {
+                        document_id: snapshot.document_id,
+                        group_id: null,
+                        command_kind: 'replace_document',
+                        revision: snapshot.revision,
+                        updated_at: snapshot.updated_at,
+                        snapshot: snapshot.snapshot,
+                        base_revision: result.base_revision,
+                        server_revision_before: result.server_revision_before,
+                        server_revision_after: result.server_revision_after,
+                        applied_from_stale_base: result.applied_from_stale_base,
+                        command_id: String(payload?.command_id ?? '').trim() || null,
+                        sent_at_ms: Date.now(),
+                    });
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({
+                        ok: true,
+                        command_kind: 'replace_document',
+                        group_id: null,
+                        document_id: snapshot.document_id,
+                        revision: snapshot.revision,
+                        updated_at: snapshot.updated_at,
+                        snapshot: snapshot.snapshot,
+                        base_revision: result.base_revision,
+                        server_revision_before: result.server_revision_before,
+                        server_revision_after: result.server_revision_after,
+                        applied_from_stale_base: result.applied_from_stale_base,
+                        command_id: String(payload?.command_id ?? '').trim() || null,
+                    }));
+                } catch (err: any) {
+                    const error = err?.message ?? "painter_document_replace_failed";
+                    const status = error === "invalid_session_token" ? 401 : 500;
+                    res.writeHead(status, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error }));
+                }
+            });
+            return;
+        }
+
+        if (url.pathname === "/api/painter/session/end") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+            let body = "";
+            req.on("data", (chunk) => {
+                body += chunk;
+            });
+            req.on("end", () => {
+                try {
+                    const payload = body ? JSON.parse(body) : {};
+                    const slot = Number(payload?.slot ?? data_slot_number) || data_slot_number;
+                    const session_token = String(payload?.session_token ?? "").trim();
+                    const session = resolve_multiplayer_session_by_token(slot, session_token);
+                    if (!session) throw new Error("invalid_session_token");
+                    write_painter_hosted_session(slot, null);
+                    void emitBridgeMessage('PAINTER_SESSION_ENDED', {
+                        reason: String(payload?.reason ?? 'host_quit_painting').trim() || 'host_quit_painting',
+                        sent_at_ms: Date.now(),
+                    });
+                    void emitBridgeMessage('PAINTER_HOSTED_SESSION_UPDATED', {
+                        hosted_session: null,
+                        sent_at_ms: Date.now(),
+                    });
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true }));
+                } catch (err: any) {
+                    const error = err?.message ?? "painter_session_end_failed";
+                    const status = error === "invalid_session_token" ? 401 : 500;
+                    res.writeHead(status, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error }));
+                }
+            });
+            return;
+        }
+
         if (url.pathname === "/api/painter/command") {
             if (req.method !== "POST") {
                 res.writeHead(405, { "Content-Type": "application/json" });
@@ -13811,14 +13970,15 @@ function start_http_server(log_path: string): void {
                     const command = data?.command ?? {};
                     const kind = String(command?.kind ?? "").trim();
                     const normalized_document_id = String(command?.document_id ?? "default_canvas").trim() || "default_canvas";
-                    let snapshot;
+                    let result;
                     let group_id: string | null = null;
+                    const base_revision = Number.isFinite(Number(command?.base_revision)) ? Math.max(0, Math.floor(Number(command.base_revision))) : null;
                     if (kind === "apply_group_voxels") {
                         group_id = String(command?.group_id ?? "").trim();
                         if (!group_id) {
                             throw new Error("painter_group_required");
                         }
-                        snapshot = apply_painter_group_voxel_changes(
+                        result = apply_painter_group_voxel_command(
                             slot,
                             normalized_document_id,
                             group_id,
@@ -13837,71 +13997,73 @@ function start_http_server(log_path: string): void {
                                         weight_index: Math.max(0, Math.min(3, Math.floor(Number(voxel?.weight_index ?? 0)) || 0)),
                                     },
                                 }))
-                                : []
+                                : [],
+                            { base_revision }
                         );
                     } else if (kind === "create_group") {
-                        snapshot = apply_painter_group_structure_change(slot, normalized_document_id, {
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, {
                             kind: 'create_group',
                             group_name: String(command?.group_name ?? '').trim() || undefined,
                             target_group_id: String(command?.target_group_id ?? '').trim() || undefined,
-                        });
+                        }, { base_revision });
                     } else if (kind === "delete_group") {
                         group_id = String(command?.group_id ?? "").trim();
                         if (!group_id) throw new Error("painter_group_required");
-                        snapshot = apply_painter_group_structure_change(slot, normalized_document_id, { kind: 'delete_group', group_id });
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, { kind: 'delete_group', group_id }, { base_revision });
                     } else if (kind === "duplicate_group") {
                         const source_group_id = String(command?.source_group_id ?? command?.group_id ?? "").trim();
                         if (!source_group_id) throw new Error("painter_group_required");
                         group_id = source_group_id;
-                        snapshot = apply_painter_group_structure_change(slot, normalized_document_id, {
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, {
                             kind: 'duplicate_group',
                             source_group_id,
                             target_group_id: String(command?.target_group_id ?? '').trim() || undefined,
-                        });
+                        }, { base_revision });
                     } else if (kind === "rename_group") {
                         group_id = String(command?.group_id ?? "").trim();
                         if (!group_id) throw new Error("painter_group_required");
-                        snapshot = apply_painter_group_structure_change(slot, normalized_document_id, {
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, {
                             kind: 'rename_group',
                             group_id,
                             group_name: String(command?.group_name ?? '').trim(),
-                        });
+                        }, { base_revision });
                     } else if (kind === "set_group_visibility") {
                         group_id = String(command?.group_id ?? "").trim();
                         if (!group_id) throw new Error("painter_group_required");
-                        snapshot = apply_painter_group_structure_change(slot, normalized_document_id, {
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, {
                             kind: 'set_group_visibility',
                             group_id,
                             visible: Boolean(command?.visible),
-                        });
+                        }, { base_revision });
                     } else if (kind === "set_group_locked") {
                         group_id = String(command?.group_id ?? "").trim();
                         if (!group_id) throw new Error("painter_group_required");
-                        snapshot = apply_painter_group_structure_change(slot, normalized_document_id, {
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, {
                             kind: 'set_group_locked',
                             group_id,
                             locked: Boolean(command?.locked),
-                        });
+                        }, { base_revision });
                     } else if (kind === "reorder_groups") {
-                        snapshot = apply_painter_group_structure_change(slot, normalized_document_id, {
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, {
                             kind: 'reorder_groups',
                             next_group_order: Array.isArray(command?.next_group_order)
                                 ? command.next_group_order.map((value: any) => String(value ?? '').trim()).filter(Boolean)
                                 : [],
-                        });
+                        }, { base_revision });
                     } else if (kind === "reset_document") {
-                        snapshot = apply_painter_group_structure_change(slot, normalized_document_id, { kind: 'reset_document' });
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, { kind: 'reset_document' }, { base_revision });
                     } else if (kind === "undo_group") {
                         group_id = String(command?.group_id ?? "").trim();
                         if (!group_id) throw new Error("painter_group_required");
-                        snapshot = undo_painter_group_changes(slot, normalized_document_id, group_id);
+                        result = undo_painter_group_command(slot, normalized_document_id, group_id, { base_revision });
                     } else if (kind === "redo_group") {
                         group_id = String(command?.group_id ?? "").trim();
                         if (!group_id) throw new Error("painter_group_required");
-                        snapshot = redo_painter_group_changes(slot, normalized_document_id, group_id);
+                        result = redo_painter_group_command(slot, normalized_document_id, group_id, { base_revision });
                     } else {
                         throw new Error("painter_command_not_supported");
                     }
+                    const snapshot = result.snapshot;
                     void emitBridgeMessage('PAINTER_DOCUMENT_PATCHED', {
                         document_id: snapshot.document_id,
                         group_id,
@@ -13909,6 +14071,11 @@ function start_http_server(log_path: string): void {
                         revision: snapshot.revision,
                         updated_at: snapshot.updated_at,
                         snapshot: snapshot.snapshot,
+                        base_revision: result.base_revision,
+                        server_revision_before: result.server_revision_before,
+                        server_revision_after: result.server_revision_after,
+                        applied_from_stale_base: result.applied_from_stale_base,
+                        command_id: String(command?.command_id ?? '').trim() || null,
                         sent_at_ms: Date.now(),
                     });
                     res.writeHead(200, { "Content-Type": "application/json" });
@@ -13920,10 +14087,21 @@ function start_http_server(log_path: string): void {
                         revision: snapshot.revision,
                         updated_at: snapshot.updated_at,
                         snapshot: snapshot.snapshot,
+                        base_revision: result.base_revision,
+                        server_revision_before: result.server_revision_before,
+                        server_revision_after: result.server_revision_after,
+                        applied_from_stale_base: result.applied_from_stale_base,
+                        command_id: String(command?.command_id ?? '').trim() || null,
                     }));
                 } catch (err: any) {
                     const error = err?.message ?? "painter_command_failed";
-                    const status = error === "invalid_session_token" ? 401 : error === "painter_command_not_supported" ? 400 : 500;
+                    const status = error === "invalid_session_token"
+                        ? 401
+                        : error === "painter_command_not_supported" || error === "painter_group_required"
+                            ? 400
+                            : error === "painter_group_not_found" || error === "painter_group_locked" || error === "painter_last_group_delete_forbidden" || error === "painter_group_already_exists"
+                                ? 409
+                                : 500;
                     res.writeHead(status, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error }));
                 }
@@ -13939,6 +14117,7 @@ function start_http_server(log_path: string): void {
             }
             const slot_raw = url.searchParams.get("slot");
             const slot = slot_raw ? Number(slot_raw) : data_slot_number;
+            const hosted_painter_session = read_painter_hosted_session(slot);
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({
                 ok: true,
@@ -13948,6 +14127,10 @@ function start_http_server(log_path: string): void {
                 host_mode: process.env.THAUM_BOOT_ROLE === 'host' ? 'host_only' : 'host_with_client_or_unknown',
                 join_mode: 'local_attach_ready',
                 supports_join: true,
+                painter_joinable: Boolean(hosted_painter_session),
+                painter_document_id: hosted_painter_session?.document_id ?? null,
+                painter_display_name: hosted_painter_session?.display_name ?? null,
+                painter_file_backed: hosted_painter_session?.file_backed ?? false,
                 host_session_file: get_host_session_file_path(slot),
                 manages_ollama: should_manage_ollama(),
                 host_cli_enabled: should_run_host_cli(),

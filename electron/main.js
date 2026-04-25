@@ -13,6 +13,65 @@ import {
 } from 'fs';
 import { join, dirname, basename } from 'path';
 
+function ensure_dir(dirPath) {
+    if (!existsSync(dirPath)) mkdirSync(dirPath, { recursive: true });
+}
+
+function make_client_instance_id() {
+    return `client_${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+if (!process.env.THAUM_CLIENT_INSTANCE_ID) {
+    process.env.THAUM_CLIENT_INSTANCE_ID = make_client_instance_id();
+}
+
+const DATA_SLOT = Number(process.env.DATA_SLOT || 1) || 1;
+const CLIENT_INSTANCE_ID = String(process.env.THAUM_CLIENT_INSTANCE_ID || '').trim() || make_client_instance_id();
+const APP_MODE = String(process.env.THAUM_APP_MODE || 'game').trim().toLowerCase() === 'ascii_painter' ? 'ascii_painter' : 'game';
+
+function configure_electron_instance_paths() {
+    const slotRoot = join(process.cwd(), 'local_data', `data_slot_${DATA_SLOT}`);
+    const sharedAppRoot = join(slotRoot, 'electron_clients', APP_MODE, 'shared');
+    const clientRoot = join(slotRoot, 'electron_clients', APP_MODE, CLIENT_INSTANCE_ID);
+    const userDataPath = join(sharedAppRoot, 'user_data');
+    const sessionDataPath = join(sharedAppRoot, 'session_data');
+    const cachePath = join(clientRoot, 'cache');
+    ensure_dir(userDataPath);
+    ensure_dir(sessionDataPath);
+    ensure_dir(cachePath);
+    try {
+        app.commandLine.appendSwitch('disk-cache-dir', cachePath);
+    } catch {
+        // ignore
+    }
+    try {
+        app.commandLine.appendSwitch('disable-gpu-shader-disk-cache');
+    } catch {
+        // ignore
+    }
+    app.setPath('userData', userDataPath);
+    try {
+        app.setPath('sessionData', sessionDataPath);
+    } catch {
+        // ignore on Electron builds without this path name
+    }
+    try {
+        app.setPath('cache', cachePath);
+    } catch {
+        // ignore on Electron builds without this path name
+    }
+    console.log('[Electron] Client instance paths configured', JSON.stringify({
+        data_slot: DATA_SLOT,
+        app_mode: APP_MODE,
+        client_instance_id: CLIENT_INSTANCE_ID,
+        user_data: userDataPath,
+        session_data: sessionDataPath,
+        cache: cachePath,
+    }));
+}
+
+configure_electron_instance_paths();
+
 const DEFAULT_INPUT_BINDINGS = {
     KeyW: 'move_up',
     KeyS: 'move_down',
@@ -26,6 +85,12 @@ const GAMEPLAY_INPUT_TRACE_ENABLED = true;
 const RAW_GAMEPLAY_HOST_TRACE_ENABLED = false;
 const RAW_GAMEPLAY_TRACE_CODES = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'Escape']);
 const GAMEPLAY_INPUT_EVENT_SOURCE = 'renderer_dom_bridge';
+
+function build_api_url(apiBaseUrl, requestPath) {
+    const base = String(apiBaseUrl || 'http://localhost:8787/api').trim().replace(/\/+$/, '');
+    const suffix = String(requestPath || '').startsWith('/') ? String(requestPath) : `/${String(requestPath || '').trim()}`;
+    return `${base}${suffix}`;
+}
 
 function log_input_trace(message, payload = {}) {
     if (!GAMEPLAY_INPUT_TRACE_ENABLED) return;
@@ -107,6 +172,7 @@ function create_gameplay_input_state() {
             session_token: null,
             actor_ref: null,
             place_id: null,
+            api_base_url: 'http://localhost:8787/api',
             move_mode: 'WALK',
             principal_view: 'top',
             roll_quarter_turn: 0,
@@ -321,7 +387,7 @@ async function dispatch_gameplay_movement_intent(state, intent) {
         ...movementRequest,
     });
     try {
-        const response = await fetch('http://127.0.0.1:8787/api/movement/intent', {
+        const response = await fetch(build_api_url(state.context.api_base_url, '/movement/intent'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -403,7 +469,7 @@ async function dispatch_gameplay_jump(state) {
         path: 'electron_main_jump',
     });
     try {
-        const response = await fetch('http://127.0.0.1:8787/api/actor/debug/ascend', {
+        const response = await fetch(build_api_url(state.context.api_base_url, '/actor/debug/ascend'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ actor_id: actorId, vz_delta: 3 }),
@@ -630,7 +696,7 @@ function attach_gameplay_input_bridge(win) {
 }
 
 // Determine which mode we're in
-const IS_PAINTER_MODE = process.env.THAUM_APP_MODE === 'ascii_painter';
+const IS_PAINTER_MODE = APP_MODE === 'ascii_painter';
 
 // Use different ports for game vs painter so they can run simultaneously
 const DEV_URL = IS_PAINTER_MODE 
@@ -837,6 +903,7 @@ ipcMain.on('gameplay-input-context', (event, payload) => {
         session_token: has('session_token') ? (typeof next.session_token === 'string' && next.session_token ? next.session_token : null) : state.context.session_token,
         actor_ref: has('actor_ref') ? (typeof next.actor_ref === 'string' && next.actor_ref ? next.actor_ref : null) : state.context.actor_ref,
         place_id: has('place_id') ? (typeof next.place_id === 'string' && next.place_id ? next.place_id : null) : state.context.place_id,
+        api_base_url: has('api_base_url') && typeof next.api_base_url === 'string' && next.api_base_url ? next.api_base_url : state.context.api_base_url,
         move_mode: has('move_mode') && typeof next.move_mode === 'string' && next.move_mode ? next.move_mode : state.context.move_mode,
         principal_view: has('principal_view') && typeof next.principal_view === 'string' && next.principal_view ? next.principal_view : state.context.principal_view,
         roll_quarter_turn: has('roll_quarter_turn') && Number.isFinite(Number(next.roll_quarter_turn)) ? normalize_place_view_roll_quarter_turn(next.roll_quarter_turn) : state.context.roll_quarter_turn,
@@ -847,6 +914,7 @@ ipcMain.on('gameplay-input-context', (event, payload) => {
         typing: state.context.typing,
         actor_ref: state.context.actor_ref,
         place_id: state.context.place_id,
+        api_base_url: state.context.api_base_url,
         session_token: state.context.session_token ? 'present' : 'missing',
         move_mode: state.context.move_mode,
         principal_view: state.context.principal_view,

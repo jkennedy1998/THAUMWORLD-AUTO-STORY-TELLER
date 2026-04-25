@@ -16,5 +16,11 @@
   },
   "06": {
     "path": "tai06_painter_depth_focus_regression/script.json"
+  },
+  "10": {
+    "path": "tai10_game_join_actor_claim_smoke/script.json"
+  },
+  "11": {
+    "path": "tai11_painter_join_bootstrap_smoke/script.json"
   }
 }

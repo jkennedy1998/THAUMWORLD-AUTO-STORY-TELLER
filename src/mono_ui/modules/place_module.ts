@@ -61,6 +61,7 @@ import { get_character_camera_focus_tile } from "../../shared/character_camera_f
 import { resolve_light_mag } from "../../mag/index.js";
 import type { ItemInstance } from "../../item_instances/store.js";
 import type { ItemDefinition } from "../../item_storage/store.js";
+import { order_resolved_targets, type DragPayload, type OrderedResolvedTargets, type ResolvedTarget } from "../runtime/interaction_runtime_types.js";
 import { get_defined_place_world_zs as get_authored_place_world_zs, get_place_base_z, get_place_tile_at_world_z as get_shared_place_tile_at_world_z, tile_offset_to_layer_key } from "../../shared/place_layers.js";
 import { compute_adjacent_place_bounds, find_place_containing_region_voxel, get_local_volume_boundary_info, get_place_region_bounds, get_places_face_adjacency, region_bounds_overlap, select_place_resize_face } from "../../shared/place_adjacency.js";
 import {
@@ -72,6 +73,7 @@ import {
   record_move_batch_received,
   record_place_breath_tick,
 } from "../../shared/movement_debug_state.js";
+import { build_api_url } from '../../shared/multiplayer_transport.js';
 
 /**
  * Convert hex color string to RGB object
@@ -430,6 +432,7 @@ export type PlaceModuleConfig = {
   on_open_tile_container?: (tile_x: number, tile_y: number, world_z: number) => void;  // Open a tile container (harvestable, planter, etc.)
   get_controlled_actor_ref?: () => string | null;
   get_session_token?: () => string | null;
+  get_api_base_url?: () => string;
   request_scene_place_refresh?: (place_id: string) => void;
   get_actor_position?: () => { x: number; y: number } | null;  // For distance checking
   get_camera_target_position?: () => { x: number; y: number } | null;
@@ -492,6 +495,8 @@ export type PlaceModuleConfig = {
   on_throw?: (tile_x: number, tile_y: number) => Promise<boolean>;  // Throw item to distant tile (within range)
   is_dragging?: () => boolean;  // Check if an item is being dragged
   get_drag_source?: () => { item_instance_id: string; source_container_id: string } | null;  // Get drag source info
+  get_drag_payload?: () => DragPayload | null;
+  resolve_drop_target?: (tile_x: number, tile_y: number, world_z: number) => ResolvedTarget | null;
 
   // In-game place painter mode hooks.
   is_place_painter_active?: () => boolean;
@@ -819,6 +824,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     weight_index_to_css: config.weight_index_to_css,
   });
   let dom_pan_px = { x: 0, y: 0, tileW: 0, tileH: 0, scale: 1 };
+  let external_dom_viewport: ReturnType<typeof compute_dom_viewport_for_rect> | null = null;
   let dom_pan_event_seen = false;
   let dom_pan_bootstrap_frames_left = 10;
   let dom_last_place_id: string | null = null;
@@ -1013,6 +1019,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         // VoxelDOMRenderer skips spaces, so this keeps the DOM layers transparent where needed.
         row.push({
           char: c?.char ?? ' ',
+          graphic: (c as any)?.graphic,
+          materials: (c as any)?.materials,
           rgb: c?.rgb ?? { r: 0, g: 0, b: 0 },
           weight_index: (c as any)?.weight_index ?? 1,
           render_index: (c as any)?.render_index,
@@ -1028,7 +1036,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     for (let y = 0; y < h; y++) {
       const row: GridCell[] = [];
       for (let x = 0; x < w; x++) {
-        row.push({ char: ' ', rgb: { r: 0, g: 0, b: 0 }, weight_index: 1, render_index: undefined });
+        row.push({ char: ' ', graphic: undefined, materials: undefined, rgb: { r: 0, g: 0, b: 0 }, weight_index: 1, render_index: undefined });
       }
       rows.push(row);
     }
@@ -1079,6 +1087,35 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
     }
     return { changed, changed_cell_count };
+  }
+
+  function summarize_grid_cells(cells: GridCell[][] | null | undefined): {
+    non_empty_cells: number;
+    graphic_cells: number;
+    first_graphic: string | null;
+  } {
+    if (!cells) return { non_empty_cells: 0, graphic_cells: 0, first_graphic: null };
+    let non_empty_cells = 0;
+    let graphic_cells = 0;
+    let first_graphic: string | null = null;
+    for (const row of cells) {
+      if (!row) continue;
+      for (const cell of row) {
+        if (!cell) continue;
+        const has_text = typeof cell.char === 'string' && cell.char !== ' ';
+        const graphic = (cell as any).graphic;
+        const has_graphic = !!graphic;
+        if (!has_text && !has_graphic) continue;
+        non_empty_cells += 1;
+        if (has_graphic) {
+          graphic_cells += 1;
+          if (!first_graphic) {
+            first_graphic = typeof graphic?.graphic_id === 'string' ? graphic.graphic_id : 'unknown';
+          }
+        }
+      }
+    }
+    return { non_empty_cells, graphic_cells, first_graphic };
   }
 
   // Derived dimensions (excluding border)
@@ -1516,7 +1553,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     const visible_planes = get_visible_plane_values(selected_place, configured_view);
     const focus_slot = Math.max(0, Math.min(Math.max(0, visible_planes.length - 1), config.get_focus_z ? config.get_focus_z() : DEFAULT_FOCUS_Z));
     const anchor_world = get_camera_anchor(selected_place);
-    const viewport_px = compute_dom_viewport_for_rect({
+    const viewport_px = external_dom_viewport ?? compute_dom_viewport_for_rect({
       pan_x_px: dom_pan_px.x,
       pan_y_px: dom_pan_px.y,
       tile_w_px: dom_pan_px.tileW,
@@ -2145,6 +2182,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       session_token: config.get_session_token?.() ?? null,
       actor_ref: actor?.actor_ref ?? null,
       place_id: place?.id ?? null,
+      api_base_url: config.get_api_base_url?.() ?? 'http://localhost:8787/api',
       move_mode: get_move_mode(),
       principal_view: view_state.principal_view,
       roll_quarter_turn: view_state.roll_quarter_turn,
@@ -2181,7 +2219,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   }): Promise<void> {
     record_intent_post_started(meta);
     try {
-      const response = await fetch('http://127.0.0.1:8787/api/movement/intent', {
+      const response = await fetch(build_api_url(config.get_api_base_url?.() ?? 'http://localhost:8787/api', '/movement/intent'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2235,7 +2273,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     if (!actor) return;
     try {
       const actor_id = String(actor.actor_ref).replace(/^actor\./, '');
-      const response = await fetch('http://127.0.0.1:8787/api/actor/debug/ascend', {
+      const response = await fetch(build_api_url(config.get_api_base_url?.() ?? 'http://localhost:8787/api', '/actor/debug/ascend'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2901,8 +2939,11 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const visible_tile_end_x = view.offset_x + width * view.scale;
       const visible_tile_end_y = view.offset_y + height * view.scale;
 
-      // Clear background
-      canvas.fill_rect(inner, { char: " ", rgb: bg_rgb });
+      // When DOM world layers are mounted, leave the place interior transparent on
+      // mono_canvas so the layered world render can show through.
+      if (!dom_layers.get_is_mounted()) {
+        canvas.fill_rect(inner, { char: " ", rgb: bg_rgb });
+      }
 
       // Spawn/update particles based on movement (used by later particle render pass).
       const movement_check_started_at_ms = performance.now();
@@ -4429,6 +4470,28 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const vp = camera_frame.viewport_px;
 
       if (!vp) {
+        try {
+          console.log('[PLACE_CAMERA_DEBUG] viewport_missing', JSON.stringify({
+            reason: 'camera_frame_viewport_unavailable',
+            place_id: place.id,
+            breath_index,
+            last_place_id: dom_last_place_id,
+            last_view_signature: dom_last_view_signature,
+            pending_view_signature: dom_pending_view_signature,
+            last_dom_viewport_ready,
+            camera: last_camera_debug_snapshot ? {
+              anchor: last_camera_debug_snapshot.anchor,
+              projected_screen: last_camera_debug_snapshot.projected_screen,
+              dom_viewport: last_camera_debug_snapshot.dom_viewport,
+              dom_selected_slot: last_camera_debug_snapshot.dom_selected_slot,
+              transition_euler: last_camera_debug_snapshot.transition_euler,
+            } : null,
+            visibility_state: typeof document !== 'undefined' ? document.visibilityState : 'unknown',
+            window_focused: typeof document !== 'undefined' ? document.hasFocus() : null,
+          }));
+        } catch {
+          // ignore debug logging failures
+        }
         record_place_render_perf_phase(render_perf_frame, 'dom_prepare_ms', performance.now() - dom_prepare_started_at_ms);
         set_place_render_perf_counter(render_perf_frame, 'dom_viewport_ready', false);
         finish_place_render_perf_frame(render_perf_frame);
@@ -4506,6 +4569,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       // Partition particles by world_z.
       // (Other passes are already split at enqueue time.)
       const changed_layers: boolean[] = [];
+      const changed_cell_counts: number[] = [];
       const dom_draw_layers_started_at_ms = performance.now();
       let dom_sync_layers_total_ms = 0;
       let changed_cell_count_total = 0;
@@ -4520,6 +4584,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         dom_sync_layers_total_ms += layer_sync_ms;
         changed_cell_count_total += sync_result.changed_cell_count;
         changed_layers.push(sync_result.changed);
+        changed_cell_counts.push(sync_result.changed_cell_count);
         if (sync_result.changed) dom_cells_versions[slot] = (dom_cells_versions[slot] ?? 0) + 1;
         record_place_render_perf_layer(render_perf_frame, {
           slot,
@@ -4570,6 +4635,29 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
       record_place_render_perf_phase(render_perf_frame, 'dom_push_layers_ms', performance.now() - dom_push_layers_started_at_ms);
       const changed_layer_count = changed_layers.filter(Boolean).length;
+      const selected_slot = Math.max(0, Math.min(plane_count - 1, focus_z));
+      const selected_slot_cells = dom_cells_layers[selected_slot] ?? null;
+      const selected_slot_summary = summarize_grid_cells(selected_slot_cells);
+      if (buffers_rebuilt || changed_layers[selected_slot]) {
+        try {
+          console.log('[PLACE_DOM_SLOT_DEBUG] selected slot summary', JSON.stringify({
+            place_id: place.id,
+            view_signature: camera_frame.view_signature,
+            focus_slot: selected_slot,
+            focused_world_z: visible_planes_z[selected_slot] ?? null,
+            rq_count: rq_layers[selected_slot]?.length ?? 0,
+            changed: !!changed_layers[selected_slot],
+            changed_cell_count: changed_cell_counts[selected_slot] ?? 0,
+            non_empty_cells: selected_slot_summary.non_empty_cells,
+            graphic_cells: selected_slot_summary.graphic_cells,
+            first_graphic: selected_slot_summary.first_graphic,
+            content_version: dom_cells_versions[selected_slot] ?? null,
+            pushed: pushed_slots.includes(selected_slot),
+          }));
+        } catch {
+          // ignore debug logging failures
+        }
+      }
       const movement_active_frame = movement_stats.moved_actor_count > 0 || movement_stats.moved_npc_count > 0;
       const static_breath_churn_frame = breath_advanced_since_last_frame && !movement_active_frame;
       set_place_render_perf_counter(render_perf_frame, 'breath_advanced_since_last_frame', breath_advanced_since_last_frame);
@@ -5731,6 +5819,16 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
       debug_log_place(`[OnDragEnd] ========== CALLING on_drop ==========`);
       debug_log_place(`[OnDragEnd] Tile: (${tile_x}, ${tile_y})`);
+      const drag_payload = config.get_drag_payload?.() ?? null;
+      const resolved_drop_target = config.resolve_drop_target?.(tile_x, tile_y, focus_world_z) ?? null;
+      if (drag_payload || resolved_drop_target) {
+        debug_log_place('[OnDragEnd] typed drag/drop seam', {
+          payload_kind: drag_payload?.payload_kind ?? null,
+          payload_source: drag_payload ? { module_id: drag_payload.source_module_id, view_id: drag_payload.source_view_id } : null,
+          target_type: resolved_drop_target?.target_type ?? null,
+          target_ref: resolved_drop_target?.target_ref ?? null,
+        });
+      }
 
       // Call the on_drop callback
       if (config.on_drop) {
@@ -6027,7 +6125,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           });
 
           const mode = get_move_mode();
-          void fetch('http://127.0.0.1:8787/api/movement/move_to', {
+          void fetch(build_api_url(config.get_api_base_url?.() ?? 'http://localhost:8787/api', '/movement/move_to'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -6083,7 +6181,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
             step: outward_step,
             border_pos: { x: connector_hit.border_x, y: connector_hit.border_y },
           });
-          void fetch('http://127.0.0.1:8787/api/movement/intent', {
+          void fetch(build_api_url(config.get_api_base_url?.() ?? 'http://localhost:8787/api', '/movement/intent'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -6110,7 +6208,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         }
 
         const mode = get_move_mode();
-        void fetch('http://127.0.0.1:8787/api/movement/move_to', {
+        void fetch(build_api_url(config.get_api_base_url?.() ?? 'http://localhost:8787/api', '/movement/move_to'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -6228,7 +6326,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
        const mode = get_move_mode();
 
        // Server-authoritative click-to-move: send goal to backend (server computes path + steps).
-       void fetch('http://127.0.0.1:8787/api/movement/move_to', {
+       void fetch(build_api_url(config.get_api_base_url?.() ?? 'http://localhost:8787/api', '/movement/move_to'), {
          method: 'POST',
          headers: { 'Content-Type': 'application/json' },
          body: JSON.stringify({
@@ -6483,7 +6581,24 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     center_on_tile(pos.x, pos.y, place);
     camera.schedule_save(place, should_persist_camera_view());
   };
+  (mod as any).set_dom_viewport = (vp: ReturnType<typeof compute_dom_viewport_for_rect> | null): void => {
+    external_dom_viewport = vp ? { ...vp } : null;
+  };
+  (mod as any).force_dom_resync = (reason: string = 'external_force_dom_resync'): void => {
+    external_dom_viewport = null;
+    reset_dom_render_state(reason);
+  };
   (mod as any).get_debug_dom_space = (): any => dom_layers.get_space();
+  (mod as any).resolveInteractionTargets = (x: number, y: number): OrderedResolvedTargets => {
+    const place = config.get_place();
+    if (!place) return order_resolved_targets([]);
+    const scene_tile = screen_to_tile(x, y);
+    const resolved = scene_tile ? resolve_scene_tile(place, scene_tile.x, scene_tile.y) : null;
+    if (!resolved || !resolved.is_interior) return order_resolved_targets([]);
+    const focus_world_z = get_focus_world_z_for_place(resolved.place);
+    const target = config.resolve_drop_target?.(resolved.tile_x, resolved.tile_y, focus_world_z) ?? null;
+    return order_resolved_targets(target ? [target] : []);
+  };
 
   return mod as any;
 }

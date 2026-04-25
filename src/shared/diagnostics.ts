@@ -45,7 +45,8 @@ const VERBOSITY_ORDER: Record<DiagnosticVerbosity, number> = {
   trace: 3,
 };
 
-const isNode = typeof process !== 'undefined' && !!process?.env;
+const maybeProcess = typeof globalThis !== 'undefined' ? (globalThis as any).process : undefined;
+const isNode = !!maybeProcess?.env;
 const runtimeOverrides: Partial<Record<DiagnosticCategory, DiagnosticVerbosity>> = {};
 
 function normalizeProgram(value: string | null | undefined): DiagnosticProgram {
@@ -61,12 +62,12 @@ function normalizeVerbosity(value: unknown): DiagnosticVerbosity | null {
 }
 
 function getBootProgram(): DiagnosticProgram {
-  const envValue = isNode ? process.env.THAUM_APP_MODE : (globalThis as any).__THAUM_APP_MODE;
+  const envValue = isNode ? maybeProcess.env.THAUM_APP_MODE : (globalThis as any).__THAUM_APP_MODE;
   return normalizeProgram(envValue);
 }
 
 function getBootProfile(): 'quiet' | 'logs' {
-  const envValue = isNode ? process.env.THAUM_DIAG_PROFILE : (globalThis as any).__THAUM_DIAG_PROFILE;
+  const envValue = isNode ? maybeProcess.env.THAUM_DIAG_PROFILE : (globalThis as any).__THAUM_DIAG_PROFILE;
   return String(envValue ?? '').trim().toLowerCase() === 'logs' ? 'logs' : 'quiet';
 }
 
@@ -110,7 +111,7 @@ function parseCategoryOverrides(raw: string | null | undefined): Partial<Record<
 }
 
 function getBootOverrides(): Partial<Record<DiagnosticCategory, DiagnosticVerbosity>> {
-  const envValue = isNode ? process.env.THAUM_DIAG_CATEGORIES : (globalThis as any).__THAUM_DIAG_CATEGORIES;
+  const envValue = isNode ? maybeProcess.env.THAUM_DIAG_CATEGORIES : (globalThis as any).__THAUM_DIAG_CATEGORIES;
   return parseCategoryOverrides(envValue);
 }
 

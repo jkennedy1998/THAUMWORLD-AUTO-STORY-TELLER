@@ -8,7 +8,7 @@ export type LaunchAdapter<TLaunchIntent> = {
   validate_resume: () => Promise<ResumeValidationResult<TLaunchIntent>>;
   create_new_intent: () => Promise<TLaunchIntent | null>;
   create_load_intent: () => Promise<TLaunchIntent | null>;
-  create_join_intent?: () => Promise<TLaunchIntent | null>;
+  create_join_intent?: (entry: LaunchJoinEntry | null) => Promise<TLaunchIntent | null>;
   get_join_entries?: () => Promise<LaunchJoinEntry[]>;
 };
 
@@ -17,6 +17,7 @@ export function create_launch_controller<TLaunchIntent>(args: {
   rect: Rect;
   adapter: LaunchAdapter<TLaunchIntent>;
   on_launch_intent: (intent: TLaunchIntent) => Promise<void> | void;
+  on_join_requested?: () => Promise<void> | void;
 }): {
   modules: readonly Module[];
   refresh: () => Promise<void>;
@@ -24,8 +25,10 @@ export function create_launch_controller<TLaunchIntent>(args: {
   let resume_candidate: ResumeCandidate | null = null;
   let resolved_resume_intent: TLaunchIntent | null = null;
   let join_entries: readonly LaunchJoinEntry[] = [];
+  let selected_join_entry_id: string | null = null;
   let state: LaunchMenuState = {
     selected_action: 'resume',
+    selected_join_entry_id: null,
     availability: {
       resume: { enabled: false, reason: 'Checking...' },
       new: { enabled: true },
@@ -62,14 +65,25 @@ export function create_launch_controller<TLaunchIntent>(args: {
       set_action_availability('resume', { enabled: false, reason: result.reason });
     }
     join_entries = args.adapter.get_join_entries ? await args.adapter.get_join_entries() : [];
-    set_action_availability('join', args.adapter.create_join_intent ? { enabled: true } : { enabled: false, reason: 'Not yet implemented' });
+    selected_join_entry_id = selected_join_entry_id && join_entries.some((entry) => entry.id === selected_join_entry_id)
+      ? selected_join_entry_id
+      : (join_entries[0]?.id ?? null);
+    const selected_join_entry = join_entries.find((entry) => entry.id === selected_join_entry_id) ?? null;
+    set_action_availability('join', args.on_join_requested
+      ? { enabled: true }
+      : args.adapter.create_join_intent
+        ? (join_entries.length > 0 ? { enabled: true } : { enabled: false, reason: 'No joinable session available' })
+        : { enabled: false, reason: 'Not yet implemented' });
     state = {
       ...state,
       validation_state: 'ready',
+      selected_join_entry_id,
       resume_candidate,
       join_entries,
       status_lines: resume_candidate
         ? ['Resume is available', resume_candidate.summary.title]
+        : selected_join_entry
+          ? ['Join target available', selected_join_entry.description ?? selected_join_entry.label]
         : args.adapter.initial_status_lines ?? ['Choose how to begin'],
     };
   }
@@ -83,7 +97,15 @@ export function create_launch_controller<TLaunchIntent>(args: {
       if (action === 'resume') intent = resolved_resume_intent;
       else if (action === 'new') intent = await args.adapter.create_new_intent();
       else if (action === 'load') intent = await args.adapter.create_load_intent();
-      else if (action === 'join') intent = args.adapter.create_join_intent ? await args.adapter.create_join_intent() : null;
+      else if (action === 'join') {
+        if (args.on_join_requested) {
+          await args.on_join_requested();
+          state = { ...state, is_busy: false };
+          return;
+        }
+        const selected_join_entry = join_entries.find((entry) => entry.id === selected_join_entry_id) ?? null;
+        intent = args.adapter.create_join_intent ? await args.adapter.create_join_intent(selected_join_entry) : null;
+      }
       if (!intent) {
         state = { ...state, is_busy: false, status_lines: ['Action cancelled'] };
         return;
@@ -101,6 +123,17 @@ export function create_launch_controller<TLaunchIntent>(args: {
     get_state: () => state,
     on_select_action: (action) => {
       state = { ...state, selected_action: action };
+    },
+    on_select_join_entry: (entry_id: string) => {
+      selected_join_entry_id = entry_id;
+      const selected_join_entry = join_entries.find((entry) => entry.id === entry_id) ?? null;
+      state = {
+        ...state,
+        selected_join_entry_id,
+        status_lines: selected_join_entry
+          ? ['Join target selected', selected_join_entry.description ?? selected_join_entry.label]
+          : state.status_lines,
+      };
     },
     on_confirm_action: (action) => {
       void confirm(action);

@@ -32,6 +32,11 @@ import type { CameraAnchor } from '../runtime/camera_anchor_runtime.js';
 import { get_principal_view_plane_axis, make_place_view_state, map_screen_direction_to_world_delta, type PlaceViewState } from '../runtime/place_view_projection.js';
 import { diag_log } from '../../shared/diagnostics.js';
 import { get_line_voxels_3d } from '../../shared/painter_tools.js';
+import {
+  order_resolved_targets,
+  type OrderedResolvedTargets,
+  type ResolvedTarget,
+} from '../runtime/interaction_runtime_types.js';
 
 function painterCanvasDiag(message: string, payload?: Record<string, unknown>): void {
   diag_log('painter', 'verbose', 'PAINTER_CANVAS', message, payload);
@@ -41,17 +46,9 @@ function painterCanvasImportant(message: string, payload?: Record<string, unknow
   diag_log('painter', 'important', 'PAINTER_CANVAS', message, payload);
 }
 
-export interface CanvasViewport {
-  x: number;      // Screen X position in pixels
-  y: number;      // Screen Y position in pixels
-  width: number;  // Width in pixels
-  height: number; // Height in pixels
-  // Note: Pan offset is stored in CameraConfig (camera.pan_x/y)
-  // The camera owns the view position in world space
-}
-
 export type PainterCanvasOptions = {
   id: string;
+  view_id?: string;
   rect: Rect;
   grid: Grid;
   brush?: Brush;
@@ -96,8 +93,6 @@ export type PainterCanvasOptions = {
   on_move?: (new_rect: Rect) => void;
   on_resize?: (new_rect: Rect) => void;
   on_close?: () => void;
-  // Viewport callback for DOM renderer
-  on_viewport_change?: (viewport: CanvasViewport) => void;
   // Mouse parallax callback for DOM renderer
   on_mouse_move?: (offsetX: number, offsetY: number) => void;
   // Gradiator and scale for paste
@@ -132,6 +127,7 @@ export type PainterInteractionAnchor = CameraAnchor;
 
 export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   let rect = opts.rect;
+  const view_id = opts.view_id ?? `${opts.id}_view`;
 
   function requireActiveGroupId(): string {
     const groupId = opts.get_active_group_id();
@@ -139,6 +135,50 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       throw new Error('Active group id is required for painter history changes');
     }
     return groupId;
+  }
+
+  function getPointerWorldAtScreenPosition(x: number, y: number): { x: number; y: number; z: number } | null {
+    const grid = screenToGrid(x, y);
+    if (grid.x < 0 || grid.x >= opts.grid.width || grid.y < 0 || grid.y >= opts.grid.height) return null;
+    return interaction_current_world
+      ?? opts.get_world_point_for_grid?.(grid.x, grid.y)
+      ?? { x: grid.x, y: grid.y, z: opts.get_selected_z() };
+  }
+
+  function buildResolvedTargetsForPointer(x: number, y: number): OrderedResolvedTargets {
+    const grid = screenToGrid(x, y);
+    if (grid.x < 0 || grid.x >= opts.grid.width || grid.y < 0 || grid.y >= opts.grid.height) {
+      return order_resolved_targets([]);
+    }
+    const world = getPointerWorldAtScreenPosition(x, y);
+    const targets: ResolvedTarget[] = [];
+    if (world) {
+      targets.push({
+        module_id: opts.id,
+        view_id,
+        domain: 'hybrid',
+        target_type: 'painter_cell',
+        target_ref: `${grid.x}:${grid.y}:${Math.floor(world.z)}`,
+        screen_position: { x, y },
+        local_position: { x: grid.x, y: grid.y },
+        world_position: { ...world },
+        grid_position: { x: grid.x, y: grid.y },
+        priority: 0,
+      });
+      targets.push({
+        module_id: opts.id,
+        view_id,
+        domain: 'world_3d',
+        target_type: 'painter_plane',
+        target_ref: `plane:${getWorldPointPlaneCoordinate(world) ?? opts.get_selected_z()}`,
+        screen_position: { x, y },
+        local_position: { x: grid.x, y: grid.y },
+        world_position: { ...world },
+        plane_coordinate: getWorldPointPlaneCoordinate(world) ?? opts.get_selected_z(),
+        priority: 10,
+      });
+    }
+    return order_resolved_targets(targets);
   }
 
   function getBrushForButton(button: number): Brush {
@@ -264,7 +304,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     return getTotalPan();
   }
 
-  function getInteractionAnchor(): PainterInteractionAnchor {
+  function getTextCursorInteractionAnchor(): PainterInteractionAnchor | null {
     const focusZ = opts.get_selected_z();
     const pan = getPan();
     if (text_mode_active) {
@@ -279,57 +319,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         },
       };
     }
-
-    if ((is_drawing || is_erasing) && active_stroke_anchor_world) {
-      const strokeGrid = opts.get_grid_point_for_world?.(active_stroke_anchor_world);
-      const strokeScreen = strokeGrid
-        ? {
-            x: rect.x0 + strokeGrid.x + 0.5,
-            y: rect.y0 + strokeGrid.y + 0.5,
-          }
-        : (current_mouse_pos
-            ? { x: current_mouse_pos.x + 0.5, y: current_mouse_pos.y + 0.5 }
-            : null);
-      return {
-        kind: 'pointer',
-        world: { ...active_stroke_anchor_world },
-        screen: strokeScreen,
-      };
-    }
-
-    if (current_mouse_pos && current_mouse_pos.x >= rect.x0 && current_mouse_pos.x <= rect.x1 && current_mouse_pos.y >= rect.y0 && current_mouse_pos.y <= rect.y1) {
-      const grid = screenToGrid(current_mouse_pos.x, current_mouse_pos.y);
-      const world = opts.get_world_point_for_grid?.(grid.x, grid.y) ?? { x: grid.x, y: grid.y, z: focusZ };
-      return {
-        kind: 'pointer',
-        world,
-        screen: { x: current_mouse_pos.x + 0.5, y: current_mouse_pos.y + 0.5 },
-      };
-    }
-
-    const selectionBounds = hasSelection(selection_bitmap) ? getSelectionBounds(selection_bitmap) : null;
-    if (selectionBounds) {
-      const centerX = selectionBounds.x + (selectionBounds.width - 1) / 2;
-      const centerY = selectionBounds.y + (selectionBounds.height - 1) / 2;
-      const world = opts.get_world_point_for_grid?.(centerX, centerY) ?? { x: centerX, y: centerY, z: focusZ };
-      return {
-        kind: 'selection',
-        world,
-        screen: {
-          x: rect.x0 + (opts.get_world_point_for_grid ? centerX : (centerX - pan.x)) + 0.5,
-          y: rect.y0 + (opts.get_world_point_for_grid ? centerY : (centerY - pan.y)) + 0.5,
-        },
-      };
-    }
-
-    return {
-      kind: 'viewport_center',
-      world: null,
-      screen: {
-        x: (rect.x0 + rect.x1 + 1) / 2,
-        y: (rect.y0 + rect.y1 + 1) / 2,
-      },
-    };
+    return null;
   }
 
   // Atomic pan functions - all panning operations use these for consistency
@@ -439,7 +429,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   }
 
   function emitPreviewChanges(changes: CellChange[], anchor_world: { x: number; y: number; z: number } | null, plane: number | null): void {
-    if (!opts.on_live_stroke_preview || changes.length < 1) return;
+    if (!opts.on_live_stroke_preview) return;
     opts.on_live_stroke_preview({
       changes: changes.map((change) => ({
         ...change,
@@ -641,17 +631,20 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     if (active_stroke_tool === 'line' && shape_start_world) {
       const endWorld = getWorldPointForEditPlane(end.x, end.y, active_stroke_world_plane ?? opts.get_selected_z());
       if (!endWorld) {
+        setInteractionCurrentWorld(null);
         pending_changes = [];
         setPreviewPoints([]);
         clearLiveStrokePreview();
         return;
       }
       active_stroke_anchor_world = { ...endWorld };
+      setInteractionCurrentWorld(endWorld);
       pending_changes = normalizeCommittedChanges(buildLinePreviewChanges(shape_start_world, endWorld, getBrushForButton(getDragButton())));
       setPreviewPoints([]);
       maybeEmitLiveStrokePreview();
       return;
     }
+    setInteractionCurrentWorld(getWorldPointForEditPlane(end.x, end.y, active_stroke_world_plane ?? opts.get_selected_z()));
     const previewChanges = buildShapePreviewChanges(active_stroke_tool as 'line' | 'rect_stroke' | 'rect_fill', drag_start, end, getBrushForButton(getDragButton()), active_stroke_world_plane);
     pending_changes = normalizeCommittedChanges(previewChanges);
     const points = active_stroke_tool === 'rect_stroke'
@@ -690,6 +683,23 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   function cloneWorldPoint(world: { x: number; y: number; z: number } | null | undefined): { x: number; y: number; z: number } | null {
     if (!world) return null;
     return { x: world.x, y: world.y, z: world.z };
+  }
+
+  function getWorldPointPlaneCoordinate(world: { x: number; y: number; z: number } | null | undefined): number | null {
+    if (!world) return null;
+    const viewState = opts.get_view_state?.() ?? make_place_view_state('top');
+    const axis = get_principal_view_plane_axis(viewState.principal_view);
+    if (axis === 'x') return Math.floor(world.x);
+    if (axis === 'y') return Math.floor(world.y);
+    return Math.floor(world.z);
+  }
+
+  function setInteractionCurrentWorld(world: { x: number; y: number; z: number } | null | undefined): void {
+    interaction_current_world = cloneWorldPoint(world);
+  }
+
+  function setInteractionEndWorld(world: { x: number; y: number; z: number } | null | undefined): void {
+    interaction_end_world = cloneWorldPoint(world);
   }
 
   function setWorldPointPlaneCoordinate(world: { x: number; y: number; z: number }, plane: number): { x: number; y: number; z: number } {
@@ -740,6 +750,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     active_stroke_tool = null;
     active_stroke_world_plane = null;
     active_stroke_anchor_world = null;
+    interaction_current_world = null;
+    interaction_end_world = null;
     shape_start_world = null;
     drag_start = null;
     last_draw_pos = null;
@@ -752,7 +764,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     if (!isActivePencilStroke() && !isActiveEraserStroke() && !isActiveShapeStroke()) return;
     const normalizedPlane = Math.floor(nextPlane);
     if (!Number.isFinite(normalizedPlane) || active_stroke_world_plane === normalizedPlane) return;
-    maybeEmitLiveStrokePreview(true);
     active_stroke_world_plane = normalizedPlane;
     const strokeGridPoint = getCurrentStrokeGridPoint();
     const nextAnchor = strokeGridPoint
@@ -760,6 +771,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       : null;
     active_stroke_anchor_world = nextAnchor
       ?? (active_stroke_anchor_world ? setWorldPointPlaneCoordinate(active_stroke_anchor_world, normalizedPlane) : null);
+    setInteractionCurrentWorld(active_stroke_anchor_world);
     if (!strokeGridPoint) return;
     if (isActivePencilStroke()) {
       applyBrushEditWithBrushSize(
@@ -911,14 +923,26 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   }
 
   function maybeEmitLiveStrokePreview(force: boolean = false): void {
-    if (!opts.on_live_stroke_preview || pending_changes.length < 1) return;
+    if (!opts.on_live_stroke_preview) return;
     const now = Date.now();
     if (!force && now - last_live_stroke_preview_at < LIVE_STROKE_PREVIEW_INTERVAL_MS) return;
     last_live_stroke_preview_at = now;
     opts.on_live_stroke_preview({
       changes: clonePendingChanges(),
-      anchor_world: active_stroke_anchor_world ? { ...active_stroke_anchor_world } : null,
-      plane: active_stroke_world_plane,
+      anchor_world: cloneWorldPoint(interaction_current_world ?? active_stroke_anchor_world),
+      plane: getWorldPointPlaneCoordinate(interaction_current_world ?? active_stroke_anchor_world),
+    });
+  }
+
+  function emitLiveInteractionAnchor(world: { x: number; y: number; z: number } | null | undefined, force: boolean = false): void {
+    if (!opts.on_live_stroke_preview) return;
+    const now = Date.now();
+    if (!force && now - last_live_stroke_preview_at < LIVE_STROKE_PREVIEW_INTERVAL_MS) return;
+    last_live_stroke_preview_at = now;
+    opts.on_live_stroke_preview({
+      changes: clonePendingChanges(),
+      anchor_world: cloneWorldPoint(world),
+      plane: getWorldPointPlaneCoordinate(world),
     });
   }
 
@@ -1018,17 +1042,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     }
   }
 
-  // Function to emit viewport updates for DOM renderer
+  // Legacy viewport callback removed: `main.ts` now owns painter DOM viewport
+  // computation from shared runtime/layout state.
   function emitViewport() {
-    if (opts.on_viewport_change) {
-      opts.on_viewport_change({
-        x: rect.x0,
-        y: rect.y0,
-        width: rect.x1 - rect.x0 + 1,
-        height: rect.y1 - rect.y0 + 1
-        // Pan is read directly from camera by DOM renderer
-      });
-    }
+    // no-op
   }
 
   function updateRect(next_rect: Rect): void {
@@ -1066,6 +1083,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   const LIVE_STROKE_PREVIEW_INTERVAL_MS = 24;
   let active_stroke_world_plane: number | null = null;
   let active_stroke_anchor_world: { x: number; y: number; z: number } | null = null;
+  let interaction_current_world: { x: number; y: number; z: number } | null = null;
+  let interaction_end_world: { x: number; y: number; z: number } | null = null;
   let shape_start_world: { x: number; y: number; z: number } | null = null;
 
   function showStatus(msg: string): void {
@@ -1168,6 +1187,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     }
   }
 
+  function getResolvedCommitPlane(): number {
+    return getWorldPointPlaneCoordinate(interaction_end_world ?? interaction_current_world ?? active_stroke_anchor_world) ?? opts.get_selected_z();
+  }
+
   function copyCurrentSelection(): void {
     if (!hasSelection(selection_bitmap)) {
       showStatus('No selection to copy!');
@@ -1188,7 +1211,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
   function finalizePendingChanges(): void {
     if ((is_drawing || is_erasing) && pending_changes.length > 0) {
-      const selected_z = opts.get_selected_z();
+      const selected_z = getResolvedCommitPlane();
       let tool_name = 'Draw';
       let action_type: 'draw_cells' | 'erase_cells' = 'draw_cells';
       if (is_erasing) {
@@ -1546,7 +1569,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     setSelectionBitmap: (bitmap: SelectionBitmap) => void;
     emitViewport: () => void;
     setGlobalPanOffset: (x: number, y: number) => void;
-    getInteractionAnchor: () => PainterInteractionAnchor;
+    getTextCursorInteractionAnchor: () => PainterInteractionAnchor | null;
+    resolveInteractionTargets: (x: number, y: number) => OrderedResolvedTargets;
     finalizePendingChanges: () => void;
     handleDepthStepDuringActiveStroke: (nextPlane: number) => void;
   } = {
@@ -1596,7 +1620,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       setGlobalPanOffset(x, y);
     },
 
-    getInteractionAnchor: () => getInteractionAnchor(),
+    getTextCursorInteractionAnchor: () => getTextCursorInteractionAnchor(),
+
+    resolveInteractionTargets: (x: number, y: number) => buildResolvedTargetsForPointer(x, y),
 
     finalizePendingChanges: () => finalizePendingChanges(),
 
@@ -2188,6 +2214,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             active_stroke_world_plane = null;
             return;
           }
+          setInteractionCurrentWorld(active_stroke_anchor_world);
+          setInteractionEndWorld(null);
           is_drawing = true;
           last_draw_pos = { x: grid_x, y: grid_y };
           applyBrushEditWithBrushSize(grid_x, grid_y, getBrushForButton(e.button), getBrushSizeForButton(e.button), active_draw_channels);
@@ -2205,6 +2233,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             active_stroke_world_plane = null;
             return;
           }
+          setInteractionCurrentWorld(active_stroke_anchor_world);
+          setInteractionEndWorld(null);
           is_erasing = true;
           last_draw_pos = { x: grid_x, y: grid_y };
           drawWithBrushSize(grid_x, grid_y, true, getBrushForButton(e.button), getBrushSizeForButton(e.button));
@@ -2218,6 +2248,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           selection_drag_start = { x: grid_x, y: grid_y };
           selection_drag_start_plane = opts.get_focus_world_plane?.() ?? opts.get_selected_z();
           selection_drag_end_plane = selection_drag_start_plane;
+          setInteractionCurrentWorld(opts.get_world_point_for_grid?.(grid_x, grid_y) ?? { x: grid_x, y: grid_y, z: selection_drag_start_plane });
+          setInteractionEndWorld(null);
+          emitLiveInteractionAnchor(interaction_current_world, true);
           showStatus('Selection: drag to select area');
           return;
         }
@@ -2247,6 +2280,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             return;
           }
           shape_start_world = { ...active_stroke_anchor_world };
+          setInteractionCurrentWorld(active_stroke_anchor_world);
+          setInteractionEndWorld(null);
           is_drawing = true;
           drag_start = { x: grid_x, y: grid_y };
           setPreviewPoints(tool_for_button === 'line'
@@ -2314,6 +2349,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const grid_x = grid_coords.x;
         const grid_y = grid_coords.y;
         if (grid_x < 0 || grid_x >= opts.grid.width || grid_y < 0 || grid_y >= opts.grid.height) return;
+        setInteractionCurrentWorld(getWorldPointForEditPlane(grid_x, grid_y, active_stroke_world_plane ?? opts.get_selected_z()));
         if (grid_x !== last_draw_pos.x || grid_y !== last_draw_pos.y) {
           drawLineWithBrushSize(last_draw_pos.x, last_draw_pos.y, grid_x, grid_y, true, getBrushForButton(getDragButton()), getBrushSizeForButton(getDragButton()));
           last_draw_pos = { x: grid_x, y: grid_y };
@@ -2327,6 +2363,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const grid_x = grid_coords.x;
         const grid_y = grid_coords.y;
         if (grid_x < 0 || grid_x >= opts.grid.width || grid_y < 0 || grid_y >= opts.grid.height) return;
+        setInteractionCurrentWorld(getWorldPointForEditPlane(grid_x, grid_y, active_stroke_world_plane ?? opts.get_selected_z()));
         if (grid_x !== last_draw_pos.x || grid_y !== last_draw_pos.y) {
           drawLineWithBrushEditChannels(last_draw_pos.x, last_draw_pos.y, grid_x, grid_y, getBrushForButton(getDragButton()), getBrushSizeForButton(getDragButton()), active_draw_channels);
           last_draw_pos = { x: grid_x, y: grid_y };
@@ -2340,6 +2377,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const grid_coords = localToGrid(local_x, local_y);
         const grid_x = grid_coords.x;
         const grid_y = grid_coords.y;
+        setInteractionCurrentWorld(opts.get_world_point_for_grid?.(grid_x, grid_y) ?? { x: grid_x, y: grid_y, z: selection_drag_end_plane ?? selection_drag_start_plane ?? opts.get_selected_z() });
+        emitLiveInteractionAnchor(interaction_current_world);
         // Show preview rect
         const new_points = previewRectStroke(selection_drag_start.x, selection_drag_start.y, grid_x, grid_y);
         opts.preview_points.length = 0;
@@ -2404,6 +2443,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const grid_coords = localToGrid(local_x, local_y);
         const end_x = grid_coords.x;
         const end_y = grid_coords.y;
+        setInteractionCurrentWorld(opts.get_world_point_for_grid?.(end_x, end_y) ?? { x: end_x, y: end_y, z: selection_drag_end_plane ?? selection_drag_start_plane ?? opts.get_selected_z() });
+        setInteractionEndWorld(interaction_current_world);
         const start_x = selection_drag_start.x;
         const start_y = selection_drag_start.y;
         
@@ -2425,6 +2466,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         selection_drag_start = null;
         selection_drag_start_plane = null;
         selection_drag_end_plane = null;
+        interaction_current_world = null;
+        interaction_end_world = null;
         opts.preview_points = [];
         opts.on_selection_change?.({ depthMin: range?.depthMin, depthMax: range?.depthMax, kind: 'rect' });
         drag_start_buttons = 0;
@@ -2516,8 +2559,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const local_y = e.y - rect.y0;
         const end_coords = localToGrid(local_x, local_y);
         updateLineRectPreview({ x: end_coords.x, y: end_coords.y });
+        setInteractionEndWorld(interaction_current_world);
         if (pending_changes.length > 0) {
-          commitLoggedCellChanges('draw_cells', 'Draw Line', opts.get_selected_z());
+          commitLoggedCellChanges('draw_cells', 'Draw Line', getResolvedCommitPlane());
         }
         clearActiveStrokeState();
         return;
@@ -2527,6 +2571,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const local_y = e.y - rect.y0;
         const end_coords = localToGrid(local_x, local_y);
         updateLineRectPreview({ x: end_coords.x, y: end_coords.y });
+        setInteractionEndWorld(interaction_current_world);
       }
       
       // Handle selection in OnPointerUp as fallback (OnDragEnd might not fire for clicks)
@@ -2536,6 +2581,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const end_coords = localToGrid(local_x, local_y);
         const end_x = end_coords.x;
         const end_y = end_coords.y;
+        setInteractionCurrentWorld(opts.get_world_point_for_grid?.(end_x, end_y) ?? { x: end_x, y: end_y, z: selection_drag_end_plane ?? selection_drag_start_plane ?? opts.get_selected_z() });
+        setInteractionEndWorld(interaction_current_world);
         const start_x = selection_drag_start.x;
         const start_y = selection_drag_start.y;
         
@@ -2556,6 +2603,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         selection_drag_start = null;
         selection_drag_start_plane = null;
         selection_drag_end_plane = null;
+        interaction_current_world = null;
+        interaction_end_world = null;
         opts.preview_points = [];
         opts.on_selection_change?.({ depthMin: range?.depthMin, depthMax: range?.depthMax, kind: 'rect' });
       }
@@ -2609,7 +2658,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       
       // Log pending changes to history when drawing ends
       if ((is_drawing || is_erasing) && pending_changes.length > 0) {
-        const selected_z = opts.get_selected_z();
+        const selected_z = getResolvedCommitPlane();
         let tool_name = 'Draw';
         let action_type: 'draw_cells' | 'erase_cells' = 'draw_cells';
         
@@ -2698,6 +2747,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           if (dir !== 0) {
             opts.cycle_focus_layer(dir as 1 | -1);
             selection_drag_end_plane = opts.get_focus_world_plane?.() ?? (selection_drag_end_plane ?? opts.get_selected_z());
+            if (interaction_current_world && selection_drag_end_plane !== null) {
+              setInteractionCurrentWorld(setWorldPointPlaneCoordinate(interaction_current_world, selection_drag_end_plane));
+              emitLiveInteractionAnchor(interaction_current_world, true);
+            }
             const local_x = e.x - rect.x0;
             const local_y = e.y - rect.y0;
             const end_coords = localToGrid(local_x, local_y);

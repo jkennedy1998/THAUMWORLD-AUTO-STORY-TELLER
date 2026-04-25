@@ -11,6 +11,21 @@ export type ToolAssistedInputsBootOptions = {
   auto_connect?: boolean;
   auto_claim?: boolean;
   actor_ref?: string | null;
+  actor_id?: string | null;
+};
+
+export type ToolAssistedInputsJoinSnapshot = {
+  selected_connection_id: string | null;
+  selected_connection_host: string | null;
+  selected_connection_kind: string | null;
+  probe_status: string | null;
+  supports_join: boolean;
+  join_mode: string | null;
+  world_label: string | null;
+  painter_document_id: string | null;
+  api_base_url: string | null;
+  bridge_ws_base_url: string | null;
+  status_lines: string[];
 };
 
 export type ToolAssistedInputsTraceEvent =
@@ -123,6 +138,7 @@ export type ToolAssistedInputsScriptAction =
   | { at_breath: number; type: 'capture_movement_trace'; slot: string }
   | { at_breath: number; type: 'capture_visible_step'; slot: string }
   | { at_breath: number; type: 'capture_text_value'; slot: string; source: string; field?: string }
+  | { at_breath: number; type: 'capture_join_snapshot'; slot: string }
   | { at_breath: number; type: 'capture_painter_tool_state'; slot: string }
   | { at_breath: number; type: 'capture_painter_focus_plane'; slot: string }
   | { at_breath: number; type: 'capture_painter_camera_target'; slot: string }
@@ -200,6 +216,7 @@ export interface AutomationRuntimeProbe {
   get_current_actor_tile(): ToolAssistedInputsTile | null;
   get_movement_trace(): ToolAssistedInputsMovementTrace | null;
   get_visible_step(): ToolAssistedInputsVisibleStep | null;
+  get_join_snapshot?: () => ToolAssistedInputsJoinSnapshot | null;
   get_text_value?: (source: string, field?: string | null) => string | null;
   invoke_helper?: (helper: string, payload?: Record<string, unknown>) => Promise<unknown> | unknown;
   get_painter_tool_state?: () => ToolAssistedInputsPainterToolState | null;

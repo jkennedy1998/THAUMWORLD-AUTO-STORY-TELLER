@@ -19,6 +19,14 @@ export type PainterDocumentBootstrap = {
   error?: string | null;
 };
 
+export type PainterCommandResultMetadata = {
+  base_revision?: number | null;
+  server_revision_before?: number | null;
+  server_revision_after?: number | null;
+  applied_from_stale_base?: boolean;
+  command_id?: string | null;
+};
+
 export type PainterApplyGroupVoxelsCommand = {
   kind: 'apply_group_voxels';
   document_id: string;
@@ -66,5 +74,5 @@ export type PainterDocumentEvent = {
   revision: number;
   group_id?: string | null;
   command_kind?: string | null;
-  payload?: Record<string, unknown>;
+  payload?: Record<string, unknown> & PainterCommandResultMetadata;
 };

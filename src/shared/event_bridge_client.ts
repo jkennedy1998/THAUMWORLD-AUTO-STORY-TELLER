@@ -8,9 +8,11 @@
 import { debug_event } from './debug_event.js';
 import type { TagChangeEvent } from './event_emitter.js';
 import { WebSocket } from 'ws';
+import { DEFAULT_LOCAL_MULTIPLAYER_TRANSPORT } from './multiplayer_transport.js';
 
-const BRIDGE_URL = 'http://127.0.0.1:8788';
-const BRIDGE_WS_URL = 'ws://127.0.0.1:8789?role=publisher';
+const BRIDGE_URL = String(process.env.THAUM_BRIDGE_HTTP_URL ?? '').trim() || DEFAULT_LOCAL_MULTIPLAYER_TRANSPORT.bridge_http_url;
+const BRIDGE_WS_BASE_URL = String(process.env.THAUM_BRIDGE_WS_URL ?? '').trim() || DEFAULT_LOCAL_MULTIPLAYER_TRANSPORT.bridge_ws_base_url;
+const BRIDGE_WS_URL = `${BRIDGE_WS_BASE_URL}?role=publisher`;
 
 export type BridgeDeliveryScope =
   | { scope?: 'public' }

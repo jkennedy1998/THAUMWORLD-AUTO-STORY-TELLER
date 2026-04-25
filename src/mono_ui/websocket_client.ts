@@ -7,6 +7,7 @@
  */
 
 import type { TagChangeEvent } from '../shared/event_emitter.js';
+import { DEFAULT_LOCAL_MULTIPLAYER_TRANSPORT } from '../shared/multiplayer_transport.js';
 
 /**
  * WebSocket client for receiving tag events
@@ -42,8 +43,8 @@ export class WebSocketClient {
     }));
   }
 
-  constructor(port: number = 8789) {
-    this.url = `ws://127.0.0.1:${port}`;
+  constructor(baseUrl: string = DEFAULT_LOCAL_MULTIPLAYER_TRANSPORT.bridge_ws_base_url) {
+    this.url = baseUrl;
   }
 
   private buildUrl(): string | null {
@@ -52,7 +53,11 @@ export class WebSocketClient {
     return `${this.url}?slot=${encodeURIComponent(String(this.slot))}&session_token=${encodeURIComponent(token)}`;
   }
 
-  updateConnectionOptions(options: { sessionToken?: string | null; slot?: number | null }): void {
+  updateConnectionOptions(options: { sessionToken?: string | null; slot?: number | null; baseUrl?: string | null }): void {
+    const nextBaseUrl = typeof options.baseUrl === 'string' ? options.baseUrl.trim() : '';
+    if (nextBaseUrl) {
+      this.url = nextBaseUrl;
+    }
     if (typeof options.sessionToken === 'string') {
       this.sessionToken = options.sessionToken.trim() || null;
     }
@@ -344,9 +349,12 @@ let client: WebSocketClient | null = null;
 /**
  * Initialize WebSocket client (call from renderer startup)
  */
-export function initWebSocketClient(port?: number, options?: { sessionToken?: string | null; slot?: number | null }): WebSocketClient {
+export function initWebSocketClient(baseUrl?: string, options?: { sessionToken?: string | null; slot?: number | null; baseUrl?: string | null }): WebSocketClient {
   if (!client) {
-    client = new WebSocketClient(port);
+    client = new WebSocketClient(baseUrl || DEFAULT_LOCAL_MULTIPLAYER_TRANSPORT.bridge_ws_base_url);
+  }
+  else if (baseUrl && baseUrl.trim()) {
+    client.updateConnectionOptions({ baseUrl });
   }
   if (options) client.updateConnectionOptions(options);
   else client.connect();

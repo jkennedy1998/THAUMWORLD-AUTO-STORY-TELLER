@@ -47,6 +47,17 @@ export type PainterDocumentSnapshot = {
   snapshot: PainterDocument;
 };
 
+export type PainterCommandApplyMetadata = {
+  base_revision: number | null;
+  server_revision_before: number;
+  server_revision_after: number;
+  applied_from_stale_base: boolean;
+};
+
+export type PainterCommandApplyResult = PainterCommandApplyMetadata & {
+  snapshot: PainterDocumentSnapshot;
+};
+
 const DEFAULT_DOCUMENT_ID = 'default_canvas';
 
 function get_painter_document_store_path(slot: number): string {
@@ -70,6 +81,23 @@ function make_history_key(slot: number, document_id: string, group_id: string): 
   return `${slot}:${document_id}:${group_id}`;
 }
 
+function normalize_base_revision(base_revision?: number | null): number | null {
+  const next = Number(base_revision);
+  if (!Number.isFinite(next)) return null;
+  return Math.max(0, Math.floor(next));
+}
+
+function build_command_apply_result(current: PainterDocumentSnapshot, next: PainterDocumentSnapshot, base_revision?: number | null): PainterCommandApplyResult {
+  const normalized_base_revision = normalize_base_revision(base_revision);
+  return {
+    snapshot: next,
+    base_revision: normalized_base_revision,
+    server_revision_before: current.revision,
+    server_revision_after: next.revision,
+    applied_from_stale_base: normalized_base_revision !== null && normalized_base_revision < current.revision,
+  };
+}
+
 function get_group_history(slot: number, document_id: string, group_id: string): { undo: PainterGroupVoxelHistoryEntry[]; redo: PainterGroupVoxelHistoryEntry[] } {
   const key = make_history_key(slot, document_id, group_id);
   const existing = painter_group_histories.get(key);
@@ -77,6 +105,13 @@ function get_group_history(slot: number, document_id: string, group_id: string):
   const created = { undo: [], redo: [] };
   painter_group_histories.set(key, created);
   return created;
+}
+
+function clear_document_group_histories(slot: number, document_id: string): void {
+  const prefix = `${slot}:${document_id}:`;
+  for (const key of Array.from(painter_group_histories.keys())) {
+    if (key.startsWith(prefix)) painter_group_histories.delete(key);
+  }
 }
 
 function apply_history_entry(snapshot: PainterDocumentSnapshot, entry: PainterGroupVoxelHistoryEntry, direction: 'undo' | 'redo'): PainterDocumentSnapshot {
@@ -263,6 +298,36 @@ export function apply_painter_group_voxel_changes(
   return saved;
 }
 
+export function replace_painter_document_snapshot(
+  slot: number,
+  document_id: string,
+  snapshot: PainterDocument,
+  options?: { base_revision?: number | null }
+): PainterCommandApplyResult {
+  const normalized_document_id = normalize_document_id(document_id);
+  const current = get_or_create_painter_document_snapshot(slot, normalized_document_id);
+  clear_document_group_histories(slot, normalized_document_id);
+  const next = save_painter_document_snapshot(slot, {
+    document_id: normalized_document_id,
+    revision: current.revision + 1,
+    updated_at: new Date().toISOString(),
+    snapshot,
+  });
+  return build_command_apply_result(current, next, options?.base_revision);
+}
+
+export function apply_painter_group_voxel_command(
+  slot: number,
+  document_id: string,
+  group_id: string,
+  changes: Array<{ x: number; y: number; z: number; cell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number } }>,
+  options?: { base_revision?: number | null }
+): PainterCommandApplyResult {
+  const current = get_or_create_painter_document_snapshot(slot, document_id);
+  const next = apply_painter_group_voxel_changes(slot, document_id, group_id, changes);
+  return build_command_apply_result(current, next, options?.base_revision);
+}
+
 export function undo_painter_group_changes(slot: number, document_id: string, group_id: string): PainterDocumentSnapshot {
   const current = get_or_create_painter_document_snapshot(slot, document_id);
   const groupHistory = get_group_history(slot, current.document_id, group_id);
@@ -273,6 +338,12 @@ export function undo_painter_group_changes(slot: number, document_id: string, gr
   return next;
 }
 
+export function undo_painter_group_command(slot: number, document_id: string, group_id: string, options?: { base_revision?: number | null }): PainterCommandApplyResult {
+  const current = get_or_create_painter_document_snapshot(slot, document_id);
+  const next = undo_painter_group_changes(slot, document_id, group_id);
+  return build_command_apply_result(current, next, options?.base_revision);
+}
+
 export function redo_painter_group_changes(slot: number, document_id: string, group_id: string): PainterDocumentSnapshot {
   const current = get_or_create_painter_document_snapshot(slot, document_id);
   const groupHistory = get_group_history(slot, current.document_id, group_id);
@@ -281,6 +352,21 @@ export function redo_painter_group_changes(slot: number, document_id: string, gr
   const next = save_painter_document_snapshot(slot, apply_history_entry(current, entry, 'redo'));
   groupHistory.undo.push(entry);
   return next;
+}
+
+export function redo_painter_group_command(slot: number, document_id: string, group_id: string, options?: { base_revision?: number | null }): PainterCommandApplyResult {
+  const current = get_or_create_painter_document_snapshot(slot, document_id);
+  const next = redo_painter_group_changes(slot, document_id, group_id);
+  return build_command_apply_result(current, next, options?.base_revision);
+}
+
+function assert_group_exists(runtime: ReturnType<typeof normalize_painter_document_runtime>, group_id: string): void {
+  if (!runtime.document.groups[group_id]) throw new Error('painter_group_not_found');
+}
+
+function assert_can_delete_group(runtime: ReturnType<typeof normalize_painter_document_runtime>, group_id: string): void {
+  assert_group_exists(runtime, group_id);
+  if (runtime.document.group_order.length <= 1) throw new Error('painter_last_group_delete_forbidden');
 }
 
 export function apply_painter_group_structure_change(
@@ -307,12 +393,13 @@ export function apply_painter_group_structure_change(
       break;
     }
     case 'delete_group': {
-      if (!runtime.document.groups[command.group_id]) throw new Error('painter_group_not_found');
+      assert_can_delete_group(runtime, command.group_id);
       remove_painter_group(runtime, command.group_id);
       break;
     }
     case 'duplicate_group': {
-      if (!runtime.document.groups[command.source_group_id]) throw new Error('painter_group_not_found');
+      assert_group_exists(runtime, command.source_group_id);
+      if (command.target_group_id && runtime.document.groups[command.target_group_id]) throw new Error('painter_group_already_exists');
       const duplicated = duplicate_painter_group(runtime, command.source_group_id);
       if (command.target_group_id && command.target_group_id !== duplicated.id) {
         const created = runtime.document.groups[duplicated.id];
@@ -334,17 +421,17 @@ export function apply_painter_group_structure_change(
       break;
     }
     case 'rename_group': {
-      if (!runtime.document.groups[command.group_id]) throw new Error('painter_group_not_found');
+      assert_group_exists(runtime, command.group_id);
       rename_painter_group(runtime, command.group_id, command.group_name);
       break;
     }
     case 'set_group_visibility': {
-      if (!runtime.document.groups[command.group_id]) throw new Error('painter_group_not_found');
+      assert_group_exists(runtime, command.group_id);
       set_painter_group_visibility(runtime, command.group_id, command.visible);
       break;
     }
     case 'set_group_locked': {
-      if (!runtime.document.groups[command.group_id]) throw new Error('painter_group_not_found');
+      assert_group_exists(runtime, command.group_id);
       set_painter_group_locked(runtime, command.group_id, command.locked);
       break;
     }
@@ -370,4 +457,23 @@ export function apply_painter_group_structure_change(
     updated_at: new Date().toISOString(),
     snapshot: export_painter_document(runtime),
   });
+}
+
+export function apply_painter_group_structure_command(
+  slot: number,
+  document_id: string,
+  command:
+    | { kind: 'create_group'; group_name?: string; target_group_id?: string }
+    | { kind: 'delete_group'; group_id: string }
+    | { kind: 'duplicate_group'; source_group_id: string; target_group_id?: string }
+    | { kind: 'rename_group'; group_id: string; group_name: string }
+    | { kind: 'set_group_visibility'; group_id: string; visible: boolean }
+    | { kind: 'set_group_locked'; group_id: string; locked: boolean }
+    | { kind: 'reorder_groups'; next_group_order: string[] }
+    | { kind: 'reset_document' },
+  options?: { base_revision?: number | null }
+): PainterCommandApplyResult {
+  const current = get_or_create_painter_document_snapshot(slot, document_id);
+  const next = apply_painter_group_structure_change(slot, document_id, command);
+  return build_command_apply_result(current, next, options?.base_revision);
 }

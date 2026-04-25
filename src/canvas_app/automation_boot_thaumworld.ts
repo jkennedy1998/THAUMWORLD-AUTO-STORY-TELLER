@@ -6,6 +6,7 @@ type ThaumworldBootstrapOptions = {
   resolve_controlled_actor_binding: (force?: boolean) => Promise<{ kind: 'bound' | 'unbound' | 'binding_required'; error?: string | null }>;
   refresh_actor_claim_state: (status_lines?: string[]) => Promise<void>;
   claim_actor: (actor_ref: string) => Promise<void>;
+  claim_actor_by_id: (actor_id: string) => Promise<{ ok: boolean; reason?: string }>;
   get_actor_claim_entries: () => ActorClaimEntry[];
   get_current_context: () => ToolAssistedInputsContext;
 };
@@ -40,6 +41,11 @@ export function create_thaumworld_bootstrap_adapter(options: ThaumworldBootstrap
       if (context.session_token && context.actor_ref && context.place_id) return context;
 
       if (boot_options.auto_claim) {
+        const requested_actor_id = String(boot_options.actor_id ?? '').trim();
+        if (requested_actor_id) {
+          const claim = await options.claim_actor_by_id(requested_actor_id);
+          if (!claim.ok) throw new Error(`tool_assisted_inputs_actor_id_claim_failed:${claim.reason ?? 'unknown'}`);
+        } else {
         const requested_actor_ref = String(boot_options.actor_ref ?? '').trim();
         if (!requested_actor_ref) throw new Error('tool_assisted_inputs_missing_boot_actor_ref');
         await options.refresh_actor_claim_state(['tool assisted inputs', 'claiming actor']);
@@ -47,6 +53,7 @@ export function create_thaumworld_bootstrap_adapter(options: ThaumworldBootstrap
         if (!choice) throw new Error('tool_assisted_inputs_actor_not_found');
         if (!choice.can_claim) throw new Error('tool_assisted_inputs_actor_not_claimable');
         await options.claim_actor(choice.actor_ref);
+        }
       }
 
       context = await wait_for_context(options.get_current_context, 6000);

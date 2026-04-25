@@ -1,8 +1,9 @@
 /**
  * ASCII Painter Save/Export System
  *
- * Handles saving, loading, and exporting ASCII art creations.
- * Supports legacy Grid format (v1), VoxelSpace format (v2), and painter documents (v3).
+ * PainterDocument is the canonical painter save/load format.
+ * Legacy Grid (v1) and VoxelSpace (v2) parsing remain import-only helpers for
+ * older files and stores while the runtime converges on a single source of truth.
  */
 
 import type { Grid, GridExport } from './types.js';
@@ -193,11 +194,12 @@ export function generateFilename(prefix: string = 'ascii_art', extension: string
 }
 
 // ============================================================================
-// VoxelSpace Support (v2 format)
+// Legacy import/export helpers (non-canonical painter formats)
 // ============================================================================
 
 /**
- * Export VoxelSpace to JSON string (v2 format)
+ * Export VoxelSpace to JSON string.
+ * Legacy/debug helper only; PainterDocument is the normal persisted format.
  */
 export function exportVoxelSpaceToJSON(space: VoxelSpace): string {
   const data = exportVoxelSpace(space);
@@ -205,7 +207,8 @@ export function exportVoxelSpaceToJSON(space: VoxelSpace): string {
 }
 
 /**
- * Export VoxelSpace artwork only (no camera/UI state)
+ * Export VoxelSpace artwork only (no camera/UI state).
+ * Legacy/debug helper only; PainterDocument is the normal persisted format.
  */
 export function exportVoxelSpaceArtworkToJSON(space: VoxelSpace): string {
   const data = exportVoxelSpace(space) as any;
@@ -227,7 +230,8 @@ export function importPainterDocumentFromJSON(json: string): PainterDocument {
 }
 
 /**
- * Import VoxelSpace from JSON string (supports v1 and v2)
+ * Import legacy painter content from JSON string (supports v1/v2 only).
+ * Import-only helper; not the canonical painter document path.
  */
 export function importVoxelSpaceFromJSON(json: string): VoxelSpace {
   const parsed = JSON.parse(json);
@@ -246,7 +250,8 @@ export function importVoxelSpaceFromJSON(json: string): VoxelSpace {
 }
 
 /**
- * Export VoxelSpace to plain text (flattens all layers)
+ * Export VoxelSpace to plain text (flattens all layers).
+ * Legacy/debug helper only.
  */
 export function exportVoxelSpaceToText(space: VoxelSpace): string {
   // Flatten to a single grid and export as text
@@ -257,7 +262,7 @@ export function exportVoxelSpaceToText(space: VoxelSpace): string {
 }
 
 /**
- * Detect if JSON is VoxelSpace (v2) or legacy Grid (v1)
+ * Detect painter file/storage format.
  */
 export function detectFileFormat(json: string): 'painter_document' | 'voxel_space' | 'grid' | 'unknown' {
   try {
@@ -276,7 +281,8 @@ export function detectFileFormat(json: string): 'painter_document' | 'voxel_spac
 }
 
 /**
- * Auto-save VoxelSpace to localStorage
+ * Auto-save VoxelSpace to localStorage.
+ * Legacy fallback only; PainterDocument auto-save is canonical.
  */
 export function autoSaveVoxelSpace(space: VoxelSpace, filename: string = 'untitled'): void {
   try {
@@ -298,8 +304,8 @@ export function autoSavePainterDocument(document: PainterDocument, filename: str
 }
 
 /**
- * Load auto-saved VoxelSpace from localStorage
- * Returns null if no auto-save exists or if it's legacy format
+ * Load auto-saved VoxelSpace from localStorage.
+ * Legacy fallback only; returns null unless the stored data is legacy v1/v2.
  */
 export function loadAutoSaveVoxelSpace(): VoxelSpace | null {
   try {

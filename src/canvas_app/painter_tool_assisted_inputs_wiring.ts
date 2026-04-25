@@ -5,6 +5,7 @@ import { create_tool_assisted_inputs_pointer_driver_runtime } from '../mono_ui/r
 import { create_tool_assisted_inputs_runtime } from '../mono_ui/runtime/automation_runtime.js';
 import { create_tool_assisted_inputs_script_repository_local } from '../mono_ui/runtime/automation_script_repository_local.js';
 import { create_tool_assisted_inputs_trace_sink } from '../mono_ui/runtime/automation_trace.js';
+import type { ToolAssistedInputsJoinSnapshot } from '../mono_ui/runtime/automation_interfaces.js';
 import type { ToolType } from '../ascii_painter/types.js';
 
 type PainterToolAssistedInputsWiringOptions = {
@@ -15,6 +16,7 @@ type PainterToolAssistedInputsWiringOptions = {
   get_bounds: () => { width: number; height: number; minZ: number; maxZ: number };
   get_interaction_anchor: () => any;
   get_cell: (x: number, y: number, z?: number | null) => { char: string; rgb: { r: number; g: number; b: number }; weight_index: number; render_index?: number } | null;
+  get_join_snapshot?: () => ToolAssistedInputsJoinSnapshot | null;
   get_text_value?: (source: string, field?: string | null) => string | null;
   invoke_helper?: (helper: string, payload?: Record<string, unknown>) => Promise<unknown> | unknown;
 };
@@ -44,6 +46,7 @@ export function create_painter_tool_assisted_inputs_wiring(options: PainterToolA
       get_current_actor_tile: () => null,
       get_movement_trace: () => null,
       get_visible_step: () => null,
+      get_join_snapshot: () => options.get_join_snapshot?.() ?? null,
       get_painter_tool_state: () => {
         const state = options.get_tool_state();
         return {

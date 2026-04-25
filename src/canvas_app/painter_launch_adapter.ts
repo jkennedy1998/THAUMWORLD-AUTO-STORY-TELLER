@@ -1,9 +1,13 @@
 import type { LaunchAdapter } from '../engine_launch/controller.js';
 import { load_launch_record, save_launch_record } from '../engine_launch/persistence.js';
-import type { ResumeValidationResult } from '../engine_launch/types.js';
+import type { LaunchJoinEntry, ResumeValidationResult } from '../engine_launch/types.js';
+import type { TaiJoinRequest } from '../engine_launch/join_menu_types.js';
+import { save_manual_connection } from '../engine_multiplayer/connection_store.js';
+import { debug_warn } from '../shared/debug.js';
 import { importPainterDocumentFromJSON, importVoxelSpaceFromJSON } from '../ascii_painter/save_system.js';
 import type { PainterLaunchIntent } from './painter_launch_types.js';
 import { PAINTER_APP_CONFIG } from './painter_runtime_config.js';
+import { discover_local_joinable_worlds } from './world_discovery.js';
 
 const APP_ID = 'ascii_painter' as const;
 
@@ -34,6 +38,26 @@ function get_tai_painter_boot_file_path(): string | null {
 
 function is_tai_boot_enabled(): boolean {
   return Boolean((window as Window).electronAPI?.toolAssistedInputsBootConfig?.enabled);
+}
+
+export function resolve_painter_tai_join_request(): TaiJoinRequest | null {
+  const config = (window as Window).electronAPI?.toolAssistedInputsBootConfig;
+  if (!config?.enabled) return null;
+  if (get_tai_painter_boot_file_path()) return null;
+  const preferred_host = String(config.joinPreferredHost ?? '').trim() || null;
+  if (preferred_host) {
+    try {
+      save_manual_connection(preferred_host, preferred_host);
+    } catch {
+      // ignore invalid host bootstrap input here; join flow will report it
+    }
+  }
+  return {
+    preferred_connection_id: String(config.joinPreferredConnectionId ?? '').trim() || null,
+    preferred_connection_kind: (String(config.joinPreferredConnectionKind ?? '').trim() || (preferred_host ? 'saved_manual' : 'local')) as TaiJoinRequest['preferred_connection_kind'],
+    preferred_host,
+    auto_join: config.joinAutoJoin !== false,
+  };
 }
 
 export function create_painter_launch_adapter(): LaunchAdapter<PainterLaunchIntent> {
@@ -97,8 +121,40 @@ export function create_painter_launch_adapter(): LaunchAdapter<PainterLaunchInte
       if (!path) return null;
       return { kind: 'load_file', slot, path };
     },
-    async create_join_intent(): Promise<PainterLaunchIntent | null> {
-      return null;
+    async create_join_intent(entry: LaunchJoinEntry | null): Promise<PainterLaunchIntent | null> {
+      const document_id = String(entry?.document_id ?? entry?.metadata?.painter_document_id ?? '').trim();
+      if (!entry || !document_id) {
+        debug_warn('[PAINTER_LAUNCH]', 'join requested but no local hosted painting is available', { slot });
+        return null;
+      }
+      return {
+        kind: 'join_authoritative',
+        slot,
+        document_id,
+        display_name: String(entry.display_name ?? entry.label ?? 'untitled'),
+        join_target_id: entry.id,
+        host_boot_id: typeof entry.host_boot_id === 'string' ? entry.host_boot_id : null,
+        persist_recent: false,
+      };
+    },
+    async get_join_entries() {
+      const entries = await discover_local_joinable_worlds(slot);
+      return entries
+        .filter((entry) => entry.painter_document_id)
+        .map((entry) => ({
+          id: entry.id,
+          label: String(entry.painter_display_name ?? entry.label ?? 'Local Painting'),
+          description: String(entry.description ?? 'join hosted local painting'),
+          local: true,
+          document_id: entry.painter_document_id,
+          display_name: entry.painter_display_name,
+          host_boot_id: entry.host_mode === 'host' ? null : null,
+          metadata: {
+            painter_document_id: entry.painter_document_id,
+            painter_display_name: entry.painter_display_name,
+            painter_file_backed: entry.painter_file_backed,
+          },
+        }));
     },
   };
 }
@@ -110,6 +166,13 @@ export async function resolve_painter_tai_boot_intent(): Promise<PainterLaunchIn
     if (!valid) return null;
     return { kind: 'resume_file', slot: PAINTER_APP_CONFIG.selected_data_slot, path, persist_recent: false };
   }
+  const config = (window as Window).electronAPI?.toolAssistedInputsBootConfig;
+  const has_join_request = Boolean(
+    String(config?.joinPreferredConnectionId ?? '').trim()
+    || String(config?.joinPreferredConnectionKind ?? '').trim()
+    || String(config?.joinPreferredHost ?? '').trim()
+  );
+  if (has_join_request) return null;
   if (is_tai_boot_enabled()) {
     return { kind: 'new_document', slot: PAINTER_APP_CONFIG.selected_data_slot, persist_recent: false };
   }

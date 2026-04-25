@@ -1,7 +1,8 @@
 import { initWebSocketClient, type WebSocketClient } from '../mono_ui/websocket_client.js';
-import { debug_warn } from '../shared/debug.js';
+import { debug_log, debug_warn } from '../shared/debug.js';
 import type { PainterDocumentBootstrap, PainterSessionLifecycle } from '../shared/painter_protocol.js';
-import { fetch_local_host_status } from './world_discovery.js';
+import type { MultiplayerTransportConfig } from '../shared/multiplayer_transport.js';
+import { fetch_host_status } from './world_discovery.js';
 
 export type PainterMultiplayerSessionState = PainterDocumentBootstrap & {
   lifecycle: PainterSessionLifecycle;
@@ -9,12 +10,24 @@ export type PainterMultiplayerSessionState = PainterDocumentBootstrap & {
 
 type PainterMultiplayerSessionOptions = {
   slot: number;
-  api_base_url: string;
-  websocket_port: number;
+  get_api_base_url: () => string;
+  get_bridge_ws_base_url: () => string;
   reconnect_token_storage_key: string;
 };
 
 type SessionSubscriber = (state: PainterMultiplayerSessionState) => void;
+
+function resolve_painter_transport(options: PainterMultiplayerSessionOptions): MultiplayerTransportConfig {
+  const api_url = new URL(options.get_api_base_url());
+  const bridge_ws_url = new URL(options.get_bridge_ws_base_url());
+  return {
+    host_input: api_url.host || 'localhost',
+    host_origin: api_url.origin,
+    api_base_url: `${api_url.origin}${api_url.pathname.replace(/\/+$/, '')}`,
+    bridge_http_url: api_url.origin,
+    bridge_ws_base_url: bridge_ws_url.origin,
+  };
+}
 
 function create_initial_state(slot: number): PainterMultiplayerSessionState {
   return {
@@ -58,7 +71,13 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
   function read_reconnect_token(): string {
     try {
       const existing = String(window.localStorage.getItem(options.reconnect_token_storage_key) ?? '').trim();
-      if (existing) return existing;
+      if (existing) {
+        debug_log('[PAINTER_SESSION]', 'reusing reconnect token', {
+          slot: options.slot,
+          reconnect_token_storage_key: options.reconnect_token_storage_key,
+        });
+        return existing;
+      }
     } catch {
       // ignore persistence failure
     }
@@ -68,6 +87,10 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
     } catch {
       // ignore persistence failure
     }
+    debug_log('[PAINTER_SESSION]', 'created reconnect token', {
+      slot: options.slot,
+      reconnect_token_storage_key: options.reconnect_token_storage_key,
+    });
     return next;
   }
 
@@ -88,6 +111,13 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
         error: typeof payload?.reason === 'string' ? payload.reason : 'session_invalidated',
       });
     });
+    client.on('PAINTER_HOSTED_SESSION_UPDATED', (payload: any) => {
+      window.dispatchEvent(new CustomEvent('painter-hosted-session-updated', { detail: payload ?? {} }));
+    });
+    client.on('PAINTER_SESSION_ENDED', (payload: any) => {
+      debug_warn('[PAINTER_SESSION]', 'painter session ended by host', payload ?? {});
+      window.dispatchEvent(new CustomEvent('painter-session-ended', { detail: payload ?? {} }));
+    });
   }
 
   async function ensure_ready(force: boolean = false): Promise<PainterMultiplayerSessionState> {
@@ -97,8 +127,31 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
     if (!force && bootstrap_promise) return bootstrap_promise;
     bootstrap_promise = (async () => {
       set_state({ ...state, lifecycle: 'connecting', error: null });
-      const host_status = await fetch_local_host_status(options.slot);
+      const transport = resolve_painter_transport(options);
+      debug_log('[PAINTER_SESSION]', 'bootstrapping painter multiplayer session', {
+        slot: options.slot,
+        force,
+        reconnect_token_storage_key: options.reconnect_token_storage_key,
+        api_base_url: transport.api_base_url,
+        bridge_ws_base_url: transport.bridge_ws_base_url,
+      });
+      console.log('[PAINTER_SESSION_BOOT]', JSON.stringify({
+        slot: options.slot,
+        force,
+        api_base_url: transport.api_base_url,
+        bridge_ws_base_url: transport.bridge_ws_base_url,
+      }));
+      const host_status = await fetch_host_status(options.slot, transport);
       if (!host_status?.ok || !host_status.supports_join) {
+        debug_warn('[PAINTER_SESSION]', 'local host join unavailable; using local compatibility mode', {
+          slot: options.slot,
+          host_status,
+        });
+        console.warn('[PAINTER_SESSION_BOOT]', JSON.stringify({
+          slot: options.slot,
+          reason: 'host_join_unavailable',
+          host_status,
+        }));
         return set_state({
           ...state,
           lifecycle: 'local_only',
@@ -112,7 +165,7 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
         });
       }
       const reconnect_token = read_reconnect_token();
-      const response = await fetch(`${options.api_base_url}/connect`, {
+      const response = await fetch(`${transport.api_base_url}/connect`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ slot: options.slot, reconnect_token }),
@@ -125,7 +178,24 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
       if (!session_token) throw new Error('painter_connect_invalid_session_token');
       const next_reconnect_token = String(data?.reconnect_token ?? reconnect_token).trim() || reconnect_token;
       persist_reconnect_token(next_reconnect_token);
-      ws_client = initWebSocketClient(options.websocket_port, { sessionToken: session_token, slot: options.slot });
+      debug_log('[PAINTER_SESSION]', 'painter multiplayer session connected', {
+        slot: options.slot,
+        reconnect_token_storage_key: options.reconnect_token_storage_key,
+        connection_id: String(data?.connection_id ?? '').trim() || null,
+        reconnect_token_reused: next_reconnect_token === reconnect_token,
+      });
+      console.log('[PAINTER_SESSION_CONNECTED]', JSON.stringify({
+        slot: options.slot,
+        connection_id: String(data?.connection_id ?? '').trim() || null,
+        reconnect_token_reused: next_reconnect_token === reconnect_token,
+        api_base_url: transport.api_base_url,
+        bridge_ws_base_url: transport.bridge_ws_base_url,
+      }));
+      ws_client = initWebSocketClient(transport.bridge_ws_base_url, {
+        baseUrl: transport.bridge_ws_base_url,
+        sessionToken: session_token,
+        slot: options.slot,
+      });
       attach_ws_handlers(ws_client);
       return set_state({
         lifecycle: 'multiplayer_ready',
@@ -145,6 +215,14 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
     })().catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       debug_warn('[PAINTER_SESSION]', 'multiplayer bootstrap failed; using local compatibility mode', { message, slot: options.slot });
+      console.warn('[PAINTER_SESSION_BOOT]', JSON.stringify({
+        slot: options.slot,
+        reason: 'bootstrap_failed',
+        message,
+        stack: error instanceof Error ? error.stack ?? null : null,
+        api_base_url: options.get_api_base_url(),
+        bridge_ws_base_url: options.get_bridge_ws_base_url(),
+      }));
       return set_state({
         ...state,
         lifecycle: 'local_only',

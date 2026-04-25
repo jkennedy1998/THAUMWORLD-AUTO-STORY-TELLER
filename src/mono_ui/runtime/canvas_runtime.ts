@@ -43,6 +43,10 @@ export type CanvasRuntimeOptions = {
     // Called on every pointer move (global hook; does not affect routing)
     on_pointer_move_global?: (x: number, y: number, e: PointerEvent) => void;
 
+    // Called on global pointer down/up so higher-level runtimes can coordinate shared interaction state.
+    on_pointer_down_global?: (x: number, y: number, e: PointerEvent) => void;
+    on_pointer_up_global?: (x: number, y: number, e: PointerEvent) => void;
+
     // Called after modules compose each frame (for overlays)
     on_after_compose?: (canvas: Canvas) => void;
 };
@@ -124,7 +128,11 @@ export class CanvasRuntime {
     
     private on_drag_end_outside: ((x: number, y: number) => void) | null = null;
     private on_pointer_move_global: ((x: number, y: number, e: PointerEvent) => void) | null = null;
+    private on_pointer_down_global: ((x: number, y: number, e: PointerEvent) => void) | null = null;
+    private on_pointer_up_global: ((x: number, y: number, e: PointerEvent) => void) | null = null;
     private on_after_compose: ((canvas: Canvas) => void) | null = null;
+    private window_layout_refresh_handler: (() => void) | null = null;
+    private window_focus_refresh_handler: (() => void) | null = null;
 
     private readonly DBLCLICK_MS = 180;
     private readonly DBLCLICK_TILE_RADIUS = 1;
@@ -274,6 +282,8 @@ export class CanvasRuntime {
         this.modules = opts.modules;
         this.on_drag_end_outside = opts.on_drag_end_outside ?? null;
         this.on_pointer_move_global = opts.on_pointer_move_global ?? null;
+        this.on_pointer_down_global = opts.on_pointer_down_global ?? null;
+        this.on_pointer_up_global = opts.on_pointer_up_global ?? null;
         this.on_after_compose = opts.on_after_compose ?? null;
 
         this.engine_canvas = create_canvas(this.grid_width, this.grid_height);
@@ -285,6 +295,14 @@ export class CanvasRuntime {
                 this.publish_gameplay_input_context(this.focused_owner_wants_text_capture());
                 this.log_input_debug('window focus observed', {
                     runtime_instance_id: this.runtime_instance_id,
+                    visibility_state: document.visibilityState,
+                    window_focused: document.hasFocus(),
+                    canvas_rect: this.canvas_el.getBoundingClientRect ? {
+                        x: Math.round(this.canvas_el.getBoundingClientRect().x),
+                        y: Math.round(this.canvas_el.getBoundingClientRect().y),
+                        width: Math.round(this.canvas_el.getBoundingClientRect().width),
+                        height: Math.round(this.canvas_el.getBoundingClientRect().height),
+                    } : null,
                     active_element_id: (document.activeElement as HTMLElement | null)?.id ?? null,
                     focused_owner_id: this.focused_owner?.id ?? null,
                 });
@@ -294,6 +312,14 @@ export class CanvasRuntime {
                 this.publish_gameplay_input_context(this.focused_owner_wants_text_capture());
                 this.log_input_debug('window blur observed', {
                     runtime_instance_id: this.runtime_instance_id,
+                    visibility_state: document.visibilityState,
+                    window_focused: document.hasFocus(),
+                    canvas_rect: this.canvas_el.getBoundingClientRect ? {
+                        x: Math.round(this.canvas_el.getBoundingClientRect().x),
+                        y: Math.round(this.canvas_el.getBoundingClientRect().y),
+                        width: Math.round(this.canvas_el.getBoundingClientRect().width),
+                        height: Math.round(this.canvas_el.getBoundingClientRect().height),
+                    } : null,
                     active_element_id: (document.activeElement as HTMLElement | null)?.id ?? null,
                     focused_owner_id: this.focused_owner?.id ?? null,
                 });
@@ -489,6 +515,14 @@ export class CanvasRuntime {
         if (this.raf_id !== null) cancelAnimationFrame(this.raf_id);
         this.raf_id = null;
         this.stop_long_task_observer();
+        if (this.window_layout_refresh_handler) {
+            window.removeEventListener('resize', this.window_layout_refresh_handler);
+            this.window_layout_refresh_handler = null;
+        }
+        if (this.window_focus_refresh_handler) {
+            window.removeEventListener('focus', this.window_focus_refresh_handler);
+            this.window_focus_refresh_handler = null;
+        }
     }
 
     private ensure_key_sink(): HTMLTextAreaElement {
@@ -722,6 +756,9 @@ export class CanvasRuntime {
         for (const m of this.modules) {
             try { m?.OnGlobalPointerDown?.(pe as PointerEvent); } catch { /* ignore */ }
         }
+        if (this.on_pointer_down_global) {
+            try { this.on_pointer_down_global(t.x, t.y, pe as PointerEvent); } catch { /* ignore */ }
+        }
         top?.OnPointerDown?.(pe);
         this.sync_text_input_focus_for_owner();
         this.last_tile = t;
@@ -735,6 +772,9 @@ export class CanvasRuntime {
         const pe: any = this.make_pointer_event('up', t.x, t.y, ev, this.engine_canvas.get(t.x, t.y));
         pe.pointer_type = ev.pointerType;
         pe.pressure = ev.pressure;
+        if (this.on_pointer_up_global) {
+            try { this.on_pointer_up_global(t.x, t.y, pe as PointerEvent); } catch { /* ignore */ }
+        }
         target?.OnPointerUp?.(pe);
         if (this.dragging && top) {
             const de: any = this.make_drag_event('drag_end', t.x, t.y, ev.buttons, this.engine_canvas.get(t.x, t.y));
@@ -845,6 +885,24 @@ export class CanvasRuntime {
         this.canvas_el.style.height = `${this.canvas_el.height}px`;
 
         this.recenter_or_clamp_pan();
+    }
+
+    private refresh_layout_from_window_event(reason: 'window_resize' | 'window_focus' | 'visibility_visible'): void {
+        diag_log('renderer', 'important', 'CANVAS_LAYOUT', 'refreshing canvas runtime layout from window event', {
+            reason,
+            visibility_state: document.visibilityState,
+            window_focused: document.hasFocus(),
+            canvas_rect: this.canvas_el.getBoundingClientRect ? {
+                x: Math.round(this.canvas_el.getBoundingClientRect().x),
+                y: Math.round(this.canvas_el.getBoundingClientRect().y),
+                width: Math.round(this.canvas_el.getBoundingClientRect().width),
+                height: Math.round(this.canvas_el.getBoundingClientRect().height),
+            } : null,
+            grid_width: this.grid_width,
+            grid_height: this.grid_height,
+            scale: this.scale,
+        });
+        this.resize_to_grid();
     }
 
     private recenter_or_clamp_pan(): void {
@@ -1361,11 +1419,28 @@ export class CanvasRuntime {
             this.log_input_debug('document visibilitychange observed', {
                 runtime_instance_id: this.runtime_instance_id,
                 visibility_state: document.visibilityState,
+                window_focused: document.hasFocus(),
+                canvas_rect: this.canvas_el.getBoundingClientRect ? {
+                    x: Math.round(this.canvas_el.getBoundingClientRect().x),
+                    y: Math.round(this.canvas_el.getBoundingClientRect().y),
+                    width: Math.round(this.canvas_el.getBoundingClientRect().width),
+                    height: Math.round(this.canvas_el.getBoundingClientRect().height),
+                } : null,
             });
             if (document.visibilityState === 'hidden') {
                 this.clear_transient_input_state();
+                return;
             }
+            this.refresh_layout_from_window_event('visibility_visible');
         });
+        this.window_layout_refresh_handler = () => {
+            this.refresh_layout_from_window_event('window_resize');
+        };
+        window.addEventListener('resize', this.window_layout_refresh_handler);
+        this.window_focus_refresh_handler = () => {
+            this.refresh_layout_from_window_event('window_focus');
+        };
+        window.addEventListener('focus', this.window_focus_refresh_handler);
 
         // Help pen/touch input behave consistently.
         // (Prevents browser gesture handling from stealing pointer events.)
@@ -1635,6 +1710,13 @@ export class CanvasRuntime {
                     // ignore
                 }
             }
+            if (this.on_pointer_down_global) {
+                try {
+                    this.on_pointer_down_global(t.x, t.y, pe as PointerEvent);
+                } catch {
+                    // ignore
+                }
+            }
             top?.OnPointerDown?.(pe);
             this.sync_text_input_focus_for_owner();
         };
@@ -1660,6 +1742,13 @@ export class CanvasRuntime {
 
             const pe: any = this.make_pointer_event('up', t.x, t.y, { ...ev, buttons: nb.buttons, button: nb.button }, this.engine_canvas.get(t.x, t.y));
             attach_pointer_meta(pe, ev);
+            if (this.on_pointer_up_global) {
+                try {
+                    this.on_pointer_up_global(t.x, t.y, pe as PointerEvent);
+                } catch {
+                    // ignore
+                }
+            }
             target?.OnPointerUp?.(pe);
 
             this.global_pan_active = false;

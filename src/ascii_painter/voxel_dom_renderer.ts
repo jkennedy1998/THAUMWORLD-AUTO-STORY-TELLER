@@ -13,9 +13,12 @@
  * - Clipped to canvas bounds
  */
 
-import type { VoxelSpace, VoxelLayer, CalibrationOffset } from './voxel_space.js';
+import type { CalibrationOffset, VoxelSpace } from './voxel_space.js';
 import { DEFAULT_CAMERA_VALUES } from './voxel_space.js';
+import type { PainterProjectedScene, PainterProjectedSlot } from './painter_view_projection_adapter.js';
+import { projected_scene_from_voxel_space } from './painter_view_projection_adapter.js';
 import { create_canvas_cell_renderer, type CanvasCellRenderer } from '../mono_ui/runtime/cell_renderer.js';
+import { diag_log } from '../shared/diagnostics.js';
 
 export interface ViewportState {
   // Canvas module position and size in screen pixels
@@ -75,7 +78,8 @@ export class VoxelDOMRenderer {
   private clipContainer: HTMLElement;
   private slotCanvases: Map<number, HTMLCanvasElement> = new Map();
   private slotContexts: Map<number, CanvasRenderingContext2D> = new Map();
-  private space: VoxelSpace | null = null;
+  private scene: PainterProjectedScene | null = null;
+  private sourceSpace: VoxelSpace | null = null;
 
   // Display-slot content invalidation: callers can bump a version per projected slot
   // to avoid re-rasterizing glyphs when only transforms (parallax/pan) change.
@@ -94,6 +98,7 @@ export class VoxelDOMRenderer {
 
   // Viewport tracking
   private viewport: ViewportState = { x: 0, y: 0, width: 0, height: 0 };
+  private lastViewportDebugKey = '';
   private mouseParallax = { x: 0, y: 0 };
   private smoothedViewAngles = { pitchDeg: 0, yawDeg: 0 };
   private lastRenderTimestampMs = 0;
@@ -169,7 +174,14 @@ export class VoxelDOMRenderer {
    * Set the voxel space to render
    */
   setSpace(space: VoxelSpace): void {
-    this.space = space;
+    this.sourceSpace = space;
+    this.scene = projected_scene_from_voxel_space(space);
+    this.createOrUpdateSlots();
+  }
+
+  setProjectedScene(scene: PainterProjectedScene): void {
+    this.sourceSpace = null;
+    this.scene = scene;
     this.createOrUpdateSlots();
   }
 
@@ -197,6 +209,7 @@ export class VoxelDOMRenderer {
     };
     this.debugState.viewport_ready = this.debugState.viewport.width > 0 && this.debugState.viewport.height > 0 && this.debugState.viewport.tileW > 0 && this.debugState.viewport.tileH > 0;
     this.updateClipContainer();
+    this.logViewportDebug('setViewport');
   }
 
   getDebugState(): VoxelDomRendererDebugState {
@@ -250,7 +263,7 @@ export class VoxelDOMRenderer {
   }
 
   private updateSpringCenteredViewAngles(nowMs: number): void {
-    const camera = this.space?.camera;
+    const camera = this.scene?.camera;
     if (!camera) return;
     const last = this.lastRenderTimestampMs > 0 ? this.lastRenderTimestampMs : nowMs - 16;
     const dt = Math.max(0.001, Math.min(0.05, (nowMs - last) / 1000));
@@ -272,8 +285,8 @@ export class VoxelDOMRenderer {
    * Update calibration offset - delegates to camera config
    */
   setCalibration(x: number, y: number): void {
-    if (this.space) {
-      this.space.camera.calibration = { x, y };
+    if (this.scene) {
+      this.scene.camera.calibration = { x, y };
     }
     console.log('[VoxelDOMRenderer] Calibration:', { x, y });
   }
@@ -282,7 +295,7 @@ export class VoxelDOMRenderer {
    * Get current calibration from camera config
    */
   getCalibration(): CalibrationOffset {
-    return this.space?.camera.calibration ?? { x: 0, y: 0 };
+    return this.scene?.camera.calibration ?? { x: 0, y: 0 };
   }
 
   /**
@@ -296,7 +309,7 @@ export class VoxelDOMRenderer {
       return { w: vw as number, h: vh as number };
     }
 
-    const camera = this.space?.camera;
+    const camera = this.scene?.camera;
     const spacingX = camera?.char_spacing_x ?? DEFAULT_CAMERA_VALUES.char_spacing_x;
     const spacingY = camera?.char_spacing_y ?? DEFAULT_CAMERA_VALUES.char_spacing_y;
     const w = this.baseFontSize * (1 + this.letterSpacing) * spacingX;
@@ -318,6 +331,45 @@ export class VoxelDOMRenderer {
     this.clipContainer.style.top = `${this.viewport.y}px`;
     this.clipContainer.style.width = `${this.viewport.width}px`;
     this.clipContainer.style.height = `${this.viewport.height}px`;
+    this.logViewportDebug('updateClipContainer');
+  }
+
+  private logViewportDebug(reason: string): void {
+    const viewport = this.viewport;
+    const key = JSON.stringify({
+      reason,
+      x: Math.round(Number(viewport?.x) || 0),
+      y: Math.round(Number(viewport?.y) || 0),
+      width: Math.round(Number(viewport?.width) || 0),
+      height: Math.round(Number(viewport?.height) || 0),
+      tileW: Number((Number(viewport?.tileW) || 0).toFixed(3)),
+      tileH: Number((Number(viewport?.tileH) || 0).toFixed(3)),
+      tracked_slots: this.slotCanvases.size,
+      viewport_ready: this.debugState.viewport_ready,
+    });
+    if (key === this.lastViewportDebugKey) return;
+    this.lastViewportDebugKey = key;
+    diag_log('painter', 'important', 'VOXEL_DOM_VIEWPORT', reason, {
+      viewport: viewport ? {
+        x: Math.round(Number(viewport.x) || 0),
+        y: Math.round(Number(viewport.y) || 0),
+        width: Math.round(Number(viewport.width) || 0),
+        height: Math.round(Number(viewport.height) || 0),
+        tileW: Number((Number(viewport.tileW) || 0).toFixed(3)),
+        tileH: Number((Number(viewport.tileH) || 0).toFixed(3)),
+        fontSizePx: Number((Number(viewport.fontSizePx) || 0).toFixed(3)),
+      } : null,
+      clip_container: {
+        left: this.clipContainer.style.left,
+        top: this.clipContainer.style.top,
+        width: this.clipContainer.style.width,
+        height: this.clipContainer.style.height,
+      },
+      viewport_ready: this.debugState.viewport_ready,
+      tracked_slot_count: this.slotCanvases.size,
+      visibility_state: typeof document !== 'undefined' ? document.visibilityState : 'unknown',
+      window_focused: typeof document !== 'undefined' ? document.hasFocus() : null,
+    });
   }
 
   /**
@@ -354,12 +406,12 @@ export class VoxelDOMRenderer {
    * Create or update canvas elements for each projected display slot.
    */
   private createOrUpdateSlots(perf?: { resize_count: number; create_count: number }): void {
-    if (!this.space) return;
+    if (!this.scene) return;
 
     // Check for duplicates before making changes
     this.checkForDuplicateCanvases();
 
-    const slotIndices = Array.from(this.space.layers.keys()).sort((a, b) => a - b);
+    const slotIndices = Array.from(this.scene.slots.keys()).sort((a, b) => a - b);
 
     // Remove canvases for deleted layers
     for (const [slotIndex, canvas] of this.slotCanvases) {
@@ -408,7 +460,7 @@ export class VoxelDOMRenderer {
     }
 
     // Update canvas size based on layer dimensions
-    const displaySlot = this.space?.layers.get(slotIndex);
+      const displaySlot = this.scene?.slots.get(slotIndex);
     if (displaySlot) {
       const { w: cellW, h: cellH } = this.getCellSize();
       const gridW = displaySlot.cells[0]?.length ?? 0;
@@ -416,7 +468,7 @@ export class VoxelDOMRenderer {
       
       // Selected layer: exact size
       // Other layers: larger to accommodate scaling
-      const isSelected = slotIndex === this.space?.camera.focus_plane;
+      const isSelected = slotIndex === this.scene?.camera.focus_plane;
       const paddingFactor = isSelected ? 1.0 : 1.5;
       
       const nextW = Math.ceil(gridW * cellW * paddingFactor);
@@ -451,8 +503,8 @@ export class VoxelDOMRenderer {
    * Selected slot is reference point (scale 1.0, at viewport center).
    * Other slots scale and parallax relative to the selected slot.
    */
-  private calculateTransform(displaySlot: VoxelLayer, selectedSlot: number): { transform: string; origin: string } {
-    const camera = this.space?.camera;
+  private calculateTransform(displaySlot: PainterProjectedSlot, selectedSlot: number): { transform: string; origin: string } {
+    const camera = this.scene?.camera;
     if (!camera) return { transform: '', origin: 'center center' };
 
     const zDistance = displaySlot.z - selectedSlot;
@@ -600,7 +652,7 @@ export class VoxelDOMRenderer {
    * Render layer content to canvas
    * Renders cells with Y-flip correction (grid Y=0 is bottom, canvas Y=0 is top)
    */
-  private renderDisplaySlot(displaySlot: VoxelLayer, ctx: CanvasRenderingContext2D): void {
+  private renderDisplaySlot(displaySlot: PainterProjectedSlot, ctx: CanvasRenderingContext2D): void {
     const { w: cellW, h: cellH } = this.getCellSize();
     const fontSizePx = this.getFontSizePx();
 
@@ -634,7 +686,10 @@ export class VoxelDOMRenderer {
 
       for (let gridX = 0; gridX < row.length; gridX++) {
         const cell = row[gridX];
-        if (!cell || cell.char === ' ') continue;
+        if (!cell) continue;
+        const has_text = typeof cell.char === 'string' && cell.char !== ' ';
+        const has_graphic = !!(cell as any).graphic;
+        if (!has_text && !has_graphic) continue;
 
         const px = startX + gridX * cellW + cellW / 2;
         const py = startY + canvasY * cellH + cellH / 2;
@@ -661,7 +716,10 @@ export class VoxelDOMRenderer {
    * Called every frame by the main loop to update all layer transforms
    */
   render(): void {
-    if (!this.space) return;
+    if (this.sourceSpace) {
+      this.scene = projected_scene_from_voxel_space(this.sourceSpace);
+    }
+    if (!this.scene) return;
     const perf_enabled = this.isPerfEnabled();
     const render_started_at_ms = perf_enabled ? performance.now() : 0;
     let create_slots_ms = 0;
@@ -677,8 +735,8 @@ export class VoxelDOMRenderer {
     this.createOrUpdateSlots(perf_counts);
     if (perf_enabled) create_slots_ms = Math.max(0, performance.now() - create_slots_started_at_ms);
 
-    const selectedSlot = this.space.camera.focus_plane;
-    const visibleSlots = Array.from(this.space.layers.values())
+    const selectedSlot = this.scene.camera.focus_plane;
+    const visibleSlots = Array.from(this.scene.slots.values())
       .filter(displaySlot => displaySlot.visible)
       .sort((a, b) => a.z - b.z);
 
@@ -727,7 +785,7 @@ export class VoxelDOMRenderer {
 
     // Hide invisible projected display slots.
     for (const [slotIndex, canvas] of this.slotCanvases) {
-      const displaySlot = this.space.layers.get(slotIndex);
+        const displaySlot = this.scene.slots.get(slotIndex);
       if (!displaySlot || !displaySlot.visible) {
         canvas.style.display = 'none';
       }

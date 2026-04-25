@@ -10,6 +10,7 @@ import { get_container_id_from_target_id } from "../../inventory_surfaces/target
 import type { ItemDefinition } from "../../item_storage/store.js";
 import type { ItemInstance } from "../../item_instances/store.js";
 import { has_resolved_tag } from "../../tag_system/canonical_readers.js";
+import { build_inventory_slot_target, order_resolved_targets, type OrderedResolvedTargets } from "../runtime/interaction_runtime_types.js";
 
 export type OwnerInventoryModuleConfig = {
   id: string;
@@ -143,7 +144,7 @@ export function make_owner_inventory_module(opts: OwnerInventoryModuleConfig): M
     return slot_hitboxes.find((entry) => entry.x === x && entry.y === y) ?? null;
   }
 
-  return make_floating_panel_module({
+  const mod = make_floating_panel_module({
     id: opts.id,
     rect: opts.rect,
     title: () => {
@@ -332,4 +333,24 @@ export function make_owner_inventory_module(opts: OwnerInventoryModuleConfig): M
       draw_render_queue(c, rq, { now_ms: Date.now(), pass_order: ["ui", "item"] });
     },
   });
+
+  (mod as any).resolveInteractionTargets = (x: number, y: number): OrderedResolvedTargets => {
+    const hit = find_slot_hitbox(x, y);
+    if (!hit) return order_resolved_targets([]);
+    const container_id = get_container_id_from_target_id(hit.slot.slot_target_id) ?? get_container_id_from_target_id(hit.surface.surface_target_id);
+    if (!container_id) return order_resolved_targets([]);
+    return order_resolved_targets([
+      build_inventory_slot_target({
+        module_id: opts.id,
+        view_id: `${opts.id}_view`,
+        container_id,
+        slot_index: hit.slot.slot_index,
+        target_ref: hit.slot.slot_target_id,
+        grid_x: hit.slot.grid_x,
+        grid_y: hit.slot.grid_y,
+      }),
+    ]);
+  };
+
+  return mod as any;
 }

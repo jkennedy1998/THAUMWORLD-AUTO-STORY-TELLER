@@ -24,11 +24,15 @@ export type LaunchJoinEntry = {
   label: string;
   description?: string;
   local?: boolean;
+  document_id?: string | null;
+  display_name?: string | null;
+  host_boot_id?: string | null;
   metadata?: Record<string, unknown>;
 };
 
 export type LaunchMenuState = {
   selected_action: LaunchActionId;
+  selected_join_entry_id: string | null;
   availability: Record<LaunchActionId, LaunchActionAvailability>;
   resume_candidate: ResumeCandidate | null;
   join_entries: readonly LaunchJoinEntry[];

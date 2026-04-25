@@ -1,6 +1,6 @@
 import { create_painter_document, create_painter_group, make_painter_coord_key } from '../ascii_painter/painter_document.js';
 import { normalize_painter_document_runtime, resolve_painter_voxel_winner } from '../ascii_painter/painter_document_runtime.js';
-import { apply_painter_group_structure_change, apply_painter_group_voxel_changes, redo_painter_group_changes, save_painter_document_snapshot, undo_painter_group_changes } from './painter_document_store.js';
+import { apply_painter_group_structure_change, apply_painter_group_structure_command, apply_painter_group_voxel_changes, apply_painter_group_voxel_command, redo_painter_group_changes, save_painter_document_snapshot, undo_painter_group_changes } from './painter_document_store.js';
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
@@ -91,5 +91,54 @@ assert(runtime.document.group_order[0] === top_group_id, 'reorder_groups should 
 winner = resolve_painter_voxel_winner(runtime, key);
 assert(winner.winning_group_id === base_group_id, 'reordering groups should change exact overlap winner without deleting top group voxels');
 assert(runtime.group_voxel_index.get(top_group_id)?.get(key)?.char === 'B', 'reordering groups should preserve top group authored voxel data');
+
+const staleApply = apply_painter_group_voxel_command(slot, with_top_group.document_id, base_group_id, [{
+  x: 4,
+  y: 4,
+  z: 1,
+  cell: { char: 'Z', rgb: { r: 0, g: 255, b: 0 }, weight_index: 2 },
+}], { base_revision: 1 });
+assert(staleApply.applied_from_stale_base === true, 'stale-base voxel commands should still apply and be marked as stale-base');
+assert(staleApply.server_revision_before >= 1 && staleApply.server_revision_after === staleApply.snapshot.revision, 'stale-base metadata should report authoritative revision transition');
+runtime = normalize_painter_document_runtime(staleApply.snapshot.snapshot);
+assert(runtime.group_voxel_index.get(base_group_id)?.get(make_painter_coord_key(4, 4, 1))?.char === 'Z', 'stale-base voxel command should still update authoritative snapshot');
+
+const singleGroupDocumentId = `painter_store_single_group_${Date.now()}`;
+save_painter_document_snapshot(slot, {
+  document_id: singleGroupDocumentId,
+  revision: 1,
+  updated_at: new Date().toISOString(),
+  snapshot: create_painter_document(4, 4, { min_z: 0, max_z: 0, default_group_name: 'Solo' }),
+});
+let lastGroupDeleteFailed = false;
+try {
+  apply_painter_group_structure_command(slot, singleGroupDocumentId, {
+    kind: 'delete_group',
+    group_id: create_painter_document(1, 1, { min_z: 0, max_z: 0, default_group_name: 'Unused' }).group_order[0]!,
+  });
+} catch (error) {
+  lastGroupDeleteFailed = error instanceof Error && error.message === 'painter_group_not_found';
+}
+assert(lastGroupDeleteFailed === true, 'delete_group should still reject missing groups before last-group semantics');
+
+const soloDocument = create_painter_document(4, 4, { min_z: 0, max_z: 0, default_group_name: 'Solo 2' });
+const soloGroupId = soloDocument.group_order[0]!;
+const soloDocumentId2 = `painter_store_single_group_real_${Date.now()}`;
+save_painter_document_snapshot(slot, {
+  document_id: soloDocumentId2,
+  revision: 1,
+  updated_at: new Date().toISOString(),
+  snapshot: soloDocument,
+});
+let deleteLastGroupRejected = false;
+try {
+  apply_painter_group_structure_command(slot, soloDocumentId2, {
+    kind: 'delete_group',
+    group_id: soloGroupId,
+  });
+} catch (error) {
+  deleteLastGroupRejected = error instanceof Error && error.message === 'painter_last_group_delete_forbidden';
+}
+assert(deleteLastGroupRejected, 'delete_group should reject deleting the final remaining group');
 
 console.log('painter_document_store tests passed');

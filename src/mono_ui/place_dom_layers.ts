@@ -63,7 +63,8 @@ export class PlaceDomLayers {
   }
 
   mount(container: HTMLElement, place_id: string): void {
-    if (this.renderer && this.place_id === place_id) return;
+    const root_connected = !!this.root && this.root.isConnected && this.root.parentElement === container;
+    if (this.renderer && this.place_id === place_id && root_connected) return;
     this.destroy();
 
     // Phase 0.5: single-owner lifecycle for #voxel_layers_container.

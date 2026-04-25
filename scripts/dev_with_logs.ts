@@ -17,9 +17,10 @@ import {
   updateLatestPointer,
   updateLatestSessionState,
 } from "../src/launcher/log_utils.js";
-import { acquireHostLaunchLock, detectLocalHost, detectVite, readHostLaunchLock, recoverHostLaunchLock, releaseHostLaunchLock, waitForLocalHost, writeHostSessionFile as writeHostSessionManifest } from "./launcher_common.mjs";
+import { acquireHostLaunchLock, detectHost, detectLocalHost, detectVite, readHostLaunchLock, recoverHostLaunchLock, releaseHostLaunchLock, waitForHost, waitForLocalHost, writeHostSessionFile as writeHostSessionManifest } from "./launcher_common.mjs";
 import { syncAtlasAssets } from "./atlas_sync.mjs";
 import { resolveToolAssistedInputsEntry } from "./tool_assisted_inputs_registry.mjs";
+import { build_multiplayer_transport_config } from "../src/shared/multiplayer_transport.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -35,12 +36,15 @@ const startup_boot_mode = (boot_mode_arg ? String(boot_mode_arg.split("=")[1] ??
   : 'manual_shell';
 const tai_id_arg = args.find((arg) => arg.startsWith("--tai-id="));
 const tai_id = tai_id_arg ? String(tai_id_arg.split("=")[1] ?? "").trim() : "";
+const host_arg = args.find((arg) => arg.startsWith("--host="));
+const preferred_host = host_arg ? String(host_arg.split("=")[1] ?? "").trim() : "";
 const diag_profile_arg = args.find((arg) => arg.startsWith("--diag-profile="));
 const diag_profile = (diag_profile_arg ? String(diag_profile_arg.split("=")[1] ?? "quiet") : (tai_id ? 'logs' : 'quiet')).trim().toLowerCase() === 'logs'
   ? 'logs'
   : 'quiet';
 const baseDir = path.join(__dirname, "..");
 const tai_entry = tai_id ? resolveToolAssistedInputsEntry(baseDir, tai_id) : null;
+const remote_transport = preferred_host ? build_multiplayer_transport_config({ host: preferred_host }) : null;
 
 console.log("Starting THAUMWORLD DEV mode with log capture...");
 console.log("Code changes will be reflected immediately (no rebuild needed)");
@@ -48,6 +52,7 @@ console.log(`Data slot: ${data_slot}`);
 console.log(`Launch mode: ${launch_mode}`);
 console.log(`Diagnostics profile: ${diag_profile}`);
 console.log(`Startup boot mode: ${tai_entry ? 'tas_runtime' : startup_boot_mode}`);
+if (preferred_host) console.log(`Preferred host: ${preferred_host}`);
 if (tai_entry) {
   console.log(`Tool Assisted Inputs: tai${tai_entry.id}`);
   console.log(`TAS test: ${tai_entry.testName}`);
@@ -233,6 +238,10 @@ function spawnWithLogging(name: string, command: string, args: string[], options
 function getClientEnv(): Record<string, string> {
   return {
     THAUM_STARTUP_BOOT_MODE: tai_entry ? 'tas_runtime' : startup_boot_mode,
+    ...(preferred_host ? {
+      THAUM_TAI_JOIN_HOST: preferred_host,
+      THAUM_TAI_JOIN_CONNECTION_KIND: 'saved_manual',
+    } : {}),
     ...(tai_entry ? {
       THAUM_TAI_ENABLED: 'true',
       THAUM_TAI_ID: tai_entry.id,
@@ -273,7 +282,8 @@ function startElectronDelayed(delayMs: number): void {
 
 async function startDev(): Promise<void> {
   console.log("Starting processes...");
-  let hostExists = await detectLocalHost(data_slot);
+  const hostProbeOptions = remote_transport ? { apiBaseUrl: remote_transport.api_base_url } : undefined;
+  let hostExists = remote_transport ? await detectHost(data_slot, hostProbeOptions) : await detectLocalHost(data_slot);
   const viteExists = await detectVite();
   const existingLock = readHostLaunchLock(baseDir, data_slot);
   if (existingLock) {
@@ -288,13 +298,17 @@ async function startDev(): Promise<void> {
   }
 
   if (launch_mode === 'client') {
+    if (remote_transport) {
+      hostExists = await waitForHost(data_slot, 25000, hostProbeOptions);
+      console.log(`Remote host wait result: ${hostExists ? 'ready' : 'not_reachable'}`);
+    }
     startViteIfNeeded(!viteExists);
     startElectronDelayed(viteExists ? 1000 : 4000);
     console.log('Client started');
     return;
   }
 
-  if (!hostExists) {
+  if (!hostExists && !remote_transport) {
     if (existingLock) {
       const recovered = await recoverHostLaunchLock(baseDir, data_slot, { timeoutMs: 5000, probeFirst: true });
       console.log(`Host lock recovery: ${recovered.reason}${recovered.cleared ? ' (cleared stale lock)' : ''}`);
@@ -317,10 +331,14 @@ async function startDev(): Promise<void> {
     startElectronDelayed(viteExists ? 6000 : 9000);
     console.log(lock.ok ? 'No local host detected; started local host + client' : 'Waiting for local host, then attaching client');
   } else {
-    console.log('Local host health probe succeeded before launch');
+    if (remote_transport && !hostExists) {
+      hostExists = await waitForHost(data_slot, 25000, hostProbeOptions);
+      console.log(`Remote host wait result: ${hostExists ? 'ready' : 'not_reachable'}`);
+    }
+    console.log(remote_transport ? 'Remote host selected before launch' : 'Local host health probe succeeded before launch');
     startViteIfNeeded(!viteExists);
     startElectronDelayed(viteExists ? 1000 : 4000);
-    console.log('Local host detected; attached client only');
+    console.log(remote_transport ? 'Remote host targeted; attached client only' : 'Local host detected; attached client only');
   }
   console.log("Press Ctrl+C to stop");
 }

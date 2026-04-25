@@ -7,6 +7,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 const appMode = process.env.THAUM_APP_MODE || 'game';
 const startupBootMode = process.env.THAUM_STARTUP_BOOT_MODE || 'manual_shell';
 const dataSlot = Number(process.env.DATA_SLOT || 1) || 1;
+const clientInstanceId = process.env.THAUM_CLIENT_INSTANCE_ID || '';
+const joinAutoJoinEnv = String(process.env.THAUM_TAI_JOIN_AUTO_JOIN || '').trim().toLowerCase();
 const toolAssistedInputsBootConfig = {
   enabled: process.env.THAUM_TAI_ENABLED === 'true',
   resetState: process.env.THAUM_TAI_RESET_STATE === 'true',
@@ -15,6 +17,12 @@ const toolAssistedInputsBootConfig = {
   openMs: Number(process.env.THAUM_TAI_OPEN_MS || 0) || 0,
   endDelayMs: Number(process.env.THAUM_TAI_END_DELAY_MS || 0) || 0,
   scriptPath: process.env.THAUM_TAI_SCRIPT_PATH || '',
+  painterBootFilePath: process.env.THAUM_TAI_PAINTER_BOOT_FILE_PATH || '',
+  joinPreferredConnectionId: process.env.THAUM_TAI_JOIN_CONNECTION_ID || '',
+  joinPreferredConnectionKind: process.env.THAUM_TAI_JOIN_CONNECTION_KIND || '',
+  joinPreferredHost: process.env.THAUM_TAI_JOIN_HOST || '',
+  joinAutoJoin: joinAutoJoinEnv ? joinAutoJoinEnv !== 'false' : true,
+  gameActorId: process.env.THAUM_TAI_GAME_ACTOR_ID || '',
 };
 
 // Expose protected methods that allow the renderer process to use
@@ -43,6 +51,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // App mode (game or ascii_painter) - set before page loads
   appMode: appMode,
   dataSlot,
+  clientInstanceId,
   startupBootMode,
   toolAssistedInputsBootConfig,
 

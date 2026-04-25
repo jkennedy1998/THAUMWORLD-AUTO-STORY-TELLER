@@ -14,8 +14,10 @@ import {
   updateLatestPointer,
   updateLatestSessionState,
 } from "../src/launcher/log_utils.js";
-import { acquireHostLaunchLock, detectLocalHost, readHostLaunchLock, recoverHostLaunchLock, releaseHostLaunchLock, waitForLocalHost } from "./launcher_common.mjs";
+import { acquireHostLaunchLock, detectHost, detectLocalHost, readHostLaunchLock, recoverHostLaunchLock, releaseHostLaunchLock, waitForHost, waitForLocalHost } from "./launcher_common.mjs";
+import { write_host_session_file } from "../src/shared/host_session_store.js";
 import { resolveToolAssistedInputsEntry } from "./tool_assisted_inputs_registry.mjs";
+import { build_multiplayer_transport_config } from "../src/shared/multiplayer_transport.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -23,18 +25,25 @@ const __dirname = path.dirname(__filename);
 const args = process.argv.slice(2);
 const slot_arg = args.find((arg) => arg.startsWith("--slot="));
 const data_slot = slot_arg ? parseInt(slot_arg.split("=")[1] ?? "1", 10) : 1;
+const mode_arg = args.find((arg) => arg.startsWith("--mode="));
+const launch_mode = (mode_arg ? String(mode_arg.split("=")[1] ?? "smart") : "smart").trim().toLowerCase();
 const tai_id_arg = args.find((arg) => arg.startsWith("--tai-id="));
 const tai_id = tai_id_arg ? String(tai_id_arg.split("=")[1] ?? "").trim() : "";
+const host_arg = args.find((arg) => arg.startsWith("--host="));
+const preferred_host = host_arg ? String(host_arg.split("=")[1] ?? "").trim() : "";
 const diag_profile_arg = args.find((arg) => arg.startsWith("--diag-profile="));
 const diag_profile = (diag_profile_arg ? String(diag_profile_arg.split("=")[1] ?? "quiet") : (tai_id ? 'logs' : 'quiet')).trim().toLowerCase() === 'logs'
   ? 'logs'
   : 'quiet';
 const baseDir = path.join(__dirname, "..");
 const tai_entry = tai_id ? resolveToolAssistedInputsEntry(baseDir, tai_id) : null;
+const remote_transport = preferred_host ? build_multiplayer_transport_config({ host: preferred_host }) : null;
 
 console.log("Starting THAUMWORLD ASCII Painter...");
 console.log(`Data slot: ${data_slot}`);
 console.log(`Diagnostics profile: ${diag_profile}`);
+console.log(`Launch mode: ${launch_mode}`);
+if (preferred_host) console.log(`Preferred host: ${preferred_host}`);
 if (tai_entry) {
   console.log(`Tool Assisted Inputs: tai${tai_entry.id}`);
   console.log(`TAS test: ${tai_entry.testName}`);
@@ -77,22 +86,6 @@ function verifyLatestPointer(): void {
 }
 
 verifyLatestPointer();
-
-const sessionFilePath = path.join(process.cwd(), ".session_id");
-fs.writeFileSync(
-  sessionFilePath,
-  JSON.stringify(
-    {
-      session_id: sessionId,
-      boot_time: bootTime.toISOString(),
-      boot_timestamp: bootTime.getTime(),
-      mode: "ascii_painter",
-      version: 1,
-    },
-    null,
-    2
-  )
-);
 
 console.log(`Logging to: ${logDir}`);
 console.log(`Main log: ${mainLog}`);
@@ -145,6 +138,7 @@ updateLatestSessionState(logDir, {
 
 function spawnWithLogging(name: string, command: string, args: string[], options: Record<string, unknown> = {}): ChildProcess {
   const isWindows = process.platform === "win32";
+  const extraEnv = (options.env && typeof options.env === 'object') ? options.env as Record<string, string> : {};
   const child = spawn(command, args, {
     ...options,
     stdio: ["pipe", "pipe", "pipe"],
@@ -158,6 +152,10 @@ function spawnWithLogging(name: string, command: string, args: string[], options
       THAUM_DIAG_PROFILE: diag_profile,
       DEBUG_LEVEL: diag_profile === 'logs' ? '3' : '2',
       THAUM_STARTUP_BOOT_MODE: tai_entry ? 'tas_runtime' : 'manual_shell',
+      ...(preferred_host ? {
+        THAUM_TAI_JOIN_HOST: preferred_host,
+        THAUM_TAI_JOIN_CONNECTION_KIND: 'saved_manual',
+      } : {}),
       ...(tai_entry ? {
         THAUM_TAI_ENABLED: 'true',
         THAUM_TAI_RESET_STATE: 'true',
@@ -167,6 +165,7 @@ function spawnWithLogging(name: string, command: string, args: string[], options
         THAUM_TAI_END_DELAY_MS: String(tai_entry.endDelayMs),
         THAUM_TAI_SCRIPT_PATH: tai_entry.scriptPath,
       } : {}),
+      ...extraEnv,
     },
   });
   childProcesses.push(child);
@@ -215,6 +214,18 @@ function startPainterHostProcesses(): void {
   }
 }
 
+function writePainterHostSessionMetadata(): void {
+  const hostSessionPath = write_host_session_file(data_slot, {
+    session_id: sessionId,
+    boot_time: bootTime,
+  });
+  appendToLog(formatLogEntry("LAUNCHER", "INFO", `Painter host session metadata written ${JSON.stringify({
+    session_id: sessionId,
+    host_session_path: hostSessionPath,
+    data_slot,
+  })}`));
+}
+
 function startPainterClientProcesses(viteExists: boolean): void {
   if (!viteExists) {
     spawnWithLogging("vite", "npx", ["vite", "--config", "vite.painter.config.ts"], { env: { THAUM_BOOT_ROLE: 'client' } });
@@ -226,29 +237,61 @@ function startPainterClientProcesses(viteExists: boolean): void {
 
 async function startPainter(): Promise<void> {
   console.log("Starting painter...");
-  let hostExists = await detectLocalHost(data_slot);
+  const hostProbeOptions = remote_transport ? { apiBaseUrl: remote_transport.api_base_url } : undefined;
+  let hostExists = remote_transport ? await detectHost(data_slot, hostProbeOptions) : await detectLocalHost(data_slot);
   const viteExists = await detectPainterVite();
+  appendToLog(formatLogEntry("LAUNCHER", "INFO", `Painter launch host probe ${JSON.stringify({
+    data_slot,
+    host_exists: hostExists,
+    vite_exists: viteExists,
+  })}`));
   const existingLock = readHostLaunchLock(baseDir, data_slot);
-  if (!hostExists && existingLock) {
+  if (!remote_transport && !hostExists && existingLock) {
     const recovered = await recoverHostLaunchLock(baseDir, data_slot, { timeoutMs: 5000, probeFirst: true });
     console.log(`Host lock recovery: ${recovered.reason}${recovered.cleared ? ' (cleared stale lock)' : ''}`);
     hostExists = await detectLocalHost(data_slot);
   }
-  if (!hostExists) {
+  if (launch_mode === 'client') {
+    if (remote_transport) {
+      hostExists = await waitForHost(data_slot, 20000, hostProbeOptions);
+      console.log(`Remote host wait result while attaching: ${hostExists ? 'ready' : 'not_reachable'}`);
+    }
+  } else if (launch_mode === 'host' || !hostExists) {
     const lock = acquireHostLaunchLock(baseDir, data_slot);
     if (lock.ok) {
       console.log(`Host lock acquired at ${lock.lockPath}`);
+      appendToLog(formatLogEntry("LAUNCHER", "INFO", `Painter host owner elected ${JSON.stringify({
+        data_slot,
+        lock_path: lock.lockPath,
+        session_id: sessionId,
+      })}`));
+      writePainterHostSessionMetadata();
       startPainterHostProcesses();
       setTimeout(() => releaseHostLaunchLock(lock.lockPath), 20000);
       hostExists = await waitForLocalHost(data_slot, 20000);
       console.log(`Host wait result after start: ${hostExists ? 'ready' : 'not_reachable'}`);
     } else {
       console.log('Another launcher is starting the local host; waiting to attach...');
+      appendToLog(formatLogEntry("LAUNCHER", "INFO", `Painter attach waiting for existing host ${JSON.stringify({
+        data_slot,
+        lock_path: lock.lockPath,
+      })}`));
       hostExists = await waitForLocalHost(data_slot, 20000);
       console.log(`Host wait result while attaching: ${hostExists ? 'ready' : 'not_reachable'}`);
     }
   } else {
-    console.log('Local host detected; attaching painter client only');
+    console.log(remote_transport ? 'Remote host detected; attaching painter client only' : 'Local host detected; attaching painter client only');
+    appendToLog(formatLogEntry("LAUNCHER", "INFO", `Painter attach-only launch ${JSON.stringify({
+      data_slot,
+      session_id: sessionId,
+      host_exists: true,
+      preferred_host: preferred_host || null,
+    })}`));
+  }
+  if (launch_mode === 'host') {
+    console.log('Painter host services started');
+    console.log("Press Ctrl+C to stop");
+    return;
   }
   startPainterClientProcesses(viteExists);
   console.log(hostExists ? 'Painter multiplayer compatibility boot ready' : 'Painter host unavailable; client will fall back locally');

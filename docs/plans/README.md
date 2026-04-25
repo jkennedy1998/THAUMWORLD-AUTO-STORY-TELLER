@@ -50,6 +50,7 @@ These two plans work together. The Inventory Movement Plan is the **primary impl
   - **DEPRECATED:** Phase 6/7 UI modules (replaced by Phase 8-9 above)
 
 ### Other Active Plans
+- `docs/plans/2026_04_24_camera_target_unification_plan.md` - Engine interaction architecture plus renderer contract convergence for painter-grade interaction flow and game-grade render contracts
 - `docs/plans/2026_04_18_ascii_painter_group_architecture_plan.md` - Source-of-truth architecture for replacing painter Z-slice layers with stable authored groups
 - `docs/plans/2026_04_15_shared_controls_module_plan.md` - Shared persistent rebinding system for game and painter controls
 - `docs/plans/2026_04_15_auto_input_debugging_plan.md` - Breath-relative scripted auto-input harness for repeatable gameplay debugging
