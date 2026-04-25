@@ -13820,6 +13820,13 @@ function start_http_server(log_path: string): void {
                 const slot_raw = url.searchParams.get("slot");
                 const slot = slot_raw ? Number(slot_raw) : data_slot_number;
                 const hosted = read_painter_hosted_session(slot);
+                console.log('[HOSTED_PAINTER_SESSION]', JSON.stringify({
+                    event: 'get_request_succeeded',
+                    slot,
+                    remote_address: req.socket.remoteAddress ?? null,
+                    cwd: process.cwd(),
+                    hosted_session: hosted,
+                }));
                 res.writeHead(200, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ ok: true, hosted_session: hosted }));
                 return;
@@ -13860,6 +13867,7 @@ function start_http_server(log_path: string): void {
                         throw new Error("invalid_session_token");
                     }
                     if (req.method === "DELETE") {
+                        const existing_hosted_session = read_painter_hosted_session(slot);
                         write_painter_hosted_session(slot, null);
                         void emitBridgeMessage('PAINTER_HOSTED_SESSION_UPDATED', {
                             hosted_session: null,
@@ -13870,6 +13878,8 @@ function start_http_server(log_path: string): void {
                             method: req.method,
                             slot,
                             remote_address: req.socket.remoteAddress ?? null,
+                            clear_reason: 'delete_endpoint',
+                            previous_hosted_session: existing_hosted_session,
                             hosted_session: null,
                         }));
                         res.writeHead(200, { "Content-Type": "application/json" });
@@ -13990,8 +14000,18 @@ function start_http_server(log_path: string): void {
                     const payload = body ? JSON.parse(body) : {};
                     const slot = Number(payload?.slot ?? data_slot_number) || data_slot_number;
                     const session_token = String(payload?.session_token ?? "").trim();
+                    console.log('[HOSTED_PAINTER_SESSION]', JSON.stringify({
+                        event: 'session_end_request_received',
+                        slot,
+                        remote_address: req.socket.remoteAddress ?? null,
+                        remote_port: req.socket.remotePort ?? null,
+                        cwd: process.cwd(),
+                        reason: String(payload?.reason ?? 'host_quit_painting').trim() || 'host_quit_painting',
+                        session_token_present: Boolean(session_token),
+                    }));
                     const session = resolve_multiplayer_session_by_token(slot, session_token);
                     if (!session) throw new Error("invalid_session_token");
+                    const existing_hosted_session = read_painter_hosted_session(slot);
                     write_painter_hosted_session(slot, null);
                     void emitBridgeMessage('PAINTER_SESSION_ENDED', {
                         reason: String(payload?.reason ?? 'host_quit_painting').trim() || 'host_quit_painting',
@@ -14001,11 +14021,25 @@ function start_http_server(log_path: string): void {
                         hosted_session: null,
                         sent_at_ms: Date.now(),
                     });
+                    console.log('[HOSTED_PAINTER_SESSION]', JSON.stringify({
+                        event: 'session_end_request_succeeded',
+                        slot,
+                        remote_address: req.socket.remoteAddress ?? null,
+                        clear_reason: String(payload?.reason ?? 'host_quit_painting').trim() || 'host_quit_painting',
+                        previous_hosted_session: existing_hosted_session,
+                    }));
                     res.writeHead(200, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: true }));
                 } catch (err: any) {
                     const error = err?.message ?? "painter_session_end_failed";
                     const status = error === "invalid_session_token" ? 401 : 500;
+                    console.warn('[HOSTED_PAINTER_SESSION]', JSON.stringify({
+                        event: 'session_end_request_failed',
+                        remote_address: req.socket.remoteAddress ?? null,
+                        cwd: process.cwd(),
+                        error,
+                        status,
+                    }));
                     res.writeHead(status, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error }));
                 }
@@ -14182,8 +14216,13 @@ function start_http_server(log_path: string): void {
                 slot,
                 remote_address: req.socket.remoteAddress ?? null,
                 remote_port: req.socket.remotePort ?? null,
+                cwd: process.cwd(),
+                requested_slot_raw: slot_raw ?? null,
                 painter_document_id: hosted_painter_session?.document_id ?? null,
+                painter_display_name: hosted_painter_session?.display_name ?? null,
                 painter_file_backed: hosted_painter_session?.file_backed ?? false,
+                painter_hosted_session_updated_at: hosted_painter_session?.updated_at ?? null,
+                painter_owner_session_token_present: Boolean(hosted_painter_session?.owner_session_token),
             }));
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({
@@ -14217,10 +14256,15 @@ function start_http_server(log_path: string): void {
                 event: 'request_succeeded',
                 slot,
                 remote_address: req.socket.remoteAddress ?? null,
+                cwd: process.cwd(),
                 supports_join: true,
                 join_mode: 'local_attach_ready',
                 painter_document_id: hosted_painter_session?.document_id ?? null,
+                painter_display_name: hosted_painter_session?.display_name ?? null,
                 painter_file_backed: hosted_painter_session?.file_backed ?? false,
+                painter_hosted_session_updated_at: hosted_painter_session?.updated_at ?? null,
+                painter_owner_session_token_present: Boolean(hosted_painter_session?.owner_session_token),
+                firewall_hint: 'If remote probes never appear here, check host firewall/router/port forwarding for 8787 and 8789.',
             }));
             return;
         }
