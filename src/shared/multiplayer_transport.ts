@@ -84,9 +84,12 @@ export function normalize_join_host_input(raw: string): NormalizedJoinHost {
   if (!trimmed) {
     throw new Error('host address required');
   }
+  const normalized_raw = /^(local|localdomain)(:\d+)?$/i.test(trimmed)
+    ? trimmed.replace(/^(local|localdomain)/i, 'localhost')
+    : trimmed;
   let parsed: URL;
   try {
-    parsed = parse_host_url(trimmed);
+    parsed = parse_host_url(normalized_raw);
   } catch {
     throw new Error('invalid host address');
   }

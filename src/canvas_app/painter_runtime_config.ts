@@ -5,11 +5,19 @@ import {
   get_theme_weight_index_to_css,
 } from '../mono_ui/runtime/render_theme.js';
 import type { MultiplayerTransportConfig } from '../shared/multiplayer_transport.js';
-import { build_multiplayer_transport_config, read_browser_manual_join_host } from '../shared/multiplayer_transport.js';
+import { build_multiplayer_transport_config, normalize_join_host_input, read_browser_manual_join_host } from '../shared/multiplayer_transport.js';
 
+const painter_manual_join_host = read_browser_manual_join_host();
 const PAINTER_TRANSPORT = build_multiplayer_transport_config({
-  host: read_browser_manual_join_host() ?? undefined,
+  host: painter_manual_join_host ?? undefined,
 });
+console.log('[PAINTER_RUNTIME_CONFIG]', JSON.stringify({
+  event: 'startup_transport_resolved',
+  manual_join_host_raw: painter_manual_join_host ?? null,
+  normalized_manual_join_host: painter_manual_join_host ? normalize_join_host_input(painter_manual_join_host).normalized_host : null,
+  api_base_url: PAINTER_TRANSPORT.api_base_url,
+  bridge_ws_base_url: PAINTER_TRANSPORT.bridge_ws_base_url,
+}));
 
 function resolve_painter_data_slot(): number {
   const slot = Number((window as Window).electronAPI?.dataSlot ?? 1);
@@ -47,9 +55,15 @@ export const PAINTER_APP_CONFIG = {
 export function apply_painter_multiplayer_transport_config(transport: Pick<MultiplayerTransportConfig, 'api_base_url' | 'bridge_ws_base_url'> & { host_input?: string | null }): void {
   (PAINTER_APP_CONFIG as any).api_base_url = String(transport.api_base_url ?? '').trim() || PAINTER_APP_CONFIG.api_base_url;
   (PAINTER_APP_CONFIG as any).bridge_ws_base_url = String(transport.bridge_ws_base_url ?? '').trim() || PAINTER_APP_CONFIG.bridge_ws_base_url;
+  console.log('[PAINTER_RUNTIME_CONFIG]', JSON.stringify({
+    event: 'apply_transport',
+    host_input: String(transport.host_input ?? '').trim() || null,
+    api_base_url: (PAINTER_APP_CONFIG as any).api_base_url,
+    bridge_ws_base_url: (PAINTER_APP_CONFIG as any).bridge_ws_base_url,
+  }));
   try {
     const host_input = String(transport.host_input ?? '').trim();
-    if (host_input) window.localStorage.setItem('thaumworld_manual_join_host', host_input);
+    if (host_input && !/^local$/i.test(host_input)) window.localStorage.setItem('thaumworld_manual_join_host', host_input);
   } catch {
     // ignore persistence failures
   }
