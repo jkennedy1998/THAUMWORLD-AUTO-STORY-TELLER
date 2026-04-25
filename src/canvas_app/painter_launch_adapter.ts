@@ -11,6 +11,10 @@ import { discover_local_joinable_worlds } from './world_discovery.js';
 
 const APP_ID = 'ascii_painter' as const;
 
+function log_painter_launch(event: string, payload: Record<string, unknown> = {}): void {
+  console.log('[PAINTER_LAUNCH]', JSON.stringify({ event, slot: PAINTER_APP_CONFIG.selected_data_slot, ...payload }));
+}
+
 async function validate_painter_file(path: string): Promise<boolean> {
   const api = window.electronAPI;
   if (!api?.readFile) return false;
@@ -52,6 +56,12 @@ export function resolve_painter_tai_join_request(): TaiJoinRequest | null {
       // ignore invalid host bootstrap input here; join flow will report it
     }
   }
+  log_painter_launch('resolve_tai_join_request', {
+    preferred_connection_id: String(config.joinPreferredConnectionId ?? '').trim() || null,
+    preferred_connection_kind: String(config.joinPreferredConnectionKind ?? '').trim() || (preferred_host ? 'saved_manual' : 'local'),
+    preferred_host,
+    auto_join: config.joinAutoJoin !== false,
+  });
   return {
     preferred_connection_id: String(config.joinPreferredConnectionId ?? '').trim() || null,
     preferred_connection_kind: (String(config.joinPreferredConnectionKind ?? '').trim() || (preferred_host ? 'saved_manual' : 'local')) as TaiJoinRequest['preferred_connection_kind'],
@@ -70,6 +80,7 @@ export function create_painter_launch_adapter(): LaunchAdapter<PainterLaunchInte
       if (taiBootPath) {
         const valid = await validate_painter_file(taiBootPath);
         if (valid) {
+          log_painter_launch('validate_resume_tai_boot_file', { path: taiBootPath, resolved_intent: 'resume_file' });
           return {
             resumable: true,
             candidate: {
@@ -91,6 +102,7 @@ export function create_painter_launch_adapter(): LaunchAdapter<PainterLaunchInte
       if (!path) return { resumable: false, reason: 'No recent painting file' };
       const valid = await validate_painter_file(path);
       if (!valid) return { resumable: false, reason: 'Last painting file is missing or invalid' };
+      log_painter_launch('validate_resume_recent_file', { path, resolved_intent: 'resume_file' });
       return {
         resumable: true,
         candidate: {
@@ -107,6 +119,7 @@ export function create_painter_launch_adapter(): LaunchAdapter<PainterLaunchInte
       };
     },
     async create_new_intent(): Promise<PainterLaunchIntent> {
+      log_painter_launch('create_new_intent', { resolved_intent: 'new_document' });
       return { kind: 'new_document', slot };
     },
     async create_load_intent(): Promise<PainterLaunchIntent | null> {
@@ -119,6 +132,7 @@ export function create_painter_launch_adapter(): LaunchAdapter<PainterLaunchInte
       }).catch(() => null);
       const path = String(openResp?.filePaths?.[0] ?? '').trim();
       if (!path) return null;
+      log_painter_launch('create_load_intent', { path, resolved_intent: 'load_file' });
       return { kind: 'load_file', slot, path };
     },
     async create_join_intent(entry: LaunchJoinEntry | null): Promise<PainterLaunchIntent | null> {
@@ -127,6 +141,12 @@ export function create_painter_launch_adapter(): LaunchAdapter<PainterLaunchInte
         debug_warn('[PAINTER_LAUNCH]', 'join requested but no local hosted painting is available', { slot });
         return null;
       }
+      log_painter_launch('create_join_intent', {
+        join_target_id: entry.id,
+        document_id,
+        display_name: entry.display_name ?? entry.label ?? 'untitled',
+        resolved_intent: 'join_authoritative',
+      });
       return {
         kind: 'join_authoritative',
         slot,
@@ -164,6 +184,7 @@ export async function resolve_painter_tai_boot_intent(): Promise<PainterLaunchIn
   if (path) {
     const valid = await validate_painter_file(path);
     if (!valid) return null;
+    log_painter_launch('resolve_tai_boot_intent', { path, resolved_intent: 'resume_file' });
     return { kind: 'resume_file', slot: PAINTER_APP_CONFIG.selected_data_slot, path, persist_recent: false };
   }
   const config = (window as Window).electronAPI?.toolAssistedInputsBootConfig;
@@ -174,6 +195,7 @@ export async function resolve_painter_tai_boot_intent(): Promise<PainterLaunchIn
   );
   if (has_join_request) return null;
   if (is_tai_boot_enabled()) {
+    log_painter_launch('resolve_tai_boot_intent', { resolved_intent: 'new_document' });
     return { kind: 'new_document', slot: PAINTER_APP_CONFIG.selected_data_slot, persist_recent: false };
   }
   return null;

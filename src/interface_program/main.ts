@@ -13746,7 +13746,21 @@ function start_http_server(log_path: string): void {
                     const data = JSON.parse(body || "{}");
                     const slot = Number.isFinite(Number(data?.slot)) ? Number(data.slot) : data_slot_number;
                     const reconnect_token = typeof data?.reconnect_token === "string" ? data.reconnect_token.trim() : "";
+                    console.log('[HOST_CONNECT]', JSON.stringify({
+                        event: 'request_received',
+                        slot,
+                        remote_address: req.socket.remoteAddress ?? null,
+                        remote_port: req.socket.remotePort ?? null,
+                        reconnect_token_present: Boolean(reconnect_token),
+                    }));
                     const session = issue_or_resume_multiplayer_session(slot, reconnect_token || null);
+                    console.log('[HOST_CONNECT]', JSON.stringify({
+                        event: 'request_succeeded',
+                        slot,
+                        remote_address: req.socket.remoteAddress ?? null,
+                        connection_id: session.connection_id,
+                        boot_session_id: session.boot_session_id,
+                    }));
                     res.writeHead(200, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({
                         ok: true,
@@ -13759,6 +13773,11 @@ function start_http_server(log_path: string): void {
                         boot_session_id: session.boot_session_id,
                     }));
                 } catch (err: any) {
+                    console.warn('[HOST_CONNECT]', JSON.stringify({
+                        event: 'request_failed',
+                        remote_address: req.socket.remoteAddress ?? null,
+                        message: err?.message ?? 'connect_failed',
+                    }));
                     res.writeHead(500, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error: err?.message ?? "connect_failed" }));
                 }
@@ -14118,6 +14137,14 @@ function start_http_server(log_path: string): void {
             const slot_raw = url.searchParams.get("slot");
             const slot = slot_raw ? Number(slot_raw) : data_slot_number;
             const hosted_painter_session = read_painter_hosted_session(slot);
+            console.log('[HOST_STATUS]', JSON.stringify({
+                event: 'request_received',
+                slot,
+                remote_address: req.socket.remoteAddress ?? null,
+                remote_port: req.socket.remotePort ?? null,
+                painter_document_id: hosted_painter_session?.document_id ?? null,
+                painter_file_backed: hosted_painter_session?.file_backed ?? false,
+            }));
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({
                 ok: true,
@@ -14145,6 +14172,15 @@ function start_http_server(log_path: string): void {
                     'npc_ai',
                     'turn_manager',
                 ],
+            }));
+            console.log('[HOST_STATUS]', JSON.stringify({
+                event: 'request_succeeded',
+                slot,
+                remote_address: req.socket.remoteAddress ?? null,
+                supports_join: true,
+                join_mode: 'local_attach_ready',
+                painter_document_id: hosted_painter_session?.document_id ?? null,
+                painter_file_backed: hosted_painter_session?.file_backed ?? false,
             }));
             return;
         }

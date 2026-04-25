@@ -116,6 +116,12 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
     });
     client.on('PAINTER_SESSION_ENDED', (payload: any) => {
       debug_warn('[PAINTER_SESSION]', 'painter session ended by host', payload ?? {});
+      console.warn('[PAINTER_SESSION_ENDED]', JSON.stringify({
+        slot: options.slot,
+        payload: payload ?? null,
+        api_base_url: options.get_api_base_url(),
+        bridge_ws_base_url: options.get_bridge_ws_base_url(),
+      }));
       window.dispatchEvent(new CustomEvent('painter-session-ended', { detail: payload ?? {} }));
     });
   }
@@ -141,7 +147,22 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
         api_base_url: transport.api_base_url,
         bridge_ws_base_url: transport.bridge_ws_base_url,
       }));
+      console.log('[JOIN_CONNECT]', JSON.stringify({
+        event: 'painter_host_status_started',
+        slot: options.slot,
+        api_base_url: transport.api_base_url,
+        bridge_ws_base_url: transport.bridge_ws_base_url,
+      }));
       const host_status = await fetch_host_status(options.slot, transport);
+      console.log('[JOIN_CONNECT]', JSON.stringify({
+        event: 'painter_host_status_completed',
+        slot: options.slot,
+        api_base_url: transport.api_base_url,
+        supports_join: Boolean(host_status?.supports_join),
+        join_mode: host_status?.join_mode ?? null,
+        host_mode: host_status?.host_mode ?? null,
+        painter_document_id: host_status?.painter_document_id ?? null,
+      }));
       if (!host_status?.ok || !host_status.supports_join) {
         debug_warn('[PAINTER_SESSION]', 'local host join unavailable; using local compatibility mode', {
           slot: options.slot,
@@ -165,6 +186,13 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
         });
       }
       const reconnect_token = read_reconnect_token();
+      console.log('[JOIN_CONNECT]', JSON.stringify({
+        event: 'painter_connect_started',
+        slot: options.slot,
+        api_base_url: transport.api_base_url,
+        bridge_ws_base_url: transport.bridge_ws_base_url,
+        reconnect_token_present: Boolean(reconnect_token),
+      }));
       const response = await fetch(`${transport.api_base_url}/connect`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -172,6 +200,13 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
       });
       const data = await response.json().catch(() => null) as any;
       if (!response.ok || !data?.ok) {
+        console.warn('[JOIN_CONNECT]', JSON.stringify({
+          event: 'painter_connect_failed',
+          slot: options.slot,
+          status: response.status,
+          api_base_url: transport.api_base_url,
+          error: data?.error ?? null,
+        }));
         throw new Error(String(data?.error ?? `painter_connect_failed:${response.status}`));
       }
       const session_token = String(data?.session_token ?? '').trim();
@@ -185,6 +220,14 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
         reconnect_token_reused: next_reconnect_token === reconnect_token,
       });
       console.log('[PAINTER_SESSION_CONNECTED]', JSON.stringify({
+        slot: options.slot,
+        connection_id: String(data?.connection_id ?? '').trim() || null,
+        reconnect_token_reused: next_reconnect_token === reconnect_token,
+        api_base_url: transport.api_base_url,
+        bridge_ws_base_url: transport.bridge_ws_base_url,
+      }));
+      console.log('[JOIN_CONNECT]', JSON.stringify({
+        event: 'painter_connect_succeeded',
         slot: options.slot,
         connection_id: String(data?.connection_id ?? '').trim() || null,
         reconnect_token_reused: next_reconnect_token === reconnect_token,

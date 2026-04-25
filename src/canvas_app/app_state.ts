@@ -328,6 +328,16 @@ export function create_app_state(): AppState {
             if (multiplayer_session_bootstrap_promise) return multiplayer_session_bootstrap_promise;
         }
         const reconnect_token = get_or_create_reconnect_token();
+        console.log('[JOIN_CONNECT]', JSON.stringify({
+            event: 'connect_started',
+            slot: APP_CONFIG.selected_data_slot,
+            force,
+            api_base_url: APP_CONFIG.api_base_url,
+            bridge_ws_base_url: APP_CONFIG.bridge_ws_base_url,
+            join_target_id: (APP_CONFIG as any).join_target_id ?? null,
+            join_target_label: (APP_CONFIG as any).join_target_label ?? null,
+            reconnect_token_present: Boolean(reconnect_token),
+        }));
         multiplayer_session_bootstrap_promise = fetch(build_api_url(APP_CONFIG.api_base_url, '/connect'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -339,6 +349,13 @@ export function create_app_state(): AppState {
             const data = await res.json().catch(() => null) as any;
             if (!res.ok || !data?.ok) {
                 debug_warn('[WORLD_BOOT]', 'multiplayer session bootstrap failed', { status: res.status, data });
+                console.warn('[JOIN_CONNECT]', JSON.stringify({
+                    event: 'connect_failed',
+                    slot: APP_CONFIG.selected_data_slot,
+                    status: res.status,
+                    api_base_url: APP_CONFIG.api_base_url,
+                    error: data?.error ?? null,
+                }));
                 throw new Error(String(data?.error ?? `connect_failed:${res.status}`));
             }
             const next_session_token = String(data?.session_token ?? '').trim();
@@ -351,6 +368,14 @@ export function create_app_state(): AppState {
             (APP_CONFIG as any).reconnect_token = next_reconnect_token;
             set_session_token(next_session_token);
             debug_log('[WORLD_BOOT]', `multiplayer session ready connection=${String(data?.connection_id ?? 'unknown')}`);
+            console.log('[JOIN_CONNECT]', JSON.stringify({
+                event: 'connect_succeeded',
+                slot: APP_CONFIG.selected_data_slot,
+                api_base_url: APP_CONFIG.api_base_url,
+                bridge_ws_base_url: APP_CONFIG.bridge_ws_base_url,
+                connection_id: String(data?.connection_id ?? '').trim() || null,
+                reconnect_token_reused: next_reconnect_token === reconnect_token,
+            }));
             try {
                 window.localStorage.setItem(reconnect_token_storage_key, next_reconnect_token);
             } catch {

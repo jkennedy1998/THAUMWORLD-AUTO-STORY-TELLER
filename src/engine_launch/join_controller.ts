@@ -43,6 +43,16 @@ export function create_join_controller(args: {
     },
   };
 
+  function log_join_ui(event: string, payload: Record<string, unknown> = {}): void {
+    console.log('[JOIN_UI]', JSON.stringify({
+      event,
+      module_id: args.id,
+      slot: args.slot,
+      selected_connection_id: state.selected_connection_id,
+      ...payload,
+    }));
+  }
+
   function get_selected_connection() {
     return state.connections.find((entry) => entry.id === state.selected_connection_id) ?? null;
   }
@@ -71,10 +81,17 @@ export function create_join_controller(args: {
     if (!exists) return false;
     state = { ...state, selected_connection_id: connection_id };
     state = { ...state, status_lines: compute_status_lines() };
+    const selected = get_selected_connection();
+    log_join_ui('select_connection', {
+      connection_id,
+      connection_host: selected?.host ?? null,
+      connection_kind: selected?.kind ?? null,
+    });
     return true;
   }
 
   function close_editor(): void {
+    log_join_ui('close_editor', { mode: state.editor.mode });
     state = {
       ...state,
       editor: {
@@ -99,7 +116,8 @@ export function create_join_controller(args: {
       : ['no connection selected'];
   }
 
-  async function refresh(): Promise<void> {
+  async function refresh(reason: string = 'manual_refresh'): Promise<void> {
+    log_join_ui('refresh_started', { reason });
     state = { ...state, is_refreshing: true, status_lines: ['refreshing connections...'] };
     const directory = await build_join_directory(args.slot);
     const previous = state.selected_connection_id;
@@ -115,9 +133,16 @@ export function create_join_controller(args: {
       status_lines: [],
     };
     state = { ...state, status_lines: compute_status_lines() };
+    log_join_ui('refresh_completed', {
+      reason,
+      connection_count: state.connections.length,
+      online_count: state.connections.filter((entry) => state.probes_by_connection_id[entry.id]?.status === 'online').length,
+      status_lines: state.status_lines,
+    });
   }
 
   function open_editor(mode: 'add' | 'rename' | 'edit_host'): void {
+    log_join_ui('open_editor', { mode, selected_connection_id: state.selected_connection_id });
     const selected = get_selected_connection();
     state = {
       ...state,
@@ -137,16 +162,35 @@ export function create_join_controller(args: {
     };
   }
 
-  async function join_selected(): Promise<void> {
+  async function join_selected(trigger: string = 'manual_join_button'): Promise<void> {
     const connection = get_selected_connection();
     if (!connection) {
       state = { ...state, status_lines: ['select a connection to join'] };
+      log_join_ui('join_requested_without_selection', { trigger });
       return;
     }
     const probe = state.probes_by_connection_id[connection.id] ?? null;
+    const selection = build_join_selection(connection, probe, args.slot);
+    log_join_ui('join_requested', {
+      trigger,
+      connection_id: connection.id,
+      connection_host: connection.host,
+      connection_kind: connection.kind,
+      probe_status: probe?.status ?? null,
+      supports_join: Boolean(probe?.supports_join),
+      api_base_url: selection.transport.api_base_url,
+      bridge_ws_base_url: selection.transport.bridge_ws_base_url,
+    });
     try {
-      await args.on_join_selection(build_join_selection(connection, probe, args.slot));
+      await args.on_join_selection(selection);
+      log_join_ui('join_completed', { trigger, connection_id: connection.id, connection_host: connection.host });
     } catch (err) {
+      log_join_ui('join_failed', {
+        trigger,
+        connection_id: connection.id,
+        connection_host: connection.host,
+        message: err instanceof Error ? err.message : String(err),
+      });
       state = {
         ...state,
         status_lines: [
@@ -180,7 +224,7 @@ export function create_join_controller(args: {
   }
 
   async function apply_tai_join_request(request: TaiJoinRequest): Promise<TaiJoinResolution> {
-    await refresh();
+    await refresh('tai_request');
     const preferred_id = String(request.preferred_connection_id ?? '').trim();
     const preferred_host = String(request.preferred_host ?? '').trim();
     const preferred_kind = request.preferred_connection_kind ?? null;
@@ -229,7 +273,7 @@ export function create_join_controller(args: {
       reason: reason ?? null,
     }));
     if (request.auto_join && can_join) {
-      await join_selected();
+      await join_selected('tai_auto_join');
     }
     return {
       selected_connection_id,
@@ -251,29 +295,39 @@ export function create_join_controller(args: {
   async function submit_editor(): Promise<void> {
     try {
       const editor = state.editor;
+      log_join_ui('submit_editor', {
+        mode: editor.mode,
+        connection_id: editor.connection_id,
+        draft_name: editor.draft_name,
+        draft_host: editor.draft_host,
+      });
       if (editor.mode === 'add') {
         const saved = save_manual_connection(editor.draft_host, editor.draft_name);
         close_editor();
-        await refresh();
+        await refresh('editor_add_saved');
         state = { ...state, selected_connection_id: saved.id, status_lines: [`saved ${saved.name}`, `probing ${saved.host}...`] };
-        await refresh();
+        log_join_ui('editor_add_saved', { connection_id: saved.id, connection_host: saved.host });
+        await refresh('editor_probe_saved_host');
         return;
       }
       if (!editor.connection_id) throw new Error('connection_not_selected');
       if (editor.mode === 'rename') {
         const saved = rename_manual_connection(editor.connection_id, editor.draft_name);
         close_editor();
-        await refresh();
+        await refresh('editor_rename_saved');
         state = { ...state, selected_connection_id: saved.id, status_lines: [`renamed to ${saved.name}`] };
+        log_join_ui('editor_rename_saved', { connection_id: saved.id, connection_name: saved.name });
         return;
       }
       if (editor.mode === 'edit_host') {
         const saved = update_manual_connection_host(editor.connection_id, editor.draft_host);
         close_editor();
-        await refresh();
+        await refresh('editor_host_updated');
         state = { ...state, selected_connection_id: saved.id, status_lines: [`updated host to ${saved.host}`] };
+        log_join_ui('editor_host_updated', { connection_id: saved.id, connection_host: saved.host });
       }
     } catch (err) {
+      log_join_ui('submit_editor_failed', { message: err instanceof Error ? err.message : String(err) });
       state = {
         ...state,
         editor: {
@@ -288,11 +342,13 @@ export function create_join_controller(args: {
     const selected = get_selected_connection();
     if (!selected || !is_connection_removable(selected.kind)) {
       state = { ...state, status_lines: ['selected connection cannot be forgotten'] };
+      log_join_ui('forget_rejected', { selected_connection_id: selected?.id ?? null });
       return;
     }
+    log_join_ui('forget_selected', { connection_id: selected.id, connection_host: selected.host });
     forget_manual_connection(selected.id);
     state = { ...state, status_lines: [`forgot ${selected.name}`] };
-    await refresh();
+    await refresh('forget_selected');
   }
 
   const module = make_join_directory_module({
@@ -308,7 +364,7 @@ export function create_join_controller(args: {
     on_select_connection: (connection_id) => {
       void select_connection(connection_id);
     },
-    on_join_selected: () => { void join_selected(); },
+    on_join_selected: () => { void join_selected('manual_join_button'); },
     on_begin_add: () => open_editor('add'),
     on_begin_rename_selected: () => {
       const selected = get_selected_connection();
@@ -329,19 +385,26 @@ export function create_join_controller(args: {
     on_forget_selected: () => { void forget_selected(); },
     on_set_editor_field: (field) => {
       state = { ...state, editor: { ...state.editor, active_field: field } };
+      log_join_ui('editor_field_selected', { field });
     },
     on_cycle_editor_field: () => {
       state = { ...state, editor: { ...state.editor, active_field: state.editor.active_field === 'name' ? 'host' : 'name' } };
+      log_join_ui('editor_field_cycled', { field: state.editor.active_field });
     },
     on_submit_editor: () => { void submit_editor(); },
     on_cancel_editor: () => close_editor(),
-    on_back: args.on_back,
-    on_refresh: () => { void refresh(); },
+    on_back: () => {
+      log_join_ui('back_pressed');
+      args.on_back();
+    },
+    on_refresh: () => { void refresh('manual_refresh_button'); },
     on_editor_name_change: (next_value) => {
       state = { ...state, editor: { ...state.editor, draft_name: next_value, error: null } };
+      log_join_ui('editor_name_changed', { length: next_value.length });
     },
     on_editor_host_change: (next_value) => {
       state = { ...state, editor: { ...state.editor, draft_host: next_value, error: null } };
+      log_join_ui('editor_host_changed', { host: next_value });
     },
     on_move: args.on_move,
   });

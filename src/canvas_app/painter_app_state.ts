@@ -2718,6 +2718,13 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     });
 
     schedule_auto_save();
+    console.log('[PAINTER_LAUNCH]', JSON.stringify({
+      event: 'sync_hosted_document_authority_after_load',
+      loaded_path: loadedPath ?? null,
+      current_file_path,
+      current_filename,
+      current_session_role,
+    }));
     await sync_hosted_document_authority(exportCurrentPainterDocument(), loadedPath ? 'host_load_file' : 'host_load_memory');
   }
 
@@ -4696,6 +4703,16 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   }
 
   async function start_from_launch_intent(intent: PainterLaunchIntent): Promise<void> {
+    console.log('[PAINTER_LAUNCH]', JSON.stringify({
+      event: 'start_from_launch_intent',
+      intent_kind: intent.kind,
+      slot: PAINTER_APP_CONFIG.selected_data_slot,
+      path: 'path' in intent ? intent.path : null,
+      document_id: 'document_id' in intent ? intent.document_id : null,
+      join_target_id: 'join_target_id' in intent ? intent.join_target_id : null,
+      api_base_url: 'api_base_url' in intent ? intent.api_base_url ?? null : null,
+      bridge_ws_base_url: 'bridge_ws_base_url' in intent ? intent.bridge_ws_base_url ?? null : null,
+    }));
     const previousSuppress = suppress_recent_file_persistence;
     suppress_recent_file_persistence = intent.persist_recent === false;
     try {
@@ -4707,6 +4724,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
           });
         }
         current_session_role = 'participant';
+        console.log('[PAINTER_LAUNCH]', JSON.stringify({ event: 'launch_role_assigned', intent_kind: intent.kind, role: current_session_role, document_id: intent.document_id }));
         current_filename = intent.display_name;
         const sync_state = await painter_sync.bootstrap(true, intent.document_id);
         painterImportant('launch intent bootstrapped multiplayer state', {
@@ -4731,6 +4749,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         lifecycle: sync_state.lifecycle,
       });
       current_session_role = 'host';
+      console.log('[PAINTER_LAUNCH]', JSON.stringify({ event: 'launch_role_assigned', intent_kind: intent.kind, role: current_session_role }));
       if (intent.kind === 'new_document') {
         await new_file();
         return;
