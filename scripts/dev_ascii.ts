@@ -153,6 +153,7 @@ function spawnWithLogging(name: string, command: string, args: string[], options
       THAUM_DIAG_PROFILE: diag_profile,
       DEBUG_LEVEL: diag_profile === 'logs' ? '3' : '2',
       THAUM_STARTUP_BOOT_MODE: tai_entry ? 'tas_runtime' : 'manual_shell',
+      THAUM_LAUNCH_MODE: launch_mode,
       ...(preferred_host ? {
         THAUM_JOIN_PREFERRED_HOST: preferred_host,
       } : {}),
@@ -240,10 +241,10 @@ function startPainterClientProcesses(viteExists: boolean, bootRole: 'host' | 'cl
     startup_join_auto_open: startupJoinAutoOpen,
   })}`));
   if (!viteExists) {
-    spawnWithLogging("vite", "npx", ["vite", "--config", "vite.painter.config.ts"], { env: { THAUM_BOOT_ROLE: bootRole, THAUM_JOIN_AUTO_OPEN: startupJoinAutoOpen ? 'true' : 'false' } });
+    spawnWithLogging("vite", "npx", ["vite", "--config", "vite.painter.config.ts"], { env: { THAUM_BOOT_ROLE: bootRole, THAUM_LAUNCH_MODE: launch_mode, THAUM_JOIN_AUTO_OPEN: startupJoinAutoOpen ? 'true' : 'false' } });
   }
   setTimeout(() => {
-    spawnWithLogging("electron", "npx", ["electron", "."], { env: { THAUM_BOOT_ROLE: bootRole, THAUM_JOIN_AUTO_OPEN: startupJoinAutoOpen ? 'true' : 'false' } });
+    spawnWithLogging("electron", "npx", ["electron", "."], { env: { THAUM_BOOT_ROLE: bootRole, THAUM_LAUNCH_MODE: launch_mode, THAUM_JOIN_AUTO_OPEN: startupJoinAutoOpen ? 'true' : 'false' } });
   }, viteExists ? 1000 : 5000);
 }
 

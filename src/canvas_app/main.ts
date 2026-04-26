@@ -19,6 +19,7 @@ import type { ToolAssistedInputsJoinSnapshot } from '../mono_ui/runtime/automati
 // Detect if we're in painter mode (set by preload script before page loads)
 const IS_PAINTER_MODE = (window as any).electronAPI?.appMode === 'ascii_painter';
 const PAINTER_BOOT_ROLE = String((window as any).electronAPI?.bootRole ?? '').trim().toLowerCase();
+const PAINTER_LAUNCH_MODE = String((window as any).electronAPI?.launchMode ?? '').trim().toLowerCase();
 const PAINTER_STARTUP_JOIN_CONFIG = (window as any).electronAPI?.startupJoinConfig ?? {};
 
 const el = document.getElementById('mono_canvas') as HTMLCanvasElement | null;
@@ -135,7 +136,7 @@ if (IS_PAINTER_MODE) {
         adapter: create_painter_launch_adapter(),
         on_launch_intent: launchPainterIntent,
         on_join_requested: async () => {
-            if (PAINTER_BOOT_ROLE === 'host') {
+            if (PAINTER_LAUNCH_MODE === 'host-only') {
                 console.warn('[PAINTER_JOIN_MODE]', JSON.stringify({ event: 'join_ui_blocked_for_host_role', boot_role: PAINTER_BOOT_ROLE }));
                 return;
             }
@@ -294,6 +295,7 @@ if (IS_PAINTER_MODE && launch_controller) {
                 console.log('[PAINTER_JOIN_STARTUP]', JSON.stringify({
                     event: 'manual_startup_join_opened',
                     boot_role: PAINTER_BOOT_ROLE,
+                    launch_mode: PAINTER_LAUNCH_MODE || null,
                     preferred_host: preferredStartupHost,
                     selected,
                     selected_connection_id: painter_join_controller.get_selected_connection_id(),

@@ -7,6 +7,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 const appMode = process.env.THAUM_APP_MODE || 'game';
 const startupBootMode = process.env.THAUM_STARTUP_BOOT_MODE || 'manual_shell';
 const bootRole = process.env.THAUM_BOOT_ROLE || '';
+const launchMode = process.env.THAUM_LAUNCH_MODE || '';
 const dataSlot = Number(process.env.DATA_SLOT || 1) || 1;
 const clientInstanceId = process.env.THAUM_CLIENT_INSTANCE_ID || '';
 const startupJoinConfig = {
@@ -59,6 +60,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   clientInstanceId,
   startupBootMode,
   bootRole,
+  launchMode,
   startupJoinConfig,
   toolAssistedInputsBootConfig,
 

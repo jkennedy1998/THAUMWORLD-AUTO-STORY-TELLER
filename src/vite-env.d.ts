@@ -40,6 +40,7 @@ interface ElectronAPI {
   clientInstanceId?: string;
   startupBootMode?: 'manual_shell' | 'direct_runtime' | 'tas_runtime' | string;
   bootRole?: string;
+  launchMode?: string;
   startupJoinConfig?: {
     preferredHost?: string;
     autoOpen?: boolean;
