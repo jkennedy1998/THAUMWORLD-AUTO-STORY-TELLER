@@ -93,6 +93,7 @@ import { get_character_id_from_ref, get_character_role_from_ref } from "../share
 import { assign_controlled_actor_ref_for_client_session, get_claiming_client_session_id_for_actor_ref, get_controlled_actor_ref_for_client_session, list_controlled_actor_claims, release_controlled_actor_claim_by_actor_ref, release_controlled_actor_ref_for_client_session, set_controlled_actor_ref_for_client_session, touch_controlled_actor_ref_for_client_session } from "../shared/session_control.js";
 import { apply_painter_group_structure_command, apply_painter_group_voxel_command, get_or_create_painter_document_snapshot, redo_painter_group_command, replace_painter_document_snapshot, undo_painter_group_command } from "../shared/painter_document_store.js";
 import { read_painter_hosted_session, write_painter_hosted_session } from "../shared/painter_hosted_session_store.js";
+import { clear_painter_selection_slot, list_painter_selection_channels, set_painter_selection_channel } from "../shared/painter_selection_presence_store.js";
 import { normalize_place_actor_presence, normalize_place_npc_presence, project_public_place_actor_presence, project_public_place_npc_presence } from "../shared/place_character_presence.js";
 import { build_actor_owner_inventory_view, build_npc_owner_inventory_view } from "../inventory_surfaces/actor_owner_view.js";
 import { build_container_owner_inventory_view } from "../inventory_surfaces/container_owner_view.js";
@@ -13841,6 +13842,7 @@ function start_http_server(log_path: string): void {
                     revision: snapshot.revision,
                     updated_at: snapshot.updated_at,
                     snapshot: snapshot.snapshot,
+                    selection_channels: list_painter_selection_channels(slot, snapshot.document_id),
                 }));
             } catch (err: any) {
                 const error = err?.message ?? "painter_document_bootstrap_failed";
@@ -14049,6 +14051,7 @@ function start_http_server(log_path: string): void {
                     if (!session) throw new Error("invalid_session_token");
                     const existing_hosted_session = read_painter_hosted_session(slot);
                     write_painter_hosted_session(slot, null);
+                    clear_painter_selection_slot(slot);
                     void emitBridgeMessage('PAINTER_SESSION_ENDED', {
                         reason: String(payload?.reason ?? 'host_quit_painting').trim() || 'host_quit_painting',
                         sent_at_ms: Date.now(),
@@ -14076,6 +14079,58 @@ function start_http_server(log_path: string): void {
                         error,
                         status,
                     }));
+                    res.writeHead(status, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: false, error }));
+                }
+            });
+            return;
+        }
+
+        if (url.pathname === "/api/painter/selection") {
+            if (req.method !== "POST") {
+                res.writeHead(405, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+                return;
+            }
+            let body = "";
+            req.on("data", (chunk) => { body += chunk; });
+            req.on("end", () => {
+                try {
+                    const data = JSON.parse(body || "{}");
+                    const slot = Number.isFinite(Number(data?.slot)) ? Number(data.slot) : data_slot_number;
+                    const context = resolve_multiplayer_request_context(slot, { session_token: data?.session_token });
+                    const connection_id = String(context.connection_id ?? '').trim();
+                    if (!connection_id) throw new Error("invalid_session_token");
+                    const document_id = String(data?.document_id ?? "default_canvas").trim() || "default_canvas";
+                    const snapshot = set_painter_selection_channel(slot, document_id, {
+                        connection_id,
+                        color_rgb: {
+                            r: Math.max(0, Math.min(255, Math.floor(Number(data?.color_rgb?.r ?? 0)) || 0)),
+                            g: Math.max(0, Math.min(255, Math.floor(Number(data?.color_rgb?.g ?? 0)) || 0)),
+                            b: Math.max(0, Math.min(255, Math.floor(Number(data?.color_rgb?.b ?? 0)) || 0)),
+                        },
+                        cells: Array.isArray(data?.cells)
+                            ? data.cells.map((cell: any) => ({
+                                x: Math.floor(Number(cell?.x ?? 0)),
+                                y: Math.floor(Number(cell?.y ?? 0)),
+                                z: Math.floor(Number(cell?.z ?? 0)),
+                            }))
+                            : [],
+                        updated_at_ms: Date.now(),
+                    });
+                    void emitBridgeMessage('PAINTER_SELECTION_UPDATED', {
+                        document_id,
+                        connection_id: snapshot.connection_id,
+                        color_rgb: snapshot.color_rgb,
+                        cells: snapshot.cells,
+                        updated_at_ms: snapshot.updated_at_ms,
+                        sent_at_ms: Date.now(),
+                    });
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true, selection_channel: snapshot }));
+                } catch (err: any) {
+                    const error = err?.message ?? "painter_selection_update_failed";
+                    const status = error === "invalid_session_token" ? 401 : 500;
                     res.writeHead(status, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: false, error }));
                 }

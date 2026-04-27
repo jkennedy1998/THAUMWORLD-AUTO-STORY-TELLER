@@ -12,10 +12,10 @@
 import type { Canvas, Module, Rect, Rgb, PointerEvent, DragEvent, WheelEvent, Cell } from '../types.js';
 import type { Grid, Brush, ToolType, GridCell } from '../../ascii_painter/types.js';
 import { createGrid, getCell, setCell } from '../../ascii_painter/types.js';
-import { drawCell, drawLine, eraseCell, applyTool, sampleCell, previewLine, previewRectStroke, previewRectFill } from '../../ascii_painter/tools.js';
+import { drawCell, drawLine, eraseCell, sampleCell, previewLine, previewRectStroke, previewRectFill } from '../../ascii_painter/tools.js';
 import { has_any_edit_channel, resolve_edit_channels_with_modifiers, type EditChannels } from '../../ascii_painter/edit_mask.js';
 import { logGroupCellAction, addToGroupBatch, type HistoryManager, type CellChange } from '../../ascii_painter/history.js';
-import { get_brightest_indexed_rgb, get_color_by_name, get_darkest_indexed_rgb } from '../colors.js';
+import { get_color_by_name } from '../colors.js';
 import { draw_module_border, PANEL_BORDER_PRESETS } from '../module_borders.js';
 import type { SelectionBitmap, SelectionMode } from '../../ascii_painter/selection.js';
 import { createSelectionBitmap, selectRect, deselectRect, selectPolygon, isSelected, hasSelection, getSelectionBounds, isSelectionBorder, clearSelection, selectAll, invertSelection, applySelectionMode } from '../../ascii_painter/selection.js';
@@ -31,7 +31,7 @@ import type { CameraConfig } from '../../ascii_painter/voxel_space.js';
 import type { CameraAnchor } from '../runtime/camera_anchor_runtime.js';
 import { get_principal_view_plane_axis, make_place_view_state, map_screen_direction_to_world_delta, type PlaceViewState } from '../runtime/place_view_projection.js';
 import { diag_log } from '../../shared/diagnostics.js';
-import { get_line_voxels_3d } from '../../shared/painter_tools.js';
+import { cells_match_edit_channels, get_flood_fill_voxels, get_line_voxels_3d } from '../../shared/painter_tools.js';
 import {
   order_resolved_targets,
   type OrderedResolvedTargets,
@@ -57,13 +57,21 @@ export type PainterCanvasOptions = {
   get_active_group_id: () => string | null;
   get_world_cell: (world: { x: number; y: number; z: number }) => GridCell;
   get_active_group_world_cell?: (world: { x: number; y: number; z: number }) => GridCell;
+  get_active_group_world_voxels?: () => Array<{ x: number; y: number; z: number; cell: GridCell }>;
+  get_active_group_world_bounds?: () => { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number } | null;
   get_active_group_locked?: () => boolean;
   get_current_tool: () => ToolType;
   get_preview_brush?: () => Brush;
   get_brush_for_button?: (button: number) => Brush;
   get_brush_edit_channels_for_button?: (button: number) => EditChannels;
+  get_bucket_select_channels_for_button?: (button: number) => EditChannels;
   get_brush_size: () => number;
   get_brush_size_for_button?: (button: number) => number;
+  get_bucket_continuous?: () => boolean;
+  get_bucket_same_depth_only?: () => boolean;
+  get_bucket_allow_diagonal?: () => boolean;
+  get_rect_select_all_depths?: () => boolean;
+  get_lasso_select_all_depths?: () => boolean;
   get_space_replace: () => boolean;
   get_paste_space_replace: () => boolean;
   get_selection_mode: () => SelectionMode;
@@ -85,6 +93,11 @@ export type PainterCanvasOptions = {
   history: HistoryManager;
   // Selection callbacks
   on_selection_change?: (args?: { depthMin?: number; depthMax?: number; kind?: 'rect' | 'lasso' | 'clear' | 'select_all' | 'invert' | 'other' }) => void;
+  on_world_selection_change?: (args: {
+    kind: 'rect' | 'lasso' | 'clear' | 'select_all' | 'invert';
+    mode?: SelectionMode;
+    cells?: Array<{ x: number; y: number; z: number }>;
+  }) => void;
   on_copy_data?: (data: string) => void | Promise<void>;
   get_clipboard_data?: () => string | null | Promise<string | null>;
   get_world_copy_data?: () => string | null;
@@ -109,7 +122,6 @@ export type PainterCanvasOptions = {
   get_grid_point_for_world?: (world: { x: number; y: number; z: number }) => { x: number; y: number } | null;
   get_view_state?: () => PlaceViewState;
   get_focus_content_bounds?: () => { min_x: number; min_y: number; max_x: number; max_y: number } | null;
-  get_selection_overlay_cells?: () => Array<{ x: number; y: number; char: string; weight_index: number }>;
   get_selection_status?: () => string | null;
   on_history_applied?: () => void;
   on_undo_request: () => string | null;
@@ -203,6 +215,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     const button = getDragButton();
     const base_channels = opts.get_brush_edit_channels_for_button?.(button) ?? { char: true, color: true, weight: true };
     return resolve_edit_channels_with_modifiers(base_channels, modifiers ?? { shift: false, ctrl: false, alt: false, meta: false });
+  }
+
+  function getBucketSelectChannelsForButton(button: number): EditChannels {
+    return opts.get_bucket_select_channels_for_button?.(button === 2 ? 2 : 0) ?? { char: true, color: true, weight: true };
   }
 
   function getPreviewBrush(): Brush {
@@ -370,6 +386,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   let selection_bitmap = createSelectionBitmap(opts.grid.width, opts.grid.height);
   let is_selecting = false;
   let selection_drag_start: { x: number; y: number } | null = null;
+  let selection_drag_start_world: { x: number; y: number; z: number } | null = null;
+  let selection_drag_end_world: { x: number; y: number; z: number } | null = null;
   let selection_drag_start_plane: number | null = null;
   let selection_drag_end_plane: number | null = null;
   let is_lasso_selecting = false;
@@ -1138,24 +1156,270 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   function trackChange(x: number, y: number, oldCell: GridCell, newCell: GridCell): boolean {
     const world = getWorldPointForEditPlane(x, y);
     if (!world) return false;
+    return trackWorldChange(world, oldCell, newCell, { x, y });
+  }
+
+  function trackWorldChange(world: { x: number; y: number; z: number }, oldCell: GridCell, newCell: GridCell, grid?: { x: number; y: number } | null): boolean {
     const group_id = requireActiveGroupId();
     const existingIndex = pending_changes.findIndex(c => c.worldX === world.x && c.worldY === world.y && c.worldZ === world.z);
     if (existingIndex >= 0 && pending_changes[existingIndex]) {
       // Update newCell but keep original oldCell
       pending_changes[existingIndex].newCell = newCell;
     } else {
-      pending_changes.push({ x, y, worldX: world.x, worldY: world.y, worldZ: world.z, group_id, oldCell: { ...oldCell }, newCell: { ...newCell } });
+      const gridPoint = grid ?? opts.get_grid_point_for_world?.(world) ?? null;
+      pending_changes.push({
+        x: gridPoint?.x ?? 0,
+        y: gridPoint?.y ?? 0,
+        worldX: world.x,
+        worldY: world.y,
+        worldZ: world.z,
+        group_id,
+        oldCell: { ...oldCell },
+        newCell: { ...newCell },
+      });
     }
     
     // Also add to batch if batching
     if (is_drawing_batch) {
-      addToGroupBatch(opts.history, { x, y, worldX: world.x, worldY: world.y, worldZ: world.z, group_id, oldCell, newCell });
+      const gridPoint = grid ?? opts.get_grid_point_for_world?.(world) ?? null;
+      addToGroupBatch(opts.history, {
+        x: gridPoint?.x ?? 0,
+        y: gridPoint?.y ?? 0,
+        worldX: world.x,
+        worldY: world.y,
+        worldZ: world.z,
+        group_id,
+        oldCell,
+        newCell,
+      });
     }
     return true;
   }
 
   function makeEmptyCell(): GridCell {
     return { char: ' ', rgb: { r: 0, g: 0, b: 0 }, weight_index: 0 };
+  }
+
+  function isEmptyCell(cell: GridCell | null | undefined): boolean {
+    return !cell || cell.char === ' ';
+  }
+
+  function cellsEqual(a: GridCell, b: GridCell): boolean {
+    return a.char === b.char
+      && a.rgb.r === b.rgb.r
+      && a.rgb.g === b.rgb.g
+      && a.rgb.b === b.rgb.b
+      && a.weight_index === b.weight_index;
+  }
+
+  function applyBrushEditToCell(cell: GridCell, brush: Brush, channels: EditChannels): GridCell {
+    const next: GridCell = { char: cell.char, rgb: { ...cell.rgb }, weight_index: cell.weight_index };
+    if (channels.char && channels.color && channels.weight) {
+      return { char: brush.char, rgb: { ...brush.rgb }, weight_index: brush.weight_index };
+    }
+    if (channels.char) next.char = brush.char;
+    if (channels.color) next.rgb = { ...brush.rgb };
+    if (channels.weight) next.weight_index = brush.weight_index;
+    return next;
+  }
+
+  function applyEraserEditToCell(cell: GridCell, channels: EditChannels): GridCell {
+    const next: GridCell = { char: cell.char, rgb: { ...cell.rgb }, weight_index: cell.weight_index };
+    if (channels.char) next.char = ' ';
+    if (channels.color) next.rgb = { r: 0, g: 0, b: 0 };
+    if (channels.weight) next.weight_index = 0;
+    return next;
+  }
+
+  function sampleActiveGroupWorldCell(world: { x: number; y: number; z: number }): GridCell {
+    const cell = opts.get_active_group_world_cell?.(world) ?? opts.get_world_cell(world);
+    return cell
+      ? { char: cell.char, rgb: { ...cell.rgb }, weight_index: cell.weight_index }
+      : makeEmptyCell();
+  }
+
+  function getActiveViewPlaneAxis(): 'x' | 'y' | 'z' {
+    const view = opts.get_view_state?.() ?? make_place_view_state('top', 0);
+    return get_principal_view_plane_axis(view.principal_view);
+  }
+
+  function getActiveGroupWorldVoxels(): Array<{ x: number; y: number; z: number; cell: GridCell }> {
+    return (opts.get_active_group_world_voxels?.() ?? []).map((entry) => ({
+      x: entry.x,
+      y: entry.y,
+      z: entry.z,
+      cell: { char: entry.cell.char, rgb: { ...entry.cell.rgb }, weight_index: entry.cell.weight_index },
+    }));
+  }
+
+  function getActiveGroupWorldBounds(): { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number } | null {
+    return opts.get_active_group_world_bounds?.() ?? null;
+  }
+
+  function getBoundsAxisMin(bounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number }, axis: 'x' | 'y' | 'z'): number {
+    return axis === 'x' ? bounds.minX : axis === 'y' ? bounds.minY : bounds.minZ;
+  }
+
+  function getBoundsAxisMax(bounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number }, axis: 'x' | 'y' | 'z'): number {
+    return axis === 'x' ? bounds.maxX : axis === 'y' ? bounds.maxY : bounds.maxZ;
+  }
+
+  function isWorldInsideBounds(world: { x: number; y: number; z: number }, bounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number }): boolean {
+    return world.x >= bounds.minX
+      && world.x <= bounds.maxX
+      && world.y >= bounds.minY
+      && world.y <= bounds.maxY
+      && world.z >= bounds.minZ
+      && world.z <= bounds.maxZ;
+  }
+
+  function enumerateBoundedWorldDomain(bounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number }): Array<{ x: number; y: number; z: number }> {
+    const out: Array<{ x: number; y: number; z: number }> = [];
+    for (let z = bounds.minZ; z <= bounds.maxZ; z += 1) {
+      for (let y = bounds.minY; y <= bounds.maxY; y += 1) {
+        for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
+          out.push({ x, y, z });
+        }
+      }
+    }
+    return out;
+  }
+
+  function buildSelectionWorldCellsFromBitmap(bitmap: SelectionBitmap, args: { depthMin: number; depthMax: number }): Array<{ x: number; y: number; z: number }> {
+    const out: Array<{ x: number; y: number; z: number }> = [];
+    const seen = new Set<string>();
+    const bounds = getActiveGroupWorldBounds();
+    if (!bounds) return out;
+    for (let y = 0; y < bitmap.height; y += 1) {
+      for (let x = 0; x < bitmap.width; x += 1) {
+        if (!isSelected(bitmap, x, y)) continue;
+        for (let plane = Math.min(args.depthMin, args.depthMax); plane <= Math.max(args.depthMin, args.depthMax); plane += 1) {
+          const world = opts.get_world_point_for_grid_on_plane?.(x, y, plane) ?? null;
+          if (!world || !isWorldInsideBounds(world, bounds)) continue;
+          const key = worldKey(world);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          out.push({ x: world.x, y: world.y, z: world.z });
+        }
+      }
+    }
+    return out;
+  }
+
+  function buildRectSelectionWorldCells(startWorld: { x: number; y: number; z: number }, endWorld: { x: number; y: number; z: number }, allDepths: boolean): Array<{ x: number; y: number; z: number }> {
+    const bounds = getActiveGroupWorldBounds();
+    if (!bounds) return [];
+    const axis = getActiveViewPlaneAxis();
+    let minX = Math.min(startWorld.x, endWorld.x);
+    let maxX = Math.max(startWorld.x, endWorld.x);
+    let minY = Math.min(startWorld.y, endWorld.y);
+    let maxY = Math.max(startWorld.y, endWorld.y);
+    let minZ = Math.min(startWorld.z, endWorld.z);
+    let maxZ = Math.max(startWorld.z, endWorld.z);
+    if (allDepths) {
+      if (axis === 'x') {
+        minX = bounds.minX;
+        maxX = bounds.maxX;
+      } else if (axis === 'y') {
+        minY = bounds.minY;
+        maxY = bounds.maxY;
+      } else {
+        minZ = bounds.minZ;
+        maxZ = bounds.maxZ;
+      }
+    }
+    minX = Math.max(minX, bounds.minX);
+    maxX = Math.min(maxX, bounds.maxX);
+    minY = Math.max(minY, bounds.minY);
+    maxY = Math.min(maxY, bounds.maxY);
+    minZ = Math.max(minZ, bounds.minZ);
+    maxZ = Math.min(maxZ, bounds.maxZ);
+    const out: Array<{ x: number; y: number; z: number }> = [];
+    for (let z = minZ; z <= maxZ; z += 1) {
+      for (let y = minY; y <= maxY; y += 1) {
+        for (let x = minX; x <= maxX; x += 1) {
+          out.push({ x, y, z });
+        }
+      }
+    }
+    return out;
+  }
+
+  function emitWorldSelectionChange(args: { kind: 'rect' | 'lasso' | 'clear' | 'select_all' | 'invert'; mode?: SelectionMode; cells?: Array<{ x: number; y: number; z: number }> }): void {
+    opts.on_world_selection_change?.(args);
+  }
+
+  function resetSelectionDragState(): void {
+    is_selecting = false;
+    selection_drag_start = null;
+    selection_drag_start_world = null;
+    selection_drag_end_world = null;
+    selection_drag_start_plane = null;
+    selection_drag_end_plane = null;
+    interaction_current_world = null;
+    interaction_end_world = null;
+    opts.preview_points = [];
+  }
+
+  function getSelectionDomainPlaneRange(allDepths: boolean): { depthMin: number; depthMax: number } | null {
+    const axis = getActiveViewPlaneAxis();
+    const bounds = getActiveGroupWorldBounds();
+    if (allDepths && bounds) {
+      return {
+        depthMin: getBoundsAxisMin(bounds, axis),
+        depthMax: getBoundsAxisMax(bounds, axis),
+      };
+    }
+    return getSelectionPlaneRange();
+  }
+
+  function formatSelectionVolumeLabel(width: number, height: number, depthMin?: number | null, depthMax?: number | null): string {
+    const safeMin = typeof depthMin === 'number' ? depthMin : 0;
+    const safeMax = typeof depthMax === 'number' ? depthMax : safeMin;
+    const depth = Math.abs(safeMax - safeMin) + 1;
+    return `Selecting: ${width}x${height}x${depth} DEPTH:${safeMin}->${safeMax}`;
+  }
+
+  function applyBucketFill(button: number, grid_x: number, grid_y: number, modifiers: { shift: boolean; ctrl: boolean; alt: boolean; meta: boolean }): number {
+    const brush = getBrushForButton(button);
+    const editChannels = resolve_edit_channels_with_modifiers(
+      opts.get_brush_edit_channels_for_button?.(button === 2 ? 2 : 0) ?? { char: true, color: true, weight: true },
+      modifiers,
+    );
+    if (!has_any_edit_channel(editChannels)) return 0;
+    const startWorld = getWorldPointForEditPlane(grid_x, grid_y, opts.get_focus_world_plane?.() ?? opts.get_selected_z());
+    if (!startWorld) return 0;
+    const bounds = getActiveGroupWorldBounds();
+    if (!bounds || !isWorldInsideBounds(startWorld, bounds)) return 0;
+    const startCell = sampleActiveGroupWorldCell(startWorld);
+    const nextStartCell = applyBrushEditToCell(startCell, brush, editChannels);
+    if (cellsEqual(startCell, nextStartCell)) return 0;
+    const selectChannels = getBucketSelectChannelsForButton(button);
+    const domain = enumerateBoundedWorldDomain(bounds);
+    if (domain.length < 1) return 0;
+    const filled = get_flood_fill_voxels({
+      start: startWorld,
+      sample: (world) => {
+        if (!isWorldInsideBounds(world, bounds)) return null;
+        const sampled = sampleActiveGroupWorldCell(world);
+        return { char: sampled.char, rgb: { ...sampled.rgb }, weight: sampled.weight_index };
+      },
+      matches: (candidate, target) => cells_match_edit_channels(candidate, target, selectChannels),
+      enumerate_domain: () => domain,
+      same_depth_only: opts.get_bucket_same_depth_only?.() ?? true,
+      allow_diagonal: opts.get_bucket_allow_diagonal?.() ?? false,
+      continuous: opts.get_bucket_continuous?.() ?? true,
+      plane_axis: getActiveViewPlaneAxis(),
+    });
+    let changed = 0;
+    for (const world of filled) {
+      const oldCell = sampleActiveGroupWorldCell(world);
+      const newCell = applyBrushEditToCell(oldCell, brush, editChannels);
+      if (cellsEqual(oldCell, newCell)) continue;
+      if (!trackWorldChange(world, oldCell, newCell, opts.get_grid_point_for_world?.(world) ?? null)) continue;
+      changed += 1;
+    }
+    return changed;
   }
 
   function isIgnoredPasteCell(cell: GridCell | null, ignoreColorRgb: { r: number; g: number; b: number }): boolean {
@@ -1171,20 +1435,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       if (rDiff <= colorThreshold && gDiff <= colorThreshold && bDiff <= colorThreshold) return true;
     }
     return false;
-  }
-
-  function trackWorldChange(world: { x: number; y: number; z: number }, oldCell: GridCell | null, newCell: GridCell | null): void {
-    const gridPoint = opts.get_grid_point_for_world?.(world);
-    const x = gridPoint?.x ?? -1;
-    const y = gridPoint?.y ?? -1;
-    const normalizedOld = oldCell ? { ...oldCell } : makeEmptyCell();
-    const normalizedNew = newCell ? { ...newCell } : makeEmptyCell();
-    const existingIndex = pending_changes.findIndex(c => c.worldX === world.x && c.worldY === world.y && c.worldZ === world.z);
-    if (existingIndex >= 0 && pending_changes[existingIndex]) {
-      pending_changes[existingIndex].newCell = normalizedNew;
-    } else {
-      pending_changes.push({ x, y, worldX: world.x, worldY: world.y, worldZ: world.z, group_id: requireActiveGroupId(), oldCell: normalizedOld, newCell: normalizedNew });
-    }
   }
 
   function getResolvedCommitPlane(): number {
@@ -1281,13 +1531,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     };
   }
 
-  function formatSelectionVolumeLabel(width: number, height: number, depthMin?: number | null, depthMax?: number | null): string {
-    const safeMin = typeof depthMin === 'number' ? depthMin : 0;
-    const safeMax = typeof depthMax === 'number' ? depthMax : safeMin;
-    const depth = Math.abs(safeMax - safeMin) + 1;
-    return `Selecting: ${width}x${height}x${depth} Z:${safeMin}->${safeMax}`;
-  }
-
   // Capture a region of the grid for before/after comparison
   function captureRegion(minX: number, minY: number, maxX: number, maxY: number): Map<string, GridCell> {
     const region = new Map<string, GridCell>();
@@ -1365,6 +1608,28 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
                 }
               }
             }
+        }
+      }
+    }
+  }
+
+  function eraseWithBrushSizeAndChannels(x: number, y: number, size: number, channels: EditChannels): void {
+    if (!has_any_edit_channel(channels)) return;
+    const offset = Math.floor(size / 2);
+    for (let dy = 0; dy < size; dy++) {
+      for (let dx = 0; dx < size; dx++) {
+        const draw_x = x - offset + dx;
+        const draw_y = y - offset + dy;
+        if (draw_x < 0 || draw_x >= opts.grid.width || draw_y < 0 || draw_y >= opts.grid.height || !canEditCell(draw_x, draw_y)) continue;
+        const oldCell = getGridCell(draw_x, draw_y);
+        const cell = getCell(opts.grid, draw_x, draw_y);
+        if (!cell || !oldCell) continue;
+        const newCell = applyEraserEditToCell(cell, channels);
+        if (cellsEqual(oldCell, newCell)) continue;
+        opts.grid.cells[draw_y]![draw_x] = { char: newCell.char, rgb: { ...newCell.rgb }, weight_index: newCell.weight_index };
+        const committed = getGridCell(draw_x, draw_y);
+        if (committed && !trackChange(draw_x, draw_y, oldCell, committed)) {
+          opts.grid.cells[draw_y]![draw_x] = { ...oldCell };
         }
       }
     }
@@ -1586,15 +1851,16 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     // Selection manipulation methods
     clearSelection: () => {
       clearSelection(selection_bitmap);
-      opts.on_selection_change?.({ kind: 'clear' });
+      emitWorldSelectionChange({ kind: 'clear' });
+      if (!opts.on_world_selection_change) opts.on_selection_change?.({ kind: 'clear' });
     },
     selectAll: () => {
-      selectAll(selection_bitmap);
-      opts.on_selection_change?.({ kind: 'select_all' });
+      emitWorldSelectionChange({ kind: 'select_all' });
+      if (!opts.on_world_selection_change) opts.on_selection_change?.({ kind: 'select_all' });
     },
     invertSelection: () => {
-      invertSelection(selection_bitmap);
-      opts.on_selection_change?.({ kind: 'invert' });
+      emitWorldSelectionChange({ kind: 'invert' });
+      if (!opts.on_world_selection_change) opts.on_selection_change?.({ kind: 'invert' });
     },
     hasSelection: () => {
       return hasSelection(selection_bitmap);
@@ -1704,58 +1970,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         }
       }
       */
-
-      // Draw selection as an animated checkerboard overlay on the focused projected slice.
-      if (hasSelection(selection_bitmap) || (opts.get_selection_overlay_cells?.().length ?? 0) > 0) {
-        const checker_phase = Math.floor(performance.now() / 400) % 2;
-        const checker_dark = get_darkest_indexed_rgb();
-        const checker_light = get_brightest_indexed_rgb();
-        const overlayCells = opts.get_selection_overlay_cells?.() ?? [];
-        const overlayOccupied = new Set<string>();
-
-        for (const overlay of overlayCells) {
-          const canvas_x = rect.x0 + overlay.x;
-          const canvas_y = rect.y0 + overlay.y;
-          if (canvas_x < rect.x0 || canvas_x > rect.x1 || canvas_y < rect.y0 || canvas_y > rect.y1) continue;
-          overlayOccupied.add(`${overlay.x},${overlay.y}`);
-          const checker_is_light = ((overlay.x + overlay.y + checker_phase) % 2) === 0;
-          const checker_rgb = checker_is_light ? checker_light : checker_dark;
-          c.set(canvas_x, canvas_y, {
-            char: overlay.char,
-            rgb: checker_rgb,
-            style: 'regular',
-            weight_index: overlay.weight_index || 1,
-            render_index: 2,
-          });
-        }
-
-        for (let gy = start_y; gy < end_y; gy++) {
-          for (let gx = start_x; gx < end_x; gx++) {
-            if (!isSelected(selection_bitmap, gx, gy)) continue;
-
-            const canvas_x = rect.x0 + (gx - start_x);
-            const canvas_y = rect.y0 + (gy - start_y);
-
-            if (canvas_x < rect.x0 || canvas_x > rect.x1 ||
-                canvas_y < rect.y0 || canvas_y > rect.y1) continue;
-
-            const checker_is_light = ((gx + gy + checker_phase) % 2) === 0;
-            const checker_rgb = checker_is_light ? checker_light : checker_dark;
-            const cell = getCell(opts.grid, gx, gy);
-            const is_empty = !cell || cell.char === ' ';
-
-            if (is_empty && !overlayOccupied.has(`${gx},${gy}`)) {
-              c.set(canvas_x, canvas_y, {
-                char: '•',
-                rgb: checker_rgb,
-                style: 'regular',
-                weight_index: 1,
-                render_index: 2,
-              });
-            }
-          }
-        }
-      }
 
       // Draw preview points for line/rect/select/lasso tools
       if (opts.preview_points.length > 0) {
@@ -2176,19 +2390,15 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
         if (tool_for_button === 'bucket') {
           if (canEditCell(grid_x, grid_y)) {
-            // Capture full grid before fill (bucket can affect large areas)
-            const beforeRegion = captureRegion(0, 0, opts.grid.width - 1, opts.grid.height - 1);
-            
-            // Apply bucket fill
-            applyTool(opts.grid, 'bucket', grid_x, grid_y, getBrushForButton(e.button));
-            
-            // Diff and track changes
-            diffRegion(beforeRegion, 0, 0, opts.grid.width - 1, opts.grid.height - 1);
-            
-            // Log the action
-            if (pending_changes.length > 0) {
-              const selected_z = opts.get_selected_z();
-              commitLoggedCellChanges('draw_cells', 'Fill', selected_z);
+            const changed = applyBucketFill(e.button, grid_x, grid_y, {
+              shift: e.shift,
+              ctrl: e.ctrl,
+              alt: e.alt,
+              meta: e.meta,
+            });
+            if (changed > 0) {
+              const selected_z = getResolvedCommitPlane();
+              commitLoggedCellChanges('fill', 'Fill', selected_z);
             }
           }
           return;
@@ -2224,6 +2434,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         }
 
         if (tool_for_button === 'eraser') {
+          const base_channels = opts.get_brush_edit_channels_for_button?.(e.button) ?? { char: true, color: true, weight: true };
+          active_draw_channels = resolve_edit_channels_with_modifiers(base_channels, e);
           active_stroke_tool = 'eraser';
           active_stroke_world_plane = opts.get_selected_z();
           active_stroke_anchor_world = getWorldPointForEditPlane(grid_x, grid_y, active_stroke_world_plane);
@@ -2237,7 +2449,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           setInteractionEndWorld(null);
           is_erasing = true;
           last_draw_pos = { x: grid_x, y: grid_y };
-          drawWithBrushSize(grid_x, grid_y, true, getBrushForButton(e.button), getBrushSizeForButton(e.button));
+          eraseWithBrushSizeAndChannels(grid_x, grid_y, getBrushSizeForButton(e.button), active_draw_channels);
           maybeEmitLiveStrokePreview(true);
           return;
         }
@@ -2248,7 +2460,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           selection_drag_start = { x: grid_x, y: grid_y };
           selection_drag_start_plane = opts.get_focus_world_plane?.() ?? opts.get_selected_z();
           selection_drag_end_plane = selection_drag_start_plane;
-          setInteractionCurrentWorld(opts.get_world_point_for_grid?.(grid_x, grid_y) ?? { x: grid_x, y: grid_y, z: selection_drag_start_plane });
+          selection_drag_start_world = getWorldPointForEditPlane(grid_x, grid_y, selection_drag_start_plane) ?? opts.get_world_point_for_grid?.(grid_x, grid_y) ?? { x: grid_x, y: grid_y, z: selection_drag_start_plane };
+          selection_drag_end_world = cloneWorldPoint(selection_drag_start_world);
+          setInteractionCurrentWorld(selection_drag_start_world);
           setInteractionEndWorld(null);
           emitLiveInteractionAnchor(interaction_current_world, true);
           showStatus('Selection: drag to select area');
@@ -2259,6 +2473,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (tool_for_button === 'lassoselect') {
           is_lasso_selecting = true;
           lasso_points = [{ x: grid_x, y: grid_y }];
+          selection_drag_start_plane = opts.get_focus_world_plane?.() ?? opts.get_selected_z();
+          selection_drag_end_plane = selection_drag_start_plane;
           showStatus('Lasso: drag to draw selection area');
           return;
         }
@@ -2344,14 +2560,15 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         return;
       }
 
-      if (isActiveEraserStroke() && last_draw_pos) {
+        if (isActiveEraserStroke() && last_draw_pos) {
         const grid_coords = localToGrid(local_x, local_y);
         const grid_x = grid_coords.x;
         const grid_y = grid_coords.y;
         if (grid_x < 0 || grid_x >= opts.grid.width || grid_y < 0 || grid_y >= opts.grid.height) return;
         setInteractionCurrentWorld(getWorldPointForEditPlane(grid_x, grid_y, active_stroke_world_plane ?? opts.get_selected_z()));
         if (grid_x !== last_draw_pos.x || grid_y !== last_draw_pos.y) {
-          drawLineWithBrushSize(last_draw_pos.x, last_draw_pos.y, grid_x, grid_y, true, getBrushForButton(getDragButton()), getBrushSizeForButton(getDragButton()));
+          const points = previewLine(last_draw_pos.x, last_draw_pos.y, grid_x, grid_y);
+          for (const point of points) eraseWithBrushSizeAndChannels(point.x, point.y, getBrushSizeForButton(getDragButton()), active_draw_channels);
           last_draw_pos = { x: grid_x, y: grid_y };
           maybeEmitLiveStrokePreview();
         }
@@ -2377,7 +2594,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const grid_coords = localToGrid(local_x, local_y);
         const grid_x = grid_coords.x;
         const grid_y = grid_coords.y;
-        setInteractionCurrentWorld(opts.get_world_point_for_grid?.(grid_x, grid_y) ?? { x: grid_x, y: grid_y, z: selection_drag_end_plane ?? selection_drag_start_plane ?? opts.get_selected_z() });
+        selection_drag_end_world = getWorldPointForEditPlane(grid_x, grid_y, selection_drag_end_plane ?? selection_drag_start_plane ?? opts.get_selected_z())
+          ?? opts.get_world_point_for_grid?.(grid_x, grid_y)
+          ?? { x: grid_x, y: grid_y, z: selection_drag_end_plane ?? selection_drag_start_plane ?? opts.get_selected_z() };
+        setInteractionCurrentWorld(selection_drag_end_world);
         emitLiveInteractionAnchor(interaction_current_world);
         // Show preview rect
         const new_points = previewRectStroke(selection_drag_start.x, selection_drag_start.y, grid_x, grid_y);
@@ -2386,7 +2606,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         // Also show status while dragging
         const width = Math.abs(grid_x - selection_drag_start.x) + 1;
         const height = Math.abs(grid_y - selection_drag_start.y) + 1;
-        const range = getSelectionPlaneRange();
+        const range = getSelectionDomainPlaneRange(opts.get_rect_select_all_depths?.() ?? false);
         const depth = range ? (range.depthMax - range.depthMin + 1) : 1;
         if (width > 1 || height > 1 || depth > 1) {
           showStatus(formatSelectionVolumeLabel(width, height, range?.depthMin, range?.depthMax));
@@ -2443,33 +2663,25 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const grid_coords = localToGrid(local_x, local_y);
         const end_x = grid_coords.x;
         const end_y = grid_coords.y;
-        setInteractionCurrentWorld(opts.get_world_point_for_grid?.(end_x, end_y) ?? { x: end_x, y: end_y, z: selection_drag_end_plane ?? selection_drag_start_plane ?? opts.get_selected_z() });
+        selection_drag_end_world = getWorldPointForEditPlane(end_x, end_y, selection_drag_end_plane ?? selection_drag_start_plane ?? opts.get_selected_z())
+          ?? opts.get_world_point_for_grid?.(end_x, end_y)
+          ?? { x: end_x, y: end_y, z: selection_drag_end_plane ?? selection_drag_start_plane ?? opts.get_selected_z() };
+        setInteractionCurrentWorld(selection_drag_end_world);
         setInteractionEndWorld(interaction_current_world);
         const start_x = selection_drag_start.x;
         const start_y = selection_drag_start.y;
-        
-        // Create temporary selection bitmap for the new rect
-        const temp_bitmap = createSelectionBitmap(opts.grid.width, opts.grid.height);
-        selectRect(temp_bitmap, start_x, start_y, end_x, end_y);
-        
-        // Apply selection mode
-        applySelectionMode(selection_bitmap, temp_bitmap, opts.get_selection_mode());
-        
+        const rectCells = selection_drag_start_world && selection_drag_end_world
+          ? buildRectSelectionWorldCells(selection_drag_start_world, selection_drag_end_world, opts.get_rect_select_all_depths?.() ?? false)
+          : [];
+        emitWorldSelectionChange({ kind: 'rect', mode: opts.get_selection_mode(), cells: rectCells });
+
         const width = Math.abs(end_x - start_x) + 1;
         const height = Math.abs(end_y - start_y) + 1;
-        
-        const range = getSelectionPlaneRange();
+        const range = getSelectionDomainPlaneRange(opts.get_rect_select_all_depths?.() ?? false);
         showStatus(formatSelectionVolumeLabel(width, height, range?.depthMin, range?.depthMax).replace('Selecting:', 'Selected'));
         painterCanvasDiag('selection rect commit', { width, height, depth_min: range?.depthMin ?? 0, depth_max: range?.depthMax ?? range?.depthMin ?? 0, mode: opts.get_selection_mode() });
-        
-        is_selecting = false;
-        selection_drag_start = null;
-        selection_drag_start_plane = null;
-        selection_drag_end_plane = null;
-        interaction_current_world = null;
-        interaction_end_world = null;
-        opts.preview_points = [];
-        opts.on_selection_change?.({ depthMin: range?.depthMin, depthMax: range?.depthMax, kind: 'rect' });
+        resetSelectionDragState();
+        if (!opts.on_world_selection_change) opts.on_selection_change?.({ depthMin: range?.depthMin, depthMax: range?.depthMax, kind: 'rect' });
         drag_start_buttons = 0;
         return;
       }
@@ -2478,26 +2690,20 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       if (is_lasso_selecting && lasso_points.length >= 3) {
         painterCanvasDiag('lasso drag end', { points: lasso_points.length });
         
-        // Create temporary selection bitmap for the lasso polygon
         const temp_bitmap = createSelectionBitmap(opts.grid.width, opts.grid.height);
         selectPolygon(temp_bitmap, lasso_points);
+        const range = getSelectionDomainPlaneRange(opts.get_lasso_select_all_depths?.() ?? false)
+          ?? getSelectionPlaneRange()
+          ?? { depthMin: opts.get_focus_world_plane?.() ?? opts.get_selected_z(), depthMax: opts.get_focus_world_plane?.() ?? opts.get_selected_z() };
+        const lassoCells = buildSelectionWorldCellsFromBitmap(temp_bitmap, range);
+        emitWorldSelectionChange({ kind: 'lasso', mode: opts.get_selection_mode(), cells: lassoCells });
         
-        // Apply selection mode
-        applySelectionMode(selection_bitmap, temp_bitmap, opts.get_selection_mode());
-        
-        let selectedCount = 0;
-        for (let y = 0; y < opts.grid.height; y++) {
-          for (let x = 0; x < opts.grid.width; x++) {
-            if (isSelected(selection_bitmap, x, y)) selectedCount++;
-          }
-        }
-        
-        showStatus(`Lasso selected ${selectedCount} cells`);
+        showStatus(`Lasso selected ${lassoCells.length} voxels`);
         
         is_lasso_selecting = false;
         lasso_points = [];
         opts.preview_points = [];
-        opts.on_selection_change?.();
+        if (!opts.on_world_selection_change) opts.on_selection_change?.({ depthMin: range.depthMin, depthMax: range.depthMax, kind: 'lasso' });
         drag_start_buttons = 0;
         return;
       }
@@ -2581,58 +2787,46 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const end_coords = localToGrid(local_x, local_y);
         const end_x = end_coords.x;
         const end_y = end_coords.y;
-        setInteractionCurrentWorld(opts.get_world_point_for_grid?.(end_x, end_y) ?? { x: end_x, y: end_y, z: selection_drag_end_plane ?? selection_drag_start_plane ?? opts.get_selected_z() });
+        selection_drag_end_world = getWorldPointForEditPlane(end_x, end_y, selection_drag_end_plane ?? selection_drag_start_plane ?? opts.get_selected_z())
+          ?? opts.get_world_point_for_grid?.(end_x, end_y)
+          ?? { x: end_x, y: end_y, z: selection_drag_end_plane ?? selection_drag_start_plane ?? opts.get_selected_z() };
+        setInteractionCurrentWorld(selection_drag_end_world);
         setInteractionEndWorld(interaction_current_world);
         const start_x = selection_drag_start.x;
         const start_y = selection_drag_start.y;
-        
-        // Create temporary selection bitmap for the new rect
-        const temp_bitmap = createSelectionBitmap(opts.grid.width, opts.grid.height);
-        selectRect(temp_bitmap, start_x, start_y, end_x, end_y);
-        
-        // Apply selection mode
-        applySelectionMode(selection_bitmap, temp_bitmap, opts.get_selection_mode());
-        
+        const rectCells = selection_drag_start_world && selection_drag_end_world
+          ? buildRectSelectionWorldCells(selection_drag_start_world, selection_drag_end_world, opts.get_rect_select_all_depths?.() ?? false)
+          : [];
+        emitWorldSelectionChange({ kind: 'rect', mode: opts.get_selection_mode(), cells: rectCells });
+
         const width = Math.abs(end_x - start_x) + 1;
         const height = Math.abs(end_y - start_y) + 1;
-        const range = getSelectionPlaneRange();
+        const range = getSelectionDomainPlaneRange(opts.get_rect_select_all_depths?.() ?? false);
         showStatus(formatSelectionVolumeLabel(width, height, range?.depthMin, range?.depthMax).replace('Selecting:', 'Selected'));
         painterCanvasDiag('selection rect fallback commit', { width, height, depth_min: range?.depthMin ?? 0, depth_max: range?.depthMax ?? range?.depthMin ?? 0, mode: opts.get_selection_mode() });
-        
-        is_selecting = false;
-        selection_drag_start = null;
-        selection_drag_start_plane = null;
-        selection_drag_end_plane = null;
-        interaction_current_world = null;
-        interaction_end_world = null;
-        opts.preview_points = [];
-        opts.on_selection_change?.({ depthMin: range?.depthMin, depthMax: range?.depthMax, kind: 'rect' });
+        resetSelectionDragState();
+        if (!opts.on_world_selection_change) opts.on_selection_change?.({ depthMin: range?.depthMin, depthMax: range?.depthMax, kind: 'rect' });
       }
       
       // Handle lasso selection in OnPointerUp as fallback
       if (is_lasso_selecting && lasso_points.length >= 3) {
         painterCanvasDiag('lasso in pointer up', { points: lasso_points.length });
-        
-        // Create temporary selection bitmap for the lasso polygon
         const temp_bitmap = createSelectionBitmap(opts.grid.width, opts.grid.height);
         selectPolygon(temp_bitmap, lasso_points);
+        const range = getSelectionDomainPlaneRange(opts.get_lasso_select_all_depths?.() ?? false)
+          ?? getSelectionPlaneRange()
+          ?? { depthMin: opts.get_focus_world_plane?.() ?? opts.get_selected_z(), depthMax: opts.get_focus_world_plane?.() ?? opts.get_selected_z() };
+        const lassoCells = buildSelectionWorldCellsFromBitmap(temp_bitmap, range);
+        emitWorldSelectionChange({ kind: 'lasso', mode: opts.get_selection_mode(), cells: lassoCells });
         
-        // Apply selection mode
-        applySelectionMode(selection_bitmap, temp_bitmap, opts.get_selection_mode());
-        
-        let selectedCount = 0;
-        for (let y = 0; y < opts.grid.height; y++) {
-          for (let x = 0; x < opts.grid.width; x++) {
-            if (isSelected(selection_bitmap, x, y)) selectedCount++;
-          }
-        }
-        
-        showStatus(`Lasso selected ${selectedCount} cells`);
+        showStatus(`Lasso selected ${lassoCells.length} voxels`);
         
         is_lasso_selecting = false;
         lasso_points = [];
+        selection_drag_start_plane = null;
+        selection_drag_end_plane = null;
         opts.preview_points = [];
-        opts.on_selection_change?.();
+        if (!opts.on_world_selection_change) opts.on_selection_change?.({ depthMin: range.depthMin, depthMax: range.depthMax, kind: 'lasso' });
       }
       
       // Reset gizmo states
@@ -2747,6 +2941,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           if (dir !== 0) {
             opts.cycle_focus_layer(dir as 1 | -1);
             selection_drag_end_plane = opts.get_focus_world_plane?.() ?? (selection_drag_end_plane ?? opts.get_selected_z());
+            if (selection_drag_end_world && selection_drag_end_plane !== null) {
+              selection_drag_end_world = setWorldPointPlaneCoordinate(selection_drag_end_world, selection_drag_end_plane);
+            }
             if (interaction_current_world && selection_drag_end_plane !== null) {
               setInteractionCurrentWorld(setWorldPointPlaneCoordinate(interaction_current_world, selection_drag_end_plane));
               emitLiveInteractionAnchor(interaction_current_world, true);
@@ -2756,7 +2953,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             const end_coords = localToGrid(local_x, local_y);
             const width = Math.abs(end_coords.x - selection_drag_start.x) + 1;
             const height = Math.abs(end_coords.y - selection_drag_start.y) + 1;
-            const range = getSelectionPlaneRange();
+            const range = getSelectionDomainPlaneRange(opts.get_rect_select_all_depths?.() ?? false);
             showStatus(formatSelectionVolumeLabel(width, height, range?.depthMin, range?.depthMax));
             return;
           }

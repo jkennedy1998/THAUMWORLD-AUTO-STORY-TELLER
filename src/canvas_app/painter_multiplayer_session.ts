@@ -143,6 +143,7 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
       return state;
     }
     if (!force && bootstrap_promise) return bootstrap_promise;
+    const bootstrap_started_at_ms = Date.now();
     bootstrap_promise = (async () => {
       set_state({ ...state, lifecycle: 'connecting', error: null });
       const transport = resolve_painter_transport(options);
@@ -161,6 +162,7 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
       console.log('[PAINTER_SESSION_BOOT]', JSON.stringify({
         slot: options.slot,
         force,
+        started_at_ms: bootstrap_started_at_ms,
         api_base_url: transport.api_base_url,
         bridge_ws_base_url: transport.bridge_ws_base_url,
         expect_local_host_boot,
@@ -169,9 +171,11 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
       }));
       let host_status: Awaited<ReturnType<typeof fetch_host_status>> = null;
       for (let attempt = 1; attempt <= max_attempts; attempt += 1) {
+        const host_status_started_at_ms = Date.now();
         console.log('[JOIN_CONNECT]', JSON.stringify({
           event: 'painter_host_status_started',
           slot: options.slot,
+          started_at_ms: host_status_started_at_ms,
           api_base_url: transport.api_base_url,
           bridge_ws_base_url: transport.bridge_ws_base_url,
           attempt,
@@ -182,6 +186,7 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
         console.log('[JOIN_CONNECT]', JSON.stringify({
           event: 'painter_host_status_completed',
           slot: options.slot,
+          latency_ms: Date.now() - host_status_started_at_ms,
           api_base_url: transport.api_base_url,
           attempt,
           max_attempts,
@@ -229,17 +234,19 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
           error: null,
         });
       }
-      const reconnect_token = read_reconnect_token();
-      let response: Response | null = null;
-      let data: any = null;
-      let last_connect_error: string | null = null;
-      for (let attempt = 1; attempt <= max_attempts; attempt += 1) {
-        console.log('[JOIN_CONNECT]', JSON.stringify({
-          event: 'painter_connect_started',
-          slot: options.slot,
-          api_base_url: transport.api_base_url,
-          bridge_ws_base_url: transport.bridge_ws_base_url,
-          reconnect_token_present: Boolean(reconnect_token),
+        const reconnect_token = read_reconnect_token();
+        let response: Response | null = null;
+        let data: any = null;
+        let last_connect_error: string | null = null;
+        for (let attempt = 1; attempt <= max_attempts; attempt += 1) {
+          const connect_started_at_ms = Date.now();
+          console.log('[JOIN_CONNECT]', JSON.stringify({
+            event: 'painter_connect_started',
+            slot: options.slot,
+            started_at_ms: connect_started_at_ms,
+            api_base_url: transport.api_base_url,
+            bridge_ws_base_url: transport.bridge_ws_base_url,
+            reconnect_token_present: Boolean(reconnect_token),
           attempt,
           max_attempts,
             expect_local_host_boot,
@@ -256,6 +263,7 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
           console.warn('[JOIN_CONNECT]', JSON.stringify({
             event: 'painter_connect_failed',
             slot: options.slot,
+            latency_ms: Date.now() - connect_started_at_ms,
             status: response.status,
             api_base_url: transport.api_base_url,
             error: data?.error ?? null,
@@ -267,6 +275,7 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
           console.warn('[JOIN_CONNECT]', JSON.stringify({
             event: 'painter_connect_error',
             slot: options.slot,
+            latency_ms: Date.now() - connect_started_at_ms,
             api_base_url: transport.api_base_url,
             message: last_connect_error,
             attempt,
@@ -309,9 +318,17 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
       console.log('[JOIN_CONNECT]', JSON.stringify({
         event: 'painter_connect_succeeded',
         slot: options.slot,
+        bootstrap_latency_ms: Date.now() - bootstrap_started_at_ms,
         connection_id: String(data?.connection_id ?? '').trim() || null,
         reconnect_token_reused: next_reconnect_token === reconnect_token,
         api_base_url: transport.api_base_url,
+        bridge_ws_base_url: transport.bridge_ws_base_url,
+      }));
+      const ws_attach_started_at_ms = Date.now();
+      console.log('[PAINTER_WS_ATTACH]', JSON.stringify({
+        event: 'ws_attach_started',
+        slot: options.slot,
+        started_at_ms: ws_attach_started_at_ms,
         bridge_ws_base_url: transport.bridge_ws_base_url,
       }));
       ws_client = initWebSocketClient(transport.bridge_ws_base_url, {
@@ -320,6 +337,12 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
         slot: options.slot,
       });
       attach_ws_handlers(ws_client);
+      console.log('[PAINTER_WS_ATTACH]', JSON.stringify({
+        event: 'ws_attach_completed',
+        slot: options.slot,
+        latency_ms: Date.now() - ws_attach_started_at_ms,
+        bridge_ws_base_url: transport.bridge_ws_base_url,
+      }));
       return set_state({
         lifecycle: 'multiplayer_ready',
         document_id: `slot:${options.slot}:default_canvas`,
@@ -338,9 +361,10 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
     })().catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       debug_warn('[PAINTER_SESSION]', 'multiplayer bootstrap failed; using local compatibility mode', { message, slot: options.slot });
-      console.warn('[PAINTER_SESSION_BOOT]', JSON.stringify({
+        console.warn('[PAINTER_SESSION_BOOT]', JSON.stringify({
           slot: options.slot,
         reason: 'bootstrap_failed',
+        latency_ms: Date.now() - bootstrap_started_at_ms,
         message,
         stack: error instanceof Error ? error.stack ?? null : null,
         api_base_url: options.get_api_base_url(),

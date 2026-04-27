@@ -226,4 +226,24 @@ const southCameraCenteredProjection = project_painter_runtime_display_space({
 });
 assert(JSON.stringify(southCameraCenteredProjection.visible_planes) === JSON.stringify([14, 13, 12, 11, 10]), 'runtime side projection should use the same camera-centered margin on the current depth axis');
 
+const eastCameraCenteredProjection = project_painter_runtime_display_space({
+  runtime: singlePlaneRuntime,
+  view_state: make_place_view_state('east', 0),
+  focus_slot: 0,
+  target_world: { x: 12, y: 1, z: 0 },
+  projection_anchor_world: { x: 12, y: 1, z: 0 },
+  viewport_width: 5,
+  viewport_height: 5,
+  center_target_in_view: true,
+});
+assert(JSON.stringify(eastCameraCenteredProjection.visible_planes) === JSON.stringify([10, 11, 12, 13, 14]), 'runtime east projection should expose empty camera-centered planes on x just like top exposes them on z');
+
+const eastEmptyPlaneFocus = get_painter_focus_slot_for_anchor({
+  anchor_world: { x: 12, y: 1, z: 0 },
+  view_state: make_place_view_state('east', 0),
+  visible_planes: eastCameraCenteredProjection.visible_planes,
+  fallback_world_plane: 12,
+});
+assert(eastEmptyPlaneFocus.focus_world_plane === 12 && eastEmptyPlaneFocus.focus_slot === 2, 'focus lookup should track empty camera-centered planes on side views');
+
 console.log('painter_view_projection_adapter tests passed');

@@ -2,6 +2,7 @@ import { trace_line_2d, trace_line_3d } from './math3d.js';
 import type { PlaneId, PlanePoint, Point2, Voxel3 } from './coords.js';
 import { key_point2, key_voxel3, trunc_voxel3, voxel3 } from './coords.js';
 import { unproject_plane_to_voxel } from './plane_coords.js';
+import type { EditChannels } from '../ascii_painter/edit_mask.js';
 
 export type PainterPoint = Point2;
 
@@ -107,6 +108,110 @@ export function get_flood_fill_points<T>(
     stack.push([x, y - 1]);
   }
 
+  return out;
+}
+
+function get_plane_neighbor_offsets(axis: 'x' | 'y' | 'z', allow_diagonal: boolean): Voxel3[] {
+  const offsets: Voxel3[] = [];
+  const values = [-1, 0, 1];
+  for (const a of values) {
+    for (const b of values) {
+      if (a === 0 && b === 0) continue;
+      if (!allow_diagonal && Math.abs(a) + Math.abs(b) !== 1) continue;
+      switch (axis) {
+        case 'x':
+          offsets.push(voxel3(0, a, b));
+          break;
+        case 'y':
+          offsets.push(voxel3(a, 0, b));
+          break;
+        case 'z':
+        default:
+          offsets.push(voxel3(a, b, 0));
+          break;
+      }
+    }
+  }
+  return offsets;
+}
+
+function get_volume_neighbor_offsets(allow_diagonal: boolean): Voxel3[] {
+  const offsets: Voxel3[] = [];
+  for (let dz = -1; dz <= 1; dz += 1) {
+    for (let dy = -1; dy <= 1; dy += 1) {
+      for (let dx = -1; dx <= 1; dx += 1) {
+        if (dx === 0 && dy === 0 && dz === 0) continue;
+        const distance = Math.abs(dx) + Math.abs(dy) + Math.abs(dz);
+        if (!allow_diagonal && distance !== 1) continue;
+        offsets.push(voxel3(dx, dy, dz));
+      }
+    }
+  }
+  return offsets;
+}
+
+export function cells_match_edit_channels<T extends { char: string; rgb: { r: number; g: number; b: number }; weight: number }>(
+  candidate: T,
+  target: T,
+  channels: EditChannels,
+): boolean {
+  if (channels.char && candidate.char !== target.char) return false;
+  if (channels.color && (
+    candidate.rgb.r !== target.rgb.r
+    || candidate.rgb.g !== target.rgb.g
+    || candidate.rgb.b !== target.rgb.b
+  )) return false;
+  if (channels.weight && candidate.weight !== target.weight) return false;
+  return true;
+}
+
+export function get_flood_fill_voxels<T>(args: {
+  start: Voxel3;
+  sample: (world: Voxel3) => T | null;
+  matches: (candidate: T, target: T) => boolean;
+  enumerate_domain: () => Iterable<Voxel3>;
+  same_depth_only: boolean;
+  allow_diagonal: boolean;
+  continuous: boolean;
+  plane_axis: 'x' | 'y' | 'z';
+}): Voxel3[] {
+  const start = trunc_voxel3(args.start);
+  const target = args.sample(start);
+  if (target == null) return [];
+  const out: Voxel3[] = [];
+  if (!args.continuous) {
+    const seen = new Set<string>();
+    const startPlane = start[args.plane_axis];
+    for (const raw of args.enumerate_domain()) {
+      const point = trunc_voxel3(raw);
+      const key = key_voxel3(point);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (args.same_depth_only && point[args.plane_axis] !== startPlane) continue;
+      const candidate = args.sample(point);
+      if (candidate == null || !args.matches(candidate, target)) continue;
+      out.push(point);
+    }
+    return out;
+  }
+
+  const neighborOffsets = args.same_depth_only
+    ? get_plane_neighbor_offsets(args.plane_axis, args.allow_diagonal)
+    : get_volume_neighbor_offsets(args.allow_diagonal);
+  const stack: Voxel3[] = [start];
+  const visited = new Set<string>();
+  while (stack.length > 0) {
+    const point = stack.pop()!;
+    const key = key_voxel3(point);
+    if (visited.has(key)) continue;
+    visited.add(key);
+    const candidate = args.sample(point);
+    if (candidate == null || !args.matches(candidate, target)) continue;
+    out.push(point);
+    for (const delta of neighborOffsets) {
+      stack.push(voxel3(point.x + delta.x, point.y + delta.y, point.z + delta.z));
+    }
+  }
   return out;
 }
 

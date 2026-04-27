@@ -27,6 +27,7 @@ export function create_join_controller(args: {
   select_first_connection_by_kind: (kind: 'local' | 'saved_manual' | 'lan_discovered') => boolean;
   apply_tai_join_request: (request: TaiJoinRequest) => Promise<TaiJoinResolution>;
 } {
+  let refresh_sequence = 0;
   let state: JoinMenuState = {
     selected_connection_id: null,
     connections: [],
@@ -117,7 +118,9 @@ export function create_join_controller(args: {
   }
 
   async function refresh(reason: string = 'manual_refresh'): Promise<void> {
-    log_join_ui('refresh_started', { reason });
+    const refresh_id = ++refresh_sequence;
+    const started_at_ms = Date.now();
+    log_join_ui('refresh_started', { reason, refresh_id, started_at_ms });
     state = { ...state, is_refreshing: true, status_lines: ['refreshing connections...'] };
     const directory = await build_join_directory(args.slot);
     const previous = state.selected_connection_id;
@@ -135,6 +138,9 @@ export function create_join_controller(args: {
     state = { ...state, status_lines: compute_status_lines() };
     log_join_ui('refresh_completed', {
       reason,
+      refresh_id,
+      started_at_ms,
+      latency_ms: Date.now() - started_at_ms,
       connection_count: state.connections.length,
       online_count: state.connections.filter((entry) => state.probes_by_connection_id[entry.id]?.status === 'online').length,
       status_lines: state.status_lines,

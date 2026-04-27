@@ -10,7 +10,9 @@ import { apply_painter_multiplayer_transport_config } from './painter_runtime_co
 import { create_launch_controller } from '../engine_launch/controller.js';
 import { create_join_controller } from '../engine_launch/join_controller.js';
 import { save_manual_connection } from '../engine_multiplayer/connection_store.js';
+import { record_successful_connection_for_content, resolve_preferred_join_record_for_content_refs } from '../engine_multiplayer/join_preference_store.js';
 import { create_painter_launch_adapter, resolve_painter_tai_boot_intent, resolve_painter_tai_join_request } from './painter_launch_adapter.js';
+import { create_painter_file_content_ref, create_painter_remote_document_content_ref } from './painter_content_refs.js';
 import type { PainterLaunchIntent } from './painter_launch_types.js';
 import { diag_log } from '../shared/diagnostics.js';
 import type { EngineJoinSelection } from '../engine_multiplayer/connection_types.js';
@@ -56,6 +58,16 @@ const refresh_painter_shell_modules = () => {
 
 if (IS_PAINTER_MODE) {
     console.log('🎨 Initializing ASCII Painter Launch...');
+    const get_launch_resume_file_path = (): string | null => {
+        const candidate = launch_controller?.get_state().resume_candidate;
+        return candidate?.source.kind === 'file' ? String(candidate.source.path ?? '').trim() || null : null;
+    };
+    const get_active_join_content_refs = () => {
+        const active_refs = painter_state?.get_active_join_content_refs() ?? [];
+        if (active_refs.length > 0) return active_refs;
+        const resume_file_path = get_launch_resume_file_path();
+        return resume_file_path ? [create_painter_file_content_ref(resume_file_path)] : [];
+    };
     launchPainterIntent = async (intent: PainterLaunchIntent) => {
         painter_state = create_painter_app_state({ skip_boot_restore: true, skip_multiplayer_bootstrap: true, get_join_snapshot: get_painter_tai_join_snapshot });
         await painter_state.start_from_launch_intent(intent);
@@ -117,6 +129,31 @@ if (IS_PAINTER_MODE) {
             bridge_ws_base_url: selection.transport.bridge_ws_base_url,
             persist_recent: false,
         });
+        const active_content_refs = get_active_join_content_refs();
+        const file_content_ref = active_content_refs.find((ref) => ref.kind === 'file') ?? null;
+        if (file_content_ref?.value) {
+            await record_successful_connection_for_content(PAINTER_CONFIG.selected_data_slot, {
+                content_ref: file_content_ref,
+                selection,
+                transport_strategy: 'direct',
+                app_metadata: {
+                    path: String(file_content_ref.value),
+                    document_id,
+                    display_name: String(selection.probe?.painter_display_name ?? selection.connection.name ?? 'untitled'),
+                },
+            });
+        }
+        await record_successful_connection_for_content(PAINTER_CONFIG.selected_data_slot, {
+            content_ref: create_painter_remote_document_content_ref(
+                document_id,
+            ),
+            selection,
+            transport_strategy: 'direct',
+            app_metadata: {
+                document_id,
+                display_name: String(selection.probe?.painter_display_name ?? selection.connection.name ?? 'untitled'),
+            },
+        });
     };
     painter_join_controller = create_join_controller({
         id: 'painter_join_module',
@@ -143,6 +180,38 @@ if (IS_PAINTER_MODE) {
             painter_join_visible = true;
             refresh_painter_shell_modules();
             await painter_join_controller?.refresh();
+            const active_content_refs = get_active_join_content_refs();
+            if (active_content_refs.length > 0) {
+                try {
+                    const resolved = await resolve_preferred_join_record_for_content_refs(
+                        PAINTER_CONFIG.selected_data_slot,
+                        active_content_refs,
+                    );
+                    const preference = resolved?.record ?? null;
+                    const selected = preference?.preferred_connection_id
+                        ? painter_join_controller?.select_connection_by_id(preference.preferred_connection_id)
+                        : false;
+                    if (!selected && preference?.preferred_host) {
+                        painter_join_controller?.select_connection_by_host(preference.preferred_host);
+                    }
+                    console.log('[PAINTER_JOIN_PREFERENCE]', JSON.stringify({
+                        event: 'preferred_target_applied',
+                        slot: PAINTER_CONFIG.selected_data_slot,
+                        content_ref_kind: resolved?.matched_content_ref.kind ?? null,
+                        content_ref_value: resolved?.matched_content_ref.value ?? null,
+                        preferred_connection_id: preference?.preferred_connection_id ?? null,
+                        preferred_host: preference?.preferred_host ?? null,
+                        matched_by: selected ? 'connection_id' : (preference?.preferred_host ? 'host' : 'none'),
+                    }));
+                } catch (error) {
+                    console.warn('[PAINTER_JOIN_PREFERENCE]', JSON.stringify({
+                        event: 'preferred_target_lookup_failed',
+                        slot: PAINTER_CONFIG.selected_data_slot,
+                        content_ref_count: active_content_refs.length,
+                        message: error instanceof Error ? error.message : String(error),
+                    }));
+                }
+            }
         },
     });
     refresh_painter_shell_modules();

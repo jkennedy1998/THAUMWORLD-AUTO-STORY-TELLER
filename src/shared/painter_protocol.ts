@@ -17,6 +17,14 @@ export type PainterDocumentBootstrap = {
   join_mode?: string | null;
   supports_join?: boolean;
   error?: string | null;
+  selection_channels?: PainterSelectionChannelSnapshot[];
+};
+
+export type PainterSelectionChannelSnapshot = {
+  connection_id: string;
+  color_rgb: { r: number; g: number; b: number };
+  cells: Array<{ x: number; y: number; z: number }>;
+  updated_at_ms: number;
 };
 
 export type PainterCommandResultMetadata = {
@@ -67,6 +75,7 @@ export type PainterDocumentEvent = {
     | 'PAINTER_DOCUMENT_BOOTSTRAPPED'
     | 'PAINTER_DOCUMENT_PATCHED'
     | 'PAINTER_DOCUMENT_REPLACED'
+    | 'PAINTER_SELECTION_UPDATED'
     | 'PAINTER_LAYER_CHANGED'
     | 'PAINTER_COMMAND_REJECTED'
     | 'PAINTER_REVISION_CONFLICT';

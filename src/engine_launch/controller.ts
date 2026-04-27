@@ -21,6 +21,7 @@ export function create_launch_controller<TLaunchIntent>(args: {
 }): {
   modules: readonly Module[];
   refresh: () => Promise<void>;
+  get_state: () => LaunchMenuState;
 } {
   let resume_candidate: ResumeCandidate | null = null;
   let resolved_resume_intent: TLaunchIntent | null = null;
@@ -143,5 +144,6 @@ export function create_launch_controller<TLaunchIntent>(args: {
   return {
     modules: [module],
     refresh,
+    get_state: () => state,
   };
 }

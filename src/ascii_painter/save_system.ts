@@ -364,6 +364,14 @@ export interface ToolProperties {
   right_brush_edit_channels: EditChannels;
   left_picker_edit_channels: EditChannels;
   right_picker_edit_channels: EditChannels;
+  left_bucket_select_channels: EditChannels;
+  right_bucket_select_channels: EditChannels;
+  bucket_continuous: boolean;
+  bucket_same_depth_only: boolean;
+  bucket_allow_diagonal: boolean;
+  rect_select_all_depths: boolean;
+  lasso_select_all_depths: boolean;
+  user_selection_color_rgb: { r: number; g: number; b: number };
   
   // Text tool settings
   text_spacing: number;
@@ -404,6 +412,14 @@ const DEFAULT_TOOL_PROPERTIES: ToolProperties = {
   right_brush_edit_channels: { ...ALL_EDIT_CHANNELS },
   left_picker_edit_channels: { ...ALL_EDIT_CHANNELS },
   right_picker_edit_channels: { ...ALL_EDIT_CHANNELS },
+  left_bucket_select_channels: { ...ALL_EDIT_CHANNELS },
+  right_bucket_select_channels: { ...ALL_EDIT_CHANNELS },
+  bucket_continuous: true,
+  bucket_same_depth_only: true,
+  bucket_allow_diagonal: false,
+  rect_select_all_depths: false,
+  lasso_select_all_depths: false,
+  user_selection_color_rgb: { r: 0, g: 220, b: 255 },
   text_spacing: 1,
   text_charlead: 0,
   text_enterlead: 1,
@@ -457,6 +473,14 @@ export function loadToolProperties(): ToolProperties {
       right_brush_edit_channels: sanitize_edit_channels(parsed.right_brush_edit_channels, DEFAULT_TOOL_PROPERTIES.right_brush_edit_channels),
       left_picker_edit_channels: sanitize_edit_channels(parsed.left_picker_edit_channels, DEFAULT_TOOL_PROPERTIES.left_picker_edit_channels),
       right_picker_edit_channels: sanitize_edit_channels(parsed.right_picker_edit_channels, DEFAULT_TOOL_PROPERTIES.right_picker_edit_channels),
+      left_bucket_select_channels: sanitize_edit_channels(parsed.left_bucket_select_channels, DEFAULT_TOOL_PROPERTIES.left_bucket_select_channels),
+      right_bucket_select_channels: sanitize_edit_channels(parsed.right_bucket_select_channels, DEFAULT_TOOL_PROPERTIES.right_bucket_select_channels),
+      bucket_continuous: sanitize_boolean(parsed.bucket_continuous, DEFAULT_TOOL_PROPERTIES.bucket_continuous),
+      bucket_same_depth_only: sanitize_boolean(parsed.bucket_same_depth_only, DEFAULT_TOOL_PROPERTIES.bucket_same_depth_only),
+      bucket_allow_diagonal: sanitize_boolean(parsed.bucket_allow_diagonal, DEFAULT_TOOL_PROPERTIES.bucket_allow_diagonal),
+      rect_select_all_depths: sanitize_boolean(parsed.rect_select_all_depths, DEFAULT_TOOL_PROPERTIES.rect_select_all_depths),
+      lasso_select_all_depths: sanitize_boolean(parsed.lasso_select_all_depths, DEFAULT_TOOL_PROPERTIES.lasso_select_all_depths),
+      user_selection_color_rgb: sanitize_rgb(parsed.user_selection_color_rgb, DEFAULT_TOOL_PROPERTIES.user_selection_color_rgb),
       text_spacing: clamp_integer(parsed.text_spacing, DEFAULT_TOOL_PROPERTIES.text_spacing, -16, 16),
       text_charlead: clamp_integer(parsed.text_charlead, DEFAULT_TOOL_PROPERTIES.text_charlead, -16, 16),
       text_enterlead: clamp_integer(parsed.text_enterlead, DEFAULT_TOOL_PROPERTIES.text_enterlead, -16, 16),

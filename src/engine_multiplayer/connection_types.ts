@@ -1,5 +1,7 @@
 export type EngineConnectionKind = 'local' | 'lan_discovered' | 'saved_manual';
 
+export type { EngineContentRef, EngineContentRefKind } from './content_refs.js';
+
 export type EngineConnectionScope = 'local_machine' | 'lan' | 'wifi' | 'internet';
 
 export type EngineConnectionTransport = {

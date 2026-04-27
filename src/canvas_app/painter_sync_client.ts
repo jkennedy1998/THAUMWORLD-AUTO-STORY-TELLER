@@ -1,5 +1,5 @@
 import { debug_warn } from '../shared/debug.js';
-import type { PainterDocumentAuthorityMode, PainterDocumentBootstrap } from '../shared/painter_protocol.js';
+import type { PainterDocumentAuthorityMode, PainterDocumentBootstrap, PainterSelectionChannelSnapshot } from '../shared/painter_protocol.js';
 import { create_painter_multiplayer_session } from './painter_multiplayer_session.js';
 
 export type PainterSyncState = {
@@ -13,6 +13,7 @@ export type PainterSyncState = {
   last_patch_server_revision_before: number | null;
   last_patch_applied_from_stale_base: boolean;
   last_command_error: string | null;
+  selection_channels: PainterSelectionChannelSnapshot[];
 };
 
 type PainterSyncClientOptions = {
@@ -29,6 +30,7 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
   subscribe: (listener: PainterSyncSubscriber) => () => void;
   bootstrap: (force?: boolean, document_id?: string | null) => Promise<PainterSyncState>;
   set_expect_local_host_boot: (expect: boolean) => void;
+  submit_selection: (args: { document_id?: string | null; cells: Array<{ x: number; y: number; z: number }>; color_rgb: { r: number; g: number; b: number } }) => Promise<PainterSyncState>;
   submit_cell_changes: (group_id: string, changes: Array<{ x: number; y: number; z: number; cell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number; render_index?: number } }>) => Promise<PainterSyncState>;
   submit_group_command: (command: {
     kind: 'create_group' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'reorder_groups' | 'reset_document' | 'undo_group' | 'redo_group';
@@ -54,6 +56,7 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
     last_patch_server_revision_before: null,
     last_patch_applied_from_stale_base: false,
     last_command_error: null,
+    selection_channels: [],
   };
   const listeners = new Set<PainterSyncSubscriber>();
 
@@ -105,6 +108,7 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
         last_patch_server_revision_before: Number.isFinite(Number(payload?.server_revision_before)) ? Math.max(0, Math.floor(Number(payload.server_revision_before))) : null,
         last_patch_applied_from_stale_base: Boolean(payload?.applied_from_stale_base),
         last_command_error: null,
+        selection_channels: state.selection_channels,
         bootstrap: {
           ...active,
           revision: next_revision,
@@ -122,6 +126,30 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
         });
       }
     });
+    ws_client.on('PAINTER_SELECTION_UPDATED', (payload: any) => {
+      const active = state.bootstrap;
+      if (!active) return;
+      const document_id = String(payload?.document_id ?? '').trim();
+      if (!document_id || document_id !== active.document_id) return;
+      const connection_id = String(payload?.connection_id ?? '').trim();
+      if (!connection_id) return;
+      const nextChannel: PainterSelectionChannelSnapshot = {
+        connection_id,
+        color_rgb: {
+          r: Math.max(0, Math.min(255, Math.floor(Number(payload?.color_rgb?.r ?? 0)) || 0)),
+          g: Math.max(0, Math.min(255, Math.floor(Number(payload?.color_rgb?.g ?? 0)) || 0)),
+          b: Math.max(0, Math.min(255, Math.floor(Number(payload?.color_rgb?.b ?? 0)) || 0)),
+        },
+        cells: Array.isArray(payload?.cells)
+          ? payload.cells.map((cell: any) => ({ x: Math.floor(Number(cell?.x ?? 0)), y: Math.floor(Number(cell?.y ?? 0)), z: Math.floor(Number(cell?.z ?? 0)) }))
+          : [],
+        updated_at_ms: Number(payload?.updated_at_ms ?? Date.now()) || Date.now(),
+      };
+      set_state({
+        ...state,
+        selection_channels: [...state.selection_channels.filter((entry) => entry.connection_id !== connection_id), nextChannel],
+      });
+    });
   }
 
   const api = {
@@ -137,12 +165,15 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
       session.set_expect_local_host_boot(expect);
     },
     async bootstrap(force: boolean = false, document_id?: string | null): Promise<PainterSyncState> {
+      const bootstrap_started_at_ms = Date.now();
       set_state({ ...state, lifecycle: 'bootstrapping', last_command_error: null });
       const session_state = await session.ensure_ready(force);
       console.log('[PAINTER_SYNC_BOOTSTRAP]', JSON.stringify({
         event: 'session_ready_result',
         slot: options.slot,
         force,
+        started_at_ms: bootstrap_started_at_ms,
+        latency_ms: Date.now() - bootstrap_started_at_ms,
         requested_document_id: String(document_id ?? '').trim() || null,
         authority_mode: session_state.authority_mode,
         lifecycle: session_state.lifecycle,
@@ -155,6 +186,14 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
       if (session_state.authority_mode === 'authoritative_host' && session_state.session_token) {
         ensure_patch_listener();
         const requested_document_id = String(document_id ?? '').trim();
+        const document_bootstrap_started_at_ms = Date.now();
+        console.log('[PAINTER_SYNC_BOOTSTRAP]', JSON.stringify({
+          event: 'document_bootstrap_started',
+          slot: options.slot,
+          force,
+          started_at_ms: document_bootstrap_started_at_ms,
+          requested_document_id,
+        }));
         const query = [
           `slot=${encodeURIComponent(String(options.slot))}`,
           `session_token=${encodeURIComponent(session_state.session_token)}`,
@@ -169,6 +208,7 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
             event: 'document_bootstrap_failed',
             slot: options.slot,
             force,
+            latency_ms: Date.now() - document_bootstrap_started_at_ms,
             requested_document_id,
             status: response.status,
             error: data?.error ?? null,
@@ -179,6 +219,7 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
           event: 'document_bootstrap_succeeded',
           slot: options.slot,
           force,
+          latency_ms: Date.now() - document_bootstrap_started_at_ms,
           requested_document_id,
           document_id: String(data?.document_id ?? session_state.document_id),
           revision: Number(data?.revision ?? 0) || 0,
@@ -193,6 +234,7 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
           last_patch_server_revision_before: state.last_patch_server_revision_before,
           last_patch_applied_from_stale_base: state.last_patch_applied_from_stale_base,
           last_command_error: null,
+          selection_channels: Array.isArray(data?.selection_channels) ? data.selection_channels : state.selection_channels,
           bootstrap: {
             document_id: String(data?.document_id ?? session_state.document_id),
             authority_mode: 'authoritative_host',
@@ -206,6 +248,7 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
             join_mode: session_state.join_mode,
             supports_join: session_state.supports_join,
             error: null,
+            selection_channels: Array.isArray(data?.selection_channels) ? data.selection_channels : state.selection_channels,
           },
         });
         return state;
@@ -266,12 +309,43 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
         last_patch_server_revision_before: Number.isFinite(Number(data?.server_revision_before)) ? Math.max(0, Math.floor(Number(data.server_revision_before))) : state.last_patch_server_revision_before,
         last_patch_applied_from_stale_base: Boolean(data?.applied_from_stale_base),
         last_command_error: null,
+        selection_channels: state.selection_channels,
         bootstrap: state.bootstrap ? {
           ...state.bootstrap,
           revision: Number(data?.revision ?? state.bootstrap.revision) || state.bootstrap.revision,
           snapshot: data?.snapshot ?? state.bootstrap.snapshot,
         } : state.bootstrap,
       });
+      return state;
+    },
+    async submit_selection(args: { document_id?: string | null; cells: Array<{ x: number; y: number; z: number }>; color_rgb: { r: number; g: number; b: number } }): Promise<PainterSyncState> {
+      const active = state.bootstrap;
+      if (!active?.session_token) return state;
+      const response = await fetch(`${options.get_api_base_url()}/painter/selection`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          slot: options.slot,
+          session_token: active.session_token,
+          document_id: String(args.document_id ?? active.document_id ?? '').trim() || active.document_id,
+          color_rgb: { ...args.color_rgb },
+          cells: args.cells.map((cell) => ({ x: cell.x, y: cell.y, z: cell.z })),
+        }),
+      });
+      const data = await response.json().catch(() => null) as any;
+      if (!response.ok || !data?.ok) {
+        const error = String(data?.error ?? `painter_selection_command_failed:${response.status}`);
+        set_state({ ...state, last_command_error: error });
+        throw new Error(error);
+      }
+      const snapshot = data?.selection_channel as PainterSelectionChannelSnapshot | undefined;
+      if (snapshot?.connection_id) {
+        set_state({
+          ...state,
+          last_command_error: null,
+          selection_channels: [...state.selection_channels.filter((entry) => entry.connection_id !== snapshot.connection_id), snapshot],
+        });
+      }
       return state;
     },
     async submit_group_command(command: {
@@ -317,6 +391,7 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
         last_patch_server_revision_before: Number.isFinite(Number(data?.server_revision_before)) ? Math.max(0, Math.floor(Number(data.server_revision_before))) : state.last_patch_server_revision_before,
         last_patch_applied_from_stale_base: Boolean(data?.applied_from_stale_base),
         last_command_error: null,
+        selection_channels: state.selection_channels,
         bootstrap: state.bootstrap ? {
           ...state.bootstrap,
           revision: Number(data?.revision ?? state.bootstrap.revision) || state.bootstrap.revision,
@@ -338,6 +413,7 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
       last_patch_server_revision_before: state.last_patch_server_revision_before,
       last_patch_applied_from_stale_base: state.last_patch_applied_from_stale_base,
       last_command_error: state.last_command_error,
+      selection_channels: state.selection_channels,
       bootstrap: {
         document_id: session_state.document_id,
         authority_mode: session_state.authority_mode,
@@ -351,6 +427,7 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
         join_mode: session_state.join_mode,
         supports_join: session_state.supports_join,
         error: session_state.error,
+        selection_channels: state.selection_channels,
       },
     });
   });
