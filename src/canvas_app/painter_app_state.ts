@@ -107,6 +107,7 @@ import { PAINTER_APP_CONFIG, apply_painter_multiplayer_transport_config } from '
 import type { PainterLaunchIntent } from './painter_launch_types.js';
 import { clear_launch_record } from '../engine_launch/persistence.js';
 import { persist_painter_resume_file } from './painter_launch_adapter.js';
+import { DEFAULT_LOCAL_MULTIPLAYER_TRANSPORT } from '../shared/multiplayer_transport.js';
 import {
   build_interaction_pointer_state,
   build_view_instance,
@@ -4810,6 +4811,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     suppress_recent_file_persistence = intent.persist_recent === false;
     try {
       if (intent.kind === 'join_authoritative') {
+        painter_sync.set_expect_local_host_boot(false);
         if (intent.api_base_url && intent.bridge_ws_base_url) {
           apply_painter_multiplayer_transport_config({
             api_base_url: intent.api_base_url,
@@ -4835,6 +4837,12 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         clearActiveFileAssociation(intent.display_name, { clearLastUsed: true });
         return;
       }
+      painter_sync.set_expect_local_host_boot(true);
+      apply_painter_multiplayer_transport_config({
+        host_input: 'local',
+        api_base_url: DEFAULT_LOCAL_MULTIPLAYER_TRANSPORT.api_base_url,
+        bridge_ws_base_url: DEFAULT_LOCAL_MULTIPLAYER_TRANSPORT.bridge_ws_base_url,
+      });
       const sync_state = await painter_sync.bootstrap(true);
       painterImportant('launch intent bootstrapped multiplayer state', {
         intent_kind: intent.kind,

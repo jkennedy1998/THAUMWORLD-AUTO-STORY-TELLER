@@ -21,10 +21,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-function get_boot_role(): string {
-  return String((window as Window).electronAPI?.bootRole ?? '').trim().toLowerCase();
-}
-
 function is_local_host_transport(transport: MultiplayerTransportConfig): boolean {
   const host = String(transport.host_input ?? '').trim().toLowerCase();
   const hostname = host.replace(/:\d+$/, '');
@@ -65,11 +61,13 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
   get_state: () => PainterMultiplayerSessionState;
   subscribe: (listener: SessionSubscriber) => () => void;
   ensure_ready: (force?: boolean) => Promise<PainterMultiplayerSessionState>;
+  set_expect_local_host_boot: (expect: boolean) => void;
   get_ws_client: () => WebSocketClient | null;
 } {
   let state = create_initial_state(options.slot);
   let bootstrap_promise: Promise<PainterMultiplayerSessionState> | null = null;
   let ws_client: WebSocketClient | null = null;
+  let expect_local_host_boot = false;
   const listeners = new Set<SessionSubscriber>();
 
   function emit(): void {
@@ -148,8 +146,7 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
     bootstrap_promise = (async () => {
       set_state({ ...state, lifecycle: 'connecting', error: null });
       const transport = resolve_painter_transport(options);
-      const boot_role = get_boot_role();
-      const strict_local_host_boot = boot_role === 'host' && is_local_host_transport(transport);
+      const strict_local_host_boot = expect_local_host_boot && is_local_host_transport(transport);
       const max_attempts = strict_local_host_boot ? 8 : 1;
       debug_log('[PAINTER_SESSION]', 'bootstrapping painter multiplayer session', {
         slot: options.slot,
@@ -157,7 +154,7 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
         reconnect_token_storage_key: options.reconnect_token_storage_key,
         api_base_url: transport.api_base_url,
         bridge_ws_base_url: transport.bridge_ws_base_url,
-        boot_role,
+        expect_local_host_boot,
         strict_local_host_boot,
         max_attempts,
       });
@@ -166,7 +163,7 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
         force,
         api_base_url: transport.api_base_url,
         bridge_ws_base_url: transport.bridge_ws_base_url,
-        boot_role,
+        expect_local_host_boot,
         strict_local_host_boot,
         max_attempts,
       }));
@@ -179,7 +176,7 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
           bridge_ws_base_url: transport.bridge_ws_base_url,
           attempt,
           max_attempts,
-          boot_role,
+          expect_local_host_boot,
         }));
         host_status = await fetch_host_status(options.slot, transport);
         console.log('[JOIN_CONNECT]', JSON.stringify({
@@ -201,7 +198,7 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
             attempt,
             max_attempts,
             api_base_url: transport.api_base_url,
-            boot_role,
+            expect_local_host_boot,
           }));
           await sleep(400 * attempt);
         }
@@ -210,14 +207,14 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
         debug_warn('[PAINTER_SESSION]', 'local host join unavailable; using local compatibility mode', {
           slot: options.slot,
           host_status,
-          boot_role,
+          expect_local_host_boot,
           strict_local_host_boot,
         });
         console.warn('[PAINTER_SESSION_BOOT]', JSON.stringify({
           slot: options.slot,
           reason: 'host_join_unavailable',
           host_status,
-          boot_role,
+          expect_local_host_boot,
           strict_local_host_boot,
         }));
         return set_state({
@@ -245,8 +242,8 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
           reconnect_token_present: Boolean(reconnect_token),
           attempt,
           max_attempts,
-          boot_role,
-        }));
+            expect_local_host_boot,
+          }));
         try {
           response = await fetch(`${transport.api_base_url}/connect`, {
             method: 'POST',
@@ -283,7 +280,7 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
             attempt,
             max_attempts,
             api_base_url: transport.api_base_url,
-            boot_role,
+            expect_local_host_boot,
             last_connect_error,
           }));
           await sleep(400 * attempt);
@@ -373,6 +370,9 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
       };
     },
     ensure_ready,
+    set_expect_local_host_boot(expect: boolean): void {
+      expect_local_host_boot = Boolean(expect);
+    },
     get_ws_client: () => ws_client,
   };
 }

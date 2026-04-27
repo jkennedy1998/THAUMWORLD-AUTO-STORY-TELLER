@@ -28,6 +28,7 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
   get_state: () => PainterSyncState;
   subscribe: (listener: PainterSyncSubscriber) => () => void;
   bootstrap: (force?: boolean, document_id?: string | null) => Promise<PainterSyncState>;
+  set_expect_local_host_boot: (expect: boolean) => void;
   submit_cell_changes: (group_id: string, changes: Array<{ x: number; y: number; z: number; cell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number; render_index?: number } }>) => Promise<PainterSyncState>;
   submit_group_command: (command: {
     kind: 'create_group' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'reorder_groups' | 'reset_document' | 'undo_group' | 'redo_group';
@@ -131,6 +132,9 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
       return () => {
         listeners.delete(listener);
       };
+    },
+    set_expect_local_host_boot(expect: boolean): void {
+      session.set_expect_local_host_boot(expect);
     },
     async bootstrap(force: boolean = false, document_id?: string | null): Promise<PainterSyncState> {
       set_state({ ...state, lifecycle: 'bootstrapping', last_command_error: null });

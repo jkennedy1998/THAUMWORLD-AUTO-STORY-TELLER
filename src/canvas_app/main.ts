@@ -270,19 +270,19 @@ if (IS_PAINTER_MODE && launch_controller) {
     void (async () => {
         const preferredStartupHost = String(PAINTER_STARTUP_JOIN_CONFIG?.preferredHost ?? '').trim();
         const startupJoinAutoOpen = Boolean(PAINTER_STARTUP_JOIN_CONFIG?.autoOpen);
-        if (PAINTER_BOOT_ROLE === 'client' && preferredStartupHost) {
+        if (preferredStartupHost) {
             try {
                 const saved = save_manual_connection(preferredStartupHost, preferredStartupHost);
                 console.log('[PAINTER_JOIN_STARTUP]', JSON.stringify({
                     event: 'manual_startup_host_seeded',
-                    boot_role: PAINTER_BOOT_ROLE,
+                    boot_role: PAINTER_BOOT_ROLE || null,
                     preferred_host: preferredStartupHost,
                     connection_id: saved.id,
                 }));
             } catch (error) {
                 console.warn('[PAINTER_JOIN_STARTUP]', JSON.stringify({
                     event: 'manual_startup_host_seed_failed',
-                    boot_role: PAINTER_BOOT_ROLE,
+                    boot_role: PAINTER_BOOT_ROLE || null,
                     preferred_host: preferredStartupHost,
                     message: error instanceof Error ? error.message : String(error),
                 }));
@@ -294,7 +294,7 @@ if (IS_PAINTER_MODE && launch_controller) {
                 const selected = painter_join_controller.select_connection_by_host(preferredStartupHost);
                 console.log('[PAINTER_JOIN_STARTUP]', JSON.stringify({
                     event: 'manual_startup_join_opened',
-                    boot_role: PAINTER_BOOT_ROLE,
+                    boot_role: PAINTER_BOOT_ROLE || null,
                     launch_mode: PAINTER_LAUNCH_MODE || null,
                     preferred_host: preferredStartupHost,
                     selected,

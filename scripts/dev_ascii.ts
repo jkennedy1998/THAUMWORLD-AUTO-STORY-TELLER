@@ -231,7 +231,7 @@ function writePainterHostSessionMetadata(): void {
   })}`));
 }
 
-function startPainterClientProcesses(viteExists: boolean, bootRole: 'host' | 'client', startupJoinAutoOpen: boolean): void {
+function startPainterClientProcesses(viteExists: boolean, bootRole: '' | 'host' | 'client', startupJoinAutoOpen: boolean): void {
   appendToLog(formatLogEntry("LAUNCHER", "INFO", `Painter client processes starting ${JSON.stringify({
     data_slot,
     vite_exists: viteExists,
@@ -269,7 +269,7 @@ async function startPainter(): Promise<void> {
     console.log(`Host lock recovery: ${recovered.reason}${recovered.cleared ? ' (cleared stale lock)' : ''}`);
     hostExists = await detectLocalHost(data_slot);
   }
-  let rendererBootRole: 'host' | 'client' = 'client';
+  let rendererBootRole: '' | 'host' | 'client' = '';
   let startupJoinAutoOpen = false;
   let spawnRenderer = true;
   let startHostServices = false;
@@ -363,10 +363,10 @@ async function startPainter(): Promise<void> {
       startHostServices = true;
       hostExists = await waitForLocalHost(data_slot, 20000);
       console.log(`Host wait result after start: ${hostExists ? 'ready' : 'not_reachable'}`);
-      rendererBootRole = 'host';
+      rendererBootRole = '';
       spawnRenderer = true;
       startupJoinAutoOpen = false;
-      decisionReason = hostExists ? 'smart_started_local_host' : 'smart_started_local_host_unreachable';
+      decisionReason = hostExists ? 'smart_shell_started_local_host' : 'smart_shell_started_local_host_unreachable';
     } else {
       console.log('Another launcher is starting the local host; waiting to attach...');
       appendToLog(formatLogEntry("LAUNCHER", "INFO", `Painter attach waiting for existing host ${JSON.stringify({
@@ -375,18 +375,18 @@ async function startPainter(): Promise<void> {
       })}`));
       hostExists = await waitForLocalHost(data_slot, 20000);
       console.log(`Host wait result while attaching: ${hostExists ? 'ready' : 'not_reachable'}`);
-      rendererBootRole = 'client';
+      rendererBootRole = '';
       spawnRenderer = true;
       startupJoinAutoOpen = false;
-      decisionReason = hostExists ? 'smart_attached_existing_host' : 'smart_existing_host_unreachable';
+      decisionReason = hostExists ? 'smart_shell_waited_for_existing_host' : 'smart_shell_existing_host_unreachable';
     }
   } else {
-    rendererBootRole = 'client';
+    rendererBootRole = '';
     spawnRenderer = true;
     startHostServices = false;
-    startupJoinAutoOpen = Boolean(preferred_host);
-    decisionReason = remote_transport ? 'smart_remote_attach' : 'smart_attached_existing_host';
-    console.log(remote_transport ? 'Remote host detected; attaching painter client only' : 'Local host detected; attaching painter client only');
+    startupJoinAutoOpen = false;
+    decisionReason = remote_transport ? 'smart_shell_remote_host_available' : 'smart_shell_local_host_available';
+    console.log(remote_transport ? 'Remote host detected; opening neutral painter shell' : 'Local host detected; opening neutral painter shell');
     appendToLog(formatLogEntry("LAUNCHER", "INFO", `Painter attach-only launch ${JSON.stringify({
       data_slot,
       session_id: sessionId,
