@@ -287,6 +287,26 @@ export function swing_place_view(state: PlaceViewState, direction: PlaceSwingDir
   return next ? make_place_view_state(next.principal_view, next.roll_quarter_turn) : current;
 }
 
+export function step_place_view_action(
+  state: PlaceViewState,
+  action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right',
+): PlaceViewState {
+  const current = make_place_view_state(state.principal_view, state.roll_quarter_turn);
+  if (action === 'roll_left' || action === 'roll_right') {
+    return rotate_place_view_roll(current, action === 'roll_left' ? 'left' : 'right');
+  }
+  return swing_place_view(current, action.replace('swing_', '') as PlaceSwingDirection);
+}
+
+export function remap_world_offset_between_views(
+  offset: WorldPoint3,
+  source_view: PlaceViewState,
+  target_view: PlaceViewState,
+): WorldPoint3 {
+  const projected = project_world_point_with_roll(offset, make_place_view_state(source_view.principal_view, source_view.roll_quarter_turn));
+  return unproject_plane_point_with_roll(projected, make_place_view_state(target_view.principal_view, target_view.roll_quarter_turn));
+}
+
 function apply_roll_to_uv(u: number, v: number, roll_quarter_turn: PlaceViewRollQuarterTurn): { u: number; v: number } {
   switch (normalize_place_view_roll_quarter_turn(roll_quarter_turn)) {
     case 1: return { u: v, v: -u };

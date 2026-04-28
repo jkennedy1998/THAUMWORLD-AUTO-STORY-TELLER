@@ -30,7 +30,7 @@ import type { ModuleGizmosConfig, GizmoState } from '../module_gizmos.js';
 import { clear_gizmo_hover_state, draw_module_gizmos, handle_gizmo_click, create_gizmo_state, is_in_gizmo_area, handle_move_drag, get_resize_edge, handle_resize_drag, handle_global_pointer_down_for_gizmos, should_draw_module_chrome, update_gizmo_hover_state } from '../module_gizmos.js';
 import type { CameraConfig } from '../../ascii_painter/voxel_space.js';
 import type { CameraAnchor } from '../runtime/camera_anchor_runtime.js';
-import { get_principal_view_plane_axis, make_place_view_state, map_screen_direction_to_world_delta, type PlaceViewState } from '../runtime/place_view_projection.js';
+import { get_principal_view_plane_axis, make_place_view_state, map_screen_direction_to_world_delta, remap_world_offset_between_views, step_place_view_action, type PlaceViewState } from '../runtime/place_view_projection.js';
 import { diag_log } from '../../shared/diagnostics.js';
 import { cells_match_edit_channels, get_flood_fill_voxels, get_line_voxels_3d } from '../../shared/painter_tools.js';
 import {
@@ -59,6 +59,8 @@ export type PainterCanvasOptions = {
   get_world_cell: (world: { x: number; y: number; z: number }) => GridCell;
   get_active_group_world_cell?: (world: { x: number; y: number; z: number }) => GridCell;
   get_active_group_world_voxels?: () => Array<{ x: number; y: number; z: number; cell: GridCell }>;
+  get_active_group_selected_world_voxels?: () => Array<{ x: number; y: number; z: number; cell: GridCell }>;
+  get_local_world_selection_cells?: () => Array<{ x: number; y: number; z: number }>;
   get_active_group_world_bounds?: () => { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number } | null;
   get_active_group_locked?: () => boolean;
   get_current_tool: () => ToolType;
@@ -75,6 +77,7 @@ export type PainterCanvasOptions = {
   get_lasso_select_all_depths?: () => boolean;
   get_space_replace: () => boolean;
   get_paste_space_replace: () => boolean;
+  get_paste_angle_mode?: () => 'relative' | 'absolute';
   get_selection_mode: () => SelectionMode;
   // Text tool spacing and leading
   get_text_spacing: () => number; // -16 to 16, horizontal movement per character
@@ -100,6 +103,8 @@ export type PainterCanvasOptions = {
     mode?: SelectionMode;
     cells?: Array<{ x: number; y: number; z: number }>;
   }) => void;
+  on_move_preview_selection_change?: (cells: Array<{ x: number; y: number; z: number }> | null) => void;
+  on_move_selection_commit?: (cells: Array<{ x: number; y: number; z: number }>) => void;
   on_copy_data?: (data: string) => void | Promise<void>;
   get_clipboard_data?: () => string | null | Promise<string | null>;
   get_world_copy_data?: () => string | null;
@@ -119,6 +124,7 @@ export type PainterCanvasOptions = {
   get_paste_ignore_white: () => boolean;
   get_paste_ignore_color: () => boolean;
   get_paste_ignore_color_rgb: () => { r: number; g: number; b: number };
+  get_move_mask_modifier_held?: () => boolean;
   get_world_point_for_grid?: (x: number, y: number) => { x: number; y: number; z: number } | null;
   get_world_point_for_grid_on_plane?: (x: number, y: number, plane: number) => { x: number; y: number; z: number } | null;
   get_grid_point_for_world?: (world: { x: number; y: number; z: number }) => { x: number; y: number } | null;
@@ -227,9 +233,129 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     return opts.get_tool_target_for_button?.(button, tool) ?? 'content';
   }
 
+  function isPasteToolActiveForAnyHand(): boolean {
+    return opts.get_left_click_tool() === 'paste' || opts.get_right_click_tool() === 'paste';
+  }
+
   function emitSelectionCells(mode: SelectionMode, cells: Array<{ x: number; y: number; z: number }>, kind: 'brush' | 'bucket' | 'rect' | 'lasso' = 'brush'): void {
     if (cells.length < 1) return;
     opts.on_world_selection_change?.({ kind, mode, cells });
+  }
+
+  function translateWorldCells<T extends { x: number; y: number; z: number }>(cells: T[], delta: { x: number; y: number; z: number }): Array<{ x: number; y: number; z: number }> {
+    return cells.map((cell) => ({ x: cell.x + delta.x, y: cell.y + delta.y, z: cell.z + delta.z }));
+  }
+
+  function buildMoveContentCommitChanges(source: Array<{ x: number; y: number; z: number; cell: GridCell }>, delta: { x: number; y: number; z: number }): CellChange[] {
+    const changesByKey = new Map<string, CellChange>();
+    for (const cell of source) {
+      const world = { x: cell.x, y: cell.y, z: cell.z };
+      const oldCell = cloneGridCell(getActiveGroupWorldCell(world));
+      changesByKey.set(worldKey(world), buildChange(world, oldCell, makeEmptyCell(), opts.get_grid_point_for_world?.(world) ?? null));
+    }
+    for (const cell of source) {
+      const world = { x: cell.x + delta.x, y: cell.y + delta.y, z: cell.z + delta.z };
+      const oldCell = cloneGridCell(getActiveGroupWorldCell(world));
+      changesByKey.set(worldKey(world), buildChange(world, oldCell, cloneGridCell(cell.cell), opts.get_grid_point_for_world?.(world) ?? null));
+    }
+    return Array.from(changesByKey.values()).filter((change) => !gridCellsEqual(change.oldCell, change.newCell));
+  }
+
+  function clearMovePreview(): void {
+    move_preview_mode = null;
+    move_preview_anchor_world = null;
+    move_preview_plane = null;
+    move_preview_depth_offset = 0;
+    move_preview_source_voxels = [];
+    move_preview_source_selection = [];
+    opts.on_move_preview_selection_change?.(null);
+    clearPendingPreviewChanges();
+  }
+
+  function isMovePreviewActive(): boolean {
+    return move_preview_mode !== null;
+  }
+
+  function resolveMoveDeltaAt(grid_x: number, grid_y: number): { x: number; y: number; z: number } | null {
+    if (!move_preview_anchor_world || move_preview_plane === null) return null;
+    const current = getWorldPointForEditPlane(grid_x, grid_y, move_preview_plane + move_preview_depth_offset)
+      ?? opts.get_world_point_for_grid?.(grid_x, grid_y)
+      ?? null;
+    if (!current) return null;
+    return {
+      x: current.x - move_preview_anchor_world.x,
+      y: current.y - move_preview_anchor_world.y,
+      z: current.z - move_preview_anchor_world.z,
+    };
+  }
+
+  function updateMovePreviewAt(grid_x: number, grid_y: number): void {
+    const delta = resolveMoveDeltaAt(grid_x, grid_y);
+    if (!delta || !move_preview_mode) return;
+    if (move_preview_mode === 'selection_mask') {
+      opts.on_move_preview_selection_change?.(translateWorldCells(move_preview_source_selection, delta));
+      return;
+    }
+    const previewChanges = buildMoveContentCommitChanges(move_preview_source_voxels, delta);
+    replacePendingPreviewChanges(previewChanges, move_preview_anchor_world, move_preview_anchor_world?.z ?? null);
+  }
+
+  function startMovePreview(grid_x: number, grid_y: number): boolean {
+    const anchorWorld = getWorldPointForEditPlane(grid_x, grid_y, opts.get_selected_z()) ?? opts.get_world_point_for_grid?.(grid_x, grid_y) ?? null;
+    if (!anchorWorld) return false;
+    const maskOnly = opts.get_move_mask_modifier_held?.() ?? false;
+    if (maskOnly) {
+      const selection = opts.get_local_world_selection_cells?.() ?? [];
+      if (selection.length < 1) return false;
+      move_preview_mode = 'selection_mask';
+      move_preview_source_selection = selection;
+    } else {
+      const selected = opts.get_active_group_selected_world_voxels?.() ?? [];
+      const wholeGroup = opts.get_active_group_world_voxels?.() ?? [];
+      move_preview_mode = selected.length > 0 ? 'selection_content' : 'group';
+      move_preview_source_voxels = (selected.length > 0 ? selected : wholeGroup).map((entry) => ({
+        x: entry.x,
+        y: entry.y,
+        z: entry.z,
+        cell: cloneGridCell(entry.cell),
+      }));
+      if (move_preview_source_voxels.length < 1) return false;
+    }
+    move_preview_anchor_world = anchorWorld;
+    move_preview_plane = getWorldPointPlaneCoordinate(anchorWorld) ?? opts.get_selected_z();
+    move_preview_depth_offset = 0;
+    updateMovePreviewAt(grid_x, grid_y);
+    return true;
+  }
+
+  function commitMovePreviewAt(grid_x: number, grid_y: number): void {
+    const delta = resolveMoveDeltaAt(grid_x, grid_y);
+    if (!delta || !move_preview_mode) {
+      clearMovePreview();
+      return;
+    }
+    if (delta.x === 0 && delta.y === 0 && delta.z === 0) {
+      clearMovePreview();
+      return;
+    }
+    if (move_preview_mode === 'selection_mask') {
+      opts.on_move_selection_commit?.(translateWorldCells(move_preview_source_selection, delta));
+      clearMovePreview();
+      showStatus(`Moved selection ${delta.x},${delta.y},${delta.z}`);
+      return;
+    }
+    const previewChanges = buildMoveContentCommitChanges(move_preview_source_voxels, delta);
+    pending_changes = previewChanges;
+    if (pending_changes.length > 0) {
+      const selected_z = move_preview_anchor_world?.z ?? opts.get_selected_z();
+      commitLoggedCellChanges('draw_cells', 'Move', selected_z);
+      if (move_preview_mode === 'selection_content') {
+        const movedSelection = translateWorldCells(move_preview_source_voxels, delta);
+        opts.on_move_selection_commit?.(movedSelection);
+      }
+    }
+    clearMovePreview();
+    showStatus(`Moved content ${delta.x},${delta.y},${delta.z}`);
   }
 
   function getPreviewBrush(): Brush {
@@ -414,6 +540,14 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   let paste_preview_pos: { x: number; y: number } | null = null;
   let paste_preview_world_data: WorldCopyData | null = null;
   let paste_preview_world_anchor: { x: number; y: number; z: number } | null = null;
+  let paste_preview_rotation_view: PlaceViewState | null = null;
+  let paste_preview_loading = false;
+  let move_preview_mode: 'group' | 'selection_content' | 'selection_mask' | null = null;
+  let move_preview_anchor_world: { x: number; y: number; z: number } | null = null;
+  let move_preview_plane: number | null = null;
+  let move_preview_depth_offset = 0;
+  let move_preview_source_voxels: Array<{ x: number; y: number; z: number; cell: GridCell }> = [];
+  let move_preview_source_selection: Array<{ x: number; y: number; z: number }> = [];
 
   function cloneGridCell(cell: GridCell): GridCell {
     return {
@@ -582,15 +716,43 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     };
   }
 
-  function buildWorldPastePreviewChanges(worldData: WorldCopyData, anchor: { x: number; y: number; z: number }): PastePreviewResult {
+  function getBasePasteTargetView(worldData: WorldCopyData): PlaceViewState {
+    if ((opts.get_paste_angle_mode?.() ?? 'relative') === 'absolute') {
+      return make_place_view_state(worldData.source_view?.principal_view ?? 'top', worldData.source_view?.roll_quarter_turn ?? 0);
+    }
+    return opts.get_view_state?.() ?? make_place_view_state('top', 0);
+  }
+
+  function getEffectivePasteTargetView(worldData: WorldCopyData): PlaceViewState {
+    return paste_preview_rotation_view ?? getBasePasteTargetView(worldData);
+  }
+
+  function resetPastePreviewRotationView(worldData?: WorldCopyData | null): void {
+    paste_preview_rotation_view = worldData ? getBasePasteTargetView(worldData) : null;
+  }
+
+  function stepPastePreviewViewAction(action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right'): void {
+    if (!paste_preview_world_data) return;
+    const current = getEffectivePasteTargetView(paste_preview_world_data);
+    paste_preview_rotation_view = step_place_view_action(current, action);
+    if (paste_preview_world_anchor) {
+      const gridPoint = opts.get_grid_point_for_world?.(paste_preview_world_anchor) ?? null;
+      if (gridPoint) updatePastePreviewAtGrid(gridPoint.x, gridPoint.y);
+    }
+  }
+
+  function buildWorldPastePreviewChanges(worldData: WorldCopyData, anchor: { x: number; y: number; z: number }, options?: { preview_only?: boolean }): PastePreviewResult {
     const result = createEmptyPastePreviewResult();
     const ignoreColorRgb = opts.get_paste_ignore_color_rgb();
     const changesByWorld = new Map<string, CellChange>();
+    const targetView = getEffectivePasteTargetView(worldData);
+    const sourceView = make_place_view_state(worldData.source_view?.principal_view ?? 'top', worldData.source_view?.roll_quarter_turn ?? 0);
     for (const entry of worldData.cells) {
+      const remapped = remap_world_offset_between_views({ x: entry.dx, y: entry.dy, z: entry.dz }, sourceView, targetView);
       const world = {
-        x: anchor.x + entry.dx,
-        y: anchor.y + entry.dy,
-        z: anchor.z + entry.dz,
+        x: anchor.x + remapped.x,
+        y: anchor.y + remapped.y,
+        z: anchor.z + remapped.z,
       };
       result.minPasteZ = Math.min(result.minPasteZ, world.z);
       result.maxPasteZ = Math.max(result.maxPasteZ, world.z);
@@ -607,6 +769,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         continue;
       }
       if (opts.get_paste_space_replace()) {
+        if (options?.preview_only && oldCell.char === ' ') {
+          result.preserved += 1;
+          continue;
+        }
         const clearedCell = makeEmptyCell();
         changesByWorld.set(worldKey(world), buildChange(world, oldCell, clearedCell, opts.get_grid_point_for_world?.(world) ?? null));
         result.cleared += 1;
@@ -686,7 +852,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   function updatePastePreviewAtGrid(grid_x: number, grid_y: number): void {
     if (paste_preview_world_data) {
       paste_preview_world_anchor = opts.get_world_point_for_grid?.(grid_x, grid_y) ?? { x: grid_x, y: grid_y, z: opts.get_selected_z() };
-      const preview = buildWorldPastePreviewChanges(paste_preview_world_data, paste_preview_world_anchor);
+      const preview = buildWorldPastePreviewChanges(paste_preview_world_data, paste_preview_world_anchor, { preview_only: true });
       replacePendingPreviewChanges(preview.changes, paste_preview_world_anchor, paste_preview_world_anchor.z);
       return;
     }
@@ -696,6 +862,79 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       const preview = buildFlatPastePreviewChanges(paste_preview_data, paste_preview_pos);
       replacePendingPreviewChanges(preview.changes, anchorWorld, anchorWorld.z);
     }
+  }
+
+  function ensurePastePreviewAtGrid(grid_x: number, grid_y: number): void {
+    if (paste_preview_data || paste_preview_world_data || paste_preview_loading) {
+      updatePastePreviewAtGrid(grid_x, grid_y);
+      return;
+    }
+    paste_preview_loading = true;
+    const scale = opts.get_paste_scale();
+    const freshGradiatorState = opts.get_gradiator_state();
+    const targetWidth = scale === 1.0 ? undefined : 80;
+    const pixelPerfect = scale === 1.0;
+    pasteImageFromClipboard(targetWidth, freshGradiatorState, pixelPerfect).then((imageData) => {
+      if (imageData) {
+        const scaledData = scale !== 1.0 ? scaleCopyData(imageData, scale) : imageData;
+        paste_preview_data = scaledData;
+        paste_preview_world_data = null;
+        paste_preview_world_anchor = null;
+        paste_preview_rotation_view = null;
+        paste_preview_pos = {
+          x: grid_x - Math.floor(scaledData.width / 2),
+          y: grid_y - Math.floor(scaledData.height / 2),
+        };
+        updatePastePreviewAtGrid(paste_preview_pos.x, paste_preview_pos.y);
+        showStatus(`Image paste: ${scaledData.width}x${scaledData.height} @ ${Math.round(scale * 100)}% - Click to place`);
+        return;
+      }
+      return Promise.resolve(opts.get_clipboard_data?.()).then((clipboard) => {
+        if (!clipboard) return;
+        const worldData = decode_world_copy_data(clipboard);
+        if (worldData) {
+          paste_preview_world_data = worldData;
+          resetPastePreviewRotationView(worldData);
+          paste_preview_world_anchor = opts.get_world_point_for_grid?.(grid_x, grid_y) ?? { x: grid_x, y: grid_y, z: opts.get_selected_z() };
+          updatePastePreviewAtGrid(grid_x, grid_y);
+          opts.set_world_copy_data?.(clipboard);
+          showStatus(`3D paste preview: ${worldData.cells.length} voxels - Click to place`);
+          return;
+        }
+        const specialData = decodeFromSpecialFormat(clipboard);
+        if (specialData) {
+          const scaledData = scale !== 1.0 ? scaleCopyData(specialData, scale) : specialData;
+          paste_preview_data = scaledData;
+          paste_preview_world_data = null;
+          paste_preview_world_anchor = null;
+          paste_preview_rotation_view = null;
+          paste_preview_pos = {
+            x: grid_x - Math.floor(scaledData.width / 2),
+            y: grid_y - Math.floor(scaledData.height / 2),
+          };
+          updatePastePreviewAtGrid(paste_preview_pos.x, paste_preview_pos.y);
+          showStatus(`Paste preview: ${scaledData.width}x${scaledData.height} @ ${Math.round(scale * 100)}% - Click to place`);
+          return;
+        }
+        const textData = scaleTextToCopyData(clipboard, scale);
+        if (textData) {
+          paste_preview_data = textData;
+          paste_preview_world_data = null;
+          paste_preview_world_anchor = null;
+          paste_preview_rotation_view = null;
+          paste_preview_pos = {
+            x: grid_x - Math.floor(textData.width / 2),
+            y: grid_y - Math.floor(textData.height / 2),
+          };
+          updatePastePreviewAtGrid(paste_preview_pos.x, paste_preview_pos.y);
+          showStatus(`Text paste: ${textData.width}x${textData.height} - Click to place`);
+        }
+      });
+    }).catch(() => {
+      // ignore clipboard load failures; user keeps control of the tool
+    }).finally(() => {
+      paste_preview_loading = false;
+    });
   }
 
   function exitTextMode(commitPending: boolean): void {
@@ -1913,6 +2152,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     resolveInteractionTargets: (x: number, y: number) => OrderedResolvedTargets;
     finalizePendingChanges: () => void;
     handleDepthStepDuringActiveStroke: (nextPlane: number) => void;
+    hasWorldPastePreview: () => boolean;
+    stepPasteViewAction: (action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right') => void;
+    setPasteAngleMode: () => void;
   } = {
     id: opts.id,
     get rect() { return rect; },
@@ -2335,12 +2577,16 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       const tool_for_button = e.button === 2 ? opts.get_right_click_tool() : opts.get_left_click_tool();
       const tool_target = getToolTargetForButton(e.button, tool_for_button);
 
-      if (tool_for_button !== 'paste' && (paste_preview_data || paste_preview_world_data)) {
+      if (tool_for_button !== 'paste' && !isPasteToolActiveForAnyHand() && (paste_preview_data || paste_preview_world_data)) {
         clearPendingPreviewChanges();
         paste_preview_data = null;
         paste_preview_pos = null;
         paste_preview_world_data = null;
         paste_preview_world_anchor = null;
+        paste_preview_rotation_view = null;
+      }
+      if (tool_for_button !== 'move' && isMovePreviewActive()) {
+        clearMovePreview();
       }
 
       if (text_mode_active) {
@@ -2354,96 +2600,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
       // Handle paste tool
       if (tool_for_button === 'paste') {
-        clearPendingPreviewChanges();
-        const scale = opts.get_paste_scale();
-        // Get fresh gradiator state at paste time (not cached)
-        const freshGradiatorState = opts.get_gradiator_state();
-        
-        // First check for images in clipboard
-        // Pass targetWidth based on scale: 100% means use original image dimensions with pixel-perfect mapping
-        const targetWidth = scale === 1.0 ? undefined : 80;
-        const pixelPerfect = scale === 1.0;
-        pasteImageFromClipboard(targetWidth, freshGradiatorState, pixelPerfect).then(imageData => {
-          if (imageData) {
-            // Image found in clipboard - scale it if needed
-            painterCanvasDiag('image pasted from clipboard', { width: imageData.width, height: imageData.height });
-            const scaledData = scale !== 1.0 ? scaleCopyData(imageData, scale) : imageData;
-            paste_preview_data = scaledData;
-            paste_preview_world_data = null;
-            paste_preview_world_anchor = null;
-            // Center the paste on the cursor
-            paste_preview_pos = { 
-              x: grid_x - Math.floor(scaledData.width / 2), 
-              y: grid_y - Math.floor(scaledData.height / 2) 
-            };
-            updatePastePreviewAtGrid(paste_preview_pos.x, paste_preview_pos.y);
-            showStatus(`Image paste: ${scaledData.width}x${scaledData.height} @ ${Math.round(scale * 100)}% - Click to place`);
-          } else {
-            // No image, try text clipboard
-            Promise.resolve(opts.get_clipboard_data?.()).then(clipboard => {
-              painterCanvasDiag('paste tool clicked', { clipboard: clipboard ? 'exists' : 'empty' });
-              if (clipboard) {
-                const worldData = decode_world_copy_data(clipboard);
-                if (worldData) {
-                  paste_preview_world_data = worldData;
-                  paste_preview_world_anchor = opts.get_world_point_for_grid?.(grid_x, grid_y) ?? { x: grid_x, y: grid_y, z: opts.get_selected_z() };
-                  updatePastePreviewAtGrid(grid_x, grid_y);
-                  opts.set_world_copy_data?.(clipboard);
-                  showStatus(`3D paste preview: ${worldData.cells.length} voxels - Click to place`);
-                  return;
-                }
-                // Try to decode special format first
-                painterCanvasDiag('decoding clipboard data', { preview: clipboard.substring(0, 200) });
-                const specialData = decodeFromSpecialFormat(clipboard);
-                if (specialData) {
-                  // Special format with colors/weights - apply scaling
-                  painterCanvasDiag('decoded special format', { width: specialData.width, height: specialData.height });
-                  // Debug: Show first few cells
-                  for (let y = 0; y < Math.min(3, specialData.height); y++) {
-                    for (let x = 0; x < Math.min(5, specialData.width); x++) {
-                      const cell = specialData.cells[y]?.[x];
-                      if (cell) {
-                        painterCanvasDiag('decoded special format sample cell', { y, x, char: cell.char, rgb: cell.rgb, weight_index: cell.weight_index });
-                      }
-                    }
-                  }
-                  const scaledData = scale !== 1.0 ? scaleCopyData(specialData, scale) : specialData;
-                  paste_preview_data = scaledData;
-                  paste_preview_world_data = null;
-                  paste_preview_world_anchor = null;
-                  // Center the paste on the cursor
-                  paste_preview_pos = { 
-                    x: grid_x - Math.floor(scaledData.width / 2), 
-                    y: grid_y - Math.floor(scaledData.height / 2) 
-                  };
-                  updatePastePreviewAtGrid(paste_preview_pos.x, paste_preview_pos.y);
-                  showStatus(`Paste preview: ${scaledData.width}x${scaledData.height} @ ${Math.round(scale * 100)}% - Click to place`);
-                } else {
-                  // Plain text - convert and scale
-                  const textData = scaleTextToCopyData(clipboard, scale);
-                  paste_preview_data = textData;
-                  paste_preview_world_data = null;
-                  paste_preview_world_anchor = null;
-                  // Center the paste on the cursor
-                  paste_preview_pos = { 
-                    x: grid_x - Math.floor(textData.width / 2), 
-                    y: grid_y - Math.floor(textData.height / 2) 
-                  };
-                  updatePastePreviewAtGrid(paste_preview_pos.x, paste_preview_pos.y);
-                  showStatus(`Paste preview: ${textData.width}x${textData.height} @ ${Math.round(scale * 100)}% - Click to place`);
-                }
-              } else {
-                showStatus('Clipboard empty! Copy something first.');
-              }
-            }).catch(err => {
-              diag_log('input', 'important', 'PAINTER_CANVAS', 'failed to read clipboard', { error: err instanceof Error ? err.message : String(err) }, { sink: 'error' });
-              showStatus('Failed to read clipboard!');
-            });
-          }
-        }).catch(err => {
-          diag_log('painter', 'important', 'PAINTER_CANVAS', 'failed to paste image', { error: err instanceof Error ? err.message : String(err) }, { sink: 'error' });
-          showStatus('Failed to read image from clipboard!');
-        });
+        ensurePastePreviewAtGrid(grid_x, grid_y);
         return;
       }
 
@@ -2614,6 +2771,13 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           return;
         }
 
+        if (tool_for_button === 'move') {
+          if (startMovePreview(grid_x, grid_y)) {
+            showStatus((opts.get_move_mask_modifier_held?.() ?? false) ? 'Move selection preview' : 'Move content preview');
+          }
+          return;
+        }
+
         if (tool_for_button === 'line' || tool_for_button.startsWith('rect_')) {
           active_stroke_tool = tool_for_button;
           active_stroke_world_plane = opts.get_selected_z();
@@ -2768,6 +2932,12 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         return;
       }
 
+      if (isMovePreviewActive()) {
+        const grid_coords = localToGrid(local_x, local_y);
+        updateMovePreviewAt(grid_coords.x, grid_coords.y);
+        return;
+      }
+
         if (isActiveShapeStroke()) {
           const current_coords = localToGrid(local_x, local_y);
           const current_x = current_coords.x;
@@ -2775,13 +2945,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           updateLineRectPreview({ x: current_x, y: current_y });
         }
 
-        // Paste preview follows mouse
-        if (opts.get_current_tool() === 'paste' && paste_preview_data) {
+        // Paste preview follows mouse lazily once the paste tool is active.
+        if (isPasteToolActiveForAnyHand()) {
           const grid_coords = localToGrid(local_x, local_y);
-          updatePastePreviewAtGrid(grid_coords.x, grid_coords.y);
-        } else if (opts.get_current_tool() === 'paste' && paste_preview_world_data) {
-          const grid_coords = localToGrid(local_x, local_y);
-          updatePastePreviewAtGrid(grid_coords.x, grid_coords.y);
+          ensurePastePreviewAtGrid(grid_coords.x, grid_coords.y);
         }
     },
 
@@ -2845,6 +3012,15 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         return;
       }
 
+      if (isMovePreviewActive()) {
+        const local_x = e.x - rect.x0;
+        const local_y = e.y - rect.y0;
+        const grid_coords = localToGrid(local_x, local_y);
+        commitMovePreviewAt(grid_coords.x, grid_coords.y);
+        drag_start_buttons = 0;
+        return;
+      }
+
       if (!is_drawing && !is_erasing) {
         drag_start_buttons = 0;
         return;
@@ -2858,7 +3034,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     },
 
     OnPointerUp(e: PointerEvent): void {
-      if (opts.get_current_tool() === 'paste' && paste_preview_world_data && paste_preview_world_anchor) {
+      if (isPasteToolActiveForAnyHand() && paste_preview_world_data && paste_preview_world_anchor) {
         if (opts.get_active_group_locked?.()) {
           showStatus('Cannot paste: active group is locked');
           return;
@@ -2873,11 +3049,12 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         showStatus(`Pasted 3D (${preview.placed} placed, ${preview.skippedIgnored} ignored, ${preview.preserved} preserved, ${preview.cleared} cleared${zLabel})`);
         paste_preview_world_data = null;
         paste_preview_world_anchor = null;
+        paste_preview_rotation_view = null;
         return;
       }
 
       // Handle paste placement
-      if (opts.get_current_tool() === 'paste' && paste_preview_data && paste_preview_pos) {
+      if (isPasteToolActiveForAnyHand() && paste_preview_data && paste_preview_pos) {
         if (opts.get_active_group_locked?.()) {
           showStatus('Cannot paste: active group is locked');
           return;
@@ -3062,6 +3239,13 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         
         // Pass to DOM renderer
         opts.on_mouse_move?.(mouse_offset_x, mouse_offset_y);
+
+        if (isPasteToolActiveForAnyHand()) {
+          const local_x = e.x - rect.x0;
+          const local_y = e.y - rect.y0;
+          const grid_coords = localToGrid(local_x, local_y);
+          ensurePastePreviewAtGrid(grid_coords.x, grid_coords.y);
+        }
       }
     },
 
@@ -3073,6 +3257,17 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       }
 
       if (!e.shift && !e.alt && opts.cycle_focus_layer) {
+        if (isMovePreviewActive()) {
+          const dir = e.delta_y < 0 ? 1 : (e.delta_y > 0 ? -1 : 0);
+          if (dir !== 0) {
+            move_preview_depth_offset += dir;
+            const local_x = e.x - rect.x0;
+            const local_y = e.y - rect.y0;
+            const grid_coords = localToGrid(local_x, local_y);
+            updateMovePreviewAt(grid_coords.x, grid_coords.y);
+            return;
+          }
+        }
         if (is_selecting && selection_drag_start) {
           const dir = e.delta_y < 0 ? 1 : (e.delta_y > 0 ? -1 : 0);
           if (dir !== 0) {
@@ -3114,6 +3309,25 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
     OnKeyDown(e: KeyboardEvent): void {
       ensureGridShapeState();
+      if (isMovePreviewActive()) {
+        const currentGrid = current_mouse_pos ? localToGrid(current_mouse_pos.x - rect.x0, current_mouse_pos.y - rect.y0) : { x: 0, y: 0 };
+        const nudgeByCode: Partial<Record<string, { x: number; y: number; z: number }>> = {
+          Numpad1: { x: -1, y: 0, z: 0 },
+          Numpad3: { x: 1, y: 0, z: 0 },
+          NumpadAdd: { x: 0, y: 0, z: 1 },
+          NumpadSubtract: { x: 0, y: 0, z: -1 },
+        };
+        const nudge = nudgeByCode[e.code];
+        if (nudge) {
+          move_preview_depth_offset += nudge.z;
+          if (move_preview_anchor_world) {
+            move_preview_anchor_world = { ...move_preview_anchor_world, x: move_preview_anchor_world.x - nudge.x, y: move_preview_anchor_world.y - nudge.y, z: move_preview_anchor_world.z };
+          }
+          updateMovePreviewAt(currentGrid.x, currentGrid.y);
+          e.preventDefault();
+          return;
+        }
+      }
       // Undo - Ctrl+Z
       if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
         finalizePendingChanges();
@@ -3340,11 +3554,13 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
     OnBlur(): void {
       exitTextMode(true);
+      clearMovePreview();
       clearPendingPreviewChanges();
       paste_preview_data = null;
       paste_preview_pos = null;
       paste_preview_world_data = null;
       paste_preview_world_anchor = null;
+      paste_preview_rotation_view = null;
       space_held = false;
       is_panning = false;
       is_drawing = false;
@@ -3369,6 +3585,20 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
     WantsTextCapture(): boolean {
       return text_mode_active;
+    },
+    hasWorldPastePreview(): boolean {
+      return !!paste_preview_world_data;
+    },
+    stepPasteViewAction(action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right'): void {
+      stepPastePreviewViewAction(action);
+    },
+    setPasteAngleMode(): void {
+      if (!paste_preview_world_data) return;
+      resetPastePreviewRotationView(paste_preview_world_data);
+      if (paste_preview_world_anchor) {
+        const gridPoint = opts.get_grid_point_for_world?.(paste_preview_world_anchor) ?? null;
+        if (gridPoint) updatePastePreviewAtGrid(gridPoint.x, gridPoint.y);
+      }
     }
   };
   

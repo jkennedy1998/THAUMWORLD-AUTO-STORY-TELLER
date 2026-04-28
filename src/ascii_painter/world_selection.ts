@@ -1,4 +1,5 @@
 import type { GridCell } from './types.js';
+import type { PlaceViewState } from '../mono_ui/runtime/place_view_projection.js';
 
 export type WorldCellKey = `${number},${number},${number}`;
 
@@ -8,6 +9,7 @@ export type WorldSelection = {
 
 export type WorldCopyData = {
   anchor: { x: number; y: number; z: number };
+  source_view: PlaceViewState;
   cells: Array<{
     dx: number;
     dy: number;

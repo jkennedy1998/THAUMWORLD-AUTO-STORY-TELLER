@@ -62,6 +62,7 @@ const PAINTER_TOOL_ACTIONS: Record<ToolType, string> = {
   lassoselect: 'painter.tool_assign.lassoselect',
   copy: 'painter.tool_assign.copy',
   paste: 'painter.tool_assign.paste',
+  move: 'painter.tool_assign.move',
 };
 
 export function create_painter_controls_runtime(data_slot: number) {

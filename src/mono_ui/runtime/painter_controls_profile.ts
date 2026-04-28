@@ -2,6 +2,12 @@ import type { ControlActionDefinition } from './controls_registry.js';
 
 export const PAINTER_CONTROLS_PROFILE: ControlActionDefinition[] = [
   { id: 'painter.tool_target_invert', label: 'Hold Invert Tool Target', category: 'Selection', system: 'painter', default_binding: { kind: 'keyboard', code: 'Backquote' } },
+  { id: 'painter.view.swing_left', label: 'Swing View Left', category: 'Camera', system: 'painter', default_binding: { kind: 'keyboard', code: 'Numpad4' } },
+  { id: 'painter.view.swing_right', label: 'Swing View Right', category: 'Camera', system: 'painter', default_binding: { kind: 'keyboard', code: 'Numpad6' } },
+  { id: 'painter.view.swing_up', label: 'Swing View Up', category: 'Camera', system: 'painter', default_binding: { kind: 'keyboard', code: 'Numpad8' } },
+  { id: 'painter.view.swing_down', label: 'Swing View Down', category: 'Camera', system: 'painter', default_binding: { kind: 'keyboard', code: 'Numpad2' } },
+  { id: 'painter.view.roll_left', label: 'Roll View Left', category: 'Camera', system: 'painter', default_binding: { kind: 'keyboard', code: 'Numpad7' } },
+  { id: 'painter.view.roll_right', label: 'Roll View Right', category: 'Camera', system: 'painter', default_binding: { kind: 'keyboard', code: 'Numpad9' } },
   { id: 'painter.tool_assign.pencil', label: 'Assign Pencil Tool', category: 'Tools', system: 'painter', default_binding: { kind: 'keyboard', code: 'KeyP' } },
   { id: 'painter.tool_assign.eraser', label: 'Assign Eraser Tool', category: 'Tools', system: 'painter', default_binding: { kind: 'keyboard', code: 'KeyE' } },
   { id: 'painter.tool_assign.bucket', label: 'Assign Bucket Tool', category: 'Tools', system: 'painter', default_binding: { kind: 'keyboard', code: 'KeyB' } },
@@ -14,4 +20,5 @@ export const PAINTER_CONTROLS_PROFILE: ControlActionDefinition[] = [
   { id: 'painter.tool_assign.lassoselect', label: 'Assign Lasso Selection Tool', category: 'Tools', system: 'painter', default_binding: { kind: 'keyboard', code: 'KeyN' } },
   { id: 'painter.tool_assign.copy', label: 'Assign Copy Tool', category: 'Tools', system: 'painter', default_binding: { kind: 'keyboard', code: 'KeyC' } },
   { id: 'painter.tool_assign.paste', label: 'Assign Paste Tool', category: 'Tools', system: 'painter', default_binding: { kind: 'keyboard', code: 'KeyV' } },
+  { id: 'painter.tool_assign.move', label: 'Assign Move Tool', category: 'Tools', system: 'painter', default_binding: { kind: 'keyboard', code: 'KeyG' } },
 ];

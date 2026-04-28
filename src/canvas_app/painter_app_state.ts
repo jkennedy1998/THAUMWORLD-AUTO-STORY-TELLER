@@ -94,7 +94,7 @@ import { makePlaceCameraControlModule } from '../mono_ui/modules/place_camera_co
 import { VoxelDOMRenderer, createVoxelDOMRenderer } from '../ascii_painter/voxel_dom_renderer.js';
 import { clone_projected_scene, commit_grid_to_painter_world, get_painter_focus_slot_for_anchor, get_painter_projection_focus_content_bounds, get_painter_world_content_bounds_center, painter_projection_grid_point_to_world, painter_projection_world_to_grid_point, project_painter_display_space, project_painter_runtime_display_space, project_world_to_painter_display_cell, sync_grid_to_painter_projection, type PainterDisplayProjection, type PainterProjectedScene } from '../ascii_painter/painter_view_projection_adapter.js';
 import { touch_world_layers_owner } from '../mono_ui/world_layers_owner.js';
-import { get_principal_view_plane_axis, get_transition_tilt_for_command, make_place_view_state, type PlaceViewState } from '../mono_ui/runtime/place_view_projection.js';
+import { get_principal_view_plane_axis, get_transition_tilt_for_command, make_place_view_state, step_place_view_action, type PlaceViewState } from '../mono_ui/runtime/place_view_projection.js';
 import { start_roll_transition, start_swing_transition, type PlaceCameraTransition } from '../mono_ui/runtime/place_camera_pose.js';
 import { clamp_anchor_to_viewport_px, compute_anchor_relative_mouse_parallax } from '../mono_ui/runtime/camera_anchor_runtime.js';
 import { resolve_place_view_transition_frame } from '../mono_ui/runtime/place_view_camera_runtime.js';
@@ -301,6 +301,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     updated_at_ms: number;
   };
   const selection_channels_by_connection = new Map<string, PainterSelectionChannelState>();
+  let move_preview_selection_override: WorldSelection | null = null;
   let world_clipboard_data: WorldCopyData | null = null;
   let legacy_group_compat: LegacyPainterGroupCompatState = {
     active_group_id: null,
@@ -352,6 +353,18 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     clear_world_selection(local.selection);
     local.updated_at_ms = Date.now();
     if (options?.publish !== false) publish_local_selection_channel();
+  }
+
+  function set_move_preview_selection_cells(cells: Array<{ x: number; y: number; z: number }> | null): void {
+    if (!cells || cells.length < 1) {
+      move_preview_selection_override = null;
+      syncDOMRenderer();
+      return;
+    }
+    const next = create_world_selection();
+    for (const cell of cells) set_world_selected(next, cell.x, cell.y, cell.z, true);
+    move_preview_selection_override = next;
+    syncDOMRenderer();
   }
 
   function replace_selection_channel_from_snapshot(connection_id: string, cells: Array<{ x: number; y: number; z: number }>, color_rgb: Rgb, updated_at_ms: number): void {
@@ -934,6 +947,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     const anchor = { x: minX, y: minY, z: minZ };
     return {
       anchor,
+      source_view: make_place_view_state(getPainterDisplayViewState().principal_view, getPainterDisplayViewState().roll_quarter_turn),
       cells: points.map((point) => ({
         dx: point.x - anchor.x,
         dy: point.y - anchor.y,
@@ -945,6 +959,27 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         },
       })),
     };
+  }
+
+  function get_active_group_selected_world_voxels(): Array<{ x: number; y: number; z: number; cell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number } }> {
+    const active_group_id = resolve_current_runtime_group_id();
+    if (!active_group_id) return [];
+    const groupIndex = painter_document_runtime.group_voxel_index.get(active_group_id);
+    if (!groupIndex) return [];
+    const selection = get_active_group_selection();
+    const out: Array<{ x: number; y: number; z: number; cell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number } }> = [];
+    for (const key of selection.cells) {
+      const point = parse_world_cell_key(key);
+      const record = groupIndex.get(`${point.x}:${point.y}:${point.z}`);
+      if (!record) continue;
+      out.push({
+        x: point.x,
+        y: point.y,
+        z: point.z,
+        cell: { char: record.char, rgb: { ...record.rgb }, weight_index: record.weight_index },
+      });
+    }
+    return out;
   }
 
   function get_active_group_world_bounds(): { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number } {
@@ -2017,14 +2052,47 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     return false;
   }
 
+  function applyLivePreviewToProjectedScene(scene: PainterProjectedScene, alternateWithBase: boolean): void {
+    if (!painter_display_projection) return;
+    const cycleIndex = Math.floor(performance.now() / 400);
+    const active_group_id = resolve_current_runtime_group_id();
+    if (!active_group_id) return;
+    for (const change of live_stroke_preview_changes) {
+      const displayCell = project_world_to_painter_display_cell({
+        projection: painter_display_projection,
+        world: { x: change.worldX, y: change.worldY, z: change.worldZ },
+      });
+      if (!displayCell) continue;
+      const slot = scene.slots.get(displayCell.slot);
+      const row = slot?.cells[displayCell.y];
+      if (!row) continue;
+      const winner = resolve_painter_group_preview_winner(painter_document_runtime, active_group_id, {
+        x: change.worldX,
+        y: change.worldY,
+        z: change.worldZ,
+        char: change.newCell.char,
+        rgb: { ...change.newCell.rgb },
+        weight_index: change.newCell.weight_index,
+      });
+      const previewCell = makeResolvedPreviewCell(winner);
+      const baseCell = row[displayCell.x];
+      const hasBase = !!baseCell && (((typeof baseCell.char === 'string') && baseCell.char !== ' ') || !!baseCell.graphic);
+      if (alternateWithBase && hasBase && cycleIndex % 2 === 0) continue;
+      row[displayCell.x] = previewCell;
+    }
+  }
+
   function applySelectionPreviewToProjectedScene(scene: PainterProjectedScene): void {
     if (!painter_display_projection) return;
     const localConnectionId = get_local_selection_connection_id();
     const cycleIndex = Math.floor(performance.now() / 400);
     const projectedSelections = new Map<string, Array<{ connection_id: string; is_local: boolean; color_rgb: Rgb }>>();
     for (const channel of selection_channels_by_connection.values()) {
+      const effectiveSelection = channel.connection_id === localConnectionId && move_preview_selection_override
+        ? move_preview_selection_override
+        : channel.selection;
       const bestByCell = new Map<string, { key: string; connection_id: string; is_local: boolean; color_rgb: Rgb }>();
-      for (const worldKey of channel.selection.cells) {
+      for (const worldKey of effectiveSelection.cells) {
         const { x, y, z } = parse_world_cell_key(worldKey);
         const displayCell = project_world_to_painter_display_cell({ projection: painter_display_projection, world: { x, y, z } });
         if (!displayCell) continue;
@@ -2147,6 +2215,32 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     }
     const direction = action.replace('swing_', '') as 'left' | 'right' | 'up' | 'down';
     painter_view_transition = start_swing_transition(direction, now, get_transition_tilt_for_command(current, 'swing', direction, 45));
+  }
+
+  function getCanvasPasteTransformApi(): (ReturnType<typeof make_painter_canvas_module> & {
+    hasWorldPastePreview?: () => boolean;
+    stepPasteViewAction?: (action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right') => void;
+    setPasteAngleMode?: () => void;
+  }) | null {
+    if (!canvas_module) return null;
+    return canvas_module as ReturnType<typeof make_painter_canvas_module> & {
+      hasWorldPastePreview?: () => boolean;
+      stepPasteViewAction?: (action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right') => void;
+      setPasteAngleMode?: () => void;
+    };
+  }
+
+  function canRoutePasteTransformActions(): boolean {
+    const api = getCanvasPasteTransformApi();
+    return !!api?.hasWorldPastePreview?.();
+  }
+
+  function stepPasteTransformAction(action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right'): void {
+    getCanvasPasteTransformApi()?.stepPasteViewAction?.(action);
+  }
+
+  function isMoveMaskModifierEvent(e: KeyboardEvent): boolean {
+    return e.code === 'Backquote' && e.shiftKey;
   }
 
   function stepPainterDepth(dir: -1 | 1): void {
@@ -2383,6 +2477,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   let right_rect_target: ToolEditTarget = saved_tool_props.right_rect_target ?? 'content';
   let picker_pick_for_opposite_hand = saved_tool_props.picker_pick_for_opposite_hand ?? false;
   let tool_target_invert_held = false;
+  let move_mask_modifier_held = false;
 
   function getBrushForSide(side: 'left' | 'right'): Brush {
     return side === 'right' ? right_brush : left_brush;
@@ -2531,6 +2626,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   
   // Paste tool: scale (0.1 to 3.0, representing 10% to 300%)
   let paste_scale = saved_tool_props.paste_scale ?? 1.0;
+  let paste_angle_mode: 'relative' | 'absolute' = saved_tool_props.paste_angle_mode ?? 'relative';
   
   // Paste tool: ignore space option (true = skip null/space cells)
   let paste_ignore_space = saved_tool_props.paste_ignore_space ?? false;
@@ -2879,27 +2975,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     }
     const previewScene = clone_projected_scene(painter_display_projection.scene);
     const active_group_id = resolve_current_runtime_group_id();
-    if (needsLivePreview && active_group_id) {
-      for (const change of live_stroke_preview_changes) {
-        const displayCell = project_world_to_painter_display_cell({
-          projection: painter_display_projection,
-          world: { x: change.worldX, y: change.worldY, z: change.worldZ },
-        });
-        if (!displayCell) continue;
-        const slot = previewScene.slots.get(displayCell.slot);
-        const row = slot?.cells[displayCell.y];
-        if (!row) continue;
-        const winner = resolve_painter_group_preview_winner(painter_document_runtime, active_group_id, {
-          x: change.worldX,
-          y: change.worldY,
-          z: change.worldZ,
-          char: change.newCell.char,
-          rgb: { ...change.newCell.rgb },
-          weight_index: change.newCell.weight_index,
-        });
-        row[displayCell.x] = makeResolvedPreviewCell(winner);
-      }
-    }
+    if (needsLivePreview && active_group_id) applyLivePreviewToProjectedScene(previewScene, current_tool === 'paste' || current_tool === 'move');
     if (needsSelectionPreview) applySelectionPreviewToProjectedScene(previewScene);
     return previewScene;
   }
@@ -3498,12 +3574,14 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     get_space_replace: () => space_replace,
     get_paste_space_replace: () => paste_space_replace,
     get_paste_scale: () => paste_scale,
+    get_paste_angle_mode: () => paste_angle_mode,
     get_gradiator_state: () => gradiator_state,
     get_paste_ignore_space: () => paste_ignore_space,
     get_paste_ignore_black: () => paste_ignore_black,
     get_paste_ignore_white: () => paste_ignore_white,
     get_paste_ignore_color: () => paste_ignore_color,
     get_paste_ignore_color_rgb: () => paste_ignore_color_rgb,
+    get_move_mask_modifier_held: () => move_mask_modifier_held,
     get_world_point_for_grid: (x, y) => painterGridPointToWorld(x, y),
     get_world_point_for_grid_on_plane: (x, y, plane) => {
       if (!painter_display_projection) return null;
@@ -3605,6 +3683,15 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       if (channels.weight) brush.weight_index = cell.weight_index;
 
       saveBrushState(target_side);
+    },
+    get_local_world_selection_cells: () => serialize_world_selection_cells(get_local_world_selection()),
+    get_active_group_selected_world_voxels: () => get_active_group_selected_world_voxels(),
+    on_move_preview_selection_change: (cells: Array<{ x: number; y: number; z: number }> | null) => {
+      set_move_preview_selection_cells(cells);
+    },
+    on_move_selection_commit: (cells: Array<{ x: number; y: number; z: number }>) => {
+      set_move_preview_selection_cells(null);
+      handle_world_selection_change({ kind: 'brush', mode: 'replace', cells });
     },
     on_selection_change: (args) => {
       updateWorldSelectionFromProjectedBitmap(selection_mode, args);
@@ -4260,6 +4347,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         case 'lassoselect': return 'LASSO';
         case 'copy': return 'COPY';
         case 'paste': return 'PASTE';
+        case 'move': return 'MOVE';
         default: return String(tool).toUpperCase();
       }
     }
@@ -4544,6 +4632,42 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
             on_toggle: () => {
               lasso_select_all_depths = !lasso_select_all_depths;
               saveToolProperties({ lasso_select_all_depths });
+            },
+          });
+        }
+      }
+
+      if (left_tool === 'paste' || right_tool === 'paste') {
+        rows.push({ type: 'info', id: 'shared_paste_rotation_header', text: '[PASTE ROT]', rgb: get_color_by_name('vivid_yellow').rgb });
+        rows.push({
+          type: 'single_cycle',
+          id: 'paste_angle_mode',
+          label: 'MODE',
+          value: paste_angle_mode === 'absolute' ? 'ABS' : 'REL',
+          options: ['REL', 'ABS'],
+          on_cycle: () => {
+            paste_angle_mode = paste_angle_mode === 'absolute' ? 'relative' : 'absolute';
+            saveToolProperties({ paste_angle_mode });
+            getCanvasPasteTransformApi()?.setPasteAngleMode?.();
+          },
+        });
+        const pasteActionButtons: Array<{ id: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right'; label: string }> = [
+          { id: 'swing_left', label: 'S.L' },
+          { id: 'swing_right', label: 'S.R' },
+          { id: 'swing_up', label: 'S.U' },
+          { id: 'swing_down', label: 'S.D' },
+          { id: 'roll_left', label: 'R.L' },
+          { id: 'roll_right', label: 'R.R' },
+        ];
+        for (const action of pasteActionButtons) {
+          rows.push({
+            type: 'single_cycle',
+            id: `paste_${action.id}`,
+            label: action.label,
+            value: '',
+            enabled: canRoutePasteTransformActions(),
+            on_cycle: () => {
+              stepPasteTransformAction(action.id);
             },
           });
         }
@@ -5374,6 +5498,9 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       tool_target_invert_held = true;
       painterDiag('tool target invert held', { active: true });
     }
+    if (isMoveMaskModifierEvent(e)) {
+      move_mask_modifier_held = true;
+    }
   });
 
   window.addEventListener('keyup', (e) => {
@@ -5381,9 +5508,42 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       tool_target_invert_held = false;
       painterDiag('tool target invert released', { active: false });
     }
+    if (e.code === 'Backquote') {
+      move_mask_modifier_held = false;
+    }
   });
 
   window.addEventListener('keydown', (e) => {
+    if (tool_target_invert_held && canRoutePasteTransformActions()) {
+      const pasteActionByCode: Partial<Record<string, 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right'>> = {
+        Numpad4: 'swing_left',
+        Numpad6: 'swing_right',
+        Numpad8: 'swing_up',
+        Numpad2: 'swing_down',
+        Numpad7: 'roll_left',
+        Numpad9: 'roll_right',
+      };
+      const pasteAction = pasteActionByCode[e.code];
+      if (pasteAction) {
+        e.preventDefault();
+        stepPasteTransformAction(pasteAction);
+        return;
+      }
+    }
+    const cameraActionBindings: Array<{ id: string; action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right' }> = [
+      { id: 'painter.view.swing_left', action: 'swing_left' },
+      { id: 'painter.view.swing_right', action: 'swing_right' },
+      { id: 'painter.view.swing_up', action: 'swing_up' },
+      { id: 'painter.view.swing_down', action: 'swing_down' },
+      { id: 'painter.view.roll_left', action: 'roll_left' },
+      { id: 'painter.view.roll_right', action: 'roll_right' },
+    ];
+    for (const binding of cameraActionBindings) {
+      if (!control_binding_matches_keyboard_event(painter_controls.runtime.get_binding(binding.id), e)) continue;
+      e.preventDefault();
+      stepPainterViewAction(binding.action);
+      return;
+    }
     if (control_binding_matches_keyboard_event(painter_controls.runtime.get_binding('global.open_controls'), e)) {
       e.preventDefault();
       toggleModule(controls_open, (v) => { controls_open = v; }, 'controls_panel', create_controls_panel_module);

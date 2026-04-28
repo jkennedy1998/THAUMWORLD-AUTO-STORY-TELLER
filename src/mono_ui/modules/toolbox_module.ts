@@ -43,6 +43,7 @@ const TOOLS: ToolboxToolDef<ToolType>[] = [
   { tool: 'lassoselect', label: 'Lasso', icon: '◎', shortcut: 'N' },
   { tool: 'copy', label: 'Copy', icon: '⎘', shortcut: 'C' },
   { tool: 'paste', label: 'Paste', icon: '⎗', shortcut: 'V' },
+  { tool: 'move', label: 'Move', icon: '✥', shortcut: 'G' },
 ];
 
 // Size constraints

@@ -16,7 +16,7 @@ import type { ToolEditTarget, ToolType } from './types.js';
 import { clamp_weight_index } from '../mono_ui/weight_system.js';
 import { ALL_EDIT_CHANNELS, sanitize_edit_channels, type EditChannels } from './edit_mask.js';
 
-const VALID_TOOL_TYPES: readonly ToolType[] = ['pencil', 'eraser', 'line', 'rect_stroke', 'rect_fill', 'bucket', 'eyedropper', 'text', 'selectangle', 'lassoselect', 'copy', 'paste'] as const;
+const VALID_TOOL_TYPES: readonly ToolType[] = ['pencil', 'eraser', 'line', 'rect_stroke', 'rect_fill', 'bucket', 'eyedropper', 'text', 'selectangle', 'lassoselect', 'copy', 'paste', 'move'] as const;
 
 function clamp_integer(value: unknown, fallback: number, min: number, max: number): number {
   const n = typeof value === 'number' ? Math.trunc(value) : fallback;
@@ -50,6 +50,10 @@ function sanitize_tool_type(value: unknown, fallback: ToolType): ToolType {
 
 function sanitize_tool_target(value: unknown, fallback: ToolEditTarget): ToolEditTarget {
   return value === 'selection' || value === 'content' ? value : fallback;
+}
+
+function sanitize_paste_angle_mode(value: unknown, fallback: 'relative' | 'absolute'): 'relative' | 'absolute' {
+  return value === 'absolute' || value === 'relative' ? value : fallback;
 }
 
 function sanitize_boolean(value: unknown, fallback: boolean): boolean {
@@ -394,6 +398,7 @@ export interface ToolProperties {
   // Paste settings
   paste_space_replace: boolean;
   paste_scale: number;
+  paste_angle_mode: 'relative' | 'absolute';
   paste_ignore_space: boolean;
   paste_ignore_color: boolean;
   paste_ignore_color_rgb: { r: number; g: number; b: number };
@@ -446,6 +451,7 @@ const DEFAULT_TOOL_PROPERTIES: ToolProperties = {
   text_enterspace: 0,
   paste_space_replace: true,
   paste_scale: 1.0,
+  paste_angle_mode: 'relative',
   paste_ignore_space: false,
   paste_ignore_color: false,
   paste_ignore_color_rgb: { r: 255, g: 255, b: 255 },
@@ -515,6 +521,7 @@ export function loadToolProperties(): ToolProperties {
       text_enterspace: clamp_integer(parsed.text_enterspace, DEFAULT_TOOL_PROPERTIES.text_enterspace, -16, 16),
       paste_space_replace: sanitize_boolean(parsed.paste_space_replace, DEFAULT_TOOL_PROPERTIES.paste_space_replace),
       paste_scale: clamp_number(parsed.paste_scale, DEFAULT_TOOL_PROPERTIES.paste_scale, 0.1, 3.0),
+      paste_angle_mode: sanitize_paste_angle_mode(parsed.paste_angle_mode, DEFAULT_TOOL_PROPERTIES.paste_angle_mode),
       paste_ignore_space: sanitize_boolean(parsed.paste_ignore_space, DEFAULT_TOOL_PROPERTIES.paste_ignore_space),
       paste_ignore_color: sanitize_boolean(parsed.paste_ignore_color, DEFAULT_TOOL_PROPERTIES.paste_ignore_color),
       paste_ignore_color_rgb: sanitize_rgb(parsed.paste_ignore_color_rgb, DEFAULT_TOOL_PROPERTIES.paste_ignore_color_rgb),

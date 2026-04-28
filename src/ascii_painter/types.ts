@@ -45,7 +45,8 @@ export type ToolType =
   | 'selectangle'
   | 'lassoselect'
   | 'copy'
-  | 'paste';
+  | 'paste'
+  | 'move';
 
 export type ToolEditTarget = 'content' | 'selection';
 
