@@ -1,6 +1,7 @@
 import type { ControlActionDefinition } from './controls_registry.js';
 
 export const PAINTER_CONTROLS_PROFILE: ControlActionDefinition[] = [
+  { id: 'painter.tool_target_invert', label: 'Hold Invert Tool Target', category: 'Selection', system: 'painter', default_binding: { kind: 'keyboard', code: 'Backquote' } },
   { id: 'painter.tool_assign.pencil', label: 'Assign Pencil Tool', category: 'Tools', system: 'painter', default_binding: { kind: 'keyboard', code: 'KeyP' } },
   { id: 'painter.tool_assign.eraser', label: 'Assign Eraser Tool', category: 'Tools', system: 'painter', default_binding: { kind: 'keyboard', code: 'KeyE' } },
   { id: 'painter.tool_assign.bucket', label: 'Assign Bucket Tool', category: 'Tools', system: 'painter', default_binding: { kind: 'keyboard', code: 'KeyB' } },

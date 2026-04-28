@@ -47,6 +47,8 @@ export type ToolType =
   | 'copy'
   | 'paste';
 
+export type ToolEditTarget = 'content' | 'selection';
+
 /**
  * Brush configuration
  */

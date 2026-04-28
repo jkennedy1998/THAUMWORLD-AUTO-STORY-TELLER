@@ -12,7 +12,7 @@ import type { VoxelSpace, VoxelSpaceExport } from './voxel_space.js';
 import { exportVoxelSpace, importVoxelSpace, gridToVoxelSpace, voxelSpaceToGrid } from './voxel_space.js';
 import type { PainterDocument } from './painter_document.js';
 import { clone_painter_document } from './painter_document.js';
-import type { ToolType } from './types.js';
+import type { ToolEditTarget, ToolType } from './types.js';
 import { clamp_weight_index } from '../mono_ui/weight_system.js';
 import { ALL_EDIT_CHANNELS, sanitize_edit_channels, type EditChannels } from './edit_mask.js';
 
@@ -46,6 +46,10 @@ function sanitize_rgb(value: unknown, fallback: { r: number; g: number; b: numbe
 function sanitize_tool_type(value: unknown, fallback: ToolType): ToolType {
   if (value === 'weighter' || value === 'colorer') return 'pencil';
   return typeof value === 'string' && (VALID_TOOL_TYPES as readonly string[]).includes(value) ? value as ToolType : fallback;
+}
+
+function sanitize_tool_target(value: unknown, fallback: ToolEditTarget): ToolEditTarget {
+  return value === 'selection' || value === 'content' ? value : fallback;
 }
 
 function sanitize_boolean(value: unknown, fallback: boolean): boolean {
@@ -372,6 +376,14 @@ export interface ToolProperties {
   rect_select_all_depths: boolean;
   lasso_select_all_depths: boolean;
   user_selection_color_rgb: { r: number; g: number; b: number };
+  left_pencil_target: ToolEditTarget;
+  right_pencil_target: ToolEditTarget;
+  left_eraser_target: ToolEditTarget;
+  right_eraser_target: ToolEditTarget;
+  left_bucket_target: ToolEditTarget;
+  right_bucket_target: ToolEditTarget;
+  left_rect_target: ToolEditTarget;
+  right_rect_target: ToolEditTarget;
   
   // Text tool settings
   text_spacing: number;
@@ -420,6 +432,14 @@ const DEFAULT_TOOL_PROPERTIES: ToolProperties = {
   rect_select_all_depths: false,
   lasso_select_all_depths: false,
   user_selection_color_rgb: { r: 0, g: 220, b: 255 },
+  left_pencil_target: 'content',
+  right_pencil_target: 'content',
+  left_eraser_target: 'content',
+  right_eraser_target: 'content',
+  left_bucket_target: 'content',
+  right_bucket_target: 'content',
+  left_rect_target: 'content',
+  right_rect_target: 'content',
   text_spacing: 1,
   text_charlead: 0,
   text_enterlead: 1,
@@ -481,6 +501,14 @@ export function loadToolProperties(): ToolProperties {
       rect_select_all_depths: sanitize_boolean(parsed.rect_select_all_depths, DEFAULT_TOOL_PROPERTIES.rect_select_all_depths),
       lasso_select_all_depths: sanitize_boolean(parsed.lasso_select_all_depths, DEFAULT_TOOL_PROPERTIES.lasso_select_all_depths),
       user_selection_color_rgb: sanitize_rgb(parsed.user_selection_color_rgb, DEFAULT_TOOL_PROPERTIES.user_selection_color_rgb),
+      left_pencil_target: sanitize_tool_target(parsed.left_pencil_target, DEFAULT_TOOL_PROPERTIES.left_pencil_target),
+      right_pencil_target: sanitize_tool_target(parsed.right_pencil_target, DEFAULT_TOOL_PROPERTIES.right_pencil_target),
+      left_eraser_target: sanitize_tool_target(parsed.left_eraser_target, DEFAULT_TOOL_PROPERTIES.left_eraser_target),
+      right_eraser_target: sanitize_tool_target(parsed.right_eraser_target, DEFAULT_TOOL_PROPERTIES.right_eraser_target),
+      left_bucket_target: sanitize_tool_target(parsed.left_bucket_target, DEFAULT_TOOL_PROPERTIES.left_bucket_target),
+      right_bucket_target: sanitize_tool_target(parsed.right_bucket_target, DEFAULT_TOOL_PROPERTIES.right_bucket_target),
+      left_rect_target: sanitize_tool_target(parsed.left_rect_target, DEFAULT_TOOL_PROPERTIES.left_rect_target),
+      right_rect_target: sanitize_tool_target(parsed.right_rect_target, DEFAULT_TOOL_PROPERTIES.right_rect_target),
       text_spacing: clamp_integer(parsed.text_spacing, DEFAULT_TOOL_PROPERTIES.text_spacing, -16, 16),
       text_charlead: clamp_integer(parsed.text_charlead, DEFAULT_TOOL_PROPERTIES.text_charlead, -16, 16),
       text_enterlead: clamp_integer(parsed.text_enterlead, DEFAULT_TOOL_PROPERTIES.text_enterlead, -16, 16),

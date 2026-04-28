@@ -11,6 +11,7 @@
 
 import type { Canvas, Module, Rect, Rgb, PointerEvent, DragEvent, WheelEvent, Cell } from '../types.js';
 import type { Grid, Brush, ToolType, GridCell } from '../../ascii_painter/types.js';
+import type { ToolEditTarget } from '../../ascii_painter/types.js';
 import { createGrid, getCell, setCell } from '../../ascii_painter/types.js';
 import { drawCell, drawLine, eraseCell, sampleCell, previewLine, previewRectStroke, previewRectFill } from '../../ascii_painter/tools.js';
 import { has_any_edit_channel, resolve_edit_channels_with_modifiers, type EditChannels } from '../../ascii_painter/edit_mask.js';
@@ -86,6 +87,7 @@ export type PainterCanvasOptions = {
   on_sample_cell: (cell: { char: string; rgb: Rgb; weight_index: number }, sample: { button: number; shift: boolean; ctrl: boolean; alt: boolean; meta: boolean }) => void;
   get_left_click_tool: () => ToolType;
   get_right_click_tool: () => ToolType;
+  get_tool_target_for_button?: (button: number, tool: ToolType) => ToolEditTarget;
   get_focus_layer_z?: () => number;
   get_focus_world_plane?: () => number | null;
   cycle_focus_layer?: (dir: 1 | -1) => void;
@@ -94,7 +96,7 @@ export type PainterCanvasOptions = {
   // Selection callbacks
   on_selection_change?: (args?: { depthMin?: number; depthMax?: number; kind?: 'rect' | 'lasso' | 'clear' | 'select_all' | 'invert' | 'other' }) => void;
   on_world_selection_change?: (args: {
-    kind: 'rect' | 'lasso' | 'clear' | 'select_all' | 'invert';
+    kind: 'rect' | 'lasso' | 'clear' | 'select_all' | 'invert' | 'brush' | 'bucket';
     mode?: SelectionMode;
     cells?: Array<{ x: number; y: number; z: number }>;
   }) => void;
@@ -219,6 +221,15 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
   function getBucketSelectChannelsForButton(button: number): EditChannels {
     return opts.get_bucket_select_channels_for_button?.(button === 2 ? 2 : 0) ?? { char: true, color: true, weight: true };
+  }
+
+  function getToolTargetForButton(button: number, tool: ToolType): ToolEditTarget {
+    return opts.get_tool_target_for_button?.(button, tool) ?? 'content';
+  }
+
+  function emitSelectionCells(mode: SelectionMode, cells: Array<{ x: number; y: number; z: number }>, kind: 'brush' | 'bucket' | 'rect' | 'lasso' = 'brush'): void {
+    if (cells.length < 1) return;
+    opts.on_world_selection_change?.({ kind, mode, cells });
   }
 
   function getPreviewBrush(): Brush {
@@ -1285,6 +1296,44 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     return out;
   }
 
+  function getBrushSelectionWorldCells(x: number, y: number, size: number, plane: number): Array<{ x: number; y: number; z: number }> {
+    const out: Array<{ x: number; y: number; z: number }> = [];
+    const seen = new Set<string>();
+    const offset = Math.floor(size / 2);
+    for (let dy = 0; dy < size; dy += 1) {
+      for (let dx = 0; dx < size; dx += 1) {
+        const draw_x = x - offset + dx;
+        const draw_y = y - offset + dy;
+        if (draw_x < 0 || draw_x >= opts.grid.width || draw_y < 0 || draw_y >= opts.grid.height) continue;
+        const world = getWorldPointForEditPlane(draw_x, draw_y, plane);
+        if (!world) continue;
+        const key = worldKey(world);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(world);
+      }
+    }
+    return out;
+  }
+
+  function applySelectionBrushAt(x: number, y: number, size: number, mode: SelectionMode, plane: number): void {
+    emitSelectionCells(mode, getBrushSelectionWorldCells(x, y, size, plane), 'brush');
+  }
+
+  function applySelectionBrushLine(x0: number, y0: number, x1: number, y1: number, size: number, mode: SelectionMode, plane: number): void {
+    const seen = new Set<string>();
+    const out: Array<{ x: number; y: number; z: number }> = [];
+    for (const point of previewLine(x0, y0, x1, y1)) {
+      for (const world of getBrushSelectionWorldCells(point.x, point.y, size, plane)) {
+        const key = worldKey(world);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(world);
+      }
+    }
+    emitSelectionCells(mode, out, 'brush');
+  }
+
   function buildSelectionWorldCellsFromBitmap(bitmap: SelectionBitmap, args: { depthMin: number; depthMax: number }): Array<{ x: number; y: number; z: number }> {
     const out: Array<{ x: number; y: number; z: number }> = [];
     const seen = new Set<string>();
@@ -1420,6 +1469,32 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       changed += 1;
     }
     return changed;
+  }
+
+  function applyBucketSelection(button: number, grid_x: number, grid_y: number): number {
+    const startWorld = getWorldPointForEditPlane(grid_x, grid_y, opts.get_focus_world_plane?.() ?? opts.get_selected_z());
+    if (!startWorld) return 0;
+    const bounds = getActiveGroupWorldBounds();
+    if (!bounds || !isWorldInsideBounds(startWorld, bounds)) return 0;
+    const selectChannels = getBucketSelectChannelsForButton(button);
+    const domain = enumerateBoundedWorldDomain(bounds);
+    if (domain.length < 1) return 0;
+    const filled = get_flood_fill_voxels({
+      start: startWorld,
+      sample: (world) => {
+        if (!isWorldInsideBounds(world, bounds)) return null;
+        const sampled = sampleActiveGroupWorldCell(world);
+        return { char: sampled.char, rgb: { ...sampled.rgb }, weight: sampled.weight_index };
+      },
+      matches: (candidate, target) => cells_match_edit_channels(candidate, target, selectChannels),
+      enumerate_domain: () => domain,
+      same_depth_only: opts.get_bucket_same_depth_only?.() ?? true,
+      allow_diagonal: opts.get_bucket_allow_diagonal?.() ?? false,
+      continuous: opts.get_bucket_continuous?.() ?? true,
+      plane_axis: getActiveViewPlaneAxis(),
+    });
+    emitSelectionCells(opts.get_selection_mode(), filled, 'bucket');
+    return filled.length;
   }
 
   function isIgnoredPasteCell(cell: GridCell | null, ignoreColorRgb: { r: number; g: number; b: number }): boolean {
@@ -2258,6 +2333,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       }
 
       const tool_for_button = e.button === 2 ? opts.get_right_click_tool() : opts.get_left_click_tool();
+      const tool_target = getToolTargetForButton(e.button, tool_for_button);
 
       if (tool_for_button !== 'paste' && (paste_preview_data || paste_preview_world_data)) {
         clearPendingPreviewChanges();
@@ -2389,7 +2465,12 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         }
 
         if (tool_for_button === 'bucket') {
-          if (canEditCell(grid_x, grid_y)) {
+          if (tool_target === 'selection') {
+            const changed = applyBucketSelection(e.button, grid_x, grid_y);
+            if (changed > 0) {
+              showStatus(`Selected ${changed} voxels`);
+            }
+          } else if (canEditCell(grid_x, grid_y)) {
             const changed = applyBucketFill(e.button, grid_x, grid_y, {
               shift: e.shift,
               ctrl: e.ctrl,
@@ -2413,6 +2494,23 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         }
 
         if (tool_for_button === 'pencil') {
+          if (tool_target === 'selection') {
+            active_stroke_tool = 'pencil';
+            active_stroke_world_plane = opts.get_selected_z();
+            active_stroke_anchor_world = getWorldPointForEditPlane(grid_x, grid_y, active_stroke_world_plane);
+            if (!active_stroke_anchor_world) {
+              showStatus('Cannot start selection stroke on selected depth here');
+              active_stroke_tool = null;
+              active_stroke_world_plane = null;
+              return;
+            }
+            setInteractionCurrentWorld(active_stroke_anchor_world);
+            setInteractionEndWorld(null);
+            is_drawing = true;
+            last_draw_pos = { x: grid_x, y: grid_y };
+            applySelectionBrushAt(grid_x, grid_y, getBrushSizeForButton(e.button), 'additive', active_stroke_world_plane);
+            return;
+          }
           const base_channels = opts.get_brush_edit_channels_for_button?.(e.button) ?? { char: true, color: true, weight: true };
           active_draw_channels = resolve_edit_channels_with_modifiers(base_channels, e);
           active_stroke_tool = 'pencil';
@@ -2434,6 +2532,23 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         }
 
         if (tool_for_button === 'eraser') {
+          if (tool_target === 'selection') {
+            active_stroke_tool = 'eraser';
+            active_stroke_world_plane = opts.get_selected_z();
+            active_stroke_anchor_world = getWorldPointForEditPlane(grid_x, grid_y, active_stroke_world_plane);
+            if (!active_stroke_anchor_world) {
+              showStatus('Cannot start selection erase stroke on selected depth here');
+              active_stroke_tool = null;
+              active_stroke_world_plane = null;
+              return;
+            }
+            setInteractionCurrentWorld(active_stroke_anchor_world);
+            setInteractionEndWorld(null);
+            is_erasing = true;
+            last_draw_pos = { x: grid_x, y: grid_y };
+            applySelectionBrushAt(grid_x, grid_y, getBrushSizeForButton(e.button), 'subtract', active_stroke_world_plane);
+            return;
+          }
           const base_channels = opts.get_brush_edit_channels_for_button?.(e.button) ?? { char: true, color: true, weight: true };
           active_draw_channels = resolve_edit_channels_with_modifiers(base_channels, e);
           active_stroke_tool = 'eraser';
@@ -2466,6 +2581,20 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           setInteractionEndWorld(null);
           emitLiveInteractionAnchor(interaction_current_world, true);
           showStatus('Selection: drag to select area');
+          return;
+        }
+
+        if (tool_target === 'selection' && tool_for_button.startsWith('rect_')) {
+          is_selecting = true;
+          selection_drag_start = { x: grid_x, y: grid_y };
+          selection_drag_start_plane = opts.get_focus_world_plane?.() ?? opts.get_selected_z();
+          selection_drag_end_plane = selection_drag_start_plane;
+          selection_drag_start_world = getWorldPointForEditPlane(grid_x, grid_y, selection_drag_start_plane) ?? opts.get_world_point_for_grid?.(grid_x, grid_y) ?? { x: grid_x, y: grid_y, z: selection_drag_start_plane };
+          selection_drag_end_world = cloneWorldPoint(selection_drag_start_world);
+          setInteractionCurrentWorld(selection_drag_start_world);
+          setInteractionEndWorld(null);
+          emitLiveInteractionAnchor(interaction_current_world, true);
+          showStatus('Selection: drag rectangle');
           return;
         }
 
@@ -2560,17 +2689,21 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         return;
       }
 
-        if (isActiveEraserStroke() && last_draw_pos) {
+      if (isActiveEraserStroke() && last_draw_pos) {
         const grid_coords = localToGrid(local_x, local_y);
         const grid_x = grid_coords.x;
         const grid_y = grid_coords.y;
         if (grid_x < 0 || grid_x >= opts.grid.width || grid_y < 0 || grid_y >= opts.grid.height) return;
         setInteractionCurrentWorld(getWorldPointForEditPlane(grid_x, grid_y, active_stroke_world_plane ?? opts.get_selected_z()));
         if (grid_x !== last_draw_pos.x || grid_y !== last_draw_pos.y) {
-          const points = previewLine(last_draw_pos.x, last_draw_pos.y, grid_x, grid_y);
-          for (const point of points) eraseWithBrushSizeAndChannels(point.x, point.y, getBrushSizeForButton(getDragButton()), active_draw_channels);
+          if (getToolTargetForButton(getDragButton(), 'eraser') === 'selection') {
+            applySelectionBrushLine(last_draw_pos.x, last_draw_pos.y, grid_x, grid_y, getBrushSizeForButton(getDragButton()), 'subtract', active_stroke_world_plane ?? opts.get_selected_z());
+          } else {
+            const points = previewLine(last_draw_pos.x, last_draw_pos.y, grid_x, grid_y);
+            for (const point of points) eraseWithBrushSizeAndChannels(point.x, point.y, getBrushSizeForButton(getDragButton()), active_draw_channels);
+          }
           last_draw_pos = { x: grid_x, y: grid_y };
-          maybeEmitLiveStrokePreview();
+          if (getToolTargetForButton(getDragButton(), 'eraser') !== 'selection') maybeEmitLiveStrokePreview();
         }
         return;
       }
@@ -2582,9 +2715,13 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (grid_x < 0 || grid_x >= opts.grid.width || grid_y < 0 || grid_y >= opts.grid.height) return;
         setInteractionCurrentWorld(getWorldPointForEditPlane(grid_x, grid_y, active_stroke_world_plane ?? opts.get_selected_z()));
         if (grid_x !== last_draw_pos.x || grid_y !== last_draw_pos.y) {
-          drawLineWithBrushEditChannels(last_draw_pos.x, last_draw_pos.y, grid_x, grid_y, getBrushForButton(getDragButton()), getBrushSizeForButton(getDragButton()), active_draw_channels);
+          if (getToolTargetForButton(getDragButton(), 'pencil') === 'selection') {
+            applySelectionBrushLine(last_draw_pos.x, last_draw_pos.y, grid_x, grid_y, getBrushSizeForButton(getDragButton()), 'additive', active_stroke_world_plane ?? opts.get_selected_z());
+          } else {
+            drawLineWithBrushEditChannels(last_draw_pos.x, last_draw_pos.y, grid_x, grid_y, getBrushForButton(getDragButton()), getBrushSizeForButton(getDragButton()), active_draw_channels);
+          }
           last_draw_pos = { x: grid_x, y: grid_y };
-          maybeEmitLiveStrokePreview();
+          if (getToolTargetForButton(getDragButton(), 'pencil') !== 'selection') maybeEmitLiveStrokePreview();
         }
         return;
       }

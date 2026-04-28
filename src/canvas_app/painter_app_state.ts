@@ -5,9 +5,9 @@
  * Uses the mono_ui module system with panning, zooming, and drawing tools.
  */
 
-import type { Module, Rect, Rgb } from '../mono_ui/types.js';
+import type { Canvas, Module, PointerEvent, Rect, Rgb } from '../mono_ui/types.js';
 import { create_module_registry, type ModuleRegistry } from '../mono_ui/module_registry.js';
-import type { Grid, Brush, ToolType, GridCell } from '../ascii_painter/types.js';
+import type { Grid, Brush, ToolEditTarget, ToolType, GridCell } from '../ascii_painter/types.js';
 import { createGrid, exportGrid, importGrid } from '../ascii_painter/types.js';
 import { createHistoryManager, logCellAction, logGroupAction, clearHistory, canUndoGroup, canRedoGroup, getGroupHistoryState, popRedoGroupAction, popUndoGroupAction, type HistoryAction, type HistoryManager } from '../ascii_painter/history.js';
 import { get_color_by_name } from '../mono_ui/colors.js';
@@ -22,6 +22,7 @@ import { make_weight_selector_module } from '../mono_ui/modules/weight_selector_
 import { make_toolbox_module } from '../mono_ui/modules/toolbox_module.js';
 import { make_tool_properties_module, type ToolPropertyRow } from '../mono_ui/modules/tool_properties_module.js';
 import { make_controls_module } from '../mono_ui/modules/controls_module.js';
+import { make_floating_panel_module } from '../mono_ui/modules/floating_panel_module.js';
 import {
   saveModulePosition,
   getModulePosition,
@@ -1972,7 +1973,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   }
 
   function handle_world_selection_change(args: {
-    kind: 'rect' | 'lasso' | 'clear' | 'select_all' | 'invert';
+    kind: 'rect' | 'lasso' | 'clear' | 'select_all' | 'invert' | 'brush' | 'bucket';
     mode?: SelectionMode;
     cells?: Array<{ x: number; y: number; z: number }>;
   }): void {
@@ -2372,7 +2373,16 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   let bucket_allow_diagonal = saved_tool_props.bucket_allow_diagonal ?? false;
   let rect_select_all_depths = saved_tool_props.rect_select_all_depths ?? false;
   let lasso_select_all_depths = saved_tool_props.lasso_select_all_depths ?? false;
+  let left_pencil_target: ToolEditTarget = saved_tool_props.left_pencil_target ?? 'content';
+  let right_pencil_target: ToolEditTarget = saved_tool_props.right_pencil_target ?? 'content';
+  let left_eraser_target: ToolEditTarget = saved_tool_props.left_eraser_target ?? 'content';
+  let right_eraser_target: ToolEditTarget = saved_tool_props.right_eraser_target ?? 'content';
+  let left_bucket_target: ToolEditTarget = saved_tool_props.left_bucket_target ?? 'content';
+  let right_bucket_target: ToolEditTarget = saved_tool_props.right_bucket_target ?? 'content';
+  let left_rect_target: ToolEditTarget = saved_tool_props.left_rect_target ?? 'content';
+  let right_rect_target: ToolEditTarget = saved_tool_props.right_rect_target ?? 'content';
   let picker_pick_for_opposite_hand = saved_tool_props.picker_pick_for_opposite_hand ?? false;
+  let tool_target_invert_held = false;
 
   function getBrushForSide(side: 'left' | 'right'): Brush {
     return side === 'right' ? right_brush : left_brush;
@@ -2396,6 +2406,71 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   function getBucketSelectChannelsForSide(side: 'left' | 'right'): EditChannels {
     return side === 'right' ? right_bucket_select_channels : left_bucket_select_channels;
+  }
+
+  function tool_supports_selection_target(tool: ToolType): boolean {
+    return tool === 'pencil' || tool === 'eraser' || tool === 'bucket' || tool === 'rect_stroke' || tool === 'rect_fill';
+  }
+
+  function getToolTargetForSideTool(side: 'left' | 'right', tool: ToolType): ToolEditTarget {
+    if (tool === 'pencil') return side === 'right' ? right_pencil_target : left_pencil_target;
+    if (tool === 'eraser') return side === 'right' ? right_eraser_target : left_eraser_target;
+    if (tool === 'bucket') return side === 'right' ? right_bucket_target : left_bucket_target;
+    if (tool === 'rect_stroke' || tool === 'rect_fill') return side === 'right' ? right_rect_target : left_rect_target;
+    return 'content';
+  }
+
+  function setToolTargetForSideTool(side: 'left' | 'right', tool: ToolType, target: ToolEditTarget): void {
+    if (tool === 'pencil') {
+      if (side === 'right') {
+        right_pencil_target = target;
+        saveToolProperties({ right_pencil_target: target });
+      } else {
+        left_pencil_target = target;
+        saveToolProperties({ left_pencil_target: target });
+      }
+      return;
+    }
+    if (tool === 'eraser') {
+      if (side === 'right') {
+        right_eraser_target = target;
+        saveToolProperties({ right_eraser_target: target });
+      } else {
+        left_eraser_target = target;
+        saveToolProperties({ left_eraser_target: target });
+      }
+      return;
+    }
+    if (tool === 'bucket') {
+      if (side === 'right') {
+        right_bucket_target = target;
+        saveToolProperties({ right_bucket_target: target });
+      } else {
+        left_bucket_target = target;
+        saveToolProperties({ left_bucket_target: target });
+      }
+      return;
+    }
+    if (tool === 'rect_stroke' || tool === 'rect_fill') {
+      if (side === 'right') {
+        right_rect_target = target;
+        saveToolProperties({ right_rect_target: target });
+      } else {
+        left_rect_target = target;
+        saveToolProperties({ left_rect_target: target });
+      }
+    }
+  }
+
+  function invertToolTarget(target: ToolEditTarget): ToolEditTarget {
+    return target === 'selection' ? 'content' : 'selection';
+  }
+
+  function getEffectiveToolTargetForButton(button: number, tool?: ToolType): ToolEditTarget {
+    const side: 'left' | 'right' = button === 2 ? 'right' : 'left';
+    const resolvedTool = tool ?? (side === 'right' ? right_click_tool : left_click_tool);
+    const base = getToolTargetForSideTool(side, resolvedTool);
+    return tool_target_invert_held && tool_supports_selection_target(resolvedTool) ? invertToolTarget(base) : base;
   }
 
   function set_user_selection_color(rgb: Rgb): void {
@@ -3410,6 +3485,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     get_current_tool: () => current_tool,
     get_preview_brush: () => getPreviewBrush(),
     get_brush_for_button: (button) => getBrushForButton(button),
+    get_tool_target_for_button: (button, tool) => getEffectiveToolTargetForButton(button, tool),
     get_brush_edit_channels_for_button: (button) => getBrushEditChannelsForSide(button === 2 ? 'right' : 'left'),
     get_bucket_select_channels_for_button: (button) => getBucketSelectChannelsForSide(button === 2 ? 'right' : 'left'),
     get_brush_size: () => getBrushSizeForSide(active_property_side),
@@ -3608,6 +3684,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   let weight_selector_open = getInitialModuleVisibility('weight_selector', true);
   let toolbox_open = getInitialModuleVisibility('toolbox', true);
   let tool_properties_open = getInitialModuleVisibility('tool_properties', true);
+  let selection_panel_open = getInitialModuleVisibility('selection_panel', true);
   let controls_open = getInitialModuleVisibility('controls_panel', false);
 
   function setModuleOpen(moduleId: string, visible: boolean, setOpen: (v: boolean) => void): void {
@@ -3637,10 +3714,16 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   let weight_selector_module: Module | null = null;
   let toolbox_module: Module | null = null;
   let tool_properties_module: Module | null = null;
+  let selection_panel_module: Module | null = null;
   let controls_module: Module | null = null;
 
   const painter_controls = create_painter_controls_runtime(PAINTER_APP_CONFIG.selected_data_slot);
   void painter_controls.load();
+
+  function isToolTargetInvertBindingEvent(e: KeyboardEvent): boolean {
+    const binding = painter_controls.runtime.get_binding('painter.tool_target_invert');
+    return binding?.kind === 'keyboard' ? binding.code === e.code : false;
+  }
   const painter_tai = create_painter_tool_assisted_inputs_wiring({
     data_slot: PAINTER_APP_CONFIG.selected_data_slot,
     get_tool_state: () => ({ current_tool, left_click_tool, right_click_tool }),
@@ -4190,6 +4273,19 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       const header_rgb = side === 'left' ? get_color_by_name('vivid_blue').rgb : get_color_by_name('vivid_red').rgb;
       rows.push({ type: 'info', id: `${side}_tool_header`, text: `${prefix} ${get_tool_label(tool)}`, rgb: header_rgb });
 
+      if (tool_supports_selection_target(tool)) {
+        rows.push({
+          type: 'single_cycle',
+          id: `${side}_${tool}_target`,
+          label: 'TGT',
+          value: getToolTargetForSideTool(side, tool) === 'selection' ? 'SELECT' : 'CONTENT',
+          options: ['CONTENT', 'SELECT'],
+          on_cycle: () => {
+            setToolTargetForSideTool(side, tool, invertToolTarget(getToolTargetForSideTool(side, tool)));
+          },
+        });
+      }
+
       if (is_brush_size_tool(tool)) {
         rows.push({ type: 'info', id: `${side}_tool_shared_brush`, text: 'size above' });
         return;
@@ -4245,8 +4341,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       const rows: ToolPropertyRow[] = [];
       const left_tool = left_click_tool;
       const right_tool = right_click_tool;
-      const left_summary = `${get_tool_label(left_tool)} ${left_brush_size}x${left_brush_size} ${format_edit_channel_summary(left_brush_edit_channels)}`;
-      const right_summary = `${get_tool_label(right_tool)} ${right_brush_size}x${right_brush_size} ${format_edit_channel_summary(right_brush_edit_channels)}`;
+      const left_summary = `${get_tool_label(left_tool)} ${tool_supports_selection_target(left_tool) ? (getToolTargetForSideTool('left', left_tool) === 'selection' ? 'SEL' : 'CNT') : ''} ${left_brush_size}x${left_brush_size} ${format_edit_channel_summary(left_brush_edit_channels)}`.trim();
+      const right_summary = `${get_tool_label(right_tool)} ${tool_supports_selection_target(right_tool) ? (getToolTargetForSideTool('right', right_tool) === 'selection' ? 'SEL' : 'CNT') : ''} ${right_brush_size}x${right_brush_size} ${format_edit_channel_summary(right_brush_edit_channels)}`.trim();
       const hands_match = left_tool === right_tool
         && left_brush_size === right_brush_size
         && left_brush_edit_channels.char === right_brush_edit_channels.char
@@ -4282,6 +4378,9 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         text: hands_match ? 'HANDS MATCH SPATIALLY' : 'HANDS DIFFER: TOOL / SIZE / MASK',
         rgb: hands_match ? get_color_by_name('vivid_green').rgb : get_color_by_name('vivid_yellow').rgb,
       });
+      if (tool_target_invert_held) {
+        rows.push({ type: 'info', id: 'tool_target_invert_info', text: 'TEMP TARGET INVERT [`]', rgb: get_color_by_name('vivid_magenta').rgb });
+      }
       rows.push({ type: 'info', id: 'hand_match_spacer', text: '' });
 
       if (is_brush_size_tool(left_tool) || is_brush_size_tool(right_tool)) {
@@ -4733,6 +4832,70 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     });
   }
 
+  function create_selection_panel_module(): Module {
+    const actions = ['MODE', 'ALL', 'INVERT', 'CLEAR'] as const;
+    return make_floating_panel_module({
+      id: 'selection_panel',
+      rect: getModuleRectWithSave('selection_panel', { x0: 138, y0: 28, x1: 166, y1: 40 }),
+      title: () => 'SELECTION',
+      is_visible: () => selection_panel_open,
+      background: { rgb: get_color_by_name('off_black').rgb },
+      border: {
+        border_rgb: get_color_by_name('vivid_magenta').rgb,
+        text_rgb: get_color_by_name('vivid_magenta').rgb,
+      },
+      gizmos: {
+        enabled: ['close', 'move', 'seamless'],
+        can_close: true,
+        can_move: true,
+        can_save_position: false,
+        on_close: () => setModuleOpen('selection_panel', false, (v) => { selection_panel_open = v; }),
+        on_move: (new_rect) => {
+          if (selection_panel_module) selection_panel_module.rect = new_rect;
+          saveModulePosition('selection_panel', new_rect);
+        },
+        on_move_end: (new_rect) => {
+          if (selection_panel_module) selection_panel_module.rect = new_rect;
+          saveModulePosition('selection_panel', new_rect);
+        },
+      },
+      draw_content(c: Canvas, rect: Rect): void {
+        const status = getPainterSelectionStatus() ?? 'SEL 0';
+        const modeLabel = selection_mode === 'replace' ? 'REPL' : selection_mode === 'additive' ? 'ADD' : selection_mode === 'subtract' ? 'SUB' : 'INT';
+        const lines = [status, `MODE ${modeLabel}`, 'ALL', 'INV', 'CLEAR', tool_target_invert_held ? '` HELD' : '` INVERT'];
+        for (let i = 0; i < lines.length; i += 1) {
+          const y = rect.y1 - 2 - i;
+          if (y <= rect.y0) break;
+          const color = i === 0 ? user_selection_color_rgb : get_color_by_name('off_white').rgb;
+          const text = lines[i]!;
+          for (let x = 0; x < text.length && rect.x0 + 1 + x < rect.x1; x += 1) {
+            c.set(rect.x0 + 1 + x, y, { char: text[x]!, rgb: color, weight_index: 4, style: 'regular' });
+          }
+        }
+      },
+      on_pointer_down_content(e: PointerEvent, rect: Rect): void {
+        const row = rect.y1 - 2 - e.y;
+        const action = actions[row as 0 | 1 | 2 | 3];
+        if (!action) return;
+        if (action === 'MODE') {
+          selection_mode = selection_mode === 'replace' ? 'additive' : selection_mode === 'additive' ? 'subtract' : selection_mode === 'subtract' ? 'intersect' : 'replace';
+          return;
+        }
+        if (action === 'ALL') {
+          handle_world_selection_change({ kind: 'select_all' });
+          return;
+        }
+        if (action === 'INVERT') {
+          handle_world_selection_change({ kind: 'invert' });
+          return;
+        }
+        if (action === 'CLEAR') {
+          handle_world_selection_change({ kind: 'clear' });
+        }
+      },
+    });
+  }
+
   // Create file menu module
   const file_menu = make_file_menu_module({
     id: 'painter_file_menu',
@@ -5179,6 +5342,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   weight_selector_module = create_weight_selector_module();
   toolbox_module = create_toolbox_module();
   tool_properties_module = create_tool_properties_module();
+  selection_panel_module = create_selection_panel_module();
   navigation_module = create_navigation_module();
   camera_control_module = create_camera_control_module();
   controls_module = create_controls_panel_module();
@@ -5188,6 +5352,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   registry.register(weight_selector_module);
   registry.register(toolbox_module);
   registry.register(tool_properties_module);
+  registry.register(selection_panel_module);
   registry.register(navigation_module);
   registry.register(camera_control_module);
   registry.register(controls_module);
@@ -5198,10 +5363,25 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   registry.set_visibility('weight_selector', weight_selector_open);
   registry.set_visibility('toolbox', toolbox_open);
   registry.set_visibility('tool_properties', tool_properties_open);
+  registry.set_visibility('selection_panel', selection_panel_open);
   registry.set_visibility('layer_palette', layer_palette_open);
   registry.set_visibility('navigation', navigation_open);
   registry.set_visibility('camera_control', camera_control_open);
   registry.set_visibility('controls_panel', controls_open);
+
+  window.addEventListener('keydown', (e) => {
+    if (isToolTargetInvertBindingEvent(e) && !tool_target_invert_held) {
+      tool_target_invert_held = true;
+      painterDiag('tool target invert held', { active: true });
+    }
+  });
+
+  window.addEventListener('keyup', (e) => {
+    if (isToolTargetInvertBindingEvent(e) && tool_target_invert_held) {
+      tool_target_invert_held = false;
+      painterDiag('tool target invert released', { active: false });
+    }
+  });
 
   window.addEventListener('keydown', (e) => {
     if (control_binding_matches_keyboard_event(painter_controls.runtime.get_binding('global.open_controls'), e)) {
