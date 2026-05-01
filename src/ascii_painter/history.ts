@@ -23,6 +23,14 @@ export type ActionType =
   | 'rename_group'
   | 'set_group_visibility'
   | 'set_group_locked'
+  | 'offset_group_in_time'
+  | 'set_group_timing'
+  | 'set_group_breath_span'
+  | 'set_group_raster_segment_length'
+  | 'split_group_raster_segment'
+  | 'swap_group_raster_segments'
+  | 'set_group_content_state'
+  | 'set_group_location_key'
   | 'reorder_groups'
   | 'selection_change'; // Rect, lasso, clear, invert, select-all
 
@@ -167,22 +175,18 @@ function cloneCell(cell: GridCell): GridCell {
 function clonePainterGroup(group: PainterGroup): PainterGroup {
   return {
     ...group,
-    voxels: group.voxels.map((voxel) => ({
-      ...voxel,
-      rgb: { ...voxel.rgb },
+    content_states: group.content_states.map((state) => ({
+      ...state,
+      content: state.content.map((voxel) => ({
+        ...voxel,
+        rgb: { ...voxel.rgb },
+      })),
     })),
-    frames: Array.isArray(group.frames)
-      ? group.frames.map((frame) => ({
-          ...frame,
-          deltas: frame.deltas.map((delta) => ({
-            ...delta,
-            next: delta.next ? {
-              ...delta.next,
-              rgb: { ...delta.next.rgb },
-            } : null,
-          })),
-        }))
-      : [],
+    location_base: { ...group.location_base },
+    location_keys: group.location_keys.map((key) => ({
+      breath: key.breath,
+      offset: { ...key.offset },
+    })),
     metadata: group.metadata ? {
       ...group.metadata,
       origin: group.metadata.origin ? { ...group.metadata.origin } : undefined,
@@ -286,7 +290,7 @@ export function logSelectionAction(
 
 export function logGroupAction(
   history: HistoryManager,
-  type: 'create_group' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'reorder_groups',
+  type: 'create_group' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'offset_group_in_time' | 'set_group_timing' | 'set_group_breath_span' | 'set_group_raster_segment_length' | 'split_group_raster_segment' | 'swap_group_raster_segments' | 'set_group_content_state' | 'set_group_location_key' | 'reorder_groups',
   description: string,
   options: {
     groupId?: string;
@@ -319,6 +323,11 @@ export function logGroupAction(
 
   history.actions.push(action);
   history.current_index++;
+
+  const historyGroupId = String(options.groupId ?? options.targetGroupId ?? options.sourceGroupId ?? '').trim();
+  if (historyGroupId) {
+    pushGroupUndoAction(history, historyGroupId, cloneHistoryAction(action));
+  }
 
   if (history.actions.length > history.max_history) {
     history.actions.shift();

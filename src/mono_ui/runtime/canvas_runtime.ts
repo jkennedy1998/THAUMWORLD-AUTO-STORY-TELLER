@@ -1269,6 +1269,11 @@ export class CanvasRuntime {
             return;
         }
 
+        if (typing) {
+            this.focused_owner?.OnKeyDown?.(ev);
+            return;
+        }
+
         if (action) {
             handle_keydown(ev, input_context);
             if (!typing || action === 'cancel') {
@@ -1323,6 +1328,10 @@ export class CanvasRuntime {
             action,
             default_prevented_before: ev.defaultPrevented,
         });
+        if (typing) {
+            this.focused_owner?.OnKeyUp?.(ev);
+            return;
+        }
         if (action) {
             handle_keyup(ev, input_context);
             if (!typing || action === 'cancel') {

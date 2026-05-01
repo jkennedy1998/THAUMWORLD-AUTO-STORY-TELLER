@@ -1,7 +1,7 @@
 import type { Canvas, DragEvent, Module, PointerEvent, Rect, Rgb, WheelEvent } from '../types.js';
-import { get_color_by_name } from '../colors.js';
 import type { ModuleBorderConfig } from '../module_borders.js';
 import { PANEL_BORDER_PRESETS, draw_module_border } from '../module_borders.js';
+import { get_ui_semantic_rgb } from '../runtime/ui_customization_store.js';
 import type { GizmoState, ModuleGizmosConfig } from '../module_gizmos.js';
 import {
   clear_gizmo_hover_state,
@@ -84,7 +84,7 @@ const NO_GIZMOS: ModuleGizmosConfig = {
 function draw_panel_background(c: Canvas, rect: Rect, background: BackgroundOptions | undefined): void {
   c.fill_rect(rect, {
     char: background?.char ?? ' ',
-    rgb: background?.rgb ?? get_color_by_name('off_black').rgb,
+    rgb: background?.rgb ?? get_ui_semantic_rgb('background'),
     style: 'regular',
   });
 }
@@ -121,12 +121,12 @@ export function make_floating_panel_module(opts: FloatingPanelOptions): Module {
         draw_module_border(c, {
           rect,
           style: opts.border?.style ?? PANEL_BORDER_PRESETS.default_double.style,
-          border_rgb: opts.border?.border_rgb ?? get_color_by_name('medium_gray').rgb,
+          border_rgb: opts.border?.border_rgb ?? get_ui_semantic_rgb('dimmest'),
           weight_index: opts.border?.weight_index ?? PANEL_BORDER_PRESETS.default_double.weight_index,
           markers: resolve_border_markers(opts.border, rect),
           header: title ? {
             text: title,
-            text_rgb: opts.border?.text_rgb,
+            text_rgb: opts.border?.text_rgb ?? get_ui_semantic_rgb('medium'),
             reserve_left_cols: opts.border?.reserve_left_cols ?? (2 + ((gizmos.enabled?.length ?? 0) * 2)),
             divider_at_col: opts.border?.divider_at_col,
             divider_mode: opts.border?.divider_mode,

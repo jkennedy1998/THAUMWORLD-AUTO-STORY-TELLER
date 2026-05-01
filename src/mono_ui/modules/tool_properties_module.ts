@@ -10,6 +10,8 @@ import { get_color_by_name } from '../colors.js';
 import { PANEL_BORDER_PRESETS } from '../module_borders.js';
 import type { ModuleGizmosConfig } from '../module_gizmos.js';
 import { make_floating_panel_module } from './floating_panel_module.js';
+import { get_ui_semantic_rgb } from '../runtime/ui_customization_store.js';
+import { clamp_numeric_slider_value, draw_numeric_dual_slider_markers, draw_numeric_single_slider_markers, draw_numeric_slider_track, get_numeric_slider_layout, get_numeric_slider_marker_x, get_numeric_slider_nudge_hit, get_numeric_slider_value_from_x } from '../runtime/slider_primitives.js';
 import type { ToolType } from '../../ascii_painter/types.js';
 import type { SelectionMode } from '../../ascii_painter/selection.js';
 import type { GradiatorState, GradiatorSlot } from '../../ascii_painter/gradiator.js';
@@ -25,6 +27,17 @@ type ToolPropertiesCustomPanel = {
 
 export type ToolPropertyRow =
   | {
+      type: 'single_slider';
+      id: string;
+      label: string;
+      min: number;
+      max: number;
+      value: number;
+      show_value_label?: boolean;
+      format_value?: (value: number) => string;
+      on_change: (value: number) => void;
+    }
+  | {
       type: 'dual_slider';
       id: string;
       label: string;
@@ -33,6 +46,7 @@ export type ToolPropertyRow =
       left_value: number;
       right_value: number;
       format_value?: (value: number) => string;
+      show_value_label?: boolean;
       on_change: (value: number, side: 'left' | 'right') => void;
     }
   | {
@@ -75,6 +89,7 @@ export type ToolPropertyRow =
   | {
       type: 'edit_channel_matrix';
       id: string;
+      row_label?: string;
       columns: Array<{
         id: string;
         label: string;
@@ -91,6 +106,10 @@ export type ToolPropertyRow =
       id: string;
       text: string;
       rgb?: { r: number; g: number; b: number };
+    }
+  | {
+      type: 'separator';
+      id: string;
     };
 
 export type ToolPropertiesOptions = {
@@ -172,28 +191,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
     on_close: opts.on_close,
     on_move: opts.on_move,
   };
-  let is_dragging_slider = false;
-  let dragging_brush_side: 'left' | 'right' = 'left';
   let is_dragging_scale = false;
-
-  // Calculate brush size from x position
-  function get_size_from_x(x: number): number {
-    const slider_start_x = rect.x0 + 3;
-    const slider_width = rect.x1 - rect.x0 - 5;
-    const segment_width = slider_width / (MAX_BRUSH_SIZE - MIN_BRUSH_SIZE);
-    
-    const relative_x = x - slider_start_x;
-    let size = Math.round(relative_x / segment_width) + MIN_BRUSH_SIZE;
-    size = Math.max(MIN_BRUSH_SIZE, Math.min(MAX_BRUSH_SIZE, size));
-    
-    return size;
-  }
-
-  // Check if position is on slider
-  function is_on_slider(x: number, y: number): boolean {
-    const slider_y = rect.y1 - 3;
-    return y >= slider_y - 1 && y <= slider_y + 1 && x >= rect.x0 + 2 && x <= rect.x1 - 2;
-  }
 
   // Check if position is on space_replace checkbox
   function is_on_space_checkbox(x: number, y: number): boolean {
@@ -396,8 +394,22 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
   }
 
   function get_property_row_height(row: ToolPropertyRow): number {
-    if (row.type === 'dual_slider' || row.type === 'edit_channel_matrix') return 3;
+    if (row.type === 'single_slider' || row.type === 'dual_slider') return 2;
+    if (row.type === 'edit_channel_matrix') return 2;
+    if (row.type === 'separator') return 2;
     return 1;
+  }
+
+  function get_property_label_x(): number {
+    return rect.x0 + 3;
+  }
+
+  function get_property_content_x(): number {
+    return rect.x0 + 11;
+  }
+
+  function get_matrix_token_text(row: Extract<ToolPropertyRow, { type: 'edit_channel_matrix' }>, column: Extract<ToolPropertyRow, { type: 'edit_channel_matrix' }>['columns'][number]): string {
+    return (row.row_label ?? '') === 'target' ? column.label.toLowerCase() : column.label.slice(0, 3).toLowerCase();
   }
 
   function is_on_property_stepper_minus(x: number): boolean {
@@ -423,37 +435,41 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
     return null;
   }
 
-  function get_property_side_from_x(x: number): 'left' | 'right' | null {
-    if (x >= rect.x0 + 15 && x <= rect.x0 + 17) return 'left';
-    if (x >= rect.x0 + 19 && x <= rect.x0 + 21) return 'right';
-    return null;
+  function get_slider_layout() {
+    return get_numeric_slider_layout(get_property_content_x(), rect.x1 - 3);
   }
 
-  function get_edit_channel_matrix_hit(row: Extract<ToolPropertyRow, { type: 'edit_channel_matrix' }>, x: number, y: number, top_y: number): { side: 'left' | 'right' | 'both'; column_id: string } | null {
-    const toggle_y = top_y - 1;
-    if (y !== toggle_y) return null;
-    const inner_width = Math.max(1, rect.x1 - rect.x0 - 3);
-    const col_width = Math.max(5, Math.floor(inner_width / Math.max(1, row.columns.length)));
-    const start_x = rect.x0 + 2;
+  function get_slider_marker_x(min: number, max: number, value: number): number {
+    return get_numeric_slider_marker_x(get_slider_layout(), min, max, value);
+  }
+
+  function get_slider_nudge_hit(x: number): 'decrement' | 'increment' | null {
+    return get_numeric_slider_nudge_hit(get_slider_layout(), x);
+  }
+
+  function get_edit_channel_matrix_hit(row: Extract<ToolPropertyRow, { type: 'edit_channel_matrix' }>, x: number, y: number, top_y: number, button: number): { side: 'left' | 'right'; column_id: string } | null {
+    if (y !== top_y) return null;
+    const start_x = get_property_content_x();
+    const inner_width = Math.max(1, rect.x1 - start_x - 1);
+    const col_width = Math.max((row.row_label ?? '') === 'target' ? 7 : 4, Math.floor(inner_width / Math.max(1, row.columns.length)));
     for (let i = 0; i < row.columns.length; i += 1) {
       const column = row.columns[i]!;
       const col_x = start_x + (i * col_width);
-      const toggle_x = col_x + Math.max(0, Math.floor((col_width - 5) / 2));
-      if (x === toggle_x) return { side: 'left', column_id: column.id };
-      if (x === toggle_x + 2) return { side: 'right', column_id: column.id };
-      if (x === toggle_x + 4) return { side: 'both', column_id: column.id };
+      const token = get_matrix_token_text(row, column);
+      const token_x = col_x + Math.max(0, Math.floor((col_width - token.length) / 2));
+      if (x >= token_x && x < token_x + token.length) {
+        return { side: button === 2 ? 'right' : 'left', column_id: column.id };
+      }
     }
     return null;
   }
 
   function get_dual_slider_value_from_x(row: Extract<ToolPropertyRow, { type: 'dual_slider' }>, x: number): number {
-    const slider_start_x = rect.x0 + 3;
-    const slider_end_x = rect.x1 - 3;
-    const track_width = Math.max(1, slider_end_x - slider_start_x);
-    const relative_x = Math.max(0, Math.min(track_width, x - slider_start_x));
-    const ratio = relative_x / track_width;
-    const value = row.min + ratio * (row.max - row.min);
-    return Math.round(value);
+    return get_numeric_slider_value_from_x(get_slider_layout(), row.min, row.max, x);
+  }
+
+  function get_single_slider_value_from_x(row: Extract<ToolPropertyRow, { type: 'single_slider' }>, x: number): number {
+    return get_numeric_slider_value_from_x(get_slider_layout(), row.min, row.max, x);
   }
 
   return make_floating_panel_module({
@@ -461,10 +477,11 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
     rect: opts.rect,
     title: opts.title ?? 'PROPS',
     gizmos: gizmo_config,
-    background: { rgb: get_color_by_name('off_black').rgb },
+    background: { rgb: get_ui_semantic_rgb('background') },
     border: {
       style: PANEL_BORDER_PRESETS.default_double.style,
-      border_rgb: get_color_by_name('medium_gray').rgb,
+      border_rgb: get_ui_semantic_rgb('dimmest'),
+      text_rgb: get_ui_semantic_rgb('medium'),
       weight_index: PANEL_BORDER_PRESETS.default_double.weight_index,
     },
     resize: {
@@ -475,11 +492,16 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
     },
     draw_content(c: Canvas, next_rect: Rect): void {
       rect = next_rect;
-      const bg_color = get_color_by_name('off_black').rgb;
+      const bg_color = get_ui_semantic_rgb('background');
       const text_color = get_color_by_name('off_white').rgb;
-      const slider_bg = get_color_by_name('dark_gray').rgb;
-      const slider_fg = get_color_by_name('vivid_blue').rgb;
-      const handle_color = get_color_by_name('vivid_yellow').rgb;
+      const medium_color = get_ui_semantic_rgb('medium');
+      const bright_color = get_ui_semantic_rgb('bright');
+      const vivid_color = get_ui_semantic_rgb('vivid');
+      const left_color = get_ui_semantic_rgb('left_hand');
+      const right_color = get_ui_semantic_rgb('right_hand');
+      const slider_bg = get_ui_semantic_rgb('dimmest');
+      const slider_fg = bright_color;
+      const handle_color = vivid_color;
       
       // Fill background
       c.fill_rect(rect, { char: ' ', rgb: bg_color, style: 'regular' });
@@ -487,15 +509,6 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
       if (should_render_property_rows()) {
         const rows = get_property_rows();
         const active_side = opts.get_active_side?.() ?? 'left';
-        const header = '            L   R';
-        for (let i = 0; i < header.length; i++) {
-          c.set(rect.x0 + 1 + i, rect.y1 - 2, {
-            char: header[i]!,
-            rgb: text_color,
-            style: 'regular',
-            weight_index: 2,
-          });
-        }
         let cursor_y = rect.y1 - 3;
         for (let i = 0; i < rows.length; i++) {
           const row = rows[i]!;
@@ -503,7 +516,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
           if (y <= rect.y0) break;
           if (row.type === 'dual_toggle') {
             const label = row.note ? `${row.label} ${row.note}` : row.label;
-            const label_rgb = row.note ? get_color_by_name('medium_gray').rgb : text_color;
+            const label_rgb = row.note ? medium_color : text_color;
             for (let j = 0; j < label.length && rect.x0 + 2 + j < rect.x0 + 14 && rect.x0 + 2 + j < rect.x1; j++) {
               c.set(rect.x0 + 2 + j, y, {
                 char: label[j]!,
@@ -514,8 +527,8 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             }
             const left_text = row.left_enabled === false ? ' - ' : (row.left_value ? '[x]' : '[ ]');
             const right_text = row.right_enabled === false ? ' - ' : (row.right_value ? '[x]' : '[ ]');
-            const left_rgb = active_side === 'left' ? get_color_by_name('vivid_blue').rgb : text_color;
-            const right_rgb = active_side === 'right' ? get_color_by_name('vivid_red').rgb : text_color;
+            const left_rgb = active_side === 'left' ? left_color : text_color;
+            const right_rgb = active_side === 'right' ? right_color : text_color;
             for (let j = 0; j < left_text.length; j++) {
               c.set(rect.x0 + 15 + j, y, { char: left_text[j]!, rgb: left_rgb, style: 'regular', weight_index: 2 });
             }
@@ -523,66 +536,85 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
               c.set(rect.x0 + 19 + j, y, { char: right_text[j]!, rgb: right_rgb, style: 'regular', weight_index: 2 });
             }
           } else if (row.type === 'dual_slider') {
-            const value_label = row.format_value
-              ? `L:${row.format_value(row.left_value)} R:${row.format_value(row.right_value)}`
-              : `L:${row.left_value} R:${row.right_value}`;
-            const label_x = Math.floor((rect.x0 + rect.x1 - value_label.length) / 2);
-            for (let j = 0; j < value_label.length && label_x + j < rect.x1; j++) {
-              c.set(label_x + j, y, {
-                char: value_label[j]!,
-                rgb: text_color,
-                style: 'regular',
-                weight_index: 2,
-              });
+            const label = row.label.charAt(0) + row.label.slice(1).toLowerCase();
+            const label_x = get_property_label_x();
+            for (let j = 0; j < label.length && label_x + j < rect.x1; j++) {
+              c.set(label_x + j, y, { char: label[j]!, rgb: medium_color, style: 'regular', weight_index: 1 });
             }
-            const slider_y = y - 1;
-            if (slider_y <= rect.y0) continue;
-            const slider_start_x = rect.x0 + 3;
-            const slider_end_x = rect.x1 - 3;
-            for (let sx = slider_start_x; sx <= slider_end_x; sx++) {
-              c.set(sx, slider_y, { char: '─', rgb: slider_bg, style: 'regular', weight_index: 1 });
-            }
-            const denom = Math.max(1, row.max - row.min);
-            for (let value = row.min; value <= row.max; value++) {
-              const ratio = (value - row.min) / denom;
-              const marker_x = Math.round(slider_start_x + ratio * (slider_end_x - slider_start_x));
-              const is_left = value === row.left_value;
-              const is_right = value === row.right_value;
-              c.set(marker_x, slider_y, {
-                char: is_left && is_right ? '◆' : (is_left || is_right) ? '●' : '○',
-                rgb: is_left || is_right ? slider_fg : slider_bg,
-                style: 'regular',
-                weight_index: is_left || is_right ? 2 : 1,
-              });
-              if (is_left || is_right) {
-                c.set(marker_x, slider_y - 1, {
-                  char: is_left && is_right ? 'B' : is_left ? 'L' : 'R',
-                  rgb: is_left && is_right
-                    ? get_color_by_name('vivid_yellow').rgb
-                    : is_left
-                      ? get_color_by_name('vivid_blue').rgb
-                      : get_color_by_name('vivid_red').rgb,
+            if (row.show_value_label !== false) {
+              const value_label = row.format_value
+                ? `L:${row.format_value(row.left_value)} R:${row.format_value(row.right_value)}`
+                : `L:${row.left_value} R:${row.right_value}`;
+              const value_x = Math.min(rect.x1 - value_label.length - 1, get_property_content_x());
+              for (let j = 0; j < value_label.length && value_x + j < rect.x1; j++) {
+                c.set(value_x + j, y, {
+                  char: value_label[j]!,
+                  rgb: text_color,
                   style: 'regular',
                   weight_index: 2,
                 });
               }
             }
+            const slider_y = y - 1;
+            if (slider_y <= rect.y0) continue;
+            const layout = get_slider_layout();
+            draw_numeric_slider_track(c, layout, slider_y, { track_rgb: slider_bg, nudge_rgb: bright_color });
+            draw_numeric_dual_slider_markers(c, layout, slider_y, {
+              min: row.min,
+              max: row.max,
+              left_value: row.left_value,
+              right_value: row.right_value,
+              left_rgb: left_color,
+              right_rgb: right_color,
+              both_rgb: vivid_color,
+              inactive_rgb: slider_bg,
+            });
+          } else if (row.type === 'single_slider') {
+            const label = row.label.charAt(0) + row.label.slice(1).toLowerCase();
+            const label_x = get_property_label_x();
+            for (let j = 0; j < label.length && label_x + j < rect.x1; j++) {
+              c.set(label_x + j, y, { char: label[j]!, rgb: medium_color, style: 'regular', weight_index: 1 });
+            }
+            if (row.show_value_label !== false) {
+              const value_label = row.format_value ? row.format_value(row.value) : `${row.value}`;
+              const value_x = Math.min(rect.x1 - value_label.length - 1, get_property_content_x());
+              for (let j = 0; j < value_label.length && value_x + j < rect.x1; j++) {
+                c.set(value_x + j, y, {
+                  char: value_label[j]!,
+                  rgb: text_color,
+                  style: 'regular',
+                  weight_index: 2,
+                });
+              }
+            }
+            const slider_y = y - 1;
+            if (slider_y <= rect.y0) continue;
+            const layout = get_slider_layout();
+            draw_numeric_slider_track(c, layout, slider_y, { track_rgb: slider_bg, nudge_rgb: bright_color });
+            draw_numeric_single_slider_markers(c, layout, slider_y, {
+              min: row.min,
+              max: row.max,
+              value: row.value,
+              active_rgb: bright_color,
+              inactive_rgb: slider_bg,
+            });
           } else if (row.type === 'single_cycle') {
             const label = `${row.label}:`;
             const value = row.options && row.options.length > 0
               ? `[${row.value}]`
               : row.value;
-            const label_rgb = row.enabled === false ? get_color_by_name('medium_gray').rgb : text_color;
-            const value_rgb = row.enabled === false ? get_color_by_name('dark_gray').rgb : get_color_by_name('vivid_yellow').rgb;
-            for (let j = 0; j < label.length && rect.x0 + 2 + j < rect.x1; j++) {
-              c.set(rect.x0 + 2 + j, y, {
+            const label_rgb = row.enabled === false ? get_ui_semantic_rgb('dimmest') : medium_color;
+            const value_rgb = row.enabled === false ? get_ui_semantic_rgb('dimmest') : bright_color;
+            const label_x = get_property_label_x();
+            for (let j = 0; j < label.length && label_x + j < rect.x1; j++) {
+              c.set(label_x + j, y, {
                 char: label[j]!,
                 rgb: label_rgb,
                 style: 'regular',
                 weight_index: 2,
               });
             }
-            const value_x = Math.min(rect.x1 - value.length - 1, rect.x0 + 2 + label.length + 1);
+            const value_x = Math.min(rect.x1 - value.length - 1, get_property_content_x());
             for (let j = 0; j < value.length && value_x + j < rect.x1; j++) {
               c.set(value_x + j, y, {
                 char: value[j]!,
@@ -592,78 +624,72 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
               });
             }
           } else if (row.type === 'single_toggle') {
-            const label_rgb = row.enabled === false ? get_color_by_name('medium_gray').rgb : text_color;
-            const value_rgb = row.enabled === false ? get_color_by_name('dark_gray').rgb : get_color_by_name('vivid_yellow').rgb;
+            const label_rgb = row.enabled === false ? get_ui_semantic_rgb('dimmest') : medium_color;
+            const value_rgb = row.enabled === false ? get_ui_semantic_rgb('dimmest') : bright_color;
             const label = row.label;
             const value = row.value ? '[x]' : '[ ]';
-            for (let j = 0; j < label.length && rect.x0 + 2 + j < rect.x1; j++) {
-              c.set(rect.x0 + 2 + j, y, { char: label[j]!, rgb: label_rgb, style: 'regular', weight_index: 2 });
+            const label_x = get_property_label_x();
+            for (let j = 0; j < label.length && label_x + j < rect.x1; j++) {
+              c.set(label_x + j, y, { char: label[j]!, rgb: label_rgb, style: 'regular', weight_index: 2 });
             }
-            const value_x = Math.min(rect.x1 - value.length - 1, rect.x0 + 14);
+            const value_x = Math.min(rect.x1 - value.length - 1, get_property_content_x());
             for (let j = 0; j < value.length && value_x + j < rect.x1; j++) {
               c.set(value_x + j, y, { char: value[j]!, rgb: value_rgb, style: 'regular', weight_index: 2 });
             }
           } else if (row.type === 'single_stepper') {
-            const label_rgb = row.enabled === false ? get_color_by_name('medium_gray').rgb : text_color;
-            const value_rgb = row.enabled === false ? get_color_by_name('dark_gray').rgb : get_color_by_name('vivid_yellow').rgb;
+            const label_rgb = row.enabled === false ? get_ui_semantic_rgb('dimmest') : medium_color;
+            const value_rgb = row.enabled === false ? get_ui_semantic_rgb('dimmest') : bright_color;
             const label = `${row.label}:`;
-            for (let j = 0; j < label.length && rect.x0 + 2 + j < rect.x1; j++) {
-              c.set(rect.x0 + 2 + j, y, { char: label[j]!, rgb: label_rgb, style: 'regular', weight_index: 2 });
+            const label_x = get_property_label_x();
+            for (let j = 0; j < label.length && label_x + j < rect.x1; j++) {
+              c.set(label_x + j, y, { char: label[j]!, rgb: label_rgb, style: 'regular', weight_index: 2 });
             }
-            const value_x = Math.min(rect.x1 - row.value.length - 5, rect.x0 + 2 + label.length + 1);
+            const value_x = Math.min(rect.x1 - row.value.length - 5, get_property_content_x());
             for (let j = 0; j < row.value.length && value_x + j < rect.x1; j++) {
               c.set(value_x + j, y, { char: row.value[j]!, rgb: value_rgb, style: 'regular', weight_index: 2 });
             }
-            c.set(rect.x1 - 3, y, { char: '-', rgb: row.enabled === false ? get_color_by_name('dark_gray').rgb : slider_fg, style: 'regular', weight_index: 2 });
-            c.set(rect.x1 - 1, y, { char: '+', rgb: row.enabled === false ? get_color_by_name('dark_gray').rgb : get_color_by_name('vivid_green').rgb, style: 'regular', weight_index: 2 });
+            c.set(rect.x1 - 3, y, { char: '-', rgb: row.enabled === false ? get_ui_semantic_rgb('dimmest') : slider_fg, style: 'regular', weight_index: 2 });
+            c.set(rect.x1 - 1, y, { char: '+', rgb: row.enabled === false ? get_ui_semantic_rgb('dimmest') : bright_color, style: 'regular', weight_index: 2 });
           } else if (row.type === 'edit_channel_matrix') {
-            const title_y = y;
-            const checks_y = y - 1;
-            const shortcut_y = y - 2;
-            if (shortcut_y <= rect.y0) continue;
-            const inner_width = Math.max(1, rect.x1 - rect.x0 - 3);
-            const col_width = Math.max(5, Math.floor(inner_width / Math.max(1, row.columns.length)));
-            const start_x = rect.x0 + 2;
+            const label = row.row_label ?? '';
+            const label_x = get_property_label_x();
+            const start_x = get_property_content_x();
+            const inner_width = Math.max(1, rect.x1 - start_x - 1);
+            const col_width = Math.max((label === 'target') ? 7 : 4, Math.floor(inner_width / Math.max(1, row.columns.length)));
+            for (let j = 0; j < label.length && label_x + j < rect.x1; j++) {
+              c.set(label_x + j, y, { char: label[j]!, rgb: medium_color, style: 'regular', weight_index: 1 });
+            }
             for (let i = 0; i < row.columns.length; i += 1) {
               const column = row.columns[i]!;
               const col_x = start_x + (i * col_width);
-              const title = column.label.slice(0, 3);
-              const shortcut = column.shortcut.slice(0, 3).toLowerCase();
+              const title = get_matrix_token_text(row, column);
               const title_x = col_x + Math.max(0, Math.floor((col_width - title.length) / 2));
-              const shortcut_x = col_x + Math.max(0, Math.floor((col_width - shortcut.length) / 2));
-              const toggle_x = col_x + Math.max(0, Math.floor((col_width - 5) / 2));
               const both_on = column.left_value && column.right_value;
-              const title_rgb = both_on ? get_color_by_name('vivid_yellow').rgb : text_color;
+              const left_on = column.left_value && !column.right_value;
+              const right_on = column.right_value && !column.left_value;
+              const title_rgb = column.left_enabled === false && column.right_enabled === false
+                ? get_ui_semantic_rgb('dimmest')
+                : both_on
+                  ? vivid_color
+                  : left_on
+                    ? left_color
+                    : right_on
+                      ? right_color
+                      : bright_color;
               for (let j = 0; j < title.length && title_x + j < rect.x1; j++) {
-                c.set(title_x + j, title_y, { char: title[j]!, rgb: title_rgb, style: 'regular', weight_index: 4 });
-              }
-              c.set(toggle_x, checks_y, {
-                char: 'L',
-                rgb: column.left_enabled === false ? get_color_by_name('dark_gray').rgb : (column.left_value ? get_color_by_name('vivid_blue').rgb : get_color_by_name('medium_gray').rgb),
-                style: column.left_value ? 'reverse' : 'regular',
-                weight_index: column.left_value ? 3 : 1,
-              });
-              c.set(toggle_x + 2, checks_y, {
-                char: 'R',
-                rgb: column.right_enabled === false ? get_color_by_name('dark_gray').rgb : (column.right_value ? get_color_by_name('vivid_red').rgb : get_color_by_name('medium_gray').rgb),
-                style: column.right_value ? 'reverse' : 'regular',
-                weight_index: column.right_value ? 3 : 1,
-              });
-              c.set(toggle_x + 4, checks_y, {
-                char: 'B',
-                rgb: both_on ? get_color_by_name('vivid_yellow').rgb : get_color_by_name('medium_gray').rgb,
-                style: both_on ? 'reverse' : 'regular',
-                weight_index: both_on ? 3 : 1,
-              });
-              for (let j = 0; j < shortcut.length && shortcut_x + j < rect.x1; j++) {
-                c.set(shortcut_x + j, shortcut_y, { char: shortcut[j]!, rgb: get_color_by_name('medium_gray').rgb, style: 'regular', weight_index: 1 });
+                c.set(title_x + j, y, { char: title[j]!, rgb: title_rgb, style: 'regular', weight_index: both_on || left_on || right_on ? 2 : 0 });
               }
             }
+          } else if (row.type === 'separator') {
+            for (let sx = get_property_label_x(); sx < rect.x1 - 1; sx += 1) {
+              c.set(sx, y, { char: '─', rgb: get_ui_semantic_rgb('dimmest'), style: 'regular', weight_index: 1 });
+            }
           } else if (row.type === 'info') {
-            for (let j = 0; j < row.text.length && rect.x0 + 2 + j < rect.x1; j++) {
-              c.set(rect.x0 + 2 + j, y, {
+            const label_x = get_property_label_x();
+            for (let j = 0; j < row.text.length && label_x + j < rect.x1; j++) {
+              c.set(label_x + j, y, {
                 char: row.text[j]!,
-                rgb: row.rgb ?? get_color_by_name('medium_gray').rgb,
+                rgb: row.rgb ?? medium_color,
                 style: 'regular',
                 weight_index: 1,
               });
@@ -1134,13 +1160,29 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             row_top_y -= get_property_row_height(rows[i]!);
           }
           if (row?.type === 'dual_slider') {
-            const side = get_property_side_from_x(e.x) ?? (e.button === 2 ? 'right' : 'left');
-            const value = get_dual_slider_value_from_x(row, e.x);
+            const side: 'left' | 'right' = e.button === 2 ? 'right' : 'left';
+            const nudge = get_slider_nudge_hit(e.x);
+            const current_value = side === 'right' ? row.right_value : row.left_value;
+            const value = nudge === 'decrement'
+              ? clamp_numeric_slider_value(current_value - 1, row.min, row.max)
+              : nudge === 'increment'
+                ? clamp_numeric_slider_value(current_value + 1, row.min, row.max)
+                : get_dual_slider_value_from_x(row, e.x);
             row.on_change(value, side);
             return;
           }
+          if (row?.type === 'single_slider') {
+            const nudge = get_slider_nudge_hit(e.x);
+            const value = nudge === 'decrement'
+              ? clamp_numeric_slider_value(row.value - 1, row.min, row.max)
+              : nudge === 'increment'
+                ? clamp_numeric_slider_value(row.value + 1, row.min, row.max)
+                : get_single_slider_value_from_x(row, e.x);
+            row.on_change(value);
+            return;
+          }
           if (row?.type === 'dual_toggle') {
-            const side = get_property_side_from_x(e.x) ?? (e.button === 2 ? 'right' : 'left');
+            const side: 'left' | 'right' = e.button === 2 ? 'right' : 'left';
             if ((side === 'left' && row.left_enabled === false) || (side === 'right' && row.right_enabled === false)) {
               return;
             }
@@ -1169,12 +1211,11 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
             }
           }
           if (row?.type === 'edit_channel_matrix') {
-            const hit = get_edit_channel_matrix_hit(row, e.x, e.y, row_top_y);
+            const hit = get_edit_channel_matrix_hit(row, e.x, e.y, row_top_y, e.button);
             if (!hit) return;
             const column = row.columns.find((entry) => entry.id === hit.column_id);
             if (!column) return;
             if ((hit.side === 'left' && column.left_enabled === false) || (hit.side === 'right' && column.right_enabled === false)) return;
-            if (hit.side === 'both' && column.left_enabled === false && column.right_enabled === false) return;
             row.on_toggle(hit.side, hit.column_id);
             return;
           }
@@ -1182,18 +1223,6 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
       }
       if (opts.custom_panel?.should_render() && opts.custom_panel.on_pointer_down?.(e, rect)) {
         return;
-      }
-      // Handle brush size slider
-      if ((opts.get_current_tool() === 'pencil' || opts.get_current_tool() === 'eraser') && is_on_slider(e.x, e.y)) {
-        is_dragging_slider = true;
-        dragging_brush_side = e.button === 2 ? 'right' : 'left';
-        const new_size = get_size_from_x(e.x);
-        const current_size = dragging_brush_side === 'right'
-          ? (opts.get_right_brush_size?.() ?? opts.get_brush_size())
-          : (opts.get_left_brush_size?.() ?? opts.get_brush_size());
-        if (new_size !== current_size) {
-          opts.on_brush_size_change(new_size, dragging_brush_side);
-        }
       }
       
       // Handle space_replace checkbox for text tool
@@ -1344,17 +1373,6 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
       if (opts.custom_panel?.should_render() && opts.custom_panel.on_drag_move?.(e, rect)) {
         return;
       }
-      // Handle slider dragging
-      if (is_dragging_slider && (opts.get_current_tool() === 'pencil' || opts.get_current_tool() === 'eraser')) {
-        const new_size = get_size_from_x(e.x);
-        const current_size = dragging_brush_side === 'right'
-          ? (opts.get_right_brush_size?.() ?? opts.get_brush_size())
-          : (opts.get_left_brush_size?.() ?? opts.get_brush_size());
-        if (new_size !== current_size) {
-          opts.on_brush_size_change(new_size, dragging_brush_side);
-        }
-      }
-      
       // Handle scale slider dragging for paste tool
       if (is_dragging_scale && opts.get_current_tool() === 'paste') {
         const new_scale = get_scale_from_x(e.x);
@@ -1364,8 +1382,6 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
       }
     },
     on_pointer_up_content(): void {
-      is_dragging_slider = false;
-      dragging_brush_side = 'left';
       is_dragging_scale = false;
       opts.custom_panel?.on_pointer_up?.();
     },

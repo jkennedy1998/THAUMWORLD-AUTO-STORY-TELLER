@@ -14,12 +14,22 @@ export type PainterSessionState = {
 };
 
 export type PainterSessionGroupCommand =
+  | { kind: 'set_document_timing'; breath_range_start: number; breath_range_end: number; frames_per_breath: number; loop_enabled: boolean }
+  | { kind: 'set_document_loop_window'; breath_start: number; breath_end: number }
   | { kind: 'create_group'; group: PainterGroup }
+  | { kind: 'offset_group_in_time'; group_id: string; delta_breaths: number }
+  | { kind: 'set_group_timing'; group_id: string; start: number; cropped_start: number; cropped_end: number }
+  | { kind: 'set_group_breath_span'; group_id: string; breath_start: number; breath_end: number }
+  | { kind: 'set_group_raster_segment_length'; group_id: string; content_state_id: string; length_breaths: number }
+  | { kind: 'split_group_raster_segment'; group_id: string; content_state_id: string; split_breath: number }
+  | { kind: 'swap_group_raster_segments'; group_id: string; source_content_state_id: string; target_content_state_id: string }
   | { kind: 'delete_group'; group_id: string }
   | { kind: 'duplicate_group'; source_group_id: string }
   | { kind: 'rename_group'; group_id: string; group_name: string }
   | { kind: 'set_group_visibility'; group_id: string; visible: boolean }
   | { kind: 'set_group_locked'; group_id: string; locked: boolean }
+  | { kind: 'set_group_content_state'; group_id: string; breath: number; voxels: Array<{ key: string; x: number; y: number; z: number; char: string; rgb: { r: number; g: number; b: number }; weight_index: number }> }
+  | { kind: 'set_group_location_key'; group_id: string; breath: number; offset: { x: number; y: number; z: number } }
   | { kind: 'reorder_groups'; next_group_order: string[] };
 
 export type PainterSessionCellChangeInput = {

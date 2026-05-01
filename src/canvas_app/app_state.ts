@@ -24,7 +24,6 @@ import { make_controls_module } from '../mono_ui/modules/controls_module.js';
 import { makeGroupsModule } from '../mono_ui/modules/groups_module.js';
 import { makePlaceCameraControlModule } from '../mono_ui/modules/place_camera_control_module.js';
 import { createVoxelSpace, type VoxelSpace } from '../ascii_painter/voxel_space.js';
-import { loadPlaceCameraConfig, saveCameraConfig, savePlaceCameraCalibration } from '../ascii_painter/save_system.js';
 import type { SlotType } from '../equipment/body_slot_resolver.js';
 import type { Canvas, Module, PointerEvent, Rgb, Rect } from '../mono_ui/types.js';
 import { create_module_registry, type ModuleRegistry } from '../mono_ui/module_registry.js';
@@ -67,6 +66,8 @@ import {
     order_resolved_targets,
     select_current_resolved_target_of_type,
 } from '../mono_ui/runtime/interaction_runtime_types.js';
+import { get_camera_settings_for_app, get_camera_slider_specs_for_app, load_camera_settings, save_camera_settings } from '../mono_ui/runtime/camera_customization_store.js';
+import { sanitize_camera_config_for_app } from '../mono_ui/runtime/camera_limits.js';
 import { tag_key } from '../tag_system/tag_key.js';
 import type { TagInstance } from '../tag_system/registry.js';
 import { resolve_grow_tag_configs } from '../mag/grow.js';
@@ -9597,26 +9598,35 @@ export function create_app_state(): AppState {
     });
 
     const camera_control_fallback_space = createVoxelSpace(1, 1);
-    function apply_saved_camera_config_to_space(space: VoxelSpace): void {
-        const cam = loadPlaceCameraConfig();
-        if (typeof cam.scale_per_layer === 'number') space.camera.scale_per_layer = cam.scale_per_layer;
-        if (typeof cam.movement_per_layer === 'number') space.camera.movement_per_layer = cam.movement_per_layer;
-        if (typeof cam.mouse_angle_yaw_deg === 'number') space.camera.mouse_angle_yaw_deg = cam.mouse_angle_yaw_deg;
-        if (typeof cam.mouse_angle_pitch_deg === 'number') space.camera.mouse_angle_pitch_deg = cam.mouse_angle_pitch_deg;
-        if (typeof cam.mouse_angle_spring === 'number') space.camera.mouse_angle_spring = cam.mouse_angle_spring;
-        if (typeof cam.parallax_intensity === 'number') space.camera.parallax_intensity = cam.parallax_intensity;
-        if (typeof cam.parallax_move_enabled === 'boolean') space.camera.parallax_move_enabled = cam.parallax_move_enabled;
-        if (typeof cam.parallax_size_enabled === 'boolean') space.camera.parallax_size_enabled = cam.parallax_size_enabled;
-        if (cam.calibration) space.camera.calibration = { ...cam.calibration };
+    const WORLD_CAMERA_APP_ID = 'thaum_world' as const;
+    function persist_world_camera_config(partial: Partial<VoxelSpace['camera']>): void {
+        void save_camera_settings(APP_CONFIG.selected_data_slot, WORLD_CAMERA_APP_ID, partial).catch(() => null);
+    }
+    function apply_saved_camera_config_to_space(space: VoxelSpace, cam: Partial<VoxelSpace['camera']> = get_camera_settings_for_app(WORLD_CAMERA_APP_ID)): void {
+        const sanitized = sanitize_camera_config_for_app(WORLD_CAMERA_APP_ID, cam);
+        if (typeof sanitized.scale_per_layer === 'number') space.camera.scale_per_layer = sanitized.scale_per_layer;
+        if (typeof sanitized.movement_per_layer === 'number') space.camera.movement_per_layer = sanitized.movement_per_layer;
+        if (typeof sanitized.mouse_angle_yaw_deg === 'number') space.camera.mouse_angle_yaw_deg = sanitized.mouse_angle_yaw_deg;
+        if (typeof sanitized.mouse_angle_pitch_deg === 'number') space.camera.mouse_angle_pitch_deg = sanitized.mouse_angle_pitch_deg;
+        if (typeof sanitized.mouse_angle_spring === 'number') space.camera.mouse_angle_spring = sanitized.mouse_angle_spring;
+        if (typeof sanitized.parallax_intensity === 'number') space.camera.parallax_intensity = sanitized.parallax_intensity;
+        if (typeof sanitized.parallax_move_enabled === 'boolean') space.camera.parallax_move_enabled = sanitized.parallax_move_enabled;
+        if (typeof sanitized.parallax_size_enabled === 'boolean') space.camera.parallax_size_enabled = sanitized.parallax_size_enabled;
+        if (sanitized.calibration) space.camera.calibration = { ...sanitized.calibration };
     }
     apply_saved_camera_config_to_space(camera_control_fallback_space);
+    void load_camera_settings(APP_CONFIG.selected_data_slot, WORLD_CAMERA_APP_ID).then((cam) => {
+        apply_saved_camera_config_to_space(camera_control_fallback_space, cam);
+        update_camera_control_spaces((space) => apply_saved_camera_config_to_space(space, cam));
+    }).catch(() => null);
+    const world_camera_limits = get_camera_slider_specs_for_app(WORLD_CAMERA_APP_ID);
     camera_control_fallback_space.camera.parallax_move_enabled = camera_control_fallback_space.camera.parallax_move_enabled ?? true;
     camera_control_fallback_space.camera.parallax_size_enabled = camera_control_fallback_space.camera.parallax_size_enabled ?? false;
     camera_control_fallback_space.camera.show_all_layers = !ui_state.place.use_focus_layer_opacity;
     camera_control_fallback_space.camera.parallax_intensity = Math.max(0, Math.min(1, camera_control_fallback_space.camera.parallax_intensity ?? 0.35));
-    camera_control_fallback_space.camera.mouse_angle_yaw_deg = Math.max(-45, Math.min(45, camera_control_fallback_space.camera.mouse_angle_yaw_deg ?? 5));
-    camera_control_fallback_space.camera.mouse_angle_pitch_deg = Math.max(-45, Math.min(45, camera_control_fallback_space.camera.mouse_angle_pitch_deg ?? 4));
-    camera_control_fallback_space.camera.mouse_angle_spring = Math.max(1, Math.min(20, camera_control_fallback_space.camera.mouse_angle_spring ?? 10));
+    camera_control_fallback_space.camera.mouse_angle_yaw_deg = Math.max(world_camera_limits.mouse_angle_yaw_deg.min, Math.min(world_camera_limits.mouse_angle_yaw_deg.max, camera_control_fallback_space.camera.mouse_angle_yaw_deg ?? 5));
+    camera_control_fallback_space.camera.mouse_angle_pitch_deg = Math.max(world_camera_limits.mouse_angle_pitch_deg.min, Math.min(world_camera_limits.mouse_angle_pitch_deg.max, camera_control_fallback_space.camera.mouse_angle_pitch_deg ?? 4));
+    camera_control_fallback_space.camera.mouse_angle_spring = Math.max(world_camera_limits.mouse_angle_spring.min, Math.min(world_camera_limits.mouse_angle_spring.max, camera_control_fallback_space.camera.mouse_angle_spring ?? 10));
     camera_control_fallback_space.camera.base_layer_scale = 1.0;
     camera_control_fallback_space.camera.scale_per_layer = typeof camera_control_fallback_space.camera.scale_per_layer === 'number' ? camera_control_fallback_space.camera.scale_per_layer : 0.06;
     camera_control_fallback_space.camera.movement_per_layer = typeof camera_control_fallback_space.camera.movement_per_layer === 'number' ? camera_control_fallback_space.camera.movement_per_layer : 12;
@@ -11134,46 +11144,47 @@ export function create_app_state(): AppState {
             id: 'camera_control',
             rect: get_persisted_rect('camera_control', { x0: 126, y0: 10, x1: 158, y1: 42 }),
             getCamera: () => get_camera_control_space().camera,
+            slider_specs: get_camera_slider_specs_for_app(WORLD_CAMERA_APP_ID),
             onParallaxMoveToggle: (enabled) => {
                 update_camera_control_spaces((space) => { space.camera.parallax_move_enabled = enabled; });
-                saveCameraConfig({ parallax_move_enabled: enabled });
+                persist_world_camera_config({ parallax_move_enabled: enabled });
             },
             onParallaxSizeToggle: (enabled) => {
                 update_camera_control_spaces((space) => { space.camera.parallax_size_enabled = enabled; });
-                saveCameraConfig({ parallax_size_enabled: enabled });
+                persist_world_camera_config({ parallax_size_enabled: enabled });
             },
             onOcclusionToggle: (enabled) => {
                 update_camera_control_spaces((space) => { space.camera.show_all_layers = !enabled; });
                 set_place_focus_layer_opacity_enabled(enabled);
-                saveCameraConfig({ show_all_layers: !enabled });
+                persist_world_camera_config({ show_all_layers: !enabled });
             },
             onCalibrationChange: (x, y) => {
                 update_camera_control_spaces((space) => { space.camera.calibration = { x, y }; });
-                savePlaceCameraCalibration({ x, y });
+                persist_world_camera_config({ calibration: { x, y } });
             },
             onCalibrationReset: () => {
                 update_camera_control_spaces((space) => { space.camera.calibration = { x: 0, y: 0 }; });
-                savePlaceCameraCalibration({ x: 0, y: 0 });
+                persist_world_camera_config({ calibration: { x: 0, y: 0 } });
             },
             onScalePerLayerChange: (value) => {
                 update_camera_control_spaces((space) => { space.camera.scale_per_layer = value; });
-                saveCameraConfig({ scale_per_layer: value });
+                persist_world_camera_config({ scale_per_layer: value });
             },
             onMovementPerLayerChange: (value) => {
                 update_camera_control_spaces((space) => { space.camera.movement_per_layer = value; });
-                saveCameraConfig({ movement_per_layer: value });
+                persist_world_camera_config({ movement_per_layer: value });
             },
             onMouseAngleYawDegChange: (value) => {
                 update_camera_control_spaces((space) => { space.camera.mouse_angle_yaw_deg = value; });
-                saveCameraConfig({ mouse_angle_yaw_deg: value });
+                persist_world_camera_config({ mouse_angle_yaw_deg: value });
             },
             onMouseAnglePitchDegChange: (value) => {
                 update_camera_control_spaces((space) => { space.camera.mouse_angle_pitch_deg = value; });
-                saveCameraConfig({ mouse_angle_pitch_deg: value });
+                persist_world_camera_config({ mouse_angle_pitch_deg: value });
             },
             onMouseAngleSpringChange: (value) => {
                 update_camera_control_spaces((space) => { space.camera.mouse_angle_spring = value; });
-                saveCameraConfig({ mouse_angle_spring: value });
+                persist_world_camera_config({ mouse_angle_spring: value });
             },
             onMove: (new_rect) => persist_module_rect('camera_control', new_rect),
             onResize: (new_rect) => persist_module_rect('camera_control', new_rect),

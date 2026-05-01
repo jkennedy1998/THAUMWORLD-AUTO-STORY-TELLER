@@ -66,8 +66,8 @@ export const BORDER_STYLES = {
 
 export const PANEL_BORDER_PRESETS = {
   default_double: {
-    style: BORDER_STYLES.double,
-    weight_index: 1,
+    style: BORDER_STYLES.thick,
+    weight_index: 2,
   },
   compact_double: {
     style: BORDER_STYLES.double,
@@ -121,6 +121,7 @@ export type ModuleBorderConfig = {
     // Back-compat: when set and divider_mode is omitted, defaults to "full_height".
     divider_at_col?: number;
     divider_mode?: 'none' | 'header_only' | 'full_height';
+    divider_style?: BorderStyle;
   };
 };
 
@@ -175,6 +176,7 @@ export function draw_module_border(
   } = config;
 
   const { x0, y0, x1, y1 } = rect;
+  const divider_style = header?.divider_style ?? BORDER_STYLES.single;
   const width = x1 - x0;
   const height = y1 - y0;
 
@@ -200,7 +202,7 @@ export function draw_module_border(
     } else if (header?.divider_at_col && x === x0 + header.divider_at_col) {
       const mode = header.divider_mode ?? 'full_height';
       if (mode !== 'none') {
-        char = style.junction_t;
+        char = divider_style.junction_t;
         is_junction = true;
       }
     }
@@ -270,7 +272,7 @@ export function draw_module_border(
         // Draw vertical line down
         for (let y = y1 - 2; y >= y0; y--) {
           c.set(divider_x, y, {
-            char: style.vertical,
+            char: divider_style.vertical,
             rgb: border_rgb,
             style: "regular",
             weight_index,
@@ -279,7 +281,7 @@ export function draw_module_border(
         }
         // Bottom junction
         c.set(divider_x, y0, {
-          char: style.junction_b,
+          char: divider_style.junction_b,
           rgb: border_rgb,
           style: "regular",
           weight_index,
@@ -299,7 +301,7 @@ export function draw_module_border(
     } else if (header?.divider_at_col && x === x0 + header.divider_at_col) {
       const mode = header.divider_mode ?? 'full_height';
       if (mode === 'full_height') {
-        char = style.junction_b;
+        char = divider_style.junction_b;
       }
     }
     c.set(x, y0, { char, rgb: border_rgb, style: "regular", weight_index, render_index: MODULE_BORDER_RENDER_INDEX });

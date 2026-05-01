@@ -220,7 +220,7 @@ export function exportVoxelSpaceToJSON(space: VoxelSpace): string {
  */
 export function exportVoxelSpaceArtworkToJSON(space: VoxelSpace): string {
   const data = exportVoxelSpace(space) as any;
-  // Camera is persisted separately via saveCameraConfig(); don't bake it into art exports.
+  // Camera is persisted separately; don't bake it into art exports.
   delete data.camera;
   return JSON.stringify(data, null, 2);
 }
@@ -231,7 +231,7 @@ export function exportPainterDocumentToJSON(document: PainterDocument): string {
 
 export function importPainterDocumentFromJSON(json: string): PainterDocument {
   const parsed = JSON.parse(json);
-  if (!parsed || parsed.version !== 3 || !parsed.bounds || !parsed.groups || !Array.isArray(parsed.group_order)) {
+  if (!parsed || (parsed.version !== 4 && parsed.version !== 3) || !parsed.bounds || !parsed.groups || !Array.isArray(parsed.group_order)) {
     throw new Error('Unsupported painter document format');
   }
   return clone_painter_document(parsed as PainterDocument);
@@ -275,7 +275,7 @@ export function exportVoxelSpaceToText(space: VoxelSpace): string {
 export function detectFileFormat(json: string): 'painter_document' | 'voxel_space' | 'grid' | 'unknown' {
   try {
     const parsed = JSON.parse(json);
-    if (parsed.version === 3 && parsed.bounds && parsed.groups && Array.isArray(parsed.group_order)) {
+    if ((parsed.version === 4 || parsed.version === 3) && parsed.bounds && parsed.groups && Array.isArray(parsed.group_order)) {
       return 'painter_document';
     } else if (parsed.version === 2 && parsed.type === 'voxel_space') {
       return 'voxel_space';
@@ -380,12 +380,16 @@ export interface ToolProperties {
   rect_select_all_depths: boolean;
   lasso_select_all_depths: boolean;
   user_selection_color_rgb: { r: number; g: number; b: number };
+  left_target: ToolEditTarget;
+  right_target: ToolEditTarget;
   left_pencil_target: ToolEditTarget;
   right_pencil_target: ToolEditTarget;
   left_eraser_target: ToolEditTarget;
   right_eraser_target: ToolEditTarget;
   left_bucket_target: ToolEditTarget;
   right_bucket_target: ToolEditTarget;
+  left_line_target: ToolEditTarget;
+  right_line_target: ToolEditTarget;
   left_rect_target: ToolEditTarget;
   right_rect_target: ToolEditTarget;
   
@@ -437,12 +441,16 @@ const DEFAULT_TOOL_PROPERTIES: ToolProperties = {
   rect_select_all_depths: false,
   lasso_select_all_depths: false,
   user_selection_color_rgb: { r: 0, g: 220, b: 255 },
+  left_target: 'content',
+  right_target: 'content',
   left_pencil_target: 'content',
   right_pencil_target: 'content',
   left_eraser_target: 'content',
   right_eraser_target: 'content',
   left_bucket_target: 'content',
   right_bucket_target: 'content',
+  left_line_target: 'content',
+  right_line_target: 'content',
   left_rect_target: 'content',
   right_rect_target: 'content',
   text_spacing: 1,
@@ -507,12 +515,16 @@ export function loadToolProperties(): ToolProperties {
       rect_select_all_depths: sanitize_boolean(parsed.rect_select_all_depths, DEFAULT_TOOL_PROPERTIES.rect_select_all_depths),
       lasso_select_all_depths: sanitize_boolean(parsed.lasso_select_all_depths, DEFAULT_TOOL_PROPERTIES.lasso_select_all_depths),
       user_selection_color_rgb: sanitize_rgb(parsed.user_selection_color_rgb, DEFAULT_TOOL_PROPERTIES.user_selection_color_rgb),
+      left_target: sanitize_tool_target(parsed.left_target ?? parsed.left_pencil_target ?? parsed.left_eraser_target ?? parsed.left_bucket_target ?? parsed.left_line_target ?? parsed.left_rect_target, DEFAULT_TOOL_PROPERTIES.left_target),
+      right_target: sanitize_tool_target(parsed.right_target ?? parsed.right_pencil_target ?? parsed.right_eraser_target ?? parsed.right_bucket_target ?? parsed.right_line_target ?? parsed.right_rect_target, DEFAULT_TOOL_PROPERTIES.right_target),
       left_pencil_target: sanitize_tool_target(parsed.left_pencil_target, DEFAULT_TOOL_PROPERTIES.left_pencil_target),
       right_pencil_target: sanitize_tool_target(parsed.right_pencil_target, DEFAULT_TOOL_PROPERTIES.right_pencil_target),
       left_eraser_target: sanitize_tool_target(parsed.left_eraser_target, DEFAULT_TOOL_PROPERTIES.left_eraser_target),
       right_eraser_target: sanitize_tool_target(parsed.right_eraser_target, DEFAULT_TOOL_PROPERTIES.right_eraser_target),
       left_bucket_target: sanitize_tool_target(parsed.left_bucket_target, DEFAULT_TOOL_PROPERTIES.left_bucket_target),
       right_bucket_target: sanitize_tool_target(parsed.right_bucket_target, DEFAULT_TOOL_PROPERTIES.right_bucket_target),
+      left_line_target: sanitize_tool_target(parsed.left_line_target, DEFAULT_TOOL_PROPERTIES.left_line_target),
+      right_line_target: sanitize_tool_target(parsed.right_line_target, DEFAULT_TOOL_PROPERTIES.right_line_target),
       left_rect_target: sanitize_tool_target(parsed.left_rect_target, DEFAULT_TOOL_PROPERTIES.left_rect_target),
       right_rect_target: sanitize_tool_target(parsed.right_rect_target, DEFAULT_TOOL_PROPERTIES.right_rect_target),
       text_spacing: clamp_integer(parsed.text_spacing, DEFAULT_TOOL_PROPERTIES.text_spacing, -16, 16),
@@ -547,104 +559,5 @@ export function clearToolProperties(): void {
     localStorage.removeItem(TOOL_PROPERTIES_KEY);
   } catch (e) {
     console.warn('Clear tool properties failed:', e);
-  }
-}
-
-// Camera config persistence key
-const CAMERA_CONFIG_KEY = 'thaumworld_ascii_painter_camera_config';
-
-/**
- * Camera configuration properties that should persist between sessions
- */
-export interface CameraConfigSaveData {
-  focus_plane?: number;
-  principal_view?: 'top' | 'bottom' | 'north' | 'east' | 'south' | 'west';
-  roll_quarter_turn?: 0 | 1 | 2 | 3;
-  calibration?: { x: number; y: number };
-  painter_calibration?: { x: number; y: number };
-  place_calibration?: { x: number; y: number };
-  scale_per_layer?: number;
-  movement_per_layer?: number;
-  mouse_angle_yaw_deg?: number;
-  mouse_angle_pitch_deg?: number;
-  mouse_angle_spring?: number;
-  render_distance_planes?: number;
-  base_layer_scale?: number;
-  char_spacing_x?: number;
-  char_spacing_y?: number;
-  parallax_intensity?: number;
-  parallax_move_enabled?: boolean;
-  parallax_size_enabled?: boolean;
-  euler_rotation?: { x: number; y: number; z: number };
-  show_all_layers?: boolean;
-  use_focus_layer_opacity?: boolean;
-  center_target_in_view?: boolean;
-  mode?: 'straight_ortho' | 'parallax_ortho' | 'rotated_ortho';
-  orientation?: 'xy' | 'yz' | 'xz';
-  pan_x?: number;
-  pan_y?: number;
-}
-
-/**
- * Save camera configuration to localStorage
- */
-export function saveCameraConfig(config: CameraConfigSaveData): void {
-  try {
-    const existing = loadCameraConfig();
-    const merged = { ...existing, ...config };
-    localStorage.setItem(CAMERA_CONFIG_KEY, JSON.stringify(merged));
-  } catch (e) {
-    console.warn('Save camera config failed:', e);
-  }
-}
-
-/**
- * Load camera configuration from localStorage
- */
-export function loadCameraConfig(): CameraConfigSaveData {
-  try {
-    const data = localStorage.getItem(CAMERA_CONFIG_KEY);
-    if (!data) return {};
-    return JSON.parse(data);
-  } catch (e) {
-    console.warn('Load camera config failed:', e);
-    return {};
-  }
-}
-
-export function loadPainterCameraConfig(): CameraConfigSaveData {
-  const config = loadCameraConfig();
-  return {
-    ...config,
-    calibration: config.painter_calibration ?? config.calibration,
-  };
-}
-
-export function loadPlaceCameraConfig(): CameraConfigSaveData {
-  const config = loadCameraConfig();
-  return {
-    ...config,
-    calibration: config.place_calibration ?? config.calibration,
-  };
-}
-
-export function savePainterCameraCalibration(calibration: { x: number; y: number }): void {
-  saveCameraConfig({ painter_calibration: calibration });
-}
-
-export function savePlaceCameraCalibration(calibration: { x: number; y: number }): void {
-  saveCameraConfig({ place_calibration: calibration });
-}
-
-/**
- * Clear camera configuration from localStorage
- * Use this to reset to defaults
- */
-export function clearCameraConfig(): void {
-  try {
-    localStorage.removeItem(CAMERA_CONFIG_KEY);
-    console.log('[Camera] Cleared saved config from localStorage');
-  } catch (e) {
-    console.warn('Clear camera config failed:', e);
   }
 }

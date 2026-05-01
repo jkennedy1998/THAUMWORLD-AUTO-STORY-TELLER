@@ -51,6 +51,7 @@ These two plans work together. The Inventory Movement Plan is the **primary impl
 
 ### Other Active Plans
 - `docs/plans/2026_04_27_multiplayer_connection_architecture_plan.md` - Source-of-truth plan for slot-scoped join persistence, preferred join targets by `content_ref`, direct IP remote play, and future Headscale-first remote transport growth
+- `docs/plans/2026_04_29_ascii_painter_breath_group_animation_architecture_plan.md` - Source-of-truth plan for breath-driven painter animation, time-aware groups, content states, group location keys, and the reshaped groups/timeline authoring UI
 - `docs/plans/2026_04_24_camera_target_unification_plan.md` - Engine interaction architecture plus renderer contract convergence for painter-grade interaction flow and game-grade render contracts
 - `docs/plans/2026_04_18_ascii_painter_group_architecture_plan.md` - Source-of-truth architecture for replacing painter Z-slice layers with stable authored groups
 - `docs/plans/2026_04_15_shared_controls_module_plan.md` - Shared persistent rebinding system for game and painter controls

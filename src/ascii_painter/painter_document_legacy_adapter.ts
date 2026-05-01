@@ -48,14 +48,14 @@ export function import_legacy_voxel_space_as_painter_document(legacy: VoxelSpace
     group.visible = layer.visible;
     group.locked = layer.locked;
     group.opacity = layer.opacity;
-    group.voxels = [];
+    group.content_states[0]!.content = [];
     for (let y = 0; y < legacy.bounds.height; y += 1) {
       const row = layer.cells[y];
       if (!row) continue;
       for (let x = 0; x < legacy.bounds.width; x += 1) {
         const cell = row[x];
         if (!is_non_empty_cell(cell)) continue;
-        group.voxels.push(create_painter_voxel_record({
+        group.content_states[0]!.content.push(create_painter_voxel_record({
           x,
           y,
           z,

@@ -183,5 +183,6 @@ export function make_controls_module(opts: ControlsModuleConfig): Module {
         if (row) arm_rebind(row.id);
       }
     },
+    wants_text_capture: () => waiting_action_id !== null,
   });
 }

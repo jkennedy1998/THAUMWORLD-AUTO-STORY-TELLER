@@ -5,11 +5,11 @@
  * Selected tool is highlighted in bright yellow, unselected in medium gray.
  */
 
-import type { Canvas, Module, Rect, PointerEvent, DragEvent, WheelEvent } from '../types.js';
-import { get_color_by_name } from '../colors.js';
+import type { Canvas, Module, Rect, PointerEvent, WheelEvent } from '../types.js';
 import type { ModuleGizmosConfig } from '../module_gizmos.js';
 import type { ToolType } from '../../ascii_painter/types.js';
 import { make_floating_panel_module } from './floating_panel_module.js';
+import { get_ui_semantic_rgb } from '../runtime/ui_customization_store.js';
 
 export type ToolboxToolDef<TTool extends string> = { tool: TTool; label: string; icon: string; shortcut: string };
 
@@ -91,7 +91,7 @@ export function make_toolbox_module<TTool extends string = ToolType>(opts: Toolb
     rect: opts.rect,
     title,
     gizmos: gizmo_config,
-    background: { rgb: get_color_by_name('off_black').rgb },
+    background: { rgb: get_ui_semantic_rgb('background') },
     resize: {
       min_width: MIN_WIDTH,
       min_height: MIN_HEIGHT,
@@ -99,11 +99,12 @@ export function make_toolbox_module<TTool extends string = ToolType>(opts: Toolb
       max_height: MAX_HEIGHT,
     },
     draw_content(c: Canvas, rect: Rect): void {
-      const bg_color = get_color_by_name('off_black').rgb;
-      const selected_color = get_color_by_name('vivid_yellow').rgb;
-      const unselected_color = get_color_by_name('medium_gray').rgb;
-      const left_color = get_color_by_name('vivid_blue').rgb;
-      const right_color = get_color_by_name('vivid_red').rgb;
+      const bg_color = get_ui_semantic_rgb('background');
+      const selected_color = get_ui_semantic_rgb('bright');
+      const unselected_color = get_ui_semantic_rgb('medium');
+      const left_color = get_ui_semantic_rgb('left_hand');
+      const right_color = get_ui_semantic_rgb('right_hand');
+      const both_color = get_ui_semantic_rgb('vivid');
       
       // Fill background
       c.fill_rect(rect, { char: ' ', rgb: bg_color, style: 'regular' });
@@ -134,7 +135,7 @@ export function make_toolbox_module<TTool extends string = ToolType>(opts: Toolb
         
         if (is_left && is_right) {
           indicator = '◆'; // Both
-          indicator_color = selected_color;
+          indicator_color = both_color;
         } else if (is_left) {
           indicator = 'L';
           indicator_color = left_color;

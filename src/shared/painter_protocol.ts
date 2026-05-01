@@ -1,4 +1,4 @@
-import type { PainterDocument, PainterVoxelRecord } from '../ascii_painter/painter_document.js';
+import type { PainterDocument, PainterGroupLocationOffset, PainterVoxelRecord } from '../ascii_painter/painter_document.js';
 
 export type PainterDocumentAuthorityMode = 'local_compat' | 'authoritative_host';
 
@@ -41,12 +41,22 @@ export type PainterApplyGroupVoxelsCommand = {
   group_id: string;
   base_revision: number;
   command_id: string;
+  breath: number;
+  auto_key?: boolean;
   voxels: PainterVoxelRecord[];
 };
 
 export type PainterGroupCommand = {
   kind:
+    | 'set_document_timing'
+    | 'set_document_loop_window'
     | 'create_group'
+    | 'offset_group_in_time'
+    | 'set_group_timing'
+    | 'set_group_breath_span'
+    | 'set_group_raster_segment_length'
+    | 'split_group_raster_segment'
+    | 'swap_group_raster_segments'
     | 'delete_group'
     | 'duplicate_group'
     | 'rename_group'
@@ -65,10 +75,49 @@ export type PainterGroupCommand = {
   group_name?: string;
   visible?: boolean;
   locked?: boolean;
+  delta_breaths?: number;
+  breath_range_start?: number;
+  breath_range_end?: number;
+  frames_per_breath?: number;
+  loop_enabled?: boolean;
+  breath_start?: number;
+  breath_end?: number;
+  start?: number;
+  cropped_start?: number;
+  cropped_end?: number;
+  content_state_id?: string;
+  source_content_state_id?: string;
+  target_content_state_id?: string;
+  split_breath?: number;
+  length_breaths?: number;
   next_group_order?: string[];
 };
 
-export type PainterCommand = PainterApplyGroupVoxelsCommand | PainterGroupCommand;
+export type PainterGroupLocationKeyCommand = {
+  kind: 'set_group_location_key';
+  document_id: string;
+  base_revision: number;
+  command_id: string;
+  group_id: string;
+  breath: number;
+  offset: PainterGroupLocationOffset;
+};
+
+export type PainterGroupContentStateCommand = {
+  kind: 'set_group_content_state';
+  document_id: string;
+  base_revision: number;
+  command_id: string;
+  group_id: string;
+  breath: number;
+  voxels: PainterVoxelRecord[];
+};
+
+export type PainterCommand =
+  | PainterApplyGroupVoxelsCommand
+  | PainterGroupCommand
+  | PainterGroupLocationKeyCommand
+  | PainterGroupContentStateCommand;
 
 export type PainterDocumentEvent = {
   type:

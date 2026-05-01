@@ -17,13 +17,17 @@ import { make_painter_canvas_module, type PainterInteractionAnchor } from '../mo
 import { make_file_menu_module } from '../mono_ui/modules/painter_file_menu_module.js';
 import { make_character_selector_module } from '../mono_ui/modules/character_selector_module.js';
 import { make_brush_preview_module } from '../mono_ui/modules/brush_preview_module.js';
+import { make_brush_color_block_module } from '../mono_ui/modules/brush_color_block_module.js';
 import { make_color_selector_module } from '../mono_ui/modules/color_selector_module.js';
-import { make_weight_selector_module } from '../mono_ui/modules/weight_selector_module.js';
+import { make_color_picker_module } from '../mono_ui/modules/color_picker_module.js';
 import { make_toolbox_module } from '../mono_ui/modules/toolbox_module.js';
 import { make_tool_properties_module, type ToolPropertyRow } from '../mono_ui/modules/tool_properties_module.js';
 import { make_controls_module } from '../mono_ui/modules/controls_module.js';
+import { makeCanvasSettingsModule } from '../mono_ui/modules/canvas_settings_module.js';
+import { make_customization_module } from '../mono_ui/modules/customization_module.js';
 import { make_floating_panel_module } from '../mono_ui/modules/floating_panel_module.js';
 import {
+  initModuleLayoutPersistence,
   saveModulePosition,
   getModulePosition,
   clearModulePositions,
@@ -54,10 +58,6 @@ import {
   saveToolProperties,
   loadToolProperties,
   clearToolProperties,
-  saveCameraConfig,
-  loadPainterCameraConfig as loadCameraConfig,
-  savePainterCameraCalibration,
-  clearCameraConfig,
   type ToolProperties,
 } from '../ascii_painter/save_system.js';
 // 3D VoxelSpace imports
@@ -80,12 +80,16 @@ import {
 import { makeGroupsModule, type GroupListItem } from '../mono_ui/modules/groups_module.js';
 import { make_navigation_module } from '../ascii_painter/navigation_module.js';
 import { build_legacy_voxel_space_from_painter_runtime, import_legacy_voxel_space_as_painter_document } from '../ascii_painter/painter_document_legacy_adapter.js';
-import { create_painter_document, create_painter_group, create_painter_voxel_record, type PainterDocument } from '../ascii_painter/painter_document.js';
-import { add_painter_group, duplicate_painter_group, erase_group_voxel, export_painter_document, normalize_painter_document_runtime, remove_painter_group, rename_painter_group, reorder_painter_groups, resolve_painter_group_preview_winner, set_group_voxel, set_painter_group_locked, set_painter_group_visibility, type PainterDocumentRuntime } from '../ascii_painter/painter_document_runtime.js';
+import { create_painter_document, create_painter_group, create_painter_voxel_record, get_painter_group_content_state_at_breath, type PainterDocument } from '../ascii_painter/painter_document.js';
+import { add_painter_group, duplicate_painter_group, erase_group_voxel, export_painter_document, get_exact_painter_group_content_state, is_painter_group_active_at_breath, normalize_painter_document_runtime, remove_painter_group, rename_painter_group, reorder_painter_groups, resolve_nearest_painter_group_content_state, resolve_nearest_painter_group_location_key, resolve_painter_group_location_at_breath, resolve_painter_group_preview_winner, set_group_voxel, set_painter_group_locked, set_painter_group_visibility, set_painter_runtime_active_breath, type PainterDocumentRuntime } from '../ascii_painter/painter_document_runtime.js';
+import { derive_group_breath_range, derive_group_raster_segment_ranges, derive_painter_document_suggested_breath_range, get_painter_document_breath_range, get_painter_document_file_breath_range, get_painter_document_playback, step_painter_breath_playback } from '../ascii_painter/painter_breath.js';
 import { create_painter_session_core } from '../ascii_painter/painter_session_core.js';
 import type { PainterGroupPlaneRegistry } from '../ascii_painter/painter_session_types.js';
 import { resolve_edit_channels_with_modifiers, type EditChannels } from '../ascii_painter/edit_mask.js';
 import { diag_log } from '../shared/diagnostics.js';
+import { get_ui_customization_state, get_ui_semantic_rgb, load_ui_customization_state, save_ui_customization_role_color, set_ui_customization_role_color, type UiCustomizationState, type UiSemanticColorRole } from '../mono_ui/runtime/ui_customization_store.js';
+import { get_camera_limit_profile, sanitize_camera_config_for_app } from '../mono_ui/runtime/camera_limits.js';
+import { get_camera_settings_for_app, load_camera_settings, reset_camera_settings, save_camera_settings } from '../mono_ui/runtime/camera_customization_store.js';
 
 function normalize_painter_tool(tool: ToolType): ToolType {
   return tool;
@@ -94,7 +98,7 @@ import { makePlaceCameraControlModule } from '../mono_ui/modules/place_camera_co
 import { VoxelDOMRenderer, createVoxelDOMRenderer } from '../ascii_painter/voxel_dom_renderer.js';
 import { clone_projected_scene, commit_grid_to_painter_world, get_painter_focus_slot_for_anchor, get_painter_projection_focus_content_bounds, get_painter_world_content_bounds_center, painter_projection_grid_point_to_world, painter_projection_world_to_grid_point, project_painter_display_space, project_painter_runtime_display_space, project_world_to_painter_display_cell, sync_grid_to_painter_projection, type PainterDisplayProjection, type PainterProjectedScene } from '../ascii_painter/painter_view_projection_adapter.js';
 import { touch_world_layers_owner } from '../mono_ui/world_layers_owner.js';
-import { get_principal_view_plane_axis, get_transition_tilt_for_command, make_place_view_state, step_place_view_action, type PlaceViewState } from '../mono_ui/runtime/place_view_projection.js';
+import { get_principal_view_plane_axis, get_transition_tilt_for_command, make_place_view_state, map_screen_direction_to_world_delta, step_place_view_action, type PlaceViewState } from '../mono_ui/runtime/place_view_projection.js';
 import { start_roll_transition, start_swing_transition, type PlaceCameraTransition } from '../mono_ui/runtime/place_camera_pose.js';
 import { clamp_anchor_to_viewport_px, compute_anchor_relative_mouse_parallax } from '../mono_ui/runtime/camera_anchor_runtime.js';
 import { resolve_place_view_transition_frame } from '../mono_ui/runtime/place_view_camera_runtime.js';
@@ -256,10 +260,11 @@ function create_legacy_painter_group_id(): string {
 }
 
 export function create_painter_app_state(options?: PainterAppStateOptions): PainterAppState {
+  initModuleLayoutPersistence(PAINTER_APP_CONFIG.selected_data_slot, 'thaum_painter');
   if (is_tai_fresh_state_enabled()) {
     clearAutoSave();
     clearToolProperties();
-    clearCameraConfig();
+    resetPainterCameraConfig();
     clearModulePositions();
     try {
       window.localStorage.removeItem('thaumworld_ascii_painter_last_file_path');
@@ -290,9 +295,15 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   const initial_painter_document = create_painter_document(CANVAS_WIDTH, CANVAS_HEIGHT, { min_z: 0, max_z: 0, default_group_name: 'Group 1' });
   let painter_document_runtime: PainterDocumentRuntime = normalize_painter_document_runtime(initial_painter_document);
   const painter_session_core = create_painter_session_core(export_painter_document(painter_document_runtime));
+  let painter_current_breath = Math.max(0, Math.floor(painter_document_runtime.active_breath));
+  let painter_timeline_view_start_breath = 0;
+  let painter_timeline_view_span_breaths = 24;
+  let painter_playback_running = false;
+  let painter_playback_frame_carry = 0;
   let last_projection_runtime_log_signature = '';
   const DEFAULT_USER_SELECTION_COLOR_RGB: Rgb = { ...get_color_by_name('pumpkin').rgb };
   const saved_tool_props = loadToolProperties();
+  let ui_customization_state: UiCustomizationState = get_ui_customization_state();
   let user_selection_color_rgb: Rgb = { ...(saved_tool_props.user_selection_color_rgb ?? DEFAULT_USER_SELECTION_COLOR_RGB) };
   type PainterSelectionChannelState = {
     connection_id: string;
@@ -313,6 +324,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   let suppress_recent_file_persistence = false;
   let authoritative_revision_applied = 0;
   let canvas_module: ReturnType<typeof make_painter_canvas_module> | null = null;
+  let painter_groups_auto_key_enabled = false;
 
   function get_local_selection_connection_id(): string {
     return String(painter_sync.get_state().bootstrap?.connection_id ?? 'local').trim() || 'local';
@@ -346,6 +358,20 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   function get_local_world_selection(): WorldSelection {
     return get_local_selection_channel().selection;
   }
+
+  function apply_ui_customization_runtime(next: UiCustomizationState): void {
+    ui_customization_state = next;
+    user_selection_color_rgb = { ...next.colors.vivid };
+    get_local_selection_channel().color_rgb = { ...user_selection_color_rgb };
+  }
+
+  void load_ui_customization_state(PAINTER_APP_CONFIG.selected_data_slot, {
+    vivid_seed_rgb: saved_tool_props.user_selection_color_rgb ?? DEFAULT_USER_SELECTION_COLOR_RGB,
+  }).then((next) => {
+    apply_ui_customization_runtime(next);
+  }).catch(() => {
+    // ignore slot customization load failures and keep defaults in memory
+  });
 
   function clear_all_selection_channels(options?: { publish?: boolean }): void {
     selection_channels_by_connection.clear();
@@ -437,7 +463,36 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     painter_document_runtime = state.runtime;
     runtime_group_planes = state.group_plane_registry;
   }
+
+  function syncActivePainterBreathAcrossState(nextBreath: number): void {
+    painter_current_breath = clampPainterBreathToNonNegative(nextBreath);
+    set_painter_runtime_active_breath(painter_document_runtime, painter_current_breath);
+    painter_session_core.set_active_breath(painter_current_breath);
+  }
+
+  function getPainterDocumentBreathRange(): { start: number; end: number } {
+    return get_painter_document_breath_range(painter_document_runtime.document);
+  }
+
+  function getPainterDocumentFileBreathRange(): { start: number; end: number } {
+    return get_painter_document_file_breath_range(painter_document_runtime.document);
+  }
+
+  function clampPainterBreathToNonNegative(breath: number): number {
+    return Math.max(0, Math.floor(Number.isFinite(breath) ? breath : painter_current_breath));
+  }
+
+  function stopPainterPlayback(): void {
+    painter_playback_running = false;
+    painter_playback_frame_carry = 0;
+  }
+
+  function syncPainterTimingStateAfterDocumentMutation(): void {
+    syncActivePainterBreathAcrossState(painter_current_breath);
+    painter_timeline_view_start_breath = Math.max(0, Math.min(painter_timeline_view_start_breath, getPainterDocumentBreathRange().end));
+  }
   sync_local_session_state_from_core();
+  syncActivePainterBreathAcrossState(painter_current_breath);
   let voxelSpace = build_legacy_voxel_space_from_painter_runtime(painter_document_runtime);
 
   function get_group_id_for_legacy_z(z: number): string | null {
@@ -530,6 +585,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   function sync_painter_runtime_after_mutation(options?: { preserve_group_order?: boolean; focus_active_group?: boolean }): void {
     sync_legacy_group_compat_state({ preserve_group_order: options?.preserve_group_order ?? true });
+    syncPainterTimingStateAfterDocumentMutation();
     ensureValidFocusPlane();
     refreshPainterProjectionFromWorld();
   }
@@ -548,13 +604,31 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   }
 
   function submit_group_command_if_authoritative(command: {
-    kind: 'create_group' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'reorder_groups' | 'reset_document' | 'undo_group' | 'redo_group';
+    kind: 'set_document_timing' | 'set_document_loop_window' | 'create_group' | 'offset_group_in_time' | 'set_group_timing' | 'set_group_breath_span' | 'set_group_raster_segment_length' | 'split_group_raster_segment' | 'swap_group_raster_segments' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'set_group_content_state' | 'set_group_location_key' | 'reorder_groups' | 'reset_document' | 'undo_group' | 'redo_group';
     group_id?: string;
     source_group_id?: string;
     target_group_id?: string;
     group_name?: string;
     visible?: boolean;
     locked?: boolean;
+    delta_breaths?: number;
+    breath_range_start?: number;
+    breath_range_end?: number;
+    frames_per_breath?: number;
+    loop_enabled?: boolean;
+    breath_start?: number;
+    breath_end?: number;
+    start?: number;
+    cropped_start?: number;
+    cropped_end?: number;
+    content_state_id?: string;
+    source_content_state_id?: string;
+    target_content_state_id?: string;
+    split_breath?: number;
+    length_breaths?: number;
+    breath?: number;
+    voxels?: Array<{ key: string; x: number; y: number; z: number; char: string; rgb: { r: number; g: number; b: number }; weight_index: number }>;
+    offset?: { x: number; y: number; z: number };
     next_group_order?: string[];
   }): void {
     if (!can_submit_to_authoritative_document()) return;
@@ -597,7 +671,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     if (!applied) return false;
     refreshPainterProjectionFromWorld();
     if (can_submit_to_authoritative_document()) {
-      void painter_sync.submit_cell_changes(active_group_id, changes.map((change) => ({
+      void painter_sync.submit_cell_changes(active_group_id, painter_current_breath, painter_groups_auto_key_enabled, changes.map((change) => ({
         x: change.worldX,
         y: change.worldY,
         z: change.worldZ,
@@ -620,6 +694,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   function reset_painter_document_state(): boolean {
     const document = create_painter_document(CANVAS_WIDTH, CANVAS_HEIGHT, { min_z: 0, max_z: 0, default_group_name: 'Group 1' });
     applyPainterDocumentSnapshot(document);
+    painter_groups_auto_key_enabled = true;
+    painterDiag('groups auto key enabled for reset document', { enabled: painter_groups_auto_key_enabled });
     setCurrentPainterDocumentLineage(`memory:reset:${Date.now()}`, 'reset_document');
     log_runtime_summary('painter document reset summary');
     if (painter_sync.get_state().authority_mode === 'authoritative_host') {
@@ -636,6 +712,14 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       || action.type === 'rename_group'
       || action.type === 'set_group_visibility'
       || action.type === 'set_group_locked'
+      || action.type === 'offset_group_in_time'
+      || action.type === 'set_group_timing'
+      || action.type === 'set_group_breath_span'
+      || action.type === 'set_group_raster_segment_length'
+      || action.type === 'split_group_raster_segment'
+      || action.type === 'swap_group_raster_segments'
+      || action.type === 'set_group_content_state'
+      || action.type === 'set_group_location_key'
       || action.type === 'reorder_groups'
     );
   }
@@ -690,6 +774,21 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         if (groupId && next) set_painter_group_locked(painter_document_runtime, groupId, next.locked);
         break;
       }
+      case 'offset_group_in_time':
+      case 'set_group_timing':
+      case 'set_group_breath_span':
+      case 'set_group_raster_segment_length':
+      case 'split_group_raster_segment':
+      case 'swap_group_raster_segments':
+      case 'set_group_content_state':
+      case 'set_group_location_key': {
+        const next = useOld ? action.oldGroupData : action.newGroupData;
+        if (groupId && next) {
+          painter_document_runtime.document.groups[groupId] = structuredClone(next);
+          legacy_group_compat.active_group_id = next.id;
+        }
+        break;
+      }
       case 'reorder_groups': {
         const nextOrder = useOld ? action.oldGroupOrder : action.newGroupOrder;
         if (nextOrder) reorder_painter_groups(painter_document_runtime, nextOrder);
@@ -728,6 +827,9 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   }
 
   function apply_painter_history_action(action: HistoryAction, direction: 'undo' | 'redo'): boolean {
+    if (is_group_structural_action(action)) {
+      return apply_group_structural_action_from_history(action, direction);
+    }
     if (is_cell_history_action(action)) {
       return apply_cell_action_from_history(action, direction);
     }
@@ -742,44 +844,56 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     return total;
   }
 
-  function undo_painter_history(): string | null {
+  function undo_painter_history(): { description: string; type: HistoryAction['type'] } | null {
     const group_id = resolve_current_runtime_group_id();
     if (!group_id || !canUndoGroup(history, group_id)) return null;
     const action = popUndoGroupAction(history, group_id);
     if (!action) return null;
     if (apply_painter_history_action(action, 'undo')) {
-      return action.description;
+      return { description: action.description, type: action.type };
     }
     return null;
   }
 
-  function redo_painter_history(): string | null {
+  function redo_painter_history(): { description: string; type: HistoryAction['type'] } | null {
     const group_id = resolve_current_runtime_group_id();
     if (!group_id || !canRedoGroup(history, group_id)) return null;
     const action = popRedoGroupAction(history, group_id);
     if (!action) return null;
     if (apply_painter_history_action(action, 'redo')) {
-      return action.description;
+      return { description: action.description, type: action.type };
     }
     return null;
   }
 
+  function isAuthoritativeUndoRedoSupported(type: HistoryAction['type']): boolean {
+    return type === 'draw_cells'
+      || type === 'erase_cells'
+      || type === 'fill'
+      || type === 'paste'
+      || type === 'clear_canvas';
+  }
+
   function performPainterUndo(): string | null {
     const group_id = resolve_current_runtime_group_id();
-    const description = undo_painter_history();
-    if (description) {
-      if (group_id) submit_group_command_if_authoritative({ kind: 'undo_group', group_id });
-      return description;
+    const result = undo_painter_history();
+    if (result) {
+      if (group_id && isAuthoritativeUndoRedoSupported(result.type)) {
+        submit_group_command_if_authoritative({ kind: 'undo_group', group_id });
+      }
+      return result.description;
     }
     return null;
   }
 
   function performPainterRedo(): string | null {
     const group_id = resolve_current_runtime_group_id();
-    const description = redo_painter_history();
-    if (description) {
-      if (group_id) submit_group_command_if_authoritative({ kind: 'redo_group', group_id });
-      return description;
+    const result = redo_painter_history();
+    if (result) {
+      if (group_id && isAuthoritativeUndoRedoSupported(result.type)) {
+        submit_group_command_if_authoritative({ kind: 'redo_group', group_id });
+      }
+      return result.description;
     }
     return null;
   }
@@ -829,8 +943,20 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       painterDiag('skipping authored group mutation: group locked', { active_group_id, change_count: changes.length });
       return false;
     }
-    const { applied, history_changes } = painter_session_core.apply_cell_changes(active_group_id, changes);
-    if (!applied) return false;
+    const { applied, history_changes, rejected_reason } = painter_session_core.apply_cell_changes(active_group_id, painter_current_breath, changes, {
+      auto_key: painter_groups_auto_key_enabled,
+    });
+    if (!applied) {
+      if (rejected_reason === 'no_visible_raster_content') {
+        painterDiag('rejected authored group mutation: no visible raster content at current breath', {
+          active_group_id,
+          change_count: changes.length,
+          active_breath: painter_current_breath,
+          auto_key: painter_groups_auto_key_enabled,
+        });
+      }
+      return false;
+    }
     sync_local_session_state_from_core();
     sync_lineage_state_from_core();
     sync_painter_runtime_after_mutation({ preserve_group_order: true });
@@ -1024,30 +1150,309 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     }
   }
 
+  function getPainterGroupDisplayOrder(): string[] {
+    return [...painter_document_runtime.document.group_order]
+      .filter((group_id) => !!painter_document_runtime.document.groups[group_id])
+      .reverse();
+  }
+
+  function mapGroupDisplayOrderToRuntimeOrder(display_group_order: string[]): string[] {
+    return [...display_group_order].reverse();
+  }
+
   function getPainterGroupListItems(): GroupListItem[] {
-    const order = [...painter_document_runtime.document.group_order].filter((group_id) => !!painter_document_runtime.document.groups[group_id]);
-    return order.slice().reverse().map((group_id) => {
+    const displayOrder = getPainterGroupDisplayOrder();
+    return displayOrder.map((group_id) => {
       const group = painter_document_runtime.document.groups[group_id]!;
+      const groupBreathRange = derive_group_breath_range(group);
+      const rasterSegments = derive_group_raster_segment_ranges(group);
       return {
         id: group_id,
         label: group.name,
         selected: legacy_group_compat.active_group_id === group_id,
+        group_start: groupBreathRange.start,
+        cropped_start: groupBreathRange.cropped_start,
+        cropped_end: groupBreathRange.cropped_end,
+        derivative_end: groupBreathRange.derivative_end,
         visible: group.visible,
         locked: group.locked,
-        can_delete: order.length > 1,
+        can_delete: displayOrder.length > 1,
+        breath_start: groupBreathRange.cropped_start,
+        breath_end: groupBreathRange.cropped_end,
+        content_state_breaths: rasterSegments.map((segment) => segment.start),
+        raster_segments: rasterSegments.map((segment) => ({ id: segment.segment_id, start: segment.start, end: segment.end, length_breaths: segment.length_breaths })),
+        location_key_breaths: group.location_keys.map((key) => key.breath),
       };
     });
   }
 
-  const PAINTER_CAMERA_LIMITS = {
-    movement_per_layer: { min: -12, max: 12 },
-    scale_per_layer: { min: -0.04, max: 0.04 },
-    mouse_angle_yaw_deg: { min: -10, max: 10 },
-    mouse_angle_pitch_deg: { min: -8, max: 8 },
-    mouse_angle_spring: { min: 4, max: 20 },
-    render_distance_planes: { min: 0, max: 8 },
-    calibration: { min: -80, max: 80 },
-  } as const;
+  function setCurrentPainterBreath(nextBreath: number): void {
+    const normalized = clampPainterBreathToNonNegative(nextBreath);
+    if (normalized === painter_current_breath) return;
+    syncActivePainterBreathAcrossState(normalized);
+    const visibleEnd = painter_timeline_view_start_breath + painter_timeline_view_span_breaths - 1;
+    if (painter_current_breath < painter_timeline_view_start_breath) painter_timeline_view_start_breath = painter_current_breath;
+    else if (painter_current_breath > visibleEnd) painter_timeline_view_start_breath = Math.max(0, painter_current_breath - painter_timeline_view_span_breaths + 1);
+    ensureValidFocusPlane();
+    refreshPainterProjectionFromWorld();
+    painterDiag('current painter breath changed', { breath: painter_current_breath });
+  }
+
+  function stepCurrentPainterBreath(delta: number): void {
+    if (!Number.isFinite(delta) || delta === 0) return;
+    setCurrentPainterBreath(painter_current_breath + Math.trunc(delta));
+  }
+
+  function setPainterTimelineViewStart(nextStart: number): void {
+    const fileRange = getPainterDocumentFileBreathRange();
+    painter_timeline_view_start_breath = Math.max(0, Math.min(Math.max(fileRange.end, painter_current_breath), Math.floor(nextStart)));
+  }
+
+  function applyPainterDocumentTiming(args: {
+    breath_range_start: number;
+    breath_range_end: number;
+    frames_per_breath: number;
+    loop_enabled: boolean;
+  }): void {
+    painter_session_core.apply_group_command({ kind: 'set_document_timing', ...args });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    sync_painter_runtime_after_mutation({ preserve_group_order: true });
+    schedule_auto_save();
+    submit_group_command_if_authoritative({ kind: 'set_document_timing', ...args });
+  }
+
+  function setPainterDocumentTiming(args: {
+    breath_range_start: number;
+    breath_range_end: number;
+    frames_per_breath: number;
+    loop_enabled: boolean;
+  }): void {
+    applyPainterDocumentTiming({
+      breath_range_start: Math.max(0, Math.floor(args.breath_range_start)),
+      breath_range_end: Math.max(0, Math.floor(args.breath_range_end)),
+      frames_per_breath: Math.max(1, Math.floor(args.frames_per_breath)),
+      loop_enabled: args.loop_enabled,
+    });
+  }
+
+  function setPainterDocumentLoopWindow(args: {
+    breath_start: number;
+    breath_end: number;
+  }): void {
+    const normalizedStart = Math.max(0, Math.floor(args.breath_start));
+    const normalizedEnd = Math.max(normalizedStart, Math.floor(args.breath_end));
+    painter_session_core.apply_group_command({ kind: 'set_document_loop_window', breath_start: normalizedStart, breath_end: normalizedEnd });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    sync_painter_runtime_after_mutation({ preserve_group_order: true });
+    schedule_auto_save();
+    submit_group_command_if_authoritative({ kind: 'set_document_loop_window', breath_start: normalizedStart, breath_end: normalizedEnd });
+  }
+
+  function fitPainterDocumentTimingToContent(): void {
+    const suggested = derive_painter_document_suggested_breath_range(painter_document_runtime.document);
+    const playback = get_painter_document_playback(painter_document_runtime.document);
+    setPainterDocumentTiming({
+      breath_range_start: suggested.start,
+      breath_range_end: suggested.end,
+      frames_per_breath: playback.frames_per_breath,
+      loop_enabled: playback.loop_enabled,
+    });
+  }
+
+  function togglePainterPlayback(): void {
+    if (painter_playback_running) {
+      stopPainterPlayback();
+      return;
+    }
+    painter_playback_running = true;
+    painter_playback_frame_carry = 0;
+    setCurrentPainterBreath(painter_current_breath);
+  }
+
+  window.setInterval(() => {
+    if (!painter_playback_running) return;
+    const step = step_painter_breath_playback({
+      document: painter_document_runtime.document,
+      current_breath: painter_current_breath,
+      frame_carry: painter_playback_frame_carry,
+      elapsed_frames: 1,
+    });
+    painter_playback_frame_carry = step.frame_carry;
+    if (step.next_breath !== painter_current_breath) {
+      setCurrentPainterBreath(step.next_breath);
+    }
+    if (step.is_finished) stopPainterPlayback();
+  }, Math.floor(1000 / 60));
+
+  function cloneLocationOffset(offset: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
+    return { x: Math.floor(offset.x), y: Math.floor(offset.y), z: Math.floor(offset.z) };
+  }
+
+  function resolveEditableGroupLocationBreath(group_id: string): number | null {
+    const group = painter_document_runtime.document.groups[group_id];
+    if (!group) return null;
+    if (painter_groups_auto_key_enabled) return painter_current_breath;
+    const nearest = resolve_nearest_painter_group_location_key(group, painter_current_breath);
+    return nearest?.breath ?? null;
+  }
+
+  function resolveEditableGroupContentBreath(group_id: string): number | null {
+    const group = painter_document_runtime.document.groups[group_id];
+    if (!group) return null;
+    if (painter_groups_auto_key_enabled) return painter_current_breath;
+    const nearest = resolve_nearest_painter_group_content_state(group, painter_current_breath);
+    return nearest ? (derive_group_raster_segment_ranges(group).find((segment) => segment.segment_id === nearest.id)?.start ?? null) : null;
+  }
+
+  function ensureEditableContentStateForGroup(group_id: string): boolean {
+    const group = painter_document_runtime.document.groups[group_id];
+    if (!group) return false;
+    const targetBreath = resolveEditableGroupContentBreath(group_id);
+    if (targetBreath === null) return false;
+    if (targetBreath !== painter_current_breath) setCurrentPainterBreath(targetBreath);
+    const refreshedGroup = painter_document_runtime.document.groups[group_id];
+    if (!refreshedGroup) return false;
+    const exact = get_exact_painter_group_content_state(refreshedGroup, painter_current_breath);
+    if (exact) return true;
+    const resolved = get_painter_group_content_state_at_breath(refreshedGroup, painter_current_breath)
+      ?? refreshedGroup.content_states[0]
+      ?? null;
+    if (!resolved) return false;
+    const oldGroupData = structuredClone(refreshedGroup);
+    painter_session_core.apply_group_command({
+      kind: 'set_group_content_state',
+      group_id,
+      breath: painter_current_breath,
+      voxels: resolved.content.map((voxel) => ({
+        key: voxel.key,
+        x: voxel.x,
+        y: voxel.y,
+        z: voxel.z,
+        char: voxel.char,
+        rgb: { ...voxel.rgb },
+        weight_index: voxel.weight_index,
+      })),
+    });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
+    logGroupAction(history, 'set_group_content_state', `Edit Content State ${refreshedGroup.name}`, {
+      groupId: group_id,
+      oldGroupData,
+      newGroupData,
+    });
+    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
+    submit_group_command_if_authoritative({
+      kind: 'set_group_content_state',
+      group_id,
+      breath: painter_current_breath,
+      voxels: resolved.content.map((voxel) => ({
+        key: voxel.key,
+        x: voxel.x,
+        y: voxel.y,
+        z: voxel.z,
+        char: voxel.char,
+        rgb: { ...voxel.rgb },
+        weight_index: voxel.weight_index,
+      })),
+    });
+    painterDiag('ensured editable content state for group', {
+      group_id,
+      breath: painter_current_breath,
+      auto_key: painter_groups_auto_key_enabled,
+      cloned_from_breath: derive_group_raster_segment_ranges(refreshedGroup).find((segment) => segment.segment_id === resolved.id)?.start ?? painter_current_breath,
+    });
+    return true;
+  }
+
+  function applyPainterGroupLocationDelta(group_id: string, delta: { x: number; y: number; z: number }, source: 'nudge' | 'drag'): boolean {
+    const group = painter_document_runtime.document.groups[group_id];
+    if (!group || group.locked) return false;
+    if (!is_painter_group_active_at_breath(group, painter_current_breath)) {
+      painterDiag('skipping group location edit: outside active breath span', {
+        group_id,
+        source,
+        active_breath: painter_current_breath,
+        breath_start: group.breath_start,
+        breath_end: group.breath_end,
+      });
+      return false;
+    }
+    const targetBreath = resolveEditableGroupLocationBreath(group_id);
+    if (targetBreath === null) {
+      painterDiag('skipping group location edit: no editable location key', {
+        group_id,
+        source,
+        active_breath: painter_current_breath,
+        auto_key: painter_groups_auto_key_enabled,
+      });
+      return false;
+    }
+    if (targetBreath !== painter_current_breath) setCurrentPainterBreath(targetBreath);
+    if (delta.x === 0 && delta.y === 0 && delta.z === 0) return false;
+    const oldGroupData = structuredClone(group);
+    const resolvedBase = resolve_painter_group_location_at_breath(group, targetBreath);
+    const nextOffset = {
+      x: resolvedBase.x + Math.floor(delta.x),
+      y: resolvedBase.y + Math.floor(delta.y),
+      z: resolvedBase.z + Math.floor(delta.z),
+    };
+    painter_session_core.apply_group_command({
+      kind: 'set_group_location_key',
+      group_id,
+      breath: targetBreath,
+      offset: nextOffset,
+    });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
+    logGroupAction(history, 'set_group_location_key', `Move Group ${group.name}`, {
+      groupId: group_id,
+      oldGroupData,
+      newGroupData,
+    });
+    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
+    submit_group_command_if_authoritative({
+      kind: 'set_group_location_key',
+      group_id,
+      breath: targetBreath,
+      offset: nextOffset,
+    });
+    schedule_auto_save();
+    painterDiag('group location edited', {
+      group_id,
+      source,
+      target_breath: targetBreath,
+      delta: cloneLocationOffset(delta),
+      next_offset: cloneLocationOffset(nextOffset),
+      auto_key: painter_groups_auto_key_enabled,
+    });
+    return true;
+  }
+
+  function nudgeActivePainterGroupLocation(direction: 'left' | 'right' | 'up' | 'down'): boolean {
+    const group_id = resolve_current_runtime_group_id();
+    if (!group_id || current_tool !== 'move') return false;
+    const worldDelta = map_screen_direction_to_world_delta(getPainterViewState(), direction);
+    return applyPainterGroupLocationDelta(group_id, worldDelta, 'nudge');
+  }
+
+  const PAINTER_CAMERA_APP_ID = 'thaum_painter' as const;
+  const PAINTER_CAMERA_LIMITS = get_camera_limit_profile(PAINTER_CAMERA_APP_ID);
+
+  function getSavedPainterCameraConfig(): Partial<CameraConfig> {
+    return get_camera_settings_for_app(PAINTER_CAMERA_APP_ID);
+  }
+
+  function persistPainterCameraConfig(partial: Partial<CameraConfig>): void {
+    void save_camera_settings(PAINTER_APP_CONFIG.selected_data_slot, PAINTER_CAMERA_APP_ID, partial).catch(() => null);
+  }
+
+  function resetPainterCameraConfig(): void {
+    void reset_camera_settings(PAINTER_APP_CONFIG.selected_data_slot, PAINTER_CAMERA_APP_ID).catch(() => null);
+  }
 
   function clampPainterCameraScalar(value: number, limits: { min: number; max: number }): number {
     return Math.max(limits.min, Math.min(limits.max, value));
@@ -1055,35 +1460,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   function sanitizePainterCameraConfig(config: Partial<typeof voxelSpace.camera> | null | undefined): Partial<typeof voxelSpace.camera> {
     if (!config) return {};
-    const next: Partial<typeof voxelSpace.camera> = { ...config };
-    if (typeof next.movement_per_layer === 'number') {
-      next.movement_per_layer = clampPainterCameraScalar(next.movement_per_layer, PAINTER_CAMERA_LIMITS.movement_per_layer);
-    }
-    if (typeof next.scale_per_layer === 'number') {
-      next.scale_per_layer = clampPainterCameraScalar(next.scale_per_layer, PAINTER_CAMERA_LIMITS.scale_per_layer);
-    }
-    if (typeof next.mouse_angle_yaw_deg === 'number') {
-      next.mouse_angle_yaw_deg = clampPainterCameraScalar(next.mouse_angle_yaw_deg, PAINTER_CAMERA_LIMITS.mouse_angle_yaw_deg);
-    }
-    if (typeof next.mouse_angle_pitch_deg === 'number') {
-      next.mouse_angle_pitch_deg = clampPainterCameraScalar(next.mouse_angle_pitch_deg, PAINTER_CAMERA_LIMITS.mouse_angle_pitch_deg);
-    }
-    if (typeof next.mouse_angle_spring === 'number') {
-      next.mouse_angle_spring = clampPainterCameraScalar(next.mouse_angle_spring, PAINTER_CAMERA_LIMITS.mouse_angle_spring);
-    }
-    if (typeof next.render_distance_planes === 'number') {
-      next.render_distance_planes = Math.round(clampPainterCameraScalar(next.render_distance_planes, PAINTER_CAMERA_LIMITS.render_distance_planes));
-    }
-    if (next.calibration) {
-      next.calibration = {
-        x: clampPainterCameraScalar(Math.round(next.calibration.x ?? 0), PAINTER_CAMERA_LIMITS.calibration),
-        y: clampPainterCameraScalar(Math.round(next.calibration.y ?? 0), PAINTER_CAMERA_LIMITS.calibration),
-      };
-    }
-    // Painter depth stacking should stay grid-faithful by default.
-    if (typeof next.parallax_size_enabled === 'boolean' && next.parallax_size_enabled) {
-      next.parallax_size_enabled = false;
-    }
+    const next: Partial<typeof voxelSpace.camera> = sanitize_camera_config_for_app(PAINTER_CAMERA_APP_ID, config);
     return next;
   }
 
@@ -1097,10 +1474,10 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       mouse_angle_spring: clampPainterCameraScalar(painter_camera_state.mouse_angle_spring ?? 0, PAINTER_CAMERA_LIMITS.mouse_angle_spring),
       render_distance_planes: Math.round(clampPainterCameraScalar(painter_camera_state.render_distance_planes ?? 2, PAINTER_CAMERA_LIMITS.render_distance_planes)),
       calibration: {
-        x: clampPainterCameraScalar(Math.round(painter_camera_state.calibration?.x ?? 0), PAINTER_CAMERA_LIMITS.calibration),
-        y: clampPainterCameraScalar(Math.round(painter_camera_state.calibration?.y ?? 0), PAINTER_CAMERA_LIMITS.calibration),
+        x: clampPainterCameraScalar(Math.round(painter_camera_state.calibration?.x ?? 0), PAINTER_CAMERA_LIMITS.calibration_x),
+        y: clampPainterCameraScalar(Math.round(painter_camera_state.calibration?.y ?? 0), PAINTER_CAMERA_LIMITS.calibration_y),
       },
-      parallax_size_enabled: false,
+      parallax_size_enabled: painter_camera_state.parallax_size_enabled ?? false,
     };
   }
 
@@ -1118,7 +1495,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   let painter_target_view = make_place_view_state(painter_camera_state.principal_view, painter_camera_state.roll_quarter_turn);
   let painter_display_view = make_place_view_state(painter_camera_state.principal_view, painter_camera_state.roll_quarter_turn);
 
-  function mergeSavedPainterCameraConfig(config: ReturnType<typeof loadCameraConfig> | null | undefined): void {
+  function mergeSavedPainterCameraConfig(config: Partial<CameraConfig> | null | undefined): void {
     painter_camera_state = { ...painter_camera_state, ...sanitizePainterCameraConfig(painter_camera_state) };
     if (!config || Object.keys(config).length < 1) return;
     painter_camera_state = { ...painter_camera_state, ...sanitizePainterCameraConfig(config) };
@@ -1130,8 +1507,12 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   }
   
   // Load saved camera configuration
-  const savedCameraConfig = loadCameraConfig();
+  const savedCameraConfig = getSavedPainterCameraConfig();
   mergeSavedPainterCameraConfig(savedCameraConfig);
+  void load_camera_settings(PAINTER_APP_CONFIG.selected_data_slot, PAINTER_CAMERA_APP_ID).then((config) => {
+    mergeSavedPainterCameraConfig(config);
+    syncPainterCameraViewTransform();
+  }).catch(() => null);
   painter_camera_state.mode = 'rotated_ortho';
   syncVoxelSpaceCameraFromPainterCamera();
   syncPainterCameraViewTransform();
@@ -1472,7 +1853,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     const compatibilityPlane = syncCompatibilityFocusPlaneFromCameraTarget();
     applyFocusWorldPlaneToProjection(compatibilityPlane);
     if (options?.persist && isAppInitialized) {
-      saveCameraConfig({ focus_plane: compatibilityPlane });
+      persistPainterCameraConfig({ focus_plane: compatibilityPlane });
     }
   }
 
@@ -1745,7 +2126,10 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       current_filename,
       active_group_id: legacy_group_compat.active_group_id,
     });
-    const created = create_painter_group(createNextPainterGroupName());
+    const created = create_painter_group(createNextPainterGroupName(), {
+      breath_start: painter_document_runtime.active_breath,
+      breath_end: painter_document_runtime.active_breath,
+    });
     const result = painter_session_core.apply_group_command({ kind: 'create_group', group: created });
     sync_local_session_state_from_core();
     sync_lineage_state_from_core();
@@ -1753,7 +2137,13 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       groupId: result.created_group_id ?? created.id,
       newGroupData: created,
     });
-    submit_group_command_if_authoritative({ kind: 'create_group', group_name: created.name, target_group_id: result.created_group_id ?? created.id });
+    submit_group_command_if_authoritative({
+      kind: 'create_group',
+      group_name: created.name,
+      target_group_id: result.created_group_id ?? created.id,
+      breath_start: created.breath_start,
+      breath_end: created.breath_end,
+    });
     legacy_group_compat.active_group_id = result.created_group_id ?? created.id;
     sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
     schedule_auto_save();
@@ -1914,6 +2304,166 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     sync_painter_runtime_after_mutation({ preserve_group_order: true });
     schedule_auto_save();
     painterDiag('group lock toggled', { group_id, locked: Boolean(newGroupData?.locked) });
+  }
+
+  function setPainterGroupBreathSpan(group_id: string, breath_start: number, breath_end: number): void {
+    finalizePendingPainterCanvasChanges();
+    commitProjectedGridToWorld();
+    const group = painter_document_runtime.document.groups[group_id];
+    if (!group) return;
+    const oldGroupData = structuredClone(group);
+    painter_session_core.apply_group_command({
+      kind: 'set_group_breath_span',
+      group_id,
+      breath_start,
+      breath_end,
+    });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
+    logGroupAction(history, 'set_group_breath_span', `Set Group Span ${group.name}`, {
+      groupId: group_id,
+      oldGroupData,
+      newGroupData,
+    });
+    submit_group_command_if_authoritative({
+      kind: 'set_group_breath_span',
+      group_id,
+      breath_start: Math.max(0, Math.floor(newGroupData?.breath_start ?? breath_start)),
+      breath_end: Math.max(0, Math.floor(newGroupData?.breath_end ?? breath_end)),
+    });
+    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
+    schedule_auto_save();
+    painterDiag('group breath span changed', {
+      group_id,
+      breath_start: newGroupData?.breath_start ?? null,
+      breath_end: newGroupData?.breath_end ?? null,
+    });
+  }
+
+  function setPainterGroupTiming(group_id: string, args: { start: number; cropped_start: number; cropped_end: number }): void {
+    finalizePendingPainterCanvasChanges();
+    commitProjectedGridToWorld();
+    const group = painter_document_runtime.document.groups[group_id];
+    if (!group) return;
+    const oldGroupData = structuredClone(group);
+    painter_session_core.apply_group_command({ kind: 'set_group_timing', group_id, ...args });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
+    logGroupAction(history, 'set_group_timing', `Set Group Timing ${group.name}`, {
+      groupId: group_id,
+      oldGroupData,
+      newGroupData,
+    });
+    submit_group_command_if_authoritative({
+      kind: 'set_group_timing',
+      group_id,
+      start: Math.max(0, Math.floor(newGroupData?.start ?? args.start)),
+      cropped_start: Math.max(0, Math.floor(newGroupData?.cropped_start ?? args.cropped_start)),
+      cropped_end: Math.max(0, Math.floor(newGroupData?.cropped_end ?? args.cropped_end)),
+    });
+    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
+    schedule_auto_save();
+  }
+
+  function offsetPainterGroupInTime(group_id: string, delta_breaths: number): void {
+    finalizePendingPainterCanvasChanges();
+    commitProjectedGridToWorld();
+    const group = painter_document_runtime.document.groups[group_id];
+    if (!group) return;
+    const oldGroupData = structuredClone(group);
+    painter_session_core.apply_group_command({ kind: 'offset_group_in_time', group_id, delta_breaths });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
+    logGroupAction(history, 'offset_group_in_time', `Offset Group In Time ${group.name}`, {
+      groupId: group_id,
+      oldGroupData,
+      newGroupData,
+    });
+    submit_group_command_if_authoritative({
+      kind: 'offset_group_in_time',
+      group_id,
+      delta_breaths: Math.floor(delta_breaths),
+    });
+    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
+    schedule_auto_save();
+  }
+
+  function setPainterGroupRasterSegmentLength(group_id: string, content_state_id: string, length_breaths: number): void {
+    finalizePendingPainterCanvasChanges();
+    commitProjectedGridToWorld();
+    const group = painter_document_runtime.document.groups[group_id];
+    if (!group) return;
+    const oldGroupData = structuredClone(group);
+    painter_session_core.apply_group_command({ kind: 'set_group_raster_segment_length', group_id, content_state_id, length_breaths });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
+    logGroupAction(history, 'set_group_raster_segment_length', `Set Raster Segment Length ${group.name}`, {
+      groupId: group_id,
+      oldGroupData,
+      newGroupData,
+    });
+    submit_group_command_if_authoritative({
+      kind: 'set_group_raster_segment_length',
+      group_id,
+      content_state_id,
+      length_breaths: Math.max(1, Math.floor(length_breaths)),
+    });
+    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
+    schedule_auto_save();
+  }
+
+  function splitPainterGroupRasterSegment(group_id: string, content_state_id: string, split_breath: number): void {
+    finalizePendingPainterCanvasChanges();
+    commitProjectedGridToWorld();
+    const group = painter_document_runtime.document.groups[group_id];
+    if (!group) return;
+    const oldGroupData = structuredClone(group);
+    painter_session_core.apply_group_command({ kind: 'split_group_raster_segment', group_id, content_state_id, split_breath });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
+    logGroupAction(history, 'split_group_raster_segment', `Split Raster Segment ${group.name}`, {
+      groupId: group_id,
+      oldGroupData,
+      newGroupData,
+    });
+    submit_group_command_if_authoritative({
+      kind: 'split_group_raster_segment',
+      group_id,
+      content_state_id,
+      split_breath: Math.max(0, Math.floor(split_breath)),
+    });
+    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
+    schedule_auto_save();
+  }
+
+  function swapPainterGroupRasterSegments(group_id: string, source_content_state_id: string, target_content_state_id: string): void {
+    finalizePendingPainterCanvasChanges();
+    commitProjectedGridToWorld();
+    const group = painter_document_runtime.document.groups[group_id];
+    if (!group || source_content_state_id === target_content_state_id) return;
+    const oldGroupData = structuredClone(group);
+    painter_session_core.apply_group_command({ kind: 'swap_group_raster_segments', group_id, source_content_state_id, target_content_state_id });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
+    logGroupAction(history, 'swap_group_raster_segments', `Swap Raster Segments ${group.name}`, {
+      groupId: group_id,
+      oldGroupData,
+      newGroupData,
+    });
+    submit_group_command_if_authoritative({
+      kind: 'swap_group_raster_segments',
+      group_id,
+      source_content_state_id,
+      target_content_state_id,
+    });
+    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
+    schedule_auto_save();
   }
 
   function renamePainterGroup(group_id: string, newName: string): void {
@@ -2373,7 +2923,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     rebuild_runtime_from_voxel_space();
     setCurrentPainterDocumentLineage(`autosave:voxel_space:${Date.now()}`, 'autosaved_voxel_space');
     // Re-apply saved camera config after loading auto-save (camera settings are global, not per-artwork)
-    const savedCameraConfig = loadCameraConfig();
+    const savedCameraConfig = getSavedPainterCameraConfig();
     mergeSavedPainterCameraConfig(savedCameraConfig);
     syncPainterCameraViewTransform();
     ensureValidFocusPlane();
@@ -2398,7 +2948,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         rebuild_runtime_from_voxel_space();
         setCurrentPainterDocumentLineage(`autosave:legacy_grid:${Date.now()}`, 'legacy_autosaved_grid');
         // Re-apply saved camera config after loading legacy auto-save
-        const savedCameraConfig = loadCameraConfig();
+        const savedCameraConfig = getSavedPainterCameraConfig();
         mergeSavedPainterCameraConfig(savedCameraConfig);
         syncPainterCameraViewTransform();
         ensureValidFocusPlane();
@@ -2456,25 +3006,17 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   let left_brush_size = saved_tool_props.left_brush_size ?? saved_tool_props.brush_size ?? 1;
   let right_brush_size = saved_tool_props.right_brush_size ?? saved_tool_props.brush_size ?? 1;
-  let left_brush_edit_channels: EditChannels = { ...saved_tool_props.left_brush_edit_channels };
-  let right_brush_edit_channels: EditChannels = { ...saved_tool_props.right_brush_edit_channels };
-  let left_picker_edit_channels: EditChannels = { ...saved_tool_props.left_picker_edit_channels };
-  let right_picker_edit_channels: EditChannels = { ...saved_tool_props.right_picker_edit_channels };
-  let left_bucket_select_channels: EditChannels = { ...saved_tool_props.left_bucket_select_channels };
-  let right_bucket_select_channels: EditChannels = { ...saved_tool_props.right_bucket_select_channels };
+  let left_edit_channels: EditChannels = { ...saved_tool_props.left_brush_edit_channels };
+  let right_edit_channels: EditChannels = { ...saved_tool_props.right_brush_edit_channels };
+  let left_select_channels: EditChannels = { ...saved_tool_props.left_bucket_select_channels };
+  let right_select_channels: EditChannels = { ...saved_tool_props.right_bucket_select_channels };
   let bucket_continuous = saved_tool_props.bucket_continuous ?? true;
   let bucket_same_depth_only = saved_tool_props.bucket_same_depth_only ?? true;
   let bucket_allow_diagonal = saved_tool_props.bucket_allow_diagonal ?? false;
   let rect_select_all_depths = saved_tool_props.rect_select_all_depths ?? false;
   let lasso_select_all_depths = saved_tool_props.lasso_select_all_depths ?? false;
-  let left_pencil_target: ToolEditTarget = saved_tool_props.left_pencil_target ?? 'content';
-  let right_pencil_target: ToolEditTarget = saved_tool_props.right_pencil_target ?? 'content';
-  let left_eraser_target: ToolEditTarget = saved_tool_props.left_eraser_target ?? 'content';
-  let right_eraser_target: ToolEditTarget = saved_tool_props.right_eraser_target ?? 'content';
-  let left_bucket_target: ToolEditTarget = saved_tool_props.left_bucket_target ?? 'content';
-  let right_bucket_target: ToolEditTarget = saved_tool_props.right_bucket_target ?? 'content';
-  let left_rect_target: ToolEditTarget = saved_tool_props.left_rect_target ?? 'content';
-  let right_rect_target: ToolEditTarget = saved_tool_props.right_rect_target ?? 'content';
+  let left_target: ToolEditTarget = saved_tool_props.left_target ?? 'content';
+  let right_target: ToolEditTarget = saved_tool_props.right_target ?? 'content';
   let picker_pick_for_opposite_hand = saved_tool_props.picker_pick_for_opposite_hand ?? false;
   let tool_target_invert_held = false;
   let move_mask_modifier_held = false;
@@ -2491,70 +3033,42 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     return side === 'right' ? right_brush_size : left_brush_size;
   }
 
-  function getBrushEditChannelsForSide(side: 'left' | 'right'): EditChannels {
-    return side === 'right' ? right_brush_edit_channels : left_brush_edit_channels;
+  function getEditChannelsForSide(side: 'left' | 'right'): EditChannels {
+    return side === 'right' ? right_edit_channels : left_edit_channels;
   }
 
-  function getPickerEditChannelsForSide(side: 'left' | 'right'): EditChannels {
-    return side === 'right' ? right_picker_edit_channels : left_picker_edit_channels;
+  function getSelectChannelsForSide(side: 'left' | 'right'): EditChannels {
+    return side === 'right' ? right_select_channels : left_select_channels;
   }
 
-  function getBucketSelectChannelsForSide(side: 'left' | 'right'): EditChannels {
-    return side === 'right' ? right_bucket_select_channels : left_bucket_select_channels;
+  function saveSharedEditChannels(): void {
+    saveToolProperties({
+      left_brush_edit_channels: left_edit_channels,
+      right_brush_edit_channels: right_edit_channels,
+      left_picker_edit_channels: left_edit_channels,
+      right_picker_edit_channels: right_edit_channels,
+    });
+  }
+
+  function saveSharedSelectChannels(): void {
+    saveToolProperties({
+      left_bucket_select_channels: left_select_channels,
+      right_bucket_select_channels: right_select_channels,
+    });
   }
 
   function tool_supports_selection_target(tool: ToolType): boolean {
-    return tool === 'pencil' || tool === 'eraser' || tool === 'bucket' || tool === 'rect_stroke' || tool === 'rect_fill';
+    return tool === 'pencil' || tool === 'eraser' || tool === 'bucket' || tool === 'line' || tool === 'rect_stroke' || tool === 'rect_fill';
   }
 
-  function getToolTargetForSideTool(side: 'left' | 'right', tool: ToolType): ToolEditTarget {
-    if (tool === 'pencil') return side === 'right' ? right_pencil_target : left_pencil_target;
-    if (tool === 'eraser') return side === 'right' ? right_eraser_target : left_eraser_target;
-    if (tool === 'bucket') return side === 'right' ? right_bucket_target : left_bucket_target;
-    if (tool === 'rect_stroke' || tool === 'rect_fill') return side === 'right' ? right_rect_target : left_rect_target;
-    return 'content';
+  function getToolTargetForSide(side: 'left' | 'right'): ToolEditTarget {
+    return side === 'right' ? right_target : left_target;
   }
 
-  function setToolTargetForSideTool(side: 'left' | 'right', tool: ToolType, target: ToolEditTarget): void {
-    if (tool === 'pencil') {
-      if (side === 'right') {
-        right_pencil_target = target;
-        saveToolProperties({ right_pencil_target: target });
-      } else {
-        left_pencil_target = target;
-        saveToolProperties({ left_pencil_target: target });
-      }
-      return;
-    }
-    if (tool === 'eraser') {
-      if (side === 'right') {
-        right_eraser_target = target;
-        saveToolProperties({ right_eraser_target: target });
-      } else {
-        left_eraser_target = target;
-        saveToolProperties({ left_eraser_target: target });
-      }
-      return;
-    }
-    if (tool === 'bucket') {
-      if (side === 'right') {
-        right_bucket_target = target;
-        saveToolProperties({ right_bucket_target: target });
-      } else {
-        left_bucket_target = target;
-        saveToolProperties({ left_bucket_target: target });
-      }
-      return;
-    }
-    if (tool === 'rect_stroke' || tool === 'rect_fill') {
-      if (side === 'right') {
-        right_rect_target = target;
-        saveToolProperties({ right_rect_target: target });
-      } else {
-        left_rect_target = target;
-        saveToolProperties({ left_rect_target: target });
-      }
-    }
+  function setToolTargetForSide(side: 'left' | 'right', target: ToolEditTarget): void {
+    if (side === 'right') right_target = target;
+    else left_target = target;
+    saveToolProperties({ left_target, right_target });
   }
 
   function invertToolTarget(target: ToolEditTarget): ToolEditTarget {
@@ -2564,14 +3078,15 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   function getEffectiveToolTargetForButton(button: number, tool?: ToolType): ToolEditTarget {
     const side: 'left' | 'right' = button === 2 ? 'right' : 'left';
     const resolvedTool = tool ?? (side === 'right' ? right_click_tool : left_click_tool);
-    const base = getToolTargetForSideTool(side, resolvedTool);
+    const base = getToolTargetForSide(side);
     return tool_target_invert_held && tool_supports_selection_target(resolvedTool) ? invertToolTarget(base) : base;
   }
 
   function set_user_selection_color(rgb: Rgb): void {
-    user_selection_color_rgb = { ...rgb };
-    get_local_selection_channel().color_rgb = { ...rgb };
+    const next = set_ui_customization_role_color('vivid', rgb);
+    apply_ui_customization_runtime(next);
     saveToolProperties({ user_selection_color_rgb });
+    void save_ui_customization_role_color(PAINTER_APP_CONFIG.selected_data_slot, 'vivid', rgb).catch(() => null);
     syncDOMRenderer();
     publish_local_selection_channel();
   }
@@ -2975,7 +3490,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     }
     const previewScene = clone_projected_scene(painter_display_projection.scene);
     const active_group_id = resolve_current_runtime_group_id();
-    if (needsLivePreview && active_group_id) applyLivePreviewToProjectedScene(previewScene, current_tool === 'paste' || current_tool === 'move');
+    if (needsLivePreview && active_group_id) applyLivePreviewToProjectedScene(previewScene, current_tool === 'paste');
     if (needsSelectionPreview) applySelectionPreviewToProjectedScene(previewScene);
     return previewScene;
   }
@@ -3055,15 +3570,17 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   function applyPainterDocumentSnapshot(document: PainterDocument, options?: { reset_history?: boolean }): void {
     const preservedCameraState = getPainterPreservedCameraState();
+    stopPainterPlayback();
     painter_session_core.replace_document(document, {
       lineage_id: current_painter_document_lineage_id,
       authoritative_revision: authoritative_revision_applied,
     });
     sync_local_session_state_from_core();
     sync_lineage_state_from_core();
+    syncPainterTimingStateAfterDocumentMutation();
     rebuild_voxel_space_from_runtime();
 
-    const savedCam = loadCameraConfig();
+    const savedCam = getSavedPainterCameraConfig();
     if (savedCam && Object.keys(savedCam).length > 0) {
       painter_camera_state = createSanitizedPainterCamera(savedCam);
       syncVoxelSpaceCameraFromPainterCamera();
@@ -3195,7 +3712,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       clear_all_selection_channels({ publish: false });
 
       // Apply persisted camera/UI settings (do not import from file)
-      const savedCam = loadCameraConfig();
+      const savedCam = getSavedPainterCameraConfig();
       if (savedCam && Object.keys(savedCam).length > 0) {
         painter_camera_state = createSanitizedPainterCamera(savedCam);
         syncVoxelSpaceCameraFromPainterCamera();
@@ -3242,9 +3759,11 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       // Fallback: just create a new in-memory canvas
       const document = create_painter_document(CANVAS_WIDTH, CANVAS_HEIGHT, { min_z: 0, max_z: 0, default_group_name: 'Group 1' });
       applyPainterDocumentSnapshot(document);
+      painter_groups_auto_key_enabled = true;
+      painterDiag('groups auto key enabled for new file', { enabled: painter_groups_auto_key_enabled, branch: 'in_memory' });
       setCurrentPainterDocumentLineage(`memory:new_file:${Date.now()}`, 'new_file_in_memory');
       clear_all_selection_channels({ publish: false });
-      const savedCam = loadCameraConfig();
+      const savedCam = getSavedPainterCameraConfig();
       if (savedCam && Object.keys(savedCam).length > 0) {
         painter_camera_state = { ...painter_camera_state, ...sanitizePainterCameraConfig(savedCam) };
         syncVoxelSpaceCameraFromPainterCamera();
@@ -3274,9 +3793,11 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
     const document = create_painter_document(CANVAS_WIDTH, CANVAS_HEIGHT, { min_z: 0, max_z: 0, default_group_name: 'Group 1' });
     applyPainterDocumentSnapshot(document);
+    painter_groups_auto_key_enabled = true;
+    painterDiag('groups auto key enabled for new file', { enabled: painter_groups_auto_key_enabled, branch: 'file_backed' });
     setCurrentPainterDocumentLineage(`file:${filePath}`, 'new_file_backed');
     clear_all_selection_channels({ publish: false });
-    const savedCam = loadCameraConfig();
+    const savedCam = getSavedPainterCameraConfig();
     if (savedCam && Object.keys(savedCam).length > 0) {
       painter_camera_state = { ...painter_camera_state, ...sanitizePainterCameraConfig(savedCam) };
       syncVoxelSpaceCameraFromPainterCamera();
@@ -3558,12 +4079,17 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       const group_id = resolve_current_runtime_group_id();
       return group_id ? Boolean(painter_document_runtime.document.groups[group_id]?.locked) : false;
     },
+    on_group_location_drag_commit: (delta) => {
+      const group_id = resolve_current_runtime_group_id();
+      if (!group_id) return false;
+      return applyPainterGroupLocationDelta(group_id, delta, 'drag');
+    },
     get_current_tool: () => current_tool,
     get_preview_brush: () => getPreviewBrush(),
     get_brush_for_button: (button) => getBrushForButton(button),
     get_tool_target_for_button: (button, tool) => getEffectiveToolTargetForButton(button, tool),
-    get_brush_edit_channels_for_button: (button) => getBrushEditChannelsForSide(button === 2 ? 'right' : 'left'),
-    get_bucket_select_channels_for_button: (button) => getBucketSelectChannelsForSide(button === 2 ? 'right' : 'left'),
+    get_brush_edit_channels_for_button: (button) => getEditChannelsForSide(button === 2 ? 'right' : 'left'),
+    get_bucket_select_channels_for_button: (button) => getSelectChannelsForSide(button === 2 ? 'right' : 'left'),
     get_brush_size: () => getBrushSizeForSide(active_property_side),
     get_brush_size_for_button: (button) => getBrushSizeForButton(button),
     get_bucket_continuous: () => bucket_continuous,
@@ -3653,7 +4179,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       if (!can_submit_to_authoritative_document()) return;
       const active_group_id = resolve_current_runtime_group_id();
       if (!active_group_id) return;
-      void painter_sync.submit_cell_changes(active_group_id, changes.map((change) => ({
+      void painter_sync.submit_cell_changes(active_group_id, painter_current_breath, painter_groups_auto_key_enabled, changes.map((change) => ({
         x: change.worldX,
         y: change.worldY,
         z: change.worldZ,
@@ -3677,7 +4203,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       active_property_side = target_side;
       const brush = getBrushForSide(target_side);
 
-      const channels = resolve_edit_channels_with_modifiers(getPickerEditChannelsForSide(clicked_side), sample);
+      const channels = resolve_edit_channels_with_modifiers(getEditChannelsForSide(clicked_side), sample);
       if (channels.char) brush.char = cell.char;
       if (channels.color) brush.rgb = { ...cell.rgb };
       if (channels.weight) brush.weight_index = cell.weight_index;
@@ -3768,11 +4294,14 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   let char_selector_open = getInitialModuleVisibility('char_selector', true);
   let brush_preview_open = getInitialModuleVisibility('brush_preview', true);
   let color_selector_open = getInitialModuleVisibility('color_selector', true);
-  let weight_selector_open = getInitialModuleVisibility('weight_selector', true);
+  let color_block_open = getInitialModuleVisibility('color_block', true);
   let toolbox_open = getInitialModuleVisibility('toolbox', true);
   let tool_properties_open = getInitialModuleVisibility('tool_properties', true);
+  let customization_open = getInitialModuleVisibility('customization_panel', false);
+  let customization_picker_open = getInitialModuleVisibility('customization_picker', false);
   let selection_panel_open = getInitialModuleVisibility('selection_panel', true);
   let controls_open = getInitialModuleVisibility('controls_panel', false);
+  let canvas_settings_open = getInitialModuleVisibility('canvas_settings_panel', false);
 
   function setModuleOpen(moduleId: string, visible: boolean, setOpen: (v: boolean) => void): void {
     setOpen(visible);
@@ -3798,11 +4327,15 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   let char_selector_module: Module | null = null;
   let brush_preview_module: Module | null = null;
   let color_selector_module: Module | null = null;
-  let weight_selector_module: Module | null = null;
+  let color_block_module: Module | null = null;
   let toolbox_module: Module | null = null;
   let tool_properties_module: Module | null = null;
+  let customization_module: Module | null = null;
+  let customization_picker_module: Module | null = null;
   let selection_panel_module: Module | null = null;
   let controls_module: Module | null = null;
+  let canvas_settings_module: Module | null = null;
+  let active_customization_role: UiSemanticColorRole = 'vivid';
 
   const painter_controls = create_painter_controls_runtime(PAINTER_APP_CONFIG.selected_data_slot);
   void painter_controls.load();
@@ -3966,7 +4499,10 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         return Boolean(performPainterRedo());
       }
       if (helper === 'add_group') {
-        const created = create_painter_group(`Layer ${painter_document_runtime.document.group_order.length + 1}`);
+        const created = create_painter_group(`Layer ${painter_document_runtime.document.group_order.length + 1}`, {
+          breath_start: painter_document_runtime.active_breath,
+          breath_end: painter_document_runtime.active_breath,
+        });
         const result = painter_session_core.apply_group_command({ kind: 'create_group', group: created });
         sync_local_session_state_from_core();
         sync_lineage_state_from_core();
@@ -3974,7 +4510,13 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
           groupId: result.created_group_id ?? created.id,
           newGroupData: created,
         });
-        submit_group_command_if_authoritative({ kind: 'create_group', group_name: created.name, target_group_id: result.created_group_id ?? created.id });
+        submit_group_command_if_authoritative({
+          kind: 'create_group',
+          group_name: created.name,
+          target_group_id: result.created_group_id ?? created.id,
+          breath_start: created.breath_start,
+          breath_end: created.breath_end,
+        });
         legacy_group_compat.active_group_id = result.created_group_id ?? created.id;
         sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
         log_runtime_summary('tai add group summary');
@@ -4125,12 +4667,12 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     x1: 121,
     y1: 35
   });
-  
-  const weight_selector_rect: Rect = getModuleRectWithSave('weight_selector', {
-    x0: 90,
+
+  const color_block_rect: Rect = getModuleRectWithSave('color_block', {
+    x0: 123,
     y0: 10,
-    x1: 103,
-    y1: 18
+    x1: 149,
+    y1: 31,
   });
   
   const toolbox_rect: Rect = getModuleRectWithSave('toolbox', {
@@ -4145,6 +4687,20 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     y0: 10,
     x1: 50,
     y1: 18
+  });
+
+  const customization_rect: Rect = getModuleRectWithSave('customization_panel', {
+    x0: 52,
+    y0: 10,
+    x1: 78,
+    y1: 20,
+  });
+
+  const customization_picker_rect: Rect = getModuleRectWithSave('customization_picker', {
+    x0: 80,
+    y0: 10,
+    x1: 114,
+    y1: 28,
   });
   
   // Layer Palette - positioned on the right side
@@ -4264,29 +4820,28 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       }
     });
   }
-  
-  function create_weight_selector_module(): Module {
-    return make_weight_selector_module({
-      id: 'weight_selector',
-      rect: weight_selector_rect,
-      get_weight_index: () => getPreviewBrush().weight_index,
-      get_left_weight_index: () => left_brush.weight_index,
-      get_right_weight_index: () => right_brush.weight_index,
-      on_weight_change: (weight_index, button) => {
-        active_property_side = button === 2 ? 'right' : 'left';
-        getBrushForButton(button).weight_index = weight_index;
-        saveBrushState(active_property_side);
-        painterDiag('selected weight', { weight_index });
+
+  function create_color_block_module(): Module {
+    return make_brush_color_block_module({
+      id: 'color_block',
+      rect: color_block_rect,
+      get_left_rgb: () => left_brush.rgb,
+      get_right_rgb: () => right_brush.rgb,
+      on_color_commit: (side, rgb) => {
+        active_property_side = side;
+        getBrushForSide(side).rgb = { ...rgb };
+        saveBrushState(side);
+        painterDiag('selected color from color block', { side, rgb });
       },
       on_move: (new_rect) => {
-        if (weight_selector_module) {
-          weight_selector_module.rect = new_rect;
-          saveModulePosition('weight_selector', new_rect);
+        if (color_block_module) {
+          color_block_module.rect = new_rect;
+          saveModulePosition('color_block', new_rect);
         }
       },
       on_close: () => {
-        setModuleOpen('weight_selector', false, (v) => { weight_selector_open = v; });
-      }
+        setModuleOpen('color_block', false, (v) => { color_block_open = v; });
+      },
     });
   }
   
@@ -4356,41 +4911,34 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       return tool === 'pencil' || tool === 'eraser';
     }
 
-    function append_side_tool_rows(rows: ToolPropertyRow[], side: 'left' | 'right', tool: ToolType): void {
-      const prefix = side === 'left' ? '[L]' : '[R]';
-      const header_rgb = side === 'left' ? get_color_by_name('vivid_blue').rgb : get_color_by_name('vivid_red').rgb;
-      rows.push({ type: 'info', id: `${side}_tool_header`, text: `${prefix} ${get_tool_label(tool)}`, rgb: header_rgb });
-
-      if (tool_supports_selection_target(tool)) {
-        rows.push({
-          type: 'single_cycle',
-          id: `${side}_${tool}_target`,
-          label: 'TGT',
-          value: getToolTargetForSideTool(side, tool) === 'selection' ? 'SELECT' : 'CONTENT',
-          options: ['CONTENT', 'SELECT'],
-          on_cycle: () => {
-            setToolTargetForSideTool(side, tool, invertToolTarget(getToolTargetForSideTool(side, tool)));
-          },
-        });
+    function cycle_hand_toggle_state(left: boolean, right: boolean, side: 'left' | 'right' | 'both'): { left: boolean; right: boolean } {
+      if (side === 'both') {
+        return left && right
+          ? { left: false, right: false }
+          : { left: true, right: true };
       }
-
-      if (is_brush_size_tool(tool)) {
-        rows.push({ type: 'info', id: `${side}_tool_shared_brush`, text: 'size above' });
-        return;
+      if (side === 'left') {
+        if (left && right) return { left: false, right: true };
+        if (left) return { left: false, right };
+        return { left: true, right };
       }
-      if (tool === 'text') {
-        rows.push({ type: 'info', id: `${side}_tool_shared_text`, text: 'text above' });
-        return;
-      }
-      if (tool === 'eyedropper') {
-        rows.push({ type: 'info', id: `${side}_tool_shared_picker`, text: 'picker above' });
-        return;
-      }
-      rows.push({ type: 'info', id: `${side}_tool_none`, text: 'no options' });
+      if (left && right) return { left: true, right: false };
+      if (right) return { left, right: false };
+      return { left, right: true };
     }
 
-    function format_edit_channel_summary(channels: EditChannels): string {
-      return `${channels.char ? 'C' : '-'}${channels.color ? 'O' : '-'}${channels.weight ? 'W' : '-'}`;
+    function toggle_edit_channel_pair(
+      side: 'left' | 'right' | 'both',
+      channel: keyof EditChannels,
+      left_channels: EditChannels,
+      right_channels: EditChannels,
+      apply: (next_left: EditChannels, next_right: EditChannels) => void,
+    ): void {
+      const next = cycle_hand_toggle_state(left_channels[channel], right_channels[channel], side);
+      apply(
+        { ...left_channels, [channel]: next.left },
+        { ...right_channels, [channel]: next.right },
+      );
     }
 
     function append_edit_channel_rows(
@@ -4425,157 +4973,118 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       });
     }
 
-    function build_stacked_property_rows(): ToolPropertyRow[] {
-      const rows: ToolPropertyRow[] = [];
-      const left_tool = left_click_tool;
-      const right_tool = right_click_tool;
-      const left_summary = `${get_tool_label(left_tool)} ${tool_supports_selection_target(left_tool) ? (getToolTargetForSideTool('left', left_tool) === 'selection' ? 'SEL' : 'CNT') : ''} ${left_brush_size}x${left_brush_size} ${format_edit_channel_summary(left_brush_edit_channels)}`.trim();
-      const right_summary = `${get_tool_label(right_tool)} ${tool_supports_selection_target(right_tool) ? (getToolTargetForSideTool('right', right_tool) === 'selection' ? 'SEL' : 'CNT') : ''} ${right_brush_size}x${right_brush_size} ${format_edit_channel_summary(right_brush_edit_channels)}`.trim();
-      const hands_match = left_tool === right_tool
-        && left_brush_size === right_brush_size
-        && left_brush_edit_channels.char === right_brush_edit_channels.char
-        && left_brush_edit_channels.color === right_brush_edit_channels.color
-        && left_brush_edit_channels.weight === right_brush_edit_channels.weight;
-
-      rows.push({ type: 'info', id: 'left_hand_summary', text: `[L] ${left_summary}`, rgb: get_color_by_name('vivid_blue').rgb });
-      rows.push({ type: 'info', id: 'right_hand_summary', text: `[R] ${right_summary}`, rgb: get_color_by_name('vivid_red').rgb });
-      rows.push({ type: 'info', id: 'user_color_summary', text: '[USER] SELECTION COLOR', rgb: user_selection_color_rgb });
+    function append_target_rows(rows: ToolPropertyRow[], left_tool: ToolType, right_tool: ToolType): void {
       rows.push({
-        type: 'single_cycle',
-        id: 'user_color_from_left',
-        label: 'USE L',
-        value: `${left_brush.rgb.r},${left_brush.rgb.g},${left_brush.rgb.b}`,
-        on_cycle: () => {
-          set_user_selection_color(left_brush.rgb);
-          painterDiag('set user selection color from left brush', { rgb: left_brush.rgb });
+        type: 'edit_channel_matrix',
+        id: 'target_matrix',
+        row_label: 'target',
+        columns: [
+          {
+            id: 'selection',
+            label: 'select',
+            shortcut: '',
+            left_value: getToolTargetForSide('left') === 'selection',
+            right_value: getToolTargetForSide('right') === 'selection',
+            left_enabled: true,
+            right_enabled: true,
+          },
+          {
+            id: 'image',
+            label: 'image',
+            shortcut: '',
+            left_value: getToolTargetForSide('left') === 'content',
+            right_value: getToolTargetForSide('right') === 'content',
+            left_enabled: true,
+            right_enabled: true,
+          },
+        ],
+        on_toggle: (side, column_id) => {
+          const next_target: ToolEditTarget = column_id === 'selection' ? 'selection' : 'content';
+          const sides: Array<'left' | 'right'> = side === 'both' ? ['left', 'right'] : [side];
+          for (const target_side of sides) {
+            setToolTargetForSide(target_side, next_target);
+          }
+        },
+      });
+    }
+
+    function append_size_rows(rows: ToolPropertyRow[]): void {
+      rows.push({
+        type: 'dual_slider',
+        id: 'shared_brush_size',
+        label: 'SIZE',
+        min: 1,
+        max: 5,
+        left_value: left_brush_size,
+        right_value: right_brush_size,
+        format_value: (value) => `${value}x${value}`,
+        show_value_label: false,
+        on_change: (value, side) => {
+          active_property_side = side;
+          if (side === 'right') right_brush_size = value;
+          else left_brush_size = value;
+          saveBrushState(side);
         },
       });
       rows.push({
-        type: 'single_cycle',
-        id: 'user_color_from_right',
-        label: 'USE R',
-        value: `${right_brush.rgb.r},${right_brush.rgb.g},${right_brush.rgb.b}`,
-        on_cycle: () => {
-          set_user_selection_color(right_brush.rgb);
-          painterDiag('set user selection color from right brush', { rgb: right_brush.rgb });
+        type: 'dual_slider',
+        id: 'shared_brush_weight',
+        label: 'WEIGHT',
+        min: 0,
+        max: 3,
+        left_value: left_brush.weight_index,
+        right_value: right_brush.weight_index,
+        show_value_label: false,
+        on_change: (value, side) => {
+          active_property_side = side;
+          getBrushForSide(side).weight_index = value;
+          saveBrushState(side);
         },
       });
-      rows.push({
-        type: 'info',
-        id: 'hand_match_summary',
-        text: hands_match ? 'HANDS MATCH SPATIALLY' : 'HANDS DIFFER: TOOL / SIZE / MASK',
-        rgb: hands_match ? get_color_by_name('vivid_green').rgb : get_color_by_name('vivid_yellow').rgb,
-      });
-      if (tool_target_invert_held) {
-        rows.push({ type: 'info', id: 'tool_target_invert_info', text: 'TEMP TARGET INVERT [`]', rgb: get_color_by_name('vivid_magenta').rgb });
-      }
-      rows.push({ type: 'info', id: 'hand_match_spacer', text: '' });
+    }
 
-      if (is_brush_size_tool(left_tool) || is_brush_size_tool(right_tool)) {
-        rows.push({ type: 'info', id: 'shared_brush_header', text: '[BRUSH]', rgb: get_color_by_name('vivid_yellow').rgb });
-        rows.push({
-          type: 'dual_slider',
-          id: 'shared_brush_size',
-          label: 'SIZE',
-          min: 1,
-          max: 5,
-          left_value: left_brush_size,
-          right_value: right_brush_size,
-          format_value: (value) => `${value}x${value}`,
-          on_change: (value, side) => {
-            active_property_side = side;
-            if (side === 'right') right_brush_size = value;
-            else left_brush_size = value;
-            saveBrushState(side);
-          },
-        });
-        append_edit_channel_rows(
-          rows,
-          'brush',
-          is_brush_size_tool(left_tool),
-          is_brush_size_tool(right_tool),
-          left_brush_edit_channels,
-          right_brush_edit_channels,
-          (side, channel) => {
-            if (side === 'both') {
-              const next_value = !(left_brush_edit_channels[channel] && right_brush_edit_channels[channel]);
-              left_brush_edit_channels = { ...left_brush_edit_channels, [channel]: next_value };
-              right_brush_edit_channels = { ...right_brush_edit_channels, [channel]: next_value };
-              saveToolProperties({ left_brush_edit_channels, right_brush_edit_channels });
-              return;
-            }
-            active_property_side = side;
-            const next = { ...(side === 'right' ? right_brush_edit_channels : left_brush_edit_channels) };
-            next[channel] = !next[channel];
-            if (side === 'right') {
-              right_brush_edit_channels = next;
-              saveToolProperties({ right_brush_edit_channels: next });
-            } else {
-              left_brush_edit_channels = next;
-              saveToolProperties({ left_brush_edit_channels: next });
-            }
-          },
-        );
-      }
+    function append_shared_matrix_rows(rows: ToolPropertyRow[]): void {
+      append_edit_channel_rows(
+        rows,
+        'shared_select',
+        true,
+        true,
+        left_select_channels,
+        right_select_channels,
+        (side, channel) => {
+          toggle_edit_channel_pair(side, channel, left_select_channels, right_select_channels, (next_left, next_right) => {
+            if (side !== 'both') active_property_side = side;
+            left_select_channels = next_left;
+            right_select_channels = next_right;
+            saveSharedSelectChannels();
+          });
+        },
+      );
+      const select_row = rows[rows.length - 1];
+      if (select_row?.type === 'edit_channel_matrix') select_row.row_label = 'Select';
 
+      append_edit_channel_rows(
+        rows,
+        'shared_edit',
+        true,
+        true,
+        left_edit_channels,
+        right_edit_channels,
+        (side, channel) => {
+          toggle_edit_channel_pair(side, channel, left_edit_channels, right_edit_channels, (next_left, next_right) => {
+            if (side !== 'both') active_property_side = side;
+            left_edit_channels = next_left;
+            right_edit_channels = next_right;
+            saveSharedEditChannels();
+          });
+        },
+      );
+      const edit_row = rows[rows.length - 1];
+      if (edit_row?.type === 'edit_channel_matrix') edit_row.row_label = 'Edit';
+    }
+
+    function append_tool_specific_rows(rows: ToolPropertyRow[], left_tool: ToolType, right_tool: ToolType): void {
       if (left_tool === 'bucket' || right_tool === 'bucket') {
-        rows.push({ type: 'info', id: 'shared_bucket_header', text: '[BUCKET]', rgb: get_color_by_name('vivid_yellow').rgb });
-        rows.push({ type: 'info', id: 'shared_bucket_select_header', text: 'SELECT MASK', rgb: get_color_by_name('vivid_cyan').rgb });
-        append_edit_channel_rows(
-          rows,
-          'bucket_select',
-          left_tool === 'bucket',
-          right_tool === 'bucket',
-          left_bucket_select_channels,
-          right_bucket_select_channels,
-          (side, channel) => {
-            if (side === 'both') {
-              const nextValue = !(left_bucket_select_channels[channel] && right_bucket_select_channels[channel]);
-              left_bucket_select_channels = { ...left_bucket_select_channels, [channel]: nextValue };
-              right_bucket_select_channels = { ...right_bucket_select_channels, [channel]: nextValue };
-              saveToolProperties({ left_bucket_select_channels, right_bucket_select_channels });
-              return;
-            }
-            active_property_side = side;
-            const next = { ...(side === 'right' ? right_bucket_select_channels : left_bucket_select_channels) };
-            next[channel] = !next[channel];
-            if (side === 'right') {
-              right_bucket_select_channels = next;
-              saveToolProperties({ right_bucket_select_channels: next });
-            } else {
-              left_bucket_select_channels = next;
-              saveToolProperties({ left_bucket_select_channels: next });
-            }
-          },
-        );
-        rows.push({ type: 'info', id: 'shared_bucket_edit_header', text: 'EDIT MASK', rgb: get_color_by_name('vivid_green').rgb });
-        append_edit_channel_rows(
-          rows,
-          'bucket_edit',
-          left_tool === 'bucket',
-          right_tool === 'bucket',
-          left_brush_edit_channels,
-          right_brush_edit_channels,
-          (side, channel) => {
-            if (side === 'both') {
-              const next_value = !(left_brush_edit_channels[channel] && right_brush_edit_channels[channel]);
-              left_brush_edit_channels = { ...left_brush_edit_channels, [channel]: next_value };
-              right_brush_edit_channels = { ...right_brush_edit_channels, [channel]: next_value };
-              saveToolProperties({ left_brush_edit_channels, right_brush_edit_channels });
-              return;
-            }
-            active_property_side = side;
-            const next = { ...(side === 'right' ? right_brush_edit_channels : left_brush_edit_channels) };
-            next[channel] = !next[channel];
-            if (side === 'right') {
-              right_brush_edit_channels = next;
-              saveToolProperties({ right_brush_edit_channels: next });
-            } else {
-              left_brush_edit_channels = next;
-              saveToolProperties({ left_brush_edit_channels: next });
-            }
-          },
-        );
         rows.push({
           type: 'single_toggle',
           id: 'bucket_continuous',
@@ -4610,7 +5119,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       }
 
       if (left_tool === 'selectangle' || right_tool === 'selectangle' || left_tool === 'lassoselect' || right_tool === 'lassoselect') {
-        rows.push({ type: 'info', id: 'shared_selection_header', text: '[SELECT]', rgb: get_color_by_name('vivid_yellow').rgb });
         if (left_tool === 'selectangle' || right_tool === 'selectangle') {
           rows.push({
             type: 'single_toggle',
@@ -4638,7 +5146,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       }
 
       if (left_tool === 'paste' || right_tool === 'paste') {
-        rows.push({ type: 'info', id: 'shared_paste_rotation_header', text: '[PASTE ROT]', rgb: get_color_by_name('vivid_yellow').rgb });
         rows.push({
           type: 'single_cycle',
           id: 'paste_angle_mode',
@@ -4674,7 +5181,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       }
 
       if (left_tool === 'text' || right_tool === 'text') {
-        rows.push({ type: 'info', id: 'shared_text_header', text: '[TEXT]', rgb: get_color_by_name('vivid_yellow').rgb });
         rows.push({
           type: 'single_toggle',
           id: 'text_space_replace',
@@ -4743,7 +5249,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       }
 
       if (left_tool === 'eyedropper' || right_tool === 'eyedropper') {
-        rows.push({ type: 'info', id: 'shared_picker_header', text: '[PICKER]', rgb: get_color_by_name('vivid_yellow').rgb });
         rows.push({
           type: 'single_cycle',
           id: 'picker_target',
@@ -4755,39 +5260,38 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
             saveToolProperties({ picker_pick_for_opposite_hand });
           },
         });
-        append_edit_channel_rows(
-          rows,
-          'picker',
-          left_tool === 'eyedropper',
-          right_tool === 'eyedropper',
-          left_picker_edit_channels,
-          right_picker_edit_channels,
-          (side, channel) => {
-            if (side === 'both') {
-              const next_value = !(left_picker_edit_channels[channel] && right_picker_edit_channels[channel]);
-              left_picker_edit_channels = { ...left_picker_edit_channels, [channel]: next_value };
-              right_picker_edit_channels = { ...right_picker_edit_channels, [channel]: next_value };
-              saveToolProperties({ left_picker_edit_channels, right_picker_edit_channels });
-              return;
-            }
-            active_property_side = side;
-            const next = { ...(side === 'right' ? right_picker_edit_channels : left_picker_edit_channels) };
-            next[channel] = !next[channel];
-            if (side === 'right') {
-              right_picker_edit_channels = next;
-              saveToolProperties({ right_picker_edit_channels: next });
-            } else {
-              left_picker_edit_channels = next;
-              saveToolProperties({ left_picker_edit_channels: next });
-            }
-          },
-        );
       }
+    }
 
-      rows.push({ type: 'info', id: 'left_spacer', text: '' });
-      append_side_tool_rows(rows, 'left', left_tool);
-      rows.push({ type: 'info', id: 'mid_spacer', text: '' });
-      append_side_tool_rows(rows, 'right', right_tool);
+    function build_stacked_property_rows(): ToolPropertyRow[] {
+      const rows: ToolPropertyRow[] = [];
+      const left_tool = left_click_tool;
+      const right_tool = right_click_tool;
+
+      const shared_rows: ToolPropertyRow[] = [];
+      const target_rows: ToolPropertyRow[] = [];
+      const size_rows: ToolPropertyRow[] = [];
+      const tool_rows: ToolPropertyRow[] = [];
+
+      append_shared_matrix_rows(shared_rows);
+      append_target_rows(target_rows, left_tool, right_tool);
+      append_size_rows(size_rows);
+      append_tool_specific_rows(tool_rows, left_tool, right_tool);
+
+      rows.push(...shared_rows);
+      if (shared_rows.length > 0 && (target_rows.length > 0 || size_rows.length > 0 || tool_rows.length > 0)) {
+        rows.push({ type: 'separator', id: 'shared_separator' });
+      }
+      rows.push(...target_rows);
+      if (target_rows.length > 0 && (size_rows.length > 0 || tool_rows.length > 0)) {
+        rows.push({ type: 'separator', id: 'target_separator' });
+      }
+      rows.push(...size_rows);
+      rows.push(...tool_rows);
+      if (tool_target_invert_held) {
+        if (rows.length > 0) rows.push({ type: 'separator', id: 'invert_separator' });
+        rows.push({ type: 'info', id: 'tool_target_invert_info', text: 'TEMP TARGET INVERT [`]', rgb: get_ui_semantic_rgb('vivid') });
+      }
       return rows;
     }
 
@@ -4939,6 +5443,63 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     });
   }
 
+  function open_customization_picker(): void {
+    if (!registry.has('customization_picker')) {
+      customization_picker_module = create_customization_picker_module();
+      registry.register(customization_picker_module);
+    }
+    setModuleOpen('customization_picker', true, (v) => { customization_picker_open = v; });
+  }
+
+  function create_customization_module(): Module {
+    return make_customization_module({
+      id: 'customization_panel',
+      rect: customization_rect,
+      get_active_role: () => active_customization_role,
+      get_role_color: (role) => ui_customization_state.colors[role],
+      on_role_select: (role) => {
+        active_customization_role = role;
+        open_customization_picker();
+      },
+      on_move: (new_rect) => {
+        if (customization_module) customization_module.rect = new_rect;
+        saveModulePosition('customization_panel', new_rect);
+      },
+      on_close: () => {
+        setModuleOpen('customization_panel', false, (v) => { customization_open = v; });
+      },
+    });
+  }
+
+  function create_customization_picker_module(): Module {
+    return make_color_picker_module({
+      id: 'customization_picker',
+      rect: customization_picker_rect,
+      title: () => `SET ${active_customization_role.replace(/_/g, ' ').toUpperCase()}`,
+      get_committed_rgb: () => ui_customization_state.colors[active_customization_role],
+      on_preview_change: (rgb) => {
+        const next = set_ui_customization_role_color(active_customization_role, rgb);
+        apply_ui_customization_runtime(next);
+      },
+      on_commit: (rgb) => {
+        const next = set_ui_customization_role_color(active_customization_role, rgb);
+        apply_ui_customization_runtime(next);
+        saveToolProperties({ user_selection_color_rgb: ui_customization_state.colors.vivid });
+        void save_ui_customization_role_color(PAINTER_APP_CONFIG.selected_data_slot, active_customization_role, rgb).then((saved) => {
+          apply_ui_customization_runtime(saved);
+          saveToolProperties({ user_selection_color_rgb: saved.colors.vivid });
+        }).catch(() => null);
+      },
+      on_move: (new_rect) => {
+        if (customization_picker_module) customization_picker_module.rect = new_rect;
+        saveModulePosition('customization_picker', new_rect);
+      },
+      on_close: () => {
+        setModuleOpen('customization_picker', false, (v) => { customization_picker_open = v; });
+      },
+    });
+  }
+
   function create_controls_panel_module(): Module {
     return make_controls_module({
       id: 'controls_panel',
@@ -5020,6 +5581,75 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     });
   }
 
+  function create_canvas_settings_module(): Module {
+    return makeCanvasSettingsModule({
+      id: 'canvas_settings_panel',
+      rect: getModuleRectWithSave('canvas_settings_panel', { x0: 138, y0: 16, x1: 176, y1: 32 }),
+      is_visible: () => canvas_settings_open,
+      get_breath_range: () => getPainterDocumentBreathRange(),
+      get_frames_per_breath: () => get_painter_document_playback(painter_document_runtime.document).frames_per_breath,
+      get_loop_enabled: () => get_painter_document_playback(painter_document_runtime.document).loop_enabled,
+      get_is_playing: () => painter_playback_running,
+      on_step_breath_start: (delta: number) => {
+        const range = getPainterDocumentBreathRange();
+        const playback = get_painter_document_playback(painter_document_runtime.document);
+        setPainterDocumentTiming({
+          breath_range_start: range.start + delta,
+          breath_range_end: range.end,
+          frames_per_breath: playback.frames_per_breath,
+          loop_enabled: playback.loop_enabled,
+        });
+      },
+      on_step_breath_end: (delta: number) => {
+        const range = getPainterDocumentBreathRange();
+        const playback = get_painter_document_playback(painter_document_runtime.document);
+        setPainterDocumentTiming({
+          breath_range_start: range.start,
+          breath_range_end: range.end + delta,
+          frames_per_breath: playback.frames_per_breath,
+          loop_enabled: playback.loop_enabled,
+        });
+      },
+      on_step_frames_per_breath: (delta: number) => {
+        const range = getPainterDocumentBreathRange();
+        const playback = get_painter_document_playback(painter_document_runtime.document);
+        setPainterDocumentTiming({
+          breath_range_start: range.start,
+          breath_range_end: range.end,
+          frames_per_breath: playback.frames_per_breath + delta,
+          loop_enabled: playback.loop_enabled,
+        });
+      },
+      on_toggle_loop: () => {
+        const range = getPainterDocumentBreathRange();
+        const playback = get_painter_document_playback(painter_document_runtime.document);
+        setPainterDocumentTiming({
+          breath_range_start: range.start,
+          breath_range_end: range.end,
+          frames_per_breath: playback.frames_per_breath,
+          loop_enabled: !playback.loop_enabled,
+        });
+      },
+      on_toggle_playback: () => {
+        togglePainterPlayback();
+      },
+      on_jump_to_start: () => {
+        setCurrentPainterBreath(getPainterDocumentBreathRange().start);
+      },
+      on_jump_to_end: () => {
+        setCurrentPainterBreath(getPainterDocumentBreathRange().end);
+      },
+      on_fit_to_content: () => {
+        fitPainterDocumentTimingToContent();
+      },
+      on_close: () => setModuleOpen('canvas_settings_panel', false, (v) => { canvas_settings_open = v; }),
+      on_move: (new_rect: Rect) => {
+        if (canvas_settings_module) canvas_settings_module.rect = new_rect;
+        saveModulePosition('canvas_settings_panel', new_rect);
+      },
+    });
+  }
+
   // Create file menu module
   const file_menu = make_file_menu_module({
     id: 'painter_file_menu',
@@ -5083,7 +5713,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     },
     on_reset_camera: () => {
       if (confirm('Reset camera to default settings?')) {
-        clearCameraConfig();
+        resetPainterCameraConfig();
         // Apply default camera settings immediately
         painter_camera_state = createSanitizedPainterCamera();
         syncVoxelSpaceCameraFromPainterCamera();
@@ -5115,12 +5745,12 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         create_color_selector_module
       );
     },
-    on_toggle_weight_selector: () => {
+    on_toggle_color_block: () => {
       toggleModule(
-        weight_selector_open,
-        (v) => { weight_selector_open = v; },
-        'weight_selector',
-        create_weight_selector_module
+        color_block_open,
+        (v) => { color_block_open = v; },
+        'color_block',
+        create_color_block_module
       );
     },
     on_toggle_brush_preview: () => {
@@ -5139,12 +5769,28 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         create_tool_properties_module
       );
     },
+    on_toggle_customization: () => {
+      toggleModule(
+        customization_open,
+        (v) => { customization_open = v; },
+        'customization_panel',
+        create_customization_module
+      );
+    },
     on_toggle_layer_palette: () => {
       toggleModule(
         layer_palette_open,
         (v) => { layer_palette_open = v; },
         'layer_palette',
         create_layer_palette_module
+      );
+    },
+    on_toggle_canvas_settings: () => {
+      toggleModule(
+        canvas_settings_open,
+        (v) => { canvas_settings_open = v; },
+        'canvas_settings_panel',
+        create_canvas_settings_module
       );
     },
     on_toggle_navigation: () => {
@@ -5176,6 +5822,10 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   // Create Layer Palette module (3D layers UI)
   let layer_palette_open = getInitialModuleVisibility('layer_palette', true);
   let layer_palette_module: Module | null = null;
+
+  function isPainterTextCaptureActive(): boolean {
+    return Boolean((layer_palette_module as any)?.WantsTextCapture?.());
+  }
   
   function create_layer_palette_module(): Module {
     return makeGroupsModule({
@@ -5183,6 +5833,25 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       rect: layer_palette_rect,
       title: 'GROUPS',
       get_groups: () => getPainterGroupListItems(),
+      get_current_breath: () => painter_current_breath,
+      get_file_breath_range: () => getPainterDocumentFileBreathRange(),
+      get_loop_breath_range: () => getPainterDocumentBreathRange(),
+      on_set_current_breath: (breath: number) => {
+        setCurrentPainterBreath(breath);
+      },
+      get_timeline_view_start: () => painter_timeline_view_start_breath,
+      get_timeline_view_span: () => painter_timeline_view_span_breaths,
+      on_set_timeline_view_start: (breath: number) => {
+        setPainterTimelineViewStart(breath);
+      },
+      on_set_document_loop_window: (breath_start: number, breath_end: number) => {
+        setPainterDocumentLoopWindow({ breath_start, breath_end });
+      },
+      get_auto_key_enabled: () => painter_groups_auto_key_enabled,
+      on_toggle_auto_key: () => {
+        painter_groups_auto_key_enabled = !painter_groups_auto_key_enabled;
+        painterDiag('groups auto key toggled', { enabled: painter_groups_auto_key_enabled });
+      },
       on_select_group: (group_id: string) => {
         selectPainterGroup(group_id);
       },
@@ -5202,7 +5871,25 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         deletePainterGroup(group_id);
       },
       on_reorder_groups: (next_group_order: string[]) => {
-        reorderPainterGroups([...next_group_order].reverse());
+        reorderPainterGroups(mapGroupDisplayOrderToRuntimeOrder(next_group_order));
+      },
+      on_offset_group_in_time: (group_id: string, delta_breaths: number) => {
+        offsetPainterGroupInTime(group_id, delta_breaths);
+      },
+      on_set_group_timing: (group_id: string, start: number, cropped_start: number, cropped_end: number) => {
+        setPainterGroupTiming(group_id, { start, cropped_start, cropped_end });
+      },
+      on_set_group_breath_span: (group_id: string, breath_start: number, breath_end: number) => {
+        setPainterGroupBreathSpan(group_id, breath_start, breath_end);
+      },
+      on_set_group_raster_segment_length: (group_id: string, content_state_id: string, length_breaths: number) => {
+        setPainterGroupRasterSegmentLength(group_id, content_state_id, length_breaths);
+      },
+      on_split_group_raster_segment: (group_id: string, content_state_id: string, split_breath: number) => {
+        splitPainterGroupRasterSegment(group_id, content_state_id, split_breath);
+      },
+      on_swap_group_raster_segments: (group_id: string, source_content_state_id: string, target_content_state_id: string) => {
+        swapPainterGroupRasterSegments(group_id, source_content_state_id, target_content_state_id);
       },
       on_move: (new_rect) => {
         if (layer_palette_module) {
@@ -5292,8 +5979,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         mouse_angle_yaw_deg: { ...PAINTER_CAMERA_LIMITS.mouse_angle_yaw_deg, step: 0.5, digits: 1 },
         mouse_angle_pitch_deg: { ...PAINTER_CAMERA_LIMITS.mouse_angle_pitch_deg, step: 0.5, digits: 1 },
         mouse_angle_spring: { ...PAINTER_CAMERA_LIMITS.mouse_angle_spring, step: 0.5, digits: 1 },
-        calibration_x: { ...PAINTER_CAMERA_LIMITS.calibration, step: 1, digits: 0 },
-        calibration_y: { ...PAINTER_CAMERA_LIMITS.calibration, step: 1, digits: 0 },
+        calibration_x: { ...PAINTER_CAMERA_LIMITS.calibration_x },
+        calibration_y: { ...PAINTER_CAMERA_LIMITS.calibration_y },
         render_distance_planes: { ...PAINTER_CAMERA_LIMITS.render_distance_planes, step: 1, digits: 0 },
       },
       action_rows: [
@@ -5326,19 +6013,19 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         syncPainterDocumentCameraFromPainterCamera();
         applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
-          saveCameraConfig({ parallax_move_enabled: enabled });
+          persistPainterCameraConfig({ parallax_move_enabled: enabled });
         }
         painterCameraDiag('parallax move toggled', { enabled });
       },
       onParallaxSizeToggle: (enabled) => {
-        painter_camera_state.parallax_size_enabled = false;
+        painter_camera_state.parallax_size_enabled = enabled;
         syncVoxelSpaceCameraFromPainterCamera();
         syncPainterDocumentCameraFromPainterCamera();
         applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
-          saveCameraConfig({ parallax_size_enabled: false });
+          persistPainterCameraConfig({ parallax_size_enabled: enabled });
         }
-        painterCameraDiag('parallax size toggled', { enabled: false });
+        painterCameraDiag('parallax size toggled', { enabled });
       },
       occlusionLabel: 'Focus Opacity',
       getOcclusionEnabled: () => painter_camera_state.use_focus_layer_opacity ?? true,
@@ -5348,7 +6035,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         syncPainterDocumentCameraFromPainterCamera();
         applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
-          saveCameraConfig({ use_focus_layer_opacity: enabled });
+          persistPainterCameraConfig({ use_focus_layer_opacity: enabled });
         }
         painterCameraDiag('focus opacity toggled', { enabled });
       },
@@ -5358,7 +6045,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         syncPainterDocumentCameraFromPainterCamera();
         refreshPainterProjectionPreservingCurrentTarget();
         if (isAppInitialized) {
-          saveCameraConfig({ center_target_in_view: enabled });
+          persistPainterCameraConfig({ center_target_in_view: enabled });
         }
         painterCameraDiag('center target toggled', { enabled });
       },
@@ -5369,7 +6056,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         syncPainterDocumentCameraFromPainterCamera();
         applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
-          savePainterCameraCalibration(nextCalibration);
+          persistPainterCameraConfig({ calibration: nextCalibration });
         }
       },
       onCalibrationReset: () => {
@@ -5378,7 +6065,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         syncPainterDocumentCameraFromPainterCamera();
         applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
-          savePainterCameraCalibration({ x: 0, y: 0 });
+          persistPainterCameraConfig({ calibration: { x: 0, y: 0 } });
         }
       },
       onScalePerLayerChange: (value) => {
@@ -5388,7 +6075,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         syncPainterDocumentCameraFromPainterCamera();
         applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
-          saveCameraConfig({ scale_per_layer: nextValue });
+          persistPainterCameraConfig({ scale_per_layer: nextValue });
         }
       },
       onMovementPerLayerChange: (value) => {
@@ -5398,7 +6085,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         syncPainterDocumentCameraFromPainterCamera();
         applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
-          saveCameraConfig({ movement_per_layer: nextValue });
+          persistPainterCameraConfig({ movement_per_layer: nextValue });
         }
       },
       onMouseAngleYawDegChange: (value) => {
@@ -5408,7 +6095,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         syncPainterDocumentCameraFromPainterCamera();
         applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
-          saveCameraConfig({ mouse_angle_yaw_deg: nextValue });
+          persistPainterCameraConfig({ mouse_angle_yaw_deg: nextValue });
         }
       },
       onMouseAnglePitchDegChange: (value) => {
@@ -5418,7 +6105,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         syncPainterDocumentCameraFromPainterCamera();
         applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
-          saveCameraConfig({ mouse_angle_pitch_deg: nextValue });
+          persistPainterCameraConfig({ mouse_angle_pitch_deg: nextValue });
         }
       },
       onMouseAngleSpringChange: (value) => {
@@ -5428,7 +6115,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         syncPainterDocumentCameraFromPainterCamera();
         applyPainterProjectedCameraTuning();
         if (isAppInitialized) {
-          saveCameraConfig({ mouse_angle_spring: nextValue });
+          persistPainterCameraConfig({ mouse_angle_spring: nextValue });
         }
       },
       onRenderDistancePlanesChange: (value) => {
@@ -5438,7 +6125,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         syncPainterDocumentCameraFromPainterCamera();
         refreshPainterProjectionPreservingCurrentTarget();
         if (isAppInitialized) {
-          saveCameraConfig({ render_distance_planes: nextValue });
+          persistPainterCameraConfig({ render_distance_planes: nextValue });
         }
       },
       onMove: (new_rect) => {
@@ -5463,20 +6150,26 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   char_selector_module = create_char_selector_module();
   brush_preview_module = create_brush_preview_module();
   color_selector_module = create_color_selector_module();
-  weight_selector_module = create_weight_selector_module();
+  color_block_module = create_color_block_module();
   toolbox_module = create_toolbox_module();
   tool_properties_module = create_tool_properties_module();
+  customization_module = create_customization_module();
+  customization_picker_module = create_customization_picker_module();
   selection_panel_module = create_selection_panel_module();
+  canvas_settings_module = create_canvas_settings_module();
   navigation_module = create_navigation_module();
   camera_control_module = create_camera_control_module();
   controls_module = create_controls_panel_module();
   registry.register(char_selector_module);
   registry.register(brush_preview_module);
   registry.register(color_selector_module);
-  registry.register(weight_selector_module);
+  registry.register(color_block_module);
   registry.register(toolbox_module);
   registry.register(tool_properties_module);
+  registry.register(customization_module);
+  registry.register(customization_picker_module);
   registry.register(selection_panel_module);
+  registry.register(canvas_settings_module);
   registry.register(navigation_module);
   registry.register(camera_control_module);
   registry.register(controls_module);
@@ -5484,10 +6177,13 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   registry.set_visibility('char_selector', char_selector_open);
   registry.set_visibility('brush_preview', brush_preview_open);
   registry.set_visibility('color_selector', color_selector_open);
-  registry.set_visibility('weight_selector', weight_selector_open);
+  registry.set_visibility('color_block', color_block_open);
   registry.set_visibility('toolbox', toolbox_open);
   registry.set_visibility('tool_properties', tool_properties_open);
+  registry.set_visibility('customization_panel', customization_open);
+  registry.set_visibility('customization_picker', customization_picker_open);
   registry.set_visibility('selection_panel', selection_panel_open);
+  registry.set_visibility('canvas_settings_panel', canvas_settings_open);
   registry.set_visibility('layer_palette', layer_palette_open);
   registry.set_visibility('navigation', navigation_open);
   registry.set_visibility('camera_control', camera_control_open);
@@ -5542,6 +6238,32 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       if (!control_binding_matches_keyboard_event(painter_controls.runtime.get_binding(binding.id), e)) continue;
       e.preventDefault();
       stepPainterViewAction(binding.action);
+      return;
+    }
+    const groupNudgeHandlers: Array<{ id: string; direction: 'left' | 'right' | 'up' | 'down' }> = [
+      { id: 'painter.group.nudge_left', direction: 'left' },
+      { id: 'painter.group.nudge_right', direction: 'right' },
+      { id: 'painter.group.nudge_up', direction: 'up' },
+      { id: 'painter.group.nudge_down', direction: 'down' },
+    ];
+    for (const binding of groupNudgeHandlers) {
+      if (!control_binding_matches_keyboard_event(painter_controls.runtime.get_binding(binding.id), e)) continue;
+      if (isPainterTextCaptureActive() || current_tool !== 'move') return;
+      e.preventDefault();
+      nudgeActivePainterGroupLocation(binding.direction);
+      return;
+    }
+    const timingActionHandlers: Array<{ id: string; run: () => void }> = [
+      { id: 'painter.breath.step_back', run: () => stepCurrentPainterBreath(-1) },
+      { id: 'painter.breath.step_forward', run: () => stepCurrentPainterBreath(1) },
+      { id: 'painter.breath.play_pause', run: () => togglePainterPlayback() },
+      { id: 'painter.breath.jump_start', run: () => setCurrentPainterBreath(getPainterDocumentBreathRange().start) },
+      { id: 'painter.breath.jump_end', run: () => setCurrentPainterBreath(getPainterDocumentBreathRange().end) },
+    ];
+    for (const binding of timingActionHandlers) {
+      if (!control_binding_matches_keyboard_event(painter_controls.runtime.get_binding(binding.id), e)) continue;
+      e.preventDefault();
+      binding.run();
       return;
     }
     if (control_binding_matches_keyboard_event(painter_controls.runtime.get_binding('global.open_controls'), e)) {
@@ -5894,7 +6616,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
           painter_transition_anchor = null;
         }
         if (viewChanged && isAppInitialized) {
-          saveCameraConfig({ principal_view: painter_target_view.principal_view, roll_quarter_turn: painter_target_view.roll_quarter_turn });
+          persistPainterCameraConfig({ principal_view: painter_target_view.principal_view, roll_quarter_turn: painter_target_view.roll_quarter_turn });
         }
         touch_world_layers_owner('painter');
         domRenderer.render();
@@ -5926,15 +6648,15 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
     // Debug function to check camera persistence
     debug_camera_config: () => {
-      const config = loadCameraConfig();
+      const config = getSavedPainterCameraConfig();
       painterCameraDiag('debug camera config', { config, voxel_camera: voxelSpace.camera, isAppInitialized });
       return config;
     },
 
     // Force save camera config
     force_save_camera: () => {
-      saveCameraConfig({
-        painter_calibration: voxelSpace.camera.calibration,
+      persistPainterCameraConfig({
+        calibration: voxelSpace.camera.calibration,
         principal_view: voxelSpace.camera.principal_view,
         roll_quarter_turn: voxelSpace.camera.roll_quarter_turn,
         scale_per_layer: voxelSpace.camera.scale_per_layer,

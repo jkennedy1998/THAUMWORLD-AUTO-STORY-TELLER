@@ -1,5 +1,5 @@
 import type { Place } from "../../types/place.js";
-import { loadPlaceCameraConfig } from "../../ascii_painter/save_system.js";
+import { get_camera_settings_for_app } from "./camera_customization_store.js";
 
 export type PlaceViewState = {
   offset_x: number;
@@ -158,7 +158,7 @@ export function create_place_camera_controller(opts?: {
   }
 
   function get_shared_dom_tuning(): SharedCameraTuning {
-    const cam = loadPlaceCameraConfig();
+    const cam = get_camera_settings_for_app('thaum_world');
     return {
       calibration: cam.calibration,
       parallax_intensity: typeof cam.parallax_intensity === 'number' ? Math.max(0, Math.min(1, cam.parallax_intensity)) : undefined,

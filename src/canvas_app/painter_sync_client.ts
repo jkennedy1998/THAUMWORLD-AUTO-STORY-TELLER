@@ -31,15 +31,33 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
   bootstrap: (force?: boolean, document_id?: string | null) => Promise<PainterSyncState>;
   set_expect_local_host_boot: (expect: boolean) => void;
   submit_selection: (args: { document_id?: string | null; cells: Array<{ x: number; y: number; z: number }>; color_rgb: { r: number; g: number; b: number } }) => Promise<PainterSyncState>;
-  submit_cell_changes: (group_id: string, changes: Array<{ x: number; y: number; z: number; cell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number; render_index?: number } }>) => Promise<PainterSyncState>;
+  submit_cell_changes: (group_id: string, breath: number, auto_key: boolean, changes: Array<{ x: number; y: number; z: number; cell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number; render_index?: number } }>) => Promise<PainterSyncState>;
   submit_group_command: (command: {
-    kind: 'create_group' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'reorder_groups' | 'reset_document' | 'undo_group' | 'redo_group';
+    kind: 'set_document_timing' | 'set_document_loop_window' | 'create_group' | 'offset_group_in_time' | 'set_group_timing' | 'set_group_breath_span' | 'set_group_raster_segment_length' | 'split_group_raster_segment' | 'swap_group_raster_segments' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'set_group_content_state' | 'set_group_location_key' | 'reorder_groups' | 'reset_document' | 'undo_group' | 'redo_group';
     group_id?: string;
     source_group_id?: string;
     target_group_id?: string;
     group_name?: string;
     visible?: boolean;
     locked?: boolean;
+    delta_breaths?: number;
+    breath_range_start?: number;
+    breath_range_end?: number;
+    frames_per_breath?: number;
+    loop_enabled?: boolean;
+    breath_start?: number;
+    breath_end?: number;
+    start?: number;
+    cropped_start?: number;
+    cropped_end?: number;
+    content_state_id?: string;
+    source_content_state_id?: string;
+    target_content_state_id?: string;
+    split_breath?: number;
+    length_breaths?: number;
+    breath?: number;
+    voxels?: Array<{ key: string; x: number; y: number; z: number; char: string; rgb: { r: number; g: number; b: number }; weight_index: number }>;
+    offset?: { x: number; y: number; z: number };
     next_group_order?: string[];
   }) => Promise<PainterSyncState>;
 } {
@@ -265,7 +283,7 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
       }));
       return state;
     },
-    async submit_cell_changes(group_id: string, changes: Array<{ x: number; y: number; z: number; cell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number; render_index?: number } }>): Promise<PainterSyncState> {
+    async submit_cell_changes(group_id: string, breath: number, auto_key: boolean, changes: Array<{ x: number; y: number; z: number; cell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number; render_index?: number } }>): Promise<PainterSyncState> {
       const active = state.bootstrap;
       if (!active || state.authority_mode !== 'authoritative_host' || !active.session_token || !group_id || changes.length < 1) {
         return state;
@@ -282,6 +300,8 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
             group_id,
             base_revision: active.revision,
             command_id: `paint_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+            breath: Math.max(0, Math.floor(breath)),
+            auto_key: auto_key === true,
             voxels: changes.map((change) => ({
               x: change.x,
               y: change.y,
@@ -349,13 +369,31 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
       return state;
     },
     async submit_group_command(command: {
-      kind: 'create_group' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'reorder_groups' | 'reset_document' | 'undo_group' | 'redo_group';
+      kind: 'set_document_timing' | 'set_document_loop_window' | 'create_group' | 'offset_group_in_time' | 'set_group_timing' | 'set_group_breath_span' | 'set_group_raster_segment_length' | 'split_group_raster_segment' | 'swap_group_raster_segments' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'set_group_content_state' | 'set_group_location_key' | 'reorder_groups' | 'reset_document' | 'undo_group' | 'redo_group';
       group_id?: string;
       source_group_id?: string;
       target_group_id?: string;
       group_name?: string;
       visible?: boolean;
       locked?: boolean;
+      delta_breaths?: number;
+      breath_range_start?: number;
+      breath_range_end?: number;
+      frames_per_breath?: number;
+      loop_enabled?: boolean;
+      breath_start?: number;
+      breath_end?: number;
+      start?: number;
+      cropped_start?: number;
+      cropped_end?: number;
+      content_state_id?: string;
+      source_content_state_id?: string;
+      target_content_state_id?: string;
+      split_breath?: number;
+      length_breaths?: number;
+      breath?: number;
+      voxels?: Array<{ key: string; x: number; y: number; z: number; char: string; rgb: { r: number; g: number; b: number }; weight_index: number }>;
+      offset?: { x: number; y: number; z: number };
       next_group_order?: string[];
     }): Promise<PainterSyncState> {
       const active = state.bootstrap;

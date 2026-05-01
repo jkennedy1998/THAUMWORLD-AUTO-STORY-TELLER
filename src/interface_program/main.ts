@@ -14182,13 +14182,87 @@ function start_http_server(log_path: string): void {
                                     },
                                 }))
                                 : [],
-                            { base_revision }
+                            {
+                                base_revision,
+                                breath: Math.floor(Number(command?.breath ?? 0)) || 0,
+                                auto_key: Boolean(command?.auto_key),
+                            }
                         );
+                    } else if (kind === "set_document_timing") {
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, {
+                            kind: 'set_document_timing',
+                            breath_range_start: Math.floor(Number(command?.breath_range_start ?? 0)) || 0,
+                            breath_range_end: Math.floor(Number(command?.breath_range_end ?? 0)) || 0,
+                            frames_per_breath: Math.max(1, Math.floor(Number(command?.frames_per_breath ?? 1)) || 1),
+                            loop_enabled: Boolean(command?.loop_enabled),
+                        }, { base_revision });
+                    } else if (kind === "set_document_loop_window") {
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, {
+                            kind: 'set_document_loop_window',
+                            breath_start: Math.floor(Number(command?.breath_start ?? 0)) || 0,
+                            breath_end: Math.floor(Number(command?.breath_end ?? 0)) || 0,
+                        }, { base_revision });
                     } else if (kind === "create_group") {
                         result = apply_painter_group_structure_command(slot, normalized_document_id, {
                             kind: 'create_group',
                             group_name: String(command?.group_name ?? '').trim() || undefined,
                             target_group_id: String(command?.target_group_id ?? '').trim() || undefined,
+                            breath_start: Math.floor(Number(command?.breath_start ?? 0)) || 0,
+                            breath_end: Math.floor(Number(command?.breath_end ?? command?.breath_start ?? 0)) || 0,
+                        }, { base_revision });
+                    } else if (kind === "offset_group_in_time") {
+                        group_id = String(command?.group_id ?? "").trim();
+                        if (!group_id) throw new Error("painter_group_required");
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, {
+                            kind: 'offset_group_in_time',
+                            group_id,
+                            delta_breaths: Math.floor(Number(command?.delta_breaths ?? 0)) || 0,
+                        }, { base_revision });
+                    } else if (kind === "set_group_breath_span") {
+                        group_id = String(command?.group_id ?? "").trim();
+                        if (!group_id) throw new Error("painter_group_required");
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, {
+                            kind: 'set_group_breath_span',
+                            group_id,
+                            breath_start: Math.floor(Number(command?.breath_start ?? 0)) || 0,
+                            breath_end: Math.floor(Number(command?.breath_end ?? 0)) || 0,
+                        }, { base_revision });
+                    } else if (kind === "set_group_timing") {
+                        group_id = String(command?.group_id ?? "").trim();
+                        if (!group_id) throw new Error("painter_group_required");
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, {
+                            kind: 'set_group_timing',
+                            group_id,
+                            start: Math.floor(Number(command?.start ?? 0)) || 0,
+                            cropped_start: Math.floor(Number(command?.cropped_start ?? 0)) || 0,
+                            cropped_end: Math.floor(Number(command?.cropped_end ?? 0)) || 0,
+                        }, { base_revision });
+                    } else if (kind === "set_group_raster_segment_length") {
+                        group_id = String(command?.group_id ?? "").trim();
+                        if (!group_id) throw new Error("painter_group_required");
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, {
+                            kind: 'set_group_raster_segment_length',
+                            group_id,
+                            content_state_id: String(command?.content_state_id ?? '').trim(),
+                            length_breaths: Math.floor(Number(command?.length_breaths ?? 1)) || 1,
+                        }, { base_revision });
+                    } else if (kind === "split_group_raster_segment") {
+                        group_id = String(command?.group_id ?? "").trim();
+                        if (!group_id) throw new Error("painter_group_required");
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, {
+                            kind: 'split_group_raster_segment',
+                            group_id,
+                            content_state_id: String(command?.content_state_id ?? '').trim(),
+                            split_breath: Math.floor(Number(command?.split_breath ?? 0)) || 0,
+                        }, { base_revision });
+                    } else if (kind === "swap_group_raster_segments") {
+                        group_id = String(command?.group_id ?? "").trim();
+                        if (!group_id) throw new Error("painter_group_required");
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, {
+                            kind: 'swap_group_raster_segments',
+                            group_id,
+                            source_content_state_id: String(command?.source_content_state_id ?? '').trim(),
+                            target_content_state_id: String(command?.target_content_state_id ?? '').trim(),
                         }, { base_revision });
                     } else if (kind === "delete_group") {
                         group_id = String(command?.group_id ?? "").trim();
@@ -14226,6 +14300,42 @@ function start_http_server(log_path: string): void {
                             kind: 'set_group_locked',
                             group_id,
                             locked: Boolean(command?.locked),
+                        }, { base_revision });
+                    } else if (kind === "set_group_content_state") {
+                        group_id = String(command?.group_id ?? "").trim();
+                        if (!group_id) throw new Error("painter_group_required");
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, {
+                            kind: 'set_group_content_state',
+                            group_id,
+                            breath: Math.floor(Number(command?.breath ?? command?.breath_start ?? 0)) || 0,
+                            voxels: Array.isArray(command?.voxels)
+                                ? command.voxels.map((voxel: any) => ({
+                                    key: String(voxel?.key ?? '').trim() || `${Math.floor(Number(voxel?.x ?? 0))}:${Math.floor(Number(voxel?.y ?? 0))}:${Math.floor(Number(voxel?.z ?? 0))}`,
+                                    x: Math.floor(Number(voxel?.x ?? 0)),
+                                    y: Math.floor(Number(voxel?.y ?? 0)),
+                                    z: Math.floor(Number(voxel?.z ?? 0)),
+                                    char: typeof voxel?.char === "string" && voxel.char.length > 0 ? voxel.char[0]! : " ",
+                                    rgb: {
+                                        r: Math.max(0, Math.min(255, Math.floor(Number(voxel?.rgb?.r ?? 0)) || 0)),
+                                        g: Math.max(0, Math.min(255, Math.floor(Number(voxel?.rgb?.g ?? 0)) || 0)),
+                                        b: Math.max(0, Math.min(255, Math.floor(Number(voxel?.rgb?.b ?? 0)) || 0)),
+                                    },
+                                    weight_index: Math.max(0, Math.min(3, Math.floor(Number(voxel?.weight_index ?? 0)) || 0)),
+                                }))
+                                : [],
+                        }, { base_revision });
+                    } else if (kind === "set_group_location_key") {
+                        group_id = String(command?.group_id ?? "").trim();
+                        if (!group_id) throw new Error("painter_group_required");
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, {
+                            kind: 'set_group_location_key',
+                            group_id,
+                            breath: Math.floor(Number(command?.breath ?? 0)) || 0,
+                            offset: {
+                                x: Math.floor(Number(command?.offset?.x ?? 0)) || 0,
+                                y: Math.floor(Number(command?.offset?.y ?? 0)) || 0,
+                                z: Math.floor(Number(command?.offset?.z ?? 0)) || 0,
+                            },
                         }, { base_revision });
                     } else if (kind === "reorder_groups") {
                         result = apply_painter_group_structure_command(slot, normalized_document_id, {

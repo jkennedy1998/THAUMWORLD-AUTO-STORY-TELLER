@@ -144,31 +144,79 @@ export type {
   PainterCoordKey,
   PainterOccupiedBounds,
   PainterDocumentMetadata,
+  PainterDocumentBreath,
+  PainterDocumentPlayback,
   PainterVoxelRecord,
-  PainterVoxelDelta,
-  PainterGroupFrame,
+  PainterGroupLocationOffset,
+  PainterGroupLocationKey,
+  PainterGroupContentState,
   PainterGroup,
   PainterDocument,
 } from './painter_document.js';
 
 export {
   make_painter_coord_key,
+  get_default_painter_document_breath,
+  get_default_painter_document_playback,
+  clone_painter_document_breath,
+  clone_painter_document_playback,
   create_painter_voxel_record,
+  create_painter_group_content_state,
   clone_painter_voxel_record,
   create_painter_group,
+  get_painter_group_content_state_at_breath,
+  get_painter_group_initial_content_state,
   clone_painter_group,
   create_painter_document,
+  normalize_painter_group_content_states,
   clone_painter_document,
 } from './painter_document.js';
+
+export type {
+  PainterDocumentBreathRange,
+  PainterDocumentAuthoredBreathBounds,
+  PainterBreathPlaybackStepResult,
+  PainterGroupBreathRange,
+  PainterGroupRasterSegmentRange,
+} from './painter_breath.js';
+
+export {
+  normalize_painter_document_breath,
+  normalize_painter_document_playback,
+  get_painter_document_breath,
+  get_painter_document_playback,
+  get_painter_document_breath_range,
+  is_breath_in_painter_document_range,
+  clamp_breath_to_painter_document_range,
+  wrap_breath_in_painter_document_range,
+  derive_group_raster_segment_ranges,
+  derive_group_breath_range,
+  get_group_raster_segment_at_breath,
+  derive_painter_document_authored_breath_bounds,
+  derive_painter_document_suggested_breath_range,
+  step_painter_breath_playback,
+} from './painter_breath.js';
 
 export type {
   ResolvedPainterVoxel,
   PainterDocumentRuntime,
   ResolveVoxelWinnerResult,
+  PainterGroupWorldBounds,
 } from './painter_document_runtime.js';
 
 export {
   derive_painter_occupied_bounds,
+  is_painter_group_active_at_breath,
+  get_exact_painter_group_content_state,
+  resolve_painter_group_location_at_breath,
+  get_exact_painter_group_location_key,
+  resolve_nearest_painter_group_location_key,
+  resolve_nearest_painter_group_content_state,
+  project_painter_group_local_voxel_to_world,
+  set_painter_group_content_state,
+  unproject_painter_group_world_voxel_to_local,
+  set_painter_group_location_key,
+  set_painter_runtime_active_breath,
   resolve_painter_voxel_winner,
   normalize_painter_document_runtime,
   get_group_voxel,
@@ -177,6 +225,13 @@ export {
   reorder_painter_groups,
   set_painter_group_visibility,
   set_painter_group_locked,
+  set_painter_document_timing,
+  set_painter_group_breath_span,
+  offset_painter_group_in_time,
+  set_painter_group_timing,
+  set_painter_group_raster_segment_length,
+  split_painter_group_raster_segment,
+  swap_painter_group_raster_segments,
   export_painter_document,
 } from './painter_document_runtime.js';
 
@@ -187,16 +242,9 @@ export {
   createVoxelDOMRenderer
 } from './voxel_dom_renderer.js';
 
-// Camera Control
-export type { CameraControlOptions } from './camera_control_module.js';
-export { makeCameraControlModule } from './camera_control_module.js';
-
 // Save System & Tool Properties
-export type { ToolProperties, CameraConfigSaveData } from './save_system.js';
+export type { ToolProperties } from './save_system.js';
 export {
   saveToolProperties,
-  loadToolProperties,
-  saveCameraConfig,
-  loadCameraConfig,
-  clearCameraConfig
+  loadToolProperties
 } from './save_system.js';
