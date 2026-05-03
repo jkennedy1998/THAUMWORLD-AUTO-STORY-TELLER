@@ -1,5 +1,5 @@
 import { create_painter_document } from '../ascii_painter/painter_document.js';
-import { derive_group_raster_segment_ranges } from '../ascii_painter/painter_breath.js';
+import { derive_channel_regions, derive_group_raster_segment_ranges, get_painter_group_channels_by_kind } from '../ascii_painter/painter_breath.js';
 import { normalize_painter_document_runtime } from '../ascii_painter/painter_document_runtime.js';
 import { apply_painter_group_structure_change, save_painter_document_snapshot } from './painter_document_store.js';
 
@@ -11,7 +11,16 @@ const slot = 998;
 const document_id = `painter_store_span_${Date.now()}`;
 const document = create_painter_document(8, 8, { min_z: 0, max_z: 0, default_group_name: 'Base' });
 const base_group_id = document.group_order[0]!;
-document.groups[base_group_id]!.location_keys.push({ breath: 2, offset: { x: 1, y: 0, z: 0 } });
+document.groups[base_group_id]!.channel_ids = ['location_1'];
+document.groups[base_group_id]!.channels.location_1 = {
+  id: 'location_1',
+  kind: 'location',
+  label: 'move',
+  gap_behavior: 'clip',
+  before_first_behavior: 'none',
+  after_last_behavior: 'none',
+  keys: [{ id: 'loc_key_1', breath: 2, value: { kind: 'vec3', x: 1, y: 0, z: 0 } }],
+};
 save_painter_document_snapshot(slot, {
   document_id,
   revision: 1,
@@ -41,7 +50,7 @@ const resized = apply_painter_group_structure_change(slot, document_id, {
 runtime = normalize_painter_document_runtime(resized.snapshot);
 assert(runtime.document.groups[base_group_id]?.breath_start === 3 && runtime.document.groups[base_group_id]?.breath_end === 7, 'set_group_breath_span should persist authored span changes in store path');
 assert(derive_group_raster_segment_ranges(runtime.document.groups[base_group_id]!)[0]?.start === derive_group_raster_segment_ranges(beforeSpan)[0]?.start, 'set_group_breath_span should not change derived segment order or start');
-assert(runtime.document.groups[base_group_id]?.location_keys.length === beforeSpan.location_keys.length, 'set_group_breath_span should not rewrite stored location keys');
+assert(get_painter_group_channels_by_kind(runtime.document.groups[base_group_id]!, 'location')[0]?.keys.length === get_painter_group_channels_by_kind(beforeSpan, 'location')[0]?.keys.length, 'set_group_breath_span should not rewrite stored move channel keys');
 
 const retimed = apply_painter_group_structure_change(slot, document_id, {
   kind: 'set_group_timing',
@@ -61,7 +70,7 @@ const offset = apply_painter_group_structure_change(slot, document_id, {
 });
 runtime = normalize_painter_document_runtime(offset.snapshot);
 assert(runtime.document.groups[base_group_id]?.start === 7, 'offset_group_in_time should persist group start offset in store path');
-assert(runtime.document.groups[base_group_id]?.location_keys[0]?.breath === 5, 'offset_group_in_time should persist keyframe offsets in store path');
+assert(get_painter_group_channels_by_kind(runtime.document.groups[base_group_id]!, 'location')[0]?.keys[0]?.breath === 5, 'offset_group_in_time should persist move channel key offsets in store path');
 
 const relengthed = apply_painter_group_structure_change(slot, document_id, {
   kind: 'set_group_raster_segment_length',
@@ -71,6 +80,7 @@ const relengthed = apply_painter_group_structure_change(slot, document_id, {
 });
 runtime = normalize_painter_document_runtime(relengthed.snapshot);
 assert(runtime.document.groups[base_group_id]?.content_states[0]?.length_breaths === 6, 'set_group_raster_segment_length should persist raster duration changes');
+assert(derive_channel_regions(get_painter_group_channels_by_kind(runtime.document.groups[base_group_id]!, 'raster_content')[0]!, null)[0]?.end === 12, 'raster channel should stay synchronized with authored raster length changes');
 assert(runtime.document.groups[base_group_id]?.cropped_start === runtime.document.groups[base_group_id]?.start, 'raster duration changes should auto-sync crop start to full content bounds for now');
 assert(runtime.document.groups[base_group_id]?.cropped_end === 12, 'raster duration changes should auto-sync crop end to derivative content bounds for now');
 

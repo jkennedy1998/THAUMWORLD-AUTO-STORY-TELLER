@@ -14324,18 +14324,91 @@ function start_http_server(log_path: string): void {
                                 }))
                                 : [],
                         }, { base_revision });
-                    } else if (kind === "set_group_location_key") {
+                    } else if (kind === "set_group_channel_key") {
+                        group_id = String(command?.group_id ?? "").trim();
+                        if (!group_id) throw new Error("painter_group_required");
+                        const valueKind = String(command?.value?.kind ?? 'vec3');
+                        const channelValue = valueKind === 'scalar'
+                            ? { kind: 'scalar' as const, value: Math.floor(Number(command?.value?.value ?? 0)) || 0 }
+                            : valueKind === 'raster'
+                                ? { kind: 'raster' as const, voxels: [] }
+                                : {
+                                    kind: 'vec3' as const,
+                                    x: Math.floor(Number(command?.value?.x ?? 0)) || 0,
+                                    y: Math.floor(Number(command?.value?.y ?? 0)) || 0,
+                                    z: Math.floor(Number(command?.value?.z ?? 0)) || 0,
+                                };
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, {
+                            kind: 'set_group_channel_key',
+                            group_id,
+                            channel_kind: String(command?.channel_kind ?? 'location') as any,
+                            channel_id: String(command?.channel_id ?? '').trim() || undefined,
+                            channel_label: String(command?.channel_label ?? '').trim() || undefined,
+                            breath: Math.floor(Number(command?.breath ?? 0)) || 0,
+                            value: channelValue,
+                        }, { base_revision });
+                    } else if (kind === "move_group_channel_key") {
                         group_id = String(command?.group_id ?? "").trim();
                         if (!group_id) throw new Error("painter_group_required");
                         result = apply_painter_group_structure_command(slot, normalized_document_id, {
-                            kind: 'set_group_location_key',
+                            kind: 'move_group_channel_key',
                             group_id,
-                            breath: Math.floor(Number(command?.breath ?? 0)) || 0,
-                            offset: {
-                                x: Math.floor(Number(command?.offset?.x ?? 0)) || 0,
-                                y: Math.floor(Number(command?.offset?.y ?? 0)) || 0,
-                                z: Math.floor(Number(command?.offset?.z ?? 0)) || 0,
-                            },
+                            channel_id: String(command?.channel_id ?? '').trim(),
+                            key_breath: Math.floor(Number(command?.key_breath ?? 0)) || 0,
+                            target_breath: Math.floor(Number(command?.target_breath ?? 0)) || 0,
+                        }, { base_revision });
+                    } else if (kind === "blank_group_raster_segment") {
+                        group_id = String(command?.group_id ?? "").trim();
+                        if (!group_id) throw new Error("painter_group_required");
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, {
+                            kind: 'blank_group_raster_segment',
+                            group_id,
+                            content_state_id: String(command?.content_state_id ?? '').trim(),
+                        }, { base_revision });
+                    } else if (kind === "trim_group_raster_segment_edge") {
+                        group_id = String(command?.group_id ?? "").trim();
+                        if (!group_id) throw new Error("painter_group_required");
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, {
+                            kind: 'trim_group_raster_segment_edge',
+                            group_id,
+                            content_state_id: String(command?.content_state_id ?? '').trim(),
+                            edge: String(command?.edge ?? 'start') === 'end' ? 'end' : 'start',
+                        }, { base_revision });
+                    } else if (kind === "merge_group_blank_segment") {
+                        group_id = String(command?.group_id ?? "").trim();
+                        if (!group_id) throw new Error("painter_group_required");
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, {
+                            kind: 'merge_group_blank_segment',
+                            group_id,
+                            content_state_id: String(command?.content_state_id ?? '').trim(),
+                            direction: String(command?.direction ?? 'left') === 'right' ? 'right' : 'left',
+                        }, { base_revision });
+                    } else if (kind === "compact_group_blank_segment_left") {
+                        group_id = String(command?.group_id ?? "").trim();
+                        if (!group_id) throw new Error("painter_group_required");
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, {
+                            kind: 'compact_group_blank_segment_left',
+                            group_id,
+                            content_state_id: String(command?.content_state_id ?? '').trim(),
+                        }, { base_revision });
+                    } else if (kind === "move_group_raster_segment") {
+                        group_id = String(command?.group_id ?? "").trim();
+                        if (!group_id) throw new Error("painter_group_required");
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, {
+                            kind: 'move_group_raster_segment',
+                            group_id,
+                            content_state_id: String(command?.content_state_id ?? '').trim(),
+                            target_breath: Math.floor(Number(command?.target_breath ?? 0)) || 0,
+                        }, { base_revision });
+                    } else if (kind === "set_group_raster_segment_edge_destructive") {
+                        group_id = String(command?.group_id ?? "").trim();
+                        if (!group_id) throw new Error("painter_group_required");
+                        result = apply_painter_group_structure_command(slot, normalized_document_id, {
+                            kind: 'set_group_raster_segment_edge_destructive',
+                            group_id,
+                            content_state_id: String(command?.content_state_id ?? '').trim(),
+                            edge: String(command?.edge ?? 'start') === 'end' ? 'end' : 'start',
+                            target_breath: Math.floor(Number(command?.target_breath ?? 0)) || 0,
                         }, { base_revision });
                     } else if (kind === "reorder_groups") {
                         result = apply_painter_group_structure_command(slot, normalized_document_id, {

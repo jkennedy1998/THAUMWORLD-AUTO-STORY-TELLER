@@ -1,13 +1,20 @@
 import {
   clone_painter_document_breath,
   clone_painter_document_playback,
+  clone_painter_channel,
+  get_default_channel_value,
   get_default_painter_document_breath,
   get_default_painter_document_playback,
+  type PainterChannel,
+  type PainterChannelKey,
+  type PainterChannelKind,
+  type PainterChannelValue,
   type PainterDocument,
   type PainterDocumentBreath,
   type PainterDocumentPlayback,
   type PainterGroup,
   type PainterGroupContentState,
+  type PainterProperty,
 } from './painter_document.js';
 
 export type PainterDocumentBreathRange = {
@@ -35,6 +42,13 @@ export type PainterGroupRasterSegmentRange = {
   end: number;
   length_breaths: number;
   state: PainterGroupContentState;
+};
+
+export type PainterChannelRegion = {
+  key_id: string;
+  start: number;
+  end: number;
+  key: PainterChannelKey;
 };
 
 export type PainterBreathPlaybackStepResult = {
@@ -75,28 +89,115 @@ export function get_painter_document_file_breath_range(document: PainterDocument
   return { start: breath.range_start, end: breath.range_end };
 }
 
+export function get_painter_group_channels_by_kind(group: PainterGroup, kind: PainterChannelKind): PainterChannel[] {
+  const orderedIds = Array.isArray(group.channel_ids) ? group.channel_ids : [];
+  const out: PainterChannel[] = [];
+  for (const id of orderedIds) {
+    const channel = group.channels?.[id];
+    if (!channel || channel.kind !== kind) continue;
+    out.push(clone_painter_channel(channel));
+  }
+  return out;
+}
+
+export function get_exact_channel_key(channel: PainterChannel, breath: number): PainterChannelKey | null {
+  const targetBreath = Math.floor(breath);
+  const exact = channel.keys.find((key) => key.breath === targetBreath) ?? null;
+  return exact ? { ...exact, value: structuredClone(exact.value) } : null;
+}
+
+export function get_nearest_channel_key(channel: PainterChannel, breath: number): PainterChannelKey | null {
+  const targetBreath = Math.floor(breath);
+  let best: PainterChannelKey | null = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const key of channel.keys) {
+    const distance = Math.abs(key.breath - targetBreath);
+    if (distance < bestDistance || (distance === bestDistance && best && key.breath < best.breath)) {
+      best = key;
+      bestDistance = distance;
+    }
+  }
+  return best ? { ...best, value: structuredClone(best.value) } : null;
+}
+
+export function evaluate_channel_at_breath(channel: PainterChannel, breath: number): PainterChannelValue {
+  const targetBreath = Math.floor(breath);
+  let resolved = get_default_channel_value(channel.kind);
+  for (const key of channel.keys) {
+    if (key.breath > targetBreath) break;
+    resolved = structuredClone(key.value);
+  }
+  return resolved;
+}
+
+export function derive_channel_regions(channel: PainterChannel, trim?: { start: number; end: number } | null): PainterChannelRegion[] {
+  const out: PainterChannelRegion[] = [];
+  for (let i = 0; i < channel.keys.length; i += 1) {
+    const key = channel.keys[i]!;
+    const next = channel.keys[i + 1] ?? null;
+    const regionStart = key.breath;
+    const regionEnd = next ? next.breath - 1 : (trim ? trim.end : key.breath);
+    const start = trim ? Math.max(trim.start, regionStart) : regionStart;
+    const end = trim ? Math.min(trim.end, regionEnd) : regionEnd;
+    if (end < start) continue;
+    out.push({ key_id: key.id, start, end, key: { ...key, value: structuredClone(key.value) } });
+  }
+  return out;
+}
+
 export function derive_group_raster_segment_ranges(group: PainterGroup): PainterGroupRasterSegmentRange[] {
+  const orderedIds = Array.isArray(group.property_ids) ? group.property_ids : [];
+  const rasterProperties: PainterProperty[] = orderedIds
+    .map((id) => group.properties?.[id] ?? null)
+    .filter((property): property is PainterProperty => !!property && property.kind === 'raster');
+  if (rasterProperties.length > 0) {
+    const segments: PainterGroupRasterSegmentRange[] = [];
+    let index = 0;
+    for (const property of rasterProperties) {
+      for (const block of property.blocks) {
+        const start = Math.max(0, Math.floor(block.start));
+        const end = Math.max(start, Math.floor(block.end));
+        segments.push({
+          segment_id: block.id,
+          index,
+          start,
+          end,
+          length_breaths: Math.max(1, end - start + 1),
+          state: {
+            id: block.id,
+            label: property.label,
+            index,
+            length_breaths: Math.max(1, end - start + 1),
+            content: block.type === 'content' && block.value.kind === 'raster'
+              ? block.value.voxels.map((voxel) => structuredClone(voxel))
+              : [],
+          },
+        });
+        index += 1;
+      }
+    }
+    return segments.sort((a, b) => a.start - b.start || a.end - b.end || a.segment_id.localeCompare(b.segment_id));
+  }
   const start = Math.max(0, Math.floor(group.start ?? group.breath_start ?? 0));
-  let cursor = start;
-  return group.content_states.map((state, index) => {
-    const length = Math.max(1, Math.floor(state.length_breaths ?? 1));
-    const segment = {
-      segment_id: state.id,
-      index,
-      start: cursor,
-      end: cursor + length - 1,
-      length_breaths: length,
-      state,
-    };
-    cursor = segment.end + 1;
-    return segment;
-  });
+  return [{
+    segment_id: `blank_${group.id}`,
+    index: 0,
+    start,
+    end: Math.max(start, Math.floor(group.breath_end ?? group.cropped_end ?? start)),
+    length_breaths: Math.max(1, Math.floor(group.breath_end ?? group.cropped_end ?? start) - start + 1),
+    state: { id: `blank_${group.id}`, label: 'content', index: 0, length_breaths: Math.max(1, Math.floor(group.breath_end ?? group.cropped_end ?? start) - start + 1), content: [] },
+  }];
 }
 
 export function derive_group_breath_range(group: PainterGroup): PainterGroupBreathRange {
   const start = Math.max(0, Math.floor(group.start ?? group.breath_start ?? 0));
-  const segments = derive_group_raster_segment_ranges(group);
-  const derivativeEnd = segments.length > 0 ? segments[segments.length - 1]!.end : start;
+  const blocks = (Array.isArray(group.property_ids) ? group.property_ids : [])
+    .map((id) => group.properties?.[id] ?? null)
+    .filter((property): property is PainterProperty => !!property)
+    .flatMap((property) => property.blocks);
+  const derivativeEnd = blocks.length > 0
+    ? blocks.reduce((max, block) => Math.max(max, Math.floor(block.end)), start)
+    : Math.max(start, Math.floor(group.breath_end ?? group.cropped_end ?? start));
   const croppedStart = Math.max(start, Math.floor(group.breath_start ?? group.cropped_start ?? start));
   const croppedEnd = Math.max(croppedStart, Math.min(Math.floor(group.breath_end ?? group.cropped_end ?? derivativeEnd), derivativeEnd));
   return {
@@ -145,9 +246,13 @@ export function derive_painter_document_authored_breath_bounds(document: Painter
     const groupRange = derive_group_breath_range(group);
     min_breath = Math.min(min_breath, groupRange.start, groupRange.cropped_start);
     max_breath = Math.max(max_breath, groupRange.cropped_end, groupRange.derivative_end);
-    for (const key of group.location_keys) {
-      min_breath = Math.min(min_breath, key.breath);
-      max_breath = Math.max(max_breath, key.breath);
+    for (const propertyId of Array.isArray(group.property_ids) ? group.property_ids : []) {
+      const property = group.properties?.[propertyId];
+      if (!property) continue;
+      for (const block of property.blocks) {
+        min_breath = Math.min(min_breath, block.start);
+        max_breath = Math.max(max_breath, block.end);
+      }
     }
   }
   if (!Number.isFinite(min_breath) || !Number.isFinite(max_breath)) return null;

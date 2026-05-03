@@ -1,4 +1,4 @@
-import type { PainterDocument, PainterGroupLocationOffset, PainterVoxelRecord } from '../ascii_painter/painter_document.js';
+import type { PainterChannelKind, PainterChannelValue, PainterDocument, PainterVoxelRecord } from '../ascii_painter/painter_document.js';
 
 export type PainterDocumentAuthorityMode = 'local_compat' | 'authoritative_host';
 
@@ -62,6 +62,14 @@ export type PainterGroupCommand = {
     | 'rename_group'
     | 'set_group_visibility'
     | 'set_group_locked'
+    | 'set_group_channel_key'
+    | 'move_group_channel_key'
+    | 'blank_group_raster_segment'
+    | 'trim_group_raster_segment_edge'
+    | 'merge_group_blank_segment'
+    | 'compact_group_blank_segment_left'
+    | 'move_group_raster_segment'
+    | 'set_group_raster_segment_edge_destructive'
     | 'reorder_groups'
     | 'reset_document'
     | 'undo_group'
@@ -91,16 +99,14 @@ export type PainterGroupCommand = {
   split_breath?: number;
   length_breaths?: number;
   next_group_order?: string[];
-};
-
-export type PainterGroupLocationKeyCommand = {
-  kind: 'set_group_location_key';
-  document_id: string;
-  base_revision: number;
-  command_id: string;
-  group_id: string;
-  breath: number;
-  offset: PainterGroupLocationOffset;
+  channel_id?: string | null;
+  channel_kind?: PainterChannelKind;
+  channel_label?: string;
+  value?: PainterChannelValue;
+  key_breath?: number;
+  target_breath?: number;
+  edge?: 'start' | 'end';
+  direction?: 'left' | 'right';
 };
 
 export type PainterGroupContentStateCommand = {
@@ -116,7 +122,6 @@ export type PainterGroupContentStateCommand = {
 export type PainterCommand =
   | PainterApplyGroupVoxelsCommand
   | PainterGroupCommand
-  | PainterGroupLocationKeyCommand
   | PainterGroupContentStateCommand;
 
 export type PainterDocumentEvent = {

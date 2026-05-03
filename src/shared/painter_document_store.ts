@@ -1,7 +1,7 @@
 import { get_data_slot_dir } from '../engine/paths.js';
-import { create_painter_document, create_painter_group, type PainterDocument } from '../ascii_painter/painter_document.js';
+import { create_painter_document, create_painter_group, type PainterChannelKind, type PainterChannelValue, type PainterDocument } from '../ascii_painter/painter_document.js';
 import { import_legacy_voxel_space_as_painter_document } from '../ascii_painter/painter_document_legacy_adapter.js';
-import { add_painter_group, duplicate_painter_group, erase_group_voxel_at_breath, export_painter_document, normalize_painter_document_runtime, offset_painter_group_in_time, remove_painter_group, rename_painter_group, reorder_painter_groups, set_group_voxel_at_breath, set_painter_document_loop_window, set_painter_document_timing, set_painter_group_breath_span, set_painter_group_content_state, set_painter_group_location_key, set_painter_group_locked, set_painter_group_raster_segment_length, set_painter_group_timing, set_painter_group_visibility, set_painter_runtime_active_breath } from '../ascii_painter/painter_document_runtime.js';
+import { add_painter_group, blank_painter_group_raster_segment, compact_painter_group_blank_segment_left, duplicate_painter_group, erase_group_voxel_at_breath, export_painter_document, merge_painter_group_blank_segment, move_painter_group_channel_key, move_painter_group_raster_segment, normalize_painter_document_runtime, offset_painter_group_in_time, remove_painter_group, rename_painter_group, reorder_painter_groups, set_group_voxel_at_breath, set_painter_document_loop_window, set_painter_document_timing, set_painter_group_breath_span, set_painter_group_channel_key, set_painter_group_content_state, set_painter_group_locked, set_painter_group_raster_segment_edge_destructive, set_painter_group_raster_segment_length, set_painter_group_timing, set_painter_group_visibility, set_painter_runtime_active_breath, trim_painter_group_raster_segment_edge } from '../ascii_painter/painter_document_runtime.js';
 import { split_painter_group_raster_segment, swap_painter_group_raster_segments } from '../ascii_painter/painter_document_runtime.js';
 import { importVoxelSpace, type VoxelSpaceExport } from '../ascii_painter/voxel_space.js';
 import { read_jsonc_file_or_default, write_json_file } from './json_file.js';
@@ -395,7 +395,14 @@ export function apply_painter_group_structure_change(
      | { kind: 'set_group_visibility'; group_id: string; visible: boolean }
      | { kind: 'set_group_locked'; group_id: string; locked: boolean }
      | { kind: 'set_group_content_state'; group_id: string; breath: number; voxels: Array<{ key: string; x: number; y: number; z: number; char: string; rgb: { r: number; g: number; b: number }; weight_index: number }> }
-     | { kind: 'set_group_location_key'; group_id: string; breath: number; offset: { x: number; y: number; z: number } }
+     | { kind: 'set_group_channel_key'; group_id: string; channel_kind: PainterChannelKind; channel_id?: string | null; channel_label?: string; breath: number; value: PainterChannelValue }
+     | { kind: 'move_group_channel_key'; group_id: string; channel_id: string; key_breath: number; target_breath: number }
+     | { kind: 'blank_group_raster_segment'; group_id: string; content_state_id: string }
+     | { kind: 'trim_group_raster_segment_edge'; group_id: string; content_state_id: string; edge: 'start' | 'end' }
+     | { kind: 'merge_group_blank_segment'; group_id: string; content_state_id: string; direction: 'left' | 'right' }
+     | { kind: 'compact_group_blank_segment_left'; group_id: string; content_state_id: string }
+     | { kind: 'move_group_raster_segment'; group_id: string; content_state_id: string; target_breath: number }
+     | { kind: 'set_group_raster_segment_edge_destructive'; group_id: string; content_state_id: string; edge: 'start' | 'end'; target_breath: number }
      | { kind: 'reorder_groups'; next_group_order: string[] }
      | { kind: 'reset_document' }
 ): PainterDocumentSnapshot {
@@ -448,6 +455,36 @@ export function apply_painter_group_structure_change(
     case 'swap_group_raster_segments': {
       assert_group_exists(runtime, command.group_id);
       swap_painter_group_raster_segments(runtime, command.group_id, command.source_content_state_id, command.target_content_state_id);
+      break;
+    }
+    case 'blank_group_raster_segment': {
+      assert_group_exists(runtime, command.group_id);
+      blank_painter_group_raster_segment(runtime, command.group_id, command.content_state_id);
+      break;
+    }
+    case 'trim_group_raster_segment_edge': {
+      assert_group_exists(runtime, command.group_id);
+      trim_painter_group_raster_segment_edge(runtime, command.group_id, command.content_state_id, command.edge);
+      break;
+    }
+    case 'merge_group_blank_segment': {
+      assert_group_exists(runtime, command.group_id);
+      merge_painter_group_blank_segment(runtime, command.group_id, command.content_state_id, command.direction);
+      break;
+    }
+    case 'compact_group_blank_segment_left': {
+      assert_group_exists(runtime, command.group_id);
+      compact_painter_group_blank_segment_left(runtime, command.group_id, command.content_state_id);
+      break;
+    }
+    case 'move_group_raster_segment': {
+      assert_group_exists(runtime, command.group_id);
+      move_painter_group_raster_segment(runtime, command.group_id, command.content_state_id, command.target_breath);
+      break;
+    }
+    case 'set_group_raster_segment_edge_destructive': {
+      assert_group_exists(runtime, command.group_id);
+      set_painter_group_raster_segment_edge_destructive(runtime, command.group_id, command.content_state_id, command.edge, command.target_breath);
       break;
     }
     case 'delete_group': {
@@ -506,9 +543,14 @@ export function apply_painter_group_structure_change(
       })));
       break;
     }
-    case 'set_group_location_key': {
+    case 'set_group_channel_key': {
       assert_group_exists(runtime, command.group_id);
-      set_painter_group_location_key(runtime, command.group_id, command.breath, command.offset);
+      set_painter_group_channel_key(runtime, command.group_id, command);
+      break;
+    }
+    case 'move_group_channel_key': {
+      assert_group_exists(runtime, command.group_id);
+      move_painter_group_channel_key(runtime, command.group_id, command);
       break;
     }
     case 'reorder_groups': {
@@ -554,7 +596,14 @@ export function apply_painter_group_structure_command(
      | { kind: 'set_group_visibility'; group_id: string; visible: boolean }
      | { kind: 'set_group_locked'; group_id: string; locked: boolean }
      | { kind: 'set_group_content_state'; group_id: string; breath: number; voxels: Array<{ key: string; x: number; y: number; z: number; char: string; rgb: { r: number; g: number; b: number }; weight_index: number }> }
-     | { kind: 'set_group_location_key'; group_id: string; breath: number; offset: { x: number; y: number; z: number } }
+     | { kind: 'set_group_channel_key'; group_id: string; channel_kind: PainterChannelKind; channel_id?: string | null; channel_label?: string; breath: number; value: PainterChannelValue }
+     | { kind: 'move_group_channel_key'; group_id: string; channel_id: string; key_breath: number; target_breath: number }
+     | { kind: 'blank_group_raster_segment'; group_id: string; content_state_id: string }
+     | { kind: 'trim_group_raster_segment_edge'; group_id: string; content_state_id: string; edge: 'start' | 'end' }
+     | { kind: 'merge_group_blank_segment'; group_id: string; content_state_id: string; direction: 'left' | 'right' }
+     | { kind: 'compact_group_blank_segment_left'; group_id: string; content_state_id: string }
+     | { kind: 'move_group_raster_segment'; group_id: string; content_state_id: string; target_breath: number }
+     | { kind: 'set_group_raster_segment_edge_destructive'; group_id: string; content_state_id: string; edge: 'start' | 'end'; target_breath: number }
      | { kind: 'reorder_groups'; next_group_order: string[] }
      | { kind: 'reset_document' },
   options?: { base_revision?: number | null }

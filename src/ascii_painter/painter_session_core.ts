@@ -1,20 +1,32 @@
 import { create_painter_group, create_painter_voxel_record, type PainterDocument } from './painter_document.js';
 import {
+  add_painter_group_property,
   add_painter_group,
   duplicate_painter_group,
   erase_group_voxel_at_breath,
+  move_painter_group_property_block,
+  move_painter_group_channel_key,
   normalize_painter_document_runtime,
+  reorder_painter_group_properties,
+  remove_painter_group_property,
   remove_painter_group,
   rename_painter_group,
   reorder_painter_groups,
   set_painter_group_content_state,
-  set_painter_group_location_key,
+  set_painter_group_channel_key,
   set_painter_group_locked,
   set_painter_document_timing,
   set_painter_document_loop_window,
   set_painter_group_breath_span,
   offset_painter_group_in_time,
+  blank_painter_group_raster_segment,
+  compact_painter_group_blank_segment_left,
+  set_painter_group_property_block,
+  move_painter_group_raster_segment,
   set_painter_group_timing,
+  trim_painter_group_raster_segment_edge,
+  merge_painter_group_blank_segment,
+  set_painter_group_raster_segment_edge_destructive,
   set_painter_group_raster_segment_length,
   split_painter_group_raster_segment,
   swap_painter_group_raster_segments,
@@ -31,6 +43,14 @@ import type {
   PainterSessionGroupCommand,
   PainterSessionState,
 } from './painter_session_types.js';
+
+function painter_timeline_session_log(event: string, payload?: Record<string, unknown>): void {
+  try {
+    console.log(`[PAINTER_TIMELINE_DEBUG] ${event} ${JSON.stringify(payload ?? {})}`);
+  } catch {
+    console.log(`[PAINTER_TIMELINE_DEBUG] ${event}`);
+  }
+}
 
 function clone_group_plane_registry(registry: PainterGroupPlaneRegistry): PainterGroupPlaneRegistry {
   return {
@@ -136,6 +156,11 @@ export function create_painter_session_core(initial_document: PainterDocument): 
   }
 
   function apply_group_command(command: PainterSessionGroupCommand): { created_group_id?: string | null } {
+    painter_timeline_session_log('session_apply_group_command', {
+      command_kind: command.kind,
+      group_id: 'group_id' in command ? command.group_id ?? null : null,
+      payload: command,
+    });
     switch (command.kind) {
       case 'set_document_timing': {
         set_painter_document_timing(state.runtime, command);
@@ -174,6 +199,30 @@ export function create_painter_session_core(initial_document: PainterDocument): 
         swap_painter_group_raster_segments(state.runtime, command.group_id, command.source_content_state_id, command.target_content_state_id);
         return {};
       }
+      case 'blank_group_raster_segment': {
+        blank_painter_group_raster_segment(state.runtime, command.group_id, command.content_state_id);
+        return {};
+      }
+      case 'trim_group_raster_segment_edge': {
+        trim_painter_group_raster_segment_edge(state.runtime, command.group_id, command.content_state_id, command.edge);
+        return {};
+      }
+      case 'merge_group_blank_segment': {
+        merge_painter_group_blank_segment(state.runtime, command.group_id, command.content_state_id, command.direction);
+        return {};
+      }
+      case 'compact_group_blank_segment_left': {
+        compact_painter_group_blank_segment_left(state.runtime, command.group_id, command.content_state_id);
+        return {};
+      }
+      case 'move_group_raster_segment': {
+        move_painter_group_raster_segment(state.runtime, command.group_id, command.content_state_id, command.target_breath);
+        return {};
+      }
+      case 'set_group_raster_segment_edge_destructive': {
+        set_painter_group_raster_segment_edge_destructive(state.runtime, command.group_id, command.content_state_id, command.edge, command.target_breath);
+        return {};
+      }
       case 'delete_group': {
         remove_painter_group(state.runtime, command.group_id);
         refresh_derived_state({ preserve_existing_group_planes: true });
@@ -200,8 +249,32 @@ export function create_painter_session_core(initial_document: PainterDocument): 
         set_painter_group_content_state(state.runtime, command.group_id, command.breath, command.voxels);
         return {};
       }
-      case 'set_group_location_key': {
-        set_painter_group_location_key(state.runtime, command.group_id, command.breath, command.offset);
+      case 'add_group_property': {
+        add_painter_group_property(state.runtime, command.group_id, command);
+        return {};
+      }
+      case 'remove_group_property': {
+        remove_painter_group_property(state.runtime, command.group_id, command.property_id);
+        return {};
+      }
+      case 'reorder_group_properties': {
+        reorder_painter_group_properties(state.runtime, command.group_id, command.next_property_order);
+        return {};
+      }
+      case 'set_group_property_block': {
+        set_painter_group_property_block(state.runtime, command.group_id, command);
+        return {};
+      }
+      case 'move_group_property_block': {
+        move_painter_group_property_block(state.runtime, command.group_id, command);
+        return {};
+      }
+      case 'set_group_channel_key': {
+        set_painter_group_channel_key(state.runtime, command.group_id, command);
+        return {};
+      }
+      case 'move_group_channel_key': {
+        move_painter_group_channel_key(state.runtime, command.group_id, command);
         return {};
       }
       case 'reorder_groups': {

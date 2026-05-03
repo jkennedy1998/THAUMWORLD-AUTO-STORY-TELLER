@@ -1,4 +1,4 @@
-import { create_painter_document, create_painter_group } from './painter_document.js';
+import { create_painter_document, create_painter_group, create_painter_voxel_record } from './painter_document.js';
 import {
   clamp_breath_to_painter_document_range,
   derive_group_breath_range,
@@ -25,14 +25,35 @@ document.groups[baseGroupId]!.cropped_start = 2;
 document.groups[baseGroupId]!.cropped_end = 6;
 document.groups[baseGroupId]!.breath_start = 2;
 document.groups[baseGroupId]!.breath_end = 6;
-document.groups[baseGroupId]!.content_states[0]!.length_breaths = 5;
-document.groups[baseGroupId]!.location_keys.push({ breath: 5, offset: { x: 1, y: 0, z: 0 } });
+document.groups[baseGroupId]!.properties.raster_1!.blocks = [{
+  id: 'base_hold',
+  type: 'content',
+  start: 2,
+  end: 6,
+  value: { kind: 'raster', voxels: [create_painter_voxel_record({ x: 0, y: 0, z: 0, char: 'A', rgb: { r: 255, g: 255, b: 255 }, weight_index: 1 })] },
+}];
+document.groups[baseGroupId]!.property_ids.push('move_1');
+document.groups[baseGroupId]!.properties.move_1 = {
+  id: 'move_1',
+  kind: 'move',
+  label: 'move',
+  process_mode: 'add',
+  blocks: [{ id: 'loc_a', type: 'content', start: 5, end: 6, value: { kind: 'vec3', x: 1, y: 0, z: 0 } }],
+};
+
 const laterGroup = create_painter_group('Later', { breath_start: 9, breath_end: 12 });
 laterGroup.start = 9;
 laterGroup.cropped_start = 9;
 laterGroup.cropped_end = 12;
-laterGroup.content_states[0]!.length_breaths = 4;
-laterGroup.location_keys.push({ breath: 11, offset: { x: 0, y: 1, z: 0 } });
+laterGroup.properties.raster_1!.blocks = [{ id: 'later_hold', type: 'content', start: 9, end: 12, value: { kind: 'raster', voxels: [] } }];
+laterGroup.property_ids.push('move_1');
+laterGroup.properties.move_1 = {
+  id: 'move_1',
+  kind: 'move',
+  label: 'move',
+  process_mode: 'add',
+  blocks: [{ id: 'loc_b', type: 'content', start: 11, end: 12, value: { kind: 'vec3', x: 0, y: 1, z: 0 } }],
+};
 document.groups[laterGroup.id] = laterGroup;
 document.group_order.push(laterGroup.id);
 
@@ -45,10 +66,10 @@ const playback = get_painter_document_playback(document);
 assert(playback.frames_per_breath === 3 && playback.loop_enabled === false, 'document playback should expose file-owned cadence settings');
 
 const groupRange = derive_group_breath_range(document.groups[baseGroupId]!);
-assert(groupRange.start === 2 && groupRange.cropped_start === 2 && groupRange.cropped_end === 6 && groupRange.derivative_end === 6, 'group breath range should expose start, crop, and derivative bounds from raster timing');
+assert(groupRange.start === 2 && groupRange.cropped_start === 2 && groupRange.cropped_end === 6 && groupRange.derivative_end === 6, 'group breath range should expose start, crop, and derivative bounds from property block timing');
 
 const bounds = derive_painter_document_authored_breath_bounds(document);
-assert(bounds?.min_breath === 2 && bounds?.max_breath === 12, 'authored breath bounds should include group spans and keyed breaths');
+assert(bounds?.min_breath === 2 && bounds?.max_breath === 12, 'authored breath bounds should include group spans and property block starts');
 
 const suggested = derive_painter_document_suggested_breath_range(document);
 assert(suggested.start === 2 && suggested.end === 12, 'suggested breath range should hug authored content exactly');

@@ -30,7 +30,7 @@ export type ActionType =
   | 'split_group_raster_segment'
   | 'swap_group_raster_segments'
   | 'set_group_content_state'
-  | 'set_group_location_key'
+  | 'set_group_channel_key'
   | 'reorder_groups'
   | 'selection_change'; // Rect, lasso, clear, invert, select-all
 
@@ -290,7 +290,7 @@ export function logSelectionAction(
 
 export function logGroupAction(
   history: HistoryManager,
-  type: 'create_group' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'offset_group_in_time' | 'set_group_timing' | 'set_group_breath_span' | 'set_group_raster_segment_length' | 'split_group_raster_segment' | 'swap_group_raster_segments' | 'set_group_content_state' | 'set_group_location_key' | 'reorder_groups',
+  type: 'create_group' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'offset_group_in_time' | 'set_group_timing' | 'set_group_breath_span' | 'set_group_raster_segment_length' | 'split_group_raster_segment' | 'swap_group_raster_segments' | 'set_group_content_state' | 'set_group_channel_key' | 'reorder_groups',
   description: string,
   options: {
     groupId?: string;

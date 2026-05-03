@@ -81,8 +81,8 @@ import { makeGroupsModule, type GroupListItem } from '../mono_ui/modules/groups_
 import { make_navigation_module } from '../ascii_painter/navigation_module.js';
 import { build_legacy_voxel_space_from_painter_runtime, import_legacy_voxel_space_as_painter_document } from '../ascii_painter/painter_document_legacy_adapter.js';
 import { create_painter_document, create_painter_group, create_painter_voxel_record, get_painter_group_content_state_at_breath, type PainterDocument } from '../ascii_painter/painter_document.js';
-import { add_painter_group, duplicate_painter_group, erase_group_voxel, export_painter_document, get_exact_painter_group_content_state, is_painter_group_active_at_breath, normalize_painter_document_runtime, remove_painter_group, rename_painter_group, reorder_painter_groups, resolve_nearest_painter_group_content_state, resolve_nearest_painter_group_location_key, resolve_painter_group_location_at_breath, resolve_painter_group_preview_winner, set_group_voxel, set_painter_group_locked, set_painter_group_visibility, set_painter_runtime_active_breath, type PainterDocumentRuntime } from '../ascii_painter/painter_document_runtime.js';
-import { derive_group_breath_range, derive_group_raster_segment_ranges, derive_painter_document_suggested_breath_range, get_painter_document_breath_range, get_painter_document_file_breath_range, get_painter_document_playback, step_painter_breath_playback } from '../ascii_painter/painter_breath.js';
+import { add_painter_group, duplicate_painter_group, erase_group_voxel, export_painter_document, get_exact_painter_group_content_state, normalize_painter_document_runtime, remove_painter_group, rename_painter_group, reorder_painter_groups, resolve_nearest_painter_group_content_state, resolve_nearest_painter_group_location_key, resolve_painter_group_location_at_breath, resolve_painter_group_preview_winner, set_group_voxel, set_painter_group_locked, set_painter_group_visibility, set_painter_runtime_active_breath, type PainterDocumentRuntime } from '../ascii_painter/painter_document_runtime.js';
+import { derive_channel_regions, derive_group_breath_range, derive_group_raster_segment_ranges, derive_painter_document_suggested_breath_range, get_painter_document_breath_range, get_painter_document_file_breath_range, get_painter_document_playback, get_painter_group_channels_by_kind, step_painter_breath_playback } from '../ascii_painter/painter_breath.js';
 import { create_painter_session_core } from '../ascii_painter/painter_session_core.js';
 import type { PainterGroupPlaneRegistry } from '../ascii_painter/painter_session_types.js';
 import { resolve_edit_channels_with_modifiers, type EditChannels } from '../ascii_painter/edit_mask.js';
@@ -158,6 +158,39 @@ function painterPerf(message: string, payload?: Record<string, unknown>): void {
 
 function painterCameraDiag(message: string, payload?: Record<string, unknown>): void {
   diag_log('camera', 'verbose', 'PAINTER_CAMERA', message, payload);
+}
+
+function painterTimelineDiag(message: string, payload?: Record<string, unknown>): void {
+  diag_log('painter', 'verbose', 'PAINTER_TIMELINE', message, payload);
+}
+
+function summarizePainterTimelineGroup(group: PainterDocument['groups'][string]): Record<string, unknown> {
+  const range = derive_group_breath_range(group);
+  return {
+    group_id: group.id,
+    start: Math.max(0, Math.floor(group.start ?? 0)),
+    cropped_start: range.cropped_start,
+    cropped_end: range.cropped_end,
+    derivative_end: range.derivative_end,
+    raster_segments: derive_group_raster_segment_ranges(group).map((segment) => ({
+      id: segment.segment_id,
+      start: segment.start,
+      end: segment.end,
+      length_breaths: segment.length_breaths,
+      is_blank: segment.state.content.length < 1,
+    })),
+    move_blocks: (Array.isArray(group.property_ids) ? group.property_ids : [])
+      .map((propertyId) => group.properties?.[propertyId] ?? null)
+      .filter((property): property is NonNullable<typeof property> => !!property && property.kind === 'move')
+      .flatMap((property) => property.blocks.map((block) => ({
+        property_id: property.id,
+        block_id: block.id,
+        start: Math.floor(block.start),
+        end: Math.max(Math.floor(block.start), Math.floor(block.end)),
+        breath: Math.floor(block.start),
+        is_blank: block.type === 'blank',
+      }))),
+  };
 }
 import { create_painter_tool_assisted_inputs_wiring } from './painter_tool_assisted_inputs_wiring.js';
 
@@ -317,6 +350,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   let legacy_group_compat: LegacyPainterGroupCompatState = {
     active_group_id: null,
   };
+  let active_group_property_id: string | null = null;
   let current_filename = 'untitled';
   let current_file_path: string | null = null;
   let current_session_role: PainterSessionRole = 'host';
@@ -532,6 +566,33 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     if (!legacy_group_compat.active_group_id || !painter_document_runtime.document.groups[legacy_group_compat.active_group_id]) {
       legacy_group_compat.active_group_id = painter_document_runtime.document.group_order[0] ?? null;
     }
+    sync_active_group_property_selection();
+  }
+
+  function resolve_default_group_property_id(group_id: string | null): string | null {
+    if (!group_id) return null;
+    const group = painter_document_runtime.document.groups[group_id];
+    if (!group) return null;
+    const orderedProperty = group.property_ids.find((property_id) => {
+      const property = group.properties[property_id];
+      return property?.kind === 'raster' || property?.kind === 'move';
+    }) ?? null;
+    return orderedProperty;
+  }
+
+  function sync_active_group_property_selection(): void {
+    const activeGroupId = legacy_group_compat.active_group_id;
+    if (!activeGroupId) {
+      active_group_property_id = null;
+      return;
+    }
+    const group = painter_document_runtime.document.groups[activeGroupId];
+    if (!group) {
+      active_group_property_id = null;
+      return;
+    }
+    if (active_group_property_id && group.properties[active_group_property_id]) return;
+    active_group_property_id = resolve_default_group_property_id(activeGroupId);
   }
 
   function resetPainterHistoryState(reason: string): void {
@@ -604,7 +665,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   }
 
   function submit_group_command_if_authoritative(command: {
-    kind: 'set_document_timing' | 'set_document_loop_window' | 'create_group' | 'offset_group_in_time' | 'set_group_timing' | 'set_group_breath_span' | 'set_group_raster_segment_length' | 'split_group_raster_segment' | 'swap_group_raster_segments' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'set_group_content_state' | 'set_group_location_key' | 'reorder_groups' | 'reset_document' | 'undo_group' | 'redo_group';
+    kind: 'set_document_timing' | 'set_document_loop_window' | 'create_group' | 'offset_group_in_time' | 'set_group_timing' | 'set_group_breath_span' | 'set_group_raster_segment_length' | 'split_group_raster_segment' | 'swap_group_raster_segments' | 'blank_group_raster_segment' | 'trim_group_raster_segment_edge' | 'merge_group_blank_segment' | 'compact_group_blank_segment_left' | 'move_group_raster_segment' | 'set_group_raster_segment_edge_destructive' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'set_group_content_state' | 'set_group_channel_key' | 'move_group_channel_key' | 'move_group_property_block' | 'reorder_groups' | 'reset_document' | 'undo_group' | 'redo_group';
     group_id?: string;
     source_group_id?: string;
     target_group_id?: string;
@@ -628,7 +689,16 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     length_breaths?: number;
     breath?: number;
     voxels?: Array<{ key: string; x: number; y: number; z: number; char: string; rgb: { r: number; g: number; b: number }; weight_index: number }>;
-    offset?: { x: number; y: number; z: number };
+    channel_id?: string | null;
+    channel_kind?: 'raster_content' | 'location' | 'rotation';
+    channel_label?: string;
+    property_id?: string;
+    block_id?: string;
+    value?: { kind: 'raster'; voxels: Array<{ key: string; x: number; y: number; z: number; char: string; rgb: { r: number; g: number; b: number }; weight_index: number }> } | { kind: 'vec3'; x: number; y: number; z: number } | { kind: 'scalar'; value: number };
+    key_breath?: number;
+    target_breath?: number;
+    edge?: 'start' | 'end';
+    direction?: 'left' | 'right';
     next_group_order?: string[];
   }): void {
     if (!can_submit_to_authoritative_document()) return;
@@ -719,7 +789,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       || action.type === 'split_group_raster_segment'
       || action.type === 'swap_group_raster_segments'
       || action.type === 'set_group_content_state'
-      || action.type === 'set_group_location_key'
+      || action.type === 'set_group_channel_key'
       || action.type === 'reorder_groups'
     );
   }
@@ -781,7 +851,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       case 'split_group_raster_segment':
       case 'swap_group_raster_segments':
       case 'set_group_content_state':
-      case 'set_group_location_key': {
+      case 'set_group_channel_key': {
         const next = useOld ? action.oldGroupData : action.newGroupData;
         if (groupId && next) {
           painter_document_runtime.document.groups[groupId] = structuredClone(next);
@@ -1165,11 +1235,31 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     return displayOrder.map((group_id) => {
       const group = painter_document_runtime.document.groups[group_id]!;
       const groupBreathRange = derive_group_breath_range(group);
-      const rasterSegments = derive_group_raster_segment_ranges(group);
+      const propertyRows: NonNullable<GroupListItem['property_rows']> = group.property_ids
+        .map((property_id) => group.properties[property_id] ?? null)
+        .filter((property): property is NonNullable<typeof property> & { kind: 'raster' | 'move' } => !!property && (property.kind === 'raster' || property.kind === 'move'))
+        .map((property) => ({
+          property_id: property.id,
+          kind: property.kind,
+          label: property.label,
+          blocks: property.blocks
+            .filter((block) => {
+              if (property.kind === 'raster') return true;
+              return block.type === 'content' && block.value.kind === 'vec3';
+            })
+            .map((block) => ({
+              id: block.id,
+              breath: block.start,
+              start: block.start,
+              end: block.end,
+              is_blank: block.type === 'blank',
+            })),
+        }));
       return {
         id: group_id,
         label: group.name,
         selected: legacy_group_compat.active_group_id === group_id,
+        selected_property_id: legacy_group_compat.active_group_id === group_id ? active_group_property_id ?? undefined : undefined,
         group_start: groupBreathRange.start,
         cropped_start: groupBreathRange.cropped_start,
         cropped_end: groupBreathRange.cropped_end,
@@ -1179,9 +1269,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         can_delete: displayOrder.length > 1,
         breath_start: groupBreathRange.cropped_start,
         breath_end: groupBreathRange.cropped_end,
-        content_state_breaths: rasterSegments.map((segment) => segment.start),
-        raster_segments: rasterSegments.map((segment) => ({ id: segment.segment_id, start: segment.start, end: segment.end, length_breaths: segment.length_breaths })),
-        location_key_breaths: group.location_keys.map((key) => key.breath),
+        property_rows: propertyRows,
       };
     });
   }
@@ -1317,7 +1405,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     const exact = get_exact_painter_group_content_state(refreshedGroup, painter_current_breath);
     if (exact) return true;
     const resolved = get_painter_group_content_state_at_breath(refreshedGroup, painter_current_breath)
-      ?? refreshedGroup.content_states[0]
       ?? null;
     if (!resolved) return false;
     const oldGroupData = structuredClone(refreshedGroup);
@@ -1370,16 +1457,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   function applyPainterGroupLocationDelta(group_id: string, delta: { x: number; y: number; z: number }, source: 'nudge' | 'drag'): boolean {
     const group = painter_document_runtime.document.groups[group_id];
     if (!group || group.locked) return false;
-    if (!is_painter_group_active_at_breath(group, painter_current_breath)) {
-      painterDiag('skipping group location edit: outside active breath span', {
-        group_id,
-        source,
-        active_breath: painter_current_breath,
-        breath_start: group.breath_start,
-        breath_end: group.breath_end,
-      });
-      return false;
-    }
     const targetBreath = resolveEditableGroupLocationBreath(group_id);
     if (targetBreath === null) {
       painterDiag('skipping group location edit: no editable location key', {
@@ -1394,31 +1471,38 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     if (delta.x === 0 && delta.y === 0 && delta.z === 0) return false;
     const oldGroupData = structuredClone(group);
     const resolvedBase = resolve_painter_group_location_at_breath(group, targetBreath);
+    const primaryLocationChannel = get_painter_group_channels_by_kind(group, 'location')[0] ?? null;
     const nextOffset = {
       x: resolvedBase.x + Math.floor(delta.x),
       y: resolvedBase.y + Math.floor(delta.y),
       z: resolvedBase.z + Math.floor(delta.z),
     };
     painter_session_core.apply_group_command({
-      kind: 'set_group_location_key',
+      kind: 'set_group_property_block',
       group_id,
+      property_kind: 'move',
+      property_id: primaryLocationChannel?.id ?? null,
+      property_label: primaryLocationChannel?.label ?? 'move',
       breath: targetBreath,
-      offset: nextOffset,
+      value: { kind: 'vec3', x: nextOffset.x, y: nextOffset.y, z: nextOffset.z },
     });
     sync_local_session_state_from_core();
     sync_lineage_state_from_core();
     const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
-    logGroupAction(history, 'set_group_location_key', `Move Group ${group.name}`, {
+    logGroupAction(history, 'set_group_channel_key', `Move Group ${group.name}`, {
       groupId: group_id,
       oldGroupData,
       newGroupData,
     });
     sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
     submit_group_command_if_authoritative({
-      kind: 'set_group_location_key',
+      kind: 'set_group_channel_key',
       group_id,
+      channel_kind: 'location',
+      channel_id: primaryLocationChannel?.id ?? null,
+      channel_label: primaryLocationChannel?.label ?? 'move',
       breath: targetBreath,
-      offset: nextOffset,
+      value: { kind: 'vec3', x: nextOffset.x, y: nextOffset.y, z: nextOffset.z },
     });
     schedule_auto_save();
     painterDiag('group location edited', {
@@ -1437,6 +1521,85 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     if (!group_id || current_tool !== 'move') return false;
     const worldDelta = map_screen_direction_to_world_delta(getPainterViewState(), direction);
     return applyPainterGroupLocationDelta(group_id, worldDelta, 'nudge');
+  }
+
+  function movePainterGroupPropertyBlock(group_id: string, property_id: string, block_id: string, target_breath: number): void {
+    const group = painter_document_runtime.document.groups[group_id];
+    if (!group || group.locked) return;
+    const property = group.properties?.[property_id] ?? null;
+    const oldGroupData = structuredClone(group);
+    if (!property) return;
+    painterTimelineDiag('command_dispatch', {
+      command_kind: 'move_group_property_block',
+      group_id,
+      property_id,
+      block_id,
+      target_breath: Math.max(0, Math.floor(target_breath)),
+      current_breath: painter_current_breath,
+      old_group_summary: summarizePainterTimelineGroup(oldGroupData),
+    });
+    painter_session_core.apply_group_command({ kind: 'move_group_property_block', group_id, property_id: property.id, block_id, target_breath });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
+    painterTimelineDiag('command_applied_local', {
+      command_kind: 'move_group_property_block',
+      group_id,
+      property_id,
+      block_id,
+      target_breath: Math.max(0, Math.floor(target_breath)),
+      current_breath: painter_current_breath,
+      old_group_summary: summarizePainterTimelineGroup(oldGroupData),
+      new_group_summary: newGroupData ? summarizePainterTimelineGroup(newGroupData) : null,
+    });
+    logGroupAction(history, 'set_group_channel_key', `Move Property Block ${group.name}`, {
+      groupId: group_id,
+      oldGroupData,
+      newGroupData,
+    });
+    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
+    submit_group_command_if_authoritative({ kind: 'move_group_property_block', group_id, property_id, block_id, target_breath });
+    schedule_auto_save();
+  }
+
+  function addPainterGroupProperty(group_id: string, property_kind: 'raster' | 'move', after_property_id?: string | null): void {
+    const group = painter_document_runtime.document.groups[group_id];
+    if (!group || group.locked) return;
+    const oldGroupData = structuredClone(group);
+    painter_session_core.apply_group_command({ kind: 'add_group_property', group_id, property_kind, after_property_id: after_property_id ?? null, property_label: property_kind });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    const newGroup = painter_document_runtime.document.groups[group_id] ?? null;
+    if (newGroup) {
+      const insertedIndex = after_property_id ? newGroup.property_ids.indexOf(after_property_id) + 1 : newGroup.property_ids.length - 1;
+      active_group_property_id = newGroup.property_ids[Math.max(0, Math.min(newGroup.property_ids.length - 1, insertedIndex))] ?? active_group_property_id;
+    }
+    const newGroupData = newGroup ? structuredClone(newGroup) : undefined;
+    logGroupAction(history, 'reorder_groups', `Add Property ${group.name}`, {
+      groupId: group_id,
+      oldGroupData,
+      newGroupData,
+    });
+    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
+    schedule_auto_save();
+  }
+
+  function removePainterGroupProperty(group_id: string, property_id: string): void {
+    const group = painter_document_runtime.document.groups[group_id];
+    if (!group || group.locked || !group.properties[property_id] || group.property_ids.length <= 1) return;
+    const oldGroupData = structuredClone(group);
+    painter_session_core.apply_group_command({ kind: 'remove_group_property', group_id, property_id });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    if (active_group_property_id === property_id) active_group_property_id = resolve_default_group_property_id(group_id);
+    const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
+    logGroupAction(history, 'reorder_groups', `Remove Property ${group.name}`, {
+      groupId: group_id,
+      oldGroupData,
+      newGroupData,
+    });
+    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
+    schedule_auto_save();
   }
 
   const PAINTER_CAMERA_APP_ID = 'thaum_painter' as const;
@@ -2259,9 +2422,18 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     commitProjectedGridToWorld();
     rebuild_runtime_group_plane_registry({ preserve_existing: true });
     legacy_group_compat.active_group_id = group_id;
+    active_group_property_id = resolve_default_group_property_id(group_id);
     ensureValidFocusPlane();
     refreshPainterProjectionFromWorld();
     painterDiag('group selected', { group_id, focus_plane: voxelSpace.camera.focus_plane });
+  }
+
+  function selectPainterGroupProperty(group_id: string, property_id: string): void {
+    if (legacy_group_compat.active_group_id !== group_id) selectPainterGroup(group_id);
+    const group = painter_document_runtime.document.groups[group_id];
+    if (!group?.properties[property_id]) return;
+    active_group_property_id = property_id;
+    painterDiag('group property selected', { group_id, property_id });
   }
 
   function togglePainterGroupVisibility(group_id: string): void {
@@ -2422,10 +2594,27 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     const group = painter_document_runtime.document.groups[group_id];
     if (!group) return;
     const oldGroupData = structuredClone(group);
+    painterTimelineDiag('command_dispatch', {
+      command_kind: 'split_group_raster_segment',
+      group_id,
+      content_state_id,
+      split_breath: Math.max(0, Math.floor(split_breath)),
+      current_breath: painter_current_breath,
+      old_group_summary: summarizePainterTimelineGroup(oldGroupData),
+    });
     painter_session_core.apply_group_command({ kind: 'split_group_raster_segment', group_id, content_state_id, split_breath });
     sync_local_session_state_from_core();
     sync_lineage_state_from_core();
     const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
+    painterTimelineDiag('command_applied_local', {
+      command_kind: 'split_group_raster_segment',
+      group_id,
+      content_state_id,
+      split_breath: Math.max(0, Math.floor(split_breath)),
+      current_breath: painter_current_breath,
+      old_group_summary: summarizePainterTimelineGroup(oldGroupData),
+      new_group_summary: newGroupData ? summarizePainterTimelineGroup(newGroupData) : null,
+    });
     logGroupAction(history, 'split_group_raster_segment', `Split Raster Segment ${group.name}`, {
       groupId: group_id,
       oldGroupData,
@@ -2447,10 +2636,27 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     const group = painter_document_runtime.document.groups[group_id];
     if (!group || source_content_state_id === target_content_state_id) return;
     const oldGroupData = structuredClone(group);
+    painterTimelineDiag('command_dispatch', {
+      command_kind: 'swap_group_raster_segments',
+      group_id,
+      source_content_state_id,
+      target_content_state_id,
+      current_breath: painter_current_breath,
+      old_group_summary: summarizePainterTimelineGroup(oldGroupData),
+    });
     painter_session_core.apply_group_command({ kind: 'swap_group_raster_segments', group_id, source_content_state_id, target_content_state_id });
     sync_local_session_state_from_core();
     sync_lineage_state_from_core();
     const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
+    painterTimelineDiag('command_applied_local', {
+      command_kind: 'swap_group_raster_segments',
+      group_id,
+      source_content_state_id,
+      target_content_state_id,
+      current_breath: painter_current_breath,
+      old_group_summary: summarizePainterTimelineGroup(oldGroupData),
+      new_group_summary: newGroupData ? summarizePainterTimelineGroup(newGroupData) : null,
+    });
     logGroupAction(history, 'swap_group_raster_segments', `Swap Raster Segments ${group.name}`, {
       groupId: group_id,
       oldGroupData,
@@ -2462,6 +2668,209 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       source_content_state_id,
       target_content_state_id,
     });
+    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
+    schedule_auto_save();
+  }
+
+  function blankPainterGroupRasterSegment(group_id: string, content_state_id: string): void {
+    finalizePendingPainterCanvasChanges();
+    commitProjectedGridToWorld();
+    const group = painter_document_runtime.document.groups[group_id];
+    if (!group) return;
+    const oldGroupData = structuredClone(group);
+    painterTimelineDiag('command_dispatch', {
+      command_kind: 'blank_group_raster_segment',
+      group_id,
+      content_state_id,
+      current_breath: painter_current_breath,
+      old_group_summary: summarizePainterTimelineGroup(oldGroupData),
+    });
+    painter_session_core.apply_group_command({ kind: 'blank_group_raster_segment', group_id, content_state_id });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
+    painterTimelineDiag('command_applied_local', {
+      command_kind: 'blank_group_raster_segment',
+      group_id,
+      content_state_id,
+      current_breath: painter_current_breath,
+      old_group_summary: summarizePainterTimelineGroup(oldGroupData),
+      new_group_summary: newGroupData ? summarizePainterTimelineGroup(newGroupData) : null,
+    });
+    logGroupAction(history, 'set_group_content_state', `Blank Raster Segment ${group.name}`, {
+      groupId: group_id,
+      oldGroupData,
+      newGroupData,
+    });
+    submit_group_command_if_authoritative({ kind: 'blank_group_raster_segment', group_id, content_state_id });
+    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
+    schedule_auto_save();
+  }
+
+  function trimPainterGroupRasterSegmentEdge(group_id: string, content_state_id: string, edge: 'start' | 'end'): void {
+    finalizePendingPainterCanvasChanges();
+    commitProjectedGridToWorld();
+    const group = painter_document_runtime.document.groups[group_id];
+    if (!group) return;
+    const oldGroupData = structuredClone(group);
+    painter_session_core.apply_group_command({ kind: 'trim_group_raster_segment_edge', group_id, content_state_id, edge });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
+    logGroupAction(history, 'set_group_raster_segment_length', `Trim Raster Segment ${group.name}`, {
+      groupId: group_id,
+      oldGroupData,
+      newGroupData,
+    });
+    submit_group_command_if_authoritative({ kind: 'trim_group_raster_segment_edge', group_id, content_state_id, edge });
+    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
+    schedule_auto_save();
+  }
+
+  function mergePainterGroupBlankSegment(group_id: string, content_state_id: string, direction: 'left' | 'right'): void {
+    finalizePendingPainterCanvasChanges();
+    commitProjectedGridToWorld();
+    const group = painter_document_runtime.document.groups[group_id];
+    if (!group) return;
+    const oldGroupData = structuredClone(group);
+    painterTimelineDiag('command_dispatch', {
+      command_kind: 'merge_group_blank_segment',
+      group_id,
+      content_state_id,
+      direction,
+      current_breath: painter_current_breath,
+      old_group_summary: summarizePainterTimelineGroup(oldGroupData),
+    });
+    painter_session_core.apply_group_command({ kind: 'merge_group_blank_segment', group_id, content_state_id, direction });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
+    painterTimelineDiag('command_applied_local', {
+      command_kind: 'merge_group_blank_segment',
+      group_id,
+      content_state_id,
+      direction,
+      current_breath: painter_current_breath,
+      old_group_summary: summarizePainterTimelineGroup(oldGroupData),
+      new_group_summary: newGroupData ? summarizePainterTimelineGroup(newGroupData) : null,
+    });
+    logGroupAction(history, 'set_group_raster_segment_length', `Merge Blank Segment ${group.name}`, {
+      groupId: group_id,
+      oldGroupData,
+      newGroupData,
+    });
+    submit_group_command_if_authoritative({ kind: 'merge_group_blank_segment', group_id, content_state_id, direction });
+    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
+    schedule_auto_save();
+  }
+
+  function compactPainterGroupBlankSegmentLeft(group_id: string, content_state_id: string): void {
+    finalizePendingPainterCanvasChanges();
+    commitProjectedGridToWorld();
+    const group = painter_document_runtime.document.groups[group_id];
+    if (!group) return;
+    const oldGroupData = structuredClone(group);
+    painterTimelineDiag('command_dispatch', {
+      command_kind: 'compact_group_blank_segment_left',
+      group_id,
+      content_state_id,
+      current_breath: painter_current_breath,
+      old_group_summary: summarizePainterTimelineGroup(oldGroupData),
+    });
+    painter_session_core.apply_group_command({ kind: 'compact_group_blank_segment_left', group_id, content_state_id });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
+    painterTimelineDiag('command_applied_local', {
+      command_kind: 'compact_group_blank_segment_left',
+      group_id,
+      content_state_id,
+      current_breath: painter_current_breath,
+      old_group_summary: summarizePainterTimelineGroup(oldGroupData),
+      new_group_summary: newGroupData ? summarizePainterTimelineGroup(newGroupData) : null,
+    });
+    logGroupAction(history, 'set_group_raster_segment_length', `Compact Blank Segment ${group.name}`, {
+      groupId: group_id,
+      oldGroupData,
+      newGroupData,
+    });
+    submit_group_command_if_authoritative({ kind: 'compact_group_blank_segment_left', group_id, content_state_id });
+    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
+    schedule_auto_save();
+  }
+
+  function movePainterGroupRasterSegment(group_id: string, content_state_id: string, target_breath: number): void {
+    finalizePendingPainterCanvasChanges();
+    commitProjectedGridToWorld();
+    const group = painter_document_runtime.document.groups[group_id];
+    if (!group) return;
+    const oldGroupData = structuredClone(group);
+    painterTimelineDiag('command_dispatch', {
+      command_kind: 'move_group_raster_segment',
+      group_id,
+      content_state_id,
+      target_breath: Math.max(0, Math.floor(target_breath)),
+      current_breath: painter_current_breath,
+      old_group_summary: summarizePainterTimelineGroup(oldGroupData),
+    });
+    painter_session_core.apply_group_command({ kind: 'move_group_raster_segment', group_id, content_state_id, target_breath });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
+    painterTimelineDiag('command_applied_local', {
+      command_kind: 'move_group_raster_segment',
+      group_id,
+      content_state_id,
+      target_breath: Math.max(0, Math.floor(target_breath)),
+      current_breath: painter_current_breath,
+      old_group_summary: summarizePainterTimelineGroup(oldGroupData),
+      new_group_summary: newGroupData ? summarizePainterTimelineGroup(newGroupData) : null,
+    });
+    logGroupAction(history, 'swap_group_raster_segments', `Move Raster Segment ${group.name}`, {
+      groupId: group_id,
+      oldGroupData,
+      newGroupData,
+    });
+    submit_group_command_if_authoritative({ kind: 'move_group_raster_segment', group_id, content_state_id, target_breath });
+    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
+    schedule_auto_save();
+  }
+
+  function setPainterGroupRasterSegmentEdgeDestructive(group_id: string, content_state_id: string, edge: 'start' | 'end', target_breath: number): void {
+    finalizePendingPainterCanvasChanges();
+    commitProjectedGridToWorld();
+    const group = painter_document_runtime.document.groups[group_id];
+    if (!group) return;
+    const oldGroupData = structuredClone(group);
+    painterTimelineDiag('command_dispatch', {
+      command_kind: 'set_group_raster_segment_edge_destructive',
+      group_id,
+      content_state_id,
+      edge,
+      target_breath: Math.max(0, Math.floor(target_breath)),
+      current_breath: painter_current_breath,
+      old_group_summary: summarizePainterTimelineGroup(oldGroupData),
+    });
+    painter_session_core.apply_group_command({ kind: 'set_group_raster_segment_edge_destructive', group_id, content_state_id, edge, target_breath });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
+    painterTimelineDiag('command_applied_local', {
+      command_kind: 'set_group_raster_segment_edge_destructive',
+      group_id,
+      content_state_id,
+      edge,
+      target_breath: Math.max(0, Math.floor(target_breath)),
+      current_breath: painter_current_breath,
+      old_group_summary: summarizePainterTimelineGroup(oldGroupData),
+      new_group_summary: newGroupData ? summarizePainterTimelineGroup(newGroupData) : null,
+    });
+    logGroupAction(history, 'set_group_raster_segment_length', `Set Raster Edge ${group.name}`, {
+      groupId: group_id,
+      oldGroupData,
+      newGroupData,
+    });
+    submit_group_command_if_authoritative({ kind: 'set_group_raster_segment_edge_destructive', group_id, content_state_id, edge, target_breath });
     sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
     schedule_auto_save();
   }
@@ -2506,6 +2915,24 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       active_group_id: legacy_group_compat.active_group_id,
     });
     log_runtime_summary('groups reordered summary');
+  }
+
+  function reorderPainterGroupProperties(group_id: string, next_property_order: string[]): void {
+    const group = painter_document_runtime.document.groups[group_id];
+    if (!group || group.locked || next_property_order.length < 1) return;
+    const oldGroupData = structuredClone(group);
+    painter_session_core.apply_group_command({ kind: 'reorder_group_properties', group_id, next_property_order });
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    sync_active_group_property_selection();
+    const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
+    logGroupAction(history, 'reorder_groups', `Reorder Properties ${group.name}`, {
+      groupId: group_id,
+      oldGroupData,
+      newGroupData,
+    });
+    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
+    schedule_auto_save();
   }
 
   function getPainterFocusContentBounds(): { min_x: number; min_y: number; max_x: number; max_y: number } | null {
@@ -5855,6 +6282,9 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       on_select_group: (group_id: string) => {
         selectPainterGroup(group_id);
       },
+      on_select_group_property: (group_id: string, property_id: string) => {
+        selectPainterGroupProperty(group_id, property_id);
+      },
       on_toggle_group_visibility: (group_id: string) => {
         togglePainterGroupVisibility(group_id);
       },
@@ -5873,14 +6303,20 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       on_reorder_groups: (next_group_order: string[]) => {
         reorderPainterGroups(mapGroupDisplayOrderToRuntimeOrder(next_group_order));
       },
+      on_reorder_group_properties: (group_id: string, next_property_order: string[]) => {
+        reorderPainterGroupProperties(group_id, next_property_order);
+      },
+      on_add_group_property: (group_id: string, property_kind: 'raster' | 'move', after_property_id?: string | null) => {
+        addPainterGroupProperty(group_id, property_kind, after_property_id ?? null);
+      },
+      on_remove_group_property: (group_id: string, property_id: string) => {
+        removePainterGroupProperty(group_id, property_id);
+      },
       on_offset_group_in_time: (group_id: string, delta_breaths: number) => {
         offsetPainterGroupInTime(group_id, delta_breaths);
       },
       on_set_group_timing: (group_id: string, start: number, cropped_start: number, cropped_end: number) => {
         setPainterGroupTiming(group_id, { start, cropped_start, cropped_end });
-      },
-      on_set_group_breath_span: (group_id: string, breath_start: number, breath_end: number) => {
-        setPainterGroupBreathSpan(group_id, breath_start, breath_end);
       },
       on_set_group_raster_segment_length: (group_id: string, content_state_id: string, length_breaths: number) => {
         setPainterGroupRasterSegmentLength(group_id, content_state_id, length_breaths);
@@ -5890,6 +6326,27 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       },
       on_swap_group_raster_segments: (group_id: string, source_content_state_id: string, target_content_state_id: string) => {
         swapPainterGroupRasterSegments(group_id, source_content_state_id, target_content_state_id);
+      },
+      on_blank_group_raster_segment: (group_id: string, content_state_id: string) => {
+        blankPainterGroupRasterSegment(group_id, content_state_id);
+      },
+      on_trim_group_raster_segment_edge: (group_id: string, content_state_id: string, edge: 'start' | 'end') => {
+        trimPainterGroupRasterSegmentEdge(group_id, content_state_id, edge);
+      },
+      on_merge_group_blank_segment: (group_id: string, content_state_id: string, direction: 'left' | 'right') => {
+        mergePainterGroupBlankSegment(group_id, content_state_id, direction);
+      },
+      on_compact_group_blank_segment_left: (group_id: string, content_state_id: string) => {
+        compactPainterGroupBlankSegmentLeft(group_id, content_state_id);
+      },
+      on_move_group_raster_segment: (group_id: string, content_state_id: string, target_breath: number) => {
+        movePainterGroupRasterSegment(group_id, content_state_id, target_breath);
+      },
+      on_set_group_raster_segment_edge_destructive: (group_id: string, content_state_id: string, edge: 'start' | 'end', target_breath: number) => {
+        setPainterGroupRasterSegmentEdgeDestructive(group_id, content_state_id, edge, target_breath);
+      },
+      on_move_group_property_block: (group_id: string, property_id: string, block_id: string, target_breath: number) => {
+        movePainterGroupPropertyBlock(group_id, property_id, block_id, target_breath);
       },
       on_move: (new_rect) => {
         if (layer_palette_module) {

@@ -1,5 +1,22 @@
 # ASCII Painter Unified Channel Animation Plan
 
+## Status Note
+
+This plan established the direction toward unified animation storage and shared row editing semantics.
+
+However, implementation and later design review changed the canonical authored truth away from key-first channel storage and toward explicit property-block storage.
+
+The current superseding plan is:
+
+- `docs/plans/2026_05_02_ascii_painter_property_block_animation_plan.md`
+
+The main divergence is:
+
+- old direction: keys are the primary authored timeline truth and blocks are derived
+- new direction: explicit content/blank blocks are the primary authored timeline truth for both raster and move
+
+This older plan should now be treated as historical context plus migration background, not the final architecture target.
+
 ## Goal
 
 Unify raster content animation and value/keyframe animation under one channel architecture so that:
