@@ -24,7 +24,7 @@ export type GroupListItem = {
     property_id: string;
     kind: 'raster' | 'move';
     label: string;
-    blocks: Array<{ id: string; breath: number; start: number; end: number; is_blank?: boolean }>;
+    blocks: Array<{ id: string; breath: number; start: number; end: number; is_blank?: boolean; dominant_rgb?: { r: number; g: number; b: number } }>;
   }>;
   content_state_breaths?: number[];
   raster_segments?: Array<{ id: string; start: number; end: number; length_breaths: number; is_blank?: boolean }>;
@@ -106,6 +106,7 @@ type PropertyRowSegment = {
   start: number;
   end: number;
   is_blank: boolean;
+  dominant_rgb?: { r: number; g: number; b: number };
 };
 
 type PropertyRowHit = {
@@ -191,12 +192,13 @@ export function resolve_groups_raster_visual_style(args: {
   interaction: InteractionStyle;
   muted_rgb: { r: number; g: number; b: number };
   selected_rgb: { r: number; g: number; b: number };
+  content_rgb?: { r: number; g: number; b: number };
+  blank_rgb?: { r: number; g: number; b: number };
 }): InteractionStyle {
   if (!args.visible) return { rgb: args.muted_rgb, weight: 1 };
   if (args.interaction.weight >= 2) return args.interaction;
-  if (args.selected_property) return { rgb: args.selected_rgb, weight: 3 };
-  if (args.is_blank) return { rgb: args.muted_rgb, weight: 1 };
-  return args.interaction;
+  if (args.is_blank) return args.selected_property ? { rgb: args.selected_rgb, weight: 3 } : { rgb: args.blank_rgb ?? args.muted_rgb, weight: 1 };
+  return { rgb: args.content_rgb ?? args.interaction.rgb, weight: Math.max(0, args.interaction.weight - 1) };
 }
 
 type PropertyRowDrawSegment = {
@@ -205,6 +207,7 @@ type PropertyRowDrawSegment = {
   start: number;
   end: number;
   is_blank: boolean;
+  dominant_rgb?: { r: number; g: number; b: number };
 };
 
 function getPropertyRowLocalYOffset(index: number): number {
@@ -386,6 +389,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     targetSegmentId: null,
     targetPropertyId: null,
   };
+  let lastSwapPreviewDiagKey = '';
 
   let rasterHoverState: {
     groupId: string | null;
@@ -759,6 +763,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
           start: block.start,
           end: block.end,
           is_blank: block.is_blank === true,
+          dominant_rgb: block.dominant_rgb,
         }))
       : [];
   }
@@ -1004,6 +1009,82 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
       length_breaths: Math.max(1, Math.floor(block.end) - Math.floor(block.start) + 1),
       is_blank: block.is_blank === true,
     })));
+  }
+
+  function getRasterRowSegments(group: GroupListItem, propertyId: string): PropertyRowDrawSegment[] {
+    const rasterRow = Array.isArray(group.property_rows)
+      ? group.property_rows.find((row) => row.property_id === propertyId) ?? null
+      : null;
+    if (rasterRow && rasterRow.blocks.length > 0) {
+      return rasterRow.blocks.map((block) => ({
+        id: block.id,
+        breath: block.breath,
+        start: block.start,
+        end: block.end,
+        is_blank: block.is_blank === true,
+        dominant_rgb: block.dominant_rgb,
+      }));
+    }
+    const rasterSegments = getRasterSegments(group);
+    if (rasterSegments.length > 0) {
+      return rasterSegments.map((segment) => ({ id: segment.id, breath: segment.start, start: segment.start, end: segment.end, is_blank: segment.is_blank }));
+    }
+    return getVisibleContentSpans(group).map((span, index) => ({ id: `fallback_${index}`, breath: Math.floor(span.start), start: Math.floor(span.start), end: Math.max(Math.floor(span.start), Math.floor(span.end)), is_blank: false }));
+  }
+
+  function removeEdgeBlankDrawSegments(segments: PropertyRowDrawSegment[]): { segments: PropertyRowDrawSegment[]; removedIds: string[] } {
+    const sorted = [...segments].sort((a, b) => a.start - b.start || a.end - b.end || a.id.localeCompare(b.id));
+    const removedIds: string[] = [];
+    while (sorted[0]?.is_blank) {
+      removedIds.push(sorted[0].id);
+      sorted.shift();
+    }
+    while (sorted[sorted.length - 1]?.is_blank) {
+      const removed = sorted.pop();
+      if (removed) removedIds.push(removed.id);
+    }
+    const nextSegments = sorted;
+    return { segments: nextSegments, removedIds };
+  }
+
+  function orderActiveRasterSourceLast(segments: PropertyRowDrawSegment[]): PropertyRowDrawSegment[] {
+    if (!rasterDragState.active || !rasterDragState.segmentId || rasterDragState.mode === 'body_swap') return segments;
+    const source = segments.find((segment) => segment.id === rasterDragState.segmentId) ?? null;
+    if (!source) return segments;
+    return [...segments.filter((segment) => segment.id !== source.id), source];
+  }
+
+  function getPreviewRasterRowSegments(group: GroupListItem, propertyId: string): PropertyRowDrawSegment[] {
+    const baseSegments = getRasterRowSegments(group, propertyId);
+    if (!rasterDragState.active || rasterDragState.groupId !== group.id) {
+      return baseSegments.map((segment) => ({ ...segment, ...getResolvedRasterSpan(group, segment) }));
+    }
+    if (rasterDragState.mode !== 'body_swap' || rasterDragState.propertyId !== propertyId || !rasterDragState.segmentId || !rasterDragState.targetSegmentId) {
+      return orderActiveRasterSourceLast(baseSegments.map((segment) => ({ ...segment, ...getResolvedRasterSpan(group, segment) })));
+    }
+    const source = baseSegments.find((segment) => segment.id === rasterDragState.segmentId) ?? null;
+    const target = baseSegments.find((segment) => segment.id === rasterDragState.targetSegmentId) ?? null;
+    if (!source || !target) return orderActiveRasterSourceLast(baseSegments.map((segment) => ({ ...segment, ...getResolvedRasterSpan(group, segment) })));
+
+    const swapped = baseSegments.map((segment) => {
+      if (segment.id === source.id) return { ...segment, start: target.start, end: target.end };
+      if (segment.id === target.id) return { ...segment, start: source.start, end: source.end };
+      return { ...segment };
+    });
+    const cleaned = removeEdgeBlankDrawSegments(swapped);
+    const diagKey = JSON.stringify({
+      groupId: group.id,
+      propertyId,
+      sourceId: source.id,
+      targetId: target.id,
+      removedEdgeBlankIds: cleaned.removedIds,
+      spans: cleaned.segments.map((segment) => ({ id: segment.id, start: segment.start, end: segment.end, isBlank: segment.is_blank })),
+    });
+    if (diagKey !== lastSwapPreviewDiagKey) {
+      lastSwapPreviewDiagKey = diagKey;
+      groupsRasterDiag('swap_preview_resolved', JSON.parse(diagKey) as Record<string, unknown>);
+    }
+    return cleaned.segments;
   }
 
   function getRasterHit(layout: GroupSectionLayout, currentRect: Rect, localX: number, localY: number): { propertyId: string; segmentId: string; mode: 'edge_start' | 'edge_end' | 'body_move' | 'body_single' | 'blank_start' | 'blank_end' | 'blank_center' | 'blank_single'; breath: number; isBlank: boolean } | null {
@@ -1630,21 +1711,10 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         c.set(x, rowY, { char: descriptor.kind === 'raster' ? ' ' : '─', rgb: mutedColor, weight_index: descriptor.kind === 'raster' ? 0 : 1, render_index: 1 });
       }
       if (descriptor.kind === 'raster') {
-        const rasterRow = Array.isArray(group.property_rows)
-          ? group.property_rows.find((row) => row.property_id === descriptor.property_id) ?? null
-          : null;
-        const rasterSpans: PropertyRowDrawSegment[] = rasterRow && rasterRow.blocks.length > 0
-          ? rasterRow.blocks.map((block) => ({ id: block.id, breath: block.breath, start: block.start, end: block.end, is_blank: block.is_blank === true }))
-          : rasterSegments.length > 0
-            ? rasterSegments.map((segment) => ({ id: segment.id, breath: segment.start, start: segment.start, end: segment.end, is_blank: segment.is_blank }))
-            : getVisibleContentSpans(layout.item).map((span, index) => ({ id: `fallback_${index}`, breath: Math.floor(span.start), start: Math.floor(span.start), end: Math.max(Math.floor(span.start), Math.floor(span.end)), is_blank: false }));
         drawPropertyRowSegments(c, {
           currentRect: rect,
           rowY,
-          segments: rasterSpans.map((span) => {
-            const resolvedSpan = getResolvedRasterSpan(group, span);
-            return { ...span, start: resolvedSpan.start, end: resolvedSpan.end };
-          }),
+          segments: getPreviewRasterRowSegments(group, descriptor.property_id),
           cellForBreath: (segment, breath) => {
             const localIndex = breath - segment.start;
             const visible = isBreathInsideGroupCrop(layout.item, breath);
@@ -1659,8 +1729,10 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
               interaction: interactionStyle,
               muted_rgb: mutedColor,
               selected_rgb: visibleColor,
+              content_rgb: segment.dominant_rgb,
+              blank_rgb: rasterDefaultColor,
             });
-            const baseWeight = visible ? (isSingle || isFirst || isLast ? 2 : 1) : 1;
+            const baseWeight = segment.is_blank ? (visible ? (isSingle || isFirst || isLast ? 2 : 1) : 1) : 0;
             return {
               char: getRasterCellChar({ visible, isSingle, isFirst, isLast, isBlank: segment.is_blank }),
               rgb: visualStyle.rgb,

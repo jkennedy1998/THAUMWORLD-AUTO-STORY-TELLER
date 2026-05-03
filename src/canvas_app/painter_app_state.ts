@@ -1230,6 +1230,25 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     return [...display_group_order].reverse();
   }
 
+  function getDominantRasterBlockRgb(block: { type: string; value?: unknown }): { r: number; g: number; b: number } | undefined {
+    if (block.type !== 'content') return undefined;
+    const value = block.value as { kind?: string; voxels?: Array<{ rgb: { r: number; g: number; b: number } }> } | undefined;
+    if (value?.kind !== 'raster' || !Array.isArray(value.voxels) || value.voxels.length < 1) return undefined;
+    const counts = new Map<string, { rgb: { r: number; g: number; b: number }; count: number; firstIndex: number }>();
+    value.voxels.forEach((voxel, index) => {
+      const rgb = voxel.rgb;
+      const key = `${Math.floor(rgb.r)},${Math.floor(rgb.g)},${Math.floor(rgb.b)}`;
+      const existing = counts.get(key);
+      if (existing) existing.count += 1;
+      else counts.set(key, { rgb: { r: Math.floor(rgb.r), g: Math.floor(rgb.g), b: Math.floor(rgb.b) }, count: 1, firstIndex: index });
+    });
+    let winner: { rgb: { r: number; g: number; b: number }; count: number; firstIndex: number } | null = null;
+    for (const entry of counts.values()) {
+      if (!winner || entry.count > winner.count || (entry.count === winner.count && entry.firstIndex < winner.firstIndex)) winner = entry;
+    }
+    return winner?.rgb;
+  }
+
   function getPainterGroupListItems(): GroupListItem[] {
     const displayOrder = getPainterGroupDisplayOrder();
     return displayOrder.map((group_id) => {
@@ -1253,6 +1272,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
               start: block.start,
               end: block.end,
               is_blank: block.type === 'blank',
+              dominant_rgb: property.kind === 'raster' ? getDominantRasterBlockRgb(block) : undefined,
             })),
         }));
       return {

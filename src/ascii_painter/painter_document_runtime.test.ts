@@ -345,11 +345,9 @@ const blankSwapBefore = { start: blankSwapRuntime.document.groups[blankSwapGroup
 swap_painter_group_raster_segments(blankSwapRuntime, blankSwapGroupId, 'guard_blank', 'guard_content');
 const blankSwapGroup = blankSwapRuntime.document.groups[blankSwapGroupId]!;
 const blankSwapBlocks = get_painter_group_properties_by_kind(blankSwapGroup, 'raster')[0]!.blocks;
-assert(blankSwapBlocks[0]!.id === 'guard_blank' && blankSwapBlocks[0]!.start === 0 && blankSwapBlocks[0]!.end === 1, 'blank/content swap should move blank into the content span');
-assert(blankSwapBlocks[1]!.id === 'guard_content' && blankSwapBlocks[1]!.start === 2 && blankSwapBlocks[1]!.end === 4, 'blank/content swap should move content into the blank span');
-assert(get_painter_group_content_state_at_breath(blankSwapGroup, 0)?.content.length === 0, 'old content span should become blank after blank/content swap');
+assert(blankSwapBlocks.length === 1 && blankSwapBlocks[0]!.id === 'guard_content' && blankSwapBlocks[0]!.start === 2 && blankSwapBlocks[0]!.end === 4, 'blank/content swap should delete blank when it lands on an edge');
 assert(get_painter_group_content_state_at_breath(blankSwapGroup, 2)?.content[0]?.char === 'C', 'old blank span should receive content after blank/content swap');
-assert(blankSwapGroup.start === blankSwapBefore.start && blankSwapGroup.breath_end === blankSwapBefore.end, 'blank/content swap should preserve total group time bounds');
+assert(blankSwapGroup.start === 2 && blankSwapGroup.breath_end === blankSwapBefore.end, 'edge blank deletion should trim group start to remaining content');
 assertRasterBlocksDoNotOverlap(blankSwapGroup, 'blank/content swap should not leave overlapping raster blocks');
 
 const blankedRuntime = normalize_painter_document_runtime(create_painter_document(8, 8, { default_group_name: 'Blank Segment' }));

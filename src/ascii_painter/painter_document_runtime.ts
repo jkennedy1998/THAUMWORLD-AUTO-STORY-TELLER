@@ -315,6 +315,20 @@ function merge_adjacent_property_blocks(property: PainterProperty): void {
   property.blocks = merged;
 }
 
+function remove_edge_blank_property_blocks(property: PainterProperty): string[] {
+  normalize_property_blocks_in_place(property);
+  const removedIds: string[] = [];
+  while (property.blocks[0]?.type === 'blank') {
+    removedIds.push(property.blocks[0].id);
+    property.blocks.shift();
+  }
+  while (property.blocks[property.blocks.length - 1]?.type === 'blank') {
+    const removed = property.blocks.pop();
+    if (removed) removedIds.push(removed.id);
+  }
+  return removedIds;
+}
+
 function normalize_non_raster_hold_ranges(property: PainterProperty): void {
   if (property.kind === 'raster') return;
   normalize_property_blocks_in_place(property);
@@ -999,6 +1013,8 @@ export function swap_painter_group_raster_segments(runtime: PainterDocumentRunti
   targetResolved.block.start = sourceStart;
   targetResolved.block.end = sourceEnd;
   merge_adjacent_property_blocks(sourceResolved.property);
+  const removedEdgeBlankIds = remove_edge_blank_property_blocks(sourceResolved.property);
+  if (removedEdgeBlankIds.length > 0) merge_adjacent_property_blocks(sourceResolved.property);
   sync_group_timing_from_properties(group);
   if (group.metadata) group.metadata.modified_at = new Date().toISOString();
   touch_modified_at(runtime.document);
@@ -1009,6 +1025,7 @@ export function swap_painter_group_raster_segments(runtime: PainterDocumentRunti
     source_content_state_id: sourceContentStateId,
     target_content_state_id: targetContentStateId,
     before,
+    removed_edge_blank_ids: removedEdgeBlankIds,
     after: summarize_painter_group_timeline(group),
   });
 }
