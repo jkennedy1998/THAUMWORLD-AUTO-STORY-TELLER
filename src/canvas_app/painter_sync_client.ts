@@ -1,5 +1,5 @@
 import { debug_warn } from '../shared/debug.js';
-import type { PainterChannelKind, PainterChannelValue } from '../ascii_painter/painter_document.js';
+import type { PainterPropertyKind, PainterPropertyValue } from '../ascii_painter/painter_document.js';
 import type { PainterDocumentAuthorityMode, PainterDocumentBootstrap, PainterSelectionChannelSnapshot } from '../shared/painter_protocol.js';
 import { create_painter_multiplayer_session } from './painter_multiplayer_session.js';
 
@@ -34,7 +34,7 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
   submit_selection: (args: { document_id?: string | null; cells: Array<{ x: number; y: number; z: number }>; color_rgb: { r: number; g: number; b: number } }) => Promise<PainterSyncState>;
   submit_cell_changes: (group_id: string, breath: number, auto_key: boolean, changes: Array<{ x: number; y: number; z: number; cell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number; render_index?: number } }>) => Promise<PainterSyncState>;
   submit_group_command: (command: {
-    kind: 'set_document_timing' | 'set_document_loop_window' | 'create_group' | 'offset_group_in_time' | 'set_group_timing' | 'set_group_breath_span' | 'set_group_raster_segment_length' | 'split_group_raster_segment' | 'swap_group_raster_segments' | 'blank_group_raster_segment' | 'trim_group_raster_segment_edge' | 'merge_group_blank_segment' | 'compact_group_blank_segment_left' | 'move_group_raster_segment' | 'set_group_raster_segment_edge_destructive' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'set_group_content_state' | 'set_group_channel_key' | 'move_group_channel_key' | 'move_group_property_block' | 'reorder_groups' | 'reset_document' | 'undo_group' | 'redo_group';
+    kind: 'set_document_timing' | 'set_document_loop_window' | 'create_group' | 'offset_group_in_time' | 'set_group_timing' | 'set_group_breath_span' | 'set_group_property_block_length' | 'split_group_property_block' | 'swap_group_property_blocks' | 'blank_group_property_block' | 'trim_group_property_block_edge' | 'merge_group_blank_property_block' | 'compact_group_blank_property_block_left' | 'set_group_property_block_edge_destructive' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'set_group_raster_state' | 'set_group_property_block' | 'move_group_property_block' | 'reorder_groups' | 'reset_document' | 'undo_group' | 'redo_group';
     group_id?: string;
     source_group_id?: string;
     target_group_id?: string;
@@ -51,20 +51,17 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
     start?: number;
     cropped_start?: number;
     cropped_end?: number;
-    content_state_id?: string;
-    source_content_state_id?: string;
-    target_content_state_id?: string;
+    property_id?: string;
+    property_kind?: PainterPropertyKind;
+    property_label?: string;
+    block_id?: string;
+    source_block_id?: string;
+    target_block_id?: string;
     split_breath?: number;
     length_breaths?: number;
     breath?: number;
     voxels?: Array<{ key: string; x: number; y: number; z: number; char: string; rgb: { r: number; g: number; b: number }; weight_index: number }>;
-    channel_id?: string | null;
-    channel_kind?: PainterChannelKind;
-    channel_label?: string;
-    property_id?: string;
-    block_id?: string;
-    value?: PainterChannelValue;
-    key_breath?: number;
+    value?: PainterPropertyValue;
     target_breath?: number;
     edge?: 'start' | 'end';
     direction?: 'left' | 'right';
@@ -379,7 +376,7 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
       return state;
     },
     async submit_group_command(command: {
-      kind: 'set_document_timing' | 'set_document_loop_window' | 'create_group' | 'offset_group_in_time' | 'set_group_timing' | 'set_group_breath_span' | 'set_group_raster_segment_length' | 'split_group_raster_segment' | 'swap_group_raster_segments' | 'blank_group_raster_segment' | 'trim_group_raster_segment_edge' | 'merge_group_blank_segment' | 'compact_group_blank_segment_left' | 'move_group_raster_segment' | 'set_group_raster_segment_edge_destructive' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'set_group_content_state' | 'set_group_channel_key' | 'move_group_channel_key' | 'move_group_property_block' | 'reorder_groups' | 'reset_document' | 'undo_group' | 'redo_group';
+      kind: 'set_document_timing' | 'set_document_loop_window' | 'create_group' | 'offset_group_in_time' | 'set_group_timing' | 'set_group_breath_span' | 'set_group_property_block_length' | 'split_group_property_block' | 'swap_group_property_blocks' | 'blank_group_property_block' | 'trim_group_property_block_edge' | 'merge_group_blank_property_block' | 'compact_group_blank_property_block_left' | 'set_group_property_block_edge_destructive' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'set_group_raster_state' | 'set_group_property_block' | 'move_group_property_block' | 'reorder_groups' | 'reset_document' | 'undo_group' | 'redo_group';
       group_id?: string;
       source_group_id?: string;
       target_group_id?: string;
@@ -396,20 +393,17 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
       start?: number;
       cropped_start?: number;
       cropped_end?: number;
-      content_state_id?: string;
-      source_content_state_id?: string;
-      target_content_state_id?: string;
+      property_id?: string;
+      property_kind?: PainterPropertyKind;
+      property_label?: string;
+      block_id?: string;
+      source_block_id?: string;
+      target_block_id?: string;
       split_breath?: number;
       length_breaths?: number;
       breath?: number;
       voxels?: Array<{ key: string; x: number; y: number; z: number; char: string; rgb: { r: number; g: number; b: number }; weight_index: number }>;
-      channel_id?: string | null;
-      channel_kind?: PainterChannelKind;
-      channel_label?: string;
-      property_id?: string;
-      block_id?: string;
-      value?: PainterChannelValue;
-      key_breath?: number;
+      value?: PainterPropertyValue;
       target_breath?: number;
       edge?: 'start' | 'end';
       direction?: 'left' | 'right';

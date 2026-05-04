@@ -1,4 +1,4 @@
-import type { PainterChannelKind, PainterChannelValue, PainterDocument, PainterVoxelRecord } from '../ascii_painter/painter_document.js';
+import type { PainterDocument, PainterPropertyKind, PainterPropertyValue, PainterVoxelRecord } from '../ascii_painter/painter_document.js';
 
 export type PainterDocumentAuthorityMode = 'local_compat' | 'authoritative_host';
 
@@ -54,22 +54,21 @@ export type PainterGroupCommand = {
     | 'offset_group_in_time'
     | 'set_group_timing'
     | 'set_group_breath_span'
-    | 'set_group_raster_segment_length'
-    | 'split_group_raster_segment'
-    | 'swap_group_raster_segments'
+    | 'set_group_property_block_length'
+    | 'split_group_property_block'
+    | 'swap_group_property_blocks'
     | 'delete_group'
     | 'duplicate_group'
     | 'rename_group'
     | 'set_group_visibility'
     | 'set_group_locked'
-    | 'set_group_channel_key'
-    | 'move_group_channel_key'
-    | 'blank_group_raster_segment'
-    | 'trim_group_raster_segment_edge'
-    | 'merge_group_blank_segment'
-    | 'compact_group_blank_segment_left'
-    | 'move_group_raster_segment'
-    | 'set_group_raster_segment_edge_destructive'
+    | 'set_group_property_block'
+    | 'blank_group_property_block'
+    | 'trim_group_property_block_edge'
+    | 'merge_group_blank_property_block'
+    | 'compact_group_blank_property_block_left'
+    | 'move_group_property_block'
+    | 'set_group_property_block_edge_destructive'
     | 'reorder_groups'
     | 'reset_document'
     | 'undo_group'
@@ -93,24 +92,23 @@ export type PainterGroupCommand = {
   start?: number;
   cropped_start?: number;
   cropped_end?: number;
-  content_state_id?: string;
-  source_content_state_id?: string;
-  target_content_state_id?: string;
+  property_id?: string;
+  property_kind?: PainterPropertyKind;
+  property_label?: string;
+  block_id?: string;
+  source_block_id?: string;
+  target_block_id?: string;
   split_breath?: number;
   length_breaths?: number;
   next_group_order?: string[];
-  channel_id?: string | null;
-  channel_kind?: PainterChannelKind;
-  channel_label?: string;
-  value?: PainterChannelValue;
-  key_breath?: number;
+  value?: PainterPropertyValue;
   target_breath?: number;
   edge?: 'start' | 'end';
   direction?: 'left' | 'right';
 };
 
-export type PainterGroupContentStateCommand = {
-  kind: 'set_group_content_state';
+export type PainterGroupRasterStateCommand = {
+  kind: 'set_group_raster_state';
   document_id: string;
   base_revision: number;
   command_id: string;
@@ -122,7 +120,7 @@ export type PainterGroupContentStateCommand = {
 export type PainterCommand =
   | PainterApplyGroupVoxelsCommand
   | PainterGroupCommand
-  | PainterGroupContentStateCommand;
+  | PainterGroupRasterStateCommand;
 
 export type PainterDocumentEvent = {
   type:

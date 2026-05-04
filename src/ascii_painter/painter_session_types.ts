@@ -1,4 +1,4 @@
-import type { PainterChannelKind, PainterChannelValue, PainterDocument, PainterGroup, PainterPropertyKind } from './painter_document.js';
+import type { PainterDocument, PainterGroup, PainterPropertyKind, PainterPropertyValue } from './painter_document.js';
 import type { PainterDocumentRuntime } from './painter_document_runtime.js';
 
 export type PainterGroupPlaneRegistry = {
@@ -20,28 +20,25 @@ export type PainterSessionGroupCommand =
   | { kind: 'offset_group_in_time'; group_id: string; delta_breaths: number }
   | { kind: 'set_group_timing'; group_id: string; start: number; cropped_start: number; cropped_end: number }
   | { kind: 'set_group_breath_span'; group_id: string; breath_start: number; breath_end: number }
-  | { kind: 'set_group_raster_segment_length'; group_id: string; content_state_id: string; length_breaths: number }
-  | { kind: 'split_group_raster_segment'; group_id: string; content_state_id: string; split_breath: number }
-  | { kind: 'swap_group_raster_segments'; group_id: string; source_content_state_id: string; target_content_state_id: string }
-  | { kind: 'blank_group_raster_segment'; group_id: string; content_state_id: string }
-  | { kind: 'trim_group_raster_segment_edge'; group_id: string; content_state_id: string; edge: 'start' | 'end' }
-  | { kind: 'merge_group_blank_segment'; group_id: string; content_state_id: string; direction: 'left' | 'right' }
-  | { kind: 'compact_group_blank_segment_left'; group_id: string; content_state_id: string }
-  | { kind: 'move_group_raster_segment'; group_id: string; content_state_id: string; target_breath: number }
-  | { kind: 'set_group_raster_segment_edge_destructive'; group_id: string; content_state_id: string; edge: 'start' | 'end'; target_breath: number }
+  | { kind: 'set_group_property_block_length'; group_id: string; property_id: string; block_id: string; length_breaths: number }
+  | { kind: 'split_group_property_block'; group_id: string; property_id: string; block_id: string; split_breath: number }
+  | { kind: 'swap_group_property_blocks'; group_id: string; property_id: string; source_block_id: string; target_block_id: string }
+  | { kind: 'blank_group_property_block'; group_id: string; property_id: string; block_id: string }
+  | { kind: 'trim_group_property_block_edge'; group_id: string; property_id: string; block_id: string; edge: 'start' | 'end' }
+  | { kind: 'merge_group_blank_property_block'; group_id: string; property_id: string; block_id: string; direction: 'left' | 'right' }
+  | { kind: 'compact_group_blank_property_block_left'; group_id: string; property_id: string; block_id: string }
+  | { kind: 'set_group_property_block_edge_destructive'; group_id: string; property_id: string; block_id: string; edge: 'start' | 'end'; target_breath: number }
   | { kind: 'delete_group'; group_id: string }
   | { kind: 'duplicate_group'; source_group_id: string }
   | { kind: 'rename_group'; group_id: string; group_name: string }
   | { kind: 'set_group_visibility'; group_id: string; visible: boolean }
   | { kind: 'set_group_locked'; group_id: string; locked: boolean }
-  | { kind: 'set_group_content_state'; group_id: string; breath: number; voxels: Array<{ key: string; x: number; y: number; z: number; char: string; rgb: { r: number; g: number; b: number }; weight_index: number }> }
+  | { kind: 'set_group_raster_state'; group_id: string; breath: number; voxels: Array<{ key: string; x: number; y: number; z: number; char: string; rgb: { r: number; g: number; b: number }; weight_index: number }> }
   | { kind: 'add_group_property'; group_id: string; property_kind: Extract<PainterPropertyKind, 'raster' | 'move'>; after_property_id?: string | null; property_label?: string }
   | { kind: 'remove_group_property'; group_id: string; property_id: string }
   | { kind: 'reorder_group_properties'; group_id: string; next_property_order: string[] }
-  | { kind: 'set_group_property_block'; group_id: string; property_kind: Extract<PainterPropertyKind, 'move' | 'rotation'>; property_id?: string | null; property_label?: string; breath: number; value: PainterChannelValue }
+  | { kind: 'set_group_property_block'; group_id: string; property_kind: Extract<PainterPropertyKind, 'move' | 'rotation'>; property_id?: string | null; property_label?: string; breath: number; value: PainterPropertyValue }
   | { kind: 'move_group_property_block'; group_id: string; property_id: string; block_id: string; target_breath: number }
-  | { kind: 'set_group_channel_key'; group_id: string; channel_kind: PainterChannelKind; channel_id?: string | null; channel_label?: string; breath: number; value: PainterChannelValue }
-  | { kind: 'move_group_channel_key'; group_id: string; channel_id: string; key_breath: number; target_breath: number }
   | { kind: 'reorder_groups'; next_group_order: string[] };
 
 export type PainterSessionCellChangeInput = {

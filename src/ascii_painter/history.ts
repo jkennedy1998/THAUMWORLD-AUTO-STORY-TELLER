@@ -8,7 +8,7 @@
 import type { GridCell, HistorySnapshot } from './types.js';
 import { getOrCreateLayer, type VoxelSpace } from './voxel_space.js';
 import type { SelectionBitmap } from './selection.js';
-import type { PainterGroup } from './painter_document.js';
+import { clone_painter_group, type PainterGroup } from './painter_document.js';
 
 // Action types
 export type ActionType = 
@@ -26,11 +26,11 @@ export type ActionType =
   | 'offset_group_in_time'
   | 'set_group_timing'
   | 'set_group_breath_span'
-  | 'set_group_raster_segment_length'
-  | 'split_group_raster_segment'
-  | 'swap_group_raster_segments'
-  | 'set_group_content_state'
-  | 'set_group_channel_key'
+  | 'set_group_property_block_length'
+  | 'split_group_property_block'
+  | 'swap_group_property_blocks'
+  | 'set_group_raster_state'
+  | 'set_group_property_block'
   | 'reorder_groups'
   | 'selection_change'; // Rect, lasso, clear, invert, select-all
 
@@ -173,25 +173,7 @@ function cloneCell(cell: GridCell): GridCell {
 }
 
 function clonePainterGroup(group: PainterGroup): PainterGroup {
-  return {
-    ...group,
-    content_states: group.content_states.map((state) => ({
-      ...state,
-      content: state.content.map((voxel) => ({
-        ...voxel,
-        rgb: { ...voxel.rgb },
-      })),
-    })),
-    location_base: { ...group.location_base },
-    location_keys: group.location_keys.map((key) => ({
-      breath: key.breath,
-      offset: { ...key.offset },
-    })),
-    metadata: group.metadata ? {
-      ...group.metadata,
-      origin: group.metadata.origin ? { ...group.metadata.origin } : undefined,
-    } : undefined,
-  };
+  return clone_painter_group(group);
 }
 
 /**
@@ -290,7 +272,7 @@ export function logSelectionAction(
 
 export function logGroupAction(
   history: HistoryManager,
-  type: 'create_group' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'offset_group_in_time' | 'set_group_timing' | 'set_group_breath_span' | 'set_group_raster_segment_length' | 'split_group_raster_segment' | 'swap_group_raster_segments' | 'set_group_content_state' | 'set_group_channel_key' | 'reorder_groups',
+  type: 'create_group' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'offset_group_in_time' | 'set_group_timing' | 'set_group_breath_span' | 'set_group_property_block_length' | 'split_group_property_block' | 'swap_group_property_blocks' | 'set_group_raster_state' | 'set_group_property_block' | 'reorder_groups',
   description: string,
   options: {
     groupId?: string;

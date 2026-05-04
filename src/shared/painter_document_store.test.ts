@@ -1,9 +1,22 @@
-import { create_painter_document, create_painter_group, make_painter_coord_key } from '../ascii_painter/painter_document.js';
+import { create_painter_document, create_painter_group, get_painter_group_raster_state_at_breath, make_painter_coord_key, type PainterGroup } from '../ascii_painter/painter_document.js';
 import { normalize_painter_document_runtime, resolve_painter_voxel_winner } from '../ascii_painter/painter_document_runtime.js';
 import { apply_painter_group_structure_change, apply_painter_group_structure_command, apply_painter_group_voxel_changes, apply_painter_group_voxel_command, redo_painter_group_changes, save_painter_document_snapshot, undo_painter_group_changes } from './painter_document_store.js';
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
+}
+
+function firstPropertyId(group: PainterGroup, kind: 'raster' | 'move'): string {
+  const propertyId = group.property_ids.find((id) => group.properties[id]?.kind === kind);
+  if (!propertyId) throw new Error(`missing_property:${kind}`);
+  return propertyId;
+}
+
+function groupHasRasterChar(group: PainterGroup, char: string): boolean {
+  return group.property_ids.some((propertyId) => {
+    const property = group.properties[propertyId];
+    return property?.kind === 'raster' && property.blocks.some((block) => block.type === 'content' && block.value.kind === 'raster' && block.value.voxels.some((voxel) => voxel.char === char));
+  });
 }
 
 const slot = 997;
@@ -90,7 +103,7 @@ runtime = normalize_painter_document_runtime(reordered.snapshot);
 assert(runtime.document.group_order[0] === top_group_id, 'reorder_groups should change authored group order in stored snapshot');
 winner = resolve_painter_voxel_winner(runtime, key);
 assert(winner.winning_group_id === base_group_id, 'reordering groups should change exact overlap winner without deleting top group voxels');
-assert(runtime.document.groups[top_group_id]?.content_states.some((state) => state.content.some((voxel) => voxel.char === 'B')) === true, 'reordering groups should preserve top group authored voxel data');
+assert(groupHasRasterChar(runtime.document.groups[top_group_id]!, 'B') === true, 'reordering groups should preserve top group authored voxel data');
 
 const retimed = apply_painter_group_structure_change(slot, with_top_group.document_id, {
   kind: 'set_document_timing',
@@ -121,8 +134,8 @@ breathDocument.groups[breathGroupId]!.cropped_start = 2;
 breathDocument.groups[breathGroupId]!.cropped_end = 4;
 breathDocument.groups[breathGroupId]!.breath_start = 2;
 breathDocument.groups[breathGroupId]!.breath_end = 4;
-breathDocument.groups[breathGroupId]!.content_states[0]!.length_breaths = 3;
-breathDocument.groups[breathGroupId]!.content_states[0]!.content = [];
+const breathRasterPropertyId = firstPropertyId(breathDocument.groups[breathGroupId]!, 'raster');
+breathDocument.groups[breathGroupId]!.properties[breathRasterPropertyId]!.blocks = [{ id: 'breath_blank', type: 'blank', start: 2, end: 4, mode: 'clip', left_boundary: 'clip', right_boundary: 'clip' }];
 const breathDocumentId = `painter_store_breath_${Date.now()}`;
 save_painter_document_snapshot(slot, {
   document_id: breathDocumentId,
@@ -137,15 +150,18 @@ const appliedAtBreath = apply_painter_group_voxel_command(slot, breathDocumentId
   cell: { char: 'K', rgb: { r: 255, g: 255, b: 255 }, weight_index: 1 },
 }], { breath: 3, auto_key: true });
 runtime = normalize_painter_document_runtime(appliedAtBreath.snapshot.snapshot);
-assert(runtime.document.groups[breathGroupId]!.content_states.length === 3, 'authoritative voxel apply should create a one-breath frame at the requested breath');
-assert(runtime.document.groups[breathGroupId]!.content_states[1]!.length_breaths === 1, 'authoritative voxel apply should isolate the requested breath');
-assert(runtime.document.groups[breathGroupId]!.content_states[1]!.content[0]?.char === 'K', 'authoritative voxel apply should write into the targeted breath frame');
+let breathBlocks = runtime.document.groups[breathGroupId]!.properties[breathRasterPropertyId]!.blocks;
+assert(breathBlocks.length === 3, 'authoritative voxel apply should create a one-breath raster block at the requested breath');
+assert(breathBlocks[1]!.start === 3 && breathBlocks[1]!.end === 3, 'authoritative voxel apply should isolate the requested breath');
+assert(get_painter_group_raster_state_at_breath(runtime.document.groups[breathGroupId]!, 3)?.content[0]?.char === 'K', 'authoritative voxel apply should write into the targeted breath frame');
 const undoneBreath = undo_painter_group_changes(slot, breathDocumentId, breathGroupId);
 runtime = normalize_painter_document_runtime(undoneBreath.snapshot);
-assert(runtime.document.groups[breathGroupId]!.content_states[1]!.content.length === 0, 'undo should clear the targeted breath frame without shifting to another breath');
+breathBlocks = runtime.document.groups[breathGroupId]!.properties[breathRasterPropertyId]!.blocks;
+assert(breathBlocks.some((block) => block.start <= 3 && block.end >= 3), 'undo should keep the targeted breath represented in the raster block timeline');
+assert(get_painter_group_raster_state_at_breath(runtime.document.groups[breathGroupId]!, 3)?.content.length === 0, 'undo should clear the targeted breath frame without restoring raster content');
 const redoneBreath = redo_painter_group_changes(slot, breathDocumentId, breathGroupId);
 runtime = normalize_painter_document_runtime(redoneBreath.snapshot);
-assert(runtime.document.groups[breathGroupId]!.content_states[1]!.content[0]?.char === 'K', 'redo should restore the targeted breath frame content');
+assert(get_painter_group_raster_state_at_breath(runtime.document.groups[breathGroupId]!, 3)?.content[0]?.char === 'K', 'redo should restore the targeted breath frame content');
 
 const singleGroupDocumentId = `painter_store_single_group_${Date.now()}`;
 save_painter_document_snapshot(slot, {

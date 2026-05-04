@@ -1,32 +1,25 @@
 import {
   clone_painter_document_breath,
   clone_painter_document_playback,
-  clone_painter_channel,
   create_painter_group,
-  derive_painter_group_properties_from_legacy_state,
   clone_painter_document,
   clone_painter_group,
   clone_painter_property,
   clone_painter_voxel_record,
-  get_default_channel_value,
-  get_painter_group_content_state_at_breath,
+  get_painter_group_raster_state_at_breath,
   make_painter_coord_key,
-  type PainterChannel,
-  type PainterChannelKind,
-  type PainterChannelKey,
-  normalize_painter_group_content_states,
   type PainterCoordKey,
   type PainterDocument,
   type PainterGroup,
-  type PainterGroupContentState,
-  type PainterGroupLocationKey,
   type PainterGroupLocationOffset,
+  type PainterGroupRasterState,
   type PainterOccupiedBounds,
   type PainterProperty,
   type PainterPropertyBlock,
+  type PainterPropertyValue,
   type PainterVoxelRecord,
 } from './painter_document.js';
-import { derive_group_breath_range, derive_group_raster_segment_ranges, evaluate_channel_at_breath, get_exact_channel_key, get_nearest_channel_key } from './painter_breath.js';
+import { derive_group_breath_range, derive_group_raster_segment_ranges } from './painter_breath.js';
 
 export type ResolvedPainterVoxel = {
   x: number;
@@ -157,27 +150,8 @@ function normalize_document_bounds(bounds: PainterDocument['bounds']): PainterDo
   };
 }
 
-function clone_location_offset(offset: PainterGroupLocationOffset): PainterGroupLocationOffset {
-  return { x: offset.x, y: offset.y, z: offset.z };
-}
-
-function is_zero_location_offset(offset: PainterGroupLocationOffset): boolean {
-  return offset.x === 0 && offset.y === 0 && offset.z === 0;
-}
-
 function add_offset(a: PainterGroupLocationOffset, b: PainterGroupLocationOffset): PainterGroupLocationOffset {
   return { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z };
-}
-
-function get_group_channels_by_kind(group: PainterGroup, kind: PainterChannelKind): PainterChannel[] {
-  const orderedIds = Array.isArray(group.channel_ids) ? group.channel_ids : [];
-  const out: PainterChannel[] = [];
-  for (const id of orderedIds) {
-    const channel = group.channels?.[id];
-    if (!channel || channel.kind !== kind) continue;
-    out.push(channel);
-  }
-  return out;
 }
 
 export function get_painter_group_properties_by_kind(group: PainterGroup, kind: PainterProperty['kind']): PainterProperty[] {
@@ -189,26 +163,6 @@ export function get_painter_group_properties_by_kind(group: PainterGroup, kind: 
     out.push(clone_painter_property(property));
   }
   return out;
-}
-
-function sync_group_properties_compat(group: PainterGroup): void {
-  const derived = derive_painter_group_properties_from_legacy_state({
-    channels: group.channels,
-    channel_ids: group.channel_ids,
-    content_states: group.content_states,
-    group_start: group.start,
-  });
-  const nextProperties: Record<string, PainterGroup['properties'][string]> = { ...group.properties };
-  for (const [propertyId, property] of Object.entries(derived.properties)) nextProperties[propertyId] = property;
-  const nextPropertyIds = [...group.property_ids.filter((propertyId) => !!nextProperties[propertyId])];
-  for (const propertyId of derived.property_ids) {
-    if (!nextPropertyIds.includes(propertyId)) nextPropertyIds.push(propertyId);
-  }
-  for (const propertyId of Object.keys(nextProperties)) {
-    if (!nextPropertyIds.includes(propertyId)) nextPropertyIds.push(propertyId);
-  }
-  group.property_ids = nextPropertyIds;
-  group.properties = nextProperties;
 }
 
 export function get_active_painter_property_block_at_breath(property: PainterProperty, breath: number): PainterPropertyBlock | null {
@@ -332,12 +286,6 @@ function remove_edge_blank_property_blocks(property: PainterProperty): string[] 
 function normalize_non_raster_hold_ranges(property: PainterProperty): void {
   if (property.kind === 'raster') return;
   normalize_property_blocks_in_place(property);
-  for (let index = 0; index < property.blocks.length; index += 1) {
-    const block = property.blocks[index]!;
-    const next = property.blocks[index + 1] ?? null;
-    if (next) block.end = Math.max(block.start, next.start - 1);
-    else block.end = Math.max(block.start, block.end);
-  }
 }
 
 function find_property_and_block(group: PainterGroup, blockId: string, kind?: PainterProperty['kind']): { property: PainterProperty; block: PainterPropertyBlock; index: number } | null {
@@ -348,6 +296,14 @@ function find_property_and_block(group: PainterGroup, blockId: string, kind?: Pa
     if (index >= 0) return { property, block: property.blocks[index]!, index };
   }
   return null;
+}
+
+function find_exact_property_block(group: PainterGroup, propertyId: string, blockId: string): { property: PainterProperty; block: PainterPropertyBlock; index: number } | null {
+  const property = group.properties?.[propertyId] ?? null;
+  if (!property) return null;
+  const index = property.blocks.findIndex((block) => block.id === blockId);
+  if (index < 0) return null;
+  return { property, block: property.blocks[index]!, index };
 }
 
 function get_primary_property(group: PainterGroup, kind: PainterProperty['kind'], createIfMissing: boolean): PainterProperty | null {
@@ -383,264 +339,12 @@ function sync_group_timing_from_properties(group: PainterGroup): void {
   group.breath_end = group.cropped_end;
 }
 
-function ensure_group_channel(group: PainterGroup, args: { kind: PainterChannelKind; label: string; channel_id?: string | null }): PainterChannel {
-  const requestedId = String(args.channel_id ?? '').trim();
-  if (requestedId && group.channels[requestedId]) return group.channels[requestedId]!;
-  const existing = get_group_channels_by_kind(group, args.kind)[0] ?? null;
-  if (existing) return existing;
-  const id = requestedId || `${args.kind}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  const channel = clone_painter_channel({
-    id,
-    kind: args.kind,
-    label: args.label,
-    gap_behavior: 'clip',
-    before_first_behavior: 'none',
-    after_last_behavior: 'none',
-    keys: [],
-  });
-  group.channels[id] = channel;
-  group.channel_ids = [...group.channel_ids.filter((channelId) => channelId !== id), id];
-  sync_group_properties_compat(group);
-  return channel;
-}
-
-function set_channel_key(channel: PainterChannel, breath: number, value: PainterChannelKey['value']): void {
-  const targetBreath = Math.max(0, Math.floor(breath));
-  const nextKey: PainterChannelKey = {
-    id: channel.keys.find((key) => key.breath === targetBreath)?.id ?? `channel_key_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    breath: targetBreath,
-    value: structuredClone(value),
-  };
-  const nextKeys = channel.keys.filter((key) => key.breath !== targetBreath);
-  nextKeys.push(nextKey);
-  channel.keys = nextKeys.sort((a, b) => a.breath - b.breath || a.id.localeCompare(b.id));
-}
-
-function move_channel_key_by_id(channel: PainterChannel, keyId: string, targetBreath: number): void {
-  const normalizedKeyId = String(keyId ?? '').trim();
-  const nextBreath = Math.max(0, Math.floor(targetBreath));
-  const sourceKey = channel.keys.find((key) => key.id === normalizedKeyId) ?? null;
-  if (!sourceKey) throw new Error(`painter_channel_key_id_not_found:${normalizedKeyId}`);
-  const nextKeys = channel.keys.filter((key) => key.id !== normalizedKeyId && key.breath !== nextBreath);
-  nextKeys.push({ ...sourceKey, breath: nextBreath });
-  channel.keys = nextKeys.sort((a, b) => a.breath - b.breath || a.id.localeCompare(b.id));
-}
-
 function make_runtime_property_id(kind: string): string {
   return `${kind}_property_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function make_runtime_property_block_id(): string {
   return `property_block_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function resolve_primary_location_channel(group: PainterGroup): PainterChannel | null {
-  return get_group_channels_by_kind(group, 'location')[0] ?? null;
-}
-
-function resolve_primary_raster_channel(group: PainterGroup): PainterChannel | null {
-  return get_group_channels_by_kind(group, 'raster_content')[0] ?? null;
-}
-
-function sync_raster_channel_from_content_states(group: PainterGroup): void {
-  const channel = ensure_group_channel(group, { kind: 'raster_content', label: 'content', channel_id: resolve_primary_raster_channel(group)?.id ?? null });
-  let cursor = Math.max(0, Math.floor(group.start ?? group.breath_start ?? 0));
-  const keys = normalize_painter_group_content_states(group.content_states).map((state) => {
-    const nextKey: PainterChannelKey = {
-      id: state.id,
-      breath: cursor,
-      value: {
-        kind: 'raster',
-        voxels: state.content.map(clone_painter_voxel_record),
-      },
-    };
-    cursor += Math.max(1, Math.floor(state.length_breaths ?? 1));
-    return nextKey;
-  });
-  keys.push({
-    id: `${channel.id}_terminal`,
-    breath: cursor,
-    value: { kind: 'raster', voxels: [] },
-  });
-  channel.keys = keys;
-  sync_group_properties_compat(group);
-}
-
-function set_group_content_state_array(group: PainterGroup, stateId: string, voxelMap: Map<string, PainterVoxelRecord>): void {
-  group.content_states = normalize_painter_group_content_states(
-    group.content_states.map((state) => state.id === stateId
-      ? { ...state, content: Array.from(voxelMap.values()).map(clone_painter_voxel_record) }
-      : state),
-    undefined
-  );
-  sync_raster_channel_from_content_states(group);
-  sync_group_properties_compat(group);
-  if (group.metadata) group.metadata.modified_at = new Date().toISOString();
-}
-
-function create_content_state_id(): string {
-  return `content_state_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function create_empty_content_state(label: string, length_breaths: number): PainterGroupContentState {
-  return {
-    id: create_content_state_id(),
-    label,
-    index: 0,
-    length_breaths: Math.max(1, Math.floor(length_breaths)),
-    content: [],
-  };
-}
-
-function is_blank_content_state(state: PainterGroupContentState): boolean {
-  return state.content.length < 1;
-}
-
-function normalize_raster_blank_states(group: PainterGroup): void {
-  group.content_states = normalize_painter_group_content_states(group.content_states);
-  sync_group_properties_compat(group);
-}
-
-function merge_adjacent_blank_raster_states(group: PainterGroup): void {
-  const normalized = normalize_painter_group_content_states(group.content_states);
-  const merged: PainterGroupContentState[] = [];
-  for (const state of normalized) {
-    const last = merged[merged.length - 1] ?? null;
-    if (last && is_blank_content_state(last) && is_blank_content_state(state)) {
-      last.length_breaths += Math.max(1, state.length_breaths);
-      continue;
-    }
-    merged.push({ ...state });
-  }
-  group.content_states = merged.map((state, index) => ({ ...state, index }));
-  sync_group_properties_compat(group);
-}
-
-function trim_terminal_blank_raster_states(group: PainterGroup): void {
-  while (group.content_states.length > 0 && is_blank_content_state(group.content_states[0]!)) group.content_states.shift();
-  while (group.content_states.length > 0 && is_blank_content_state(group.content_states[group.content_states.length - 1]!)) group.content_states.pop();
-  group.content_states = group.content_states.map((state, index) => ({ ...state, index }));
-  sync_group_properties_compat(group);
-}
-
-type RasterTimelineCell = {
-  source_id: string;
-  label: string;
-  content: PainterVoxelRecord[];
-};
-
-function build_raster_timeline_cells(group: PainterGroup): { start: number; end: number; cells: Array<RasterTimelineCell | null> } {
-  const segments = derive_group_raster_segment_ranges(group);
-  const start = segments.length > 0
-    ? segments.reduce((min, segment) => Math.min(min, segment.start), Number.POSITIVE_INFINITY)
-    : Math.max(0, Math.floor(group.start ?? group.breath_start ?? 0));
-  const end = segments.length > 0
-    ? segments.reduce((max, segment) => Math.max(max, segment.end), Math.max(0, start))
-    : Math.max(start, Math.floor(group.breath_end ?? group.cropped_end ?? start));
-  const cells: Array<RasterTimelineCell | null> = [];
-  for (let breath = start; breath <= end; breath += 1) cells.push(null);
-  for (const segment of segments) {
-    const cell = segment.state.content.length <= 0
-      ? null
-      : {
-          source_id: segment.segment_id,
-          label: segment.state.label,
-          content: segment.state.content.map(clone_painter_voxel_record),
-        } satisfies RasterTimelineCell;
-    for (let breath = segment.start; breath <= segment.end; breath += 1) {
-      cells[breath - start] = cell ? { ...cell, content: cell.content.map(clone_painter_voxel_record) } : null;
-    }
-  }
-  return {
-    start,
-    end: Math.max(start, end),
-    cells,
-  };
-}
-
-function rebuild_raster_states_from_timeline(group: PainterGroup, timelineStart: number, cells: Array<RasterTimelineCell | null>): void {
-  let firstContent = -1;
-  let lastContent = -1;
-  for (let i = 0; i < cells.length; i += 1) {
-    if (!cells[i]) continue;
-    if (firstContent < 0) firstContent = i;
-    lastContent = i;
-  }
-  if (firstContent < 0 || lastContent < 0) {
-    group.content_states = [{ ...create_empty_content_state('Blank', Math.max(1, cells.length || 1)), index: 0 }];
-    group.start = Math.max(0, timelineStart);
-    sync_group_timing_compat(group, { preserve_blank_boundaries: true });
-    return;
-  }
-  const trimmed = cells.slice(firstContent, lastContent + 1);
-  group.start = Math.max(0, timelineStart + firstContent);
-  const nextStates: PainterGroupContentState[] = [];
-  const idUsage = new Map<string, number>();
-  let cursor = 0;
-  while (cursor < trimmed.length) {
-    const cell = trimmed[cursor] ?? null;
-    let runEnd = cursor;
-    while (runEnd + 1 < trimmed.length) {
-      const next = trimmed[runEnd + 1] ?? null;
-      if (cell === null && next === null) {
-        runEnd += 1;
-        continue;
-      }
-      if (cell !== null && next !== null && next.source_id === cell.source_id && next.label === cell.label) {
-        runEnd += 1;
-        continue;
-      }
-      break;
-    }
-    const length = runEnd - cursor + 1;
-    if (cell === null) {
-      nextStates.push({ ...create_empty_content_state('Blank', length), index: nextStates.length });
-    } else {
-      const seen = idUsage.get(cell.source_id) ?? 0;
-      idUsage.set(cell.source_id, seen + 1);
-      nextStates.push({
-        id: seen === 0 ? cell.source_id : create_content_state_id(),
-        label: cell.label,
-        index: nextStates.length,
-        length_breaths: length,
-        content: cell.content.map(clone_painter_voxel_record),
-      });
-    }
-    cursor = runEnd + 1;
-  }
-  group.content_states = nextStates;
-  sync_group_timing_compat(group, { preserve_blank_boundaries: true });
-}
-
-function sync_group_timing_compat(group: PainterGroup, opts?: { preserve_blank_boundaries?: boolean }): void {
-  let cursor = Math.max(0, Math.floor(group.start ?? 0));
-  if (opts?.preserve_blank_boundaries !== true) normalize_raster_blank_states(group);
-  group.content_states = normalize_painter_group_content_states(group.content_states).map((state, index) => {
-    const next = {
-      ...state,
-      index,
-      length_breaths: Math.max(1, Math.floor(state.length_breaths ?? 1)),
-    };
-    cursor += next.length_breaths;
-    return next;
-  });
-  sync_raster_channel_from_content_states(group);
-  const derivativeEnd = Math.max(Math.max(0, Math.floor(group.start ?? 0)), cursor - 1);
-  group.cropped_start = Math.max(Math.floor(group.start ?? 0), Math.floor(group.cropped_start ?? group.start ?? 0));
-  group.cropped_end = Math.max(group.cropped_start, Math.min(Math.floor(group.cropped_end ?? derivativeEnd), derivativeEnd));
-  group.breath_start = group.cropped_start;
-  group.breath_end = group.cropped_end;
-  sync_group_properties_compat(group);
-}
-
-function sync_group_crop_to_content_bounds(group: PainterGroup): void {
-  sync_group_timing_compat(group);
-  const derivativeEnd = derive_group_breath_range(group).derivative_end;
-  const start = Math.max(0, Math.floor(group.start ?? 0));
-  group.cropped_start = start;
-  group.cropped_end = derivativeEnd;
-  group.breath_start = group.cropped_start;
-  group.breath_end = group.cropped_end;
 }
 
 function scan_world_extents_from_voxel_maps(voxelMaps: Iterable<Map<string, PainterVoxelRecord>>): PainterVoxelExtents | null {
@@ -735,45 +439,32 @@ export function is_painter_group_active_at_breath(group: PainterGroup, breath: n
 }
 
 export function resolve_painter_group_location_at_breath(group: PainterGroup, breath: number): PainterGroupLocationOffset {
-  const properties = get_painter_group_properties_by_kind(group, 'move');
-  if (properties.length > 0) {
-    return properties.reduce((resolved, property) => {
-      const block = get_active_painter_property_block_at_breath(property, breath);
-      if (!block || block.type !== 'content' || block.value.kind !== 'vec3') return resolved;
-      return add_offset(resolved, { x: block.value.x, y: block.value.y, z: block.value.z });
-    }, { x: 0, y: 0, z: 0 } satisfies PainterGroupLocationOffset);
-  }
-  return get_group_channels_by_kind(group, 'location').reduce((resolved, channel) => {
-    const value = evaluate_channel_at_breath(channel, breath);
-    return value.kind === 'vec3'
-      ? add_offset(resolved, { x: value.x, y: value.y, z: value.z })
-      : resolved;
+  return get_painter_group_properties_by_kind(group, 'move').reduce((resolved, property) => {
+    const block = get_active_painter_property_block_at_breath(property, breath);
+    if (!block || block.type !== 'content' || block.value.kind !== 'vec3') return resolved;
+    return add_offset(resolved, { x: block.value.x, y: block.value.y, z: block.value.z });
   }, { x: 0, y: 0, z: 0 } satisfies PainterGroupLocationOffset);
 }
 
-export function resolve_nearest_painter_group_location_key(group: PainterGroup, breath: number): PainterGroupLocationKey | null {
-  const channel = resolve_primary_location_channel(group);
-  const key = channel ? get_nearest_channel_key(channel, breath) : null;
-  return key && key.value.kind === 'vec3'
-    ? { breath: key.breath, offset: { x: key.value.x, y: key.value.y, z: key.value.z } }
-    : null;
-}
+export type PainterGroupMoveBlockSnapshot = { property_id: string; block_id: string; breath: number; offset: PainterGroupLocationOffset };
 
-export function get_exact_painter_group_location_key(group: PainterGroup, breath: number): PainterGroupLocationKey | null {
-  const channel = resolve_primary_location_channel(group);
-  const key = channel ? get_exact_channel_key(channel, breath) : null;
-  return key && key.value.kind === 'vec3'
-    ? { breath: key.breath, offset: { x: key.value.x, y: key.value.y, z: key.value.z } }
-    : null;
-}
-
-export function set_painter_group_location_key(runtime: PainterDocumentRuntime, groupId: string, breath: number, offset: PainterGroupLocationOffset): void {
-  set_painter_group_channel_key(runtime, groupId, {
-    channel_kind: 'location',
-    channel_label: 'move',
-    breath,
-    value: { kind: 'vec3', x: offset.x, y: offset.y, z: offset.z },
-  });
+export function resolve_nearest_painter_group_move_block(group: PainterGroup, breath: number): PainterGroupMoveBlockSnapshot | null {
+  const targetBreath = Math.floor(breath);
+  let best: PainterGroupMoveBlockSnapshot | null = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const propertyId of Array.isArray(group.property_ids) ? group.property_ids : []) {
+    const property = group.properties?.[propertyId];
+    if (!property || property.kind !== 'move') continue;
+    for (const block of property.blocks) {
+      if (block.type !== 'content' || block.value.kind !== 'vec3') continue;
+      const distance = Math.abs(block.start - targetBreath);
+      if (distance > bestDistance) continue;
+      if (distance === bestDistance && best && block.start >= best.breath) continue;
+      best = { property_id: property.id, block_id: block.id, breath: block.start, offset: { x: block.value.x, y: block.value.y, z: block.value.z } };
+      bestDistance = distance;
+    }
+  }
+  return best;
 }
 
 export function set_painter_group_property_block(runtime: PainterDocumentRuntime, groupId: string, args: {
@@ -781,7 +472,7 @@ export function set_painter_group_property_block(runtime: PainterDocumentRuntime
   property_label?: string;
   property_id?: string | null;
   breath: number;
-  value: PainterChannelKey['value'];
+  value: PainterPropertyValue;
 }): { property_id: string } {
   const group = runtime.document.groups[groupId];
   if (!group) throw new Error(`painter_group_not_found:${groupId}`);
@@ -792,8 +483,7 @@ export function set_painter_group_property_block(runtime: PainterDocumentRuntime
   if (!property) throw new Error(`painter_property_not_found:${requestedId || args.property_kind}`);
   property.label = String(args.property_label ?? '').trim() || property.label;
   const nextBlocks = property.blocks.filter((block) => !(block.start === targetBreath));
-  const following = nextBlocks.filter((block) => block.start > targetBreath).sort((a, b) => a.start - b.start)[0] ?? null;
-  nextBlocks.push(create_value_property_block(targetBreath, following ? Math.max(targetBreath, following.start - 1) : targetBreath, args.value));
+  nextBlocks.push(create_value_property_block(targetBreath, targetBreath, args.value));
   property.blocks = nextBlocks;
   merge_adjacent_property_blocks(property);
   normalize_non_raster_hold_ranges(property);
@@ -802,40 +492,6 @@ export function set_painter_group_property_block(runtime: PainterDocumentRuntime
   touch_modified_at(runtime.document);
   rebuild_runtime_indices(runtime);
   return { property_id: property.id };
-}
-
-export function set_painter_group_channel_key(runtime: PainterDocumentRuntime, groupId: string, args: {
-  channel_kind: PainterChannelKind;
-  channel_label?: string;
-  channel_id?: string | null;
-  breath: number;
-  value: PainterChannelKey['value'];
-}): { channel_id: string } {
-  const property_kind: PainterProperty['kind'] = args.channel_kind === 'location'
-    ? 'move'
-    : args.channel_kind === 'rotation'
-      ? 'rotation'
-      : 'raster';
-  const result = set_painter_group_property_block(runtime, groupId, {
-    property_kind: property_kind === 'move' || property_kind === 'rotation' ? property_kind : 'move',
-    property_label: args.channel_label,
-    property_id: args.channel_id,
-    breath: args.breath,
-    value: args.value,
-  });
-  return { channel_id: result.property_id };
-}
-
-export function move_painter_group_channel_key(runtime: PainterDocumentRuntime, groupId: string, args: {
-  channel_id: string;
-  key_breath: number;
-  target_breath: number;
-}): void {
-  move_painter_group_property_block(runtime, groupId, {
-    property_id: args.channel_id,
-    block_id: args.channel_id,
-    target_breath: args.target_breath,
-  });
 }
 
 export function move_painter_group_property_block(runtime: PainterDocumentRuntime, groupId: string, args: {
@@ -859,6 +515,22 @@ export function move_painter_group_property_block(runtime: PainterDocumentRuntim
   const targetBlock = property.blocks.find((block) => block.id === args.block_id) ?? null;
   if (!targetBlock) throw new Error(`painter_property_block_not_found:${args.block_id}`);
   const targetBreath = Math.max(0, Math.floor(args.target_breath));
+  if (property.kind === 'raster') {
+    rewrite_painter_group_raster_property_span_destructive(group, property, targetBlock, targetBreath, targetBreath + (targetBlock.end - targetBlock.start));
+    if (group.metadata) group.metadata.modified_at = new Date().toISOString();
+    touch_modified_at(runtime.document);
+    rebuild_runtime_indices(runtime);
+    painter_timeline_runtime_log('runtime_after', {
+      command_kind: 'move_group_property_block',
+      group_id: groupId,
+      property_id: args.property_id,
+      block_id: args.block_id,
+      target_breath: Math.max(0, Math.floor(args.target_breath)),
+      before,
+      after: summarize_painter_group_timeline(group),
+    });
+    return;
+  }
   const delta = targetBreath - targetBlock.start;
   targetBlock.start = targetBreath;
   targetBlock.end = Math.max(targetBreath, targetBlock.end + delta);
@@ -940,72 +612,77 @@ export function set_painter_group_timing(runtime: PainterDocumentRuntime, groupI
   rebuild_runtime_indices(runtime);
 }
 
-export function set_painter_group_raster_segment_length(runtime: PainterDocumentRuntime, groupId: string, contentStateId: string, lengthBreaths: number): void {
+export function set_painter_group_property_block_length(runtime: PainterDocumentRuntime, groupId: string, propertyId: string, blockId: string, lengthBreaths: number): void {
   const group = runtime.document.groups[groupId];
   if (!group) throw new Error(`painter_group_not_found:${groupId}`);
   const targetLength = Math.max(1, Math.floor(lengthBreaths));
-  const resolved = find_property_and_block(group, contentStateId, 'raster');
-  if (!resolved) throw new Error(`painter_content_state_not_found:${contentStateId}`);
+  const resolved = find_exact_property_block(group, propertyId, blockId);
+  if (!resolved) throw new Error(`painter_property_block_not_found:${blockId}`);
   resolved.block.end = resolved.block.start + targetLength - 1;
   merge_adjacent_property_blocks(resolved.property);
+  normalize_non_raster_hold_ranges(resolved.property);
   sync_group_timing_from_properties(group);
   if (group.metadata) group.metadata.modified_at = new Date().toISOString();
   touch_modified_at(runtime.document);
   rebuild_runtime_indices(runtime);
 }
 
-export function split_painter_group_raster_segment(runtime: PainterDocumentRuntime, groupId: string, contentStateId: string, splitBreath: number): void {
+export function split_painter_group_property_block(runtime: PainterDocumentRuntime, groupId: string, propertyId: string, blockId: string, splitBreath: number): void {
   const group = runtime.document.groups[groupId];
   if (!group) throw new Error(`painter_group_not_found:${groupId}`);
   const before = summarize_painter_group_timeline(group);
   painter_timeline_runtime_log('runtime_before', {
-    command_kind: 'split_group_raster_segment',
+    command_kind: 'split_group_property_block',
     group_id: groupId,
-    content_state_id: contentStateId,
+    property_id: propertyId,
+    block_id: blockId,
     split_breath: Math.floor(splitBreath),
     before,
   });
-  const resolved = find_property_and_block(group, contentStateId, 'raster');
+  const resolved = find_exact_property_block(group, propertyId, blockId);
   const target = resolved ? { segment_id: resolved.block.id, start: resolved.block.start, end: resolved.block.end, block: resolved.block, property: resolved.property } : null;
-  if (!target) throw new Error(`painter_content_state_not_found:${contentStateId}`);
+  if (!target) throw new Error(`painter_property_block_not_found:${blockId}`);
   const splitAt = Math.floor(splitBreath);
   if (splitAt <= target.start || splitAt > target.end) return;
   const left = target.block.type === 'blank'
     ? create_blank_property_block(target.start, splitAt - 1)
-    : create_raster_content_property_block(target.start, splitAt - 1, target.block.value.kind === 'raster' ? target.block.value.voxels : [], target.block.id);
+    : create_value_property_block(target.start, splitAt - 1, target.block.value, target.block.id);
   const right = target.block.type === 'blank'
     ? create_blank_property_block(splitAt, target.end)
-    : create_raster_content_property_block(splitAt, target.end, target.block.value.kind === 'raster' ? target.block.value.voxels : []);
-  replace_raster_block(target.property, contentStateId, [left, right]);
+    : create_value_property_block(splitAt, target.end, target.block.value);
+  replace_raster_block(target.property, blockId, [left, right]);
+  normalize_non_raster_hold_ranges(target.property);
   sync_group_timing_from_properties(group);
   if (group.metadata) group.metadata.modified_at = new Date().toISOString();
   touch_modified_at(runtime.document);
   rebuild_runtime_indices(runtime);
   painter_timeline_runtime_log('runtime_after', {
-    command_kind: 'split_group_raster_segment',
+    command_kind: 'split_group_property_block',
     group_id: groupId,
-    content_state_id: contentStateId,
+    property_id: propertyId,
+    block_id: blockId,
     split_breath: Math.floor(splitBreath),
     before,
     after: summarize_painter_group_timeline(group),
   });
 }
 
-export function swap_painter_group_raster_segments(runtime: PainterDocumentRuntime, groupId: string, sourceContentStateId: string, targetContentStateId: string): void {
+export function swap_painter_group_property_blocks(runtime: PainterDocumentRuntime, groupId: string, propertyId: string, sourceBlockId: string, targetBlockId: string): void {
   const group = runtime.document.groups[groupId];
   if (!group) throw new Error(`painter_group_not_found:${groupId}`);
-  if (sourceContentStateId === targetContentStateId) return;
+  if (sourceBlockId === targetBlockId) return;
   const before = summarize_painter_group_timeline(group);
   painter_timeline_runtime_log('runtime_before', {
-    command_kind: 'swap_group_raster_segments',
+    command_kind: 'swap_group_property_blocks',
     group_id: groupId,
-    source_content_state_id: sourceContentStateId,
-    target_content_state_id: targetContentStateId,
+    property_id: propertyId,
+    source_block_id: sourceBlockId,
+    target_block_id: targetBlockId,
     before,
   });
-  const sourceResolved = find_property_and_block(group, sourceContentStateId, 'raster');
-  const targetResolved = find_property_and_block(group, targetContentStateId, 'raster');
-  if (!sourceResolved || !targetResolved || sourceResolved.property.id !== targetResolved.property.id) throw new Error('painter_content_state_not_found');
+  const sourceResolved = find_exact_property_block(group, propertyId, sourceBlockId);
+  const targetResolved = find_exact_property_block(group, propertyId, targetBlockId);
+  if (!sourceResolved || !targetResolved || sourceResolved.property.id !== targetResolved.property.id) throw new Error('painter_property_block_not_found');
   const sourceStart = sourceResolved.block.start;
   const sourceEnd = sourceResolved.block.end;
   sourceResolved.block.start = targetResolved.block.start;
@@ -1015,55 +692,60 @@ export function swap_painter_group_raster_segments(runtime: PainterDocumentRunti
   merge_adjacent_property_blocks(sourceResolved.property);
   const removedEdgeBlankIds = remove_edge_blank_property_blocks(sourceResolved.property);
   if (removedEdgeBlankIds.length > 0) merge_adjacent_property_blocks(sourceResolved.property);
+  normalize_non_raster_hold_ranges(sourceResolved.property);
   sync_group_timing_from_properties(group);
   if (group.metadata) group.metadata.modified_at = new Date().toISOString();
   touch_modified_at(runtime.document);
   rebuild_runtime_indices(runtime);
   painter_timeline_runtime_log('runtime_after', {
-    command_kind: 'swap_group_raster_segments',
+    command_kind: 'swap_group_property_blocks',
     group_id: groupId,
-    source_content_state_id: sourceContentStateId,
-    target_content_state_id: targetContentStateId,
+    property_id: propertyId,
+    source_block_id: sourceBlockId,
+    target_block_id: targetBlockId,
     before,
     removed_edge_blank_ids: removedEdgeBlankIds,
     after: summarize_painter_group_timeline(group),
   });
 }
 
-export function blank_painter_group_raster_segment(runtime: PainterDocumentRuntime, groupId: string, contentStateId: string): void {
+export function blank_painter_group_property_block(runtime: PainterDocumentRuntime, groupId: string, propertyId: string, blockId: string): void {
   const group = runtime.document.groups[groupId];
   if (!group) throw new Error(`painter_group_not_found:${groupId}`);
   const before = summarize_painter_group_timeline(group);
   painter_timeline_runtime_log('runtime_before', {
-    command_kind: 'blank_group_raster_segment',
+    command_kind: 'blank_group_property_block',
     group_id: groupId,
-    content_state_id: contentStateId,
+    property_id: propertyId,
+    block_id: blockId,
     before,
   });
-  const resolved = find_property_and_block(group, contentStateId, 'raster');
-  if (!resolved) throw new Error(`painter_content_state_not_found:${contentStateId}`);
-  replace_raster_block(resolved.property, contentStateId, [create_blank_property_block(resolved.block.start, resolved.block.end)]);
+  const resolved = find_exact_property_block(group, propertyId, blockId);
+  if (!resolved) throw new Error(`painter_property_block_not_found:${blockId}`);
+  replace_raster_block(resolved.property, blockId, [create_blank_property_block(resolved.block.start, resolved.block.end)]);
+  normalize_non_raster_hold_ranges(resolved.property);
   sync_group_timing_from_properties(group);
   if (group.metadata) group.metadata.modified_at = new Date().toISOString();
   touch_modified_at(runtime.document);
   rebuild_runtime_indices(runtime);
   painter_timeline_runtime_log('runtime_after', {
-    command_kind: 'blank_group_raster_segment',
+    command_kind: 'blank_group_property_block',
     group_id: groupId,
-    content_state_id: contentStateId,
+    property_id: propertyId,
+    block_id: blockId,
     before,
     after: summarize_painter_group_timeline(group),
   });
 }
 
-export function trim_painter_group_raster_segment_edge(runtime: PainterDocumentRuntime, groupId: string, contentStateId: string, edge: 'start' | 'end'): void {
+export function trim_painter_group_property_block_edge(runtime: PainterDocumentRuntime, groupId: string, propertyId: string, blockId: string, edge: 'start' | 'end'): void {
   const group = runtime.document.groups[groupId];
   if (!group) throw new Error(`painter_group_not_found:${groupId}`);
-  const resolved = find_property_and_block(group, contentStateId, 'raster');
-  if (!resolved) throw new Error('painter_content_state_not_found');
+  const resolved = find_exact_property_block(group, propertyId, blockId);
+  if (!resolved) throw new Error('painter_property_block_not_found');
   const target = resolved.block;
   if (target.end <= target.start) {
-    blank_painter_group_raster_segment(runtime, groupId, contentStateId);
+    blank_painter_group_property_block(runtime, groupId, propertyId, blockId);
     return;
   }
   if (edge === 'start') {
@@ -1072,28 +754,30 @@ export function trim_painter_group_raster_segment_edge(runtime: PainterDocumentR
     target.end -= 1;
   }
   merge_adjacent_property_blocks(resolved.property);
+  normalize_non_raster_hold_ranges(resolved.property);
   sync_group_timing_from_properties(group);
   if (group.metadata) group.metadata.modified_at = new Date().toISOString();
   touch_modified_at(runtime.document);
   rebuild_runtime_indices(runtime);
 }
 
-export function merge_painter_group_blank_segment(runtime: PainterDocumentRuntime, groupId: string, contentStateId: string, direction: 'left' | 'right'): void {
+export function merge_painter_group_blank_property_block(runtime: PainterDocumentRuntime, groupId: string, propertyId: string, blockId: string, direction: 'left' | 'right'): void {
   const group = runtime.document.groups[groupId];
   if (!group) throw new Error(`painter_group_not_found:${groupId}`);
   const before = summarize_painter_group_timeline(group);
   painter_timeline_runtime_log('runtime_before', {
-    command_kind: 'merge_group_blank_segment',
+    command_kind: 'merge_group_blank_property_block',
     group_id: groupId,
-    content_state_id: contentStateId,
+    property_id: propertyId,
+    block_id: blockId,
     direction,
     before,
   });
-  const resolved = find_property_and_block(group, contentStateId, 'raster');
-  if (!resolved || resolved.block.type !== 'blank') throw new Error('painter_content_state_not_found');
+  const resolved = find_exact_property_block(group, propertyId, blockId);
+  if (!resolved || resolved.block.type !== 'blank') throw new Error('painter_property_block_not_found');
   const blocks = resolved.property.blocks;
-  const index = blocks.findIndex((block) => block.id === contentStateId);
-  if (index < 0) throw new Error('painter_content_state_not_found');
+  const index = blocks.findIndex((block) => block.id === blockId);
+  if (index < 0) throw new Error('painter_property_block_not_found');
   if (direction === 'left') {
     const previous = blocks[index - 1] ?? null;
     if (!previous || previous.type !== 'content') return;
@@ -1106,99 +790,42 @@ export function merge_painter_group_blank_segment(runtime: PainterDocumentRuntim
     blocks.splice(index, 1);
   }
   merge_adjacent_property_blocks(resolved.property);
+  normalize_non_raster_hold_ranges(resolved.property);
   sync_group_timing_from_properties(group);
   if (group.metadata) group.metadata.modified_at = new Date().toISOString();
   touch_modified_at(runtime.document);
   rebuild_runtime_indices(runtime);
   painter_timeline_runtime_log('runtime_after', {
-    command_kind: 'merge_group_blank_segment',
+    command_kind: 'merge_group_blank_property_block',
     group_id: groupId,
-    content_state_id: contentStateId,
+    property_id: propertyId,
+    block_id: blockId,
     direction,
     before,
     after: summarize_painter_group_timeline(group),
   });
 }
 
-export function compact_painter_group_blank_segment_left(runtime: PainterDocumentRuntime, groupId: string, contentStateId: string): void {
+export function compact_painter_group_blank_property_block_left(runtime: PainterDocumentRuntime, groupId: string, propertyId: string, blockId: string): void {
   const group = runtime.document.groups[groupId];
   if (!group) throw new Error(`painter_group_not_found:${groupId}`);
   const before = summarize_painter_group_timeline(group);
   painter_timeline_runtime_log('runtime_before', {
-    command_kind: 'compact_group_blank_segment_left',
+    command_kind: 'compact_group_blank_property_block_left',
     group_id: groupId,
-    content_state_id: contentStateId,
+    property_id: propertyId,
+    block_id: blockId,
     before,
   });
-  merge_painter_group_blank_segment(runtime, groupId, contentStateId, 'left');
+  merge_painter_group_blank_property_block(runtime, groupId, propertyId, blockId, 'left');
   painter_timeline_runtime_log('runtime_after', {
-    command_kind: 'compact_group_blank_segment_left',
+    command_kind: 'compact_group_blank_property_block_left',
     group_id: groupId,
-    content_state_id: contentStateId,
+    property_id: propertyId,
+    block_id: blockId,
     before,
     after: summarize_painter_group_timeline(runtime.document.groups[groupId]!),
   });
-}
-
-export function move_painter_group_raster_segment(runtime: PainterDocumentRuntime, groupId: string, contentStateId: string, targetBreath: number): void {
-  const group = runtime.document.groups[groupId];
-  if (!group) throw new Error(`painter_group_not_found:${groupId}`);
-  const before = summarize_painter_group_timeline(group);
-  painter_timeline_runtime_log('runtime_before', {
-    command_kind: 'move_group_raster_segment',
-    group_id: groupId,
-    content_state_id: contentStateId,
-    target_breath: Math.max(0, Math.floor(targetBreath)),
-    before,
-  });
-  const resolved = find_property_and_block(group, contentStateId, 'raster');
-  if (!resolved) throw new Error('painter_content_state_not_found');
-  const nextStart = Math.max(0, Math.floor(targetBreath));
-  rewrite_painter_group_raster_property_span_destructive(group, resolved.property, resolved.block, nextStart, nextStart + (resolved.block.end - resolved.block.start));
-  if (group.metadata) group.metadata.modified_at = new Date().toISOString();
-  touch_modified_at(runtime.document);
-  rebuild_runtime_indices(runtime);
-  painter_timeline_runtime_log('runtime_after', {
-    command_kind: 'move_group_raster_segment',
-    group_id: groupId,
-    content_state_id: contentStateId,
-    target_breath: Math.max(0, Math.floor(targetBreath)),
-    before,
-    after: summarize_painter_group_timeline(group),
-  });
-}
-
-function rewrite_painter_group_raster_segment_span_destructive(group: PainterGroup, target: ReturnType<typeof derive_group_raster_segment_ranges>[number], nextStart: number, nextEnd: number): void {
-  const targetStart = Math.max(0, Math.floor(nextStart));
-  const targetEnd = Math.max(targetStart, Math.floor(nextEnd));
-  const timeline = build_raster_timeline_cells(group);
-  const minBreath = Math.min(timeline.start, targetStart);
-  const maxBreath = Math.max(timeline.end, targetEnd);
-  const cells: Array<RasterTimelineCell | null> = [];
-  for (let breath = minBreath; breath <= maxBreath; breath += 1) {
-    const sourceIndex = breath - timeline.start;
-    cells.push(sourceIndex >= 0 && sourceIndex < timeline.cells.length ? timeline.cells[sourceIndex]! : null);
-  }
-  const fillCell = target.state.content.length > 0
-    ? {
-        source_id: target.segment_id,
-        label: target.state.label,
-        content: target.state.content.map(clone_painter_voxel_record),
-      } satisfies RasterTimelineCell
-    : null;
-  for (let breath = target.start; breath <= target.end; breath += 1) {
-    cells[breath - minBreath] = null;
-  }
-  for (let breath = targetStart; breath <= targetEnd; breath += 1) {
-    cells[breath - minBreath] = fillCell
-      ? {
-          source_id: fillCell.source_id,
-          label: fillCell.label,
-          content: fillCell.content.map(clone_painter_voxel_record),
-        }
-      : null;
-  }
-  rebuild_raster_states_from_timeline(group, minBreath, cells);
 }
 
 type RasterPropertyTimelineCell = {
@@ -1274,33 +901,43 @@ function rewrite_painter_group_raster_property_span_destructive(group: PainterGr
   sync_group_timing_from_properties(group);
 }
 
-export function set_painter_group_raster_segment_edge_destructive(runtime: PainterDocumentRuntime, groupId: string, contentStateId: string, edge: 'start' | 'end', targetBreath: number): void {
+export function set_painter_group_property_block_edge_destructive(runtime: PainterDocumentRuntime, groupId: string, propertyId: string, blockId: string, edge: 'start' | 'end', targetBreath: number): void {
   const group = runtime.document.groups[groupId];
   if (!group) throw new Error(`painter_group_not_found:${groupId}`);
   const before = summarize_painter_group_timeline(group);
   painter_timeline_runtime_log('runtime_before', {
-    command_kind: 'set_group_raster_segment_edge_destructive',
+    command_kind: 'set_group_property_block_edge_destructive',
     group_id: groupId,
-    content_state_id: contentStateId,
+    property_id: propertyId,
+    block_id: blockId,
     edge,
     target_breath: Math.max(0, Math.floor(targetBreath)),
     before,
   });
-  const resolved = find_property_and_block(group, contentStateId, 'raster');
-  if (!resolved) throw new Error('painter_content_state_not_found');
+  const resolved = find_exact_property_block(group, propertyId, blockId);
+  if (!resolved) throw new Error('painter_property_block_not_found');
   const nextBreath = Math.max(0, Math.floor(targetBreath));
-  if (edge === 'start') {
+  if (resolved.property.kind === 'raster' && edge === 'start') {
     rewrite_painter_group_raster_property_span_destructive(group, resolved.property, resolved.block, Math.min(nextBreath, resolved.block.end), resolved.block.end);
-  } else {
+  } else if (resolved.property.kind === 'raster') {
     rewrite_painter_group_raster_property_span_destructive(group, resolved.property, resolved.block, resolved.block.start, Math.max(nextBreath, resolved.block.start));
+  } else if (edge === 'start') {
+    resolved.block.start = Math.min(nextBreath, resolved.block.end);
+    normalize_non_raster_hold_ranges(resolved.property);
+    sync_group_timing_from_properties(group);
+  } else {
+    resolved.block.end = Math.max(nextBreath, resolved.block.start);
+    normalize_non_raster_hold_ranges(resolved.property);
+    sync_group_timing_from_properties(group);
   }
   if (group.metadata) group.metadata.modified_at = new Date().toISOString();
   touch_modified_at(runtime.document);
   rebuild_runtime_indices(runtime);
   painter_timeline_runtime_log('runtime_after', {
-    command_kind: 'set_group_raster_segment_edge_destructive',
+    command_kind: 'set_group_property_block_edge_destructive',
     group_id: groupId,
-    content_state_id: contentStateId,
+    property_id: propertyId,
+    block_id: blockId,
     edge,
     target_breath: Math.max(0, Math.floor(targetBreath)),
     before,
@@ -1308,9 +945,9 @@ export function set_painter_group_raster_segment_edge_destructive(runtime: Paint
   });
 }
 
-export function resolve_nearest_painter_group_content_state(group: PainterGroup, breath: number): PainterGroupContentState | null {
+export function resolve_nearest_painter_group_raster_state(group: PainterGroup, breath: number): PainterGroupRasterState | null {
   const targetBreath = Math.floor(breath);
-  let best: PainterGroupContentState | null = null;
+  let best: PainterGroupRasterState | null = null;
   let bestDistance = Number.POSITIVE_INFINITY;
   let bestStart = Number.POSITIVE_INFINITY;
   for (const segment of derive_group_raster_segment_ranges(group)) {
@@ -1330,7 +967,7 @@ export function resolve_nearest_painter_group_content_state(group: PainterGroup,
   return best;
 }
 
-export function get_exact_painter_group_content_state(group: PainterGroup, breath: number): PainterGroupContentState | null {
+export function get_exact_painter_group_raster_state(group: PainterGroup, breath: number): PainterGroupRasterState | null {
   const targetBreath = Math.floor(breath);
   const segment = derive_group_raster_segment_ranges(group).find((entry) => entry.start === targetBreath) ?? null;
   return segment
@@ -1363,7 +1000,7 @@ function replace_raster_block(property: PainterProperty, blockId: string, replac
   merge_adjacent_property_blocks(property);
 }
 
-export function set_painter_group_content_state(runtime: PainterDocumentRuntime, groupId: string, breath: number, voxels: PainterVoxelRecord[]): void {
+export function set_painter_group_raster_state(runtime: PainterDocumentRuntime, groupId: string, breath: number, voxels: PainterVoxelRecord[]): void {
   const group = runtime.document.groups[groupId];
   if (!group) throw new Error(`painter_group_not_found:${groupId}`);
   const property = get_primary_raster_property_for_edit(group);
@@ -1379,7 +1016,7 @@ export function set_painter_group_content_state(runtime: PainterDocumentRuntime,
     }
   } else {
     const containingBlock = property.blocks.find((entry) => targetBreath >= entry.start && targetBreath <= entry.end) ?? null;
-    if (!containingBlock) throw new Error(`painter_content_state_not_found_at_breath:${targetBreath}`);
+    if (!containingBlock) throw new Error(`painter_property_block_not_found_at_breath:${targetBreath}`);
     const replacement: PainterPropertyBlock[] = [];
     if (containingBlock.start < targetBreath) {
       replacement.push(containingBlock.type === 'blank'
@@ -1397,7 +1034,7 @@ export function set_painter_group_content_state(runtime: PainterDocumentRuntime,
   rebuild_runtime_indices(runtime);
 }
 
-function insert_empty_exact_content_state_at_breath(group: PainterGroup, breath: number): PainterGroupContentState {
+function insert_empty_exact_raster_state_at_breath(group: PainterGroup, breath: number): PainterGroupRasterState {
   const property = get_primary_raster_property_for_edit(group);
   const targetBreath = Math.max(0, Math.floor(breath));
   const containingBlock = property.blocks.find((entry) => targetBreath >= entry.start && targetBreath <= entry.end) ?? null;
@@ -1435,10 +1072,10 @@ function resolve_group_voxel_edit_state(group: PainterGroup, breath: number, opt
   allow_create?: boolean;
 }): { state_id: string | null; reason: 'ok' | 'no_visible_raster_content' } {
   const targetBreath = Math.floor(breath);
-  const visibleState = get_painter_group_content_state_at_breath(group, targetBreath);
+  const visibleState = get_painter_group_raster_state_at_breath(group, targetBreath);
   if (visibleState && visibleState.content.length > 0) return { state_id: visibleState.id, reason: 'ok' };
   if (!options?.allow_create || options?.auto_key !== true) return { state_id: null, reason: 'no_visible_raster_content' };
-  const created = insert_empty_exact_content_state_at_breath(group, targetBreath);
+  const created = insert_empty_exact_raster_state_at_breath(group, targetBreath);
   return { state_id: created.id, reason: 'ok' };
 }
 
@@ -1583,12 +1220,6 @@ export function normalize_painter_document_runtime(document: PainterDocument, op
 export function get_group_voxel(runtime: PainterDocumentRuntime, groupId: string, coordKey: PainterCoordKey): PainterVoxelRecord | null {
   const voxel = runtime.group_voxel_index.get(groupId)?.get(coordKey) ?? null;
   return voxel ? clone_painter_voxel_record(voxel) : null;
-}
-
-function get_or_create_active_content_state(group: PainterGroup, breath: number): PainterGroupContentState {
-  const activeState = get_painter_group_content_state_at_breath(group, breath);
-  if (activeState) return activeState;
-  return insert_empty_exact_content_state_at_breath(group, breath);
 }
 
 export function set_group_voxel_at_breath(runtime: PainterDocumentRuntime, groupId: string, breath: number, voxel: PainterVoxelRecord, options?: {

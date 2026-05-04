@@ -5,31 +5,28 @@ import {
   duplicate_painter_group,
   erase_group_voxel_at_breath,
   move_painter_group_property_block,
-  move_painter_group_channel_key,
   normalize_painter_document_runtime,
   reorder_painter_group_properties,
   remove_painter_group_property,
   remove_painter_group,
   rename_painter_group,
   reorder_painter_groups,
-  set_painter_group_content_state,
-  set_painter_group_channel_key,
+  set_painter_group_raster_state,
   set_painter_group_locked,
   set_painter_document_timing,
   set_painter_document_loop_window,
   set_painter_group_breath_span,
   offset_painter_group_in_time,
-  blank_painter_group_raster_segment,
-  compact_painter_group_blank_segment_left,
+  blank_painter_group_property_block,
+  compact_painter_group_blank_property_block_left,
   set_painter_group_property_block,
-  move_painter_group_raster_segment,
   set_painter_group_timing,
-  trim_painter_group_raster_segment_edge,
-  merge_painter_group_blank_segment,
-  set_painter_group_raster_segment_edge_destructive,
-  set_painter_group_raster_segment_length,
-  split_painter_group_raster_segment,
-  swap_painter_group_raster_segments,
+  trim_painter_group_property_block_edge,
+  merge_painter_group_blank_property_block,
+  set_painter_group_property_block_edge_destructive,
+  set_painter_group_property_block_length,
+  split_painter_group_property_block,
+  swap_painter_group_property_blocks,
   set_painter_group_visibility,
   set_painter_runtime_active_breath,
   set_group_voxel_at_breath,
@@ -187,40 +184,36 @@ export function create_painter_session_core(initial_document: PainterDocument): 
         set_painter_group_timing(state.runtime, command.group_id, command);
         return {};
       }
-      case 'set_group_raster_segment_length': {
-        set_painter_group_raster_segment_length(state.runtime, command.group_id, command.content_state_id, command.length_breaths);
+      case 'set_group_property_block_length': {
+        set_painter_group_property_block_length(state.runtime, command.group_id, command.property_id, command.block_id, command.length_breaths);
         return {};
       }
-      case 'split_group_raster_segment': {
-        split_painter_group_raster_segment(state.runtime, command.group_id, command.content_state_id, command.split_breath);
+      case 'split_group_property_block': {
+        split_painter_group_property_block(state.runtime, command.group_id, command.property_id, command.block_id, command.split_breath);
         return {};
       }
-      case 'swap_group_raster_segments': {
-        swap_painter_group_raster_segments(state.runtime, command.group_id, command.source_content_state_id, command.target_content_state_id);
+      case 'swap_group_property_blocks': {
+        swap_painter_group_property_blocks(state.runtime, command.group_id, command.property_id, command.source_block_id, command.target_block_id);
         return {};
       }
-      case 'blank_group_raster_segment': {
-        blank_painter_group_raster_segment(state.runtime, command.group_id, command.content_state_id);
+      case 'blank_group_property_block': {
+        blank_painter_group_property_block(state.runtime, command.group_id, command.property_id, command.block_id);
         return {};
       }
-      case 'trim_group_raster_segment_edge': {
-        trim_painter_group_raster_segment_edge(state.runtime, command.group_id, command.content_state_id, command.edge);
+      case 'trim_group_property_block_edge': {
+        trim_painter_group_property_block_edge(state.runtime, command.group_id, command.property_id, command.block_id, command.edge);
         return {};
       }
-      case 'merge_group_blank_segment': {
-        merge_painter_group_blank_segment(state.runtime, command.group_id, command.content_state_id, command.direction);
+      case 'merge_group_blank_property_block': {
+        merge_painter_group_blank_property_block(state.runtime, command.group_id, command.property_id, command.block_id, command.direction);
         return {};
       }
-      case 'compact_group_blank_segment_left': {
-        compact_painter_group_blank_segment_left(state.runtime, command.group_id, command.content_state_id);
+      case 'compact_group_blank_property_block_left': {
+        compact_painter_group_blank_property_block_left(state.runtime, command.group_id, command.property_id, command.block_id);
         return {};
       }
-      case 'move_group_raster_segment': {
-        move_painter_group_raster_segment(state.runtime, command.group_id, command.content_state_id, command.target_breath);
-        return {};
-      }
-      case 'set_group_raster_segment_edge_destructive': {
-        set_painter_group_raster_segment_edge_destructive(state.runtime, command.group_id, command.content_state_id, command.edge, command.target_breath);
+      case 'set_group_property_block_edge_destructive': {
+        set_painter_group_property_block_edge_destructive(state.runtime, command.group_id, command.property_id, command.block_id, command.edge, command.target_breath);
         return {};
       }
       case 'delete_group': {
@@ -245,8 +238,8 @@ export function create_painter_session_core(initial_document: PainterDocument): 
         set_painter_group_locked(state.runtime, command.group_id, command.locked);
         return {};
       }
-      case 'set_group_content_state': {
-        set_painter_group_content_state(state.runtime, command.group_id, command.breath, command.voxels);
+      case 'set_group_raster_state': {
+        set_painter_group_raster_state(state.runtime, command.group_id, command.breath, command.voxels);
         return {};
       }
       case 'add_group_property': {
@@ -267,14 +260,6 @@ export function create_painter_session_core(initial_document: PainterDocument): 
       }
       case 'move_group_property_block': {
         move_painter_group_property_block(state.runtime, command.group_id, command);
-        return {};
-      }
-      case 'set_group_channel_key': {
-        set_painter_group_channel_key(state.runtime, command.group_id, command);
-        return {};
-      }
-      case 'move_group_channel_key': {
-        move_painter_group_channel_key(state.runtime, command.group_id, command);
         return {};
       }
       case 'reorder_groups': {

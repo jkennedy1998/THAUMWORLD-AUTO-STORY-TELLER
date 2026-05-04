@@ -1,10 +1,10 @@
 import type { GridCell } from './types.js';
 import {
-  clone_painter_voxel_record,
   create_painter_document,
   create_painter_group,
   create_painter_voxel_record,
   type PainterDocument,
+  type PainterVoxelRecord,
 } from './painter_document.js';
 import {
   normalize_painter_document_runtime,
@@ -48,14 +48,14 @@ export function import_legacy_voxel_space_as_painter_document(legacy: VoxelSpace
     group.visible = layer.visible;
     group.locked = layer.locked;
     group.opacity = layer.opacity;
-    group.content_states[0]!.content = [];
+    const voxels: PainterVoxelRecord[] = [];
     for (let y = 0; y < legacy.bounds.height; y += 1) {
       const row = layer.cells[y];
       if (!row) continue;
       for (let x = 0; x < legacy.bounds.width; x += 1) {
         const cell = row[x];
         if (!is_non_empty_cell(cell)) continue;
-        group.content_states[0]!.content.push(create_painter_voxel_record({
+        voxels.push(create_painter_voxel_record({
           x,
           y,
           z,
@@ -64,6 +64,12 @@ export function import_legacy_voxel_space_as_painter_document(legacy: VoxelSpace
           weight_index: cell.weight_index,
         }));
       }
+    }
+    const rasterProperty = group.properties[group.property_ids[0] ?? 'raster_1'];
+    if (rasterProperty) {
+      rasterProperty.blocks = voxels.length > 0
+        ? [{ id: `property_block_${z}`, type: 'content', start: group.start, end: group.cropped_end, value: { kind: 'raster', voxels } }]
+        : [{ id: `property_block_${z}`, type: 'blank', start: group.start, end: group.cropped_end, mode: 'clip', left_boundary: 'clip', right_boundary: 'clip' }];
     }
     document.groups[group.id] = group;
     entries.push({ group_id: group.id, z, layer });

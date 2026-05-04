@@ -80,9 +80,9 @@ import {
 import { makeGroupsModule, type GroupListItem } from '../mono_ui/modules/groups_module.js';
 import { make_navigation_module } from '../ascii_painter/navigation_module.js';
 import { build_legacy_voxel_space_from_painter_runtime, import_legacy_voxel_space_as_painter_document } from '../ascii_painter/painter_document_legacy_adapter.js';
-import { create_painter_document, create_painter_group, create_painter_voxel_record, get_painter_group_content_state_at_breath, type PainterDocument } from '../ascii_painter/painter_document.js';
-import { add_painter_group, duplicate_painter_group, erase_group_voxel, export_painter_document, get_exact_painter_group_content_state, normalize_painter_document_runtime, remove_painter_group, rename_painter_group, reorder_painter_groups, resolve_nearest_painter_group_content_state, resolve_nearest_painter_group_location_key, resolve_painter_group_location_at_breath, resolve_painter_group_preview_winner, set_group_voxel, set_painter_group_locked, set_painter_group_visibility, set_painter_runtime_active_breath, type PainterDocumentRuntime } from '../ascii_painter/painter_document_runtime.js';
-import { derive_channel_regions, derive_group_breath_range, derive_group_raster_segment_ranges, derive_painter_document_suggested_breath_range, get_painter_document_breath_range, get_painter_document_file_breath_range, get_painter_document_playback, get_painter_group_channels_by_kind, step_painter_breath_playback } from '../ascii_painter/painter_breath.js';
+import { create_painter_document, create_painter_group, create_painter_voxel_record, get_painter_group_raster_state_at_breath, type PainterDocument } from '../ascii_painter/painter_document.js';
+import { add_painter_group, duplicate_painter_group, erase_group_voxel, export_painter_document, get_exact_painter_group_raster_state, normalize_painter_document_runtime, remove_painter_group, rename_painter_group, reorder_painter_groups, resolve_nearest_painter_group_move_block, resolve_nearest_painter_group_raster_state, resolve_painter_group_location_at_breath, resolve_painter_group_preview_winner, set_group_voxel, set_painter_group_locked, set_painter_group_visibility, set_painter_runtime_active_breath, type PainterDocumentRuntime } from '../ascii_painter/painter_document_runtime.js';
+import { derive_group_breath_range, derive_group_raster_segment_ranges, derive_painter_document_suggested_breath_range, get_painter_document_breath_range, get_painter_document_file_breath_range, get_painter_document_playback, step_painter_breath_playback } from '../ascii_painter/painter_breath.js';
 import { create_painter_session_core } from '../ascii_painter/painter_session_core.js';
 import type { PainterGroupPlaneRegistry } from '../ascii_painter/painter_session_types.js';
 import { resolve_edit_channels_with_modifiers, type EditChannels } from '../ascii_painter/edit_mask.js';
@@ -665,7 +665,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   }
 
   function submit_group_command_if_authoritative(command: {
-    kind: 'set_document_timing' | 'set_document_loop_window' | 'create_group' | 'offset_group_in_time' | 'set_group_timing' | 'set_group_breath_span' | 'set_group_raster_segment_length' | 'split_group_raster_segment' | 'swap_group_raster_segments' | 'blank_group_raster_segment' | 'trim_group_raster_segment_edge' | 'merge_group_blank_segment' | 'compact_group_blank_segment_left' | 'move_group_raster_segment' | 'set_group_raster_segment_edge_destructive' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'set_group_content_state' | 'set_group_channel_key' | 'move_group_channel_key' | 'move_group_property_block' | 'reorder_groups' | 'reset_document' | 'undo_group' | 'redo_group';
+    kind: 'set_document_timing' | 'set_document_loop_window' | 'create_group' | 'offset_group_in_time' | 'set_group_timing' | 'set_group_breath_span' | 'set_group_property_block_length' | 'split_group_property_block' | 'swap_group_property_blocks' | 'blank_group_property_block' | 'trim_group_property_block_edge' | 'merge_group_blank_property_block' | 'compact_group_blank_property_block_left' | 'set_group_property_block_edge_destructive' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'set_group_raster_state' | 'set_group_property_block' | 'move_group_property_block' | 'reorder_groups' | 'reset_document' | 'undo_group' | 'redo_group';
     group_id?: string;
     source_group_id?: string;
     target_group_id?: string;
@@ -682,20 +682,17 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     start?: number;
     cropped_start?: number;
     cropped_end?: number;
-    content_state_id?: string;
-    source_content_state_id?: string;
-    target_content_state_id?: string;
+    property_id?: string;
+    property_kind?: 'raster' | 'move' | 'rotation' | 'opacity';
+    property_label?: string;
+    block_id?: string;
+    source_block_id?: string;
+    target_block_id?: string;
     split_breath?: number;
     length_breaths?: number;
     breath?: number;
     voxels?: Array<{ key: string; x: number; y: number; z: number; char: string; rgb: { r: number; g: number; b: number }; weight_index: number }>;
-    channel_id?: string | null;
-    channel_kind?: 'raster_content' | 'location' | 'rotation';
-    channel_label?: string;
-    property_id?: string;
-    block_id?: string;
     value?: { kind: 'raster'; voxels: Array<{ key: string; x: number; y: number; z: number; char: string; rgb: { r: number; g: number; b: number }; weight_index: number }> } | { kind: 'vec3'; x: number; y: number; z: number } | { kind: 'scalar'; value: number };
-    key_breath?: number;
     target_breath?: number;
     edge?: 'start' | 'end';
     direction?: 'left' | 'right';
@@ -785,11 +782,11 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       || action.type === 'offset_group_in_time'
       || action.type === 'set_group_timing'
       || action.type === 'set_group_breath_span'
-      || action.type === 'set_group_raster_segment_length'
-      || action.type === 'split_group_raster_segment'
-      || action.type === 'swap_group_raster_segments'
-      || action.type === 'set_group_content_state'
-      || action.type === 'set_group_channel_key'
+      || action.type === 'set_group_property_block_length'
+      || action.type === 'split_group_property_block'
+      || action.type === 'swap_group_property_blocks'
+      || action.type === 'set_group_raster_state'
+      || action.type === 'set_group_property_block'
       || action.type === 'reorder_groups'
     );
   }
@@ -847,11 +844,11 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       case 'offset_group_in_time':
       case 'set_group_timing':
       case 'set_group_breath_span':
-      case 'set_group_raster_segment_length':
-      case 'split_group_raster_segment':
-      case 'swap_group_raster_segments':
-      case 'set_group_content_state':
-      case 'set_group_channel_key': {
+      case 'set_group_property_block_length':
+      case 'split_group_property_block':
+      case 'swap_group_property_blocks':
+      case 'set_group_raster_state':
+      case 'set_group_property_block': {
         const next = useOld ? action.oldGroupData : action.newGroupData;
         if (groupId && next) {
           painter_document_runtime.document.groups[groupId] = structuredClone(next);
@@ -1262,10 +1259,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
           kind: property.kind,
           label: property.label,
           blocks: property.blocks
-            .filter((block) => {
-              if (property.kind === 'raster') return true;
-              return block.type === 'content' && block.value.kind === 'vec3';
-            })
             .map((block) => ({
               id: block.id,
               breath: block.start,
@@ -1402,7 +1395,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     const group = painter_document_runtime.document.groups[group_id];
     if (!group) return null;
     if (painter_groups_auto_key_enabled) return painter_current_breath;
-    const nearest = resolve_nearest_painter_group_location_key(group, painter_current_breath);
+    const nearest = resolve_nearest_painter_group_move_block(group, painter_current_breath);
     return nearest?.breath ?? null;
   }
 
@@ -1410,7 +1403,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     const group = painter_document_runtime.document.groups[group_id];
     if (!group) return null;
     if (painter_groups_auto_key_enabled) return painter_current_breath;
-    const nearest = resolve_nearest_painter_group_content_state(group, painter_current_breath);
+    const nearest = resolve_nearest_painter_group_raster_state(group, painter_current_breath);
     return nearest ? (derive_group_raster_segment_ranges(group).find((segment) => segment.segment_id === nearest.id)?.start ?? null) : null;
   }
 
@@ -1422,14 +1415,14 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     if (targetBreath !== painter_current_breath) setCurrentPainterBreath(targetBreath);
     const refreshedGroup = painter_document_runtime.document.groups[group_id];
     if (!refreshedGroup) return false;
-    const exact = get_exact_painter_group_content_state(refreshedGroup, painter_current_breath);
+    const exact = get_exact_painter_group_raster_state(refreshedGroup, painter_current_breath);
     if (exact) return true;
-    const resolved = get_painter_group_content_state_at_breath(refreshedGroup, painter_current_breath)
+    const resolved = get_painter_group_raster_state_at_breath(refreshedGroup, painter_current_breath)
       ?? null;
     if (!resolved) return false;
     const oldGroupData = structuredClone(refreshedGroup);
     painter_session_core.apply_group_command({
-      kind: 'set_group_content_state',
+      kind: 'set_group_raster_state',
       group_id,
       breath: painter_current_breath,
       voxels: resolved.content.map((voxel) => ({
@@ -1445,14 +1438,14 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     sync_local_session_state_from_core();
     sync_lineage_state_from_core();
     const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
-    logGroupAction(history, 'set_group_content_state', `Edit Content State ${refreshedGroup.name}`, {
+    logGroupAction(history, 'set_group_raster_state', `Edit Raster State ${refreshedGroup.name}`, {
       groupId: group_id,
       oldGroupData,
       newGroupData,
     });
     sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
     submit_group_command_if_authoritative({
-      kind: 'set_group_content_state',
+      kind: 'set_group_raster_state',
       group_id,
       breath: painter_current_breath,
       voxels: resolved.content.map((voxel) => ({
@@ -1479,7 +1472,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     if (!group || group.locked) return false;
     const targetBreath = resolveEditableGroupLocationBreath(group_id);
     if (targetBreath === null) {
-      painterDiag('skipping group location edit: no editable location key', {
+      painterDiag('skipping group location edit: no editable move block', {
         group_id,
         source,
         active_breath: painter_current_breath,
@@ -1491,7 +1484,9 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     if (delta.x === 0 && delta.y === 0 && delta.z === 0) return false;
     const oldGroupData = structuredClone(group);
     const resolvedBase = resolve_painter_group_location_at_breath(group, targetBreath);
-    const primaryLocationChannel = get_painter_group_channels_by_kind(group, 'location')[0] ?? null;
+    const targetMoveBlock = resolve_nearest_painter_group_move_block(group, targetBreath);
+    const primaryMoveProperty = group.property_ids.map((propertyId) => group.properties[propertyId] ?? null).find((property) => property?.kind === 'move') ?? null;
+    const targetPropertyId = targetMoveBlock?.property_id ?? primaryMoveProperty?.id ?? null;
     const nextOffset = {
       x: resolvedBase.x + Math.floor(delta.x),
       y: resolvedBase.y + Math.floor(delta.y),
@@ -1501,26 +1496,26 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       kind: 'set_group_property_block',
       group_id,
       property_kind: 'move',
-      property_id: primaryLocationChannel?.id ?? null,
-      property_label: primaryLocationChannel?.label ?? 'move',
+      property_id: targetPropertyId ?? undefined,
+      property_label: primaryMoveProperty?.label ?? 'move',
       breath: targetBreath,
       value: { kind: 'vec3', x: nextOffset.x, y: nextOffset.y, z: nextOffset.z },
     });
     sync_local_session_state_from_core();
     sync_lineage_state_from_core();
     const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
-    logGroupAction(history, 'set_group_channel_key', `Move Group ${group.name}`, {
+    logGroupAction(history, 'set_group_property_block', `Move Group ${group.name}`, {
       groupId: group_id,
       oldGroupData,
       newGroupData,
     });
     sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
     submit_group_command_if_authoritative({
-      kind: 'set_group_channel_key',
+      kind: 'set_group_property_block',
       group_id,
-      channel_kind: 'location',
-      channel_id: primaryLocationChannel?.id ?? null,
-      channel_label: primaryLocationChannel?.label ?? 'move',
+      property_kind: 'move',
+      property_id: targetPropertyId ?? undefined,
+      property_label: primaryMoveProperty?.label ?? 'move',
       breath: targetBreath,
       value: { kind: 'vec3', x: nextOffset.x, y: nextOffset.y, z: nextOffset.z },
     });
@@ -1544,6 +1539,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   }
 
   function movePainterGroupPropertyBlock(group_id: string, property_id: string, block_id: string, target_breath: number): void {
+    finalizePendingPainterCanvasChanges();
+    commitProjectedGridToWorld();
     const group = painter_document_runtime.document.groups[group_id];
     if (!group || group.locked) return;
     const property = group.properties?.[property_id] ?? null;
@@ -1572,7 +1569,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       old_group_summary: summarizePainterTimelineGroup(oldGroupData),
       new_group_summary: newGroupData ? summarizePainterTimelineGroup(newGroupData) : null,
     });
-    logGroupAction(history, 'set_group_channel_key', `Move Property Block ${group.name}`, {
+    logGroupAction(history, 'set_group_property_block', `Move Property Block ${group.name}`, {
       groupId: group_id,
       oldGroupData,
       newGroupData,
@@ -2583,314 +2580,292 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     schedule_auto_save();
   }
 
-  function setPainterGroupRasterSegmentLength(group_id: string, content_state_id: string, length_breaths: number): void {
+  function setPainterGroupPropertyBlockLength(group_id: string, property_id: string, block_id: string, length_breaths: number): void {
     finalizePendingPainterCanvasChanges();
     commitProjectedGridToWorld();
     const group = painter_document_runtime.document.groups[group_id];
     if (!group) return;
     const oldGroupData = structuredClone(group);
-    painter_session_core.apply_group_command({ kind: 'set_group_raster_segment_length', group_id, content_state_id, length_breaths });
+    painter_session_core.apply_group_command({ kind: 'set_group_property_block_length', group_id, property_id, block_id, length_breaths });
     sync_local_session_state_from_core();
     sync_lineage_state_from_core();
     const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
-    logGroupAction(history, 'set_group_raster_segment_length', `Set Raster Segment Length ${group.name}`, {
+    logGroupAction(history, 'set_group_property_block_length', `Set Property Block Length ${group.name}`, {
       groupId: group_id,
       oldGroupData,
       newGroupData,
     });
     submit_group_command_if_authoritative({
-      kind: 'set_group_raster_segment_length',
+      kind: 'set_group_property_block_length',
       group_id,
-      content_state_id,
+      property_id,
+      block_id,
       length_breaths: Math.max(1, Math.floor(length_breaths)),
     });
     sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
     schedule_auto_save();
   }
 
-  function splitPainterGroupRasterSegment(group_id: string, content_state_id: string, split_breath: number): void {
+  function splitPainterGroupPropertyBlock(group_id: string, property_id: string, block_id: string, split_breath: number): void {
     finalizePendingPainterCanvasChanges();
     commitProjectedGridToWorld();
     const group = painter_document_runtime.document.groups[group_id];
     if (!group) return;
     const oldGroupData = structuredClone(group);
     painterTimelineDiag('command_dispatch', {
-      command_kind: 'split_group_raster_segment',
+      command_kind: 'split_group_property_block',
       group_id,
-      content_state_id,
+      property_id,
+      block_id,
       split_breath: Math.max(0, Math.floor(split_breath)),
       current_breath: painter_current_breath,
       old_group_summary: summarizePainterTimelineGroup(oldGroupData),
     });
-    painter_session_core.apply_group_command({ kind: 'split_group_raster_segment', group_id, content_state_id, split_breath });
+    painter_session_core.apply_group_command({ kind: 'split_group_property_block', group_id, property_id, block_id, split_breath });
     sync_local_session_state_from_core();
     sync_lineage_state_from_core();
     const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
     painterTimelineDiag('command_applied_local', {
-      command_kind: 'split_group_raster_segment',
+      command_kind: 'split_group_property_block',
       group_id,
-      content_state_id,
+      property_id,
+      block_id,
       split_breath: Math.max(0, Math.floor(split_breath)),
       current_breath: painter_current_breath,
       old_group_summary: summarizePainterTimelineGroup(oldGroupData),
       new_group_summary: newGroupData ? summarizePainterTimelineGroup(newGroupData) : null,
     });
-    logGroupAction(history, 'split_group_raster_segment', `Split Raster Segment ${group.name}`, {
+    logGroupAction(history, 'split_group_property_block', `Split Property Block ${group.name}`, {
       groupId: group_id,
       oldGroupData,
       newGroupData,
     });
     submit_group_command_if_authoritative({
-      kind: 'split_group_raster_segment',
+      kind: 'split_group_property_block',
       group_id,
-      content_state_id,
+      property_id,
+      block_id,
       split_breath: Math.max(0, Math.floor(split_breath)),
     });
     sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
     schedule_auto_save();
   }
 
-  function swapPainterGroupRasterSegments(group_id: string, source_content_state_id: string, target_content_state_id: string): void {
+  function swapPainterGroupPropertyBlocks(group_id: string, property_id: string, source_block_id: string, target_block_id: string): void {
     finalizePendingPainterCanvasChanges();
     commitProjectedGridToWorld();
     const group = painter_document_runtime.document.groups[group_id];
-    if (!group || source_content_state_id === target_content_state_id) return;
+    if (!group || source_block_id === target_block_id) return;
     const oldGroupData = structuredClone(group);
     painterTimelineDiag('command_dispatch', {
-      command_kind: 'swap_group_raster_segments',
+      command_kind: 'swap_group_property_blocks',
       group_id,
-      source_content_state_id,
-      target_content_state_id,
+      property_id,
+      source_block_id,
+      target_block_id,
       current_breath: painter_current_breath,
       old_group_summary: summarizePainterTimelineGroup(oldGroupData),
     });
-    painter_session_core.apply_group_command({ kind: 'swap_group_raster_segments', group_id, source_content_state_id, target_content_state_id });
+    painter_session_core.apply_group_command({ kind: 'swap_group_property_blocks', group_id, property_id, source_block_id, target_block_id });
     sync_local_session_state_from_core();
     sync_lineage_state_from_core();
     const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
     painterTimelineDiag('command_applied_local', {
-      command_kind: 'swap_group_raster_segments',
+      command_kind: 'swap_group_property_blocks',
       group_id,
-      source_content_state_id,
-      target_content_state_id,
+      property_id,
+      source_block_id,
+      target_block_id,
       current_breath: painter_current_breath,
       old_group_summary: summarizePainterTimelineGroup(oldGroupData),
       new_group_summary: newGroupData ? summarizePainterTimelineGroup(newGroupData) : null,
     });
-    logGroupAction(history, 'swap_group_raster_segments', `Swap Raster Segments ${group.name}`, {
+    logGroupAction(history, 'swap_group_property_blocks', `Swap Property Blocks ${group.name}`, {
       groupId: group_id,
       oldGroupData,
       newGroupData,
     });
     submit_group_command_if_authoritative({
-      kind: 'swap_group_raster_segments',
+      kind: 'swap_group_property_blocks',
       group_id,
-      source_content_state_id,
-      target_content_state_id,
+      property_id,
+      source_block_id,
+      target_block_id,
     });
     sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
     schedule_auto_save();
   }
 
-  function blankPainterGroupRasterSegment(group_id: string, content_state_id: string): void {
+  function blankPainterGroupPropertyBlock(group_id: string, property_id: string, block_id: string): void {
     finalizePendingPainterCanvasChanges();
     commitProjectedGridToWorld();
     const group = painter_document_runtime.document.groups[group_id];
     if (!group) return;
     const oldGroupData = structuredClone(group);
     painterTimelineDiag('command_dispatch', {
-      command_kind: 'blank_group_raster_segment',
+      command_kind: 'blank_group_property_block',
       group_id,
-      content_state_id,
+      property_id,
+      block_id,
       current_breath: painter_current_breath,
       old_group_summary: summarizePainterTimelineGroup(oldGroupData),
     });
-    painter_session_core.apply_group_command({ kind: 'blank_group_raster_segment', group_id, content_state_id });
+    painter_session_core.apply_group_command({ kind: 'blank_group_property_block', group_id, property_id, block_id });
     sync_local_session_state_from_core();
     sync_lineage_state_from_core();
     const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
     painterTimelineDiag('command_applied_local', {
-      command_kind: 'blank_group_raster_segment',
+      command_kind: 'blank_group_property_block',
       group_id,
-      content_state_id,
+      property_id,
+      block_id,
       current_breath: painter_current_breath,
       old_group_summary: summarizePainterTimelineGroup(oldGroupData),
       new_group_summary: newGroupData ? summarizePainterTimelineGroup(newGroupData) : null,
     });
-    logGroupAction(history, 'set_group_content_state', `Blank Raster Segment ${group.name}`, {
+    logGroupAction(history, 'set_group_property_block', `Blank Property Block ${group.name}`, {
       groupId: group_id,
       oldGroupData,
       newGroupData,
     });
-    submit_group_command_if_authoritative({ kind: 'blank_group_raster_segment', group_id, content_state_id });
+    submit_group_command_if_authoritative({ kind: 'blank_group_property_block', group_id, property_id, block_id });
     sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
     schedule_auto_save();
   }
 
-  function trimPainterGroupRasterSegmentEdge(group_id: string, content_state_id: string, edge: 'start' | 'end'): void {
+  function trimPainterGroupPropertyBlockEdge(group_id: string, property_id: string, block_id: string, edge: 'start' | 'end'): void {
     finalizePendingPainterCanvasChanges();
     commitProjectedGridToWorld();
     const group = painter_document_runtime.document.groups[group_id];
     if (!group) return;
     const oldGroupData = structuredClone(group);
-    painter_session_core.apply_group_command({ kind: 'trim_group_raster_segment_edge', group_id, content_state_id, edge });
+    painter_session_core.apply_group_command({ kind: 'trim_group_property_block_edge', group_id, property_id, block_id, edge });
     sync_local_session_state_from_core();
     sync_lineage_state_from_core();
     const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
-    logGroupAction(history, 'set_group_raster_segment_length', `Trim Raster Segment ${group.name}`, {
+    logGroupAction(history, 'set_group_property_block_length', `Trim Property Block ${group.name}`, {
       groupId: group_id,
       oldGroupData,
       newGroupData,
     });
-    submit_group_command_if_authoritative({ kind: 'trim_group_raster_segment_edge', group_id, content_state_id, edge });
+    submit_group_command_if_authoritative({ kind: 'trim_group_property_block_edge', group_id, property_id, block_id, edge });
     sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
     schedule_auto_save();
   }
 
-  function mergePainterGroupBlankSegment(group_id: string, content_state_id: string, direction: 'left' | 'right'): void {
+  function mergePainterGroupBlankPropertyBlock(group_id: string, property_id: string, block_id: string, direction: 'left' | 'right'): void {
     finalizePendingPainterCanvasChanges();
     commitProjectedGridToWorld();
     const group = painter_document_runtime.document.groups[group_id];
     if (!group) return;
     const oldGroupData = structuredClone(group);
     painterTimelineDiag('command_dispatch', {
-      command_kind: 'merge_group_blank_segment',
+      command_kind: 'merge_group_blank_property_block',
       group_id,
-      content_state_id,
+      property_id,
+      block_id,
       direction,
       current_breath: painter_current_breath,
       old_group_summary: summarizePainterTimelineGroup(oldGroupData),
     });
-    painter_session_core.apply_group_command({ kind: 'merge_group_blank_segment', group_id, content_state_id, direction });
+    painter_session_core.apply_group_command({ kind: 'merge_group_blank_property_block', group_id, property_id, block_id, direction });
     sync_local_session_state_from_core();
     sync_lineage_state_from_core();
     const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
     painterTimelineDiag('command_applied_local', {
-      command_kind: 'merge_group_blank_segment',
+      command_kind: 'merge_group_blank_property_block',
       group_id,
-      content_state_id,
+      property_id,
+      block_id,
       direction,
       current_breath: painter_current_breath,
       old_group_summary: summarizePainterTimelineGroup(oldGroupData),
       new_group_summary: newGroupData ? summarizePainterTimelineGroup(newGroupData) : null,
     });
-    logGroupAction(history, 'set_group_raster_segment_length', `Merge Blank Segment ${group.name}`, {
+    logGroupAction(history, 'set_group_property_block_length', `Merge Blank Property Block ${group.name}`, {
       groupId: group_id,
       oldGroupData,
       newGroupData,
     });
-    submit_group_command_if_authoritative({ kind: 'merge_group_blank_segment', group_id, content_state_id, direction });
+    submit_group_command_if_authoritative({ kind: 'merge_group_blank_property_block', group_id, property_id, block_id, direction });
     sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
     schedule_auto_save();
   }
 
-  function compactPainterGroupBlankSegmentLeft(group_id: string, content_state_id: string): void {
+  function compactPainterGroupBlankPropertyBlockLeft(group_id: string, property_id: string, block_id: string): void {
     finalizePendingPainterCanvasChanges();
     commitProjectedGridToWorld();
     const group = painter_document_runtime.document.groups[group_id];
     if (!group) return;
     const oldGroupData = structuredClone(group);
     painterTimelineDiag('command_dispatch', {
-      command_kind: 'compact_group_blank_segment_left',
+      command_kind: 'compact_group_blank_property_block_left',
       group_id,
-      content_state_id,
+      property_id,
+      block_id,
       current_breath: painter_current_breath,
       old_group_summary: summarizePainterTimelineGroup(oldGroupData),
     });
-    painter_session_core.apply_group_command({ kind: 'compact_group_blank_segment_left', group_id, content_state_id });
+    painter_session_core.apply_group_command({ kind: 'compact_group_blank_property_block_left', group_id, property_id, block_id });
     sync_local_session_state_from_core();
     sync_lineage_state_from_core();
     const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
     painterTimelineDiag('command_applied_local', {
-      command_kind: 'compact_group_blank_segment_left',
+      command_kind: 'compact_group_blank_property_block_left',
       group_id,
-      content_state_id,
+      property_id,
+      block_id,
       current_breath: painter_current_breath,
       old_group_summary: summarizePainterTimelineGroup(oldGroupData),
       new_group_summary: newGroupData ? summarizePainterTimelineGroup(newGroupData) : null,
     });
-    logGroupAction(history, 'set_group_raster_segment_length', `Compact Blank Segment ${group.name}`, {
+    logGroupAction(history, 'set_group_property_block_length', `Compact Blank Property Block ${group.name}`, {
       groupId: group_id,
       oldGroupData,
       newGroupData,
     });
-    submit_group_command_if_authoritative({ kind: 'compact_group_blank_segment_left', group_id, content_state_id });
+    submit_group_command_if_authoritative({ kind: 'compact_group_blank_property_block_left', group_id, property_id, block_id });
     sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
     schedule_auto_save();
   }
 
-  function movePainterGroupRasterSegment(group_id: string, content_state_id: string, target_breath: number): void {
+  function setPainterGroupPropertyBlockEdgeDestructive(group_id: string, property_id: string, block_id: string, edge: 'start' | 'end', target_breath: number): void {
     finalizePendingPainterCanvasChanges();
     commitProjectedGridToWorld();
     const group = painter_document_runtime.document.groups[group_id];
     if (!group) return;
     const oldGroupData = structuredClone(group);
     painterTimelineDiag('command_dispatch', {
-      command_kind: 'move_group_raster_segment',
+      command_kind: 'set_group_property_block_edge_destructive',
       group_id,
-      content_state_id,
-      target_breath: Math.max(0, Math.floor(target_breath)),
-      current_breath: painter_current_breath,
-      old_group_summary: summarizePainterTimelineGroup(oldGroupData),
-    });
-    painter_session_core.apply_group_command({ kind: 'move_group_raster_segment', group_id, content_state_id, target_breath });
-    sync_local_session_state_from_core();
-    sync_lineage_state_from_core();
-    const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
-    painterTimelineDiag('command_applied_local', {
-      command_kind: 'move_group_raster_segment',
-      group_id,
-      content_state_id,
-      target_breath: Math.max(0, Math.floor(target_breath)),
-      current_breath: painter_current_breath,
-      old_group_summary: summarizePainterTimelineGroup(oldGroupData),
-      new_group_summary: newGroupData ? summarizePainterTimelineGroup(newGroupData) : null,
-    });
-    logGroupAction(history, 'swap_group_raster_segments', `Move Raster Segment ${group.name}`, {
-      groupId: group_id,
-      oldGroupData,
-      newGroupData,
-    });
-    submit_group_command_if_authoritative({ kind: 'move_group_raster_segment', group_id, content_state_id, target_breath });
-    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
-    schedule_auto_save();
-  }
-
-  function setPainterGroupRasterSegmentEdgeDestructive(group_id: string, content_state_id: string, edge: 'start' | 'end', target_breath: number): void {
-    finalizePendingPainterCanvasChanges();
-    commitProjectedGridToWorld();
-    const group = painter_document_runtime.document.groups[group_id];
-    if (!group) return;
-    const oldGroupData = structuredClone(group);
-    painterTimelineDiag('command_dispatch', {
-      command_kind: 'set_group_raster_segment_edge_destructive',
-      group_id,
-      content_state_id,
+      property_id,
+      block_id,
       edge,
       target_breath: Math.max(0, Math.floor(target_breath)),
       current_breath: painter_current_breath,
       old_group_summary: summarizePainterTimelineGroup(oldGroupData),
     });
-    painter_session_core.apply_group_command({ kind: 'set_group_raster_segment_edge_destructive', group_id, content_state_id, edge, target_breath });
+    painter_session_core.apply_group_command({ kind: 'set_group_property_block_edge_destructive', group_id, property_id, block_id, edge, target_breath });
     sync_local_session_state_from_core();
     sync_lineage_state_from_core();
     const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
     painterTimelineDiag('command_applied_local', {
-      command_kind: 'set_group_raster_segment_edge_destructive',
+      command_kind: 'set_group_property_block_edge_destructive',
       group_id,
-      content_state_id,
+      property_id,
+      block_id,
       edge,
       target_breath: Math.max(0, Math.floor(target_breath)),
       current_breath: painter_current_breath,
       old_group_summary: summarizePainterTimelineGroup(oldGroupData),
       new_group_summary: newGroupData ? summarizePainterTimelineGroup(newGroupData) : null,
     });
-    logGroupAction(history, 'set_group_raster_segment_length', `Set Raster Edge ${group.name}`, {
+    logGroupAction(history, 'set_group_property_block_length', `Set Property Block Edge ${group.name}`, {
       groupId: group_id,
       oldGroupData,
       newGroupData,
     });
-    submit_group_command_if_authoritative({ kind: 'set_group_raster_segment_edge_destructive', group_id, content_state_id, edge, target_breath });
+    submit_group_command_if_authoritative({ kind: 'set_group_property_block_edge_destructive', group_id, property_id, block_id, edge, target_breath });
     sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
     schedule_auto_save();
   }
@@ -6338,32 +6313,29 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       on_set_group_timing: (group_id: string, start: number, cropped_start: number, cropped_end: number) => {
         setPainterGroupTiming(group_id, { start, cropped_start, cropped_end });
       },
-      on_set_group_raster_segment_length: (group_id: string, content_state_id: string, length_breaths: number) => {
-        setPainterGroupRasterSegmentLength(group_id, content_state_id, length_breaths);
+      on_set_group_property_block_length: (group_id: string, property_id: string, block_id: string, length_breaths: number) => {
+        setPainterGroupPropertyBlockLength(group_id, property_id, block_id, length_breaths);
       },
-      on_split_group_raster_segment: (group_id: string, content_state_id: string, split_breath: number) => {
-        splitPainterGroupRasterSegment(group_id, content_state_id, split_breath);
+      on_split_group_property_block: (group_id: string, property_id: string, block_id: string, split_breath: number) => {
+        splitPainterGroupPropertyBlock(group_id, property_id, block_id, split_breath);
       },
-      on_swap_group_raster_segments: (group_id: string, source_content_state_id: string, target_content_state_id: string) => {
-        swapPainterGroupRasterSegments(group_id, source_content_state_id, target_content_state_id);
+      on_swap_group_property_blocks: (group_id: string, property_id: string, source_block_id: string, target_block_id: string) => {
+        swapPainterGroupPropertyBlocks(group_id, property_id, source_block_id, target_block_id);
       },
-      on_blank_group_raster_segment: (group_id: string, content_state_id: string) => {
-        blankPainterGroupRasterSegment(group_id, content_state_id);
+      on_blank_group_property_block: (group_id: string, property_id: string, block_id: string) => {
+        blankPainterGroupPropertyBlock(group_id, property_id, block_id);
       },
-      on_trim_group_raster_segment_edge: (group_id: string, content_state_id: string, edge: 'start' | 'end') => {
-        trimPainterGroupRasterSegmentEdge(group_id, content_state_id, edge);
+      on_trim_group_property_block_edge: (group_id: string, property_id: string, block_id: string, edge: 'start' | 'end') => {
+        trimPainterGroupPropertyBlockEdge(group_id, property_id, block_id, edge);
       },
-      on_merge_group_blank_segment: (group_id: string, content_state_id: string, direction: 'left' | 'right') => {
-        mergePainterGroupBlankSegment(group_id, content_state_id, direction);
+      on_merge_group_blank_property_block: (group_id: string, property_id: string, block_id: string, direction: 'left' | 'right') => {
+        mergePainterGroupBlankPropertyBlock(group_id, property_id, block_id, direction);
       },
-      on_compact_group_blank_segment_left: (group_id: string, content_state_id: string) => {
-        compactPainterGroupBlankSegmentLeft(group_id, content_state_id);
+      on_compact_group_blank_property_block_left: (group_id: string, property_id: string, block_id: string) => {
+        compactPainterGroupBlankPropertyBlockLeft(group_id, property_id, block_id);
       },
-      on_move_group_raster_segment: (group_id: string, content_state_id: string, target_breath: number) => {
-        movePainterGroupRasterSegment(group_id, content_state_id, target_breath);
-      },
-      on_set_group_raster_segment_edge_destructive: (group_id: string, content_state_id: string, edge: 'start' | 'end', target_breath: number) => {
-        setPainterGroupRasterSegmentEdgeDestructive(group_id, content_state_id, edge, target_breath);
+      on_set_group_property_block_edge_destructive: (group_id: string, property_id: string, block_id: string, edge: 'start' | 'end', target_breath: number) => {
+        setPainterGroupPropertyBlockEdgeDestructive(group_id, property_id, block_id, edge, target_breath);
       },
       on_move_group_property_block: (group_id: string, property_id: string, block_id: string, target_breath: number) => {
         movePainterGroupPropertyBlock(group_id, property_id, block_id, target_breath);

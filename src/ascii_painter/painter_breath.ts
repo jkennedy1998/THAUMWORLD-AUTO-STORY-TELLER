@@ -1,19 +1,13 @@
 import {
   clone_painter_document_breath,
   clone_painter_document_playback,
-  clone_painter_channel,
-  get_default_channel_value,
   get_default_painter_document_breath,
   get_default_painter_document_playback,
-  type PainterChannel,
-  type PainterChannelKey,
-  type PainterChannelKind,
-  type PainterChannelValue,
   type PainterDocument,
   type PainterDocumentBreath,
   type PainterDocumentPlayback,
   type PainterGroup,
-  type PainterGroupContentState,
+  type PainterGroupRasterState,
   type PainterProperty,
 } from './painter_document.js';
 
@@ -41,14 +35,7 @@ export type PainterGroupRasterSegmentRange = {
   start: number;
   end: number;
   length_breaths: number;
-  state: PainterGroupContentState;
-};
-
-export type PainterChannelRegion = {
-  key_id: string;
-  start: number;
-  end: number;
-  key: PainterChannelKey;
+  state: PainterGroupRasterState;
 };
 
 export type PainterBreathPlaybackStepResult = {
@@ -87,62 +74,6 @@ export function get_painter_document_breath_range(document: PainterDocument): Pa
 export function get_painter_document_file_breath_range(document: PainterDocument): PainterDocumentBreathRange {
   const breath = get_painter_document_breath(document);
   return { start: breath.range_start, end: breath.range_end };
-}
-
-export function get_painter_group_channels_by_kind(group: PainterGroup, kind: PainterChannelKind): PainterChannel[] {
-  const orderedIds = Array.isArray(group.channel_ids) ? group.channel_ids : [];
-  const out: PainterChannel[] = [];
-  for (const id of orderedIds) {
-    const channel = group.channels?.[id];
-    if (!channel || channel.kind !== kind) continue;
-    out.push(clone_painter_channel(channel));
-  }
-  return out;
-}
-
-export function get_exact_channel_key(channel: PainterChannel, breath: number): PainterChannelKey | null {
-  const targetBreath = Math.floor(breath);
-  const exact = channel.keys.find((key) => key.breath === targetBreath) ?? null;
-  return exact ? { ...exact, value: structuredClone(exact.value) } : null;
-}
-
-export function get_nearest_channel_key(channel: PainterChannel, breath: number): PainterChannelKey | null {
-  const targetBreath = Math.floor(breath);
-  let best: PainterChannelKey | null = null;
-  let bestDistance = Number.POSITIVE_INFINITY;
-  for (const key of channel.keys) {
-    const distance = Math.abs(key.breath - targetBreath);
-    if (distance < bestDistance || (distance === bestDistance && best && key.breath < best.breath)) {
-      best = key;
-      bestDistance = distance;
-    }
-  }
-  return best ? { ...best, value: structuredClone(best.value) } : null;
-}
-
-export function evaluate_channel_at_breath(channel: PainterChannel, breath: number): PainterChannelValue {
-  const targetBreath = Math.floor(breath);
-  let resolved = get_default_channel_value(channel.kind);
-  for (const key of channel.keys) {
-    if (key.breath > targetBreath) break;
-    resolved = structuredClone(key.value);
-  }
-  return resolved;
-}
-
-export function derive_channel_regions(channel: PainterChannel, trim?: { start: number; end: number } | null): PainterChannelRegion[] {
-  const out: PainterChannelRegion[] = [];
-  for (let i = 0; i < channel.keys.length; i += 1) {
-    const key = channel.keys[i]!;
-    const next = channel.keys[i + 1] ?? null;
-    const regionStart = key.breath;
-    const regionEnd = next ? next.breath - 1 : (trim ? trim.end : key.breath);
-    const start = trim ? Math.max(trim.start, regionStart) : regionStart;
-    const end = trim ? Math.min(trim.end, regionEnd) : regionEnd;
-    if (end < start) continue;
-    out.push({ key_id: key.id, start, end, key: { ...key, value: structuredClone(key.value) } });
-  }
-  return out;
 }
 
 export function derive_group_raster_segment_ranges(group: PainterGroup): PainterGroupRasterSegmentRange[] {

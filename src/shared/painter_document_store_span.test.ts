@@ -1,31 +1,44 @@
-import { create_painter_document } from '../ascii_painter/painter_document.js';
-import { derive_channel_regions, derive_group_raster_segment_ranges, get_painter_group_channels_by_kind } from '../ascii_painter/painter_breath.js';
-import { normalize_painter_document_runtime } from '../ascii_painter/painter_document_runtime.js';
+import { create_painter_document, create_painter_voxel_record, get_painter_group_raster_state_at_breath } from '../ascii_painter/painter_document.js';
+import { derive_group_raster_segment_ranges } from '../ascii_painter/painter_breath.js';
+import { normalize_painter_document_runtime, set_painter_group_property_block } from '../ascii_painter/painter_document_runtime.js';
 import { apply_painter_group_structure_change, save_painter_document_snapshot } from './painter_document_store.js';
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
 }
 
+function firstPropertyId(document: ReturnType<typeof create_painter_document>, groupId: string, kind: 'raster' | 'move'): string {
+  const group = document.groups[groupId]!;
+  const propertyId = group.property_ids.find((id) => group.properties[id]?.kind === kind);
+  if (!propertyId) throw new Error(`missing_property:${kind}`);
+  return propertyId;
+}
+
 const slot = 998;
 const document_id = `painter_store_span_${Date.now()}`;
 const document = create_painter_document(8, 8, { min_z: 0, max_z: 0, default_group_name: 'Base' });
 const base_group_id = document.group_order[0]!;
-document.groups[base_group_id]!.channel_ids = ['location_1'];
-document.groups[base_group_id]!.channels.location_1 = {
-  id: 'location_1',
-  kind: 'location',
-  label: 'move',
-  gap_behavior: 'clip',
-  before_first_behavior: 'none',
-  after_last_behavior: 'none',
-  keys: [{ id: 'loc_key_1', breath: 2, value: { kind: 'vec3', x: 1, y: 0, z: 0 } }],
-};
+const baseRasterPropertyId = firstPropertyId(document, base_group_id, 'raster');
+document.groups[base_group_id]!.properties[baseRasterPropertyId]!.blocks = [
+  {
+    id: 'raster_a',
+    type: 'content',
+    start: 0,
+    end: 2,
+    value: { kind: 'raster', voxels: [create_painter_voxel_record({ x: 0, y: 0, z: 0, char: 'A', rgb: { r: 255, g: 255, b: 255 }, weight_index: 1 })] },
+  },
+];
+const seededRuntime = normalize_painter_document_runtime(document);
+set_painter_group_property_block(seededRuntime, base_group_id, {
+  property_kind: 'move',
+  breath: 2,
+  value: { kind: 'vec3', x: 1, y: 0, z: 0 },
+});
 save_painter_document_snapshot(slot, {
   document_id,
   revision: 1,
   updated_at: new Date().toISOString(),
-  snapshot: document,
+  snapshot: seededRuntime.document,
 });
 
 const created = apply_painter_group_structure_change(slot, document_id, {
@@ -38,7 +51,7 @@ const created = apply_painter_group_structure_change(slot, document_id, {
 let runtime = normalize_painter_document_runtime(created.snapshot);
 assert(runtime.document.groups['span_group_test']?.breath_start === 6, 'create_group should preserve explicit authored breath start in store path');
 assert(runtime.document.groups['span_group_test']?.breath_end === 10, 'create_group should preserve explicit authored breath end in store path');
-assert(derive_group_raster_segment_ranges(runtime.document.groups['span_group_test']!)[0]?.start === 6, 'create_group should derive the first segment start from the group start');
+assert(derive_group_raster_segment_ranges(runtime.document.groups['span_group_test']!)[0]?.start === 6, 'create_group should derive the first block start from the group start');
 
 const beforeSpan = structuredClone(runtime.document.groups[base_group_id]!);
 const resized = apply_painter_group_structure_change(slot, document_id, {
@@ -49,8 +62,8 @@ const resized = apply_painter_group_structure_change(slot, document_id, {
 });
 runtime = normalize_painter_document_runtime(resized.snapshot);
 assert(runtime.document.groups[base_group_id]?.breath_start === 3 && runtime.document.groups[base_group_id]?.breath_end === 7, 'set_group_breath_span should persist authored span changes in store path');
-assert(derive_group_raster_segment_ranges(runtime.document.groups[base_group_id]!)[0]?.start === derive_group_raster_segment_ranges(beforeSpan)[0]?.start, 'set_group_breath_span should not change derived segment order or start');
-assert(get_painter_group_channels_by_kind(runtime.document.groups[base_group_id]!, 'location')[0]?.keys.length === get_painter_group_channels_by_kind(beforeSpan, 'location')[0]?.keys.length, 'set_group_breath_span should not rewrite stored move channel keys');
+assert(derive_group_raster_segment_ranges(runtime.document.groups[base_group_id]!)[0]?.start === derive_group_raster_segment_ranges(beforeSpan)[0]?.start, 'set_group_breath_span should not rewrite property block starts');
+assert(runtime.document.groups[base_group_id]!.property_ids.length === beforeSpan.property_ids.length, 'set_group_breath_span should preserve authored properties');
 
 const retimed = apply_painter_group_structure_change(slot, document_id, {
   kind: 'set_group_timing',
@@ -69,44 +82,45 @@ const offset = apply_painter_group_structure_change(slot, document_id, {
   delta_breaths: 3,
 });
 runtime = normalize_painter_document_runtime(offset.snapshot);
-assert(runtime.document.groups[base_group_id]?.start === 7, 'offset_group_in_time should persist group start offset in store path');
-assert(get_painter_group_channels_by_kind(runtime.document.groups[base_group_id]!, 'location')[0]?.keys[0]?.breath === 5, 'offset_group_in_time should persist move channel key offsets in store path');
+const offsetMovePropertyId = firstPropertyId(runtime.document, base_group_id, 'move');
+assert(runtime.document.groups[base_group_id]?.start === 3, 'offset_group_in_time should sync group start from offset property blocks');
+assert(runtime.document.groups[base_group_id]!.properties[offsetMovePropertyId]!.blocks[0]?.start === 5, 'offset_group_in_time should persist move property block offsets in store path');
 
+const rasterPropertyId = firstPropertyId(runtime.document, base_group_id, 'raster');
+const rasterBlockId = runtime.document.groups[base_group_id]!.properties[rasterPropertyId]!.blocks[0]!.id;
 const relengthed = apply_painter_group_structure_change(slot, document_id, {
-  kind: 'set_group_raster_segment_length',
+  kind: 'set_group_property_block_length',
   group_id: base_group_id,
-  content_state_id: runtime.document.groups[base_group_id]!.content_states[0]!.id,
+  property_id: rasterPropertyId,
+  block_id: rasterBlockId,
   length_breaths: 6,
 });
 runtime = normalize_painter_document_runtime(relengthed.snapshot);
-assert(runtime.document.groups[base_group_id]?.content_states[0]?.length_breaths === 6, 'set_group_raster_segment_length should persist raster duration changes');
-assert(derive_channel_regions(get_painter_group_channels_by_kind(runtime.document.groups[base_group_id]!, 'raster_content')[0]!, null)[0]?.end === 12, 'raster channel should stay synchronized with authored raster length changes');
-assert(runtime.document.groups[base_group_id]?.cropped_start === runtime.document.groups[base_group_id]?.start, 'raster duration changes should auto-sync crop start to full content bounds for now');
-assert(runtime.document.groups[base_group_id]?.cropped_end === 12, 'raster duration changes should auto-sync crop end to derivative content bounds for now');
+assert(runtime.document.groups[base_group_id]!.properties[rasterPropertyId]!.blocks[0]?.end === 8, 'set_group_property_block_length should persist raster duration changes');
+assert(runtime.document.groups[base_group_id]?.cropped_start === runtime.document.groups[base_group_id]?.start, 'raster duration changes should sync crop start to property bounds');
+assert(runtime.document.groups[base_group_id]?.cropped_end === 8, 'raster duration changes should sync crop end to property bounds');
 
-const splitSourceId = runtime.document.groups[base_group_id]!.content_states[0]!.id;
 const split = apply_painter_group_structure_change(slot, document_id, {
-  kind: 'split_group_raster_segment',
+  kind: 'split_group_property_block',
   group_id: base_group_id,
-  content_state_id: splitSourceId,
-  split_breath: 10,
+  property_id: rasterPropertyId,
+  block_id: rasterBlockId,
+  split_breath: 6,
 });
 runtime = normalize_painter_document_runtime(split.snapshot);
-assert(runtime.document.groups[base_group_id]!.content_states.length === 2, 'split_group_raster_segment should create a second raster segment');
-assert(runtime.document.groups[base_group_id]!.content_states[0]!.length_breaths === 3, 'split should shorten the left segment length');
-assert(runtime.document.groups[base_group_id]!.content_states[1]!.length_breaths === 3, 'split should create the right segment length from the remainder');
-assert(runtime.document.groups[base_group_id]!.cropped_start === runtime.document.groups[base_group_id]!.start, 'split should keep crop start synced to full content bounds for now');
-assert(runtime.document.groups[base_group_id]!.cropped_end === 12, 'split should keep crop end synced to full derivative bounds for now');
+const splitBlocks = runtime.document.groups[base_group_id]!.properties[rasterPropertyId]!.blocks;
+assert(splitBlocks.length === 2, 'split_group_property_block should create a second raster block');
+assert(splitBlocks[0]!.start === 3 && splitBlocks[0]!.end === 5, 'split should shorten the left block span');
+assert(splitBlocks[1]!.start === 6 && splitBlocks[1]!.end === 8, 'split should create the right block span from the remainder');
 
-const firstId = runtime.document.groups[base_group_id]!.content_states[0]!.id;
-const secondId = runtime.document.groups[base_group_id]!.content_states[1]!.id;
 const swapped = apply_painter_group_structure_change(slot, document_id, {
-  kind: 'swap_group_raster_segments',
+  kind: 'swap_group_property_blocks',
   group_id: base_group_id,
-  source_content_state_id: firstId,
-  target_content_state_id: secondId,
+  property_id: rasterPropertyId,
+  source_block_id: splitBlocks[0]!.id,
+  target_block_id: splitBlocks[1]!.id,
 });
 runtime = normalize_painter_document_runtime(swapped.snapshot);
-assert(runtime.document.groups[base_group_id]!.content_states[0]!.id === secondId, 'swap_group_raster_segments should swap segment order');
+assert(get_painter_group_raster_state_at_breath(runtime.document.groups[base_group_id]!, 6)?.content[0]?.char === 'A', 'swap_group_property_blocks should preserve raster payload after swapping spans');
 
 console.log('painter_document_store_span tests passed');

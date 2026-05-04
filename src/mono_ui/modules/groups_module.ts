@@ -26,11 +26,6 @@ export type GroupListItem = {
     label: string;
     blocks: Array<{ id: string; breath: number; start: number; end: number; is_blank?: boolean; dominant_rgb?: { r: number; g: number; b: number } }>;
   }>;
-  content_state_breaths?: number[];
-  raster_segments?: Array<{ id: string; start: number; end: number; length_breaths: number; is_blank?: boolean }>;
-  move_blocks?: Array<{ property_id: string; block_id: string; breath: number; start: number; end: number }>;
-  move_key_breaths?: number[];
-  move_regions?: Array<{ channel_id: string; key_id: string; breath: number; start: number; end: number }>;
 };
 
 export type GroupsModuleOptions = {
@@ -61,15 +56,14 @@ export type GroupsModuleOptions = {
   on_remove_group_property?: (groupId: string, propertyId: string) => void;
   on_offset_group_in_time?: (groupId: string, deltaBreaths: number) => void;
   on_set_group_timing?: (groupId: string, start: number, cropped_start: number, cropped_end: number) => void;
-  on_set_group_raster_segment_length?: (groupId: string, contentStateId: string, lengthBreaths: number) => void;
-  on_split_group_raster_segment?: (groupId: string, contentStateId: string, splitBreath: number) => void;
-  on_swap_group_raster_segments?: (groupId: string, sourceContentStateId: string, targetContentStateId: string) => void;
-  on_blank_group_raster_segment?: (groupId: string, contentStateId: string) => void;
-  on_trim_group_raster_segment_edge?: (groupId: string, contentStateId: string, edge: 'start' | 'end') => void;
-  on_merge_group_blank_segment?: (groupId: string, contentStateId: string, direction: 'left' | 'right') => void;
-  on_compact_group_blank_segment_left?: (groupId: string, contentStateId: string) => void;
-  on_move_group_raster_segment?: (groupId: string, contentStateId: string, targetBreath: number) => void;
-  on_set_group_raster_segment_edge_destructive?: (groupId: string, contentStateId: string, edge: 'start' | 'end', targetBreath: number) => void;
+  on_set_group_property_block_length?: (groupId: string, propertyId: string, blockId: string, lengthBreaths: number) => void;
+  on_split_group_property_block?: (groupId: string, propertyId: string, blockId: string, splitBreath: number) => void;
+  on_swap_group_property_blocks?: (groupId: string, propertyId: string, sourceBlockId: string, targetBlockId: string) => void;
+  on_blank_group_property_block?: (groupId: string, propertyId: string, blockId: string) => void;
+  on_trim_group_property_block_edge?: (groupId: string, propertyId: string, blockId: string, edge: 'start' | 'end') => void;
+  on_merge_group_blank_property_block?: (groupId: string, propertyId: string, blockId: string, direction: 'left' | 'right') => void;
+  on_compact_group_blank_property_block_left?: (groupId: string, propertyId: string, blockId: string) => void;
+  on_set_group_property_block_edge_destructive?: (groupId: string, propertyId: string, blockId: string, edge: 'start' | 'end', targetBreath: number) => void;
   on_move_group_property_block?: (groupId: string, propertyId: string, blockId: string, targetBreath: number) => void;
   on_move?: (new_rect: Rect) => void;
   on_resize?: (new_rect: Rect) => void;
@@ -318,44 +312,24 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
   };
 
   let lastPointerLocalPos: { x: number; y: number } | null = null;
-  let propertyBlockDragState: {
-    active: boolean;
-    kind: PropertyRowKind | null;
-    groupId: string | null;
-    propertyId: string | null;
-    blockId: string | null;
-    blockBreath: number;
-    blockStart: number;
-    blockEnd: number;
-    anchorBreath: number;
-    previewBreath: number;
-  } = {
-    active: false,
-    kind: null,
-    groupId: null,
-    propertyId: null,
-    blockId: null,
-    blockBreath: 0,
-    blockStart: 0,
-    blockEnd: 0,
-    anchorBreath: 0,
-    previewBreath: 0,
-  };
   let blankMergeDragState: {
     active: boolean;
     groupId: string | null;
+    propertyId: string | null;
     segmentId: string | null;
     anchorBreath: number;
     previewDirection: 'left' | 'right' | null;
   } = {
     active: false,
     groupId: null,
+    propertyId: null,
     segmentId: null,
     anchorBreath: 0,
     previewDirection: null,
   };
   let rasterDragState: {
     active: boolean;
+    kind: PropertyRowKind | null;
     groupId: string | null;
     propertyId: string | null;
     segmentId: string | null;
@@ -373,6 +347,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     targetPropertyId: string | null;
   } = {
     active: false,
+    kind: null,
     groupId: null,
     propertyId: null,
     segmentId: null,
@@ -768,10 +743,10 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
       : [];
   }
 
-  function getResolvedRasterSpan(group: GroupListItem, span: { id: string; start: number; end: number }): { start: number; end: number } {
+  function getResolvedPropertyBlockSpan(group: GroupListItem, propertyId: string, span: { id: string; start: number; end: number }): { start: number; end: number } {
     let start = Math.floor(span.start);
     let end = Math.max(start, Math.floor(span.end));
-    if (rasterDragState.active && rasterDragState.groupId === group.id && rasterDragState.segmentId === span.id) {
+    if (rasterDragState.active && rasterDragState.groupId === group.id && rasterDragState.propertyId === propertyId && rasterDragState.segmentId === span.id) {
       if (rasterDragState.mode === 'edge_start') {
         start = Math.max(0, Math.min(rasterDragState.previewBreath, rasterDragState.originalSegmentEnd));
         end = Math.max(start, rasterDragState.originalSegmentEnd);
@@ -819,27 +794,22 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     return null;
   }
 
-  function beginPropertyBlockDrag(args: {
-    kind: PropertyRowKind;
-    groupId: string;
-    propertyId: string;
-    blockId: string;
-    blockBreath: number;
-    blockStart: number;
-    blockEnd: number;
-    anchorBreath: number;
-    previewBreath?: number;
-  }): void {
-    propertyBlockDragState.active = true;
-    propertyBlockDragState.kind = args.kind;
-    propertyBlockDragState.groupId = args.groupId;
-    propertyBlockDragState.propertyId = args.propertyId;
-    propertyBlockDragState.blockId = args.blockId;
-    propertyBlockDragState.blockBreath = args.blockBreath;
-    propertyBlockDragState.blockStart = args.blockStart;
-    propertyBlockDragState.blockEnd = args.blockEnd;
-    propertyBlockDragState.anchorBreath = args.anchorBreath;
-    propertyBlockDragState.previewBreath = args.previewBreath ?? args.blockBreath;
+  function getPropertyBlockDragSegment(group: GroupListItem, propertyId: string | null, blockId: string): { id: string; start: number; end: number; length_breaths: number; is_blank: boolean } | null {
+    if (!propertyId) return null;
+    const row = Array.isArray(group.property_rows)
+      ? group.property_rows.find((entry) => entry.property_id === propertyId) ?? null
+      : null;
+    const block = row?.blocks.find((entry) => entry.id === blockId) ?? null;
+    if (!block) return null;
+    const start = Math.floor(block.start);
+    const end = Math.max(start, Math.floor(block.end));
+    return {
+      id: block.id,
+      start,
+      end,
+      length_breaths: Math.max(1, end - start + 1),
+      is_blank: block.is_blank === true,
+    };
   }
 
   function beginPendingBlockPress(args: {
@@ -867,39 +837,14 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     pendingBlockPress.breath = args.breath;
   }
 
-  function clearPropertyBlockDrag(): void {
-    propertyBlockDragState.active = false;
-    propertyBlockDragState.kind = null;
-    propertyBlockDragState.groupId = null;
-    propertyBlockDragState.propertyId = null;
-    propertyBlockDragState.blockId = null;
-    propertyBlockDragState.blockBreath = 0;
-    propertyBlockDragState.blockStart = 0;
-    propertyBlockDragState.blockEnd = 0;
-    propertyBlockDragState.anchorBreath = 0;
-    propertyBlockDragState.previewBreath = 0;
-  }
-
   function getMoveRegionHit(layout: GroupSectionLayout, currentRect: Rect, localX: number, localY: number): { propertyId: string; blockId: string; breath: number } | null {
     if (getPropertyRowKindAtLocalY(layout, localY) !== 'move') return null;
     const hit = getPropertyRowHit(layout, currentRect, localX, localY);
     return hit ? { propertyId: hit.propertyId, blockId: hit.blockId, breath: hit.breath } : null;
   }
 
-  function commitMoveRegionDrag(): void {
-    if (!propertyBlockDragState.active || propertyBlockDragState.kind !== 'move' || !propertyBlockDragState.groupId || !propertyBlockDragState.propertyId || !propertyBlockDragState.blockId) return;
-    if (propertyBlockDragState.previewBreath !== propertyBlockDragState.blockStart) {
-      opts.on_move_group_property_block?.(
-        propertyBlockDragState.groupId,
-        propertyBlockDragState.propertyId,
-        propertyBlockDragState.blockId,
-        propertyBlockDragState.previewBreath,
-      );
-    }
-    clearPropertyBlockDrag();
-  }
-
   function armRasterSegmentDrag(args: {
+    kind: PropertyRowKind;
     group: GroupListItem;
     propertyId: string | null;
     segment: { id: string; start: number; end: number; length_breaths: number; is_blank: boolean };
@@ -910,6 +855,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     finalMode: RasterDragMode;
   }): void {
     rasterDragState.active = true;
+    rasterDragState.kind = args.kind;
     rasterDragState.groupId = args.group.id;
     rasterDragState.propertyId = args.propertyId;
     rasterDragState.segmentId = args.segment.id;
@@ -927,6 +873,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     rasterDragState.targetPropertyId = null;
     groupsRasterDiag('arm_drag', {
       groupId: args.group.id,
+      kind: args.kind,
       propertyId: args.propertyId ?? 'raster',
       segmentId: args.segment.id,
       isBlank: args.segment.is_blank,
@@ -941,10 +888,11 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
   }
 
   function commitBlankMergeDrag(): void {
-    if (!blankMergeDragState.active || !blankMergeDragState.groupId || !blankMergeDragState.segmentId || !blankMergeDragState.previewDirection) return;
-    opts.on_merge_group_blank_segment?.(blankMergeDragState.groupId, blankMergeDragState.segmentId, blankMergeDragState.previewDirection);
+    if (!blankMergeDragState.active || !blankMergeDragState.groupId || !blankMergeDragState.propertyId || !blankMergeDragState.segmentId || !blankMergeDragState.previewDirection) return;
+    opts.on_merge_group_blank_property_block?.(blankMergeDragState.groupId, blankMergeDragState.propertyId, blankMergeDragState.segmentId, blankMergeDragState.previewDirection);
     blankMergeDragState.active = false;
     blankMergeDragState.groupId = null;
+    blankMergeDragState.propertyId = null;
     blankMergeDragState.segmentId = null;
     blankMergeDragState.previewDirection = null;
   }
@@ -1011,12 +959,12 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     })));
   }
 
-  function getRasterRowSegments(group: GroupListItem, propertyId: string): PropertyRowDrawSegment[] {
-    const rasterRow = Array.isArray(group.property_rows)
+  function getPropertyRowDrawSegments(group: GroupListItem, propertyId: string): PropertyRowDrawSegment[] {
+    const propertyRow = Array.isArray(group.property_rows)
       ? group.property_rows.find((row) => row.property_id === propertyId) ?? null
       : null;
-    if (rasterRow && rasterRow.blocks.length > 0) {
-      return rasterRow.blocks.map((block) => ({
+    if (propertyRow && propertyRow.blocks.length > 0) {
+      return propertyRow.blocks.map((block) => ({
         id: block.id,
         breath: block.breath,
         start: block.start,
@@ -1047,24 +995,24 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     return { segments: nextSegments, removedIds };
   }
 
-  function orderActiveRasterSourceLast(segments: PropertyRowDrawSegment[]): PropertyRowDrawSegment[] {
-    if (!rasterDragState.active || !rasterDragState.segmentId || rasterDragState.mode === 'body_swap') return segments;
+  function orderActiveRasterSourceLast(propertyId: string, segments: PropertyRowDrawSegment[]): PropertyRowDrawSegment[] {
+    if (!rasterDragState.active || rasterDragState.propertyId !== propertyId || !rasterDragState.segmentId || rasterDragState.mode === 'body_swap') return segments;
     const source = segments.find((segment) => segment.id === rasterDragState.segmentId) ?? null;
     if (!source) return segments;
     return [...segments.filter((segment) => segment.id !== source.id), source];
   }
 
-  function getPreviewRasterRowSegments(group: GroupListItem, propertyId: string): PropertyRowDrawSegment[] {
-    const baseSegments = getRasterRowSegments(group, propertyId);
+  function getPreviewPropertyRowSegments(group: GroupListItem, propertyId: string): PropertyRowDrawSegment[] {
+    const baseSegments = getPropertyRowDrawSegments(group, propertyId);
     if (!rasterDragState.active || rasterDragState.groupId !== group.id) {
-      return baseSegments.map((segment) => ({ ...segment, ...getResolvedRasterSpan(group, segment) }));
+      return baseSegments.map((segment) => ({ ...segment, ...getResolvedPropertyBlockSpan(group, propertyId, segment) }));
     }
     if (rasterDragState.mode !== 'body_swap' || rasterDragState.propertyId !== propertyId || !rasterDragState.segmentId || !rasterDragState.targetSegmentId) {
-      return orderActiveRasterSourceLast(baseSegments.map((segment) => ({ ...segment, ...getResolvedRasterSpan(group, segment) })));
+      return orderActiveRasterSourceLast(propertyId, baseSegments.map((segment) => ({ ...segment, ...getResolvedPropertyBlockSpan(group, propertyId, segment) })));
     }
     const source = baseSegments.find((segment) => segment.id === rasterDragState.segmentId) ?? null;
     const target = baseSegments.find((segment) => segment.id === rasterDragState.targetSegmentId) ?? null;
-    if (!source || !target) return orderActiveRasterSourceLast(baseSegments.map((segment) => ({ ...segment, ...getResolvedRasterSpan(group, segment) })));
+    if (!source || !target) return orderActiveRasterSourceLast(propertyId, baseSegments.map((segment) => ({ ...segment, ...getResolvedPropertyBlockSpan(group, propertyId, segment) })));
 
     const swapped = baseSegments.map((segment) => {
       if (segment.id === source.id) return { ...segment, start: target.start, end: target.end };
@@ -1180,28 +1128,30 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
       && pendingBlockSingleClick.button === args.button;
   }
 
-  function deleteRasterSegmentAtHit(group: GroupListItem, segmentId: string): void {
-    opts.on_blank_group_raster_segment?.(group.id, segmentId);
+  function deletePropertyBlockAtHit(group: GroupListItem, propertyId: string | null, blockId: string): void {
+    if (!propertyId) return;
+    opts.on_blank_group_property_block?.(group.id, propertyId, blockId);
   }
 
-  function handleRasterDoubleClick(group: GroupListItem, propertyId: string | null, button: number, hit: { segmentId: string; mode: 'edge_start' | 'edge_end' | 'body_move' | 'body_single' | 'blank_start' | 'blank_end' | 'blank_center' | 'blank_single'; breath: number; isBlank: boolean }, currentRect: Rect, localX: number): void {
+  function handlePropertyBlockDoubleClick(group: GroupListItem, propertyId: string | null, button: number, hit: { segmentId: string; mode: 'edge_start' | 'edge_end' | 'body_move' | 'body_single' | 'blank_start' | 'blank_end' | 'blank_center' | 'blank_single'; breath: number; isBlank: boolean }, currentRect: Rect, localX: number): void {
     opts.on_select_group_property?.(group.id, propertyId ?? 'raster');
     if (hit.isBlank) {
       if (button !== 2) return;
-      const blankSegment = getRasterSegments(group).find((entry) => entry.id === hit.segmentId) ?? null;
+      const blankSegment = getPropertyBlockDragSegment(group, propertyId, hit.segmentId);
       if (!blankSegment) return;
       const direction = getBlankCompactDirection(blankSegment, hit);
-      if (direction === 'left') opts.on_compact_group_blank_segment_left?.(group.id, hit.segmentId);
-      else opts.on_merge_group_blank_segment?.(group.id, hit.segmentId, 'right');
+      if (!propertyId) return;
+      if (direction === 'left') opts.on_compact_group_blank_property_block_left?.(group.id, propertyId, hit.segmentId);
+      else opts.on_merge_group_blank_property_block?.(group.id, propertyId, hit.segmentId, 'right');
       return;
     }
     if (button === 0) {
       if (hit.mode === 'body_move') {
-        opts.on_split_group_raster_segment?.(group.id, hit.segmentId, timelineXToBreath(currentRect, localX + currentRect.x0));
+        if (propertyId) opts.on_split_group_property_block?.(group.id, propertyId, hit.segmentId, timelineXToBreath(currentRect, localX + currentRect.x0));
       }
       return;
     }
-    if (button === 2) deleteRasterSegmentAtHit(group, hit.segmentId);
+    if (button === 2) deletePropertyBlockAtHit(group, propertyId, hit.segmentId);
   }
 
   function updateRasterHoverState(currentRect: Rect, pointerX: number, pointerY: number): void {
@@ -1294,12 +1244,20 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
   function getMoveInteractionStyle(groupId: string, propertyId: string, blockId: string, breath: number): InteractionStyle {
     const hoverMatchesBlock = moveHoverState.groupId === groupId && moveHoverState.propertyId === propertyId && moveHoverState.blockId === blockId;
     const hoverMatchesBreath = hoverMatchesBlock && moveHoverState.breath === breath;
-    const dragMatches = propertyBlockDragState.active
-      && propertyBlockDragState.kind === 'move'
-      && propertyBlockDragState.groupId === groupId
-      && propertyBlockDragState.propertyId === propertyId
-      && propertyBlockDragState.blockId === blockId;
-    if (dragMatches) return { rgb: rasterLeftDragColor, weight: 3 };
+    const sharedDragMatchesSource = rasterDragState.active
+      && rasterDragState.kind === 'move'
+      && rasterDragState.groupId === groupId
+      && rasterDragState.propertyId === propertyId
+      && rasterDragState.segmentId === blockId;
+    const sharedDragMatchesTarget = rasterDragState.active
+      && rasterDragState.kind === 'move'
+      && rasterDragState.groupId === groupId
+      && rasterDragState.propertyId === propertyId
+      && rasterDragState.targetSegmentId === blockId
+      && rasterDragState.segmentId !== blockId;
+    if (sharedDragMatchesTarget) return { rgb: rasterSwapTargetColor, weight: 2 };
+    if (sharedDragMatchesSource && rasterDragState.button === 2) return { rgb: rasterRightDragColor, weight: 3 };
+    if (sharedDragMatchesSource && rasterDragState.button === 0) return { rgb: rasterLeftDragColor, weight: 3 };
     if (hoverMatchesBreath) return { rgb: rasterHoverColor, weight: 3 };
     if (hoverMatchesBlock) return { rgb: rasterHoverColor, weight: 2 };
     return { rgb: rasterDefaultColor, weight: 1 };
@@ -1325,11 +1283,33 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     }
   }
 
-  function commitRasterDrag(): void {
-    if (!rasterDragState.active || !rasterDragState.groupId || !rasterDragState.segmentId || !rasterDragState.mode) return;
+  function clearActivePropertyBlockDrag(): void {
+    rasterDragState.active = false;
+    rasterDragState.kind = null;
+    rasterDragState.groupId = null;
+    rasterDragState.propertyId = null;
+    rasterDragState.segmentId = null;
+    rasterDragState.mode = null;
+    rasterDragState.button = 0;
+    rasterDragState.originalGroupStart = 0;
+    rasterDragState.originalCropStart = 0;
+    rasterDragState.originalCropEnd = 0;
+    rasterDragState.originalSegmentStart = 0;
+    rasterDragState.originalSegmentEnd = 0;
+    rasterDragState.originalLength = 1;
+    rasterDragState.anchorBreath = 0;
+    rasterDragState.previewBreath = 0;
+    rasterDragState.targetSegmentId = null;
+    rasterDragState.targetPropertyId = null;
+  }
+
+  function commitPropertyBlockDrag(): void {
+    if (!rasterDragState.active || !rasterDragState.groupId || !rasterDragState.propertyId || !rasterDragState.segmentId || !rasterDragState.mode) return;
     const delta = rasterDragState.previewBreath - rasterDragState.anchorBreath;
     groupsRasterDiag('commit_drag', {
       groupId: rasterDragState.groupId,
+      kind: rasterDragState.kind,
+      propertyId: rasterDragState.propertyId,
       segmentId: rasterDragState.segmentId,
       mode: rasterDragState.mode,
       button: rasterDragState.button,
@@ -1339,47 +1319,53 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
       targetSegmentId: rasterDragState.targetSegmentId,
     });
     if (rasterDragState.mode === 'body_move') {
-      opts.on_move_group_raster_segment?.(rasterDragState.groupId, rasterDragState.segmentId, Math.max(0, rasterDragState.originalSegmentStart + delta));
+      opts.on_move_group_property_block?.(rasterDragState.groupId, rasterDragState.propertyId, rasterDragState.segmentId, Math.max(0, rasterDragState.originalSegmentStart + delta));
     } else if (rasterDragState.mode === 'edge_start') {
-      opts.on_set_group_raster_segment_edge_destructive?.(
+      opts.on_set_group_property_block_edge_destructive?.(
         rasterDragState.groupId,
+        rasterDragState.propertyId,
         rasterDragState.segmentId,
         'start',
         Math.max(0, Math.min(rasterDragState.previewBreath, rasterDragState.originalSegmentEnd)),
       );
     } else if (rasterDragState.mode === 'edge_end') {
-      opts.on_set_group_raster_segment_edge_destructive?.(
+      opts.on_set_group_property_block_edge_destructive?.(
         rasterDragState.groupId,
+        rasterDragState.propertyId,
         rasterDragState.segmentId,
         'end',
         Math.max(rasterDragState.originalSegmentStart, rasterDragState.previewBreath),
       );
     } else if (rasterDragState.mode === 'edge_start_dynamic') {
-      opts.on_set_group_raster_segment_edge_destructive?.(
+      opts.on_set_group_property_block_edge_destructive?.(
         rasterDragState.groupId,
+        rasterDragState.propertyId,
         rasterDragState.segmentId,
         'start',
         Math.max(0, Math.min(rasterDragState.previewBreath, rasterDragState.originalSegmentEnd)),
       );
     } else if (rasterDragState.mode === 'body_dynamic_resize') {
       if (rasterDragState.previewBreath < rasterDragState.anchorBreath) {
-        opts.on_set_group_raster_segment_edge_destructive?.(
+        opts.on_set_group_property_block_edge_destructive?.(
           rasterDragState.groupId,
+          rasterDragState.propertyId,
           rasterDragState.segmentId,
           'start',
           Math.max(0, rasterDragState.previewBreath),
         );
       } else if (rasterDragState.previewBreath > rasterDragState.anchorBreath) {
-        opts.on_set_group_raster_segment_edge_destructive?.(
+        opts.on_set_group_property_block_edge_destructive?.(
           rasterDragState.groupId,
+          rasterDragState.propertyId,
           rasterDragState.segmentId,
           'end',
           Math.max(rasterDragState.originalSegmentStart, rasterDragState.previewBreath),
         );
       }
     } else if (rasterDragState.mode === 'edge_end_dynamic') {
-      opts.on_set_group_raster_segment_edge_destructive?.(
+      opts.on_set_group_property_block_edge_destructive?.(
         rasterDragState.groupId,
+        rasterDragState.propertyId,
         rasterDragState.segmentId,
         'end',
         Math.max(rasterDragState.originalSegmentStart, rasterDragState.previewBreath),
@@ -1389,22 +1375,18 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
       const swapWillFire = !!targetSegmentId && targetSegmentId !== rasterDragState.segmentId;
       groupsRasterDiag('commit_swap', {
         groupId: rasterDragState.groupId,
+        kind: rasterDragState.kind,
+        propertyId: rasterDragState.propertyId,
         sourceSegmentId: rasterDragState.segmentId,
         targetSegmentId,
         targetPropertyId: rasterDragState.targetPropertyId,
         fired: swapWillFire,
       });
       if (swapWillFire) {
-        opts.on_swap_group_raster_segments?.(rasterDragState.groupId, rasterDragState.segmentId, targetSegmentId);
+        opts.on_swap_group_property_blocks?.(rasterDragState.groupId, rasterDragState.propertyId, rasterDragState.segmentId, targetSegmentId);
       }
     }
-    rasterDragState.active = false;
-    rasterDragState.groupId = null;
-    rasterDragState.propertyId = null;
-    rasterDragState.segmentId = null;
-    rasterDragState.mode = null;
-    rasterDragState.targetSegmentId = null;
-    rasterDragState.targetPropertyId = null;
+    clearActivePropertyBlockDrag();
   }
 
   function getResolvedGroupSpan(group: GroupListItem): { start: number; end: number } {
@@ -1714,7 +1696,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         drawPropertyRowSegments(c, {
           currentRect: rect,
           rowY,
-          segments: getPreviewRasterRowSegments(group, descriptor.property_id),
+          segments: getPreviewPropertyRowSegments(group, descriptor.property_id),
           cellForBreath: (segment, breath) => {
             const localIndex = breath - segment.start;
             const visible = isBreathInsideGroupCrop(layout.item, breath);
@@ -1743,35 +1725,22 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         });
         continue;
       }
-      const moveRow = Array.isArray(group.property_rows)
-        ? group.property_rows.find((row) => row.property_id === descriptor.property_id) ?? null
-        : null;
-      const moveSegments: PropertyRowDrawSegment[] = moveRow
-        ? moveRow.blocks.filter((block) => block.is_blank !== true).map((block) => {
-            const isDragged = propertyBlockDragState.active && propertyBlockDragState.kind === 'move' && propertyBlockDragState.groupId === group.id && propertyBlockDragState.propertyId === descriptor.property_id && propertyBlockDragState.blockId === block.id;
-            const delta = isDragged ? (propertyBlockDragState.previewBreath - propertyBlockDragState.blockBreath) : 0;
-            return { id: block.id, breath: block.breath + delta, start: block.start + delta, end: block.end + delta, is_blank: false };
-          })
-        : moveRegions.map((region) => {
-            const isDragged = propertyBlockDragState.active && propertyBlockDragState.kind === 'move' && propertyBlockDragState.groupId === group.id && propertyBlockDragState.propertyId === region.property_id && propertyBlockDragState.blockId === region.block_id;
-            const delta = isDragged ? (propertyBlockDragState.previewBreath - propertyBlockDragState.blockBreath) : 0;
-            return { id: region.block_id, breath: region.breath + delta, start: region.start + delta, end: region.end + delta, is_blank: false };
-          });
       drawPropertyRowSegments(c, {
         currentRect: rect,
         rowY,
-        segments: moveSegments,
+        segments: getPreviewPropertyRowSegments(group, descriptor.property_id),
         cellForBreath: (segment, breath) => {
           const localIndex = breath - segment.start;
           const isSingle = segment.start === segment.end;
           const isFirst = localIndex === 0;
           const isLast = breath === segment.end;
           const interactionStyle = getMoveInteractionStyle(group.id, descriptor.property_id, segment.id, breath);
-          const isExact = breath === segment.breath;
-          return {
-            char: getRasterCellChar({ visible: true, isSingle, isFirst, isLast }),
-            rgb: interactionStyle.weight >= 2 ? interactionStyle.rgb : group.selected_property_id === descriptor.property_id ? visibleColor : isExact ? selectedColor : rowColor,
-            weight: Math.max(interactionStyle.weight, group.selected_property_id === descriptor.property_id ? 3 : isExact ? 3 : 2),
+            const isExact = breath === segment.breath;
+            const visible = isBreathInsideGroupCrop(layout.item, breath);
+            return {
+              char: getRasterCellChar({ visible, isSingle, isFirst, isLast, isBlank: segment.is_blank }),
+              rgb: interactionStyle.weight >= 2 ? interactionStyle.rgb : segment.is_blank ? rasterDefaultColor : group.selected_property_id === descriptor.property_id ? visibleColor : isExact ? selectedColor : rowColor,
+              weight: Math.max(interactionStyle.weight, segment.is_blank ? 1 : group.selected_property_id === descriptor.property_id ? 3 : isExact ? 3 : 2),
             renderIndex: interactionStyle.weight >= 3 ? 3 : 2,
           };
         },
@@ -1960,50 +1929,37 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
       const group = layout.item;
       const firstPropertyRowY = layout.propertyRows[0]?.y ?? layout.sectionTopY - 2;
       const secondPropertyRowY = layout.propertyRows[1]?.y ?? layout.sectionTopY - 4;
-      const moveRegionHit = getMoveRegionHit(layout, currentRect, localX, localY);
-      if (moveRegionHit && (e.button === 0 || e.button === 2)) {
-        beginPendingBlockPress({
-          kind: 'move',
-          groupId: group.id,
-          propertyId: moveRegionHit.propertyId,
-          blockId: moveRegionHit.blockId,
-          mode: 'body_move',
-          isBlank: false,
-          button: e.button,
-          localDownX: localX,
-          localDownY: localY,
-          breath: moveRegionHit.breath,
-        });
-        return;
-      }
-      const rasterHit = getRasterHit(layout, currentRect, localX, localY);
-      if (rasterHit) {
-        const rasterDescriptor = getPropertyRowDescriptorAtLocalY(layout, localY);
-        const hitSegment = getRasterSegments(group).find((entry) => entry.id === rasterHit.segmentId) ?? null;
+      const propertyDescriptorAtHit = getPropertyRowDescriptorAtLocalY(layout, localY);
+      const propertyHit = propertyDescriptorAtHit && (propertyDescriptorAtHit.kind === 'raster' || propertyDescriptorAtHit.kind === 'move')
+        ? getPropertyRowHit(layout, currentRect, localX, localY)
+        : null;
+      if (propertyDescriptorAtHit && propertyHit && (e.button === 0 || e.button === 2)) {
+        const hitSegment = getPropertyBlockDragSegment(group, propertyHit.propertyId, propertyHit.blockId);
         groupsRasterDiag('pointer_down_hit', {
           groupId: group.id,
-          propertyId: rasterDescriptor?.property_id ?? 'raster',
-          segmentId: rasterHit.segmentId,
+          kind: propertyDescriptorAtHit.kind,
+          propertyId: propertyHit.propertyId,
+          segmentId: propertyHit.blockId,
           segmentStart: hitSegment?.start ?? null,
           segmentEnd: hitSegment?.end ?? null,
-          mode: rasterHit.mode,
+          mode: propertyHit.mode,
           button: e.button,
-          breath: rasterHit.breath,
-          isBlank: rasterHit.isBlank,
+          breath: propertyHit.breath,
+          isBlank: propertyHit.isBlank,
           localX,
           localY,
         });
         beginPendingBlockPress({
-          kind: 'raster',
+          kind: propertyDescriptorAtHit.kind,
           groupId: group.id,
-          propertyId: rasterDescriptor?.property_id ?? 'raster',
-          blockId: rasterHit.segmentId,
-          mode: rasterHit.mode,
-          isBlank: rasterHit.isBlank,
+          propertyId: propertyHit.propertyId,
+          blockId: propertyHit.blockId,
+          mode: propertyHit.mode,
+          isBlank: propertyHit.isBlank,
           button: e.button,
           localDownX: localX,
           localDownY: localY,
-          breath: rasterHit.breath,
+          breath: propertyHit.breath,
         });
         return;
       }
@@ -2014,7 +1970,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         selectGroup(group);
         return;
       }
-      const propertyDescriptorAtPointer = getPropertyRowDescriptorAtLocalY(layout, localY);
+      const propertyDescriptorAtPointer = propertyDescriptorAtHit ?? getPropertyRowDescriptorAtLocalY(layout, localY);
       if (propertyDescriptorAtPointer && localX >= 20 && localX < 28) {
         selectGroup(group);
         opts.on_select_group_property?.(group.id, propertyDescriptorAtPointer.property_id);
@@ -2125,37 +2081,13 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         }
         selectGroup(group);
         if (pendingBlockPress.propertyId) opts.on_select_group_property?.(group.id, pendingBlockPress.propertyId);
-        if (pendingBlockPress.kind === 'move') {
-          if (pendingBlockPress.button !== 0) {
-            clearPendingBlockPress();
-            return;
-          }
-          const moveSegment = getMoveRegions(group).find((region) => region.property_id === pendingBlockPress.propertyId && region.block_id === pendingBlockPress.blockId) ?? null;
-          if (!moveSegment) {
-            clearPendingBlockPress();
-            return;
-          }
-          beginPropertyBlockDrag({
-            kind: 'move',
-            groupId: group.id,
-            propertyId: pendingBlockPress.propertyId ?? moveSegment.property_id,
-            blockId: pendingBlockPress.blockId,
-            blockBreath: moveSegment.breath,
-            blockStart: moveSegment.start,
-            blockEnd: moveSegment.end,
-            anchorBreath: timelineXToBreath(rect, e.x),
-            previewBreath: timelineXToBreath(rect, e.x),
-          });
-          clearPendingBlockPress();
-          return;
-        }
         if (pendingBlockPress.isBlank && pendingBlockPress.button === 0 && (pendingBlockPress.mode === 'blank_center' || pendingBlockPress.mode === 'blank_single')) {
           setCurrentBreath(timelineXToBreath(rect, e.x));
           timelineScrubDrag = true;
           clearPendingBlockPress();
           return;
         }
-        const segment = getRasterSegments(group).find((entry) => entry.id === pendingBlockPress.blockId) ?? null;
+        const segment = getPropertyBlockDragSegment(group, pendingBlockPress.propertyId, pendingBlockPress.blockId);
         if (!segment) {
           clearPendingBlockPress();
           return;
@@ -2182,6 +2114,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
           return;
         }
         armRasterSegmentDrag({
+          kind: pendingBlockPress.kind,
           group,
           propertyId: pendingBlockPress.propertyId,
           segment,
@@ -2201,11 +2134,6 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         else blankMergeDragState.previewDirection = null;
         return;
       }
-      if (propertyBlockDragState.active) {
-        const delta = timelineXToBreath(rect, e.x) - propertyBlockDragState.anchorBreath;
-        propertyBlockDragState.previewBreath = Math.max(0, propertyBlockDragState.blockBreath + delta);
-        return;
-      }
       if (propertyOrderDragState.active && propertyOrderDragState.groupId) {
         const layout = getLayoutAtPointer(rect, e.x, e.y);
         propertyOrderDragState.dragPointerY = e.y;
@@ -2220,14 +2148,14 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
           const layout = getLayoutAtPointer(rect, e.x, e.y);
           const localX = e.x - rect.x0;
           const localY = e.y - rect.y0;
-          const hit = layout ? getRasterHit(layout, rect, localX, localY) : null;
+          const hit = layout ? getPropertyRowHit(layout, rect, localX, localY) : null;
           const swapTarget = resolve_groups_raster_swap_target_result({
             sourceGroupId: rasterDragState.groupId,
             sourcePropertyId: rasterDragState.propertyId,
             sourceSegmentId: rasterDragState.segmentId,
             hitGroupId: layout?.item.id ?? null,
             hitPropertyId: hit?.propertyId ?? null,
-            hitSegmentId: hit?.segmentId ?? null,
+            hitSegmentId: hit?.blockId ?? null,
             hitIsBlank: hit?.isBlank ?? true,
           });
           rasterDragState.targetSegmentId = swapTarget.targetSegmentId;
@@ -2238,7 +2166,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
             sourceSegmentId: rasterDragState.segmentId,
             hitGroupId: layout?.item.id ?? null,
             hitPropertyId: hit?.propertyId ?? null,
-            hitSegmentId: hit?.segmentId ?? null,
+            hitSegmentId: hit?.blockId ?? null,
             hitMode: hit?.mode ?? null,
             hitIsBlank: hit?.isBlank ?? null,
             targetSegmentId: rasterDragState.targetSegmentId,
@@ -2289,14 +2217,12 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
           const group = getGroupById(candidate.groupId);
           clearPendingBlockSingleClick();
           if (!group) return;
-          if (candidate.kind === 'raster') {
-            handleRasterDoubleClick(group, candidate.propertyId, candidate.button, {
-              segmentId: candidate.blockId,
-              mode: candidate.mode,
-              breath: candidate.breath,
-              isBlank: candidate.isBlank,
-            }, rect, lastPointerLocalPos?.x ?? 0);
-          }
+          handlePropertyBlockDoubleClick(group, candidate.propertyId, candidate.button, {
+            segmentId: candidate.blockId,
+            mode: candidate.mode,
+            breath: candidate.breath,
+            isBlank: candidate.isBlank,
+          }, rect, lastPointerLocalPos?.x ?? 0);
           return;
         }
         if (candidate.button === 0) {
@@ -2328,12 +2254,8 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         }
         return;
       }
-      if (propertyBlockDragState.active && propertyBlockDragState.kind === 'move') {
-        commitMoveRegionDrag();
-        return;
-      }
       if (rasterDragState.active) {
-        commitRasterDrag();
+        commitPropertyBlockDrag();
         return;
       }
       if (timelinePanDrag.active) {
