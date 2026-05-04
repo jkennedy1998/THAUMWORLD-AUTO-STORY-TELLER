@@ -130,7 +130,7 @@ export type PainterCanvasOptions = {
   get_world_point_for_grid_on_plane?: (x: number, y: number, plane: number) => { x: number; y: number; z: number } | null;
   get_grid_point_for_world?: (world: { x: number; y: number; z: number }) => { x: number; y: number } | null;
   get_view_state?: () => PlaceViewState;
-  get_focus_content_bounds?: () => { min_x: number; min_y: number; max_x: number; max_y: number } | null;
+  get_is_playing?: () => boolean;
   get_selection_status?: () => string | null;
   on_history_applied?: () => void;
   on_undo_request: () => string | null;
@@ -1673,20 +1673,33 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     return opts.get_active_group_world_bounds?.() ?? null;
   }
 
+  function isPlaybackRunning(): boolean {
+    return opts.get_is_playing?.() === true;
+  }
+
   function getActiveGroupProjectedBounds(delta?: { x: number; y: number; z: number } | null): { minX: number; minY: number; maxX: number; maxY: number } | null {
-    const voxels = getActiveGroupWorldVoxels();
-    if (voxels.length < 1) return null;
+    const bounds = getActiveGroupWorldBounds();
+    if (!bounds) return null;
+    const projectedPoints = [
+      { x: bounds.minX, y: bounds.minY, z: bounds.minZ },
+      { x: bounds.minX, y: bounds.minY, z: bounds.maxZ },
+      { x: bounds.minX, y: bounds.maxY, z: bounds.minZ },
+      { x: bounds.minX, y: bounds.maxY, z: bounds.maxZ },
+      { x: bounds.maxX, y: bounds.minY, z: bounds.minZ },
+      { x: bounds.maxX, y: bounds.minY, z: bounds.maxZ },
+      { x: bounds.maxX, y: bounds.maxY, z: bounds.minZ },
+      { x: bounds.maxX, y: bounds.maxY, z: bounds.maxZ },
+    ].map((world) => opts.get_grid_point_for_world?.({
+      x: world.x + (delta?.x ?? 0),
+      y: world.y + (delta?.y ?? 0),
+      z: world.z + (delta?.z ?? 0),
+    }) ?? null).filter((point): point is { x: number; y: number } => !!point);
+    if (projectedPoints.length < 1) return null;
     let minX = Number.POSITIVE_INFINITY;
     let minY = Number.POSITIVE_INFINITY;
     let maxX = Number.NEGATIVE_INFINITY;
     let maxY = Number.NEGATIVE_INFINITY;
-    for (const voxel of voxels) {
-      const point = opts.get_grid_point_for_world?.({
-        x: voxel.x + (delta?.x ?? 0),
-        y: voxel.y + (delta?.y ?? 0),
-        z: voxel.z + (delta?.z ?? 0),
-      }) ?? null;
-      if (!point) continue;
+    for (const point of projectedPoints) {
       minX = Math.min(minX, point.x);
       minY = Math.min(minY, point.y);
       maxX = Math.max(maxX, point.x);
@@ -1696,6 +1709,26 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     return { minX, minY, maxX, maxY };
   }
 
+  function drawProjectedBoundsBorder(c: Canvas, rect: Rect, bounds: { minX: number; minY: number; maxX: number; maxY: number }, rgb: Rgb, weight_index: number, render_index: number): void {
+    const x0 = Math.max(rect.x0, rect.x0 + bounds.minX);
+    const x1 = Math.min(rect.x1, rect.x0 + bounds.maxX);
+    const y0 = Math.max(rect.y0, rect.y0 + bounds.minY);
+    const y1 = Math.min(rect.y1, rect.y0 + bounds.maxY);
+    if (x0 > x1 || y0 > y1) return;
+    for (let x = x0; x <= x1; x += 1) {
+      c.set(x, y0, { char: '─', rgb, style: 'regular', weight_index, render_index });
+      c.set(x, y1, { char: '─', rgb, style: 'regular', weight_index, render_index });
+    }
+    for (let y = y0; y <= y1; y += 1) {
+      c.set(x0, y, { char: '│', rgb, style: 'regular', weight_index, render_index });
+      c.set(x1, y, { char: '│', rgb, style: 'regular', weight_index, render_index });
+    }
+    c.set(x0, y0, { char: '┌', rgb, style: 'regular', weight_index, render_index });
+    c.set(x1, y0, { char: '┐', rgb, style: 'regular', weight_index, render_index });
+    c.set(x0, y1, { char: '└', rgb, style: 'regular', weight_index, render_index });
+    c.set(x1, y1, { char: '┘', rgb, style: 'regular', weight_index, render_index });
+  }
+
   function isGridOnProjectedBoundsBorder(grid_x: number, grid_y: number, bounds: { minX: number; minY: number; maxX: number; maxY: number } | null): boolean {
     if (!bounds) return false;
     if (grid_x < bounds.minX || grid_x > bounds.maxX || grid_y < bounds.minY || grid_y > bounds.maxY) return false;
@@ -1703,7 +1736,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   }
 
   function canEditGroupLocation(): boolean {
-    return opts.get_current_tool() === 'move'
+    return !isPlaybackRunning()
+      && opts.get_current_tool() === 'move'
       && !opts.get_active_group_locked?.()
       && Boolean(getActiveGroupWorldBounds())
       && typeof opts.on_group_location_drag_commit === 'function';
@@ -2663,81 +2697,17 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           });
         }
       }
-      // Draw a border around the selected canvas bounds (replaces the origin crosshair).
-      // This stays clipped to the module rect and gives a clear "drawing space" frame.
-      if (!gizmo_state.is_resize_mode) {
-        const bounds_color = get_color_by_name('pale_gray').rgb;
-
-        const contentBounds = opts.get_focus_content_bounds?.() ?? null;
-        const left = rect.x0 + (contentBounds?.min_x ?? 0);
-        const bottom = rect.y0 + (contentBounds?.min_y ?? 0);
-        const right = rect.x0 + (contentBounds?.max_x ?? Math.max(0, opts.grid.width - 1));
-        const top = rect.y0 + (contentBounds?.max_y ?? Math.max(0, opts.grid.height - 1));
-
-        const x0 = Math.max(rect.x0, left);
-        const x1 = Math.min(rect.x1, right);
-        const y0 = Math.max(rect.y0, bottom);
-        const y1 = Math.min(rect.y1, top);
-
-        if (x0 <= x1 && y0 <= y1) {
-          for (let x = x0; x <= x1; x++) {
-            if (bottom >= rect.y0 && bottom <= rect.y1) {
-              c.set(x, bottom, { char: '─', rgb: bounds_color, style: 'regular', weight_index: 1, render_index: 996 });
-            }
-            if (top >= rect.y0 && top <= rect.y1) {
-              c.set(x, top, { char: '─', rgb: bounds_color, style: 'regular', weight_index: 1, render_index: 996 });
-            }
-          }
-
-          for (let y = y0; y <= y1; y++) {
-            if (left >= rect.x0 && left <= rect.x1) {
-              c.set(left, y, { char: '│', rgb: bounds_color, style: 'regular', weight_index: 1, render_index: 996 });
-            }
-            if (right >= rect.x0 && right <= rect.x1) {
-              c.set(right, y, { char: '│', rgb: bounds_color, style: 'regular', weight_index: 1, render_index: 996 });
-            }
-          }
-
-          if (left >= rect.x0 && left <= rect.x1 && bottom >= rect.y0 && bottom <= rect.y1) {
-            c.set(left, bottom, { char: '└', rgb: bounds_color, style: 'regular', weight_index: 1, render_index: 996 });
-          }
-          if (right >= rect.x0 && right <= rect.x1 && bottom >= rect.y0 && bottom <= rect.y1) {
-            c.set(right, bottom, { char: '┘', rgb: bounds_color, style: 'regular', weight_index: 1, render_index: 996 });
-          }
-          if (left >= rect.x0 && left <= rect.x1 && top >= rect.y0 && top <= rect.y1) {
-            c.set(left, top, { char: '┌', rgb: bounds_color, style: 'regular', weight_index: 1, render_index: 996 });
-          }
-          if (right >= rect.x0 && right <= rect.x1 && top >= rect.y0 && top <= rect.y1) {
-            c.set(right, top, { char: '┐', rgb: bounds_color, style: 'regular', weight_index: 1, render_index: 996 });
-          }
-        }
-      }
-
       const activeGroupProjectedBounds = getActiveGroupProjectedBounds(group_location_drag_preview_delta);
-      if (activeGroupProjectedBounds && canEditGroupLocation()) {
-        const borderColor = group_location_drag_active
-          ? get_color_by_name('vivid_yellow').rgb
-          : group_location_border_hovered
-            ? get_color_by_name('light_blue').rgb
-            : get_color_by_name('medium_gray').rgb;
-        const x0 = Math.max(rect.x0, rect.x0 + activeGroupProjectedBounds.minX);
-        const x1 = Math.min(rect.x1, rect.x0 + activeGroupProjectedBounds.maxX);
-        const y0 = Math.max(rect.y0, rect.y0 + activeGroupProjectedBounds.minY);
-        const y1 = Math.min(rect.y1, rect.y0 + activeGroupProjectedBounds.maxY);
-        if (x0 <= x1 && y0 <= y1) {
-          for (let x = x0; x <= x1; x += 1) {
-            c.set(x, y0, { char: '─', rgb: borderColor, style: 'regular', weight_index: group_location_drag_active ? 2 : 1, render_index: 997 });
-            c.set(x, y1, { char: '─', rgb: borderColor, style: 'regular', weight_index: group_location_drag_active ? 2 : 1, render_index: 997 });
-          }
-          for (let y = y0; y <= y1; y += 1) {
-            c.set(x0, y, { char: '│', rgb: borderColor, style: 'regular', weight_index: group_location_drag_active ? 2 : 1, render_index: 997 });
-            c.set(x1, y, { char: '│', rgb: borderColor, style: 'regular', weight_index: group_location_drag_active ? 2 : 1, render_index: 997 });
-          }
-          c.set(x0, y0, { char: '┌', rgb: borderColor, style: 'regular', weight_index: group_location_drag_active ? 2 : 1, render_index: 997 });
-          c.set(x1, y0, { char: '┐', rgb: borderColor, style: 'regular', weight_index: group_location_drag_active ? 2 : 1, render_index: 997 });
-          c.set(x0, y1, { char: '└', rgb: borderColor, style: 'regular', weight_index: group_location_drag_active ? 2 : 1, render_index: 997 });
-          c.set(x1, y1, { char: '┘', rgb: borderColor, style: 'regular', weight_index: group_location_drag_active ? 2 : 1, render_index: 997 });
-        }
+      if (!gizmo_state.is_resize_mode && activeGroupProjectedBounds && !isPlaybackRunning()) {
+        const canEditLocation = canEditGroupLocation();
+        const borderColor = canEditLocation
+          ? (group_location_drag_active
+            ? get_color_by_name('vivid_yellow').rgb
+            : group_location_border_hovered
+              ? get_color_by_name('light_blue').rgb
+              : get_color_by_name('medium_gray').rgb)
+          : get_color_by_name('pale_gray').rgb;
+        drawProjectedBoundsBorder(c, rect, activeGroupProjectedBounds, borderColor, group_location_drag_active ? 2 : 1, canEditLocation ? 997 : 996);
       }
 
       // Visual debug: Show current mouse position

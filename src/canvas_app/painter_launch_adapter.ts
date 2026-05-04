@@ -40,6 +40,11 @@ function get_tai_painter_boot_file_path(): string | null {
   return path || null;
 }
 
+export function resolve_open_dialog_first_path(openResp: any): string | null {
+  const path = String(openResp?.result?.filePaths?.[0] ?? openResp?.filePaths?.[0] ?? '').trim();
+  return path || null;
+}
+
 function is_tai_boot_enabled(): boolean {
   return Boolean((window as Window).electronAPI?.toolAssistedInputsBootConfig?.enabled);
 }
@@ -130,7 +135,7 @@ export function create_painter_launch_adapter(): LaunchAdapter<PainterLaunchInte
         filters: [{ name: 'JSON Files', extensions: ['json'] }],
         properties: ['openFile'],
       }).catch(() => null);
-      const path = String(openResp?.filePaths?.[0] ?? '').trim();
+      const path = resolve_open_dialog_first_path(openResp);
       if (!path) return null;
       log_painter_launch('create_load_intent', { path, resolved_intent: 'load_file' });
       return { kind: 'load_file', slot, path };

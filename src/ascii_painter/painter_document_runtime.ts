@@ -482,12 +482,20 @@ export function set_painter_group_property_block(runtime: PainterDocumentRuntime
   if (!property) property = get_primary_property(group, args.property_kind, true);
   if (!property) throw new Error(`painter_property_not_found:${requestedId || args.property_kind}`);
   property.label = String(args.property_label ?? '').trim() || property.label;
-  const nextBlocks = property.blocks.filter((block) => !(block.start === targetBreath));
-  nextBlocks.push(create_value_property_block(targetBreath, targetBreath, args.value));
-  property.blocks = nextBlocks;
-  merge_adjacent_property_blocks(property);
-  normalize_non_raster_hold_ranges(property);
-  sync_group_timing_from_properties(group);
+  const existingExact = property.blocks.find((block) => block.start === targetBreath && block.type === 'content') ?? null;
+  const activeAtBreath = get_active_painter_property_block_at_breath(property, targetBreath);
+  const activeContent = activeAtBreath?.type === 'content' ? activeAtBreath : null;
+  if (existingExact) {
+    rewrite_painter_group_non_raster_property_point_destructive(group, property, targetBreath, args.value, existingExact.id);
+  } else if (activeContent) {
+    rewrite_painter_group_non_raster_property_span_destructive(group, property, activeContent, activeContent.start, activeContent.end);
+    const resolvedActive = find_exact_property_block(group, property.id, activeContent.id);
+    if (resolvedActive?.block.type === 'content') resolvedActive.block.value = structuredClone(args.value);
+    normalize_non_raster_hold_ranges(property);
+    sync_group_timing_from_properties(group);
+  } else {
+    rewrite_painter_group_non_raster_property_point_destructive(group, property, targetBreath, args.value);
+  }
   if (group.metadata) group.metadata.modified_at = new Date().toISOString();
   touch_modified_at(runtime.document);
   rebuild_runtime_indices(runtime);
@@ -531,12 +539,7 @@ export function move_painter_group_property_block(runtime: PainterDocumentRuntim
     });
     return;
   }
-  const delta = targetBreath - targetBlock.start;
-  targetBlock.start = targetBreath;
-  targetBlock.end = Math.max(targetBreath, targetBlock.end + delta);
-  merge_adjacent_property_blocks(property);
-  normalize_non_raster_hold_ranges(property);
-  sync_group_timing_from_properties(group);
+  rewrite_painter_group_non_raster_property_span_destructive(group, property, targetBlock, targetBreath, targetBreath + (targetBlock.end - targetBlock.start));
   if (group.metadata) group.metadata.modified_at = new Date().toISOString();
   touch_modified_at(runtime.document);
   rebuild_runtime_indices(runtime);
@@ -834,6 +837,12 @@ type RasterPropertyTimelineCell = {
   voxels: PainterVoxelRecord[];
 };
 
+type ValuePropertyTimelineCell = {
+  source_id: string;
+  type: 'content' | 'blank';
+  value?: PainterPropertyValue;
+};
+
 function rewrite_painter_group_raster_property_span_destructive(group: PainterGroup, property: PainterProperty, target: PainterPropertyBlock, nextStart: number, nextEnd: number): void {
   normalize_property_blocks_in_place(property);
   const targetStart = Math.max(0, Math.floor(nextStart));
@@ -901,6 +910,102 @@ function rewrite_painter_group_raster_property_span_destructive(group: PainterGr
   sync_group_timing_from_properties(group);
 }
 
+function rebuild_non_raster_property_from_cells(group: PainterGroup, property: PainterProperty, cells: Array<ValuePropertyTimelineCell | null>, minBreath: number, maxBreath: number): void {
+  let firstContent = -1;
+  let lastContent = -1;
+  for (let index = 0; index < cells.length; index += 1) {
+    if (cells[index]?.type !== 'content') continue;
+    if (firstContent < 0) firstContent = index;
+    lastContent = index;
+  }
+
+  if (firstContent < 0 || lastContent < 0) {
+    property.blocks = [create_blank_property_block(minBreath, maxBreath)];
+    sync_group_timing_from_properties(group);
+    return;
+  }
+
+  const nextBlocks: PainterPropertyBlock[] = [];
+  const idUsage = new Map<string, number>();
+  let cursor = firstContent;
+  while (cursor <= lastContent) {
+    const cell = cells[cursor] ?? null;
+    let runEnd = cursor;
+    while (runEnd + 1 <= lastContent) {
+      const next = cells[runEnd + 1] ?? null;
+      const sameBlank = (!cell || cell.type === 'blank') && (!next || next.type === 'blank');
+      const sameContent = cell?.type === 'content' && next?.type === 'content' && cell.source_id === next.source_id;
+      if (!sameBlank && !sameContent) break;
+      runEnd += 1;
+    }
+
+    const start = minBreath + cursor;
+    const end = minBreath + runEnd;
+    if (!cell || cell.type === 'blank') {
+      nextBlocks.push(create_blank_property_block(start, end));
+    } else {
+      const seen = idUsage.get(cell.source_id) ?? 0;
+      idUsage.set(cell.source_id, seen + 1);
+      nextBlocks.push(create_value_property_block(start, end, cell.value, seen === 0 ? cell.source_id : undefined));
+    }
+    cursor = runEnd + 1;
+  }
+
+  property.blocks = nextBlocks;
+  merge_adjacent_property_blocks(property);
+  normalize_non_raster_hold_ranges(property);
+  sync_group_timing_from_properties(group);
+}
+
+function rewrite_painter_group_non_raster_property_span_destructive(group: PainterGroup, property: PainterProperty, target: PainterPropertyBlock, nextStart: number, nextEnd: number): void {
+  normalize_property_blocks_in_place(property);
+  const targetStart = Math.max(0, Math.floor(nextStart));
+  const targetEnd = Math.max(targetStart, Math.floor(nextEnd));
+  const minBreath = Math.min(target.start, targetStart, ...property.blocks.map((block) => block.start));
+  const maxBreath = Math.max(target.end, targetEnd, ...property.blocks.map((block) => block.end));
+  const cells: Array<ValuePropertyTimelineCell | null> = [];
+  for (let breath = minBreath; breath <= maxBreath; breath += 1) cells.push(null);
+
+  for (const block of property.blocks) {
+    const cell: ValuePropertyTimelineCell = block.type === 'content'
+      ? { source_id: block.id, type: 'content', value: structuredClone(block.value) }
+      : { source_id: block.id, type: 'blank' };
+    for (let breath = block.start; breath <= block.end; breath += 1) cells[breath - minBreath] = cell;
+  }
+
+  for (let breath = target.start; breath <= target.end; breath += 1) cells[breath - minBreath] = null;
+  const fillCell: ValuePropertyTimelineCell = target.type === 'content'
+    ? { source_id: target.id, type: 'content', value: structuredClone(target.value) }
+    : { source_id: target.id, type: 'blank' };
+  for (let breath = targetStart; breath <= targetEnd; breath += 1) cells[breath - minBreath] = fillCell;
+
+  rebuild_non_raster_property_from_cells(group, property, cells, minBreath, maxBreath);
+}
+
+function rewrite_painter_group_non_raster_property_point_destructive(group: PainterGroup, property: PainterProperty, breath: number, value: PainterPropertyValue, sourceId?: string): void {
+  normalize_property_blocks_in_place(property);
+  if (property.blocks.length < 1) {
+    property.blocks = [create_value_property_block(breath, breath, value, sourceId)];
+    merge_adjacent_property_blocks(property);
+    normalize_non_raster_hold_ranges(property);
+    sync_group_timing_from_properties(group);
+    return;
+  }
+  const targetBreath = Math.max(0, Math.floor(breath));
+  const minBreath = Math.min(targetBreath, ...property.blocks.map((block) => block.start));
+  const maxBreath = Math.max(targetBreath, ...property.blocks.map((block) => block.end));
+  const cells: Array<ValuePropertyTimelineCell | null> = [];
+  for (let current = minBreath; current <= maxBreath; current += 1) cells.push(null);
+  for (const block of property.blocks) {
+    const cell: ValuePropertyTimelineCell = block.type === 'content'
+      ? { source_id: block.id, type: 'content', value: structuredClone(block.value) }
+      : { source_id: block.id, type: 'blank' };
+    for (let current = block.start; current <= block.end; current += 1) cells[current - minBreath] = cell;
+  }
+  cells[targetBreath - minBreath] = { source_id: sourceId ?? make_runtime_property_block_id(), type: 'content', value: structuredClone(value) };
+  rebuild_non_raster_property_from_cells(group, property, cells, minBreath, maxBreath);
+}
+
 export function set_painter_group_property_block_edge_destructive(runtime: PainterDocumentRuntime, groupId: string, propertyId: string, blockId: string, edge: 'start' | 'end', targetBreath: number): void {
   const group = runtime.document.groups[groupId];
   if (!group) throw new Error(`painter_group_not_found:${groupId}`);
@@ -922,13 +1027,9 @@ export function set_painter_group_property_block_edge_destructive(runtime: Paint
   } else if (resolved.property.kind === 'raster') {
     rewrite_painter_group_raster_property_span_destructive(group, resolved.property, resolved.block, resolved.block.start, Math.max(nextBreath, resolved.block.start));
   } else if (edge === 'start') {
-    resolved.block.start = Math.min(nextBreath, resolved.block.end);
-    normalize_non_raster_hold_ranges(resolved.property);
-    sync_group_timing_from_properties(group);
+    rewrite_painter_group_non_raster_property_span_destructive(group, resolved.property, resolved.block, Math.min(nextBreath, resolved.block.end), resolved.block.end);
   } else {
-    resolved.block.end = Math.max(nextBreath, resolved.block.start);
-    normalize_non_raster_hold_ranges(resolved.property);
-    sync_group_timing_from_properties(group);
+    rewrite_painter_group_non_raster_property_span_destructive(group, resolved.property, resolved.block, resolved.block.start, Math.max(nextBreath, resolved.block.start));
   }
   if (group.metadata) group.metadata.modified_at = new Date().toISOString();
   touch_modified_at(runtime.document);

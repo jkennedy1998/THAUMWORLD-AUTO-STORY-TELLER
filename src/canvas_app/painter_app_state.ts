@@ -96,7 +96,7 @@ function normalize_painter_tool(tool: ToolType): ToolType {
 }
 import { makePlaceCameraControlModule } from '../mono_ui/modules/place_camera_control_module.js';
 import { VoxelDOMRenderer, createVoxelDOMRenderer } from '../ascii_painter/voxel_dom_renderer.js';
-import { clone_projected_scene, commit_grid_to_painter_world, get_painter_focus_slot_for_anchor, get_painter_projection_focus_content_bounds, get_painter_world_content_bounds_center, painter_projection_grid_point_to_world, painter_projection_world_to_grid_point, project_painter_display_space, project_painter_runtime_display_space, project_world_to_painter_display_cell, sync_grid_to_painter_projection, type PainterDisplayProjection, type PainterProjectedScene } from '../ascii_painter/painter_view_projection_adapter.js';
+import { clone_projected_scene, commit_grid_to_painter_world, get_painter_focus_slot_for_anchor, get_painter_world_content_bounds_center, painter_projection_grid_point_to_world, painter_projection_world_to_grid_point, project_painter_display_space, project_painter_runtime_display_space, project_world_to_painter_display_cell, sync_grid_to_painter_projection, type PainterDisplayProjection, type PainterProjectedScene } from '../ascii_painter/painter_view_projection_adapter.js';
 import { touch_world_layers_owner } from '../mono_ui/world_layers_owner.js';
 import { get_principal_view_plane_axis, get_transition_tilt_for_command, make_place_view_state, map_screen_direction_to_world_delta, step_place_view_action, type PlaceViewState } from '../mono_ui/runtime/place_view_projection.js';
 import { start_roll_transition, start_swing_transition, type PlaceCameraTransition } from '../mono_ui/runtime/place_camera_pose.js';
@@ -1175,39 +1175,16 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     return out;
   }
 
-  function get_active_group_world_bounds(): { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number } {
-    const fallback = {
-      minX: painter_document_runtime.document.bounds.minX,
-      minY: painter_document_runtime.document.bounds.minY,
-      minZ: painter_document_runtime.document.bounds.minZ,
-      maxX: painter_document_runtime.document.bounds.minX + painter_document_runtime.document.bounds.width - 1,
-      maxY: painter_document_runtime.document.bounds.minY + painter_document_runtime.document.bounds.height - 1,
-      maxZ: painter_document_runtime.document.bounds.maxZ,
-    };
+  function get_active_group_world_bounds(): { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number } | null {
     const active_group_id = resolve_current_runtime_group_id();
-    if (!active_group_id) return fallback;
-    const groupIndex = painter_document_runtime.group_voxel_index.get(active_group_id);
-    if (!groupIndex || groupIndex.size < 1) return fallback;
-    let minX = Number.POSITIVE_INFINITY;
-    let minY = Number.POSITIVE_INFINITY;
-    let minZ = Number.POSITIVE_INFINITY;
-    let maxX = Number.NEGATIVE_INFINITY;
-    let maxY = Number.NEGATIVE_INFINITY;
-    let maxZ = Number.NEGATIVE_INFINITY;
-    for (const voxel of groupIndex.values()) {
-      minX = Math.min(minX, voxel.x);
-      minY = Math.min(minY, voxel.y);
-      minZ = Math.min(minZ, voxel.z);
-      maxX = Math.max(maxX, voxel.x);
-      maxY = Math.max(maxY, voxel.y);
-      maxZ = Math.max(maxZ, voxel.z);
-    }
-    if (!Number.isFinite(minX)) return fallback;
-    return { minX, minY, minZ, maxX, maxY, maxZ };
+    if (!active_group_id) return null;
+    const bounds = painter_document_runtime.resolved_group_bounds_index.get(active_group_id) ?? null;
+    return bounds ? { ...bounds } : null;
   }
 
   function for_each_active_group_world_position(callback: (world: { x: number; y: number; z: number }) => void): void {
     const bounds = get_active_group_world_bounds();
+    if (!bounds) return;
     for (let z = bounds.minZ; z <= bounds.maxZ; z += 1) {
       for (let y = bounds.minY; y <= bounds.maxY; y += 1) {
         for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
@@ -2930,11 +2907,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     schedule_auto_save();
   }
 
-  function getPainterFocusContentBounds(): { min_x: number; min_y: number; max_x: number; max_y: number } | null {
-    if (!painter_display_projection) return null;
-    return get_painter_projection_focus_content_bounds(painter_display_projection);
-  }
-
   function getPainterCanvasModuleApi(): (ReturnType<typeof make_painter_canvas_module> & {
     getSelectionBitmap?: () => SelectionBitmap;
     setSelectionBitmap?: (bitmap: SelectionBitmap) => void;
@@ -4544,7 +4516,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     },
     get_grid_point_for_world: (world) => painterWorldToGridPoint(world),
     get_view_state: () => getPainterViewState(),
-    get_focus_content_bounds: () => getPainterFocusContentBounds(),
+    get_is_playing: () => painter_playback_running,
     on_history_applied: () => {
       refreshPainterProjectionFromWorld();
     },

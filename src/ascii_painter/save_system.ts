@@ -229,9 +229,21 @@ export function exportPainterDocumentToJSON(document: PainterDocument): string {
   return JSON.stringify(clone_painter_document(document), null, 2);
 }
 
+function is_supported_painter_document_version(version: unknown): boolean {
+  return version === 3 || version === 4 || version === 5;
+}
+
+function is_painter_document_like(parsed: any): boolean {
+  return !!parsed
+    && is_supported_painter_document_version(parsed.version)
+    && !!parsed.bounds
+    && !!parsed.groups
+    && Array.isArray(parsed.group_order);
+}
+
 export function importPainterDocumentFromJSON(json: string): PainterDocument {
   const parsed = JSON.parse(json);
-  if (!parsed || (parsed.version !== 4 && parsed.version !== 3) || !parsed.bounds || !parsed.groups || !Array.isArray(parsed.group_order)) {
+  if (!is_painter_document_like(parsed)) {
     throw new Error('Unsupported painter document format');
   }
   return clone_painter_document(parsed as PainterDocument);
@@ -275,7 +287,7 @@ export function exportVoxelSpaceToText(space: VoxelSpace): string {
 export function detectFileFormat(json: string): 'painter_document' | 'voxel_space' | 'grid' | 'unknown' {
   try {
     const parsed = JSON.parse(json);
-    if ((parsed.version === 4 || parsed.version === 3) && parsed.bounds && parsed.groups && Array.isArray(parsed.group_order)) {
+    if (is_painter_document_like(parsed)) {
       return 'painter_document';
     } else if (parsed.version === 2 && parsed.type === 'voxel_space') {
       return 'voxel_space';

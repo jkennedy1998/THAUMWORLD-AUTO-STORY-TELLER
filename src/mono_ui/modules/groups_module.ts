@@ -195,6 +195,23 @@ export function resolve_groups_raster_visual_style(args: {
   return { rgb: args.content_rgb ?? args.interaction.rgb, weight: Math.max(0, args.interaction.weight - 1) };
 }
 
+function resolve_groups_move_visual_style(args: {
+  is_blank: boolean;
+  visible: boolean;
+  selected_property: boolean;
+  interaction: InteractionStyle;
+  muted_rgb: { r: number; g: number; b: number };
+  selected_rgb: { r: number; g: number; b: number };
+  content_rgb: { r: number; g: number; b: number };
+  blank_rgb?: { r: number; g: number; b: number };
+}): InteractionStyle {
+  if (!args.visible) return { rgb: args.muted_rgb, weight: 1 };
+  if (args.interaction.weight >= 2) return args.interaction;
+  if (args.is_blank) return args.selected_property ? { rgb: args.selected_rgb, weight: 2 } : { rgb: args.blank_rgb ?? args.muted_rgb, weight: 1 };
+  if (args.selected_property) return { rgb: args.content_rgb, weight: 2 };
+  return { rgb: args.content_rgb, weight: 1 };
+}
+
 type PropertyRowDrawSegment = {
   id: string;
   breath: number;
@@ -654,17 +671,11 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     return 'body';
   }
 
-  function getMoveRegions(group: GroupListItem): Array<{ property_id: string; block_id: string; breath: number; start: number; end: number }> {
-    const moveRows = Array.isArray(group.property_rows)
-      ? group.property_rows.filter((row) => row.kind === 'move')
-      : [];
-    return moveRows.flatMap((moveRow) => moveRow.blocks.map((block) => ({
-      property_id: moveRow.property_id,
-      block_id: block.id,
-      breath: Math.floor(block.breath),
-      start: Math.floor(block.start),
-      end: Math.max(Math.floor(block.start), Math.floor(block.end)),
-    })));
+  function hasPropertyRowExactKeyAtBreath(group: GroupListItem, propertyId: string, breath: number): boolean {
+    const propertyRow = Array.isArray(group.property_rows)
+      ? group.property_rows.find((row) => row.property_id === propertyId) ?? null
+      : null;
+    return (propertyRow?.blocks ?? []).some((block) => Math.floor(block.breath) === Math.floor(breath) && block.is_blank !== true);
   }
 
   function getOrderedVisiblePropertyRows(group: GroupListItem): Array<{ property_id: string; kind: PropertyRowKind; label: string; blocks: Array<{ id: string; breath: number; start: number; end: number; is_blank?: boolean }> }> {
@@ -1002,10 +1013,77 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     return [...segments.filter((segment) => segment.id !== source.id), source];
   }
 
+  function rewritePreviewPropertyRowSegmentsDestructive(segments: PropertyRowDrawSegment[], sourceId: string, nextStart: number, nextEnd: number): PropertyRowDrawSegment[] {
+    const source = segments.find((segment) => segment.id === sourceId) ?? null;
+    if (!source) return segments;
+    const minBreath = Math.min(source.start, nextStart, ...segments.map((segment) => segment.start));
+    const maxBreath = Math.max(source.end, nextEnd, ...segments.map((segment) => segment.end));
+    const cells: Array<{ source_id: string; is_blank: boolean; dominant_rgb?: { r: number; g: number; b: number } } | null> = [];
+    for (let breath = minBreath; breath <= maxBreath; breath += 1) cells.push(null);
+
+    for (const segment of segments) {
+      const cell = { source_id: segment.id, is_blank: segment.is_blank, dominant_rgb: segment.dominant_rgb };
+      for (let breath = segment.start; breath <= segment.end; breath += 1) cells[breath - minBreath] = cell;
+    }
+
+    for (let breath = source.start; breath <= source.end; breath += 1) cells[breath - minBreath] = null;
+    const fillCell = { source_id: source.id, is_blank: source.is_blank, dominant_rgb: source.dominant_rgb };
+    for (let breath = nextStart; breath <= nextEnd; breath += 1) cells[breath - minBreath] = fillCell;
+
+    let firstContent = -1;
+    let lastContent = -1;
+    for (let index = 0; index < cells.length; index += 1) {
+      if (!cells[index] || cells[index]!.is_blank) continue;
+      if (firstContent < 0) firstContent = index;
+      lastContent = index;
+    }
+    if (firstContent < 0 || lastContent < 0) return [{ ...source, start: nextStart, end: nextEnd, breath: nextStart }];
+
+    const nextSegments: PropertyRowDrawSegment[] = [];
+    const idUsage = new Map<string, number>();
+    let cursor = firstContent;
+    while (cursor <= lastContent) {
+      const cell = cells[cursor] ?? null;
+      let runEnd = cursor;
+      while (runEnd + 1 <= lastContent) {
+        const next = cells[runEnd + 1] ?? null;
+        const sameBlank = (!cell || cell.is_blank) && (!next || next.is_blank);
+        const sameContent = !!cell && !!next && !cell.is_blank && !next.is_blank && cell.source_id === next.source_id;
+        if (!sameBlank && !sameContent) break;
+        runEnd += 1;
+      }
+      const start = minBreath + cursor;
+      const end = minBreath + runEnd;
+      if (!cell || cell.is_blank) {
+        nextSegments.push({ id: `preview_blank_${start}_${end}`, breath: start, start, end, is_blank: true });
+      } else {
+        const seen = idUsage.get(cell.source_id) ?? 0;
+        idUsage.set(cell.source_id, seen + 1);
+        nextSegments.push({
+          id: seen === 0 ? cell.source_id : `${cell.source_id}__preview_${seen}`,
+          breath: start,
+          start,
+          end,
+          is_blank: false,
+          dominant_rgb: cell.dominant_rgb,
+        });
+      }
+      cursor = runEnd + 1;
+    }
+    return nextSegments;
+  }
+
   function getPreviewPropertyRowSegments(group: GroupListItem, propertyId: string): PropertyRowDrawSegment[] {
     const baseSegments = getPropertyRowDrawSegments(group, propertyId);
     if (!rasterDragState.active || rasterDragState.groupId !== group.id) {
       return baseSegments.map((segment) => ({ ...segment, ...getResolvedPropertyBlockSpan(group, propertyId, segment) }));
+    }
+    if (rasterDragState.kind === 'move' && rasterDragState.propertyId === propertyId && rasterDragState.segmentId && rasterDragState.mode !== 'body_swap') {
+      const source = baseSegments.find((segment) => segment.id === rasterDragState.segmentId) ?? null;
+      if (source) {
+        const resolved = getResolvedPropertyBlockSpan(group, propertyId, source);
+        return rewritePreviewPropertyRowSegmentsDestructive(baseSegments, source.id, resolved.start, resolved.end);
+      }
     }
     if (rasterDragState.mode !== 'body_swap' || rasterDragState.propertyId !== propertyId || !rasterDragState.segmentId || !rasterDragState.targetSegmentId) {
       return orderActiveRasterSourceLast(propertyId, baseSegments.map((segment) => ({ ...segment, ...getResolvedPropertyBlockSpan(group, propertyId, segment) })));
@@ -1607,8 +1685,6 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     const currentBreath = getCurrentBreath();
     const rasterSegments = getRasterSegments(layout.item);
     const hasExactContentState = rasterSegments.some((segment) => currentBreath >= segment.start && currentBreath <= segment.end);
-    const moveRegions = getMoveRegions(layout.item);
-    const hasExactLocationKey = moveRegions.some((region) => region.breath === currentBreath);
     const propertyRowStates = layout.propertyRows.map((descriptor) => {
       const row = Array.isArray(group.property_rows)
         ? group.property_rows.find((entry) => entry.property_id === descriptor.property_id) ?? null
@@ -1618,9 +1694,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         descriptor,
         label: (row?.label || descriptor.label || descriptor.kind).slice(0, 5),
         selected: isSelectedProperty,
-        active: descriptor.kind === 'raster'
-          ? (row?.blocks ?? []).some((block) => currentBreath >= block.start && currentBreath <= block.end)
-          : (row?.blocks ?? []).some((block) => block.breath === currentBreath),
+        active: (row?.blocks ?? []).some((block) => currentBreath >= block.start && currentBreath <= block.end),
       };
     });
     const firstPropertyRowY = layout.propertyRows[0]?.y ?? layout.sectionTopY - 2;
@@ -1690,7 +1764,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     for (const descriptor of layout.propertyRows) {
       const rowY = rect.y0 + descriptor.y;
       for (let x = timelineStartX; x <= timelineEndX; x += 1) {
-        c.set(x, rowY, { char: descriptor.kind === 'raster' ? ' ' : '─', rgb: mutedColor, weight_index: descriptor.kind === 'raster' ? 0 : 1, render_index: 1 });
+        c.set(x, rowY, { char: ' ', rgb: mutedColor, weight_index: 0, render_index: 1 });
       }
       if (descriptor.kind === 'raster') {
         drawPropertyRowSegments(c, {
@@ -1731,16 +1805,26 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         segments: getPreviewPropertyRowSegments(group, descriptor.property_id),
         cellForBreath: (segment, breath) => {
           const localIndex = breath - segment.start;
+          const visible = isBreathInsideGroupCrop(layout.item, breath);
           const isSingle = segment.start === segment.end;
           const isFirst = localIndex === 0;
           const isLast = breath === segment.end;
           const interactionStyle = getMoveInteractionStyle(group.id, descriptor.property_id, segment.id, breath);
-            const isExact = breath === segment.breath;
-            const visible = isBreathInsideGroupCrop(layout.item, breath);
-            return {
-              char: getRasterCellChar({ visible, isSingle, isFirst, isLast, isBlank: segment.is_blank }),
-              rgb: interactionStyle.weight >= 2 ? interactionStyle.rgb : segment.is_blank ? rasterDefaultColor : group.selected_property_id === descriptor.property_id ? visibleColor : isExact ? selectedColor : rowColor,
-              weight: Math.max(interactionStyle.weight, segment.is_blank ? 1 : group.selected_property_id === descriptor.property_id ? 3 : isExact ? 3 : 2),
+          const visualStyle = resolve_groups_move_visual_style({
+            is_blank: segment.is_blank,
+            visible,
+            selected_property: group.selected_property_id === descriptor.property_id,
+            interaction: interactionStyle,
+            muted_rgb: mutedColor,
+            selected_rgb: selectedColor,
+            content_rgb: visibleColor,
+            blank_rgb: rasterDefaultColor,
+          });
+          const baseWeight = segment.is_blank ? (visible ? (isSingle || isFirst || isLast ? 2 : 1) : 1) : 0;
+          return {
+            char: getRasterCellChar({ visible, isSingle, isFirst, isLast, isBlank: segment.is_blank }),
+            rgb: visualStyle.rgb,
+            weight: Math.max(baseWeight, visualStyle.weight),
             renderIndex: interactionStyle.weight >= 3 ? 3 : 2,
           };
         },
@@ -1749,6 +1833,9 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     const cursorX = breathToTimelineX(rect, currentBreath);
     for (let y = rect.y0 + firstPropertyRowY; y <= rect.y0 + layout.footerRowY; y += 1) {
       const rowDescriptor = layout.propertyRows.find((row) => rect.y0 + row.y === y) ?? null;
+      const hasExactLocationKey = rowDescriptor?.kind === 'move' && rowDescriptor.property_id
+        ? hasPropertyRowExactKeyAtBreath(group, rowDescriptor.property_id, currentBreath)
+        : false;
       c.set(cursorX, y, {
         char: rowDescriptor?.kind === 'move'
             ? (hasExactLocationKey ? '█' : hasExactContentState ? '◆' : '│')
