@@ -74,7 +74,7 @@ const MAX_WIDTH = 90;
 const MIN_HEIGHT = 14;
 const MAX_HEIGHT = 80;
 const HEADER_HEIGHT = 5;
-const SECTION_SPACING = 1;
+const SECTION_SPACING = 0;
 const BLOCK_DOUBLE_CLICK_MS = 350;
 const BLOCK_DRAG_THRESHOLD_PX = 1;
 
@@ -360,7 +360,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
   let timelineScrubDrag = false;
   let loopWindowDrag: {
     active: boolean;
-    mode: 'start' | 'end' | 'body' | null;
+    mode: 'start' | 'end' | 'body_move' | 'body_dynamic_resize' | null;
     originalStart: number;
     originalEnd: number;
     anchorBreath: number;
@@ -654,6 +654,16 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
 
   function getTimelineViewport(currentRect: Rect): GroupsTimelineViewport {
     return resolve_groups_timeline_viewport(currentRect, getTimelineViewStart());
+  }
+
+  function isWithinContentViewportWorldY(currentRect: Rect, worldY: number): boolean {
+    const metrics = getContentMetrics(currentRect);
+    return worldY >= currentRect.y0 + metrics.contentBottomY && worldY <= currentRect.y0 + metrics.contentTopY;
+  }
+
+  function setClippedContentCell(c: Canvas, currentRect: Rect, x: number, y: number, cell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number; render_index: number }): void {
+    if (!isWithinContentViewportWorldY(currentRect, y)) return;
+    c.set(x, y, cell);
   }
 
   function getTimelineRegion(currentRect: Rect): GroupsTimelineRegion {
@@ -1387,11 +1397,12 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     segments: PropertyRowDrawSegment[];
     cellForBreath: (segment: PropertyRowDrawSegment, breath: number) => { char: string; rgb: { r: number; g: number; b: number }; weight: number; renderIndex?: number };
   }): void {
+    if (!isWithinContentViewportWorldY(args.currentRect, args.rowY)) return;
     for (const segment of args.segments) {
       for (let breath = Math.max(segment.start, getTimelineViewStart()); breath <= Math.min(segment.end, getTimelineViewEnd(rect)); breath += 1) {
         const x = breathToTimelineX(args.currentRect, breath);
         const cell = args.cellForBreath(segment, breath);
-        c.set(x, args.rowY, {
+        setClippedContentCell(c, args.currentRect, x, args.rowY, {
           char: cell.char,
           rgb: cell.rgb,
           weight_index: cell.weight,
@@ -1514,7 +1525,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
   }
 
   function getSectionHeight(group: GroupListItem): number {
-    return Math.max(3, getOrderedVisiblePropertyRows(group).length) + 4;
+    return Math.max(3, getOrderedVisiblePropertyRows(group).length) + 3;
   }
 
   function buildSectionLayout(group: GroupListItem, sectionTopY: number): GroupSectionLayout {
@@ -1669,12 +1680,6 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         render_index: MODULE_CHROME_RENDER_INDEX + 2,
       });
     }
-    if (loopRange.start >= timelineViewport.startBreath && loopRange.start <= timelineViewport.endBreath) {
-      c.set(breathToTimelineX(rect, loopRange.start), headerY, { char: '[', rgb: selectedColor(), weight_index: 2, render_index: MODULE_CHROME_RENDER_INDEX + 3 });
-    }
-    if (loopRange.end >= timelineViewport.startBreath && loopRange.end <= timelineViewport.endBreath) {
-      c.set(breathToTimelineX(rect, loopRange.end), headerY, { char: ']', rgb: selectedColor(), weight_index: 2, render_index: MODULE_CHROME_RENDER_INDEX + 3 });
-    }
     const occupiedLabelXs = new Set<number>();
     drawTimelineHeaderLabel(c, occupiedLabelXs, {
       y: titleY,
@@ -1752,26 +1757,30 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
   function drawSectionFrame(c: Canvas, layout: GroupSectionLayout): void {
     const left = rect.x0 + 1;
     const right = rect.x1 - 1;
-    for (let x = left; x < right; x += 1) {
-      c.set(x, rect.y0 + layout.sectionTopY, { char: '─', rgb: borderColor(), weight_index: 1, render_index: 1 });
-      c.set(x, rect.y0 + layout.sectionBottomY, { char: '─', rgb: borderColor(), weight_index: 1, render_index: 1 });
-    }
-    c.set(left, rect.y0 + layout.sectionTopY, { char: '┌', rgb: borderColor(), weight_index: 1, render_index: 1 });
-    c.set(right, rect.y0 + layout.sectionTopY, { char: '┐', rgb: borderColor(), weight_index: 1, render_index: 1 });
-    c.set(left, rect.y0 + layout.sectionBottomY, { char: '└', rgb: borderColor(), weight_index: 1, render_index: 1 });
-    c.set(right, rect.y0 + layout.sectionBottomY, { char: '┘', rgb: borderColor(), weight_index: 1, render_index: 1 });
-    for (let y = layout.sectionBottomY + 1; y < layout.sectionTopY; y += 1) {
-      c.set(left, rect.y0 + y, { char: '│', rgb: borderColor(), weight_index: 1, render_index: 1 });
-      c.set(right, rect.y0 + y, { char: '│', rgb: borderColor(), weight_index: 1, render_index: 1 });
-    }
-
+    const topY = rect.y0 + layout.sectionTopY;
     const dividerA = rect.x0 + Math.min(rect.x1 - rect.x0 - 2, 9);
     const dividerB = rect.x0 + Math.min(rect.x1 - rect.x0 - 2, 17);
     const dividerC = rect.x0 + Math.min(rect.x1 - rect.x0 - 2, 26);
-    for (let y = layout.sectionBottomY + 1; y < layout.sectionTopY; y += 1) {
-      if (dividerA < right) c.set(dividerA, rect.y0 + y, { char: '│', rgb: borderColor(), weight_index: 1, render_index: 1 });
-      if (dividerB < right) c.set(dividerB, rect.y0 + y, { char: '│', rgb: borderColor(), weight_index: 1, render_index: 1 });
-      if (dividerC < right) c.set(dividerC, rect.y0 + y, { char: '│', rgb: borderColor(), weight_index: 1, render_index: 1 });
+    const dividerXs = [dividerA, dividerB, dividerC].filter((x) => x > left && x < right);
+
+    for (let x = left; x < right; x += 1) {
+      setClippedContentCell(c, rect, x, topY, {
+        char: dividerXs.includes(x) ? '┬' : '─',
+        rgb: borderColor(),
+        weight_index: 1,
+        render_index: 1,
+      });
+    }
+
+    for (let y = layout.sectionBottomY; y < layout.sectionTopY; y += 1) {
+      const worldY = rect.y0 + y;
+      for (const dividerX of dividerXs) {
+        setClippedContentCell(c, rect, dividerX, worldY, { char: '│', rgb: borderColor(), weight_index: 1, render_index: 1 });
+      }
+    }
+
+    for (const dividerX of dividerXs) {
+      setClippedContentCell(c, rect, dividerX, topY, { char: '┬', rgb: borderColor(), weight_index: 1, render_index: 1 });
     }
   }
 
@@ -1802,7 +1811,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     const titleNameStart = titlePrefixStart + titlePrefix.length;
     const titleNameMaxWidth = Math.max(1, Math.min(13, rect.x0 + 18 - titleNameStart));
     for (let i = 0; i < titlePrefix.length && titlePrefixStart + i < rect.x1 - 2; i += 1) {
-      c.set(titlePrefixStart + i, titleWorldY, {
+      setClippedContentCell(c, rect, titlePrefixStart + i, titleWorldY, {
         char: titlePrefix[i]!,
         rgb: mutedColor(),
         weight_index: 1,
@@ -1811,12 +1820,12 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     }
     if (isBeingRenamed) {
       for (let x = titleNameStart; x < titleNameStart + titleNameMaxWidth; x += 1) {
-        c.set(x, titleWorldY, { char: ' ', rgb: editBgColor(), weight_index: 0, render_index: 2 });
+        setClippedContentCell(c, rect, x, titleWorldY, { char: ' ', rgb: editBgColor(), weight_index: 0, render_index: 2 });
       }
       const displayText = renameState.editText.slice(0, titleNameMaxWidth);
       for (let j = 0; j < displayText.length; j += 1) {
         const isCursor = j === renameState.cursorPosition;
-        c.set(titleNameStart + j, titleWorldY, {
+        setClippedContentCell(c, rect, titleNameStart + j, titleWorldY, {
           char: displayText[j]!,
           rgb: isCursor ? editCursorColor() : textColor(),
           weight_index: 2,
@@ -1824,12 +1833,12 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         });
       }
       if (renameState.cursorPosition >= displayText.length && titleNameStart + displayText.length < titleNameStart + titleNameMaxWidth) {
-        c.set(titleNameStart + displayText.length, titleWorldY, { char: '▏', rgb: editCursorColor(), weight_index: 2, render_index: 2 });
+        setClippedContentCell(c, rect, titleNameStart + displayText.length, titleWorldY, { char: '▏', rgb: editCursorColor(), weight_index: 2, render_index: 2 });
       }
     } else {
       const displayLabel = group.label.slice(0, titleNameMaxWidth);
       for (let j = 0; j < displayLabel.length; j += 1) {
-        c.set(titleNameStart + j, titleWorldY, {
+        setClippedContentCell(c, rect, titleNameStart + j, titleWorldY, {
           char: displayLabel[j]!,
           rgb: rowColor,
           weight_index: group.selected ? 2 : 1,
@@ -1838,13 +1847,13 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
       }
     }
     if (group.selected && !isBeingRenamed) {
-      c.set(rect.x0 + 17, titleWorldY, { char: '▶', rgb: selectedColor(), weight_index: 2, render_index: 2 });
+      setClippedContentCell(c, rect, rect.x0 + 17, titleWorldY, { char: '▶', rgb: selectedColor(), weight_index: 2, render_index: 2 });
     }
 
     for (const row of layout.leftDataRows) {
       const label = row.key;
       for (let j = 0; j < label.length && rect.x0 + 2 + j < rect.x0 + 8; j += 1) {
-        c.set(rect.x0 + 2 + j, rect.y0 + row.y, { char: label[j]!, rgb: mutedColor(), weight_index: 1, render_index: 2 });
+        setClippedContentCell(c, rect, rect.x0 + 2 + j, rect.y0 + row.y, { char: label[j]!, rgb: mutedColor(), weight_index: 1, render_index: 2 });
       }
     }
 
@@ -1860,14 +1869,14 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
           ? deleteColor()
           : rowColor;
       for (let j = 0; j < text.length && rect.x0 + 11 + j < rect.x0 + 17; j += 1) {
-        c.set(rect.x0 + 11 + j, rect.y0 + row.y, { char: text[j]!, rgb: color, weight_index: 1, render_index: 2 });
+        setClippedContentCell(c, rect, rect.x0 + 11 + j, rect.y0 + row.y, { char: text[j]!, rgb: color, weight_index: 1, render_index: 2 });
       }
     }
 
     for (const row of propertyRowStates) {
       const label = row.label;
       for (let j = 0; j < label.length && rect.x0 + 20 + j < rect.x0 + 26; j += 1) {
-        c.set(rect.x0 + 20 + j, rect.y0 + row.descriptor.y, {
+        setClippedContentCell(c, rect, rect.x0 + 20 + j, rect.y0 + row.descriptor.y, {
           char: label[j]!,
           rgb: row.selected ? visibleColor() : row.active ? selectedColor() : rowColor,
           weight_index: row.selected ? 3 : 2,
@@ -1882,7 +1891,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     for (const descriptor of layout.propertyRows) {
       const rowY = rect.y0 + descriptor.y;
       for (let x = timelineStartX; x <= timelineEndX; x += 1) {
-        c.set(x, rowY, { char: ' ', rgb: mutedColor(), weight_index: 0, render_index: 1 });
+        setClippedContentCell(c, rect, x, rowY, { char: ' ', rgb: mutedColor(), weight_index: 0, render_index: 1 });
       }
       if (descriptor.kind === 'raster') {
         drawPropertyRowSegments(c, {
@@ -1964,7 +1973,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
       const hasExactLocationKey = rowDescriptor?.kind === 'move' && rowDescriptor.property_id
         ? hasPropertyRowExactKeyAtBreath(group, rowDescriptor.property_id, currentBreath)
         : false;
-      c.set(cursorX, y, {
+      setClippedContentCell(c, rect, cursorX, y, {
         char: rowDescriptor?.kind === 'move'
             ? (hasExactLocationKey ? '█' : hasExactContentState ? '◆' : '│')
             : '│',
@@ -2012,7 +2021,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         const dropY = contentTopY - beforeGroupsHeight + scrollOffset + 1;
         if (dropY >= contentBottomY && dropY <= contentTopY) {
           for (let x = rect.x0 + 1; x < rect.x1; x += 1) {
-            c.set(x, rect.y0 + dropY, { char: '━', rgb: dropIndicatorColor(), weight_index: 2, render_index: 3 });
+            setClippedContentCell(c, rect, x, rect.y0 + dropY, { char: '━', rgb: dropIndicatorColor(), weight_index: 2, render_index: 3 });
           }
         }
       }
@@ -2024,7 +2033,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
           const dropY = rect.y0 + (dropRow ? dropRow.y : ((propertyLayout.propertyRows[propertyLayout.propertyRows.length - 1]?.y ?? propertyLayout.titleRowY) - 1));
           if (dropY >= rect.y0 + propertyLayout.sectionBottomY && dropY <= rect.y0 + propertyLayout.sectionTopY) {
             for (let x = rect.x0 + 18; x < rect.x1 - 1; x += 1) {
-              c.set(x, dropY, { char: '━', rgb: dropIndicatorColor(), weight_index: 2, render_index: 3 });
+              setClippedContentCell(c, rect, x, dropY, { char: '━', rgb: dropIndicatorColor(), weight_index: 2, render_index: 3 });
             }
           }
         }
@@ -2086,7 +2095,9 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         if (loopHit) {
           const loopRange = getLoopBreathRange();
           loopWindowDrag.active = true;
-          loopWindowDrag.mode = loopHit;
+          loopWindowDrag.mode = loopHit === 'body'
+            ? (e.button === 2 ? 'body_dynamic_resize' : 'body_move')
+            : loopHit;
           loopWindowDrag.originalStart = loopRange.start;
           loopWindowDrag.originalEnd = loopRange.end;
           loopWindowDrag.anchorBreath = timelineXToBreath(currentRect, localX + currentRect.x0);
@@ -2199,6 +2210,17 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         } else if (loopWindowDrag.mode === 'end') {
           loopWindowDrag.previewStart = loopWindowDrag.originalStart;
           loopWindowDrag.previewEnd = Math.max(loopWindowDrag.originalStart, previewBreath);
+        } else if (loopWindowDrag.mode === 'body_dynamic_resize') {
+          if (previewBreath < loopWindowDrag.anchorBreath) {
+            loopWindowDrag.previewStart = Math.max(0, previewBreath);
+            loopWindowDrag.previewEnd = loopWindowDrag.originalEnd;
+          } else if (previewBreath > loopWindowDrag.anchorBreath) {
+            loopWindowDrag.previewStart = loopWindowDrag.originalStart;
+            loopWindowDrag.previewEnd = Math.max(loopWindowDrag.originalStart, previewBreath);
+          } else {
+            loopWindowDrag.previewStart = loopWindowDrag.originalStart;
+            loopWindowDrag.previewEnd = loopWindowDrag.originalEnd;
+          }
         } else {
           const delta = previewBreath - loopWindowDrag.anchorBreath;
           const length = loopWindowDrag.originalEnd - loopWindowDrag.originalStart;
