@@ -33,6 +33,7 @@ import {
   swap_painter_group_property_blocks,
   erase_group_voxel,
   erase_group_voxel_at_breath,
+  set_painter_document_loop_window,
 } from './painter_document_runtime.js';
 
 function assert(condition: unknown, message: string): void {
@@ -119,6 +120,9 @@ assert(runtime.document.groups[baseGroupId]?.breath_start === 0 && runtime.docum
 assert(get_painter_group_raster_state_at_breath(runtime.document.groups[baseGroupId]!, 4)?.content.length === get_painter_group_raster_state_at_breath(beforeSpanState, 0)?.content.length, 'set_painter_group_breath_span should preserve raster content payload');
 assert(is_painter_group_active_at_breath(runtime.document.groups[baseGroupId]!, 4) === true, 'group should be active at updated span interior breath');
 assert(is_painter_group_active_at_breath(runtime.document.groups[baseGroupId]!, 10) === false, 'group should be inactive outside updated span');
+
+set_painter_document_loop_window(runtime, { breath_start: 10, breath_end: 16 });
+assert(runtime.document.breath.cropped_start === 10 && runtime.document.breath.cropped_end === 16, 'document loop window should extend beyond stored file timing bounds');
 
 const contentSplitDocument = create_painter_document(8, 8, { default_group_name: 'Split Test' });
 const contentSplitGroupId = contentSplitDocument.group_order[0]!;

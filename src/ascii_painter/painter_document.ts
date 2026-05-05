@@ -162,8 +162,8 @@ function normalize_document_breath(breath: any): PainterDocumentBreath {
   const start = 0;
   const rangeStart = Math.max(0, clamp_int(breath?.range_start, 0));
   const rangeEnd = Math.max(rangeStart, clamp_int(breath?.range_end, rangeStart));
-  const croppedStart = Math.max(rangeStart, clamp_int(breath?.cropped_start, rangeStart));
-  const croppedEnd = Math.max(croppedStart, Math.min(rangeEnd, clamp_int(breath?.cropped_end, rangeEnd)));
+  const croppedStart = Math.max(0, clamp_int(breath?.cropped_start, rangeStart));
+  const croppedEnd = Math.max(croppedStart, clamp_int(breath?.cropped_end, Math.max(rangeEnd, croppedStart)));
   return {
     start,
     cropped_start: croppedStart,

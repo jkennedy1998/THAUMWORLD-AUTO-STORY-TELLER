@@ -1482,10 +1482,8 @@ export function set_painter_document_loop_window(runtime: PainterDocumentRuntime
   breath_end: number;
 }): void {
   const current = clone_painter_document_breath(runtime.document.breath);
-  const rangeStart = Math.max(0, Math.floor(current.range_start ?? 0));
-  const rangeEnd = Math.max(rangeStart, Math.floor(current.range_end ?? rangeStart));
-  const nextStart = Math.max(rangeStart, Math.min(rangeEnd, Math.floor(args.breath_start)));
-  const nextEnd = Math.max(nextStart, Math.min(rangeEnd, Math.floor(args.breath_end)));
+  const nextStart = Math.max(0, Math.floor(args.breath_start));
+  const nextEnd = Math.max(nextStart, Math.floor(args.breath_end));
   runtime.document.breath = clone_painter_document_breath({
     ...current,
     cropped_start: nextStart,

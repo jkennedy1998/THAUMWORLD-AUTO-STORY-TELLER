@@ -6,12 +6,14 @@ export type CanvasSettingsModuleOptions = {
   id: string;
   rect: Rect;
   is_visible: () => boolean;
-  get_breath_range: () => { start: number; end: number };
+  get_loop_breath_range: () => { start: number; end: number };
+  get_file_breath_range: () => { start: number; end: number };
+  get_content_breath_range?: () => { start: number; end: number } | null;
   get_frames_per_breath: () => number;
   get_loop_enabled: () => boolean;
   get_is_playing: () => boolean;
-  on_step_breath_start: (delta: number) => void;
-  on_step_breath_end: (delta: number) => void;
+  on_step_loop_start: (delta: number) => void;
+  on_step_loop_end: (delta: number) => void;
   on_step_frames_per_breath: (delta: number) => void;
   on_toggle_loop: () => void;
   on_toggle_playback: () => void;
@@ -23,10 +25,10 @@ export type CanvasSettingsModuleOptions = {
 };
 
 type HitAction =
-  | 'breath_start_dec'
-  | 'breath_start_inc'
-  | 'breath_end_dec'
-  | 'breath_end_inc'
+  | 'loop_start_dec'
+  | 'loop_start_inc'
+  | 'loop_end_dec'
+  | 'loop_end_inc'
   | 'frames_dec'
   | 'frames_inc'
   | 'toggle_loop'
@@ -86,17 +88,19 @@ export function makeCanvasSettingsModule(opts: CanvasSettingsModuleOptions): Mod
     },
     draw_content(c: Canvas, rect: Rect): void {
       hitboxes = [];
-      const range = opts.get_breath_range();
+      const loopRange = opts.get_loop_breath_range();
+      const fileRange = opts.get_file_breath_range();
+      const contentRange = opts.get_content_breath_range?.() ?? null;
       const framesPerBreath = opts.get_frames_per_breath();
       const loopEnabled = opts.get_loop_enabled();
       const isPlaying = opts.get_is_playing();
       const rows = [rect.y1 - 2, rect.y1 - 4, rect.y1 - 6, rect.y1 - 8, rect.y1 - 10, rect.y1 - 12];
-      draw_text(c, rect.x0 + 2, rows[0]!, `B START ${range.start}`, valueColor);
-      draw_button(c, rect.x1 - 11, rows[0]!, '-', 'breath_start_dec');
-      draw_button(c, rect.x1 - 7, rows[0]!, '+', 'breath_start_inc');
-      draw_text(c, rect.x0 + 2, rows[1]!, `B END   ${range.end}`, valueColor);
-      draw_button(c, rect.x1 - 11, rows[1]!, '-', 'breath_end_dec');
-      draw_button(c, rect.x1 - 7, rows[1]!, '+', 'breath_end_inc');
+      draw_text(c, rect.x0 + 2, rows[0]!, `LOOP S ${loopRange.start}`, valueColor);
+      draw_button(c, rect.x1 - 11, rows[0]!, '-', 'loop_start_dec');
+      draw_button(c, rect.x1 - 7, rows[0]!, '+', 'loop_start_inc');
+      draw_text(c, rect.x0 + 2, rows[1]!, `LOOP E ${loopRange.end}`, valueColor);
+      draw_button(c, rect.x1 - 11, rows[1]!, '-', 'loop_end_dec');
+      draw_button(c, rect.x1 - 7, rows[1]!, '+', 'loop_end_inc');
       draw_text(c, rect.x0 + 2, rows[2]!, `FPB ${framesPerBreath}`, valueColor);
       draw_button(c, rect.x1 - 11, rows[2]!, '-', 'frames_dec');
       draw_button(c, rect.x1 - 7, rows[2]!, '+', 'frames_inc');
@@ -105,15 +109,16 @@ export function makeCanvasSettingsModule(opts: CanvasSettingsModuleOptions): Mod
       draw_button(c, rect.x0 + 2, rows[4]!, 'JMP S', 'jump_start');
       draw_button(c, rect.x0 + 12, rows[4]!, 'JMP E', 'jump_end');
       draw_button(c, rect.x0 + 2, rows[5]!, 'FIT', 'fit_content');
-      draw_text(c, rect.x0 + 10, rows[5]!, 'ruler:b', labelColor);
+      draw_text(c, rect.x0 + 10, rows[5]!, `FILE ${fileRange.start}..${fileRange.end}`, labelColor);
+      if (contentRange) draw_text(c, rect.x0 + 10, rows[5]! - 1, `CNT ${contentRange.start}..${contentRange.end}`, labelColor);
     },
     on_pointer_down_content(e: PointerEvent): void {
       const action = find_hitbox(e.x, e.y);
       if (!action) return;
-      if (action === 'breath_start_dec') opts.on_step_breath_start(-1);
-      else if (action === 'breath_start_inc') opts.on_step_breath_start(1);
-      else if (action === 'breath_end_dec') opts.on_step_breath_end(-1);
-      else if (action === 'breath_end_inc') opts.on_step_breath_end(1);
+      if (action === 'loop_start_dec') opts.on_step_loop_start(-1);
+      else if (action === 'loop_start_inc') opts.on_step_loop_start(1);
+      else if (action === 'loop_end_dec') opts.on_step_loop_end(-1);
+      else if (action === 'loop_end_inc') opts.on_step_loop_end(1);
       else if (action === 'frames_dec') opts.on_step_frames_per_breath(-1);
       else if (action === 'frames_inc') opts.on_step_frames_per_breath(1);
       else if (action === 'toggle_loop') opts.on_toggle_loop();

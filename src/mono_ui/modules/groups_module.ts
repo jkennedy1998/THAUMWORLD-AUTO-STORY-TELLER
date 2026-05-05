@@ -52,7 +52,6 @@ export type GroupsModuleOptions = {
   on_delete_group?: (id: string) => void;
   on_reorder_groups: (ids_in_display_order: string[]) => void;
   on_reorder_group_properties?: (groupId: string, next_property_order: string[]) => void;
-  on_add_group_property?: (groupId: string, propertyKind: 'raster' | 'move', afterPropertyId?: string | null) => void;
   on_remove_group_property?: (groupId: string, propertyId: string) => void;
   on_offset_group_in_time?: (groupId: string, deltaBreaths: number) => void;
   on_set_group_timing?: (groupId: string, start: number, cropped_start: number, cropped_end: number) => void;
@@ -84,10 +83,8 @@ type GroupSectionLayout = {
   sectionTopY: number;
   sectionBottomY: number;
   titleRowY: number;
-  spacerRowY: number;
-  turnRowY: number;
-  transRowY: number;
-  footerRowY: number;
+  leftDataRows: Array<{ key: 'clip' | 'prnt'; y: number }>;
+  actionRows: Array<{ key: 'visibility' | 'lock' | 'delete'; y: number }>;
   propertyRows: Array<{ property_id: string; kind: PropertyRowKind; label: string; y: number }>;
 };
 
@@ -116,6 +113,49 @@ type RasterHitMode = PropertyRowHit['mode'];
 type RasterDragMode = 'edge_start' | 'edge_end' | 'edge_start_dynamic' | 'edge_end_dynamic' | 'body_move' | 'body_dynamic_resize' | 'body_swap';
 
 type InteractionStyle = { rgb: { r: number; g: number; b: number }; weight: number };
+
+export type GroupsTimelineRegion = {
+  startX: number;
+  endX: number;
+  innerStartX: number;
+  innerEndX: number;
+  innerWidth: number;
+};
+
+export type GroupsTimelineViewport = GroupsTimelineRegion & {
+  startBreath: number;
+  endBreath: number;
+  visibleSpan: number;
+};
+
+export function resolve_groups_timeline_region(currentRect: Rect): GroupsTimelineRegion {
+  const startX = currentRect.x0 + 29;
+  const endX = currentRect.x1 - 3;
+  const innerStartX = startX + 1;
+  const innerEndX = endX - 1;
+  return {
+    startX,
+    endX,
+    innerStartX,
+    innerEndX,
+    innerWidth: Math.max(1, innerEndX - innerStartX + 1),
+  };
+}
+
+export function resolve_groups_timeline_viewport(currentRect: Rect, startBreath: number): GroupsTimelineViewport {
+  const region = resolve_groups_timeline_region(currentRect);
+  const normalizedStart = Math.max(0, Math.floor(startBreath));
+  return {
+    ...region,
+    startBreath: normalizedStart,
+    endBreath: normalizedStart + region.innerWidth - 1,
+    visibleSpan: region.innerWidth,
+  };
+}
+
+export function resolve_groups_timeline_visible_span(currentRect: Rect): number {
+  return resolve_groups_timeline_region(currentRect).innerWidth;
+}
 
 export function resolve_groups_raster_swap_target(args: {
   sourceGroupId: string | null;
@@ -604,48 +644,40 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     };
   }
 
-  function getTimelineRegion(currentRect: Rect): { startX: number; endX: number; innerStartX: number; innerEndX: number; innerWidth: number } {
-    const startX = currentRect.x0 + 29;
-    const endX = currentRect.x1 - 3;
-    const innerStartX = startX + 1;
-    const innerEndX = endX - 1;
-    return {
-      startX,
-      endX,
-      innerStartX,
-      innerEndX,
-      innerWidth: Math.max(1, innerEndX - innerStartX + 1),
-    };
+  function getTimelineViewport(currentRect: Rect): GroupsTimelineViewport {
+    return resolve_groups_timeline_viewport(currentRect, getTimelineViewStart());
+  }
+
+  function getTimelineRegion(currentRect: Rect): GroupsTimelineRegion {
+    return getTimelineViewport(currentRect);
   }
 
   function getVisibleBreathColumns(currentRect: Rect): number {
-    return getTimelineRegion(currentRect).innerWidth;
+    return getTimelineViewport(currentRect).visibleSpan;
   }
 
   function getTimelineViewEnd(currentRect: Rect): number {
-    return getTimelineViewStart() + getVisibleBreathColumns(currentRect) - 1;
+    return getTimelineViewport(currentRect).endBreath;
   }
 
   function isPointerInTimelineHeader(currentRect: Rect, localX: number, localY: number): boolean {
     const metrics = getContentMetrics(currentRect);
-    const timelineRegion = getTimelineRegion(currentRect);
+    const timelineViewport = getTimelineViewport(currentRect);
     return (localY === metrics.headerRow1Y || localY === metrics.headerRow2Y)
-      && localX >= timelineRegion.startX - currentRect.x0
-      && localX <= timelineRegion.endX - currentRect.x0;
+      && localX >= timelineViewport.startX - currentRect.x0
+      && localX <= timelineViewport.endX - currentRect.x0;
   }
 
   function breathToTimelineX(currentRect: Rect, breath: number): number {
-    const region = getTimelineRegion(currentRect);
-    const start = getTimelineViewStart();
-    const offset = Math.floor(breath) - start;
-    return Math.max(region.innerStartX, Math.min(region.innerEndX, region.innerStartX + offset));
+    const timelineViewport = getTimelineViewport(currentRect);
+    const offset = Math.floor(breath) - timelineViewport.startBreath;
+    return Math.max(timelineViewport.innerStartX, Math.min(timelineViewport.innerEndX, timelineViewport.innerStartX + offset));
   }
 
   function timelineXToBreath(currentRect: Rect, localX: number): number {
-    const region = getTimelineRegion(currentRect);
-    const start = getTimelineViewStart();
-    const clampedX = Math.max(region.innerStartX, Math.min(region.innerEndX, localX));
-    return start + (clampedX - region.innerStartX);
+    const timelineViewport = getTimelineViewport(currentRect);
+    const clampedX = Math.max(timelineViewport.innerStartX, Math.min(timelineViewport.innerEndX, localX));
+    return timelineViewport.startBreath + (clampedX - timelineViewport.innerStartX);
   }
 
   function getResolvedLoopBreathRange(): { start: number; end: number } {
@@ -659,8 +691,8 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
   function getLoopWindowHit(currentRect: Rect, localX: number, localY: number): 'start' | 'end' | 'body' | null {
     const metrics = getContentMetrics(currentRect);
     if (localY !== metrics.headerRow2Y) return null;
-    const region = getTimelineRegion(currentRect);
-    if (localX < region.innerStartX - currentRect.x0 || localX > region.innerEndX - currentRect.x0) return null;
+    const timelineViewport = getTimelineViewport(currentRect);
+    if (localX < timelineViewport.innerStartX - currentRect.x0 || localX > timelineViewport.innerEndX - currentRect.x0) return null;
     const loopRange = getResolvedLoopBreathRange();
     const startX = breathToTimelineX(currentRect, loopRange.start) - currentRect.x0;
     const endX = breathToTimelineX(currentRect, loopRange.end) - currentRect.x0;
@@ -1474,7 +1506,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
   }
 
   function getSectionHeight(group: GroupListItem): number {
-    return getOrderedVisiblePropertyRows(group).length + 7;
+    return Math.max(3, getOrderedVisiblePropertyRows(group).length) + 4;
   }
 
   function buildSectionLayout(group: GroupListItem, sectionTopY: number): GroupSectionLayout {
@@ -1484,17 +1516,24 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
       label: row.label,
       y: sectionTopY - getPropertyRowLocalYOffset(index),
     }));
-    const propertyCount = propertyRows.length;
+    const leftListStartY = propertyRows[0]?.y ?? sectionTopY - 2;
+    const leftDataRows: GroupSectionLayout['leftDataRows'] = [
+      { key: 'clip', y: leftListStartY },
+      { key: 'prnt', y: leftListStartY - 1 },
+    ];
+    const actionRows: GroupSectionLayout['actionRows'] = [
+      { key: 'visibility', y: leftListStartY },
+      { key: 'lock', y: leftListStartY - 1 },
+      { key: 'delete', y: leftListStartY - 2 },
+    ];
     return {
       item: group,
       sectionTopY,
       sectionBottomY: sectionTopY - (getSectionHeight(group) - 1),
       titleRowY: sectionTopY - 1,
+      leftDataRows,
+      actionRows,
       propertyRows,
-      spacerRowY: sectionTopY - (propertyCount + 2),
-      turnRowY: sectionTopY - (propertyCount + 3),
-      transRowY: sectionTopY - (propertyCount + 4),
-      footerRowY: sectionTopY - (propertyCount + 5),
     };
   }
 
@@ -1554,37 +1593,37 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     return null;
   }
 
+  function drawTimelineHeaderLabel(c: Canvas, occupiedXs: Set<number>, args: { y: number; text: string; startX: number; rgb: { r: number; g: number; b: number }; weight: number; minX: number; maxX: number; renderIndex: number }): boolean {
+    const text = String(args.text ?? '');
+    if (!text) return false;
+    const endX = args.startX + text.length - 1;
+    if (args.startX < args.minX || endX > args.maxX) return false;
+    for (let x = args.startX; x <= endX; x += 1) {
+      if (occupiedXs.has(x)) return false;
+    }
+    for (let i = 0; i < text.length; i += 1) {
+      const x = args.startX + i;
+      occupiedXs.add(x);
+      c.set(x, args.y, {
+        char: text[i]!,
+        rgb: args.rgb,
+        weight_index: args.weight,
+        render_index: args.renderIndex,
+      });
+    }
+    return true;
+  }
+
   function drawHeader(c: Canvas): void {
     const metrics = getContentMetrics(rect);
     const headerY = rect.y0 + metrics.headerRow2Y;
     const titleY = rect.y0 + metrics.headerRow1Y;
-    const timelineRegion = getTimelineRegion(rect);
-    const timelineStart = getTimelineViewStart();
-    const timelineEnd = getTimelineViewEnd(rect);
-    const fileRange = getFileBreathRange();
+    const timelineViewport = getTimelineViewport(rect);
     const loopRange = getResolvedLoopBreathRange();
-    c.set(rect.x1 - 2, rect.y0 + metrics.titleRowY, { char: '[', rgb: borderColor, weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
-    c.set(rect.x1 - 1, rect.y0 + metrics.titleRowY, { char: '+', rgb: visibleColor, weight_index: 2, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
-    c.set(rect.x0 + 1, titleY, { char: '☰', rgb: dragHandleColor, weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
-    c.set(rect.x0 + 3, titleY, { char: '✕', rgb: deleteColor, weight_index: 2, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
-    c.set(rect.x0 + 5, titleY, { char: '+', rgb: visibleColor, weight_index: 2, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
-    c.set(rect.x0 + 7, titleY, { char: '$', rgb: visibleColor, weight_index: 2, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
-    const titleLabel = 'GROUPS';
-    const titleStart = rect.x0 + 11;
-    for (let i = 0; i < titleLabel.length && titleStart + i < rect.x1 - 14; i += 1) {
-      c.set(titleStart + i, titleY, {
-        char: titleLabel[i]!,
-        rgb: textColor,
-        weight_index: 1,
-        render_index: MODULE_CHROME_RENDER_INDEX + 1,
-      });
-    }
-    c.set(rect.x0 + 1, headerY, { char: '≋', rgb: mutedColor, weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
-    c.set(rect.x0 + 3, headerY, { char: '✕', rgb: mutedColor, weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
-    c.set(rect.x0 + 5, headerY, { char: '+', rgb: mutedColor, weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
-    c.set(rect.x0 + 7, headerY, { char: '$', rgb: hiddenColor, weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+    const addButtonX = rect.x1 - 2;
+    c.set(addButtonX, titleY, { char: '+', rgb: visibleColor, weight_index: 2, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
     const autoKeyLabel = 'AUTO KEY';
-    const autoKeyStart = rect.x0 + 15;
+    const autoKeyStart = rect.x0 + 2;
     for (let i = 0; i < autoKeyLabel.length && autoKeyStart + i < rect.x1 - 14; i += 1) {
       c.set(autoKeyStart + i, headerY, {
         char: autoKeyLabel[i]!,
@@ -1593,25 +1632,23 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         render_index: MODULE_CHROME_RENDER_INDEX + 1,
       });
     }
-    const autoKeyBoxStart = Math.min(rect.x1 - 10, autoKeyStart + autoKeyLabel.length + 2);
+    const autoKeyBoxStart = Math.min(rect.x0 + 14, autoKeyStart + autoKeyLabel.length + 2);
     const autoKeyEnabled = getAutoKeyEnabled();
     c.set(autoKeyBoxStart, headerY, { char: '[', rgb: mutedColor, weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
     c.set(autoKeyBoxStart + 1, headerY, { char: autoKeyEnabled ? 'x' : ' ', rgb: autoKeyEnabled ? selectedColor : mutedColor, weight_index: autoKeyEnabled ? 2 : 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
     c.set(autoKeyBoxStart + 2, headerY, { char: ']', rgb: mutedColor, weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
-    for (let x = timelineRegion.startX; x <= timelineRegion.endX; x += 1) {
+    for (let x = timelineViewport.startX; x <= timelineViewport.endX; x += 1) {
       c.set(x, headerY, { char: ' ', rgb: mutedColor, weight_index: 0, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
     }
-    for (let breath = Math.max(fileRange.start, timelineStart); breath <= Math.min(fileRange.end, timelineEnd); breath += 1) {
-      const x = breathToTimelineX(rect, breath);
-      c.set(x, headerY, { char: '─', rgb: textColor, weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+    for (let breath = timelineViewport.startBreath; breath <= timelineViewport.endBreath; breath += 1) {
+      c.set(breathToTimelineX(rect, breath), headerY, {
+        char: '─',
+        rgb: mutedColor,
+        weight_index: 1,
+        render_index: MODULE_CHROME_RENDER_INDEX + 1,
+      });
     }
-    if (fileRange.start >= timelineStart && fileRange.start <= timelineEnd) {
-      c.set(breathToTimelineX(rect, fileRange.start), headerY, { char: '[', rgb: textColor, weight_index: 2, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
-    }
-    if (fileRange.end >= timelineStart && fileRange.end <= timelineEnd) {
-      c.set(breathToTimelineX(rect, fileRange.end), headerY, { char: ']', rgb: textColor, weight_index: 2, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
-    }
-    for (let breath = Math.max(loopRange.start, timelineStart); breath <= Math.min(loopRange.end, timelineEnd); breath += 1) {
+    for (let breath = Math.max(loopRange.start, timelineViewport.startBreath); breath <= Math.min(loopRange.end, timelineViewport.endBreath); breath += 1) {
       const x = breathToTimelineX(rect, breath);
       const localIndex = breath - loopRange.start;
       const isSingle = loopRange.start === loopRange.end;
@@ -1624,25 +1661,76 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         render_index: MODULE_CHROME_RENDER_INDEX + 2,
       });
     }
-    const startLabel = String(timelineStart);
-    for (let i = 0; i < startLabel.length && timelineRegion.startX + 2 + i < timelineRegion.endX; i += 1) {
-      c.set(timelineRegion.startX + 2 + i, titleY, { char: startLabel[i]!, rgb: mutedColor, weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+    if (loopRange.start >= timelineViewport.startBreath && loopRange.start <= timelineViewport.endBreath) {
+      c.set(breathToTimelineX(rect, loopRange.start), headerY, { char: '[', rgb: selectedColor, weight_index: 2, render_index: MODULE_CHROME_RENDER_INDEX + 3 });
     }
-    const endLabel = String(timelineEnd);
-    for (let i = 0; i < endLabel.length && timelineRegion.endX - endLabel.length + 1 + i < rect.x1 - 1; i += 1) {
-      c.set(timelineRegion.endX - endLabel.length + 1 + i, titleY, { char: endLabel[i]!, rgb: mutedColor, weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+    if (loopRange.end >= timelineViewport.startBreath && loopRange.end <= timelineViewport.endBreath) {
+      c.set(breathToTimelineX(rect, loopRange.end), headerY, { char: ']', rgb: selectedColor, weight_index: 2, render_index: MODULE_CHROME_RENDER_INDEX + 3 });
     }
-    const breathLabel = String(getCurrentBreath());
-    const cursorX = breathToTimelineX(rect, getCurrentBreath());
-    for (let i = 0; i < breathLabel.length && cursorX + i < timelineRegion.endX; i += 1) {
-      c.set(cursorX + i, titleY, {
-        char: breathLabel[i]!,
+    const occupiedLabelXs = new Set<number>();
+    drawTimelineHeaderLabel(c, occupiedLabelXs, {
+      y: titleY,
+      text: String(timelineViewport.startBreath),
+      startX: timelineViewport.innerStartX,
+      rgb: mutedColor,
+      weight: 1,
+      minX: timelineViewport.innerStartX,
+      maxX: timelineViewport.innerEndX,
+      renderIndex: MODULE_CHROME_RENDER_INDEX + 1,
+    });
+    drawTimelineHeaderLabel(c, occupiedLabelXs, {
+      y: titleY,
+      text: String(timelineViewport.endBreath),
+      startX: timelineViewport.innerEndX - String(timelineViewport.endBreath).length + 1,
+      rgb: mutedColor,
+      weight: 1,
+      minX: timelineViewport.innerStartX,
+      maxX: timelineViewport.innerEndX,
+      renderIndex: MODULE_CHROME_RENDER_INDEX + 1,
+    });
+    if (loopRange.start >= timelineViewport.startBreath && loopRange.start <= timelineViewport.endBreath) {
+      const loopStartText = String(loopRange.start);
+      drawTimelineHeaderLabel(c, occupiedLabelXs, {
+        y: titleY,
+        text: loopStartText,
+        startX: Math.max(timelineViewport.innerStartX, Math.min(timelineViewport.innerEndX - loopStartText.length + 1, breathToTimelineX(rect, loopRange.start) - Math.floor((loopStartText.length - 1) / 2))),
         rgb: selectedColor,
-        weight_index: 2,
-        render_index: MODULE_CHROME_RENDER_INDEX + 1,
+        weight: 2,
+        minX: timelineViewport.innerStartX,
+        maxX: timelineViewport.innerEndX,
+        renderIndex: MODULE_CHROME_RENDER_INDEX + 2,
       });
     }
-    c.set(cursorX, headerY, { char: '║', rgb: selectedColor, weight_index: 2, render_index: MODULE_CHROME_RENDER_INDEX + 2 });
+    if (loopRange.end >= timelineViewport.startBreath && loopRange.end <= timelineViewport.endBreath && loopRange.end !== loopRange.start) {
+      const loopEndText = String(loopRange.end);
+      drawTimelineHeaderLabel(c, occupiedLabelXs, {
+        y: titleY,
+        text: loopEndText,
+        startX: Math.max(timelineViewport.innerStartX, Math.min(timelineViewport.innerEndX - loopEndText.length + 1, breathToTimelineX(rect, loopRange.end) - Math.floor((loopEndText.length - 1) / 2))),
+        rgb: selectedColor,
+        weight: 2,
+        minX: timelineViewport.innerStartX,
+        maxX: timelineViewport.innerEndX,
+        renderIndex: MODULE_CHROME_RENDER_INDEX + 2,
+      });
+    }
+    const currentBreath = getCurrentBreath();
+    const currentBreathVisible = currentBreath >= timelineViewport.startBreath && currentBreath <= timelineViewport.endBreath;
+    const cursorX = breathToTimelineX(rect, currentBreath);
+    const breathLabel = String(currentBreath);
+    if (currentBreathVisible) {
+      drawTimelineHeaderLabel(c, occupiedLabelXs, {
+        y: titleY,
+        text: breathLabel,
+        startX: Math.max(timelineViewport.innerStartX, Math.min(timelineViewport.innerEndX - breathLabel.length + 1, cursorX - Math.floor((breathLabel.length - 1) / 2))),
+        rgb: selectedColor,
+        weight: 2,
+        minX: timelineViewport.innerStartX,
+        maxX: timelineViewport.innerEndX,
+        renderIndex: MODULE_CHROME_RENDER_INDEX + 3,
+      });
+      c.set(cursorX, headerY, { char: '║', rgb: selectedColor, weight_index: 2, render_index: MODULE_CHROME_RENDER_INDEX + 4 });
+    }
     const separatorY = rect.y0 + metrics.dividerY;
     draw_panel_horizontal_divider(c, {
       y: separatorY,
@@ -1697,62 +1785,84 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         active: (row?.blocks ?? []).some((block) => currentBreath >= block.start && currentBreath <= block.end),
       };
     });
-    const firstPropertyRowY = layout.propertyRows[0]?.y ?? layout.sectionTopY - 2;
-    const secondPropertyRowY = layout.propertyRows[1]?.y ?? layout.sectionTopY - 4;
+    const firstPropertyRowY = layout.propertyRows[0]?.y ?? layout.leftDataRows[0]?.y ?? layout.sectionTopY - 2;
+    const lastPropertyRowY = layout.propertyRows[layout.propertyRows.length - 1]?.y ?? firstPropertyRowY;
     const rowColor = group.selected ? selectedColor : textColor;
     const titleWorldY = rect.y0 + layout.titleRowY;
-    const nameStart = rect.x0 + 2;
-    const titlePrefix = `Group ${getVisualOrder(group.id)}`;
-    for (let i = 0; i < titlePrefix.length && nameStart + i < rect.x1 - 2; i += 1) {
-      c.set(nameStart + i, titleWorldY, {
+    const titlePrefix = `${getVisualOrder(group.id)} `;
+    const titlePrefixStart = rect.x0 + 2;
+    const titleNameStart = titlePrefixStart + titlePrefix.length;
+    const titleNameMaxWidth = Math.max(1, Math.min(13, rect.x0 + 18 - titleNameStart));
+    for (let i = 0; i < titlePrefix.length && titlePrefixStart + i < rect.x1 - 2; i += 1) {
+      c.set(titlePrefixStart + i, titleWorldY, {
         char: titlePrefix[i]!,
-        rgb: rowColor,
-        weight_index: group.selected ? 2 : 1,
+        rgb: mutedColor,
+        weight_index: 1,
         render_index: 2,
       });
     }
+    if (isBeingRenamed) {
+      for (let x = titleNameStart; x < titleNameStart + titleNameMaxWidth; x += 1) {
+        c.set(x, titleWorldY, { char: ' ', rgb: editBgColor, weight_index: 0, render_index: 2 });
+      }
+      const displayText = renameState.editText.slice(0, titleNameMaxWidth);
+      for (let j = 0; j < displayText.length; j += 1) {
+        const isCursor = j === renameState.cursorPosition;
+        c.set(titleNameStart + j, titleWorldY, {
+          char: displayText[j]!,
+          rgb: isCursor ? editCursorColor : textColor,
+          weight_index: 2,
+          render_index: 2,
+        });
+      }
+      if (renameState.cursorPosition >= displayText.length && titleNameStart + displayText.length < titleNameStart + titleNameMaxWidth) {
+        c.set(titleNameStart + displayText.length, titleWorldY, { char: '▏', rgb: editCursorColor, weight_index: 2, render_index: 2 });
+      }
+    } else {
+      const displayLabel = group.label.slice(0, titleNameMaxWidth);
+      for (let j = 0; j < displayLabel.length; j += 1) {
+        c.set(titleNameStart + j, titleWorldY, {
+          char: displayLabel[j]!,
+          rgb: rowColor,
+          weight_index: group.selected ? 2 : 1,
+          render_index: 2,
+        });
+      }
+    }
+    if (group.selected && !isBeingRenamed) {
+      c.set(rect.x0 + 17, titleWorldY, { char: '▶', rgb: selectedColor, weight_index: 2, render_index: 2 });
+    }
 
-    const leftText = (group.subtitle?.trim() || 'none').slice(0, 5);
-    const leftRows = [
-      { y: firstPropertyRowY, label: 'lane1', color: mutedColor, weight: 1 },
-      { y: layout.spacerRowY, label: leftText, color: rowColor, weight: 2 },
-      { y: secondPropertyRowY, label: 'lane2', color: mutedColor, weight: 1 },
-      { y: layout.turnRowY, label: 'none', color: mutedColor, weight: 1 },
-    ];
-    for (const row of leftRows) {
-      const label = row.label;
+    for (const row of layout.leftDataRows) {
+      const label = row.key;
       for (let j = 0; j < label.length && rect.x0 + 2 + j < rect.x0 + 8; j += 1) {
-        c.set(rect.x0 + 2 + j, rect.y0 + row.y, { char: label[j]!, rgb: row.color, weight_index: row.weight, render_index: 2 });
+        c.set(rect.x0 + 2 + j, rect.y0 + row.y, { char: label[j]!, rgb: mutedColor, weight_index: 1, render_index: 2 });
       }
     }
 
-    const middleRows = [
-      { y: layout.titleRowY, text: 'drag :', color: mutedColor },
-      { y: firstPropertyRowY, text: `hide ${group.visible === false ? 'o' : 'a'}`, color: rowColor },
-      ...layout.propertyRows.slice(1).map((row) => ({ y: row.y, text: 'row  :', color: mutedColor })),
-      { y: layout.spacerRowY, text: `ordr ${getVisualOrder(group.id)}`, color: mutedColor },
-      { y: layout.turnRowY, text: 'del  x', color: deleteColor },
-      { y: layout.transRowY, text: '+mv/+r', color: visibleColor },
-    ];
-    for (const row of middleRows) {
-      const label = row.text;
-      for (let j = 0; j < label.length && rect.x0 + 11 + j < rect.x0 + 17; j += 1) {
-        c.set(rect.x0 + 11 + j, rect.y0 + row.y, { char: row.text[j]!, rgb: row.color, weight_index: 1, render_index: 2 });
+    for (const row of layout.actionRows) {
+      const text = row.key === 'visibility'
+        ? (group.visible === false ? 'show' : 'hide')
+        : row.key === 'lock'
+          ? (group.locked ? 'unlock' : 'lock')
+          : 'delete';
+      const color = row.key === 'lock'
+        ? (group.locked ? lockedColor : rowColor)
+        : row.key === 'delete'
+          ? deleteColor
+          : rowColor;
+      for (let j = 0; j < text.length && rect.x0 + 11 + j < rect.x0 + 17; j += 1) {
+        c.set(rect.x0 + 11 + j, rect.y0 + row.y, { char: text[j]!, rgb: color, weight_index: 1, render_index: 2 });
       }
     }
 
-    const propertyRows = [
-      ...propertyRowStates.map((row) => ({ y: row.descriptor.y, label: row.label, color: row.selected ? visibleColor : row.active ? selectedColor : rowColor, weight: row.selected ? 3 : 2 })),
-      { y: layout.turnRowY, label: 'turn', color: mutedColor, weight: 1 },
-      { y: layout.transRowY, label: 'trans', color: mutedColor, weight: 1 },
-    ];
-    for (const row of propertyRows) {
+    for (const row of propertyRowStates) {
       const label = row.label;
       for (let j = 0; j < label.length && rect.x0 + 20 + j < rect.x0 + 26; j += 1) {
-        c.set(rect.x0 + 20 + j, rect.y0 + row.y, {
+        c.set(rect.x0 + 20 + j, rect.y0 + row.descriptor.y, {
           char: label[j]!,
-          rgb: row.color,
-          weight_index: row.weight,
+          rgb: row.selected ? visibleColor : row.active ? selectedColor : rowColor,
+          weight_index: row.selected ? 3 : 2,
           render_index: 2,
         });
       }
@@ -1831,7 +1941,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
       });
     }
     const cursorX = breathToTimelineX(rect, currentBreath);
-    for (let y = rect.y0 + firstPropertyRowY; y <= rect.y0 + layout.footerRowY; y += 1) {
+    for (let y = rect.y0 + firstPropertyRowY; y >= rect.y0 + lastPropertyRowY; y -= 1) {
       const rowDescriptor = layout.propertyRows.find((row) => rect.y0 + row.y === y) ?? null;
       const hasExactLocationKey = rowDescriptor?.kind === 'move' && rowDescriptor.property_id
         ? hasPropertyRowExactKeyAtBreath(group, rowDescriptor.property_id, currentBreath)
@@ -1845,48 +1955,12 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         render_index: 3,
       });
     }
-
-    const nameRowY = rect.y0 + layout.footerRowY;
-    const editableStart = rect.x0 + 2;
-    const maxNameWidth = Math.max(1, Math.min(18, rect.x1 - editableStart - 4));
-    const footerPrefix = hasExactContentState ? `State ${currentBreath}` : group.label;
-    if (isBeingRenamed) {
-      for (let x = editableStart; x < editableStart + maxNameWidth; x += 1) {
-        c.set(x, nameRowY, { char: ' ', rgb: editBgColor, weight_index: 0, render_index: 2 });
-      }
-      const displayText = renameState.editText.slice(0, maxNameWidth);
-      for (let j = 0; j < displayText.length; j += 1) {
-        const isCursor = j === renameState.cursorPosition;
-        c.set(editableStart + j, nameRowY, {
-          char: displayText[j]!,
-          rgb: isCursor ? editCursorColor : textColor,
-          weight_index: 2,
-          render_index: 2,
-        });
-      }
-      if (renameState.cursorPosition >= displayText.length && editableStart + displayText.length < editableStart + maxNameWidth) {
-        c.set(editableStart + displayText.length, nameRowY, { char: '▏', rgb: editCursorColor, weight_index: 2, render_index: 2 });
-      }
-    } else {
-      const displayLabel = footerPrefix.slice(0, maxNameWidth);
-      for (let j = 0; j < displayLabel.length; j += 1) {
-        c.set(editableStart + j, nameRowY, {
-          char: displayLabel[j]!,
-          rgb: hasExactContentState ? textColor : rowColor,
-          weight_index: hasExactContentState || group.selected ? 2 : 1,
-          render_index: 2,
-        });
-      }
-    }
-    if (group.selected && !isBeingRenamed) {
-      c.set(rect.x1 - 2, nameRowY, { char: '▶', rgb: selectedColor, weight_index: 2, render_index: 2 });
-    }
   }
 
   const module = make_floating_panel_module({
     id: opts.id,
     rect: opts.rect,
-    title: undefined,
+    title: opts.title ?? 'GROUPS',
     gizmos: gizmo_config,
     background: { rgb: bgColor },
     border: {
@@ -1932,7 +2006,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         const propertyLayout = layouts.find((entry) => entry.item.id === propertyOrderDragState.groupId) ?? null;
         if (propertyLayout) {
           const dropRow = propertyLayout.propertyRows[propertyOrderDragState.currentDropIndex] ?? null;
-          const dropY = rect.y0 + (dropRow ? dropRow.y : propertyLayout.footerRowY + 1);
+          const dropY = rect.y0 + (dropRow ? dropRow.y : ((propertyLayout.propertyRows[propertyLayout.propertyRows.length - 1]?.y ?? propertyLayout.titleRowY) - 1));
           if (dropY >= rect.y0 + propertyLayout.sectionBottomY && dropY <= rect.y0 + propertyLayout.sectionTopY) {
             for (let x = rect.x0 + 18; x < rect.x1 - 1; x += 1) {
               c.set(x, dropY, { char: '━', rgb: dropIndicatorColor, weight_index: 2, render_index: 3 });
@@ -1964,9 +2038,9 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         const clickedLayout = getLayoutAtPointer(currentRect, e.x, e.y);
         const clickedOnRenameField = !!clickedLayout
           && clickedLayout.item.id === renameState.groupId
-          && localY === clickedLayout.footerRowY
-          && localX >= 2
-          && localX < 20;
+          && localY === clickedLayout.titleRowY
+          && localX >= 4
+          && localX < 18;
         if (!clickedOnRenameField) {
           if (renameState.groupId !== null) renameGroup(renameState.groupId, renameState.editText);
           renameState.isRenaming = false;
@@ -1976,7 +2050,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
 
       const metrics = getContentMetrics(currentRect);
       const addButtonX = currentRect.x1 - currentRect.x0 - 2;
-      if (localY === metrics.titleRowY && localX >= addButtonX) {
+      if (localY === metrics.headerRow1Y && localX >= addButtonX) {
         opts.on_add_group();
         return;
       }
@@ -2014,8 +2088,8 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
       const layout = getLayoutAtPointer(currentRect, e.x, e.y);
       if (!layout) return;
       const group = layout.item;
-      const firstPropertyRowY = layout.propertyRows[0]?.y ?? layout.sectionTopY - 2;
-      const secondPropertyRowY = layout.propertyRows[1]?.y ?? layout.sectionTopY - 4;
+      const firstPropertyRowY = layout.propertyRows[0]?.y ?? layout.leftDataRows[0]?.y ?? layout.sectionTopY - 2;
+      const lastPropertyRowY = layout.propertyRows[layout.propertyRows.length - 1]?.y ?? firstPropertyRowY;
       const propertyDescriptorAtHit = getPropertyRowDescriptorAtLocalY(layout, localY);
       const propertyHit = propertyDescriptorAtHit && (propertyDescriptorAtHit.kind === 'raster' || propertyDescriptorAtHit.kind === 'move')
         ? getPropertyRowHit(layout, currentRect, localX, localY)
@@ -2050,11 +2124,14 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         });
         return;
       }
-      const sectionLocalTop = layout.sectionTopY;
-      const sectionLocalBottom = layout.sectionBottomY;
-
-      if (localY === layout.titleRowY && localX >= 2 && localX < 18) {
+      if (localY === layout.titleRowY && localX >= 4 && localX < 18) {
         selectGroup(group);
+        if (e.button === 0) {
+          if (renameState.isRenaming && renameState.groupId !== group.id && renameState.groupId !== null) {
+            renameGroup(renameState.groupId, renameState.editText);
+          }
+          beginRenameGroup(group.id);
+        }
         return;
       }
       const propertyDescriptorAtPointer = propertyDescriptorAtHit ?? getPropertyRowDescriptorAtLocalY(layout, localY);
@@ -2064,66 +2141,26 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         return;
       }
       if (localX >= 11 && localX <= 16) {
-        if (localY === layout.titleRowY) {
-          if (e.button !== 0) return;
-          dragState.isDragging = true;
-          dragState.sourceGroupId = group.id;
-          dragState.dragPointerY = e.y;
-          dragState.draggedGroup = group;
-          dragState.currentDropIndex = getDropIndexForPointer(currentRect, e.y, getGroups());
-          return;
-        }
-        const propertyRowDescriptor = getPropertyRowDescriptorAtLocalY(layout, localY);
-        if (propertyRowDescriptor) {
-          opts.on_select_group_property?.(group.id, propertyRowDescriptor.property_id);
-          if (e.button === 2) {
-            opts.on_remove_group_property?.(group.id, propertyRowDescriptor.property_id);
-            return;
-          }
-          if (localY === firstPropertyRowY) {
-            toggleGroupVisibility(group);
-            return;
-          }
-          if (e.button !== 0) return;
-          propertyOrderDragState.active = true;
-          propertyOrderDragState.groupId = group.id;
-          propertyOrderDragState.propertyId = propertyRowDescriptor.property_id;
-          propertyOrderDragState.dragPointerY = e.y;
-          propertyOrderDragState.currentDropIndex = getPropertyRowDropIndex(layout, localY);
-          return;
-        }
-        if (localY === firstPropertyRowY) {
+        const actionRow = layout.actionRows.find((row) => row.y === localY) ?? null;
+        if (actionRow?.key === 'visibility') {
           toggleGroupVisibility(group);
           return;
         }
-        if (localY === layout.turnRowY) {
+        if (actionRow?.key === 'lock') {
+          toggleGroupLock(group);
+          return;
+        }
+        if (actionRow?.key === 'delete') {
           if (group.can_delete !== false && getGroups().length > 1) deleteGroup(group);
           return;
         }
-        if (localY === layout.transRowY) {
-          const selectedPropertyId = group.selected_property_id ?? layout.propertyRows[layout.propertyRows.length - 1]?.property_id ?? null;
-          opts.on_add_group_property?.(group.id, e.button === 2 ? 'raster' : 'move', selectedPropertyId);
-          return;
-        }
       }
-      if (localY === layout.footerRowY && localX >= 2 && localX < 20) {
-        selectGroup(group);
-        if (renameState.isRenaming && renameState.groupId !== group.id && renameState.groupId !== null) {
-          renameGroup(renameState.groupId, renameState.editText);
-        }
-        beginRenameGroup(group.id);
-        return;
-      }
-      if (localX >= 2 && localX < 9 && localY <= layout.turnRowY && localY >= firstPropertyRowY) {
+      if (localX >= 2 && localX < 9 && localY <= firstPropertyRowY && localY >= (layout.leftDataRows[layout.leftDataRows.length - 1]?.y ?? firstPropertyRowY)) {
         selectGroup(group);
         if (propertyDescriptorAtPointer) opts.on_select_group_property?.(group.id, propertyDescriptorAtPointer.property_id);
         return;
       }
-      if (localX >= 11 && localX < 17 && localY === layout.spacerRowY) {
-        toggleGroupLock(group);
-        return;
-      }
-      if (localY >= firstPropertyRowY && localY <= layout.footerRowY && localX >= timelineRegion.startX - currentRect.x0 && localX <= timelineRegion.endX - currentRect.x0) {
+      if (localY <= firstPropertyRowY && localY >= lastPropertyRowY && localX >= timelineRegion.startX - currentRect.x0 && localX <= timelineRegion.endX - currentRect.x0) {
         setCurrentBreath(timelineXToBreath(currentRect, localX + currentRect.x0));
         selectGroup(group);
         if (propertyDescriptorAtPointer) opts.on_select_group_property?.(group.id, propertyDescriptorAtPointer.property_id);
@@ -2141,17 +2178,16 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
       }
       if (loopWindowDrag.active && loopWindowDrag.mode) {
         const previewBreath = timelineXToBreath(rect, e.x);
-        const fileRange = getFileBreathRange();
         if (loopWindowDrag.mode === 'start') {
-          loopWindowDrag.previewStart = Math.max(fileRange.start, Math.min(previewBreath, loopWindowDrag.originalEnd));
+          loopWindowDrag.previewStart = Math.max(0, Math.min(previewBreath, loopWindowDrag.originalEnd));
           loopWindowDrag.previewEnd = loopWindowDrag.originalEnd;
         } else if (loopWindowDrag.mode === 'end') {
           loopWindowDrag.previewStart = loopWindowDrag.originalStart;
-          loopWindowDrag.previewEnd = Math.max(loopWindowDrag.originalStart, Math.min(fileRange.end, previewBreath));
+          loopWindowDrag.previewEnd = Math.max(loopWindowDrag.originalStart, previewBreath);
         } else {
           const delta = previewBreath - loopWindowDrag.anchorBreath;
           const length = loopWindowDrag.originalEnd - loopWindowDrag.originalStart;
-          const nextStart = Math.max(fileRange.start, Math.min(fileRange.end - length, loopWindowDrag.originalStart + delta));
+          const nextStart = Math.max(0, loopWindowDrag.originalStart + delta);
           loopWindowDrag.previewStart = nextStart;
           loopWindowDrag.previewEnd = nextStart + length;
         }

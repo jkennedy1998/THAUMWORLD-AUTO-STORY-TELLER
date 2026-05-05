@@ -5,6 +5,7 @@ import {
   derive_painter_document_authored_breath_bounds,
   derive_painter_document_suggested_breath_range,
   get_painter_document_breath_range,
+  get_painter_document_file_breath_range,
   get_painter_document_playback,
   step_painter_breath_playback,
 } from './painter_breath.js';
@@ -58,9 +59,11 @@ document.groups[laterGroup.id] = laterGroup;
 document.group_order.push(laterGroup.id);
 
 const range = get_painter_document_breath_range(document);
-assert(range.start === 2 && range.end === 6, 'document breath range should expose file-owned start/end');
-assert(clamp_breath_to_painter_document_range(document, -5) === 2, 'breath clamp should honor file-owned start');
-assert(clamp_breath_to_painter_document_range(document, 99) === 6, 'breath clamp should honor file-owned end');
+assert(range.start === 2 && range.end === 6, 'document breath range should expose loop start/end');
+assert(clamp_breath_to_painter_document_range(document, -5) === 2, 'breath clamp should honor loop start');
+assert(clamp_breath_to_painter_document_range(document, 99) === 6, 'breath clamp should honor loop end');
+const fileRange = get_painter_document_file_breath_range(document);
+assert(fileRange.start === 2 && fileRange.end === 12, 'file breath range should derive from authored content extent');
 
 const playback = get_painter_document_playback(document);
 assert(playback.frames_per_breath === 3 && playback.loop_enabled === false, 'document playback should expose file-owned cadence settings');
@@ -94,6 +97,6 @@ playbackStep = step_painter_breath_playback({
   frame_carry: 0,
   elapsed_frames: 3,
 });
-assert(playbackStep.next_breath === 6 && playbackStep.is_finished === true, 'non-looping playback should stop at the file-owned end breath');
+assert(playbackStep.next_breath === 6 && playbackStep.is_finished === true, 'non-looping playback should stop at the loop end breath');
 
 console.log('painter_breath tests passed');

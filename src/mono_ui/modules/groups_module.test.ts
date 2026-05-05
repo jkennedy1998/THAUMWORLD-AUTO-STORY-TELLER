@@ -1,4 +1,4 @@
-import { resolve_groups_raster_drag_mode, resolve_groups_raster_hit_mode_for_span, resolve_groups_raster_swap_target, resolve_groups_raster_visual_style } from './groups_module.js';
+import { resolve_groups_raster_drag_mode, resolve_groups_raster_hit_mode_for_span, resolve_groups_raster_swap_target, resolve_groups_raster_visual_style, resolve_groups_timeline_region, resolve_groups_timeline_viewport, resolve_groups_timeline_visible_span } from './groups_module.js';
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
@@ -101,6 +101,22 @@ assert(
     hitIsBlank: false,
   }) === null,
   'swap target should reject content blocks from another raster row',
+);
+
+const timelineRect = { x0: 10, y0: 5, x1: 70, y1: 30 };
+const timelineRegion = resolve_groups_timeline_region(timelineRect);
+assert(
+  timelineRegion.innerStartX === 40 && timelineRegion.innerEndX === 66,
+  'timeline region should reserve a fixed left metadata gutter and right controls gutter',
+);
+assert(
+  resolve_groups_timeline_visible_span(timelineRect) === 27,
+  'timeline visible span should equal the rendered inner timeline width',
+);
+const timelineViewport = resolve_groups_timeline_viewport(timelineRect, 8);
+assert(
+  timelineViewport.startBreath === 8 && timelineViewport.endBreath === 34 && timelineViewport.visibleSpan === 27,
+  'timeline viewport should derive its end breath from the rendered width rather than a stale stored span',
 );
 
 const muted = { r: 1, g: 2, b: 3 };

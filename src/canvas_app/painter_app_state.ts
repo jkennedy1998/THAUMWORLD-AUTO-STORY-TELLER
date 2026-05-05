@@ -77,12 +77,12 @@ import {
   debugVoxelSpace,
   createDefaultCamera,
 } from '../ascii_painter/voxel_space.js';
-import { makeGroupsModule, type GroupListItem } from '../mono_ui/modules/groups_module.js';
+import { makeGroupsModule, resolve_groups_timeline_visible_span, type GroupListItem } from '../mono_ui/modules/groups_module.js';
 import { make_navigation_module } from '../ascii_painter/navigation_module.js';
 import { build_legacy_voxel_space_from_painter_runtime, import_legacy_voxel_space_as_painter_document } from '../ascii_painter/painter_document_legacy_adapter.js';
 import { create_painter_document, create_painter_group, create_painter_voxel_record, get_painter_group_raster_state_at_breath, type PainterDocument } from '../ascii_painter/painter_document.js';
 import { add_painter_group, duplicate_painter_group, erase_group_voxel, export_painter_document, get_exact_painter_group_raster_state, normalize_painter_document_runtime, remove_painter_group, rename_painter_group, reorder_painter_groups, resolve_nearest_painter_group_move_block, resolve_nearest_painter_group_raster_state, resolve_painter_group_location_at_breath, resolve_painter_group_preview_winner, set_group_voxel, set_painter_group_locked, set_painter_group_visibility, set_painter_runtime_active_breath, type PainterDocumentRuntime } from '../ascii_painter/painter_document_runtime.js';
-import { derive_group_breath_range, derive_group_raster_segment_ranges, derive_painter_document_suggested_breath_range, get_painter_document_breath_range, get_painter_document_file_breath_range, get_painter_document_playback, step_painter_breath_playback } from '../ascii_painter/painter_breath.js';
+import { derive_group_breath_range, derive_group_raster_segment_ranges, derive_painter_document_authored_breath_bounds, derive_painter_document_suggested_breath_range, get_painter_document_breath_range, get_painter_document_file_breath_range, get_painter_document_playback, step_painter_breath_playback } from '../ascii_painter/painter_breath.js';
 import { create_painter_session_core } from '../ascii_painter/painter_session_core.js';
 import type { PainterGroupPlaneRegistry } from '../ascii_painter/painter_session_types.js';
 import { resolve_edit_channels_with_modifiers, type EditChannels } from '../ascii_painter/edit_mask.js';
@@ -1264,13 +1264,19 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     });
   }
 
+  function getPainterGroupsTimelineVisibleSpan(): number {
+    const groupsRect = layer_palette_module?.rect ?? layer_palette_rect;
+    return Math.max(1, resolve_groups_timeline_visible_span(groupsRect));
+  }
+
   function setCurrentPainterBreath(nextBreath: number): void {
     const normalized = clampPainterBreathToNonNegative(nextBreath);
     if (normalized === painter_current_breath) return;
     syncActivePainterBreathAcrossState(normalized);
-    const visibleEnd = painter_timeline_view_start_breath + painter_timeline_view_span_breaths - 1;
+    const visibleSpan = getPainterGroupsTimelineVisibleSpan();
+    const visibleEnd = painter_timeline_view_start_breath + visibleSpan - 1;
     if (painter_current_breath < painter_timeline_view_start_breath) painter_timeline_view_start_breath = painter_current_breath;
-    else if (painter_current_breath > visibleEnd) painter_timeline_view_start_breath = Math.max(0, painter_current_breath - painter_timeline_view_span_breaths + 1);
+    else if (painter_current_breath > visibleEnd) painter_timeline_view_start_breath = Math.max(0, painter_current_breath - visibleSpan + 1);
     ensureValidFocusPlane();
     refreshPainterProjectionFromWorld();
     painterDiag('current painter breath changed', { breath: painter_current_breath });
@@ -1283,7 +1289,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   function setPainterTimelineViewStart(nextStart: number): void {
     const fileRange = getPainterDocumentFileBreathRange();
-    painter_timeline_view_start_breath = Math.max(0, Math.min(Math.max(fileRange.end, painter_current_breath), Math.floor(nextStart)));
+    const loopRange = getPainterDocumentBreathRange();
+    painter_timeline_view_start_breath = Math.max(0, Math.min(Math.max(fileRange.end, loopRange.end, painter_current_breath), Math.floor(nextStart)));
   }
 
   function applyPainterDocumentTiming(args: {
@@ -1328,14 +1335,25 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     submit_group_command_if_authoritative({ kind: 'set_document_loop_window', breath_start: normalizedStart, breath_end: normalizedEnd });
   }
 
+  function setPainterDocumentTimingPreservingLoop(args: {
+    breath_range_start: number;
+    breath_range_end: number;
+    frames_per_breath: number;
+    loop_enabled: boolean;
+  }): void {
+    const previousLoop = getPainterDocumentBreathRange();
+    setPainterDocumentTiming(args);
+    setPainterDocumentLoopWindow({
+      breath_start: previousLoop.start,
+      breath_end: previousLoop.end,
+    });
+  }
+
   function fitPainterDocumentTimingToContent(): void {
     const suggested = derive_painter_document_suggested_breath_range(painter_document_runtime.document);
-    const playback = get_painter_document_playback(painter_document_runtime.document);
-    setPainterDocumentTiming({
-      breath_range_start: suggested.start,
-      breath_range_end: suggested.end,
-      frames_per_breath: playback.frames_per_breath,
-      loop_enabled: playback.loop_enabled,
+    setPainterDocumentLoopWindow({
+      breath_start: suggested.start,
+      breath_end: suggested.end,
     });
   }
 
@@ -1553,28 +1571,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     });
     sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
     submit_group_command_if_authoritative({ kind: 'move_group_property_block', group_id, property_id, block_id, target_breath });
-    schedule_auto_save();
-  }
-
-  function addPainterGroupProperty(group_id: string, property_kind: 'raster' | 'move', after_property_id?: string | null): void {
-    const group = painter_document_runtime.document.groups[group_id];
-    if (!group || group.locked) return;
-    const oldGroupData = structuredClone(group);
-    painter_session_core.apply_group_command({ kind: 'add_group_property', group_id, property_kind, after_property_id: after_property_id ?? null, property_label: property_kind });
-    sync_local_session_state_from_core();
-    sync_lineage_state_from_core();
-    const newGroup = painter_document_runtime.document.groups[group_id] ?? null;
-    if (newGroup) {
-      const insertedIndex = after_property_id ? newGroup.property_ids.indexOf(after_property_id) + 1 : newGroup.property_ids.length - 1;
-      active_group_property_id = newGroup.property_ids[Math.max(0, Math.min(newGroup.property_ids.length - 1, insertedIndex))] ?? active_group_property_id;
-    }
-    const newGroupData = newGroup ? structuredClone(newGroup) : undefined;
-    logGroupAction(history, 'reorder_groups', `Add Property ${group.name}`, {
-      groupId: group_id,
-      oldGroupData,
-      newGroupData,
-    });
-    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
     schedule_auto_save();
   }
 
@@ -5980,34 +5976,33 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       id: 'canvas_settings_panel',
       rect: getModuleRectWithSave('canvas_settings_panel', { x0: 138, y0: 16, x1: 176, y1: 32 }),
       is_visible: () => canvas_settings_open,
-      get_breath_range: () => getPainterDocumentBreathRange(),
+      get_loop_breath_range: () => getPainterDocumentBreathRange(),
+      get_file_breath_range: () => getPainterDocumentFileBreathRange(),
+      get_content_breath_range: () => {
+        const bounds = derive_painter_document_authored_breath_bounds(painter_document_runtime.document);
+        return bounds ? { start: bounds.min_breath, end: bounds.max_breath } : null;
+      },
       get_frames_per_breath: () => get_painter_document_playback(painter_document_runtime.document).frames_per_breath,
       get_loop_enabled: () => get_painter_document_playback(painter_document_runtime.document).loop_enabled,
       get_is_playing: () => painter_playback_running,
-      on_step_breath_start: (delta: number) => {
+      on_step_loop_start: (delta: number) => {
         const range = getPainterDocumentBreathRange();
-        const playback = get_painter_document_playback(painter_document_runtime.document);
-        setPainterDocumentTiming({
-          breath_range_start: range.start + delta,
-          breath_range_end: range.end,
-          frames_per_breath: playback.frames_per_breath,
-          loop_enabled: playback.loop_enabled,
+        setPainterDocumentLoopWindow({
+          breath_start: range.start + delta,
+          breath_end: range.end,
         });
       },
-      on_step_breath_end: (delta: number) => {
+      on_step_loop_end: (delta: number) => {
         const range = getPainterDocumentBreathRange();
-        const playback = get_painter_document_playback(painter_document_runtime.document);
-        setPainterDocumentTiming({
-          breath_range_start: range.start,
-          breath_range_end: range.end + delta,
-          frames_per_breath: playback.frames_per_breath,
-          loop_enabled: playback.loop_enabled,
+        setPainterDocumentLoopWindow({
+          breath_start: range.start,
+          breath_end: range.end + delta,
         });
       },
       on_step_frames_per_breath: (delta: number) => {
-        const range = getPainterDocumentBreathRange();
+        const range = getPainterDocumentFileBreathRange();
         const playback = get_painter_document_playback(painter_document_runtime.document);
-        setPainterDocumentTiming({
+        setPainterDocumentTimingPreservingLoop({
           breath_range_start: range.start,
           breath_range_end: range.end,
           frames_per_breath: playback.frames_per_breath + delta,
@@ -6015,9 +6010,9 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         });
       },
       on_toggle_loop: () => {
-        const range = getPainterDocumentBreathRange();
+        const range = getPainterDocumentFileBreathRange();
         const playback = get_painter_document_playback(painter_document_runtime.document);
-        setPainterDocumentTiming({
+        setPainterDocumentTimingPreservingLoop({
           breath_range_start: range.start,
           breath_range_end: range.end,
           frames_per_breath: playback.frames_per_breath,
@@ -6272,9 +6267,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       },
       on_reorder_group_properties: (group_id: string, next_property_order: string[]) => {
         reorderPainterGroupProperties(group_id, next_property_order);
-      },
-      on_add_group_property: (group_id: string, property_kind: 'raster' | 'move', after_property_id?: string | null) => {
-        addPainterGroupProperty(group_id, property_kind, after_property_id ?? null);
       },
       on_remove_group_property: (group_id: string, property_id: string) => {
         removePainterGroupProperty(group_id, property_id);

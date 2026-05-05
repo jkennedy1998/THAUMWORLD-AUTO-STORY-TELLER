@@ -72,8 +72,14 @@ export function get_painter_document_breath_range(document: PainterDocument): Pa
 }
 
 export function get_painter_document_file_breath_range(document: PainterDocument): PainterDocumentBreathRange {
-  const breath = get_painter_document_breath(document);
-  return { start: breath.range_start, end: breath.range_end };
+  const authored = derive_painter_document_authored_breath_bounds(document);
+  if (authored) {
+    return {
+      start: Math.max(0, authored.min_breath),
+      end: Math.max(Math.max(0, authored.min_breath), authored.max_breath),
+    };
+  }
+  return { start: 0, end: 0 };
 }
 
 export function derive_group_raster_segment_ranges(group: PainterGroup): PainterGroupRasterSegmentRange[] {
