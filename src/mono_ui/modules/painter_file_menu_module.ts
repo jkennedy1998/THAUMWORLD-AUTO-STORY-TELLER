@@ -30,7 +30,6 @@ export type FileMenuOptions = {
   on_toggle_customization?: () => void;
   on_toggle_layer_palette?: () => void;
   on_toggle_canvas_settings?: () => void;
-  on_toggle_navigation?: () => void;
   on_toggle_camera?: () => void;
   on_toggle_controls?: () => void;
   get_is_host?: () => boolean;
@@ -50,7 +49,6 @@ export function make_file_menu_module(opts: FileMenuOptions): Module {
   if (opts.on_toggle_customization) module_items.push({ id: 'custom', label: 'CUSTOM', onPress: opts.on_toggle_customization, width: 8 });
   if (opts.on_toggle_layer_palette) module_items.push({ id: 'layers', label: 'LAYERS', onPress: opts.on_toggle_layer_palette, width: 8 });
   if (opts.on_toggle_canvas_settings) module_items.push({ id: 'timing', label: 'TIMING', onPress: opts.on_toggle_canvas_settings, width: 8 });
-  if (opts.on_toggle_navigation) module_items.push({ id: 'nav', label: 'NAV', onPress: opts.on_toggle_navigation, width: 5 });
   if (opts.on_toggle_camera) module_items.push({ id: 'camera', label: 'CAMERA', onPress: opts.on_toggle_camera, width: 8 });
   if (opts.on_toggle_controls) module_items.push({ id: 'controls', label: 'CONTROLS', onPress: opts.on_toggle_controls, width: 10 });
 

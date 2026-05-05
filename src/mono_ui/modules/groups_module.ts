@@ -1,5 +1,5 @@
 import type { Module, Canvas, Rect, PointerEvent, DragEvent } from '../types.js';
-import { get_color_by_name } from '../colors.js';
+import { get_ui_semantic_rgb } from '../runtime/ui_customization_store.js';
 import { MODULE_CHROME_RENDER_INDEX, PANEL_BORDER_PRESETS, draw_panel_horizontal_divider } from '../module_borders.js';
 import type { ModuleGizmosConfig } from '../module_gizmos.js';
 import { make_floating_panel_module } from './floating_panel_module.js';
@@ -223,6 +223,7 @@ export function resolve_groups_raster_visual_style(args: {
   is_blank: boolean;
   visible: boolean;
   selected_property: boolean;
+  active_content_block?: boolean;
   interaction: InteractionStyle;
   muted_rgb: { r: number; g: number; b: number };
   selected_rgb: { r: number; g: number; b: number };
@@ -232,6 +233,7 @@ export function resolve_groups_raster_visual_style(args: {
   if (!args.visible) return { rgb: args.muted_rgb, weight: 1 };
   if (args.interaction.weight >= 2) return args.interaction;
   if (args.is_blank) return args.selected_property ? { rgb: args.selected_rgb, weight: 3 } : { rgb: args.blank_rgb ?? args.muted_rgb, weight: 1 };
+  if (args.active_content_block) return { rgb: args.selected_rgb, weight: 3 };
   return { rgb: args.content_rgb ?? args.interaction.rgb, weight: Math.max(0, args.interaction.weight - 1) };
 }
 
@@ -239,6 +241,7 @@ function resolve_groups_move_visual_style(args: {
   is_blank: boolean;
   visible: boolean;
   selected_property: boolean;
+  active_content_block?: boolean;
   interaction: InteractionStyle;
   muted_rgb: { r: number; g: number; b: number };
   selected_rgb: { r: number; g: number; b: number };
@@ -248,6 +251,7 @@ function resolve_groups_move_visual_style(args: {
   if (!args.visible) return { rgb: args.muted_rgb, weight: 1 };
   if (args.interaction.weight >= 2) return args.interaction;
   if (args.is_blank) return args.selected_property ? { rgb: args.selected_rgb, weight: 2 } : { rgb: args.blank_rgb ?? args.muted_rgb, weight: 1 };
+  if (args.active_content_block) return { rgb: args.selected_rgb, weight: 3 };
   if (args.selected_property) return { rgb: args.content_rgb, weight: 2 };
   return { rgb: args.content_rgb, weight: 1 };
 }
@@ -269,25 +273,29 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
   let rect = opts.rect;
   let scrollOffset = 0;
 
-  const bgColor = get_color_by_name('off_black').rgb;
-  const borderColor = get_color_by_name('medium_gray').rgb;
-  const textColor = get_color_by_name('off_white').rgb;
-  const selectedColor = get_color_by_name('vivid_yellow').rgb;
-  const visibleColor = get_color_by_name('pale_green').rgb;
-  const hiddenColor = get_color_by_name('pale_gray').rgb;
-  const lockedColor = get_color_by_name('vivid_red').rgb;
-  const deleteColor = get_color_by_name('vivid_red').rgb;
-  const dragHandleColor = get_color_by_name('vivid_cyan').rgb;
-  const orderNumColor = get_color_by_name('light_blue').rgb;
-  const dropIndicatorColor = get_color_by_name('vivid_green').rgb;
-  const editBgColor = get_color_by_name('deep_blue').rgb;
-  const editCursorColor = get_color_by_name('vivid_yellow').rgb;
-  const mutedColor = get_color_by_name('medium_gray').rgb;
-  const rasterDefaultColor = get_color_by_name('off_white').rgb;
-  const rasterHoverColor = get_color_by_name('vivid_yellow').rgb;
-  const rasterLeftDragColor = get_color_by_name('vivid_cyan').rgb;
-  const rasterRightDragColor = get_color_by_name('pumpkin').rgb;
-  const rasterSwapTargetColor = get_color_by_name('vivid_green').rgb;
+  const bgColor = () => get_ui_semantic_rgb('background');
+  const uiDimmestColor = () => get_ui_semantic_rgb('dimmest');
+  const uiMediumColor = () => get_ui_semantic_rgb('medium');
+  const uiBrightColor = () => get_ui_semantic_rgb('bright');
+  const uiVividColor = () => get_ui_semantic_rgb('vivid');
+  const borderColor = () => uiMediumColor();
+  const textColor = () => uiBrightColor();
+  const selectedColor = () => uiVividColor();
+  const visibleColor = () => uiBrightColor();
+  const hiddenColor = () => uiMediumColor();
+  const lockedColor = () => uiBrightColor();
+  const deleteColor = () => uiBrightColor();
+  const dragHandleColor = () => uiVividColor();
+  const orderNumColor = () => uiMediumColor();
+  const dropIndicatorColor = () => uiBrightColor();
+  const editBgColor = () => uiDimmestColor();
+  const editCursorColor = () => uiVividColor();
+  const mutedColor = () => uiMediumColor();
+  const rasterDefaultColor = () => uiBrightColor();
+  const rasterHoverColor = () => uiVividColor();
+  const rasterLeftDragColor = () => uiVividColor();
+  const rasterRightDragColor = () => uiBrightColor();
+  const rasterSwapTargetColor = () => uiBrightColor();
 
   function groupsRasterDiag(event: string, payload?: Record<string, unknown>): void {
     diag_log('painter', 'verbose', 'GROUPS_RASTER', event, payload);
@@ -1337,18 +1345,18 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     const pendingMatches = pendingBlockPress.active && pendingBlockPress.kind === 'raster' && pendingBlockPress.groupId === groupId && pendingBlockPress.blockId === segmentId;
     const blankMergeMatches = blankMergeDragState.active && blankMergeDragState.groupId === groupId && blankMergeDragState.segmentId === segmentId;
 
-    if (dragMatchesTarget) return { rgb: rasterSwapTargetColor, weight: 2 };
+    if (dragMatchesTarget) return { rgb: rasterSwapTargetColor(), weight: 2 };
     if (blankMergeMatches) {
-      return { rgb: blankMergeDragState.previewDirection === 'right' ? rasterRightDragColor : rasterLeftDragColor, weight: 3 };
+      return { rgb: blankMergeDragState.previewDirection === 'right' ? rasterRightDragColor() : rasterLeftDragColor(), weight: 3 };
     }
-    if (pendingMatches && pendingBlockPress.button === 2) return { rgb: rasterRightDragColor, weight: 3 };
-    if (pendingMatches && pendingBlockPress.button === 0) return { rgb: rasterLeftDragColor, weight: 3 };
-    if (dragMatchesWholeGroupMove) return { rgb: rasterLeftDragColor, weight: 3 };
-    if (dragMatchesSource && rasterDragState.button === 2) return { rgb: rasterRightDragColor, weight: 3 };
-    if (dragMatchesSource && rasterDragState.button === 0) return { rgb: rasterLeftDragColor, weight: 3 };
-    if (hoverMatchesBreath) return { rgb: rasterHoverColor, weight: 3 };
-    if (hoverMatchesGroup) return { rgb: rasterHoverColor, weight: 2 };
-    return { rgb: rasterDefaultColor, weight: 1 };
+    if (pendingMatches && pendingBlockPress.button === 2) return { rgb: rasterRightDragColor(), weight: 3 };
+    if (pendingMatches && pendingBlockPress.button === 0) return { rgb: rasterLeftDragColor(), weight: 3 };
+    if (dragMatchesWholeGroupMove) return { rgb: rasterLeftDragColor(), weight: 3 };
+    if (dragMatchesSource && rasterDragState.button === 2) return { rgb: rasterRightDragColor(), weight: 3 };
+    if (dragMatchesSource && rasterDragState.button === 0) return { rgb: rasterLeftDragColor(), weight: 3 };
+    if (hoverMatchesBreath) return { rgb: rasterHoverColor(), weight: 3 };
+    if (hoverMatchesGroup) return { rgb: rasterHoverColor(), weight: 2 };
+    return { rgb: rasterDefaultColor(), weight: 1 };
   }
 
   function getMoveInteractionStyle(groupId: string, propertyId: string, blockId: string, breath: number): InteractionStyle {
@@ -1365,12 +1373,12 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
       && rasterDragState.propertyId === propertyId
       && rasterDragState.targetSegmentId === blockId
       && rasterDragState.segmentId !== blockId;
-    if (sharedDragMatchesTarget) return { rgb: rasterSwapTargetColor, weight: 2 };
-    if (sharedDragMatchesSource && rasterDragState.button === 2) return { rgb: rasterRightDragColor, weight: 3 };
-    if (sharedDragMatchesSource && rasterDragState.button === 0) return { rgb: rasterLeftDragColor, weight: 3 };
-    if (hoverMatchesBreath) return { rgb: rasterHoverColor, weight: 3 };
-    if (hoverMatchesBlock) return { rgb: rasterHoverColor, weight: 2 };
-    return { rgb: rasterDefaultColor, weight: 1 };
+    if (sharedDragMatchesTarget) return { rgb: rasterSwapTargetColor(), weight: 2 };
+    if (sharedDragMatchesSource && rasterDragState.button === 2) return { rgb: rasterRightDragColor(), weight: 3 };
+    if (sharedDragMatchesSource && rasterDragState.button === 0) return { rgb: rasterLeftDragColor(), weight: 3 };
+    if (hoverMatchesBreath) return { rgb: rasterHoverColor(), weight: 3 };
+    if (hoverMatchesBlock) return { rgb: rasterHoverColor(), weight: 2 };
+    return { rgb: rasterDefaultColor(), weight: 1 };
   }
 
   function drawPropertyRowSegments(c: Canvas, args: {
@@ -1621,29 +1629,29 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     const timelineViewport = getTimelineViewport(rect);
     const loopRange = getResolvedLoopBreathRange();
     const addButtonX = rect.x1 - 2;
-    c.set(addButtonX, titleY, { char: '+', rgb: visibleColor, weight_index: 2, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+    c.set(addButtonX, titleY, { char: '+', rgb: visibleColor(), weight_index: 2, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
     const autoKeyLabel = 'AUTO KEY';
     const autoKeyStart = rect.x0 + 2;
     for (let i = 0; i < autoKeyLabel.length && autoKeyStart + i < rect.x1 - 14; i += 1) {
       c.set(autoKeyStart + i, headerY, {
         char: autoKeyLabel[i]!,
-        rgb: mutedColor,
+        rgb: mutedColor(),
         weight_index: 1,
         render_index: MODULE_CHROME_RENDER_INDEX + 1,
       });
     }
     const autoKeyBoxStart = Math.min(rect.x0 + 14, autoKeyStart + autoKeyLabel.length + 2);
     const autoKeyEnabled = getAutoKeyEnabled();
-    c.set(autoKeyBoxStart, headerY, { char: '[', rgb: mutedColor, weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
-    c.set(autoKeyBoxStart + 1, headerY, { char: autoKeyEnabled ? 'x' : ' ', rgb: autoKeyEnabled ? selectedColor : mutedColor, weight_index: autoKeyEnabled ? 2 : 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
-    c.set(autoKeyBoxStart + 2, headerY, { char: ']', rgb: mutedColor, weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+    c.set(autoKeyBoxStart, headerY, { char: '[', rgb: mutedColor(), weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+    c.set(autoKeyBoxStart + 1, headerY, { char: autoKeyEnabled ? 'x' : ' ', rgb: autoKeyEnabled ? selectedColor() : mutedColor(), weight_index: autoKeyEnabled ? 2 : 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+    c.set(autoKeyBoxStart + 2, headerY, { char: ']', rgb: mutedColor(), weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
     for (let x = timelineViewport.startX; x <= timelineViewport.endX; x += 1) {
-      c.set(x, headerY, { char: ' ', rgb: mutedColor, weight_index: 0, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+      c.set(x, headerY, { char: ' ', rgb: mutedColor(), weight_index: 0, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
     }
     for (let breath = timelineViewport.startBreath; breath <= timelineViewport.endBreath; breath += 1) {
       c.set(breathToTimelineX(rect, breath), headerY, {
         char: '─',
-        rgb: mutedColor,
+        rgb: mutedColor(),
         weight_index: 1,
         render_index: MODULE_CHROME_RENDER_INDEX + 1,
       });
@@ -1656,23 +1664,23 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
       const isLast = breath === loopRange.end;
       c.set(x, headerY, {
         char: getRasterCellChar({ visible: true, isSingle, isFirst, isLast }),
-        rgb: selectedColor,
+        rgb: selectedColor(),
         weight_index: loopWindowDrag.active ? 3 : 2,
         render_index: MODULE_CHROME_RENDER_INDEX + 2,
       });
     }
     if (loopRange.start >= timelineViewport.startBreath && loopRange.start <= timelineViewport.endBreath) {
-      c.set(breathToTimelineX(rect, loopRange.start), headerY, { char: '[', rgb: selectedColor, weight_index: 2, render_index: MODULE_CHROME_RENDER_INDEX + 3 });
+      c.set(breathToTimelineX(rect, loopRange.start), headerY, { char: '[', rgb: selectedColor(), weight_index: 2, render_index: MODULE_CHROME_RENDER_INDEX + 3 });
     }
     if (loopRange.end >= timelineViewport.startBreath && loopRange.end <= timelineViewport.endBreath) {
-      c.set(breathToTimelineX(rect, loopRange.end), headerY, { char: ']', rgb: selectedColor, weight_index: 2, render_index: MODULE_CHROME_RENDER_INDEX + 3 });
+      c.set(breathToTimelineX(rect, loopRange.end), headerY, { char: ']', rgb: selectedColor(), weight_index: 2, render_index: MODULE_CHROME_RENDER_INDEX + 3 });
     }
     const occupiedLabelXs = new Set<number>();
     drawTimelineHeaderLabel(c, occupiedLabelXs, {
       y: titleY,
       text: String(timelineViewport.startBreath),
       startX: timelineViewport.innerStartX,
-      rgb: mutedColor,
+      rgb: mutedColor(),
       weight: 1,
       minX: timelineViewport.innerStartX,
       maxX: timelineViewport.innerEndX,
@@ -1682,7 +1690,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
       y: titleY,
       text: String(timelineViewport.endBreath),
       startX: timelineViewport.innerEndX - String(timelineViewport.endBreath).length + 1,
-      rgb: mutedColor,
+      rgb: mutedColor(),
       weight: 1,
       minX: timelineViewport.innerStartX,
       maxX: timelineViewport.innerEndX,
@@ -1694,7 +1702,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         y: titleY,
         text: loopStartText,
         startX: Math.max(timelineViewport.innerStartX, Math.min(timelineViewport.innerEndX - loopStartText.length + 1, breathToTimelineX(rect, loopRange.start) - Math.floor((loopStartText.length - 1) / 2))),
-        rgb: selectedColor,
+        rgb: selectedColor(),
         weight: 2,
         minX: timelineViewport.innerStartX,
         maxX: timelineViewport.innerEndX,
@@ -1707,7 +1715,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         y: titleY,
         text: loopEndText,
         startX: Math.max(timelineViewport.innerStartX, Math.min(timelineViewport.innerEndX - loopEndText.length + 1, breathToTimelineX(rect, loopRange.end) - Math.floor((loopEndText.length - 1) / 2))),
-        rgb: selectedColor,
+        rgb: selectedColor(),
         weight: 2,
         minX: timelineViewport.innerStartX,
         maxX: timelineViewport.innerEndX,
@@ -1723,20 +1731,20 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         y: titleY,
         text: breathLabel,
         startX: Math.max(timelineViewport.innerStartX, Math.min(timelineViewport.innerEndX - breathLabel.length + 1, cursorX - Math.floor((breathLabel.length - 1) / 2))),
-        rgb: selectedColor,
+        rgb: selectedColor(),
         weight: 2,
         minX: timelineViewport.innerStartX,
         maxX: timelineViewport.innerEndX,
         renderIndex: MODULE_CHROME_RENDER_INDEX + 3,
       });
-      c.set(cursorX, headerY, { char: '║', rgb: selectedColor, weight_index: 2, render_index: MODULE_CHROME_RENDER_INDEX + 4 });
+      c.set(cursorX, headerY, { char: '║', rgb: selectedColor(), weight_index: 2, render_index: MODULE_CHROME_RENDER_INDEX + 4 });
     }
     const separatorY = rect.y0 + metrics.dividerY;
     draw_panel_horizontal_divider(c, {
       y: separatorY,
       rect,
       style: PANEL_BORDER_PRESETS.default_double.style,
-      rgb: borderColor,
+      rgb: borderColor(),
       weight_index: 1,
     });
   }
@@ -1745,25 +1753,25 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     const left = rect.x0 + 1;
     const right = rect.x1 - 1;
     for (let x = left; x < right; x += 1) {
-      c.set(x, rect.y0 + layout.sectionTopY, { char: '─', rgb: borderColor, weight_index: 1, render_index: 1 });
-      c.set(x, rect.y0 + layout.sectionBottomY, { char: '─', rgb: borderColor, weight_index: 1, render_index: 1 });
+      c.set(x, rect.y0 + layout.sectionTopY, { char: '─', rgb: borderColor(), weight_index: 1, render_index: 1 });
+      c.set(x, rect.y0 + layout.sectionBottomY, { char: '─', rgb: borderColor(), weight_index: 1, render_index: 1 });
     }
-    c.set(left, rect.y0 + layout.sectionTopY, { char: '┌', rgb: borderColor, weight_index: 1, render_index: 1 });
-    c.set(right, rect.y0 + layout.sectionTopY, { char: '┐', rgb: borderColor, weight_index: 1, render_index: 1 });
-    c.set(left, rect.y0 + layout.sectionBottomY, { char: '└', rgb: borderColor, weight_index: 1, render_index: 1 });
-    c.set(right, rect.y0 + layout.sectionBottomY, { char: '┘', rgb: borderColor, weight_index: 1, render_index: 1 });
+    c.set(left, rect.y0 + layout.sectionTopY, { char: '┌', rgb: borderColor(), weight_index: 1, render_index: 1 });
+    c.set(right, rect.y0 + layout.sectionTopY, { char: '┐', rgb: borderColor(), weight_index: 1, render_index: 1 });
+    c.set(left, rect.y0 + layout.sectionBottomY, { char: '└', rgb: borderColor(), weight_index: 1, render_index: 1 });
+    c.set(right, rect.y0 + layout.sectionBottomY, { char: '┘', rgb: borderColor(), weight_index: 1, render_index: 1 });
     for (let y = layout.sectionBottomY + 1; y < layout.sectionTopY; y += 1) {
-      c.set(left, rect.y0 + y, { char: '│', rgb: borderColor, weight_index: 1, render_index: 1 });
-      c.set(right, rect.y0 + y, { char: '│', rgb: borderColor, weight_index: 1, render_index: 1 });
+      c.set(left, rect.y0 + y, { char: '│', rgb: borderColor(), weight_index: 1, render_index: 1 });
+      c.set(right, rect.y0 + y, { char: '│', rgb: borderColor(), weight_index: 1, render_index: 1 });
     }
 
     const dividerA = rect.x0 + Math.min(rect.x1 - rect.x0 - 2, 9);
     const dividerB = rect.x0 + Math.min(rect.x1 - rect.x0 - 2, 17);
     const dividerC = rect.x0 + Math.min(rect.x1 - rect.x0 - 2, 26);
     for (let y = layout.sectionBottomY + 1; y < layout.sectionTopY; y += 1) {
-      if (dividerA < right) c.set(dividerA, rect.y0 + y, { char: '│', rgb: borderColor, weight_index: 1, render_index: 1 });
-      if (dividerB < right) c.set(dividerB, rect.y0 + y, { char: '│', rgb: borderColor, weight_index: 1, render_index: 1 });
-      if (dividerC < right) c.set(dividerC, rect.y0 + y, { char: '│', rgb: borderColor, weight_index: 1, render_index: 1 });
+      if (dividerA < right) c.set(dividerA, rect.y0 + y, { char: '│', rgb: borderColor(), weight_index: 1, render_index: 1 });
+      if (dividerB < right) c.set(dividerB, rect.y0 + y, { char: '│', rgb: borderColor(), weight_index: 1, render_index: 1 });
+      if (dividerC < right) c.set(dividerC, rect.y0 + y, { char: '│', rgb: borderColor(), weight_index: 1, render_index: 1 });
     }
   }
 
@@ -1787,7 +1795,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     });
     const firstPropertyRowY = layout.propertyRows[0]?.y ?? layout.leftDataRows[0]?.y ?? layout.sectionTopY - 2;
     const lastPropertyRowY = layout.propertyRows[layout.propertyRows.length - 1]?.y ?? firstPropertyRowY;
-    const rowColor = group.selected ? selectedColor : textColor;
+    const rowColor = group.selected ? selectedColor() : textColor();
     const titleWorldY = rect.y0 + layout.titleRowY;
     const titlePrefix = `${getVisualOrder(group.id)} `;
     const titlePrefixStart = rect.x0 + 2;
@@ -1796,27 +1804,27 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     for (let i = 0; i < titlePrefix.length && titlePrefixStart + i < rect.x1 - 2; i += 1) {
       c.set(titlePrefixStart + i, titleWorldY, {
         char: titlePrefix[i]!,
-        rgb: mutedColor,
+        rgb: mutedColor(),
         weight_index: 1,
         render_index: 2,
       });
     }
     if (isBeingRenamed) {
       for (let x = titleNameStart; x < titleNameStart + titleNameMaxWidth; x += 1) {
-        c.set(x, titleWorldY, { char: ' ', rgb: editBgColor, weight_index: 0, render_index: 2 });
+        c.set(x, titleWorldY, { char: ' ', rgb: editBgColor(), weight_index: 0, render_index: 2 });
       }
       const displayText = renameState.editText.slice(0, titleNameMaxWidth);
       for (let j = 0; j < displayText.length; j += 1) {
         const isCursor = j === renameState.cursorPosition;
         c.set(titleNameStart + j, titleWorldY, {
           char: displayText[j]!,
-          rgb: isCursor ? editCursorColor : textColor,
+          rgb: isCursor ? editCursorColor() : textColor(),
           weight_index: 2,
           render_index: 2,
         });
       }
       if (renameState.cursorPosition >= displayText.length && titleNameStart + displayText.length < titleNameStart + titleNameMaxWidth) {
-        c.set(titleNameStart + displayText.length, titleWorldY, { char: '▏', rgb: editCursorColor, weight_index: 2, render_index: 2 });
+        c.set(titleNameStart + displayText.length, titleWorldY, { char: '▏', rgb: editCursorColor(), weight_index: 2, render_index: 2 });
       }
     } else {
       const displayLabel = group.label.slice(0, titleNameMaxWidth);
@@ -1830,13 +1838,13 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
       }
     }
     if (group.selected && !isBeingRenamed) {
-      c.set(rect.x0 + 17, titleWorldY, { char: '▶', rgb: selectedColor, weight_index: 2, render_index: 2 });
+      c.set(rect.x0 + 17, titleWorldY, { char: '▶', rgb: selectedColor(), weight_index: 2, render_index: 2 });
     }
 
     for (const row of layout.leftDataRows) {
       const label = row.key;
       for (let j = 0; j < label.length && rect.x0 + 2 + j < rect.x0 + 8; j += 1) {
-        c.set(rect.x0 + 2 + j, rect.y0 + row.y, { char: label[j]!, rgb: mutedColor, weight_index: 1, render_index: 2 });
+        c.set(rect.x0 + 2 + j, rect.y0 + row.y, { char: label[j]!, rgb: mutedColor(), weight_index: 1, render_index: 2 });
       }
     }
 
@@ -1847,9 +1855,9 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
           ? (group.locked ? 'unlock' : 'lock')
           : 'delete';
       const color = row.key === 'lock'
-        ? (group.locked ? lockedColor : rowColor)
+        ? (group.locked ? lockedColor() : rowColor)
         : row.key === 'delete'
-          ? deleteColor
+          ? deleteColor()
           : rowColor;
       for (let j = 0; j < text.length && rect.x0 + 11 + j < rect.x0 + 17; j += 1) {
         c.set(rect.x0 + 11 + j, rect.y0 + row.y, { char: text[j]!, rgb: color, weight_index: 1, render_index: 2 });
@@ -1861,7 +1869,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
       for (let j = 0; j < label.length && rect.x0 + 20 + j < rect.x0 + 26; j += 1) {
         c.set(rect.x0 + 20 + j, rect.y0 + row.descriptor.y, {
           char: label[j]!,
-          rgb: row.selected ? visibleColor : row.active ? selectedColor : rowColor,
+          rgb: row.selected ? visibleColor() : row.active ? selectedColor() : rowColor,
           weight_index: row.selected ? 3 : 2,
           render_index: 2,
         });
@@ -1874,7 +1882,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     for (const descriptor of layout.propertyRows) {
       const rowY = rect.y0 + descriptor.y;
       for (let x = timelineStartX; x <= timelineEndX; x += 1) {
-        c.set(x, rowY, { char: ' ', rgb: mutedColor, weight_index: 0, render_index: 1 });
+        c.set(x, rowY, { char: ' ', rgb: mutedColor(), weight_index: 0, render_index: 1 });
       }
       if (descriptor.kind === 'raster') {
         drawPropertyRowSegments(c, {
@@ -1892,11 +1900,12 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
               is_blank: segment.is_blank,
               visible,
               selected_property: group.selected_property_id === descriptor.property_id,
+              active_content_block: segment.is_blank !== true && currentBreath >= segment.start && currentBreath <= segment.end,
               interaction: interactionStyle,
-              muted_rgb: mutedColor,
-              selected_rgb: visibleColor,
+              muted_rgb: mutedColor(),
+              selected_rgb: uiVividColor(),
               content_rgb: segment.dominant_rgb,
-              blank_rgb: rasterDefaultColor,
+              blank_rgb: rasterDefaultColor(),
             });
             const baseWeight = segment.is_blank ? (visible ? (isSingle || isFirst || isLast ? 2 : 1) : 1) : 0;
             return {
@@ -1909,10 +1918,18 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         });
         continue;
       }
+      const movePreviewSegments = getPreviewPropertyRowSegments(group, descriptor.property_id);
+      const moveContentSegmentColorById = new Map<string, { r: number; g: number; b: number }>();
+      let moveContentSegmentIndex = 0;
+      for (const previewSegment of movePreviewSegments) {
+        if (previewSegment.is_blank) continue;
+        moveContentSegmentColorById.set(previewSegment.id, moveContentSegmentIndex % 2 === 0 ? uiBrightColor() : uiMediumColor());
+        moveContentSegmentIndex += 1;
+      }
       drawPropertyRowSegments(c, {
         currentRect: rect,
         rowY,
-        segments: getPreviewPropertyRowSegments(group, descriptor.property_id),
+        segments: movePreviewSegments,
         cellForBreath: (segment, breath) => {
           const localIndex = breath - segment.start;
           const visible = isBreathInsideGroupCrop(layout.item, breath);
@@ -1924,11 +1941,12 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
             is_blank: segment.is_blank,
             visible,
             selected_property: group.selected_property_id === descriptor.property_id,
+            active_content_block: segment.is_blank !== true && currentBreath >= segment.start && currentBreath <= segment.end,
             interaction: interactionStyle,
-            muted_rgb: mutedColor,
-            selected_rgb: selectedColor,
-            content_rgb: visibleColor,
-            blank_rgb: rasterDefaultColor,
+            muted_rgb: mutedColor(),
+            selected_rgb: uiVividColor(),
+            content_rgb: moveContentSegmentColorById.get(segment.id) ?? uiBrightColor(),
+            blank_rgb: rasterDefaultColor(),
           });
           const baseWeight = segment.is_blank ? (visible ? (isSingle || isFirst || isLast ? 2 : 1) : 1) : 0;
           return {
@@ -1950,7 +1968,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         char: rowDescriptor?.kind === 'move'
             ? (hasExactLocationKey ? '█' : hasExactContentState ? '◆' : '│')
             : '│',
-        rgb: rowDescriptor?.kind === 'move' && hasExactLocationKey ? selectedColor : mutedColor,
+        rgb: rowDescriptor?.kind === 'move' && hasExactLocationKey ? selectedColor() : mutedColor(),
         weight_index: 2,
         render_index: 3,
       });
@@ -1962,12 +1980,9 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     rect: opts.rect,
     title: opts.title ?? 'GROUPS',
     gizmos: gizmo_config,
-    background: { rgb: bgColor },
     border: {
       style: PANEL_BORDER_PRESETS.default_double.style,
-      border_rgb: borderColor,
       weight_index: PANEL_BORDER_PRESETS.default_double.weight_index,
-      text_rgb: textColor,
       markers: () => {
         const groups = getGroups();
         const max = getMaxScrollSectionOffset(rect, groups);
@@ -1997,7 +2012,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         const dropY = contentTopY - beforeGroupsHeight + scrollOffset + 1;
         if (dropY >= contentBottomY && dropY <= contentTopY) {
           for (let x = rect.x0 + 1; x < rect.x1; x += 1) {
-            c.set(x, rect.y0 + dropY, { char: '━', rgb: dropIndicatorColor, weight_index: 2, render_index: 3 });
+            c.set(x, rect.y0 + dropY, { char: '━', rgb: dropIndicatorColor(), weight_index: 2, render_index: 3 });
           }
         }
       }
@@ -2009,7 +2024,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
           const dropY = rect.y0 + (dropRow ? dropRow.y : ((propertyLayout.propertyRows[propertyLayout.propertyRows.length - 1]?.y ?? propertyLayout.titleRowY) - 1));
           if (dropY >= rect.y0 + propertyLayout.sectionBottomY && dropY <= rect.y0 + propertyLayout.sectionTopY) {
             for (let x = rect.x0 + 18; x < rect.x1 - 1; x += 1) {
-              c.set(x, dropY, { char: '━', rgb: dropIndicatorColor, weight_index: 2, render_index: 3 });
+              c.set(x, dropY, { char: '━', rgb: dropIndicatorColor(), weight_index: 2, render_index: 3 });
             }
           }
         }

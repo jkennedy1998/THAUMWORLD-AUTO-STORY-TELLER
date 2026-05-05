@@ -10,12 +10,12 @@
     "maxZ": -1
   },
   "occupied_bounds": {
-    "minX": -20,
+    "minX": -22,
     "minY": 0,
-    "minZ": -13,
-    "maxX": 2,
+    "minZ": -12,
+    "maxX": 0,
     "maxY": 0,
-    "maxZ": -2
+    "maxZ": -1
   },
   "groups": {
     "group_1777989742441_4taz10r9": {

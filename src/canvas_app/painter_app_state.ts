@@ -78,7 +78,6 @@ import {
   createDefaultCamera,
 } from '../ascii_painter/voxel_space.js';
 import { makeGroupsModule, resolve_groups_timeline_visible_span, type GroupListItem } from '../mono_ui/modules/groups_module.js';
-import { make_navigation_module } from '../ascii_painter/navigation_module.js';
 import { build_legacy_voxel_space_from_painter_runtime, import_legacy_voxel_space_as_painter_document } from '../ascii_painter/painter_document_legacy_adapter.js';
 import { create_painter_document, create_painter_group, create_painter_voxel_record, get_painter_group_raster_state_at_breath, type PainterDocument } from '../ascii_painter/painter_document.js';
 import { add_painter_group, duplicate_painter_group, erase_group_voxel, export_painter_document, get_exact_painter_group_raster_state, normalize_painter_document_runtime, remove_painter_group, rename_painter_group, reorder_painter_groups, resolve_nearest_painter_group_move_block, resolve_nearest_painter_group_raster_state, resolve_painter_group_location_at_breath, resolve_painter_group_preview_winner, set_group_voxel, set_painter_group_locked, set_painter_group_visibility, set_painter_runtime_active_breath, type PainterDocumentRuntime } from '../ascii_painter/painter_document_runtime.js';
@@ -4513,6 +4512,12 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     get_grid_point_for_world: (world) => painterWorldToGridPoint(world),
     get_view_state: () => getPainterViewState(),
     get_is_playing: () => painter_playback_running,
+    on_step_view_action: (action) => {
+      stepPainterViewAction(action);
+    },
+    on_step_depth: (dir) => {
+      stepPainterDepth(dir);
+    },
     on_history_applied: () => {
       refreshPainterProjectionFromWorld();
     },
@@ -4858,12 +4863,12 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
           x1: canvas_rect.x1 + 22,
           y1: canvas_rect.y0 + 20,
         };
-        if (navigation_module) {
-          navigation_module.rect = {
+        if (camera_control_module) {
+          camera_control_module.rect = {
             x0: canvas_rect.x1 + 2,
             y0: canvas_rect.y0 + 22,
             x1: canvas_rect.x1 + 30,
-            y1: canvas_rect.y0 + 32,
+            y1: canvas_rect.y0 + 40,
           };
         }
         refreshPainterProjectionPreservingCurrentTarget();
@@ -5102,19 +5107,11 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   });
 
   // Camera Control - positioned below layer palette
-  const navigation_rect: Rect = getModuleRectWithSave('navigation', {
-    x0: canvas_rect.x1 + 2,
-    y0: canvas_rect.y0 + 22,
-    x1: canvas_rect.x1 + 30,
-    y1: canvas_rect.y0 + 32,
-  });
-
-  // Camera Control - positioned below navigation
   const camera_control_rect: Rect = getModuleRectWithSave('camera_control', {
     x0: canvas_rect.x1 + 2,  // Right of canvas
-    y0: canvas_rect.y0 + 34, // Below navigation
+    y0: canvas_rect.y0 + 22,
     x1: canvas_rect.x1 + 30, // 28 chars wide
-    y1: canvas_rect.y0 + 52  // 18 chars tall
+    y1: canvas_rect.y0 + 40  // 18 chars tall
   });
 
   // Factory functions for creating modules
@@ -6182,14 +6179,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         create_canvas_settings_module
       );
     },
-    on_toggle_navigation: () => {
-      toggleModule(
-        navigation_open,
-        (v) => { navigation_open = v; },
-        'navigation',
-        create_navigation_module
-      );
-    },
     on_toggle_camera: () => {
       toggleModule(
         camera_control_open,
@@ -6329,53 +6318,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   layer_palette_module = create_layer_palette_module();
   registry.register(layer_palette_module);
 
-  let navigation_open = getInitialModuleVisibility('navigation', true);
-  let navigation_module: Module | null = null;
-
-  function create_navigation_module(): Module {
-    return make_navigation_module({
-      id: 'navigation',
-      rect: navigation_rect,
-      title: 'Navigation',
-      get_focus_world_plane: () => painter_display_projection?.focus_world_plane ?? voxelSpace.camera.focus_plane,
-      get_focus_slot: () => painter_display_projection?.focus_slot ?? 0,
-      get_visible_planes: () => painter_display_projection?.visible_planes ?? [],
-      on_action: (action) => {
-        switch (action) {
-          case 'depth_prev':
-            stepPainterDepth(-1);
-            break;
-          case 'depth_next':
-            stepPainterDepth(1);
-            break;
-          case 'swing_left':
-          case 'swing_right':
-          case 'swing_up':
-          case 'swing_down':
-          case 'roll_left':
-          case 'roll_right':
-            stepPainterViewAction(action);
-            break;
-        }
-      },
-      on_move: (new_rect) => {
-        if (navigation_module) {
-          navigation_module.rect = new_rect;
-          saveModulePosition('navigation', new_rect);
-        }
-      },
-      on_resize: (new_rect) => {
-        if (navigation_module) {
-          navigation_module.rect = new_rect;
-          saveModulePosition('navigation', new_rect);
-        }
-      },
-      onClose: () => {
-        setModuleOpen('navigation', false, (v) => { navigation_open = v; });
-      },
-    });
-  }
-
   // Create Camera Control module (closed by default)
   let camera_control_open = getInitialModuleVisibility('camera_control', false);
   let camera_control_module: Module | null = null;
@@ -6395,30 +6337,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         calibration_x: { ...PAINTER_CAMERA_LIMITS.calibration_x },
         calibration_y: { ...PAINTER_CAMERA_LIMITS.calibration_y },
         render_distance_planes: { ...PAINTER_CAMERA_LIMITS.render_distance_planes, step: 1, digits: 0 },
-      },
-      action_rows: [
-        [
-          { id: 'swing_up', label: 'S.Up' },
-          { id: 'swing_down', label: 'S.Dn' },
-        ],
-        [
-          { id: 'swing_left', label: 'S.L' },
-          { id: 'swing_right', label: 'S.R' },
-          { id: 'roll_left', label: 'R.L' },
-          { id: 'roll_right', label: 'R.R' },
-        ],
-      ],
-      onAction: (id) => {
-        switch (id) {
-          case 'swing_up':
-          case 'swing_down':
-          case 'swing_left':
-          case 'swing_right':
-          case 'roll_left':
-          case 'roll_right':
-            stepPainterViewAction(id);
-            break;
-        }
       },
       onParallaxMoveToggle: (enabled) => {
         painter_camera_state.parallax_move_enabled = enabled;
@@ -6570,7 +6488,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   customization_picker_module = create_customization_picker_module();
   selection_panel_module = create_selection_panel_module();
   canvas_settings_module = create_canvas_settings_module();
-  navigation_module = create_navigation_module();
   camera_control_module = create_camera_control_module();
   controls_module = create_controls_panel_module();
   registry.register(char_selector_module);
@@ -6583,7 +6500,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   registry.register(customization_picker_module);
   registry.register(selection_panel_module);
   registry.register(canvas_settings_module);
-  registry.register(navigation_module);
   registry.register(camera_control_module);
   registry.register(controls_module);
 
@@ -6598,7 +6514,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   registry.set_visibility('selection_panel', selection_panel_open);
   registry.set_visibility('canvas_settings_panel', canvas_settings_open);
   registry.set_visibility('layer_palette', layer_palette_open);
-  registry.set_visibility('navigation', navigation_open);
   registry.set_visibility('camera_control', camera_control_open);
   registry.set_visibility('controls_panel', controls_open);
 

@@ -18,6 +18,7 @@ import { has_any_edit_channel, resolve_edit_channels_with_modifiers, type EditCh
 import { logGroupCellAction, addToGroupBatch, type HistoryManager, type CellChange } from '../../ascii_painter/history.js';
 import { get_color_by_name } from '../colors.js';
 import { draw_module_border, PANEL_BORDER_PRESETS } from '../module_borders.js';
+import { get_ui_semantic_rgb } from '../runtime/ui_customization_store.js';
 import type { SelectionBitmap, SelectionMode } from '../../ascii_painter/selection.js';
 import { createSelectionBitmap, selectRect, deselectRect, selectPolygon, isSelected, hasSelection, getSelectionBounds, isSelectionBorder, clearSelection, selectAll, invertSelection, applySelectionMode } from '../../ascii_painter/selection.js';
 import type { CopyData } from '../../ascii_painter/copy_paste.js';
@@ -132,6 +133,8 @@ export type PainterCanvasOptions = {
   get_view_state?: () => PlaceViewState;
   get_is_playing?: () => boolean;
   get_selection_status?: () => string | null;
+  on_step_view_action?: (action: PainterViewAction) => void;
+  on_step_depth?: (dir: -1 | 1) => void;
   on_history_applied?: () => void;
   on_undo_request: () => string | null;
   on_redo_request: () => string | null;
@@ -145,6 +148,7 @@ export type PainterCanvasOptions = {
 };
 
 export type PainterInteractionAnchor = CameraAnchor;
+export type PainterViewAction = 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right';
 
 export type RasterMoveSourceVoxel = { x: number; y: number; z: number; cell: GridCell };
 
@@ -1505,6 +1509,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   };
   
   const gizmo_state: GizmoState = create_gizmo_state();
+  let show_canvas_nav_cluster = false;
+  let hovered_canvas_nav_button: CanvasNavButtonId | null = null;
+  let pressed_canvas_nav_button: CanvasNavButtonId | null = null;
 
   // Emit initial viewport
   emitViewport();
@@ -1521,6 +1528,68 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   let interaction_current_world: { x: number; y: number; z: number } | null = null;
   let interaction_end_world: { x: number; y: number; z: number } | null = null;
   let shape_start_world: { x: number; y: number; z: number } | null = null;
+
+  type CanvasNavButtonId = 'nav_toggle' | PainterViewAction | 'depth_prev' | 'depth_next' | 'pan_placeholder';
+
+  function getCanvasTopLeftGizmoCount(): number {
+    let count = 0;
+    if (gizmo_config.enabled.includes('move') && gizmo_config.can_move) count++;
+    if (gizmo_config.enabled.includes('close') && gizmo_config.can_close) count++;
+    if (gizmo_config.enabled.includes('save_position') && gizmo_config.can_save_position) count++;
+    if (gizmo_config.enabled.includes('resize')) count++;
+    if (gizmo_config.enabled.includes('seamless')) count++;
+    return count;
+  }
+
+  function getCanvasNavTogglePosition(): { x: number; y: number } {
+    return { x: rect.x0 + 1 + (getCanvasTopLeftGizmoCount() * 2), y: rect.y1 - 1 };
+  }
+
+  function getCanvasNavClusterButtons(): Array<{ id: CanvasNavButtonId; x: number; y: number; char: string }> {
+    if (!show_canvas_nav_cluster) return [];
+    const start_x = rect.x1 - 4;
+    const start_y = rect.y1 - 2;
+    return [
+      { id: 'roll_left', x: start_x, y: start_y, char: 'r' },
+      { id: 'swing_up', x: start_x + 1, y: start_y, char: '↑' },
+      { id: 'roll_right', x: start_x + 2, y: start_y, char: 'R' },
+      { id: 'swing_left', x: start_x, y: start_y - 1, char: '←' },
+      { id: 'pan_placeholder', x: start_x + 1, y: start_y - 1, char: '·' },
+      { id: 'swing_right', x: start_x + 2, y: start_y - 1, char: '→' },
+      { id: 'depth_prev', x: start_x, y: start_y - 2, char: '-' },
+      { id: 'swing_down', x: start_x + 1, y: start_y - 2, char: '↓' },
+      { id: 'depth_next', x: start_x + 2, y: start_y - 2, char: '+' },
+    ];
+  }
+
+  function getCanvasNavHit(x: number, y: number): CanvasNavButtonId | null {
+    const toggle = getCanvasNavTogglePosition();
+    if (x === toggle.x && y === toggle.y) return 'nav_toggle';
+    const hit = getCanvasNavClusterButtons().find((button) => button.x === x && button.y === y);
+    return hit?.id ?? null;
+  }
+
+  function updateCanvasNavHover(x: number, y: number): void {
+    hovered_canvas_nav_button = getCanvasNavHit(x, y);
+  }
+
+  function clearCanvasNavInteraction(): void {
+    hovered_canvas_nav_button = null;
+    pressed_canvas_nav_button = null;
+  }
+
+  function getCanvasNavReservedLeftX(): number {
+    if (!show_canvas_nav_cluster) return rect.x1;
+    return rect.x1 - 5;
+  }
+
+  function getCursorWorldReadout(): string | null {
+    const world = cloneWorldPoint(interaction_current_world)
+      ?? cloneWorldPoint(text_cursor_world)
+      ?? null;
+    if (!world) return null;
+    return `X:${world.x} Y:${world.y} Z:${world.z}`;
+  }
 
   function showStatus(msg: string): void {
     status_message = msg;
@@ -2578,7 +2647,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const is_selection_preview = is_selecting || is_lasso_selecting;
         const preview_brush = getPreviewBrush();
         const preview_color = is_selection_preview 
-          ? get_color_by_name('vivid_yellow').rgb 
+          ? get_ui_semantic_rgb('vivid')
           : preview_brush.rgb;
         const preview_char = is_selection_preview ? '▫' : preview_brush.char;
         for (const point of opts.preview_points) {
@@ -2599,7 +2668,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
       // Draw status message (if recent)
       if (status_message && Date.now() - status_message_time < 2000) {
-        const status_color = get_color_by_name('vivid_yellow').rgb;
+        const status_color = get_ui_semantic_rgb('bright');
         const msg = status_message.slice(0, rect.x1 - rect.x0 - 2);
         const msg_y = rect.y0 + 1;
         for (let i = 0; i < msg.length; i++) {
@@ -2615,7 +2684,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
       // Draw canvas border (standard double border; resize mode only tints it).
       if (should_draw_module_chrome(gizmo_config, gizmo_state)) {
-        const border_color = get_color_by_name('medium_gray').rgb;
+        const border_color = get_ui_semantic_rgb('dimmest');
         const viewport_width = rect.x1 - rect.x0 + 1;
         const viewport_height = rect.y1 - rect.y0 + 1;
         const totalPan = getTotalPan();
@@ -2636,6 +2705,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           },
           header: {
             text: 'CANVAS',
+            text_rgb: get_ui_semantic_rgb('medium'),
             reserve_left_cols: 2 + ((gizmo_config.enabled?.length ?? 0) * 2),
           },
         });
@@ -2648,7 +2718,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const cursor_canvas_y = rect.y0 + text_cursor_y;
         if (cursor_canvas_x >= rect.x0 && cursor_canvas_x <= rect.x1 &&
             cursor_canvas_y >= rect.y0 && cursor_canvas_y <= rect.y1) {
-          const cursor_color = get_color_by_name('vivid_yellow').rgb;
+          const cursor_color = get_ui_semantic_rgb('vivid');
           c.set(cursor_canvas_x, cursor_canvas_y, {
             char: '_',
             rgb: cursor_color,
@@ -2661,7 +2731,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
       // DEBUG: Draw calibration info
       const debug_totalPan = getTotalPan();
-      const debug_color = get_color_by_name('vivid_cyan').rgb;
+      const debug_color = get_ui_semantic_rgb('medium');
       const debug_text = `PAN:${Math.floor(debug_totalPan.x)},${Math.floor(debug_totalPan.y)}`;
       
       // Draw pan values in top-left corner
@@ -2679,15 +2749,35 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         }
       }
 
+      const max_right = getCanvasNavReservedLeftX();
+      const cursor_world_readout = getCursorWorldReadout();
+      if (cursor_world_readout) {
+        const readout_max_width = Math.max(0, max_right - rect.x0 - 1);
+        const readout = cursor_world_readout.slice(0, readout_max_width);
+        const rgb = get_ui_semantic_rgb('medium');
+        for (let i = 0; i < readout.length; i++) {
+          const x = rect.x0 + 1 + i;
+          if (x > max_right) break;
+          c.set(x, rect.y0, {
+            char: readout[i] ?? ' ',
+            rgb,
+            style: 'regular',
+            weight_index: 1,
+            render_index: 999,
+          });
+        }
+      }
+
       const selection_status = opts.get_selection_status?.();
       if (selection_status) {
-        const msg = selection_status.slice(0, Math.max(0, rect.x1 - rect.x0 - 2));
-        const base_x = Math.max(rect.x0 + 1, rect.x1 - msg.length);
+        const max_width = Math.max(0, max_right - rect.x0 - 1);
+        const msg = selection_status.slice(0, max_width);
+        const base_x = Math.max(rect.x0 + 1, max_right - msg.length);
         const y = rect.y0;
-        const rgb = get_color_by_name('vivid_cyan').rgb;
+        const rgb = get_ui_semantic_rgb('bright');
         for (let i = 0; i < msg.length; i++) {
           const x = base_x + i;
-          if (x > rect.x1) break;
+          if (x > max_right) break;
           c.set(x, y, {
             char: msg[i] ?? ' ',
             rgb,
@@ -2697,16 +2787,17 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           });
         }
       }
+
       const activeGroupProjectedBounds = getActiveGroupProjectedBounds(group_location_drag_preview_delta);
       if (!gizmo_state.is_resize_mode && activeGroupProjectedBounds && !isPlaybackRunning()) {
         const canEditLocation = canEditGroupLocation();
         const borderColor = canEditLocation
           ? (group_location_drag_active
-            ? get_color_by_name('vivid_yellow').rgb
+            ? get_ui_semantic_rgb('vivid')
             : group_location_border_hovered
-              ? get_color_by_name('light_blue').rgb
-              : get_color_by_name('medium_gray').rgb)
-          : get_color_by_name('pale_gray').rgb;
+              ? get_ui_semantic_rgb('bright')
+              : get_ui_semantic_rgb('medium'))
+          : get_ui_semantic_rgb('dimmest');
         drawProjectedBoundsBorder(c, rect, activeGroupProjectedBounds, borderColor, group_location_drag_active ? 2 : 1, canEditLocation ? 997 : 996);
       }
 
@@ -2760,6 +2851,26 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       if (should_draw_module_chrome(gizmo_config, gizmo_state)) {
         draw_module_gizmos(c, rect, gizmo_config, gizmo_state);
       }
+
+      const navToggle = getCanvasNavTogglePosition();
+      c.set(navToggle.x, navToggle.y, {
+        char: '>',
+        rgb: get_ui_semantic_rgb('bright'),
+        style: 'regular',
+        weight_index: pressed_canvas_nav_button === 'nav_toggle' ? 3 : 2,
+        render_index: 1003,
+      });
+      for (const button of getCanvasNavClusterButtons()) {
+        const pressed = pressed_canvas_nav_button === button.id;
+        const hovered = hovered_canvas_nav_button === button.id;
+        c.set(button.x, button.y, {
+          char: button.char,
+          rgb: pressed ? get_ui_semantic_rgb('vivid') : get_ui_semantic_rgb('bright'),
+          style: 'regular',
+          weight_index: pressed || hovered ? 1 : 0,
+          render_index: 1003,
+        });
+      }
     },
 
     OnPointerDown(e: PointerEvent): void {
@@ -2777,6 +2888,24 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       
       // Store last click for visual debug
       (module as any).last_click = { x: e.x, y: e.y, grid_x, grid_y };
+
+      // Handle canvas nav clicks before canvas content interactions
+      updateCanvasNavHover(e.x, e.y);
+      const navHit = getCanvasNavHit(e.x, e.y);
+      if (navHit) {
+        pressed_canvas_nav_button = navHit;
+        if (navHit === 'nav_toggle') {
+          show_canvas_nav_cluster = !show_canvas_nav_cluster;
+          hovered_canvas_nav_button = getCanvasNavHit(e.x, e.y);
+        } else if (navHit === 'depth_prev') {
+          opts.on_step_depth?.(-1);
+        } else if (navHit === 'depth_next') {
+          opts.on_step_depth?.(1);
+        } else if (navHit !== 'pan_placeholder') {
+          opts.on_step_view_action?.(navHit);
+        }
+        return;
+      }
 
       // Handle gizmo clicks first
       update_gizmo_hover_state(e.x, e.y, rect, gizmo_config, gizmo_state);
@@ -3309,6 +3438,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     },
 
     OnPointerUp(e: PointerEvent): void {
+      pressed_canvas_nav_button = null;
       if (isPasteToolActiveForAnyHand() && paste_preview_world_data && paste_preview_world_anchor) {
         if (opts.get_active_group_locked?.()) {
           showStatus('Cannot paste: active group is locked');
@@ -3495,6 +3625,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       current_mouse_pos = { x: e.x, y: e.y };
       const hoverGrid = screenToGrid(e.x, e.y);
       updateGroupLocationHover(hoverGrid.x, hoverGrid.y);
+      updateCanvasNavHover(e.x, e.y);
       update_gizmo_hover_state(e.x, e.y, rect, gizmo_config, gizmo_state);
       
       // Handle resize edge detection when in resize mode but not dragging
@@ -3821,6 +3952,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
     OnPointerLeave(): void {
       clear_gizmo_hover_state(gizmo_state);
+      clearCanvasNavInteraction();
       group_location_border_hovered = false;
     },
 
@@ -3839,6 +3971,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
     OnBlur(): void {
       exitTextMode(true);
+      clearCanvasNavInteraction();
       clearMovePreview();
       clearGroupLocationDrag();
       clearPendingPreviewChanges();

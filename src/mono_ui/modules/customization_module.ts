@@ -55,11 +55,6 @@ export function make_customization_module(opts: CustomizationModuleOptions): Mod
     rect: opts.rect,
     title: 'CUSTOM',
     gizmos: gizmo_config,
-    background: { rgb: get_ui_semantic_rgb('background') },
-    border: {
-      border_rgb: get_ui_semantic_rgb('dimmest'),
-      text_rgb: get_ui_semantic_rgb('medium'),
-    },
     resize: {
       min_width: MIN_WIDTH,
       min_height: MIN_HEIGHT,

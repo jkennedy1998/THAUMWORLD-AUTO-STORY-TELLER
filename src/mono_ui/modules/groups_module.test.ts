@@ -149,4 +149,19 @@ assert(
   'selected blank blocks should still show selected-property styling when idle',
 );
 
+const activeContentBlock = resolve_groups_raster_visual_style({
+  is_blank: false,
+  visible: true,
+  selected_property: false,
+  active_content_block: true,
+  interaction: { rgb: { r: 2, g: 2, b: 2 }, weight: 1 },
+  muted_rgb: muted,
+  selected_rgb: selected,
+  content_rgb: { r: 8, g: 8, b: 8 },
+});
+assert(
+  activeContentBlock.rgb.r === selected.r && activeContentBlock.weight === 3,
+  'active content blocks should promote the whole block to the vivid menu color when the current breath is inside them',
+);
+
 console.log('groups_module drag mode tests passed');

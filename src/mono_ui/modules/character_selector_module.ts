@@ -7,8 +7,8 @@
  */
 
 import type { Canvas, Module, Rect, PointerEvent, WheelEvent, Rgb } from '../types.js';
-import { get_color_by_name } from '../colors.js';
 import type { ModuleGizmosConfig } from '../module_gizmos.js';
+import { get_ui_semantic_rgb } from '../runtime/ui_customization_store.js';
 import { make_floating_panel_module } from './floating_panel_module.js';
 
 export type CharacterSelectorOptions = {
@@ -162,28 +162,32 @@ function push_recent_rows(rows: SelectorRow[], recent_chars: string[], rect: Rec
 
 function build_selector_rows(rect: Rect, recent_chars: string[]): SelectorRow[] {
   const rows: SelectorRow[] = [];
+  const bg = get_ui_semantic_rgb('background');
+  const medium = get_ui_semantic_rgb('medium');
+  const bright = get_ui_semantic_rgb('bright');
+  const vivid = get_ui_semantic_rgb('vivid');
   if (recent_chars.length > 0) {
     push_recent_rows(rows, recent_chars, rect);
   }
-  rows.push({ kind: 'text', text: '', rgb: get_color_by_name('off_black').rgb, weight_index: 1 });
+  rows.push({ kind: 'text', text: '', rgb: bg, weight_index: 1 });
 
   for (const section of CHARACTER_SECTIONS) {
-    rows.push({ kind: 'text', text: `[${section.label}]`, rgb: get_color_by_name('vivid_blue').rgb, weight_index: 5 });
+    rows.push({ kind: 'text', text: `[${section.label}]`, rgb: bright, weight_index: 5 });
     if (section.layout === 'borders') {
-      rows.push({ kind: 'text', text: 'SETS', rgb: get_color_by_name('pale_yellow').rgb, weight_index: 4 });
+      rows.push({ kind: 'text', text: 'SETS', rgb: vivid, weight_index: 4 });
       for (const group of BORDER_SHOWCASE_GROUPS) push_showcase_rows(rows, group.label, group.chars, rect);
-      rows.push({ kind: 'text', text: 'ALL', rgb: get_color_by_name('medium_gray').rgb, weight_index: 3 });
+      rows.push({ kind: 'text', text: 'ALL', rgb: medium, weight_index: 3 });
       push_grid_rows(rows, section.chars, rect);
     } else if (section.layout === 'blocks') {
-      rows.push({ kind: 'text', text: 'SETS', rgb: get_color_by_name('pale_yellow').rgb, weight_index: 4 });
+      rows.push({ kind: 'text', text: 'SETS', rgb: vivid, weight_index: 4 });
       for (const group of BLOCK_SHOWCASE_GROUPS) push_showcase_rows(rows, group.label, group.chars, rect);
-      rows.push({ kind: 'text', text: 'ALL', rgb: get_color_by_name('medium_gray').rgb, weight_index: 3 });
+      rows.push({ kind: 'text', text: 'ALL', rgb: medium, weight_index: 3 });
       push_grid_rows(rows, section.chars, rect);
     } else {
       push_grid_rows(rows, section.chars, rect);
     }
     for (let i = 0; i < SECTION_SPACING_ROWS; i += 1) {
-      rows.push({ kind: 'text', text: '', rgb: get_color_by_name('off_black').rgb, weight_index: 1 });
+      rows.push({ kind: 'text', text: '', rgb: bg, weight_index: 1 });
     }
   }
   return rows;
@@ -220,9 +224,9 @@ function get_glyph_style(
     return { rgb: right_rgb, weight_index: right_weight_index };
   }
   if (char === selected_char) {
-    return { rgb: get_color_by_name('off_white').rgb, weight_index: 4 };
+    return { rgb: get_ui_semantic_rgb('bright'), weight_index: 4 };
   }
-  return { rgb: get_color_by_name('medium_gray').rgb, weight_index: neutral_weight_index };
+  return { rgb: get_ui_semantic_rgb('medium'), weight_index: neutral_weight_index };
 }
 
 function push_recent_char(recent_chars: string[], char: string): void {
@@ -275,7 +279,6 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
     rect: opts.rect,
     title: 'CHARS',
     gizmos: gizmo_config,
-    background: { rgb: get_color_by_name('off_black').rgb },
     resize: {
       min_width: MIN_WIDTH,
       min_height: MIN_HEIGHT,
@@ -286,19 +289,19 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
       selected_char = opts.get_selected_char?.() ?? selected_char;
       const left_selected_char = opts.get_left_selected_char?.() ?? selected_char;
       const right_selected_char = opts.get_right_selected_char?.() ?? selected_char;
-      const left_rgb = opts.get_left_rgb?.() ?? get_color_by_name('vivid_blue').rgb;
-      const right_rgb = opts.get_right_rgb?.() ?? get_color_by_name('vivid_red').rgb;
+      const left_rgb = opts.get_left_rgb?.() ?? get_ui_semantic_rgb('left_hand');
+      const right_rgb = opts.get_right_rgb?.() ?? get_ui_semantic_rgb('right_hand');
       const left_weight_index = opts.get_left_weight_index?.() ?? 4;
       const right_weight_index = opts.get_right_weight_index?.() ?? 4;
       const neutral_weight_index = last_selected_side === 'right' ? right_weight_index : left_weight_index;
       const use_left_flash = Math.floor(Date.now() / 400) % 2 === 0;
       const rows = clamp_scroll(rect);
       const { top, visible_rows } = get_content_bounds(rect);
-      const bg_color = get_color_by_name('off_black').rgb;
-      const label_rgb = get_color_by_name('medium_gray').rgb;
-      const marker_left_rgb = get_color_by_name('vivid_blue').rgb;
-      const marker_right_rgb = get_color_by_name('vivid_red').rgb;
-      const marker_both_rgb = get_color_by_name('vivid_yellow').rgb;
+      const bg_color = get_ui_semantic_rgb('background');
+      const label_rgb = get_ui_semantic_rgb('medium');
+      const marker_left_rgb = get_ui_semantic_rgb('left_hand');
+      const marker_right_rgb = get_ui_semantic_rgb('right_hand');
+      const marker_both_rgb = get_ui_semantic_rgb('vivid');
 
       last_hitboxes = [];
       c.fill_rect(rect, { char: ' ', rgb: bg_color, style: 'regular' });
@@ -359,7 +362,7 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
           if (row.style === 'recent') {
             const x = glyph_start_x + (i * RECENT_CELL_WIDTH);
             if (x + 3 >= rect.x1) break;
-            const bracket_rgb = char === selected_char ? get_color_by_name('vivid_yellow').rgb : label_rgb;
+            const bracket_rgb = char === selected_char ? get_ui_semantic_rgb('vivid') : label_rgb;
             c.set(x, y, {
               char: marker,
               rgb: marker_rgb,
@@ -412,7 +415,7 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
         const indicator_y = top - Math.floor(scroll_percent * Math.max(0, visible_rows - 1));
         c.set(rect.x1 - 1, indicator_y, {
           char: '│',
-          rgb: get_color_by_name('pale_yellow').rgb,
+          rgb: get_ui_semantic_rgb('bright'),
           style: 'regular',
           weight_index: 2,
         });

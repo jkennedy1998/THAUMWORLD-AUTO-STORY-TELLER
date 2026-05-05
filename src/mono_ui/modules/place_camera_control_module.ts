@@ -1,6 +1,6 @@
 import type { Module, Canvas, Rect, PointerEvent } from '../types.js';
-import { get_color_by_name } from '../colors.js';
 import type { ModuleGizmosConfig } from '../module_gizmos.js';
+import { get_ui_semantic_rgb } from '../runtime/ui_customization_store.js';
 import { make_floating_panel_module } from './floating_panel_module.js';
 import type { CameraConfig } from '../../ascii_painter/voxel_space.js';
 
@@ -107,15 +107,15 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
   let buttonHitboxes: Array<{ id: string; x0: number; y0: number; x1: number; y1: number }> = [];
   let pressedButtons = new Set<string>();
 
-  const borderColor = get_color_by_name('medium_gray').rgb;
-  const textColor = get_color_by_name('off_white').rgb;
-  const labelColor = get_color_by_name('pale_gray').rgb;
-  const enabledColor = get_color_by_name('vivid_green').rgb;
-  const disabledColor = get_color_by_name('pale_gray').rgb;
-  const accentColor = get_color_by_name('vivid_cyan').rgb;
-  const valueColor = get_color_by_name('vivid_yellow').rgb;
-  const sliderBgColor = get_color_by_name('dark_gray').rgb;
-  const sliderFgColor = get_color_by_name('vivid_blue').rgb;
+  const borderColor = () => get_ui_semantic_rgb('dimmest');
+  const textColor = () => get_ui_semantic_rgb('bright');
+  const labelColor = () => get_ui_semantic_rgb('medium');
+  const enabledColor = () => get_ui_semantic_rgb('vivid');
+  const disabledColor = () => get_ui_semantic_rgb('dimmest');
+  const accentColor = () => get_ui_semantic_rgb('vivid');
+  const valueColor = () => get_ui_semantic_rgb('bright');
+  const sliderBgColor = () => get_ui_semantic_rgb('dimmest');
+  const sliderFgColor = () => get_ui_semantic_rgb('vivid');
 
   const gizmo_config: ModuleGizmosConfig = {
     enabled: ['move', 'resize', 'close', 'seamless'],
@@ -158,23 +158,23 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
   function drawSeparator(c: Canvas, row: number): void {
     if (!is_row_visible(row)) return;
     const y = get_screen_y(row);
-    for (let x = rect.x0 + 1; x < rect.x1; x += 1) c.set(x, y, { char: '─', rgb: borderColor, weight_index: 1, render_index: 10 });
+    for (let x = rect.x0 + 1; x < rect.x1; x += 1) c.set(x, y, { char: '─', rgb: borderColor(), weight_index: 1, render_index: 10 });
   }
 
   function drawLabel(c: Canvas, row: number, text: string): void {
     if (!is_row_visible(row)) return;
     const y = get_screen_y(row);
-    for (let i = 0; i < text.length && rect.x0 + COL_LABEL + i <= rect.x1 - 2; i += 1) c.set(rect.x0 + COL_LABEL + i, y, { char: text[i]!, rgb: labelColor, weight_index: 0, render_index: 10 });
+    for (let i = 0; i < text.length && rect.x0 + COL_LABEL + i <= rect.x1 - 2; i += 1) c.set(rect.x0 + COL_LABEL + i, y, { char: text[i]!, rgb: labelColor(), weight_index: 0, render_index: 10 });
   }
 
   function drawToggle(c: Canvas, row: number, enabled: boolean, label: string): void {
     if (!is_row_visible(row)) return;
     const y = get_screen_y(row);
     const x = rect.x0 + COL_TOGGLE;
-    c.set(x, y, { char: '[', rgb: borderColor, weight_index: 0, render_index: 10 });
-    c.set(x + 1, y, { char: enabled ? 'x' : ' ', rgb: enabled ? enabledColor : disabledColor, weight_index: 2, render_index: 10 });
-    c.set(x + 2, y, { char: ']', rgb: borderColor, weight_index: 0, render_index: 10 });
-    for (let i = 0; i < label.length && x + 4 + i <= rect.x1 - 2; i += 1) c.set(x + 4 + i, y, { char: label[i]!, rgb: textColor, weight_index: 0, render_index: 10 });
+    c.set(x, y, { char: '[', rgb: borderColor(), weight_index: 0, render_index: 10 });
+    c.set(x + 1, y, { char: enabled ? 'x' : ' ', rgb: enabled ? enabledColor() : disabledColor(), weight_index: 2, render_index: 10 });
+    c.set(x + 2, y, { char: ']', rgb: borderColor(), weight_index: 0, render_index: 10 });
+    for (let i = 0; i < label.length && x + 4 + i <= rect.x1 - 2; i += 1) c.set(x + 4 + i, y, { char: label[i]!, rgb: textColor(), weight_index: 0, render_index: 10 });
     set_button_hitbox(`toggle:${row}`, rect.x0 + 1, y, rect.x1 - 2, y);
   }
 
@@ -187,7 +187,7 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
       const label = `[${action.label}]`;
       const x = rect.x0 + 2 + slotWidth * index;
       for (let i = 0; i < label.length && x + i <= rect.x1 - 2; i += 1) {
-        c.set(x + i, y, { char: label[i]!, rgb: pressedButtons.has(action.id) ? accentColor : textColor, weight_index: 1, render_index: 10 });
+        c.set(x + i, y, { char: label[i]!, rgb: pressedButtons.has(action.id) ? accentColor() : textColor(), weight_index: 1, render_index: 10 });
       }
       set_button_hitbox(`action:${action.id}`, x, y, Math.min(rect.x1 - 2, x + label.length - 1), y);
     });
@@ -197,7 +197,7 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
     if (!is_row_visible(row)) return;
     const y = get_screen_y(row);
     const x = rect.x0 + Math.floor((rect.x1 - rect.x0 - value.length) / 2);
-    for (let i = 0; i < value.length; i += 1) c.set(x + i, y, { char: value[i]!, rgb: valueColor, weight_index: 1, render_index: 10 });
+    for (let i = 0; i < value.length; i += 1) c.set(x + i, y, { char: value[i]!, rgb: valueColor(), weight_index: 1, render_index: 10 });
   }
 
   function slider_bounds(): { x0: number; x1: number } {
@@ -240,18 +240,18 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
     if (!is_row_visible(row)) return;
     const y = get_screen_y(row);
     const { x0, x1 } = slider_bounds();
-    c.set(x0, y, { char: '[', rgb: borderColor, weight_index: 0, render_index: 10 });
-    c.set(x0 + 1, y, { char: '-', rgb: textColor, weight_index: 1, render_index: 10 });
-    c.set(x0 + 2, y, { char: ']', rgb: borderColor, weight_index: 0, render_index: 10 });
-    c.set(x1 - 2, y, { char: '[', rgb: borderColor, weight_index: 0, render_index: 10 });
-    c.set(x1 - 1, y, { char: '+', rgb: textColor, weight_index: 1, render_index: 10 });
-    c.set(x1, y, { char: ']', rgb: borderColor, weight_index: 0, render_index: 10 });
+    c.set(x0, y, { char: '[', rgb: borderColor(), weight_index: 0, render_index: 10 });
+    c.set(x0 + 1, y, { char: '-', rgb: textColor(), weight_index: 1, render_index: 10 });
+    c.set(x0 + 2, y, { char: ']', rgb: borderColor(), weight_index: 0, render_index: 10 });
+    c.set(x1 - 2, y, { char: '[', rgb: borderColor(), weight_index: 0, render_index: 10 });
+    c.set(x1 - 1, y, { char: '+', rgb: textColor(), weight_index: 1, render_index: 10 });
+    c.set(x1, y, { char: ']', rgb: borderColor(), weight_index: 0, render_index: 10 });
     const track_x0 = x0 + 4;
     const track_x1 = x1 - 4;
-    for (let x = track_x0; x <= track_x1; x += 1) c.set(x, y, { char: '─', rgb: sliderBgColor, weight_index: 0, render_index: 10 });
+    for (let x = track_x0; x <= track_x1; x += 1) c.set(x, y, { char: '─', rgb: sliderBgColor(), weight_index: 0, render_index: 10 });
     const t = Math.max(0, Math.min(1, (value - min) / Math.max(0.0001, max - min)));
     const knobX = track_x0 + Math.round((track_x1 - track_x0) * t);
-    c.set(knobX, y, { char: '◆', rgb: sliderFgColor, weight_index: 2, render_index: 10 });
+    c.set(knobX, y, { char: '◆', rgb: sliderFgColor(), weight_index: 2, render_index: 10 });
   }
 
   function getSliderSpec(kind: SliderKind) {
@@ -340,7 +340,7 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
         const y = get_screen_y(ROW_RESET);
         const label = '[Reset Calibration]';
         const x = rect.x0 + Math.floor((rect.x1 - rect.x0 - label.length) / 2);
-        for (let i = 0; i < label.length; i += 1) c.set(x + i, y, { char: label[i]!, rgb: pressedButtons.has('reset_calibration') ? accentColor : textColor, weight_index: 1, render_index: 10 });
+        for (let i = 0; i < label.length; i += 1) c.set(x + i, y, { char: label[i]!, rgb: pressedButtons.has('reset_calibration') ? accentColor() : textColor(), weight_index: 1, render_index: 10 });
         set_button_hitbox('reset_calibration', x, y, x + label.length - 1, y);
       }
       if (opts.onRenderDistancePlanesChange) {

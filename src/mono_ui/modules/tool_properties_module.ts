@@ -318,35 +318,39 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
     return Math.max(10, Math.min(300, Math.round(percent))) / 100;
   }
 
+  function get_selection_controls_layout(): {
+    modes: Array<{ mode: SelectionMode; x0: number; x1: number; y: number; label: string }>;
+    buttons: Array<{ id: 'clear' | 'invert' | 'all'; x0: number; x1: number; y: number; label: string }>;
+  } {
+    const modes: SelectionMode[] = ['replace', 'additive', 'subtract', 'intersect'];
+    const modeRows = modes.map((mode, index) => {
+      const y = rect.y1 - 4 - index;
+      const label = mode.charAt(0).toUpperCase() + mode.slice(1);
+      return { mode, x0: rect.x0 + 2, x1: Math.min(rect.x1 - 2, rect.x0 + 4 + label.length - 1), y, label };
+    });
+    const buttonIds: Array<'clear' | 'invert' | 'all'> = ['clear', 'invert', 'all'];
+    let btn_x = rect.x0 + 2;
+    const buttons = buttonIds.map((id) => {
+      const label = id === 'clear' ? '[Clear]' : id === 'invert' ? '[Invert]' : '[All]';
+      const x0 = btn_x;
+      const x1 = Math.min(rect.x1 - 1, btn_x + label.length - 1);
+      const button = { id, x0, x1, y: rect.y1 - 8, label };
+      btn_x += label.length + 1;
+      return button;
+    });
+    return { modes: modeRows, buttons };
+  }
+
   // Check if position is on selection mode option
   function is_on_selection_mode(x: number, y: number): SelectionMode | null {
-    const modes: SelectionMode[] = ['replace', 'additive', 'subtract', 'intersect'];
-    let y_pos = rect.y1 - 4;
-    
-    for (const mode of modes) {
-      if (y === y_pos && x >= rect.x0 + 2 && x <= rect.x1 - 2) {
-        return mode;
-      }
-      y_pos--;
-    }
-    return null;
+    const hit = get_selection_controls_layout().modes.find((entry) => entry.y === y && x >= entry.x0 && x <= entry.x1);
+    return hit?.mode ?? null;
   }
 
   // Check if position is on selection button
   function is_on_selection_button(x: number, y: number): 'clear' | 'invert' | 'all' | null {
-    const btn_y = rect.y1 - 8;
-    if (y !== btn_y) return null;
-    
-    // [Clear] [Invert] [All]
-    let btn_x = rect.x0 + 2;
-    
-    if (x >= btn_x && x < btn_x + 7) return 'clear';
-    btn_x += 8;
-    if (x >= btn_x && x < btn_x + 8) return 'invert';
-    btn_x += 9;
-    if (x >= btn_x && x < btn_x + 5) return 'all';
-    
-    return null;
+    const hit = get_selection_controls_layout().buttons.find((entry) => entry.y === y && x >= entry.x0 && x <= entry.x1);
+    return hit?.id ?? null;
   }
 
   // Check if position is on text spacing +/- buttons
@@ -493,7 +497,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
     draw_content(c: Canvas, next_rect: Rect): void {
       rect = next_rect;
       const bg_color = get_ui_semantic_rgb('background');
-      const text_color = get_color_by_name('off_white').rgb;
+      const text_color = get_ui_semantic_rgb('bright');
       const medium_color = get_ui_semantic_rgb('medium');
       const bright_color = get_ui_semantic_rgb('bright');
       const vivid_color = get_ui_semantic_rgb('vivid');
@@ -846,47 +850,37 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
         c.set(rect.x1 - 3, y_pos, { char: '-', rgb: slider_fg, style: 'regular', weight_index: 2 });
         c.set(rect.x1 - 1, y_pos, { char: '+', rgb: slider_fg, style: 'regular', weight_index: 2 });
       } else if (opts.get_current_tool() === 'selectangle' || opts.get_current_tool() === 'lassoselect') {
-        // Show selection mode options
-        const modes: SelectionMode[] = ['replace', 'additive', 'subtract', 'intersect'];
         const current_mode = opts.get_selection_mode();
-        let y_pos = rect.y1 - 4;
-        
-        for (const mode of modes) {
-          const is_selected = current_mode === mode;
-          c.set(rect.x0 + 2, y_pos, {
+        const selectionLayout = get_selection_controls_layout();
+
+        for (const row of selectionLayout.modes) {
+          const is_selected = current_mode === row.mode;
+          c.set(rect.x0 + 2, row.y, {
             char: is_selected ? '●' : '○',
-            rgb: is_selected ? slider_fg : text_color,
+            rgb: is_selected ? vivid_color : medium_color,
             style: 'regular',
-            weight_index: is_selected ? 3 : 1
+            weight_index: is_selected ? 2 : 1
           });
-          
-          const label = mode.charAt(0).toUpperCase() + mode.slice(1);
-          for (let i = 0; i < label.length && i < rect.x1 - rect.x0 - 5; i++) {
-            c.set(rect.x0 + 4 + i, y_pos, {
-              char: label[i]!,
-              rgb: is_selected ? slider_fg : text_color,
+
+          for (let i = 0; i < row.label.length && rect.x0 + 4 + i < rect.x1; i++) {
+            c.set(rect.x0 + 4 + i, row.y, {
+              char: row.label[i]!,
+              rgb: is_selected ? bright_color : medium_color,
               style: 'regular',
-              weight_index: is_selected ? 2 : 1
+              weight_index: 1
             });
           }
-          y_pos--;
         }
-        
-        // Draw buttons
-        const btn_y = rect.y1 - 8;
-        const btns = ['[Clear]', '[Invert]', '[All]'];
-        let btn_x = rect.x0 + 2;
-        
-        for (const btn of btns) {
-          for (let i = 0; i < btn.length && btn_x + i < rect.x1; i++) {
-            c.set(btn_x + i, btn_y, {
-              char: btn[i]!,
-              rgb: text_color,
+
+        for (const button of selectionLayout.buttons) {
+          for (let i = 0; i < button.label.length && button.x0 + i < rect.x1; i++) {
+            c.set(button.x0 + i, button.y, {
+              char: button.label[i]!,
+              rgb: medium_color,
               style: 'regular',
-              weight_index: 2
+              weight_index: 1
             });
           }
-          btn_x += btn.length + 1;
         }
       } else if (opts.get_current_tool() === 'paste') {
         const gradiatorState = opts.get_gradiator_state();

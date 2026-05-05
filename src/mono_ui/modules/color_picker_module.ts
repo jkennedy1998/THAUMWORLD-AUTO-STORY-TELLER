@@ -162,11 +162,6 @@ export function make_color_picker_module(opts: ColorPickerOptions): Module {
     rect: opts.rect,
     title: opts.title ?? 'PICK COLOR',
     gizmos: gizmo_config,
-    background: { rgb: get_ui_semantic_rgb('background') },
-    border: {
-      border_rgb: get_ui_semantic_rgb('dimmest'),
-      text_rgb: get_ui_semantic_rgb('medium'),
-    },
     resize: {
       min_width: MIN_WIDTH,
       min_height: MIN_HEIGHT,
@@ -207,7 +202,7 @@ export function make_color_picker_module(opts: ColorPickerOptions): Module {
         c.set(preview_x, preview_y, { char: '◎', rgb: vivid, style: 'regular', weight_index: 3, render_index: 7 });
       }
       if ((opts.show_slider_marker ?? true) && layout.slider.x0 - 1 >= rect.x0 + 1) {
-        c.set(layout.slider.x0 - 1, slider_y, { char: '▶', rgb: bright, style: 'regular', weight_index: 2, render_index: 7 });
+        c.set(layout.slider.x0 - 1, slider_y, { char: '▶', rgb: vivid, style: 'regular', weight_index: 2, render_index: 7 });
       }
 
       const indexed = find_indexed_color_by_rgb(preview_rgb) ?? nearest_indexed_color(preview_rgb);
