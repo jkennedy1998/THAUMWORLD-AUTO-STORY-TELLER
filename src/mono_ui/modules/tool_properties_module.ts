@@ -484,8 +484,6 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
     background: { rgb: get_ui_semantic_rgb('background') },
     border: {
       style: PANEL_BORDER_PRESETS.default_double.style,
-      border_rgb: get_ui_semantic_rgb('dimmest'),
-      text_rgb: get_ui_semantic_rgb('medium'),
       weight_index: PANEL_BORDER_PRESETS.default_double.weight_index,
     },
     resize: {

@@ -43,6 +43,8 @@ export type GroupsModuleOptions = {
   on_set_document_loop_window?: (breathStart: number, breathEnd: number) => void;
   get_auto_key_enabled?: () => boolean;
   on_toggle_auto_key?: () => void;
+  get_frames_per_breath?: () => number;
+  on_step_frames_per_breath?: (delta: number) => void;
   on_select_group: (id: string) => void;
   on_select_group_property?: (groupId: string, propertyId: string) => void;
   on_toggle_group_visibility?: (id: string) => void;
@@ -77,6 +79,8 @@ const HEADER_HEIGHT = 5;
 const SECTION_SPACING = 0;
 const BLOCK_DOUBLE_CLICK_MS = 350;
 const BLOCK_DRAG_THRESHOLD_PX = 1;
+const GROUPS_TIMELINE_LEFT_OFFSET = 36;
+const GROUPS_MIN_TIMELINE_INNER_WIDTH = 8;
 
 type GroupSectionLayout = {
   item: GroupListItem;
@@ -129,10 +133,12 @@ export type GroupsTimelineViewport = GroupsTimelineRegion & {
 };
 
 export function resolve_groups_timeline_region(currentRect: Rect): GroupsTimelineRegion {
-  const startX = currentRect.x0 + 29;
-  const endX = currentRect.x1 - 3;
-  const innerStartX = startX + 1;
-  const innerEndX = endX - 1;
+  const endX = Math.max(currentRect.x0 + 4, currentRect.x1 - 3);
+  const desiredStartX = currentRect.x0 + GROUPS_TIMELINE_LEFT_OFFSET;
+  const maxStartX = Math.max(currentRect.x0 + 2, endX - (GROUPS_MIN_TIMELINE_INNER_WIDTH + 1));
+  const startX = Math.min(desiredStartX, maxStartX);
+  const innerStartX = Math.min(endX - 1, startX + 1);
+  const innerEndX = Math.max(innerStartX, endX - 1);
   return {
     startX,
     endX,
@@ -579,6 +585,14 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
 
   function toggleAutoKey(): void {
     opts.on_toggle_auto_key?.();
+  }
+
+  function getFramesPerBreath(): number {
+    return Math.max(1, Math.floor(opts.get_frames_per_breath?.() ?? 1));
+  }
+
+  function stepFramesPerBreath(delta: number): void {
+    opts.on_step_frames_per_breath?.(Math.floor(delta));
   }
 
   function getCurrentBreath(): number {
@@ -1651,11 +1665,30 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         render_index: MODULE_CHROME_RENDER_INDEX + 1,
       });
     }
-    const autoKeyBoxStart = Math.min(rect.x0 + 14, autoKeyStart + autoKeyLabel.length + 2);
+    const autoKeyBoxStart = Math.min(rect.x0 + 12, rect.x1 - 24);
     const autoKeyEnabled = getAutoKeyEnabled();
     c.set(autoKeyBoxStart, headerY, { char: '[', rgb: mutedColor(), weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
     c.set(autoKeyBoxStart + 1, headerY, { char: autoKeyEnabled ? 'x' : ' ', rgb: autoKeyEnabled ? selectedColor() : mutedColor(), weight_index: autoKeyEnabled ? 2 : 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
     c.set(autoKeyBoxStart + 2, headerY, { char: ']', rgb: mutedColor(), weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+    const fpbLabelStart = autoKeyBoxStart + 5;
+    const fpbValue = String(getFramesPerBreath());
+    const fpbValueStart = fpbLabelStart + 4;
+    const fpbDecStart = fpbValueStart + fpbValue.length + 1;
+    const fpbIncStart = fpbDecStart + 4;
+    if (opts.on_step_frames_per_breath && fpbIncStart + 2 < timelineViewport.startX) {
+      c.set(fpbLabelStart, headerY, { char: 'F', rgb: mutedColor(), weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+      c.set(fpbLabelStart + 1, headerY, { char: 'P', rgb: mutedColor(), weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+      c.set(fpbLabelStart + 2, headerY, { char: 'B', rgb: mutedColor(), weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+      for (let i = 0; i < fpbValue.length; i += 1) {
+        c.set(fpbValueStart + i, headerY, { char: fpbValue[i]!, rgb: textColor(), weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+      }
+      c.set(fpbDecStart, headerY, { char: '[', rgb: mutedColor(), weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+      c.set(fpbDecStart + 1, headerY, { char: '-', rgb: selectedColor(), weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+      c.set(fpbDecStart + 2, headerY, { char: ']', rgb: mutedColor(), weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+      c.set(fpbIncStart, headerY, { char: '[', rgb: mutedColor(), weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+      c.set(fpbIncStart + 1, headerY, { char: '+', rgb: selectedColor(), weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+      c.set(fpbIncStart + 2, headerY, { char: ']', rgb: mutedColor(), weight_index: 1, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
+    }
     for (let x = timelineViewport.startX; x <= timelineViewport.endX; x += 1) {
       c.set(x, headerY, { char: ' ', rgb: mutedColor(), weight_index: 0, render_index: MODULE_CHROME_RENDER_INDEX + 1 });
     }
@@ -2078,13 +2111,28 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         opts.on_add_group();
         return;
       }
-      const autoKeyStart = 11;
-      const autoKeyBoxStart = Math.min(currentRect.x1 - currentRect.x0 - 10, autoKeyStart + 'AUTO KEY'.length + 2);
+      const autoKeyStart = 2;
+      const autoKeyBoxStart = Math.min(12, currentRect.x1 - currentRect.x0 - 24);
       if (localY === metrics.headerRow2Y && localX >= autoKeyStart && localX <= autoKeyBoxStart + 2) {
         toggleAutoKey();
         return;
       }
+      const fpbValue = String(getFramesPerBreath());
+      const fpbLabelStart = autoKeyBoxStart + 5;
+      const fpbValueStart = fpbLabelStart + 4;
+      const fpbDecStart = fpbValueStart + fpbValue.length + 1;
+      const fpbIncStart = fpbDecStart + 4;
       const timelineRegion = getTimelineRegion(currentRect);
+      if (localY === metrics.headerRow2Y && opts.on_step_frames_per_breath && fpbIncStart + 2 < timelineRegion.startX - currentRect.x0) {
+        if (localX >= fpbDecStart && localX <= fpbDecStart + 2) {
+          stepFramesPerBreath(-1);
+          return;
+        }
+        if (localX >= fpbIncStart && localX <= fpbIncStart + 2) {
+          stepFramesPerBreath(1);
+          return;
+        }
+      }
       const loopHit = getLoopWindowHit(currentRect, localX, localY);
       if (localY === metrics.headerRow1Y && localX >= timelineRegion.startX - currentRect.x0 && localX <= timelineRegion.endX - currentRect.x0) {
         setCurrentBreath(timelineXToBreath(currentRect, localX + currentRect.x0));

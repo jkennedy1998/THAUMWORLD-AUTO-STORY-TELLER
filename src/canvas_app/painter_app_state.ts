@@ -23,7 +23,6 @@ import { make_color_picker_module } from '../mono_ui/modules/color_picker_module
 import { make_toolbox_module } from '../mono_ui/modules/toolbox_module.js';
 import { make_tool_properties_module, type ToolPropertyRow } from '../mono_ui/modules/tool_properties_module.js';
 import { make_controls_module } from '../mono_ui/modules/controls_module.js';
-import { makeCanvasSettingsModule } from '../mono_ui/modules/canvas_settings_module.js';
 import { make_customization_module } from '../mono_ui/modules/customization_module.js';
 import { make_floating_panel_module } from '../mono_ui/modules/floating_panel_module.js';
 import {
@@ -4696,7 +4695,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   let customization_picker_open = getInitialModuleVisibility('customization_picker', false);
   let selection_panel_open = getInitialModuleVisibility('selection_panel', true);
   let controls_open = getInitialModuleVisibility('controls_panel', false);
-  let canvas_settings_open = getInitialModuleVisibility('canvas_settings_panel', false);
 
   function setModuleOpen(moduleId: string, visible: boolean, setOpen: (v: boolean) => void): void {
     setOpen(visible);
@@ -4729,7 +4727,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   let customization_picker_module: Module | null = null;
   let selection_panel_module: Module | null = null;
   let controls_module: Module | null = null;
-  let canvas_settings_module: Module | null = null;
   let active_customization_role: UiSemanticColorRole = 'vivid';
 
   const painter_controls = create_painter_controls_runtime(PAINTER_APP_CONFIG.selected_data_slot);
@@ -5905,16 +5902,64 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   }
 
   function create_selection_panel_module(): Module {
-    const actions = ['MODE', 'ALL', 'INVERT', 'CLEAR'] as const;
+    const uiBackground = () => get_ui_semantic_rgb('background');
+    const uiMedium = () => get_ui_semantic_rgb('medium');
+    const uiBright = () => get_ui_semantic_rgb('bright');
+    const uiVivid = () => get_ui_semantic_rgb('vivid');
+    const uiDimmest = () => get_ui_semantic_rgb('dimmest');
+    const modeOptions: Array<{ mode: SelectionMode; label: string }> = [
+      { mode: 'replace', label: 'Replace' },
+      { mode: 'additive', label: 'Additive' },
+      { mode: 'subtract', label: 'Subtract' },
+      { mode: 'intersect', label: 'Intersect' },
+    ];
+    const actionButtons: Array<{ id: 'all' | 'invert' | 'clear'; label: string }> = [
+      { id: 'all', label: '[All]' },
+      { id: 'invert', label: '[Invert]' },
+      { id: 'clear', label: '[Clear]' },
+    ];
+    let hitboxes: Array<{ id: string; x0: number; y0: number; x1: number; y1: number }> = [];
+    let hoveredControlId: string | null = null;
+    let pressedControlId: string | null = null;
+
+    function getRowY(rect: Rect, rowIndexFromBottom: number): number {
+      return rect.y1 - 2 - rowIndexFromBottom;
+    }
+
+    function setHitbox(id: string, x0: number, y0: number, x1: number, y1: number): void {
+      hitboxes.push({ id, x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1) });
+    }
+
+    function findHitbox(x: number, y: number): { id: string; x0: number; y0: number; x1: number; y1: number } | null {
+      for (let i = hitboxes.length - 1; i >= 0; i -= 1) {
+        const hit = hitboxes[i]!;
+        if (x >= hit.x0 && x <= hit.x1 && y >= hit.y0 && y <= hit.y1) return hit;
+      }
+      return null;
+    }
+
+    function resolveControlColor(id: string): Rgb {
+      return hoveredControlId === id || pressedControlId === id ? uiVivid() : uiBright();
+    }
+
+    function resolveControlWeight(baseWeight: number, id: string): 0 | 1 | 2 | 3 {
+      const next = pressedControlId === id ? baseWeight + 1 : baseWeight;
+      return Math.max(0, Math.min(3, next)) as 0 | 1 | 2 | 3;
+    }
+
+    function drawText(c: Canvas, rect: Rect, x: number, y: number, text: string, rgb: Rgb, weight_index: 0 | 1 | 2 | 3): void {
+      for (let i = 0; i < text.length && x + i < rect.x1; i += 1) {
+        c.set(x + i, y, { char: text[i]!, rgb, weight_index, style: 'regular' });
+      }
+    }
+
     return make_floating_panel_module({
       id: 'selection_panel',
       rect: getModuleRectWithSave('selection_panel', { x0: 138, y0: 28, x1: 166, y1: 40 }),
       title: () => 'SELECTION',
       is_visible: () => selection_panel_open,
-      background: { rgb: get_color_by_name('off_black').rgb },
+      background: { rgb: uiBackground() },
       border: {
-        border_rgb: get_color_by_name('vivid_magenta').rgb,
-        text_rgb: get_color_by_name('vivid_magenta').rgb,
       },
       gizmos: {
         enabled: ['close', 'move', 'seamless'],
@@ -5932,106 +5977,71 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         },
       },
       draw_content(c: Canvas, rect: Rect): void {
+        hitboxes = [];
         const status = getPainterSelectionStatus() ?? 'SEL 0';
-        const modeLabel = selection_mode === 'replace' ? 'REPL' : selection_mode === 'additive' ? 'ADD' : selection_mode === 'subtract' ? 'SUB' : 'INT';
-        const lines = [status, `MODE ${modeLabel}`, 'ALL', 'INV', 'CLEAR', tool_target_invert_held ? '` HELD' : '` INVERT'];
-        for (let i = 0; i < lines.length; i += 1) {
-          const y = rect.y1 - 2 - i;
-          if (y <= rect.y0) break;
-          const color = i === 0 ? user_selection_color_rgb : get_color_by_name('off_white').rgb;
-          const text = lines[i]!;
-          for (let x = 0; x < text.length && rect.x0 + 1 + x < rect.x1; x += 1) {
-            c.set(rect.x0 + 1 + x, y, { char: text[x]!, rgb: color, weight_index: 4, style: 'regular' });
-          }
+        const statusY = getRowY(rect, 6);
+        const replaceY = getRowY(rect, 5);
+        const actionTopY = getRowY(rect, 2);
+        const footerY = getRowY(rect, 0);
+        const textX = rect.x0 + 1;
+
+        if (statusY > rect.y0) drawText(c, rect, textX, statusY, status, user_selection_color_rgb, 1);
+
+        for (let i = 0; i < modeOptions.length; i += 1) {
+          const option = modeOptions[i]!;
+          const y = replaceY - i;
+          if (y <= rect.y0) continue;
+          const selected = selection_mode === option.mode;
+          const id = `mode:${option.mode}`;
+          const marker = selected ? '[x]' : '[ ]';
+          const label = `${marker} ${option.label}`;
+          const baseWeight = selected ? 2 : 1;
+          drawText(c, rect, textX, y, label, resolveControlColor(id), resolveControlWeight(baseWeight, id));
+          setHitbox(id, rect.x0 + 1, y, rect.x1 - 1, y);
+        }
+
+        for (let i = 0; i < actionButtons.length; i += 1) {
+          const button = actionButtons[i]!;
+          const y = actionTopY - i;
+          if (y <= rect.y0) continue;
+          const id = `action:${button.id}`;
+          drawText(c, rect, textX, y, button.label, resolveControlColor(id), resolveControlWeight(1, id));
+          setHitbox(id, rect.x0 + 1, y, Math.min(rect.x1 - 1, textX + button.label.length - 1), y);
+        }
+
+        if (footerY > rect.y0) {
+          const footer = tool_target_invert_held ? '` invert held' : '` invert key';
+          drawText(c, rect, textX, footerY, footer, uiMedium(), 1);
         }
       },
-      on_pointer_down_content(e: PointerEvent, rect: Rect): void {
-        const row = rect.y1 - 2 - e.y;
-        const action = actions[row as 0 | 1 | 2 | 3];
-        if (!action) return;
-        if (action === 'MODE') {
-          selection_mode = selection_mode === 'replace' ? 'additive' : selection_mode === 'additive' ? 'subtract' : selection_mode === 'subtract' ? 'intersect' : 'replace';
+      on_pointer_down_content(e: PointerEvent): void {
+        const hit = findHitbox(e.x, e.y);
+        pressedControlId = hit?.id ?? null;
+        if (!hit) return;
+        if (hit.id.startsWith('mode:')) {
+          const mode = hit.id.slice('mode:'.length) as SelectionMode;
+          selection_mode = mode;
           return;
         }
-        if (action === 'ALL') {
+        if (hit.id === 'action:all') {
           handle_world_selection_change({ kind: 'select_all' });
           return;
         }
-        if (action === 'INVERT') {
+        if (hit.id === 'action:invert') {
           handle_world_selection_change({ kind: 'invert' });
           return;
         }
-        if (action === 'CLEAR') {
-          handle_world_selection_change({ kind: 'clear' });
-        }
+        if (hit.id === 'action:clear') handle_world_selection_change({ kind: 'clear' });
       },
-    });
-  }
-
-  function create_canvas_settings_module(): Module {
-    return makeCanvasSettingsModule({
-      id: 'canvas_settings_panel',
-      rect: getModuleRectWithSave('canvas_settings_panel', { x0: 138, y0: 16, x1: 176, y1: 32 }),
-      is_visible: () => canvas_settings_open,
-      get_loop_breath_range: () => getPainterDocumentBreathRange(),
-      get_file_breath_range: () => getPainterDocumentFileBreathRange(),
-      get_content_breath_range: () => {
-        const bounds = derive_painter_document_authored_breath_bounds(painter_document_runtime.document);
-        return bounds ? { start: bounds.min_breath, end: bounds.max_breath } : null;
+      on_pointer_move_content(e: PointerEvent): void {
+        hoveredControlId = findHitbox(e.x, e.y)?.id ?? null;
       },
-      get_frames_per_breath: () => get_painter_document_playback(painter_document_runtime.document).frames_per_breath,
-      get_loop_enabled: () => get_painter_document_playback(painter_document_runtime.document).loop_enabled,
-      get_is_playing: () => painter_playback_running,
-      on_step_loop_start: (delta: number) => {
-        const range = getPainterDocumentBreathRange();
-        setPainterDocumentLoopWindow({
-          breath_start: range.start + delta,
-          breath_end: range.end,
-        });
+      on_pointer_leave_content(): void {
+        hoveredControlId = null;
+        pressedControlId = null;
       },
-      on_step_loop_end: (delta: number) => {
-        const range = getPainterDocumentBreathRange();
-        setPainterDocumentLoopWindow({
-          breath_start: range.start,
-          breath_end: range.end + delta,
-        });
-      },
-      on_step_frames_per_breath: (delta: number) => {
-        const range = getPainterDocumentFileBreathRange();
-        const playback = get_painter_document_playback(painter_document_runtime.document);
-        setPainterDocumentTimingPreservingLoop({
-          breath_range_start: range.start,
-          breath_range_end: range.end,
-          frames_per_breath: playback.frames_per_breath + delta,
-          loop_enabled: playback.loop_enabled,
-        });
-      },
-      on_toggle_loop: () => {
-        const range = getPainterDocumentFileBreathRange();
-        const playback = get_painter_document_playback(painter_document_runtime.document);
-        setPainterDocumentTimingPreservingLoop({
-          breath_range_start: range.start,
-          breath_range_end: range.end,
-          frames_per_breath: playback.frames_per_breath,
-          loop_enabled: !playback.loop_enabled,
-        });
-      },
-      on_toggle_playback: () => {
-        togglePainterPlayback();
-      },
-      on_jump_to_start: () => {
-        setCurrentPainterBreath(getPainterDocumentBreathRange().start);
-      },
-      on_jump_to_end: () => {
-        setCurrentPainterBreath(getPainterDocumentBreathRange().end);
-      },
-      on_fit_to_content: () => {
-        fitPainterDocumentTimingToContent();
-      },
-      on_close: () => setModuleOpen('canvas_settings_panel', false, (v) => { canvas_settings_open = v; }),
-      on_move: (new_rect: Rect) => {
-        if (canvas_settings_module) canvas_settings_module.rect = new_rect;
-        saveModulePosition('canvas_settings_panel', new_rect);
+      on_pointer_up_content(): void {
+        pressedControlId = null;
       },
     });
   }
@@ -6171,14 +6181,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         create_layer_palette_module
       );
     },
-    on_toggle_canvas_settings: () => {
-      toggleModule(
-        canvas_settings_open,
-        (v) => { canvas_settings_open = v; },
-        'canvas_settings_panel',
-        create_canvas_settings_module
-      );
-    },
     on_toggle_camera: () => {
       toggleModule(
         camera_control_open,
@@ -6229,6 +6231,17 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       on_toggle_auto_key: () => {
         painter_groups_auto_key_enabled = !painter_groups_auto_key_enabled;
         painterDiag('groups auto key toggled', { enabled: painter_groups_auto_key_enabled });
+      },
+      get_frames_per_breath: () => get_painter_document_playback(painter_document_runtime.document).frames_per_breath,
+      on_step_frames_per_breath: (delta: number) => {
+        const range = getPainterDocumentFileBreathRange();
+        const playback = get_painter_document_playback(painter_document_runtime.document);
+        setPainterDocumentTimingPreservingLoop({
+          breath_range_start: range.start,
+          breath_range_end: range.end,
+          frames_per_breath: playback.frames_per_breath + delta,
+          loop_enabled: playback.loop_enabled,
+        });
       },
       on_select_group: (group_id: string) => {
         selectPainterGroup(group_id);
@@ -6487,7 +6500,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   customization_module = create_customization_module();
   customization_picker_module = create_customization_picker_module();
   selection_panel_module = create_selection_panel_module();
-  canvas_settings_module = create_canvas_settings_module();
   camera_control_module = create_camera_control_module();
   controls_module = create_controls_panel_module();
   registry.register(char_selector_module);
@@ -6499,7 +6511,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   registry.register(customization_module);
   registry.register(customization_picker_module);
   registry.register(selection_panel_module);
-  registry.register(canvas_settings_module);
   registry.register(camera_control_module);
   registry.register(controls_module);
 
@@ -6512,7 +6523,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   registry.set_visibility('customization_panel', customization_open);
   registry.set_visibility('customization_picker', customization_picker_open);
   registry.set_visibility('selection_panel', selection_panel_open);
-  registry.set_visibility('canvas_settings_panel', canvas_settings_open);
   registry.set_visibility('layer_palette', layer_palette_open);
   registry.set_visibility('camera_control', camera_control_open);
   registry.set_visibility('controls_panel', controls_open);

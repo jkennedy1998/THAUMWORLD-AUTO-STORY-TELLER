@@ -1742,73 +1742,86 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     return opts.get_active_group_world_bounds?.() ?? null;
   }
 
+  type ProjectedGroupBorderSlice = {
+    plane: number;
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+  };
+
   function isPlaybackRunning(): boolean {
     return opts.get_is_playing?.() === true;
   }
 
-  function getActiveGroupProjectedBounds(delta?: { x: number; y: number; z: number } | null): { minX: number; minY: number; maxX: number; maxY: number } | null {
-    const bounds = getActiveGroupWorldBounds();
-    if (!bounds) return null;
-    const projectedPoints = [
-      { x: bounds.minX, y: bounds.minY, z: bounds.minZ },
-      { x: bounds.minX, y: bounds.minY, z: bounds.maxZ },
-      { x: bounds.minX, y: bounds.maxY, z: bounds.minZ },
-      { x: bounds.minX, y: bounds.maxY, z: bounds.maxZ },
-      { x: bounds.maxX, y: bounds.minY, z: bounds.minZ },
-      { x: bounds.maxX, y: bounds.minY, z: bounds.maxZ },
-      { x: bounds.maxX, y: bounds.maxY, z: bounds.minZ },
-      { x: bounds.maxX, y: bounds.maxY, z: bounds.maxZ },
-    ].map((world) => opts.get_grid_point_for_world?.({
-      x: world.x + (delta?.x ?? 0),
-      y: world.y + (delta?.y ?? 0),
-      z: world.z + (delta?.z ?? 0),
-    }) ?? null).filter((point): point is { x: number; y: number } => !!point);
-    if (projectedPoints.length < 1) return null;
-    let minX = Number.POSITIVE_INFINITY;
-    let minY = Number.POSITIVE_INFINITY;
-    let maxX = Number.NEGATIVE_INFINITY;
-    let maxY = Number.NEGATIVE_INFINITY;
-    for (const point of projectedPoints) {
-      minX = Math.min(minX, point.x);
-      minY = Math.min(minY, point.y);
-      maxX = Math.max(maxX, point.x);
-      maxY = Math.max(maxY, point.y);
-    }
-    if (!Number.isFinite(minX)) return null;
-    return { minX, minY, maxX, maxY };
+  function getWorldPlaneCoordinateForAxis(world: { x: number; y: number; z: number }, axis: 'x' | 'y' | 'z'): number {
+    return axis === 'x' ? Math.floor(world.x) : axis === 'y' ? Math.floor(world.y) : Math.floor(world.z);
   }
 
-  function drawProjectedBoundsBorder(c: Canvas, rect: Rect, bounds: { minX: number; minY: number; maxX: number; maxY: number }, rgb: Rgb, weight_index: number, render_index: number): void {
-    const x0 = Math.max(rect.x0, rect.x0 + bounds.minX);
-    const x1 = Math.min(rect.x1, rect.x0 + bounds.maxX);
-    const y0 = Math.max(rect.y0, rect.y0 + bounds.minY);
-    const y1 = Math.min(rect.y1, rect.y0 + bounds.maxY);
-    if (x0 > x1 || y0 > y1) return;
-    for (let x = x0; x <= x1; x += 1) {
-      c.set(x, y0, { char: '─', rgb, style: 'regular', weight_index, render_index });
-      c.set(x, y1, { char: '─', rgb, style: 'regular', weight_index, render_index });
+  function getActiveGroupProjectedBorderSlices(delta?: { x: number; y: number; z: number } | null): ProjectedGroupBorderSlice[] {
+    const projectedByPlane = new Map<number, ProjectedGroupBorderSlice>();
+    const planeAxis = getActiveViewPlaneAxis();
+    const dx = delta?.x ?? 0;
+    const dy = delta?.y ?? 0;
+    const dz = delta?.z ?? 0;
+    for (const voxel of getActiveGroupWorldVoxels()) {
+      const shiftedWorld = { x: voxel.x + dx, y: voxel.y + dy, z: voxel.z + dz };
+      const plane = getWorldPlaneCoordinateForAxis(shiftedWorld, planeAxis);
+      const gridPoint = opts.get_grid_point_for_world?.(shiftedWorld) ?? null;
+      if (!gridPoint) continue;
+      const existing = projectedByPlane.get(plane);
+      if (existing) {
+        existing.minX = Math.min(existing.minX, gridPoint.x);
+        existing.minY = Math.min(existing.minY, gridPoint.y);
+        existing.maxX = Math.max(existing.maxX, gridPoint.x);
+        existing.maxY = Math.max(existing.maxY, gridPoint.y);
+      } else {
+        projectedByPlane.set(plane, {
+          plane,
+          minX: gridPoint.x,
+          minY: gridPoint.y,
+          maxX: gridPoint.x,
+          maxY: gridPoint.y,
+        });
+      }
     }
-    for (let y = y0; y <= y1; y += 1) {
-      c.set(x0, y, { char: '│', rgb, style: 'regular', weight_index, render_index });
-      c.set(x1, y, { char: '│', rgb, style: 'regular', weight_index, render_index });
-    }
-    c.set(x0, y0, { char: '┌', rgb, style: 'regular', weight_index, render_index });
-    c.set(x1, y0, { char: '┐', rgb, style: 'regular', weight_index, render_index });
-    c.set(x0, y1, { char: '└', rgb, style: 'regular', weight_index, render_index });
-    c.set(x1, y1, { char: '┘', rgb, style: 'regular', weight_index, render_index });
+    return Array.from(projectedByPlane.values()).sort((a, b) => a.plane - b.plane);
   }
 
-  function isGridOnProjectedBoundsBorder(grid_x: number, grid_y: number, bounds: { minX: number; minY: number; maxX: number; maxY: number } | null): boolean {
-    if (!bounds) return false;
-    if (grid_x < bounds.minX || grid_x > bounds.maxX || grid_y < bounds.minY || grid_y > bounds.maxY) return false;
-    return grid_x === bounds.minX || grid_x === bounds.maxX || grid_y === bounds.minY || grid_y === bounds.maxY;
+  function drawProjectedGroupBorderSlices(c: Canvas, rect: Rect, slices: ProjectedGroupBorderSlice[], rgb: Rgb, weight_index: number, render_index: number): void {
+    for (const slice of slices) {
+      const x0 = Math.max(rect.x0, rect.x0 + slice.minX);
+      const x1 = Math.min(rect.x1, rect.x0 + slice.maxX);
+      const y0 = Math.max(rect.y0, rect.y0 + slice.minY);
+      const y1 = Math.min(rect.y1, rect.y0 + slice.maxY);
+      if (x0 > x1 || y0 > y1) continue;
+      for (let x = x0; x <= x1; x += 1) {
+        c.set(x, y0, { char: '─', rgb, style: 'regular', weight_index, render_index });
+        c.set(x, y1, { char: '─', rgb, style: 'regular', weight_index, render_index });
+      }
+      for (let y = y0; y <= y1; y += 1) {
+        c.set(x0, y, { char: '│', rgb, style: 'regular', weight_index, render_index });
+        c.set(x1, y, { char: '│', rgb, style: 'regular', weight_index, render_index });
+      }
+      c.set(x0, y0, { char: '└', rgb, style: 'regular', weight_index, render_index });
+      c.set(x1, y0, { char: '┘', rgb, style: 'regular', weight_index, render_index });
+      c.set(x0, y1, { char: '┌', rgb, style: 'regular', weight_index, render_index });
+      c.set(x1, y1, { char: '┐', rgb, style: 'regular', weight_index, render_index });
+    }
+  }
+
+  function getProjectedGroupBorderSliceHit(grid_x: number, grid_y: number, slices: ProjectedGroupBorderSlice[]): ProjectedGroupBorderSlice | null {
+    for (const slice of slices) {
+      if (grid_x < slice.minX || grid_x > slice.maxX || grid_y < slice.minY || grid_y > slice.maxY) continue;
+      if (grid_x === slice.minX || grid_x === slice.maxX || grid_y === slice.minY || grid_y === slice.maxY) return slice;
+    }
+    return null;
   }
 
   function canEditGroupLocation(): boolean {
     return !isPlaybackRunning()
-      && opts.get_current_tool() === 'move'
       && !opts.get_active_group_locked?.()
-      && Boolean(getActiveGroupWorldBounds())
+      && getActiveGroupWorldVoxels().length > 0
       && typeof opts.on_group_location_drag_commit === 'function';
   }
 
@@ -1821,7 +1834,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
   function resolveGroupLocationDragDeltaAt(grid_x: number, grid_y: number): { x: number; y: number; z: number } | null {
     if (!group_location_drag_anchor_world || group_location_drag_plane === null) return null;
-    const current = opts.get_world_point_for_grid?.(grid_x, grid_y)
+    const current = opts.get_world_point_for_grid_on_plane?.(grid_x, grid_y, group_location_drag_plane)
+      ?? opts.get_world_point_for_grid?.(grid_x, grid_y)
       ?? getWorldPointForEditPlane(grid_x, grid_y, group_location_drag_plane)
       ?? null;
     if (!current) return null;
@@ -1833,21 +1847,25 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   }
 
   function updateGroupLocationHover(grid_x: number, grid_y: number): void {
-    group_location_border_hovered = canEditGroupLocation() && isGridOnProjectedBoundsBorder(grid_x, grid_y, getActiveGroupProjectedBounds(group_location_drag_preview_delta));
+    group_location_border_hovered = canEditGroupLocation()
+      && Boolean(getProjectedGroupBorderSliceHit(grid_x, grid_y, getActiveGroupProjectedBorderSlices(group_location_drag_preview_delta)));
   }
 
   function startGroupLocationDrag(grid_x: number, grid_y: number): boolean {
     if (!canEditGroupLocation()) return false;
-    const projectedBounds = getActiveGroupProjectedBounds();
-    if (!isGridOnProjectedBoundsBorder(grid_x, grid_y, projectedBounds)) return false;
-    const anchorWorld = opts.get_world_point_for_grid?.(grid_x, grid_y) ?? getWorldPointForEditPlane(grid_x, grid_y, opts.get_selected_z()) ?? null;
+    const hitSlice = getProjectedGroupBorderSliceHit(grid_x, grid_y, getActiveGroupProjectedBorderSlices());
+    if (!hitSlice) return false;
+    const anchorWorld = opts.get_world_point_for_grid_on_plane?.(grid_x, grid_y, hitSlice.plane)
+      ?? opts.get_world_point_for_grid?.(grid_x, grid_y)
+      ?? getWorldPointForEditPlane(grid_x, grid_y, hitSlice.plane)
+      ?? null;
     if (!anchorWorld) return false;
     group_location_drag_active = true;
     group_location_drag_anchor_world = anchorWorld;
-    group_location_drag_plane = getWorldPointPlaneCoordinate(anchorWorld) ?? opts.get_selected_z();
+    group_location_drag_plane = hitSlice.plane;
     group_location_drag_preview_delta = { x: 0, y: 0, z: 0 };
     group_location_border_hovered = true;
-    showStatus('Move group location');
+    showStatus(`Move group location @ ${hitSlice.plane}`);
     return true;
   }
 
@@ -2788,8 +2806,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         }
       }
 
-      const activeGroupProjectedBounds = getActiveGroupProjectedBounds(group_location_drag_preview_delta);
-      if (!gizmo_state.is_resize_mode && activeGroupProjectedBounds && !isPlaybackRunning()) {
+      const activeGroupProjectedBorderSlices = getActiveGroupProjectedBorderSlices(group_location_drag_preview_delta);
+      if (!gizmo_state.is_resize_mode && activeGroupProjectedBorderSlices.length > 0 && !isPlaybackRunning()) {
         const canEditLocation = canEditGroupLocation();
         const borderColor = canEditLocation
           ? (group_location_drag_active
@@ -2798,7 +2816,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
               ? get_ui_semantic_rgb('bright')
               : get_ui_semantic_rgb('medium'))
           : get_ui_semantic_rgb('dimmest');
-        drawProjectedBoundsBorder(c, rect, activeGroupProjectedBounds, borderColor, group_location_drag_active ? 2 : 1, canEditLocation ? 997 : 996);
+        drawProjectedGroupBorderSlices(c, rect, activeGroupProjectedBorderSlices, borderColor, group_location_drag_active ? 2 : 1, canEditLocation ? 997 : 996);
       }
 
       // Visual debug: Show current mouse position
