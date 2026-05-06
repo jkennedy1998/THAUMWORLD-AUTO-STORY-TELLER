@@ -1,7 +1,15 @@
 import type { Canvas, Module, PointerEvent, Rect, WheelEvent, Rgb } from "../types.js";
 import { make_floating_panel_module } from "./floating_panel_module.js";
-import { get_color_by_name } from "../colors.js";
 import { get_ui_semantic_rgb } from "../runtime/ui_customization_store.js";
+import {
+  begin_plain_text_control_frame,
+  clear_plain_text_control_interaction,
+  create_plain_text_control_state,
+  press_plain_text_control,
+  release_hovered_plain_text_control,
+  update_plain_text_hover,
+} from "../ux/plain_text_controls.js";
+import { draw_text_stateful_row } from "../ux/plain_text_interactables.js";
 
 export type DebugCommanderAction = {
   id: string;
@@ -33,9 +41,7 @@ const MAX_HEIGHT = 34;
 
 export function make_debug_commander_module(opts: DebugCommanderModuleConfig): Module {
   let scroll_offset = 0;
-  let row_hits: Array<{ action_id: string; x0: number; y0: number; x1: number; y1: number }> = [];
-  let hovered_action_id: string | null = null;
-  let pressed_action_id: string | null = null;
+  const text_controls = create_plain_text_control_state();
 
   function trim_to_width(text: string, width: number): string {
     if (width <= 0) return "";
@@ -54,27 +60,6 @@ export function make_debug_commander_module(opts: DebugCommanderModuleConfig): M
     return opts.get_actions();
   }
 
-  function find_hit(x: number, y: number): { action_id: string; x0: number; y0: number; x1: number; y1: number } | null {
-    for (let i = row_hits.length - 1; i >= 0; i -= 1) {
-      const hit = row_hits[i]!;
-      if (x >= hit.x0 && x <= hit.x1 && y >= hit.y0 && y <= hit.y1) return hit;
-    }
-    return null;
-  }
-
-  function resolve_action_rgb(action: DebugCommanderAction, selected: boolean): Rgb {
-    if (action.disabled) return get_ui_semantic_rgb('dimmest');
-    if (pressed_action_id === action.id) return get_ui_semantic_rgb('vivid');
-    if (hovered_action_id === action.id) return get_ui_semantic_rgb('vivid');
-    if (selected) return get_ui_semantic_rgb('bright');
-    return get_ui_semantic_rgb('bright');
-  }
-
-  function resolve_action_weight(selected: boolean, action_id: string): 0 | 1 | 2 | 3 {
-    const base = selected ? 2 : 1;
-    const next = pressed_action_id === action_id ? base + 1 : base;
-    return Math.max(0, Math.min(3, next)) as 0 | 1 | 2 | 3;
-  }
 
   function get_selected_index(actions: DebugCommanderAction[]): number {
     const selected_action_id = opts.get_selected_action_id();
@@ -131,7 +116,7 @@ export function make_debug_commander_module(opts: DebugCommanderModuleConfig): M
       on_resize_end: opts.on_resize,
     },
     draw_content(c: Canvas, rect: Rect): void {
-      row_hits = [];
+      begin_plain_text_control_frame(text_controls);
       const actions = get_actions();
       clamp_scroll(rect, actions);
       ensure_selected_visible(rect, actions);
@@ -148,10 +133,28 @@ export function make_debug_commander_module(opts: DebugCommanderModuleConfig): M
         const y = top_y - i;
         if (y <= rect.y0 + 3) break;
         const selected = action.id === selected_action_id;
-        const prefix = selected ? '[x]' : '[ ]';
-        const line = trim_to_width(`${prefix} ${action.label}`, inner_width);
-        draw_line(c, rect.x0 + 1, y, line, resolve_action_rgb(action, selected), resolve_action_weight(selected, action.id));
-        row_hits.push({ action_id: action.id, x0: rect.x0 + 1, y0: y, x1: rect.x1 - 1, y1: y });
+        const line = trim_to_width(action.label, inner_width);
+        draw_text_stateful_row(c, {
+          id: action.id,
+          label: line,
+          x: rect.x0 + 1,
+          y,
+          row_x0: rect.x0 + 1,
+          row_x1: rect.x1 - 1,
+          state: text_controls,
+          active: selected,
+          disabled: action.disabled,
+          inactive_role: 'medium',
+          active_role: 'custom',
+          hover_role: 'custom',
+          pressed_role: 'custom',
+          custom_active_rgb: action.rgb,
+          base_weight_index: 1,
+          active_weight_index: 2,
+          pressed_weight_index: 3,
+          render_index: 6,
+          style: 'regular',
+        });
       }
 
       const selected = actions.find((action) => action.id === selected_action_id) ?? null;
@@ -170,24 +173,18 @@ export function make_debug_commander_module(opts: DebugCommanderModuleConfig): M
       }
     },
     on_pointer_down_content(e: PointerEvent): void {
-      const hit = find_hit(e.x, e.y);
-      hovered_action_id = hit?.action_id ?? null;
-      pressed_action_id = hit?.action_id ?? null;
-      if (!hit) return;
-      opts.on_select_action(hit.action_id);
+      const pressed_id = press_plain_text_control(text_controls, e.x, e.y);
+      if (pressed_id) opts.on_select_action(pressed_id);
     },
     on_pointer_move_content(e: PointerEvent): void {
-      hovered_action_id = find_hit(e.x, e.y)?.action_id ?? null;
+      update_plain_text_hover(text_controls, e.x, e.y);
     },
-    on_pointer_up_content(rect: Rect): void {
-      const hit = hovered_action_id ? row_hits.find((entry) => entry.action_id === hovered_action_id) ?? null : null;
-      const triggered_action_id = pressed_action_id && hit && hit.action_id === pressed_action_id ? pressed_action_id : null;
-      pressed_action_id = null;
+    on_pointer_up_content(): void {
+      const triggered_action_id = release_hovered_plain_text_control(text_controls);
       if (triggered_action_id) opts.on_trigger_action(triggered_action_id);
     },
     on_pointer_leave_content(): void {
-      hovered_action_id = null;
-      pressed_action_id = null;
+      clear_plain_text_control_interaction(text_controls);
     },
     on_wheel_content(e: WheelEvent, rect: Rect): void {
       const actions = get_actions();

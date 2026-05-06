@@ -104,6 +104,16 @@ import { apply_world_selection_mode, clear_world_selection, create_world_selecti
 import { project_world_point_with_roll, unproject_plane_point_with_roll } from '../mono_ui/runtime/place_view_projection.js';
 import { create_painter_controls_runtime } from './controls_wiring.js';
 import { control_binding_matches_keyboard_event } from '../mono_ui/runtime/controls_binding_matcher.js';
+import {
+  begin_plain_text_control_frame,
+  clear_plain_text_control_interaction,
+  create_plain_text_control_state,
+  draw_plain_text_control,
+  draw_plain_text_row,
+  press_plain_text_control,
+  release_hovered_plain_text_control,
+  update_plain_text_hover,
+} from '../mono_ui/ux/plain_text_controls.js';
 import { create_profile_scope, type ProfileScope } from '../user_profiles/profile_scope.js';
 import { resolve_profile_scope } from '../user_profiles/named_profile_store.js';
 import { create_painter_tool_shortcut_interpreter } from './painter_tool_shortcut_interpreter.js';
@@ -5917,9 +5927,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   function create_selection_panel_module(): Module {
     const uiBackground = () => get_ui_semantic_rgb('background');
     const uiMedium = () => get_ui_semantic_rgb('medium');
-    const uiBright = () => get_ui_semantic_rgb('bright');
-    const uiVivid = () => get_ui_semantic_rgb('vivid');
-    const uiDimmest = () => get_ui_semantic_rgb('dimmest');
     const modeOptions: Array<{ mode: SelectionMode; label: string }> = [
       { mode: 'replace', label: 'Replace' },
       { mode: 'additive', label: 'Additive' },
@@ -5931,33 +5938,10 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       { id: 'invert', label: '[Invert]' },
       { id: 'clear', label: '[Clear]' },
     ];
-    let hitboxes: Array<{ id: string; x0: number; y0: number; x1: number; y1: number }> = [];
-    let hoveredControlId: string | null = null;
-    let pressedControlId: string | null = null;
+    const textControls = create_plain_text_control_state();
 
     function getRowY(rect: Rect, rowIndexFromBottom: number): number {
       return rect.y1 - 2 - rowIndexFromBottom;
-    }
-
-    function setHitbox(id: string, x0: number, y0: number, x1: number, y1: number): void {
-      hitboxes.push({ id, x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1) });
-    }
-
-    function findHitbox(x: number, y: number): { id: string; x0: number; y0: number; x1: number; y1: number } | null {
-      for (let i = hitboxes.length - 1; i >= 0; i -= 1) {
-        const hit = hitboxes[i]!;
-        if (x >= hit.x0 && x <= hit.x1 && y >= hit.y0 && y <= hit.y1) return hit;
-      }
-      return null;
-    }
-
-    function resolveControlColor(id: string): Rgb {
-      return hoveredControlId === id || pressedControlId === id ? uiVivid() : uiBright();
-    }
-
-    function resolveControlWeight(baseWeight: number, id: string): 0 | 1 | 2 | 3 {
-      const next = pressedControlId === id ? baseWeight + 1 : baseWeight;
-      return Math.max(0, Math.min(3, next)) as 0 | 1 | 2 | 3;
     }
 
     function drawText(c: Canvas, rect: Rect, x: number, y: number, text: string, rgb: Rgb, weight_index: 0 | 1 | 2 | 3): void {
@@ -5990,7 +5974,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         },
       },
       draw_content(c: Canvas, rect: Rect): void {
-        hitboxes = [];
+        begin_plain_text_control_frame(textControls);
         const status = getPainterSelectionStatus() ?? 'SEL 0';
         const statusY = getRowY(rect, 6);
         const replaceY = getRowY(rect, 5);
@@ -6009,8 +5993,19 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
           const marker = selected ? '[x]' : '[ ]';
           const label = `${marker} ${option.label}`;
           const baseWeight = selected ? 2 : 1;
-          drawText(c, rect, textX, y, label, resolveControlColor(id), resolveControlWeight(baseWeight, id));
-          setHitbox(id, rect.x0 + 1, y, rect.x1 - 1, y);
+          draw_plain_text_row(c, {
+            id,
+            text: label,
+            x: textX,
+            y,
+            row_x0: rect.x0 + 1,
+            row_x1: rect.x1 - 1,
+            state: textControls,
+            selected,
+            base_weight_index: 1,
+            selected_weight_index: baseWeight,
+            pressed_weight_index: Math.min(3, baseWeight + 1),
+          });
         }
 
         for (let i = 0; i < actionButtons.length; i += 1) {
@@ -6018,8 +6013,17 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
           const y = actionTopY - i;
           if (y <= rect.y0) continue;
           const id = `action:${button.id}`;
-          drawText(c, rect, textX, y, button.label, resolveControlColor(id), resolveControlWeight(1, id));
-          setHitbox(id, rect.x0 + 1, y, Math.min(rect.x1 - 1, textX + button.label.length - 1), y);
+          draw_plain_text_control(c, {
+            id,
+            text: button.label,
+            x: textX,
+            y,
+            state: textControls,
+            hitbox: 'text_only',
+            base_weight_index: 1,
+            selected_weight_index: 1,
+            pressed_weight_index: 2,
+          });
         }
 
         if (footerY > rect.y0) {
@@ -6028,33 +6032,31 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         }
       },
       on_pointer_down_content(e: PointerEvent): void {
-        const hit = findHitbox(e.x, e.y);
-        pressedControlId = hit?.id ?? null;
-        if (!hit) return;
-        if (hit.id.startsWith('mode:')) {
-          const mode = hit.id.slice('mode:'.length) as SelectionMode;
+        press_plain_text_control(textControls, e.x, e.y);
+      },
+      on_pointer_move_content(e: PointerEvent): void {
+        update_plain_text_hover(textControls, e.x, e.y);
+      },
+      on_pointer_leave_content(): void {
+        clear_plain_text_control_interaction(textControls);
+      },
+      on_pointer_up_content(): void {
+        const hitId = release_hovered_plain_text_control(textControls);
+        if (!hitId) return;
+        if (hitId.startsWith('mode:')) {
+          const mode = hitId.slice('mode:'.length) as SelectionMode;
           selection_mode = mode;
           return;
         }
-        if (hit.id === 'action:all') {
+        if (hitId === 'action:all') {
           handle_world_selection_change({ kind: 'select_all' });
           return;
         }
-        if (hit.id === 'action:invert') {
+        if (hitId === 'action:invert') {
           handle_world_selection_change({ kind: 'invert' });
           return;
         }
-        if (hit.id === 'action:clear') handle_world_selection_change({ kind: 'clear' });
-      },
-      on_pointer_move_content(e: PointerEvent): void {
-        hoveredControlId = findHitbox(e.x, e.y)?.id ?? null;
-      },
-      on_pointer_leave_content(): void {
-        hoveredControlId = null;
-        pressedControlId = null;
-      },
-      on_pointer_up_content(): void {
-        pressedControlId = null;
+        if (hitId === 'action:clear') handle_world_selection_change({ kind: 'clear' });
       },
     });
   }

@@ -1,6 +1,15 @@
 import type { Canvas, Module, PointerEvent, Rect } from '../types.js';
 import { make_floating_panel_module } from './floating_panel_module.js';
 import { get_standard_ux_chrome_colors } from '../module_borders.js';
+import {
+  begin_plain_text_control_frame,
+  clear_plain_text_control_interaction,
+  create_plain_text_control_state,
+  press_plain_text_control,
+  release_hovered_plain_text_control,
+  update_plain_text_hover,
+} from '../ux/plain_text_controls.js';
+import { draw_text_command_row, draw_text_stateful_row } from '../ux/plain_text_interactables.js';
 import type { LaunchActionId, LaunchMenuState } from '../../engine_launch/types.js';
 
 type LaunchModuleOptions = {
@@ -24,8 +33,7 @@ const LABELS: Record<LaunchActionId, string> = {
 export function make_launch_module(opts: LaunchModuleOptions): Module {
   const { text_rgb: text, muted_rgb: muted, accent_rgb: accent } = get_standard_ux_chrome_colors();
   const good = accent;
-  let hits: Array<{ action: LaunchActionId; x0: number; x1: number; y: number }> = [];
-  let join_hits: Array<{ entry_id: string; x0: number; x1: number; y: number }> = [];
+  const text_controls = create_plain_text_control_state();
 
   function trim_text(value: string, width: number): string {
     if (value.length <= width) return value;
@@ -51,8 +59,7 @@ export function make_launch_module(opts: LaunchModuleOptions): Module {
       can_save_position: false,
     },
     draw_content(c: Canvas, rect: Rect): void {
-      hits = [];
-      join_hits = [];
+      begin_plain_text_control_frame(text_controls);
       const state = opts.get_state();
       const actionStartY = rect.y1 - 3;
       const innerWidth = Math.max(1, rect.x1 - rect.x0 - 3);
@@ -70,9 +77,28 @@ export function make_launch_module(opts: LaunchModuleOptions): Module {
         const availability = state.availability[action];
         const enabled = availability.enabled;
         const label = `[${LABELS[action].toUpperCase()}]`;
-        const color = !enabled ? muted : selected ? accent : text;
-        drawText(c, rect.x0 + 2, rowY, label, color, selected ? 5 : 3);
-        hits.push({ action, x0: rect.x0 + 2, x1: rect.x0 + 2 + label.length - 1, y: rowY });
+        draw_text_stateful_row(c, {
+          id: `action:${action}`,
+          label,
+          x: rect.x0 + 2,
+          y: rowY,
+          row_x0: rect.x0 + 2,
+          row_x1: rect.x1 - 2,
+          state: text_controls,
+          active: selected,
+          disabled: !enabled,
+          inactive_role: 'custom',
+          active_role: 'custom',
+          hover_role: 'bright',
+          pressed_role: 'vivid',
+          disabled_role: 'dimmest',
+          custom_inactive_rgb: text,
+          custom_active_rgb: accent,
+          base_weight_index: 2,
+          active_weight_index: 4,
+          pressed_weight_index: 5,
+          render_index: 6,
+        });
         if (!enabled) {
           drawText(c, rect.x0 + 2 + label.length + 2, rowY, trim_text(availability.reason, Math.max(1, innerWidth - label.length - 2)), muted, 2);
         }
@@ -87,11 +113,28 @@ export function make_launch_module(opts: LaunchModuleOptions): Module {
         for (const entry of state.join_entries) {
           if (joinY >= joinBottomLimit) break;
           const selected = state.selected_join_entry_id === entry.id;
-          const prefix = selected ? '>' : ' ';
           const localMarker = entry.local ? 'L' : 'R';
-          const line = trim_text(`${prefix}[${localMarker}] ${entry.label}`, innerWidth);
-          drawText(c, rect.x0 + 2, joinY, line, selected ? accent : text, selected ? 4 : 2);
-          join_hits.push({ entry_id: entry.id, x0: rect.x0 + 2, x1: rect.x0 + 2 + line.length - 1, y: joinY });
+          const line = trim_text(`[${localMarker}] ${entry.label}`, innerWidth);
+          draw_text_stateful_row(c, {
+            id: `join:${entry.id}`,
+            label: line,
+            x: rect.x0 + 2,
+            y: joinY,
+            row_x0: rect.x0 + 2,
+            row_x1: rect.x1 - 2,
+            state: text_controls,
+            active: selected,
+            inactive_role: 'custom',
+            active_role: 'custom',
+            hover_role: 'bright',
+            pressed_role: 'vivid',
+            custom_inactive_rgb: text,
+            custom_active_rgb: accent,
+            base_weight_index: 2,
+            active_weight_index: 3,
+            pressed_weight_index: 4,
+            render_index: 6,
+          });
           joinY += 1;
           if (joinY >= joinBottomLimit) break;
           if (entry.description) {
@@ -107,17 +150,30 @@ export function make_launch_module(opts: LaunchModuleOptions): Module {
       }
     },
     on_pointer_down_content(e: PointerEvent): void {
-      const joinHit = join_hits.find((entry) => entry.y === e.y && e.x >= entry.x0 && e.x <= entry.x1);
-      if (joinHit) {
+      const hit = press_plain_text_control(text_controls, e.x, e.y);
+      if (!hit) return;
+      if (hit.startsWith('join:')) {
         opts.on_select_action('join');
-        opts.on_select_join_entry(joinHit.entry_id);
+        opts.on_select_join_entry(hit.slice('join:'.length));
         return;
       }
-      const hit = hits.find((entry) => entry.y === e.y && e.x >= entry.x0 && e.x <= entry.x1);
+      if (hit.startsWith('action:')) {
+        opts.on_select_action(hit.slice('action:'.length) as LaunchActionId);
+      }
+    },
+    on_pointer_move_content(e: PointerEvent): void {
+      update_plain_text_hover(text_controls, e.x, e.y);
+    },
+    on_pointer_up_content(): void {
+      const hit = release_hovered_plain_text_control(text_controls);
       if (!hit) return;
-      opts.on_select_action(hit.action);
-      const availability = opts.get_state().availability[hit.action];
-      if (availability.enabled) opts.on_confirm_action(hit.action);
+      if (!hit.startsWith('action:')) return;
+      const action = hit.slice('action:'.length) as LaunchActionId;
+      const availability = opts.get_state().availability[action];
+      if (availability.enabled) opts.on_confirm_action(action);
+    },
+    on_pointer_leave_content(): void {
+      clear_plain_text_control_interaction(text_controls);
     },
     on_key_down(e: KeyboardEvent): void {
       const state = opts.get_state();

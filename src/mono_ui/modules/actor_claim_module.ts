@@ -2,6 +2,15 @@ import type { Canvas, Module, PointerEvent, Rect } from "../types.js";
 import { make_floating_panel_module } from "./floating_panel_module.js";
 import { get_color_by_name } from "../colors.js";
 import { get_standard_ux_chrome_colors } from "../module_borders.js";
+import {
+  begin_plain_text_control_frame,
+  clear_plain_text_control_interaction,
+  create_plain_text_control_state,
+  press_plain_text_control,
+  release_hovered_plain_text_control,
+  update_plain_text_hover,
+} from "../ux/plain_text_controls.js";
+import { draw_text_command, draw_text_stateful_row } from "../ux/plain_text_interactables.js";
 
 export type ActorClaimEntry = {
   actor_ref: string;
@@ -43,8 +52,7 @@ type ButtonHit = "claim" | "create" | "release" | "delete" | "refresh" | "close"
 export function make_actor_claim_module(opts: ActorClaimModuleConfig): Module {
   let cursor = 0;
   let visible_start = 0;
-  let row_hits: Array<{ y: number; actor_ref: string }> = [];
-  let button_hits: Array<{ x0: number; x1: number; y: number; action: ButtonHit }> = [];
+  const text_controls = create_plain_text_control_state();
 
   function trim_to_width(text: string, width: number): string {
     if (width <= 0) return "";
@@ -125,8 +133,7 @@ export function make_actor_claim_module(opts: ActorClaimModuleConfig): Module {
     },
     draw_content(c: Canvas, rect: Rect): void {
       sync_cursor();
-      row_hits = [];
-      button_hits = [];
+      begin_plain_text_control_frame(text_controls);
       const { accent_rgb, muted_rgb, text_rgb } = get_standard_ux_chrome_colors();
       const entries = get_entries();
       const current_ref = opts.get_current_actor_ref();
@@ -165,19 +172,36 @@ export function make_actor_claim_module(opts: ActorClaimModuleConfig): Module {
             : entry.blocked_by_current_claim
               ? "SWAP"
               : "OPEN";
-        const prefix = is_cursor ? ">" : " ";
-        const line = trim_to_width(`${prefix}${entry.actor_name} [${state}]`, inner_width);
+        const line = trim_to_width(`${entry.actor_name} [${state}]`, inner_width);
         const rgb = entry.claimed_by_self
           ? get_color_by_name("vivid_green").rgb
           : entry.claimed_by_other
             ? get_color_by_name("medium_gray").rgb
             : entry.blocked_by_current_claim
               ? get_color_by_name("pale_orange").rgb
-            : is_cursor
-              ? accent_rgb
               : text_rgb;
-        draw_line(c, rect.x0 + 1, y, line, rgb, is_cursor ? 6 : 4);
-        row_hits.push({ y, actor_ref: entry.actor_ref });
+        draw_text_stateful_row(c, {
+          id: `row:${entry.actor_ref}`,
+          label: line,
+          x: rect.x0 + 1,
+          y,
+          row_x0: rect.x0 + 1,
+          row_x1: rect.x1 - 1,
+          state: text_controls,
+          active: is_cursor,
+          inactive_role: 'custom',
+          active_role: 'custom',
+          hover_role: 'custom',
+          pressed_role: 'custom',
+          custom_inactive_rgb: rgb,
+          custom_active_rgb: entry.can_claim ? accent_rgb : rgb,
+          custom_hover_rgb: accent_rgb,
+          custom_pressed_rgb: accent_rgb,
+          base_weight_index: 2,
+          active_weight_index: 3,
+          pressed_weight_index: 4,
+          render_index: 6,
+        });
       }
 
       const button_specs: Array<{ action: ButtonHit; label: string; enabled: boolean }> = [
@@ -191,11 +215,29 @@ export function make_actor_claim_module(opts: ActorClaimModuleConfig): Module {
       let x = rect.x0 + 1;
       for (const button of button_specs) {
         const text = button.enabled ? button.label : button.label.replace(/[A-Z]/g, (ch) => ch.toLowerCase());
-        const button_rgb = button.enabled
-          ? (button.action === 'delete' ? get_color_by_name('vivid_red').rgb : (button.action === 'claim' ? accent_rgb : text_rgb))
-          : muted_rgb;
-        draw_line(c, x, button_y, trim_to_width(text, Math.max(1, rect.x1 - x)), button_rgb, 4);
-        button_hits.push({ x0: x, x1: x + text.length - 1, y: button_y, action: button.action });
+        const button_rgb = button.action === 'delete'
+          ? get_color_by_name('vivid_red').rgb
+          : button.action === 'claim'
+            ? accent_rgb
+            : text_rgb;
+        draw_text_command(c, {
+          id: button.action,
+          label: trim_to_width(text, Math.max(1, rect.x1 - x)),
+          x,
+          y: button_y,
+          state: text_controls,
+          disabled: !button.enabled,
+          idle_role: button.enabled ? 'custom' : 'dimmest',
+          hover_role: button.enabled ? 'custom' : 'dimmest',
+          pressed_role: button.enabled ? 'custom' : 'dimmest',
+          disabled_role: 'dimmest',
+          custom_idle_rgb: button_rgb,
+          custom_hover_rgb: accent_rgb,
+          custom_pressed_rgb: accent_rgb,
+          base_weight_index: 2,
+          pressed_weight_index: 4,
+          render_index: 6,
+        });
         x += text.length + 1;
       }
 
@@ -214,18 +256,28 @@ export function make_actor_claim_module(opts: ActorClaimModuleConfig): Module {
       }
     },
     on_pointer_down_content(e: PointerEvent): void {
-      const button = button_hits.find((hit) => hit.y === e.y && e.x >= hit.x0 && e.x <= hit.x1);
-      if (button) {
-        trigger_button(button.action);
+      const hit = press_plain_text_control(text_controls, e.x, e.y);
+      if (!hit) return;
+      if (hit.startsWith('row:')) {
+        opts.on_select(hit.slice('row:'.length));
+      }
+    },
+    on_pointer_move_content(e: PointerEvent): void {
+      update_plain_text_hover(text_controls, e.x, e.y);
+    },
+    on_pointer_up_content(): void {
+      const hit = release_hovered_plain_text_control(text_controls);
+      if (!hit) return;
+      if (hit.startsWith('row:')) {
+        const actor_ref = hit.slice('row:'.length);
+        const entry = get_entries().find((candidate) => candidate.actor_ref === actor_ref) ?? null;
+        if (entry?.can_claim) opts.on_claim_selected();
         return;
       }
-      const row = row_hits.find((hit) => hit.y === e.y);
-      if (!row) return;
-      opts.on_select(row.actor_ref);
-      const entry = get_entries().find((candidate) => candidate.actor_ref === row.actor_ref) ?? null;
-      if (e.button === 0 && entry?.can_claim) {
-        opts.on_claim_selected();
-      }
+      trigger_button(hit as ButtonHit);
+    },
+    on_pointer_leave_content(): void {
+      clear_plain_text_control_interaction(text_controls);
     },
     on_key_down(e: KeyboardEvent): void {
       sync_cursor();

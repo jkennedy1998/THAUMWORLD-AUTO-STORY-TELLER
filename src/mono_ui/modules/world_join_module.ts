@@ -2,6 +2,15 @@ import type { Canvas, Module, PointerEvent, Rect } from "../types.js";
 import { make_floating_panel_module } from "./floating_panel_module.js";
 import { get_color_by_name } from "../colors.js";
 import { get_standard_ux_chrome_colors } from "../module_borders.js";
+import {
+  begin_plain_text_control_frame,
+  clear_plain_text_control_interaction,
+  create_plain_text_control_state,
+  press_plain_text_control,
+  release_hovered_plain_text_control,
+  update_plain_text_hover,
+} from "../ux/plain_text_controls.js";
+import { draw_text_command, draw_text_stateful_row } from "../ux/plain_text_interactables.js";
 
 export type JoinableWorldEntry = {
   id: string;
@@ -49,8 +58,7 @@ export type WorldJoinModuleConfig = {
 };
 
 export function make_world_join_module(opts: WorldJoinModuleConfig): Module {
-  let row_hits: Array<{ y: number; world_id: string }> = [];
-  let button_hits: Array<{ x0: number; x1: number; y: number; action: 'join' | 'refresh' | 'add' | 'edit' | 'forget' | 'back' | 'save' | 'cancel' | 'field_host' | 'field_label' }> = [];
+  const text_controls = create_plain_text_control_state();
 
   function trim_end(text: string, width: number): string {
     if (text.length <= width) return text;
@@ -68,9 +76,21 @@ export function make_world_join_module(opts: WorldJoinModuleConfig): Module {
     return width <= 1 ? text.slice(0, width) : `${text.slice(0, width - 1)}~`;
   }
 
-  function draw_button(c: Canvas, x: number, y: number, label: string, rgb: { r: number; g: number; b: number }, action: 'join' | 'refresh' | 'add' | 'edit' | 'forget' | 'back' | 'save' | 'cancel' | 'field_host' | 'field_label'): number {
-    draw_line(c, x, y, label, rgb, 5);
-    button_hits.push({ x0: x, x1: x + label.length - 1, y, action });
+  function draw_button(c: Canvas, x: number, y: number, label: string, rgb: { r: number; g: number; b: number }, id: 'join' | 'refresh' | 'add' | 'edit' | 'forget' | 'back' | 'save' | 'cancel'): number {
+    draw_text_command(c, {
+      id,
+      label,
+      x,
+      y,
+      state: text_controls,
+      idle_role: 'custom',
+      hover_role: 'bright',
+      pressed_role: 'vivid',
+      custom_idle_rgb: rgb,
+      base_weight_index: 4,
+      pressed_weight_index: 5,
+      render_index: 6,
+    });
     return x + label.length + 1;
   }
 
@@ -107,8 +127,7 @@ export function make_world_join_module(opts: WorldJoinModuleConfig): Module {
       on_move_end: opts.on_move,
     },
     draw_content(c: Canvas, rect: Rect): void {
-      row_hits = [];
-      button_hits = [];
+      begin_plain_text_control_frame(text_controls);
       const { accent_rgb, muted_rgb, text_rgb } = get_standard_ux_chrome_colors();
       const entries = opts.get_entries();
       const selected = opts.get_selected_world_id();
@@ -118,19 +137,36 @@ export function make_world_join_module(opts: WorldJoinModuleConfig): Module {
       const list_floor_y = editor.mode === 'hidden' ? rect.y0 + 4 : rect.y0 + 8;
       for (const entry of entries) {
         if (y <= list_floor_y) break;
-        const prefix = entry.id === selected ? ">" : " ";
         const online = entry.online !== false;
         const sourceGlyph = entry.local ? 'L' : 'W';
         const onlineGlyph = online ? '+' : '-';
         const addressSuffix = !entry.local && entry.host_address ? ` @ ${entry.host_address}` : '';
-        const line = trim(`${prefix}[${sourceGlyph}${onlineGlyph}] ${entry.label}${addressSuffix}`, innerWidth);
+        const line = trim(`[${sourceGlyph}${onlineGlyph}] ${entry.label}${addressSuffix}`, innerWidth);
         const rgb = entry.local
           ? get_color_by_name('vivid_green').rgb
           : online
             ? accent_rgb
             : muted_rgb;
-        draw_line(c, rect.x0 + 1, y, line, rgb, entry.id === selected ? 3 : 2);
-        row_hits.push({ y, world_id: entry.id });
+        draw_text_stateful_row(c, {
+          id: `row:${entry.id}`,
+          label: line,
+          x: rect.x0 + 1,
+          y,
+          row_x0: rect.x0 + 1,
+          row_x1: rect.x1 - 1,
+          state: text_controls,
+          active: entry.id === selected,
+          inactive_role: 'custom',
+          active_role: 'custom',
+          hover_role: 'bright',
+          pressed_role: 'vivid',
+          custom_inactive_rgb: rgb,
+          custom_active_rgb: rgb,
+          base_weight_index: 2,
+          active_weight_index: 3,
+          pressed_weight_index: 4,
+          render_index: 6,
+        });
         y -= 1;
       }
       const buttonY = rect.y0 + 2;
@@ -162,10 +198,46 @@ export function make_world_join_module(opts: WorldJoinModuleConfig): Module {
         const labelPrefix = editor.active_field === 'label' ? '>name: ' : ' name: ';
         const hostValue = trim_end(editor.host || (editor.mode === 'add' ? '192.168.1.50:8787' : ''), Math.max(1, innerWidth - hostPrefix.length));
         const labelValue = trim_end(editor.label || 'My Host', Math.max(1, innerWidth - labelPrefix.length));
-        draw_line(c, rect.x0 + 1, rect.y0 + 5, trim_end(`${hostPrefix}${hostValue}`, innerWidth), text_rgb, 2);
-        draw_line(c, rect.x0 + 1, rect.y0 + 4, trim_end(`${labelPrefix}${labelValue}`, innerWidth), text_rgb, 2);
-        button_hits.push({ x0: rect.x0 + 1, x1: rect.x0 + 1 + trim_end(`${hostPrefix}${hostValue}`, innerWidth).length - 1, y: rect.y0 + 5, action: 'field_host' });
-        button_hits.push({ x0: rect.x0 + 1, x1: rect.x0 + 1 + trim_end(`${labelPrefix}${labelValue}`, innerWidth).length - 1, y: rect.y0 + 4, action: 'field_label' });
+        draw_text_stateful_row(c, {
+          id: 'field_host',
+          label: trim_end(`${hostPrefix}${hostValue}`, innerWidth),
+          x: rect.x0 + 1,
+          y: rect.y0 + 5,
+          row_x0: rect.x0 + 1,
+          row_x1: rect.x1 - 1,
+          state: text_controls,
+          active: editor.active_field === 'host',
+          inactive_role: 'custom',
+          active_role: 'custom',
+          hover_role: 'bright',
+          pressed_role: 'vivid',
+          custom_inactive_rgb: text_rgb,
+          custom_active_rgb: text_rgb,
+          base_weight_index: 2,
+          active_weight_index: 3,
+          pressed_weight_index: 4,
+          render_index: 6,
+        });
+        draw_text_stateful_row(c, {
+          id: 'field_label',
+          label: trim_end(`${labelPrefix}${labelValue}`, innerWidth),
+          x: rect.x0 + 1,
+          y: rect.y0 + 4,
+          row_x0: rect.x0 + 1,
+          row_x1: rect.x1 - 1,
+          state: text_controls,
+          active: editor.active_field === 'label',
+          inactive_role: 'custom',
+          active_role: 'custom',
+          hover_role: 'bright',
+          pressed_role: 'vivid',
+          custom_inactive_rgb: text_rgb,
+          custom_active_rgb: text_rgb,
+          base_weight_index: 2,
+          active_weight_index: 3,
+          pressed_weight_index: 4,
+          render_index: 6,
+        });
         const saveLabel = '[SAVE]';
         const cancelLabel = '[CANCEL]';
         draw_button(c, rect.x0 + 1, rect.y0 + 3, saveLabel, get_color_by_name('vivid_green').rgb, 'save');
@@ -180,22 +252,34 @@ export function make_world_join_module(opts: WorldJoinModuleConfig): Module {
       }
     },
     on_pointer_down_content(e: PointerEvent): void {
-      const button = button_hits.find((entry) => entry.y === e.y && e.x >= entry.x0 && e.x <= entry.x1);
-      if (button) {
-        if (button.action === "join") opts.on_join_selected();
-        else if (button.action === "refresh") opts.on_refresh();
-        else if (button.action === 'add') opts.on_begin_add();
-        else if (button.action === 'edit') opts.on_begin_rename_selected();
-        else if (button.action === 'forget') opts.on_forget_selected();
-        else if (button.action === 'save') opts.on_submit_editor();
-        else if (button.action === 'cancel') opts.on_cancel_editor();
-        else if (button.action === 'field_host') opts.on_set_editor_field('host');
-        else if (button.action === 'field_label') opts.on_set_editor_field('label');
-        else opts.on_back();
+      const hit = press_plain_text_control(text_controls, e.x, e.y);
+      if (!hit) return;
+      if (hit.startsWith('row:')) {
+        opts.on_select_world(hit.slice('row:'.length));
         return;
       }
-      const row = row_hits.find((entry) => entry.y === e.y);
-      if (row) opts.on_select_world(row.world_id);
+      if (hit === 'field_host') opts.on_set_editor_field('host');
+      else if (hit === 'field_label') opts.on_set_editor_field('label');
+    },
+    on_pointer_move_content(e: PointerEvent): void {
+      update_plain_text_hover(text_controls, e.x, e.y);
+    },
+    on_pointer_up_content(): void {
+      const hit = release_hovered_plain_text_control(text_controls);
+      if (!hit) return;
+      if (hit === "join") opts.on_join_selected();
+      else if (hit === "refresh") opts.on_refresh();
+      else if (hit === 'add') opts.on_begin_add();
+      else if (hit === 'edit') opts.on_begin_rename_selected();
+      else if (hit === 'forget') opts.on_forget_selected();
+      else if (hit === 'save') opts.on_submit_editor();
+      else if (hit === 'cancel') opts.on_cancel_editor();
+      else if (hit === 'field_host') opts.on_set_editor_field('host');
+      else if (hit === 'field_label') opts.on_set_editor_field('label');
+      else if (hit === 'back') opts.on_back();
+    },
+    on_pointer_leave_content(): void {
+      clear_plain_text_control_interaction(text_controls);
     },
     on_key_down(e: KeyboardEvent): void {
       const editor = opts.get_editor_state();

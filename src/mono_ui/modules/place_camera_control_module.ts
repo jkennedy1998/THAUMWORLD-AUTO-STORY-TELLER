@@ -1,6 +1,16 @@
 import type { Module, Canvas, Rect, PointerEvent } from '../types.js';
 import type { ModuleGizmosConfig } from '../module_gizmos.js';
 import { get_ui_semantic_rgb } from '../runtime/ui_customization_store.js';
+import {
+  begin_plain_text_control_frame,
+  clear_plain_text_control_interaction,
+  create_plain_text_control_state,
+  draw_plain_text_control,
+  draw_plain_text_toggle,
+  press_plain_text_control,
+  release_hovered_plain_text_control,
+  update_plain_text_hover,
+} from '../ux/plain_text_controls.js';
 import { make_floating_panel_module } from './floating_panel_module.js';
 import type { CameraConfig } from '../../ascii_painter/voxel_space.js';
 
@@ -104,15 +114,13 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
   let rect = opts.rect;
   let scroll_offset = 0;
   let is_dragging_slider: SliderKind | null = null;
-  let buttonHitboxes: Array<{ id: string; x0: number; y0: number; x1: number; y1: number }> = [];
-  let pressedButtons = new Set<string>();
+  const text_controls = create_plain_text_control_state();
 
   const borderColor = () => get_ui_semantic_rgb('dimmest');
   const textColor = () => get_ui_semantic_rgb('bright');
   const labelColor = () => get_ui_semantic_rgb('medium');
   const enabledColor = () => get_ui_semantic_rgb('vivid');
   const disabledColor = () => get_ui_semantic_rgb('dimmest');
-  const accentColor = () => get_ui_semantic_rgb('vivid');
   const valueColor = () => get_ui_semantic_rgb('bright');
   const sliderBgColor = () => get_ui_semantic_rgb('dimmest');
   const sliderFgColor = () => get_ui_semantic_rgb('vivid');
@@ -143,18 +151,6 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
     return rect.y1 - 1 - (row - scroll_offset);
   }
 
-  function set_button_hitbox(id: string, x0: number, y0: number, x1: number, y1: number): void {
-    buttonHitboxes.push({ id, x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1) });
-  }
-
-  function find_button_hitbox(x: number, y: number) {
-    for (let i = buttonHitboxes.length - 1; i >= 0; i -= 1) {
-      const hit = buttonHitboxes[i]!;
-      if (x >= hit.x0 && x <= hit.x1 && y >= hit.y0 && y <= hit.y1) return hit;
-    }
-    return null;
-  }
-
   function drawSeparator(c: Canvas, row: number): void {
     if (!is_row_visible(row)) return;
     const y = get_screen_y(row);
@@ -170,12 +166,25 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
   function drawToggle(c: Canvas, row: number, enabled: boolean, label: string): void {
     if (!is_row_visible(row)) return;
     const y = get_screen_y(row);
-    const x = rect.x0 + COL_TOGGLE;
-    c.set(x, y, { char: '[', rgb: borderColor(), weight_index: 0, render_index: 10 });
-    c.set(x + 1, y, { char: enabled ? 'x' : ' ', rgb: enabled ? enabledColor() : disabledColor(), weight_index: 2, render_index: 10 });
-    c.set(x + 2, y, { char: ']', rgb: borderColor(), weight_index: 0, render_index: 10 });
-    for (let i = 0; i < label.length && x + 4 + i <= rect.x1 - 2; i += 1) c.set(x + 4 + i, y, { char: label[i]!, rgb: textColor(), weight_index: 0, render_index: 10 });
-    set_button_hitbox(`toggle:${row}`, rect.x0 + 1, y, rect.x1 - 2, y);
+    draw_plain_text_toggle(c, {
+      id: `toggle:${row}`,
+      x: rect.x0 + COL_TOGGLE,
+      y,
+      state: text_controls,
+      label,
+      value: enabled,
+      selected: enabled,
+      row_x0: rect.x0 + 1,
+      row_x1: rect.x1 - 2,
+      idle_role: 'bright',
+      hover_role: 'vivid',
+      pressed_role: 'vivid',
+      selected_role: 'custom',
+      custom_selected_rgb: enabled ? enabledColor() : disabledColor(),
+      base_weight_index: 1,
+      selected_weight_index: 2,
+      pressed_weight_index: 3,
+    });
   }
 
   function drawActionRow(c: Canvas, row: number, actions: Array<{ id: string; label: string }>): void {
@@ -186,10 +195,17 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
     actions.forEach((action, index) => {
       const label = `[${action.label}]`;
       const x = rect.x0 + 2 + slotWidth * index;
-      for (let i = 0; i < label.length && x + i <= rect.x1 - 2; i += 1) {
-        c.set(x + i, y, { char: label[i]!, rgb: pressedButtons.has(action.id) ? accentColor() : textColor(), weight_index: 1, render_index: 10 });
-      }
-      set_button_hitbox(`action:${action.id}`, x, y, Math.min(rect.x1 - 2, x + label.length - 1), y);
+      draw_plain_text_control(c, {
+        id: `action:${action.id}`,
+        text: label,
+        x,
+        y,
+        state: text_controls,
+        hitbox: 'text_only',
+        base_weight_index: 1,
+        selected_weight_index: 1,
+        pressed_weight_index: 2,
+      });
     });
   }
 
@@ -299,7 +315,7 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
     draw_content(c: Canvas, next_rect: Rect): void {
       rect = next_rect;
       clamp_scroll();
-      buttonHitboxes = [];
+      begin_plain_text_control_frame(text_controls);
       const cam = camera();
       drawSeparator(c, ROW_SEPARATOR_1);
       drawToggle(c, ROW_PARALLAX_MOVE, cam.parallax_move_enabled ?? false, 'Soft Mouse Tilt');
@@ -340,8 +356,17 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
         const y = get_screen_y(ROW_RESET);
         const label = '[Reset Calibration]';
         const x = rect.x0 + Math.floor((rect.x1 - rect.x0 - label.length) / 2);
-        for (let i = 0; i < label.length; i += 1) c.set(x + i, y, { char: label[i]!, rgb: pressedButtons.has('reset_calibration') ? accentColor() : textColor(), weight_index: 1, render_index: 10 });
-        set_button_hitbox('reset_calibration', x, y, x + label.length - 1, y);
+        draw_plain_text_control(c, {
+          id: 'reset_calibration',
+          text: label,
+          x,
+          y,
+          state: text_controls,
+          hitbox: 'text_only',
+          base_weight_index: 1,
+          selected_weight_index: 1,
+          pressed_weight_index: 2,
+        });
       }
       if (opts.onRenderDistancePlanesChange) {
         drawSeparator(c, ROW_SEPARATOR_8);
@@ -384,28 +409,13 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
       if (opts.onRenderDistancePlanesChange && is_on_minus(e.x, e.y, ROW_RENDER_DISTANCE_SLIDER)) return void nudgeSlider('render_distance_planes', -1);
       if (opts.onRenderDistancePlanesChange && is_on_plus(e.x, e.y, ROW_RENDER_DISTANCE_SLIDER)) return void nudgeSlider('render_distance_planes', 1);
 
-      const hit = find_button_hitbox(e.x, e.y);
-      if (!hit) return;
-      if (hit.id.startsWith('action:')) {
-        const actionId = hit.id.slice('action:'.length);
-        pressedButtons.add(actionId);
-        opts.onAction?.(actionId);
-        return;
-      }
-      if (hit.id === `toggle:${ROW_PARALLAX_MOVE}`) return void opts.onParallaxMoveToggle?.(!(cam.parallax_move_enabled ?? false));
-      if (hit.id === `toggle:${ROW_PARALLAX_SIZE}`) return void opts.onParallaxSizeToggle?.(!(cam.parallax_size_enabled ?? false));
-      if (hit.id === `toggle:${ROW_OCCLUSION}`) {
-        const enabled = opts.getOcclusionEnabled ? opts.getOcclusionEnabled() : !(cam.show_all_layers ?? true);
-        return void opts.onOcclusionToggle?.(!enabled);
-      }
-      if (hit.id === `toggle:${ROW_CENTER_TARGET}`) return void opts.onCenterTargetToggle?.(!(cam.center_target_in_view ?? false));
-      if (hit.id === 'reset_calibration') {
-        pressedButtons.add('reset_calibration');
-        opts.onCalibrationReset?.();
-      }
+      press_plain_text_control(text_controls, e.x, e.y);
     },
     on_pointer_move_content(e: PointerEvent): void {
-      if (!is_dragging_slider) return;
+      if (!is_dragging_slider) {
+        update_plain_text_hover(text_controls, e.x, e.y);
+        return;
+      }
       const spec = getSliderSpec(is_dragging_slider);
       const nextValue = quantizeSliderValue(is_dragging_slider, get_slider_value(e.x, spec.min, spec.max));
       if (is_dragging_slider === 'mouse_angle_yaw_deg') opts.onMouseAngleYawDegChange?.(nextValue);
@@ -418,8 +428,27 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
       else if (is_dragging_slider === 'render_distance_planes') opts.onRenderDistancePlanesChange?.(nextValue);
     },
     on_pointer_up_content(): void {
-      is_dragging_slider = null;
-      pressedButtons.clear();
+      if (is_dragging_slider) {
+        is_dragging_slider = null;
+        return;
+      }
+      const hit_id = release_hovered_plain_text_control(text_controls);
+      if (!hit_id) return;
+      if (hit_id.startsWith('action:')) {
+        opts.onAction?.(hit_id.slice('action:'.length));
+        return;
+      }
+      if (hit_id === `toggle:${ROW_PARALLAX_MOVE}`) return void opts.onParallaxMoveToggle?.(!(camera().parallax_move_enabled ?? false));
+      if (hit_id === `toggle:${ROW_PARALLAX_SIZE}`) return void opts.onParallaxSizeToggle?.(!(camera().parallax_size_enabled ?? false));
+      if (hit_id === `toggle:${ROW_OCCLUSION}`) {
+        const enabled = opts.getOcclusionEnabled ? opts.getOcclusionEnabled() : !(camera().show_all_layers ?? true);
+        return void opts.onOcclusionToggle?.(!enabled);
+      }
+      if (hit_id === `toggle:${ROW_CENTER_TARGET}`) return void opts.onCenterTargetToggle?.(!(camera().center_target_in_view ?? false));
+      if (hit_id === 'reset_calibration') opts.onCalibrationReset?.();
+    },
+    on_pointer_leave_content(): void {
+      clear_plain_text_control_interaction(text_controls);
     },
     on_wheel_content(e): void {
       scroll_offset += e.delta_y > 0 ? 3 : -3;

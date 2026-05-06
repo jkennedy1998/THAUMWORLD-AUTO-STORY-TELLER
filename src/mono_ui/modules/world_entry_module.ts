@@ -1,6 +1,15 @@
 import type { Canvas, Module, PointerEvent, Rect } from "../types.js";
 import { make_floating_panel_module } from "./floating_panel_module.js";
 import { get_standard_ux_chrome_colors } from "../module_borders.js";
+import {
+  begin_plain_text_control_frame,
+  clear_plain_text_control_interaction,
+  create_plain_text_control_state,
+  press_plain_text_control,
+  release_hovered_plain_text_control,
+  update_plain_text_hover,
+} from "../ux/plain_text_controls.js";
+import { draw_text_command } from "../ux/plain_text_interactables.js";
 
 export type WorldEntryModuleConfig = {
   id: string;
@@ -13,8 +22,7 @@ export type WorldEntryModuleConfig = {
 };
 
 export function make_world_entry_module(opts: WorldEntryModuleConfig): Module {
-  type Button = "launch" | "join";
-  let button_hits: Array<{ x0: number; x1: number; y: number; action: Button }> = [];
+  const text_controls = create_plain_text_control_state();
 
   function draw_line(c: Canvas, x: number, y: number, text: string, rgb = get_standard_ux_chrome_colors().text_rgb, weight_index = 2): void {
     for (let i = 0; i < text.length; i += 1) {
@@ -38,24 +46,54 @@ export function make_world_entry_module(opts: WorldEntryModuleConfig): Module {
       on_move_end: opts.on_move,
     },
     draw_content(c: Canvas, rect: Rect): void {
-      button_hits = [];
+      begin_plain_text_control_frame(text_controls);
       const { accent_rgb, muted_rgb } = get_standard_ux_chrome_colors();
       const status_lines = opts.get_status_lines?.() ?? [];
-      const launch = "[LAUNCH WORLD]";
-      const join = "[JOIN WORLD]";
-      draw_line(c, rect.x0 + 2, rect.y1 - 3, launch, accent_rgb, 5);
-      draw_line(c, rect.x0 + 2, rect.y1 - 5, join, accent_rgb, 4);
-      button_hits.push({ x0: rect.x0 + 2, x1: rect.x0 + 2 + launch.length - 1, y: rect.y1 - 3, action: "launch" });
-      button_hits.push({ x0: rect.x0 + 2, x1: rect.x0 + 2 + join.length - 1, y: rect.y1 - 5, action: "join" });
+      draw_text_command(c, {
+        id: 'launch',
+        label: '[LAUNCH WORLD]',
+        x: rect.x0 + 2,
+        y: rect.y1 - 3,
+        state: text_controls,
+        idle_role: 'custom',
+        hover_role: 'bright',
+        pressed_role: 'vivid',
+        custom_idle_rgb: accent_rgb,
+        base_weight_index: 4,
+        pressed_weight_index: 5,
+        render_index: 6,
+      });
+      draw_text_command(c, {
+        id: 'join',
+        label: '[JOIN WORLD]',
+        x: rect.x0 + 2,
+        y: rect.y1 - 5,
+        state: text_controls,
+        idle_role: 'custom',
+        hover_role: 'bright',
+        pressed_role: 'vivid',
+        custom_idle_rgb: accent_rgb,
+        base_weight_index: 3,
+        pressed_weight_index: 4,
+        render_index: 6,
+      });
       for (let i = 0; i < status_lines.length && rect.y0 + 2 + i < rect.y1 - 6; i += 1) {
         draw_line(c, rect.x0 + 2, rect.y0 + 2 + i, status_lines[i] ?? "", muted_rgb, 3);
       }
     },
     on_pointer_down_content(e: PointerEvent): void {
-      const hit = button_hits.find((entry) => entry.y === e.y && e.x >= entry.x0 && e.x <= entry.x1);
-      if (!hit) return;
-      if (hit.action === "launch") opts.on_launch_world();
-      else opts.on_join_world();
+      press_plain_text_control(text_controls, e.x, e.y);
+    },
+    on_pointer_move_content(e: PointerEvent): void {
+      update_plain_text_hover(text_controls, e.x, e.y);
+    },
+    on_pointer_up_content(): void {
+      const hit = release_hovered_plain_text_control(text_controls);
+      if (hit === 'launch') opts.on_launch_world();
+      else if (hit === 'join') opts.on_join_world();
+    },
+    on_pointer_leave_content(): void {
+      clear_plain_text_control_interaction(text_controls);
     },
     on_key_down(e: KeyboardEvent): void {
       if (e.key === "Enter") {
